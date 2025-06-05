@@ -1,0 +1,1016 @@
+// This is the optimized Prisma schema for Avoqado
+// Multi-sector POS & Management System
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// CORE MULTI-TENANT ARCHITECTURE
+// ==========================================
+
+model Organization {
+  id    String       @id @default(cuid())
+  name  String
+  email String
+  phone String
+  taxId String?
+  type  BusinessType @default(RESTAURANT)
+
+  // Billing configuration
+  billingEmail   String?
+  billingAddress Json?
+
+  venues   Venue[]
+  staff    Staff[]
+  invoices Invoice[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Venue {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Basic info
+  name     String
+  slug     String    @unique
+  type     VenueType @default(RESTAURANT)
+  timezone String    @default("America/Mexico_City")
+  currency String    @default("MXN")
+
+  // Location
+  address   String
+  city      String
+  state     String
+  country   String   @default("MX")
+  zipCode   String
+  latitude  Decimal? @db.Decimal(10, 8)
+  longitude Decimal? @db.Decimal(11, 8)
+
+  // Contact
+  phone   String
+  email   String
+  website String?
+
+  // Branding
+  logo           String?
+  primaryColor   String?
+  secondaryColor String?
+
+  // Status
+  active           Boolean   @default(true)
+  operationalSince DateTime?
+
+  // POS Integration
+  posType   PosType?
+  posConfig Json? // Encrypted POS credentials
+  posStatus PosStatus @default(NOT_INTEGRATED)
+
+  // Avoqado Fees
+  feeType       FeeType      @default(PERCENTAGE)
+  feeValue      Decimal      @default(0.025) @db.Decimal(5, 4)
+  feeScheduleId String?
+  feeSchedule   FeeSchedule? @relation(fields: [feeScheduleId], references: [id])
+
+  // Features & Settings
+  features VenueFeature[]
+  settings VenueSettings?
+
+  // Relations
+  staff        StaffVenue[]
+  products     Product[]
+  inventories  Inventory[]
+  tables       Table[]
+  shifts       Shift[]
+  orders       Order[]
+  payments     Payment[]
+  transactions VenueTransaction[]
+  reviews      Review[]
+  terminals    Terminal[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([slug])
+  @@index([active])
+}
+
+model VenueSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Operations
+  autoCloseShifts Boolean @default(false)
+  shiftDuration   Int     @default(8) // hours
+  requirePinLogin Boolean @default(true)
+
+  // Reviews
+  autoReplyReviews   Boolean @default(false)
+  notifyBadReviews   Boolean @default(true)
+  badReviewThreshold Int     @default(3)
+
+  // Inventory
+  trackInventory    Boolean @default(false)
+  lowStockAlert     Boolean @default(true)
+  lowStockThreshold Int     @default(10)
+
+  // Customer features
+  allowReservations Boolean @default(false)
+  allowTakeout      Boolean @default(false)
+  allowDelivery     Boolean @default(false)
+
+  // Payment
+  acceptCash          Boolean @default(true)
+  acceptCard          Boolean @default(true)
+  acceptDigitalWallet Boolean @default(true)
+  tipSuggestions      Json? // [15, 18, 20, 25]
+
+  updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// STAFF MANAGEMENT (SIMPLIFIED)
+// ==========================================
+
+model Staff {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Authentication
+  email    String  @unique
+  password String? // Null for PIN-only users
+  pin      String? // 4-6 digits for TPV access
+
+  // Profile
+  firstName    String
+  lastName     String
+  phone        String?
+  employeeCode String?
+  photoUrl     String?
+
+  // Status
+  active        Boolean @default(true)
+  emailVerified Boolean @default(false)
+
+  // Access
+  venues            StaffVenue[]
+  shifts            Shift[]
+  ordersCreated     Order[]       @relation("OrderCreatedBy")
+  ordersServed      Order[]       @relation("OrderServedBy")
+  paymentsProcessed Payment[]
+  activities        ActivityLog[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastLoginAt DateTime?
+
+  @@index([email])
+  @@index([pin])
+  @@index([organizationId])
+}
+
+model StaffVenue {
+  id      String @id @default(cuid())
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  role        StaffRole
+  permissions Json? // Custom permissions override
+
+  // Performance tracking (for waiters)
+  totalSales    Decimal @default(0) @db.Decimal(12, 2)
+  totalTips     Decimal @default(0) @db.Decimal(10, 2)
+  averageRating Decimal @default(0) @db.Decimal(3, 2)
+  totalOrders   Int     @default(0)
+
+  active    Boolean   @default(true)
+  startDate DateTime  @default(now())
+  endDate   DateTime?
+
+  @@unique([staffId, venueId])
+  @@index([staffId])
+  @@index([venueId])
+  @@index([role])
+}
+
+// ==========================================
+// INVENTORY MANAGEMENT
+// ==========================================
+
+model Product {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Basic info
+  sku         String
+  name        String
+  description String?
+  category    ProductCategory
+
+  // Pricing
+  price   Decimal  @db.Decimal(10, 2)
+  cost    Decimal? @db.Decimal(10, 2)
+  taxRate Decimal  @default(0.16) @db.Decimal(5, 4)
+
+  // Display
+  imageUrl     String?
+  displayOrder Int     @default(0)
+  featured     Boolean @default(false)
+
+  // Inventory tracking
+  trackInventory Boolean @default(false)
+  unit           String? // "pza", "kg", "lt", etc.
+
+  // Status
+  active         Boolean   @default(true)
+  availableFrom  DateTime?
+  availableUntil DateTime?
+
+  // Relations
+  inventory      Inventory?
+  orderItems     OrderItem[]
+  modifierGroups ProductModifierGroup[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, sku])
+  @@index([venueId])
+  @@index([category])
+  @@index([active])
+}
+
+model Inventory {
+  id            String   @id @default(cuid())
+  productId     String   @unique
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  venueId       String
+  venue         Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  currentStock  Decimal  @db.Decimal(10, 2)
+  reservedStock Decimal  @default(0) @db.Decimal(10, 2)
+  minimumStock  Decimal  @default(0) @db.Decimal(10, 2)
+  maximumStock  Decimal? @db.Decimal(10, 2)
+
+  lastRestockedAt DateTime?
+  lastCountedAt   DateTime?
+
+  movements InventoryMovement[]
+
+  updatedAt DateTime @updatedAt
+
+  @@index([productId])
+}
+
+model InventoryMovement {
+  id          String    @id @default(cuid())
+  inventoryId String
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+
+  type          MovementType
+  quantity      Decimal      @db.Decimal(10, 2) // Positive or negative
+  previousStock Decimal      @db.Decimal(10, 2)
+  newStock      Decimal      @db.Decimal(10, 2)
+
+  reason    String?
+  reference String? // Order ID, adjustment ID, etc.
+
+  createdBy String?
+  createdAt DateTime @default(now())
+
+  @@index([inventoryId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ==========================================
+// OPERATIONS
+// ==========================================
+
+model Table {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  number   String
+  section  String?
+  capacity Int
+  qrCode   String  @unique
+
+  active Boolean @default(true)
+
+  orders Order[]
+
+  @@unique([venueId, number])
+  @@index([venueId])
+}
+
+model Shift {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id])
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  startTime DateTime
+  endTime   DateTime?
+
+  // Cash management
+  startingCash   Decimal  @default(0) @db.Decimal(10, 2)
+  endingCash     Decimal? @db.Decimal(10, 2)
+  cashDifference Decimal? @db.Decimal(10, 2)
+
+  // Summary
+  totalSales  Decimal @default(0) @db.Decimal(12, 2)
+  totalTips   Decimal @default(0) @db.Decimal(10, 2)
+  totalOrders Int     @default(0)
+
+  status ShiftStatus @default(OPEN)
+  notes  String?
+
+  orders   Order[]
+  payments Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([staffId])
+  @@index([status])
+  @@index([startTime])
+}
+
+model Order {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  // Order info
+  orderNumber String
+  type        OrderType   @default(DINE_IN)
+  source      OrderSource @default(TPV)
+
+  // Relations
+  tableId String?
+  table   Table?  @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  shiftId String?
+  shift   Shift?  @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  // Staff
+  createdById String?
+  createdBy   Staff?  @relation("OrderCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  servedById  String?
+  servedBy    Staff?  @relation("OrderServedBy", fields: [servedById], references: [id], onDelete: SetNull)
+
+  // Customer info (for guest checkout)
+  customerName  String?
+  customerPhone String?
+  customerEmail String?
+
+  // Amounts
+  subtotal       Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(10, 2)
+  taxAmount      Decimal @db.Decimal(10, 2)
+  tipAmount      Decimal @default(0) @db.Decimal(10, 2)
+  total          Decimal @db.Decimal(12, 2)
+
+  // Status
+  status        OrderStatus   @default(PENDING)
+  kitchenStatus KitchenStatus @default(PENDING)
+  paymentStatus PaymentStatus @default(PENDING)
+
+  // POS sync
+  externalId String? // POS order ID
+  syncStatus SyncStatus @default(PENDING)
+  syncedAt   DateTime?
+
+  // Relations
+  items    OrderItem[]
+  payments Payment[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  @@unique([venueId, orderNumber])
+  @@index([venueId])
+  @@index([shiftId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity       Int
+  unitPrice      Decimal @db.Decimal(10, 2)
+  discountAmount Decimal @default(0) @db.Decimal(10, 2)
+  taxAmount      Decimal @db.Decimal(10, 2)
+  total          Decimal @db.Decimal(10, 2)
+
+  notes String?
+
+  modifiers OrderItemModifier[]
+
+  // Kitchen
+  sentToKitchenAt DateTime?
+  preparedAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+// ==========================================
+// MODIFIERS
+// ==========================================
+
+model ModifierGroup {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+
+  required      Boolean @default(false)
+  allowMultiple Boolean @default(false)
+  minSelections Int     @default(0)
+  maxSelections Int?
+
+  modifiers Modifier[]
+  products  ProductModifierGroup[]
+}
+
+model Modifier {
+  id      String        @id @default(cuid())
+  groupId String
+  group   ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  name  String
+  price Decimal @default(0) @db.Decimal(10, 2)
+
+  active Boolean @default(true)
+
+  orderItems OrderItemModifier[]
+}
+
+model ProductModifierGroup {
+  id        String        @id @default(cuid())
+  productId String
+  product   Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  groupId   String
+  group     ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  displayOrder Int @default(0)
+
+  @@unique([productId, groupId])
+}
+
+model OrderItemModifier {
+  id          String    @id @default(cuid())
+  orderItemId String
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  modifierId  String
+  modifier    Modifier  @relation(fields: [modifierId], references: [id])
+
+  quantity Int     @default(1)
+  price    Decimal @db.Decimal(10, 2)
+}
+
+// ==========================================
+// PAYMENTS & FEES
+// ==========================================
+
+model Payment {
+  id      String  @id @default(cuid())
+  venueId String
+  venue   Venue   @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  orderId String
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  shiftId String?
+  shift   Shift?  @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  processedById String?
+  processedBy   Staff?  @relation(fields: [processedById], references: [id], onDelete: SetNull)
+
+  // Amounts
+  amount    Decimal @db.Decimal(12, 2)
+  tipAmount Decimal @default(0) @db.Decimal(10, 2)
+
+  // Payment info
+  method PaymentMethod
+  status TransactionStatus @default(PENDING)
+
+  // Processor info
+  processor     String? // stripe, mercadopago, etc.
+  processorId   String?
+  processorData Json?
+
+  // Fee calculation
+  feePercentage Decimal @db.Decimal(5, 4)
+  feeAmount     Decimal @db.Decimal(10, 2)
+  netAmount     Decimal @db.Decimal(12, 2)
+
+  // POS sync
+  externalId String?
+  syncStatus SyncStatus @default(PENDING)
+  syncedAt   DateTime?
+
+  // Relations
+  transaction VenueTransaction?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([orderId])
+  @@index([shiftId])
+  @@index([method])
+  @@index([status])
+}
+
+model VenueTransaction {
+  id        String  @id @default(cuid())
+  venueId   String
+  venue     Venue   @relation(fields: [venueId], references: [id])
+  paymentId String  @unique
+  payment   Payment @relation(fields: [paymentId], references: [id])
+
+  type TransactionType
+
+  // Amounts
+  grossAmount Decimal @db.Decimal(12, 2)
+  feeAmount   Decimal @db.Decimal(10, 2)
+  netAmount   Decimal @db.Decimal(12, 2)
+
+  // Settlement
+  status       SettlementStatus @default(PENDING)
+  settledAt    DateTime?
+  settlementId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ==========================================
+// FEATURES & BILLING
+// ==========================================
+
+model Feature {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  name        String
+  description String?
+
+  category     FeatureCategory
+  monthlyPrice Decimal         @db.Decimal(10, 2)
+
+  active Boolean @default(true)
+
+  venues VenueFeature[]
+}
+
+model VenueFeature {
+  id        String  @id @default(cuid())
+  venueId   String
+  venue     Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  featureId String
+  feature   Feature @relation(fields: [featureId], references: [id], onDelete: Restrict)
+
+  active       Boolean @default(true)
+  monthlyPrice Decimal @db.Decimal(10, 2)
+
+  startDate DateTime  @default(now())
+  endDate   DateTime?
+
+  @@unique([venueId, featureId])
+  @@index([venueId])
+}
+
+model FeeSchedule {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+
+  tiers  FeeTier[]
+  venues Venue[]
+
+  active Boolean @default(true)
+}
+
+model FeeTier {
+  id         String      @id @default(cuid())
+  scheduleId String
+  schedule   FeeSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  minVolume  Decimal  @db.Decimal(12, 2)
+  maxVolume  Decimal? @db.Decimal(12, 2)
+  percentage Decimal  @db.Decimal(5, 4)
+
+  @@index([scheduleId])
+}
+
+model Invoice {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  invoiceNumber String   @unique
+  periodStart   DateTime
+  periodEnd     DateTime
+  dueDate       DateTime
+
+  // Amounts
+  subtotal  Decimal @db.Decimal(12, 2)
+  taxAmount Decimal @db.Decimal(10, 2)
+  total     Decimal @db.Decimal(12, 2)
+
+  status InvoiceStatus @default(PENDING)
+  paidAt DateTime?
+
+  items InvoiceItem[]
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([status])
+}
+
+model InvoiceItem {
+  id        String  @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  type        ChargeType
+  description String
+  venueId     String?
+
+  quantity  Decimal @db.Decimal(10, 2)
+  unitPrice Decimal @db.Decimal(10, 2)
+  amount    Decimal @db.Decimal(12, 2)
+}
+
+// ==========================================
+// REVIEWS
+// ==========================================
+
+model Review {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id])
+
+  // Rating
+  overallRating  Int // 1-5
+  foodRating     Int?
+  serviceRating  Int?
+  ambienceRating Int?
+
+  comment String?
+
+  // Customer info
+  customerName  String?
+  customerEmail String?
+
+  // Source
+  source     ReviewSource @default(AVOQADO)
+  externalId String? // Google review ID, etc.
+
+  // Response
+  responseText      String?
+  respondedAt       DateTime?
+  responseAutomated Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId])
+  @@index([overallRating])
+  @@index([createdAt])
+}
+
+// ==========================================
+// HARDWARE
+// ==========================================
+
+model Terminal {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id])
+
+  serialNumber String       @unique
+  name         String
+  type         TerminalType
+
+  // Status
+  status        TerminalStatus @default(INACTIVE)
+  lastHeartbeat DateTime?
+
+  // Configuration
+  config Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([status])
+}
+
+// ==========================================
+// AUDIT & LOGS
+// ==========================================
+
+model ActivityLog {
+  id      String  @id @default(cuid())
+  staffId String?
+  staff   Staff?  @relation(fields: [staffId], references: [id])
+  venueId String
+
+  action   String
+  entity   String?
+  entityId String?
+
+  data      Json?
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([staffId])
+  @@index([venueId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+// ==========================================
+// CUSTOMERS (FUTURE IMPLEMENTATION)
+// ==========================================
+
+model Customer {
+  id    String  @id @default(cuid())
+  email String? @unique
+  phone String? @unique
+
+  firstName String?
+  lastName  String?
+  birthDate DateTime?
+  gender    String?
+
+  // Auth
+  password   String?
+  provider   AuthProvider @default(EMAIL)
+  providerId String?
+
+  // Preferences
+  language         String  @default("es")
+  marketingConsent Boolean @default(false)
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([phone])
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum BusinessType {
+  RESTAURANT
+  RETAIL
+  HOTEL
+  FITNESS
+  SPA
+  OTHER
+}
+
+enum VenueType {
+  RESTAURANT
+  BAR
+  CAFE
+  FAST_FOOD
+  FOOD_TRUCK
+  RETAIL_STORE
+  HOTEL_RESTAURANT
+  FITNESS_STUDIO
+  SPA
+  OTHER
+}
+
+enum PosType {
+  SOFTRESTAURANT
+  SQUARE
+  TOAST
+  CLOVER
+  ALOHA
+  MICROS
+  NCR
+  CUSTOM
+  NONE
+}
+
+enum PosStatus {
+  NOT_INTEGRATED
+  CONNECTING
+  CONNECTED
+  ERROR
+  DISABLED
+}
+
+enum FeeType {
+  PERCENTAGE
+  FIXED
+  TIERED
+}
+
+enum StaffRole {
+  OWNER // Full access to everything
+  ADMIN // Full venue access
+  MANAGER // Operations access
+  WAITER // Service access
+  CASHIER // Payment access only
+  KITCHEN // Kitchen display access
+  HOST // Reservations/seating
+  VIEWER // Read-only
+}
+
+enum ProductCategory {
+  // Restaurant
+  APPETIZER
+  MAIN_COURSE
+  DESSERT
+  BEVERAGE
+  ALCOHOL
+  // Retail
+  PRODUCT
+  SERVICE
+  // Common
+  OTHER
+}
+
+enum MovementType {
+  PURCHASE // New stock arrival
+  SALE // Sold to customer
+  ADJUSTMENT // Manual adjustment
+  LOSS // Damage, theft, expiry
+  TRANSFER // Between venues
+  COUNT // Physical count correction
+}
+
+enum OrderType {
+  DINE_IN
+  TAKEOUT
+  DELIVERY
+  PICKUP
+}
+
+enum OrderSource {
+  TPV // Terminal
+  QR // Customer QR
+  WEB // Website
+  APP // Mobile app
+  PHONE // Phone order
+  POS // Direct from POS
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  COMPLETED
+  CANCELLED
+}
+
+enum KitchenStatus {
+  PENDING
+  RECEIVED
+  PREPARING
+  READY
+  SERVED
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIAL
+  PAID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  CREDIT_CARD
+  DEBIT_CARD
+  DIGITAL_WALLET
+  BANK_TRANSFER
+  OTHER
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum TransactionType {
+  PAYMENT
+  REFUND
+  ADJUSTMENT
+}
+
+enum SettlementStatus {
+  PENDING
+  PROCESSING
+  SETTLED
+  FAILED
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSING
+  CLOSED
+}
+
+enum FeatureCategory {
+  OPERATIONS
+  PAYMENTS
+  MARKETING
+  ANALYTICS
+  INTEGRATIONS
+}
+
+enum ChargeType {
+  TRANSACTION_FEE
+  FEATURE_FEE
+  SETUP_FEE
+  OVERAGE_FEE
+  OTHER
+}
+
+enum InvoiceStatus {
+  DRAFT
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum ReviewSource {
+  AVOQADO
+  GOOGLE
+  TRIPADVISOR
+  FACEBOOK
+  YELP
+}
+
+enum TerminalType {
+  TPV_ANDROID
+  TPV_IOS
+  PRINTER_RECEIPT
+  PRINTER_KITCHEN
+  KDS // Kitchen Display System
+}
+
+enum TerminalStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+  RETIRED
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCING
+  SYNCED
+  FAILED
+  NOT_REQUIRED
+}
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  FACEBOOK
+  APPLE
+}

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".", // Adding baseUrl can sometimes help with path resolution consistency
+    "target": "es2020",
+    "module": "commonjs",
+    "rootDir": "./",
+    "outDir": "./dist",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "moduleResolution": "node",
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"],
+  "ts-node": {
+    "files": true,
+    "compilerOptions": {
+      // ts-node can optionally override compilerOptions here,
+      // but we'll let it inherit from the main compilerOptions for now.
+      // Example: "module": "commonjs"
+    }
+  }
+}

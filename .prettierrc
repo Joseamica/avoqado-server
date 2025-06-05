@@ -1,0 +1,33 @@
+{
+  "arrowParens": "avoid",
+  "bracketSpacing": true,
+  "embeddedLanguageFormatting": "auto",
+  "endOfLine": "lf",
+  "htmlWhitespaceSensitivity": "css",
+  "insertPragma": false,
+  "jsxBracketSameLine": false,
+  "jsxSingleQuote": false,
+  "printWidth": 140,
+  "proseWrap": "always",
+  "quoteProps": "as-needed",
+  "requirePragma": false,
+  "semi": false,
+  "singleQuote": true,
+  "tabWidth": 2,
+  "trailingComma": "all",
+  "useTabs": false,
+  "importOrder": [
+    "react",
+    "^@remix-run",
+    "<THIRD_PARTY_MODULES>",
+    "^@server/(.*)$",
+    "~/models",
+    "~/events",
+    "^[./]",
+    "^~/utils",
+    "^~/components",
+    "^@ui/(.*)$"
+  ],
+  "importOrderSeparation": true,
+  "importOrderSortSpecifiers": true
+}
