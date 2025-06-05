@@ -1,4 +1,4 @@
-import express from 'express'
+import express, { RequestHandler } from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { authorizeRole } from '../middlewares/authorizeRole.middleware' // Verifica esta ruta
 import { validateRequest as validateRequestMiddleware } from '../middlewares/validation' // Verifica esta ruta
@@ -22,13 +22,13 @@ router.post(
   venueController.createVenue, // Llamas al método del controlador
 )
 
-// router.get(
-//   '/venues',
-//   authenticateTokenMiddleware,
-//   authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-//   validateRequestMiddleware(listVenuesQuerySchema), // Validar query params
-//   venueController.listVenues,
-// )
+router.get(
+  '/venues',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequestMiddleware(listVenuesQuerySchema), // Validar query params
+  venueController.listVenues as unknown as RequestHandler, // Type assertion for controller
+)
 // ... más rutas del dashboard
 
 export default router

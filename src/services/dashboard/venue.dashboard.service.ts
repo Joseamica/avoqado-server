@@ -53,13 +53,9 @@ export async function createVenueForOrganization(orgId: string, venueData: Creat
   return newVenue
 }
 
-export async function getVenuesByOrganization(orgId: string, queryOptions: any /* ListVenuesQueryDto */): Promise<Venue[]> {
+export async function listVenuesForOrganization(orgId: string, queryOptions: any /* ListVenuesQueryDto */): Promise<Venue[]> {
   // Aquí implementarías la lógica para paginación, filtros, ordenación basados en queryOptions
   return prisma.venue.findMany({
-    where: {
-      organizationId: orgId,
-      // ... aplicar filtros basados en queryOptions.search ...
-    },
     // orderBy: { [queryOptions.sortBy || 'createdAt']: queryOptions.sortOrder || 'desc' },
     // skip: (queryOptions.page - 1) * queryOptions.limit,
     // take: queryOptions.limit,

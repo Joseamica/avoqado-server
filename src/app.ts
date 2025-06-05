@@ -1,6 +1,6 @@
 import express, { Express, Request as ExpressRequest, Response as ExpressResponse, NextFunction } from 'express'
-import jwt, { SignOptions } from 'jsonwebtoken';
-import type { StringValue } from 'ms';
+import jwt, { SignOptions } from 'jsonwebtoken'
+import type { StringValue } from 'ms'
 import { StaffRole } from '@prisma/client' // Assuming Prisma client is set up
 
 import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
@@ -8,6 +8,7 @@ import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
 import AppError from './errors/AppError'
+import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 
 // Import routes
 import productRoutes from './routes/products.routes'
@@ -30,6 +31,10 @@ app.use('/api/v1/venues/:venueId/products', productRoutes)
 app.use('/api/v1/venues/:venueId/public-menu', publicMenuRoutes)
 app.use('/api/v1/secure', orderRoutes) // Consider renaming '/secure' if it's for orders specifically
 
+// --- Montaje de Rutas de la API ---
+const API_PREFIX = process.env.API_PREFIX || '/api/v1' // Define un prefijo base para tu API
+app.use(API_PREFIX, mainApiRouter)
+
 // Health check endpoint
 app.get('/api/public/healthcheck', (req: ExpressRequest, res: ExpressResponse) => {
   const correlationId = (req as any).correlationId || 'N/A'
@@ -44,8 +49,8 @@ if (NODE_ENV === 'development') {
     sub?: string // userId
     orgId?: string
     venueId?: string
-    role: StaffRole;
-    expiresIn?: StringValue; // e.g., '1h', '7d'
+    role: StaffRole
+    expiresIn?: StringValue // e.g., '1h', '7d'
   }
 
   const generateTestToken = (payloadOverride: Partial<AvoqadoJwtPayload>, expiresIn?: StringValue): string => {
@@ -60,7 +65,7 @@ if (NODE_ENV === 'development') {
     const payload: AvoqadoJwtPayload = { ...defaultPayload, ...payloadOverride }
     const signOptions: jwt.SignOptions = {
       expiresIn: expiresIn || '1d', // Default to 1 day for dev tokens
-    };
+    }
 
     return jwt.sign(payload, ACCESS_TOKEN_SECRET, signOptions)
   }
