@@ -1,16 +1,11 @@
 // src/services/dashboard/venue.dashboard.service.ts
 import prisma from '../../utils/prismaClient' // Tu instancia de Prisma Client
-import { CreateVenueDto } from '../../schemas/venue.schema' // Ajusta la ruta
+import { CreateVenueDto } from '../../schemas/dashboard/venue.schema' // Ajusta la ruta
 import { Venue } from '@prisma/client'
-import { BadRequestError } from '../../errors/AppError' // Tu error personalizado
+import { BadRequestError, NotFoundError } from '../../errors/AppError' // Tu error personalizado
+import { generateSlug } from '../../utils/slugify'
 
 // Función para generar slugs (podría estar en un utilitario)
-function generateSlug(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\s+/g, '-')
-    .replace(/[^\w-]+/g, '')
-}
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -60,4 +55,31 @@ export async function listVenuesForOrganization(orgId: string, queryOptions: any
     // skip: (queryOptions.page - 1) * queryOptions.limit,
     // take: queryOptions.limit,
   })
+}
+
+export async function getVenueById(orgId: string, venueId: string): Promise<Venue> {
+  const venue = await prisma.venue.findUnique({
+    where: {
+      id: venueId,
+    },
+    include: {
+      menuCategories: true,
+      modifierGroups: true,
+      menus: true,
+      terminals: true,
+      staff: true,
+      inventories: true,
+      tables: true,
+      shifts: true,
+      orders: true,
+      payments: true,
+      transactions: true,
+      reviews: true,
+      features: true,
+    },
+  })
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+  return venue
 }

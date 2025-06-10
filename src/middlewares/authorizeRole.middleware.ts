@@ -20,7 +20,12 @@ export const authorizeRole = (allowedRoles: StaffRole[]) => {
       return;
     }
 
-    const userRole = req.authContext.role;
+        const userRole = req.authContext.role;
+
+    // SUPERADMIN siempre tiene acceso
+    if (userRole === StaffRole.SUPERADMIN) {
+      return next();
+    }
 
     if (allowedRoles.includes(userRole)) {
       next(); // El rol del usuario está en la lista de permitidos

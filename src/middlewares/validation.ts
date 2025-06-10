@@ -1,7 +1,7 @@
 // src/middlewares/validation.ts
 import { Request, Response, NextFunction } from 'express';
 import { ZodError, z, AnyZodObject } from 'zod'; // Import AnyZodObject
-import AppError from '../errors/AppError';
+import AppError, { BadRequestError, InternalServerError } from '../errors/AppError';
 
 export const validateRequest = (schema: AnyZodObject) => async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -25,14 +25,14 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
       // this basic implementation might need adjustment or a more specific schema type.
       // For now, we assume the schema is an object containing keys like 'body', 'query', 'params'.
       // This case should ideally not be hit if schemas are structured as z.object({ query: ..., body: ...}).
-      return next(new AppError('Validation schema is not structured as expected (e.g., z.object containing body/query/params keys)).', 500));
+      return next(new InternalServerError('Validation schema is not structured as expected (e.g., z.object containing body/query/params keys)).'));
     }
 
     const parsedResult = await schema.safeParseAsync(dataToParse);
 
     if (!parsedResult.success) {
       const errorMessages = parsedResult.error.errors.map(err => `${err.path.join('.')}: ${err.message}`).join(', ');
-      return next(new AppError(`Validation failed: ${errorMessages}`, 400));
+      return next(new BadRequestError(`Validation failed: ${errorMessages}`));
     }
 
     // Assign the successfully parsed (and potentially transformed) data back to req.
@@ -54,8 +54,8 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
       // This catch block might be redundant if safeParseAsync handles all ZodErrors from the parse call itself,
       // but good for other ZodErrors that might occur if schema manipulation was more complex.
       const errorMessages = error.errors.map(err => `${err.path.join('.')}: ${err.message}`).join(', ');
-      return next(new AppError(`Validation failed during Zod processing: ${errorMessages}`, 400));
+      return next(new BadRequestError(`Validation failed during Zod processing: ${errorMessages}`));
     }
-    return next(new AppError('An unexpected error occurred during request validation.', 500));
+    return next(new InternalServerError('An unexpected error occurred during request validation.'));
   }
 };

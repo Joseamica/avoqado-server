@@ -6,6 +6,7 @@ declare global {
     export interface Request {
       authContext?: AuthContext
       correlationId?: string
+      authenticated?: boolean
     }
   }
 }

@@ -1,5 +1,5 @@
 import jwt, { Secret, SignOptions } from 'jsonwebtoken'
-import { StaffRole } from './security'
+import { StaffRole } from '@prisma/client'
 import crypto from 'crypto'
 import dotenv from 'dotenv'
 

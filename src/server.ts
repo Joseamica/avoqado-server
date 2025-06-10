@@ -9,6 +9,7 @@ import app from './app'; // The configured Express application
 import logger from './config/logger';
 import { PORT, NODE_ENV } from './config/env';
 import pgPool from './config/database'; // Import pgPool for graceful shutdown
+import prisma from './utils/prismaClient'; // Import Prisma client for graceful shutdown
 
 const httpServer = http.createServer(app);
 
@@ -22,6 +23,12 @@ const gracefulShutdown = (signal: string) => {
       logger.info('PostgreSQL pool has been closed.');
     } catch (e) {
       logger.error('Error closing PostgreSQL pool', e);
+    }
+    try {
+      await prisma.$disconnect();
+      logger.info('Prisma client has been disconnected.');
+    } catch (e) {
+      logger.error('Error disconnecting Prisma client', e);
     }
     process.exit(0);
   });

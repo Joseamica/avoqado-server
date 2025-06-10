@@ -11,7 +11,7 @@ datasource db {
 }
 
 // ==========================================
-// CORE MULTI-TENANT ARCHITECTURE
+// NOTE: CORE MULTI-TENANT ARCHITECTURE
 // ==========================================
 
 model Organization {
@@ -26,9 +26,10 @@ model Organization {
   billingEmail   String?
   billingAddress Json?
 
-  venues   Venue[]
-  staff    Staff[]
-  invoices Invoice[]
+  venues      Venue[]
+  staff       Staff[]
+  invitations Invitation[]
+  invoices    Invoice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -85,16 +86,20 @@ model Venue {
   settings VenueSettings?
 
   // Relations
-  staff        StaffVenue[]
-  products     Product[]
-  inventories  Inventory[]
-  tables       Table[]
-  shifts       Shift[]
-  orders       Order[]
-  payments     Payment[]
-  transactions VenueTransaction[]
-  reviews      Review[]
-  terminals    Terminal[]
+  invitations    Invitation[]
+  staff          StaffVenue[]
+  menuCategories MenuCategory[]
+  menus          Menu[]
+  products       Product[]
+  modifierGroups ModifierGroup[]
+  inventories    Inventory[]
+  tables         Table[]
+  shifts         Shift[]
+  orders         Order[]
+  payments       Payment[]
+  transactions   VenueTransaction[]
+  reviews        Review[]
+  terminals      Terminal[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -139,7 +144,7 @@ model VenueSettings {
 }
 
 // ==========================================
-// STAFF MANAGEMENT (SIMPLIFIED)
+// NOTE: STAFF MANAGEMENT (SIMPLIFIED)
 // ==========================================
 
 model Staff {
@@ -160,8 +165,9 @@ model Staff {
   photoUrl     String?
 
   // Status
-  active        Boolean @default(true)
-  emailVerified Boolean @default(false)
+  active        Boolean      @default(true)
+  emailVerified Boolean      @default(false)
+  invitations   Invitation[]
 
   // Access
   venues            StaffVenue[]
@@ -206,8 +212,146 @@ model StaffVenue {
   @@index([role])
 }
 
+model Invitation {
+  id    String    @id @default(cuid())
+  email String
+  role  StaffRole
+
+  // Tipo de invitación
+  type InvitationType @default(VENUE_STAFF) // ✅ AGREGAR
+
+  // Organization (siempre requerida)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Venue (opcional - solo para invitaciones de staff a venue específico)
+  venueId String?
+  venue   Venue?  @relation(fields: [venueId], references: [id])
+
+  // Token y seguridad
+  token     String   @unique @default(cuid()) // ✅ Generar por defecto
+  expiresAt DateTime
+
+  // Estado
+  status     InvitationStatus @default(PENDING) // ✅ MEJOR QUE isUsed
+  acceptedAt DateTime?
+  declinedAt DateTime? // ✅ AGREGAR
+
+  // Metadata
+  message     String? // ✅ Mensaje personalizado del invitador
+  permissions Json? // ✅ Permisos específicos si aplica
+
+  // Tracking
+  invitedById  String
+  invitedBy    Staff   @relation(fields: [invitedById], references: [id])
+  acceptedById String? // ✅ AGREGAR - Quién aceptó (puede ser diferente)
+
+  // Intentos de uso
+  attemptCount  Int       @default(0) // ✅ AGREGAR
+  lastAttemptAt DateTime? // ✅ AGREGAR
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt // ✅ AGREGAR
+
+  @@index([email])
+  @@index([token])
+  @@index([organizationId])
+  @@index([venueId])
+  @@index([status]) // ✅ AGREGAR
+  @@index([expiresAt]) // ✅ AGREGAR para queries de limpieza
+}
+
 // ==========================================
-// INVENTORY MANAGEMENT
+// NOTE: MENU & CATEGORIES
+// ==========================================
+model MenuCategory {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Basic info
+  name        String
+  description String?
+  slug        String
+
+  // Display
+  displayOrder Int     @default(0)
+  imageUrl     String?
+  color        String? // For UI theming
+  icon         String? // Icon name/class
+
+  // Hierarchy (for subcategories)
+  parentId String?
+  parent   MenuCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children MenuCategory[] @relation("CategoryHierarchy")
+
+  // Scheduling
+  active         Boolean  @default(true)
+  availableFrom  String? // "08:00"
+  availableUntil String? // "22:00"
+  availableDays  String[] // ["MON", "TUE", "WED"]
+
+  // Relations
+  products Product[]
+  menus    MenuCategoryAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, slug])
+  @@index([venueId])
+  @@index([displayOrder])
+  @@index([active])
+}
+
+model Menu {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Basic info
+  name        String
+  description String?
+  type        MenuType @default(REGULAR)
+
+  // Display
+  displayOrder Int     @default(0)
+  isDefault    Boolean @default(false) // Main menu
+
+  // Scheduling
+  active         Boolean   @default(true)
+  startDate      DateTime?
+  endDate        DateTime?
+  availableFrom  String? // "11:00"
+  availableUntil String? // "15:00"
+  availableDays  String[] // ["MON", "TUE"]
+
+  // Relations
+  categories MenuCategoryAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([active])
+}
+
+model MenuCategoryAssignment {
+  id         String       @id @default(cuid())
+  menuId     String
+  menu       Menu         @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  categoryId String
+  category   MenuCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  displayOrder Int @default(0)
+
+  @@unique([menuId, categoryId])
+  @@index([menuId])
+  @@index([categoryId])
+}
+
+// ==========================================
+// NOTE: INVENTORY MANAGEMENT
 // ==========================================
 
 model Product {
@@ -219,7 +363,13 @@ model Product {
   sku         String
   name        String
   description String?
-  category    ProductCategory
+
+  // Category relationship (flexible)
+  categoryId String
+  category   MenuCategory @relation(fields: [categoryId], references: [id])
+
+  // Type for reporting/analytics
+  type ProductType @default(FOOD)
 
   // Pricing
   price   Decimal  @db.Decimal(10, 2)
@@ -231,6 +381,15 @@ model Product {
   displayOrder Int     @default(0)
   featured     Boolean @default(false)
 
+  // Dietary info
+  tags      String[] // ["vegetarian", "gluten-free", "spicy"]
+  allergens String[] // ["nuts", "dairy", "shellfish"]
+  calories  Int?
+
+  // Preparation
+  prepTime     Int? // minutes
+  cookingNotes String?
+
   // Inventory tracking
   trackInventory Boolean @default(false)
   unit           String? // "pza", "kg", "lt", etc.
@@ -239,6 +398,13 @@ model Product {
   active         Boolean   @default(true)
   availableFrom  DateTime?
   availableUntil DateTime?
+
+  // POS Integration
+  externalId   String? // ID from POS
+  externalData Json? // Raw data from POS
+  fromPOS      Boolean    @default(false)
+  syncStatus   SyncStatus @default(NOT_REQUIRED)
+  lastSyncAt   DateTime?
 
   // Relations
   inventory      Inventory?
@@ -249,9 +415,11 @@ model Product {
   updatedAt DateTime @updatedAt
 
   @@unique([venueId, sku])
+  @@unique([venueId, externalId])
   @@index([venueId])
-  @@index([category])
+  @@index([categoryId])
   @@index([active])
+  @@index([type])
 }
 
 model Inventory {
@@ -297,7 +465,7 @@ model InventoryMovement {
 }
 
 // ==========================================
-// OPERATIONS
+// NOTE: OPERATIONS
 // ==========================================
 
 model Table {
@@ -440,11 +608,14 @@ model OrderItem {
 }
 
 // ==========================================
-// MODIFIERS
+// NOTE: MODIFIERS
 // ==========================================
 
 model ModifierGroup {
-  id          String  @id @default(cuid())
+  id      String @id @default(cuid())
+  venueId String // ✅ AGREGAR ESTE CAMPO
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade) // ✅ AGREGAR RELACIÓN
+
   name        String
   description String?
 
@@ -453,8 +624,17 @@ model ModifierGroup {
   minSelections Int     @default(0)
   maxSelections Int?
 
+  // Display
+  displayOrder Int     @default(0)
+  active       Boolean @default(true)
+
   modifiers Modifier[]
   products  ProductModifierGroup[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId]) // ✅ AGREGAR ÍNDICE
 }
 
 model Modifier {
@@ -494,7 +674,7 @@ model OrderItemModifier {
 }
 
 // ==========================================
-// PAYMENTS & FEES
+// NOTE: PAYMENTS & FEES
 // ==========================================
 
 model Payment {
@@ -527,9 +707,11 @@ model Payment {
   feeAmount     Decimal @db.Decimal(10, 2)
   netAmount     Decimal @db.Decimal(12, 2)
 
+  // Receipt
+  receipts   DigitalReceipt[]
   // POS sync
   externalId String?
-  syncStatus SyncStatus @default(PENDING)
+  syncStatus SyncStatus       @default(PENDING)
   syncedAt   DateTime?
 
   // Relations
@@ -543,6 +725,33 @@ model Payment {
   @@index([shiftId])
   @@index([method])
   @@index([status])
+}
+
+model DigitalReceipt {
+  id String @id @default(cuid())
+
+  // Un identificador seguro y no secuencial para la URL pública
+  // Es mejor que usar el CUID/UUID directamente, que puede ser largo
+  accessKey String @unique @default(cuid())
+
+  // Relación con el pago
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id])
+
+  // Snapshot de los datos en el momento de la creación
+  // ¡Esta es la clave para la inmutabilidad!
+  dataSnapshot Json
+
+  // Tracking del envío
+  status         ReceiptStatus @default(PENDING)
+  recipientEmail String?
+  sentAt         DateTime?
+  viewedAt       DateTime? // Se puede actualizar cuando se accede al link
+
+  createdAt DateTime @default(now())
+
+  @@index([accessKey])
+  @@index([paymentId])
 }
 
 model VenueTransaction {
@@ -572,7 +781,7 @@ model VenueTransaction {
 }
 
 // ==========================================
-// FEATURES & BILLING
+// NOTE: FEATURES & BILLING
 // ==========================================
 
 model Feature {
@@ -670,7 +879,7 @@ model InvoiceItem {
 }
 
 // ==========================================
-// REVIEWS
+// NOTE REVIEWS
 // ==========================================
 
 model Review {
@@ -707,7 +916,7 @@ model Review {
 }
 
 // ==========================================
-// HARDWARE
+// NOTE HARDWARE
 // ==========================================
 
 model Terminal {
@@ -734,7 +943,7 @@ model Terminal {
 }
 
 // ==========================================
-// AUDIT & LOGS
+// NOTE: AUDIT & LOGS
 // ==========================================
 
 model ActivityLog {
@@ -760,7 +969,7 @@ model ActivityLog {
 }
 
 // ==========================================
-// CUSTOMERS (FUTURE IMPLEMENTATION)
+// NOTE: CUSTOMERS (FUTURE IMPLEMENTATION)
 // ==========================================
 
 model Customer {
@@ -792,7 +1001,7 @@ model Customer {
 }
 
 // ==========================================
-// ENUMS
+// NOTE: ENUMS
 // ==========================================
 
 enum BusinessType {
@@ -844,6 +1053,7 @@ enum FeeType {
 }
 
 enum StaffRole {
+  SUPERADMIN // Full access to everything
   OWNER // Full access to everything
   ADMIN // Full venue access
   MANAGER // Operations access
@@ -854,18 +1064,24 @@ enum StaffRole {
   VIEWER // Read-only
 }
 
-enum ProductCategory {
-  // Restaurant
-  APPETIZER
-  MAIN_COURSE
-  DESSERT
+enum ProductType {
+  FOOD
   BEVERAGE
   ALCOHOL
-  // Retail
-  PRODUCT
+  RETAIL
   SERVICE
-  // Common
   OTHER
+}
+
+enum MenuType {
+  REGULAR
+  BREAKFAST
+  LUNCH
+  DINNER
+  SEASONAL
+  CATERING
+  DRINKS
+  KIDS
 }
 
 enum MovementType {
@@ -1008,9 +1224,31 @@ enum SyncStatus {
   NOT_REQUIRED
 }
 
+enum InvitationType {
+  ORGANIZATION_ADMIN // Invitación para admin de organización
+  VENUE_STAFF // Invitación para staff de venue
+  VENUE_ADMIN // Invitación para admin de venue específico
+}
+
+enum InvitationStatus {
+  PENDING // Esperando aceptación
+  ACCEPTED // Aceptada y usada
+  DECLINED // Rechazada explícitamente
+  EXPIRED // Expiró antes de usar
+  REVOKED // Revocada por admin
+}
+
 enum AuthProvider {
   EMAIL
   GOOGLE
   FACEBOOK
   APPLE
+}
+
+enum ReceiptStatus {
+  PENDING // Generado pero no enviado
+  SENT // Enviado exitosamente
+  DELIVERED // Confirmado como entregado por el servicio de email (si lo soporta)
+  VIEWED // El cliente abrió el link
+  ERROR // Fallo en el envío
 }

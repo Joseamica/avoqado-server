@@ -17,7 +17,10 @@ CREATE TYPE "FeeType" AS ENUM ('PERCENTAGE', 'FIXED', 'TIERED');
 CREATE TYPE "StaffRole" AS ENUM ('OWNER', 'ADMIN', 'MANAGER', 'WAITER', 'CASHIER', 'KITCHEN', 'HOST', 'VIEWER');
 
 -- CreateEnum
-CREATE TYPE "ProductCategory" AS ENUM ('APPETIZER', 'MAIN_COURSE', 'DESSERT', 'BEVERAGE', 'ALCOHOL', 'PRODUCT', 'SERVICE', 'OTHER');
+CREATE TYPE "ProductType" AS ENUM ('FOOD', 'BEVERAGE', 'ALCOHOL', 'RETAIL', 'SERVICE', 'OTHER');
+
+-- CreateEnum
+CREATE TYPE "MenuType" AS ENUM ('REGULAR', 'BREAKFAST', 'LUNCH', 'DINNER', 'SEASONAL', 'CATERING', 'DRINKS', 'KIDS');
 
 -- CreateEnum
 CREATE TYPE "MovementType" AS ENUM ('PURCHASE', 'SALE', 'ADJUSTMENT', 'LOSS', 'TRANSFER', 'COUNT');
@@ -193,24 +196,88 @@ CREATE TABLE "StaffVenue" (
 );
 
 -- CreateTable
+CREATE TABLE "MenuCategory" (
+    "id" TEXT NOT NULL,
+    "venueId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "description" TEXT,
+    "slug" TEXT NOT NULL,
+    "displayOrder" INTEGER NOT NULL DEFAULT 0,
+    "imageUrl" TEXT,
+    "color" TEXT,
+    "icon" TEXT,
+    "parentId" TEXT,
+    "active" BOOLEAN NOT NULL DEFAULT true,
+    "availableFrom" TEXT,
+    "availableUntil" TEXT,
+    "availableDays" TEXT[],
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "MenuCategory_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Menu" (
+    "id" TEXT NOT NULL,
+    "venueId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "description" TEXT,
+    "type" "MenuType" NOT NULL DEFAULT 'REGULAR',
+    "displayOrder" INTEGER NOT NULL DEFAULT 0,
+    "isDefault" BOOLEAN NOT NULL DEFAULT false,
+    "active" BOOLEAN NOT NULL DEFAULT true,
+    "startDate" TIMESTAMP(3),
+    "endDate" TIMESTAMP(3),
+    "availableFrom" TEXT,
+    "availableUntil" TEXT,
+    "availableDays" TEXT[],
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Menu_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "MenuCategoryAssignment" (
+    "id" TEXT NOT NULL,
+    "menuId" TEXT NOT NULL,
+    "categoryId" TEXT NOT NULL,
+    "displayOrder" INTEGER NOT NULL DEFAULT 0,
+
+    CONSTRAINT "MenuCategoryAssignment_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "Product" (
     "id" TEXT NOT NULL,
     "venueId" TEXT NOT NULL,
     "sku" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "description" TEXT,
-    "category" "ProductCategory" NOT NULL,
+    "categoryId" TEXT NOT NULL,
+    "type" "ProductType" NOT NULL DEFAULT 'FOOD',
     "price" DECIMAL(10,2) NOT NULL,
     "cost" DECIMAL(10,2),
     "taxRate" DECIMAL(5,4) NOT NULL DEFAULT 0.16,
     "imageUrl" TEXT,
     "displayOrder" INTEGER NOT NULL DEFAULT 0,
     "featured" BOOLEAN NOT NULL DEFAULT false,
+    "tags" TEXT[],
+    "allergens" TEXT[],
+    "calories" INTEGER,
+    "prepTime" INTEGER,
+    "cookingNotes" TEXT,
     "trackInventory" BOOLEAN NOT NULL DEFAULT false,
     "unit" TEXT,
     "active" BOOLEAN NOT NULL DEFAULT true,
     "availableFrom" TIMESTAMP(3),
     "availableUntil" TIMESTAMP(3),
+    "externalId" TEXT,
+    "externalData" JSONB,
+    "fromPOS" BOOLEAN NOT NULL DEFAULT false,
+    "syncStatus" "SyncStatus" NOT NULL DEFAULT 'NOT_REQUIRED',
+    "lastSyncAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -336,12 +403,17 @@ CREATE TABLE "OrderItem" (
 -- CreateTable
 CREATE TABLE "ModifierGroup" (
     "id" TEXT NOT NULL,
+    "venueId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "description" TEXT,
     "required" BOOLEAN NOT NULL DEFAULT false,
     "allowMultiple" BOOLEAN NOT NULL DEFAULT false,
     "minSelections" INTEGER NOT NULL DEFAULT 0,
     "maxSelections" INTEGER,
+    "displayOrder" INTEGER NOT NULL DEFAULT 0,
+    "active" BOOLEAN NOT NULL DEFAULT true,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "ModifierGroup_pkey" PRIMARY KEY ("id")
 );
@@ -614,16 +686,49 @@ CREATE INDEX "StaffVenue_role_idx" ON "StaffVenue"("role");
 CREATE UNIQUE INDEX "StaffVenue_staffId_venueId_key" ON "StaffVenue"("staffId", "venueId");
 
 -- CreateIndex
+CREATE INDEX "MenuCategory_venueId_idx" ON "MenuCategory"("venueId");
+
+-- CreateIndex
+CREATE INDEX "MenuCategory_displayOrder_idx" ON "MenuCategory"("displayOrder");
+
+-- CreateIndex
+CREATE INDEX "MenuCategory_active_idx" ON "MenuCategory"("active");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "MenuCategory_venueId_slug_key" ON "MenuCategory"("venueId", "slug");
+
+-- CreateIndex
+CREATE INDEX "Menu_venueId_idx" ON "Menu"("venueId");
+
+-- CreateIndex
+CREATE INDEX "Menu_active_idx" ON "Menu"("active");
+
+-- CreateIndex
+CREATE INDEX "MenuCategoryAssignment_menuId_idx" ON "MenuCategoryAssignment"("menuId");
+
+-- CreateIndex
+CREATE INDEX "MenuCategoryAssignment_categoryId_idx" ON "MenuCategoryAssignment"("categoryId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "MenuCategoryAssignment_menuId_categoryId_key" ON "MenuCategoryAssignment"("menuId", "categoryId");
+
+-- CreateIndex
 CREATE INDEX "Product_venueId_idx" ON "Product"("venueId");
 
 -- CreateIndex
-CREATE INDEX "Product_category_idx" ON "Product"("category");
+CREATE INDEX "Product_categoryId_idx" ON "Product"("categoryId");
 
 -- CreateIndex
 CREATE INDEX "Product_active_idx" ON "Product"("active");
 
 -- CreateIndex
+CREATE INDEX "Product_type_idx" ON "Product"("type");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "Product_venueId_sku_key" ON "Product"("venueId", "sku");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Product_venueId_externalId_key" ON "Product"("venueId", "externalId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Inventory_productId_key" ON "Inventory"("productId");
@@ -681,6 +786,9 @@ CREATE INDEX "OrderItem_orderId_idx" ON "OrderItem"("orderId");
 
 -- CreateIndex
 CREATE INDEX "OrderItem_productId_idx" ON "OrderItem"("productId");
+
+-- CreateIndex
+CREATE INDEX "ModifierGroup_venueId_idx" ON "ModifierGroup"("venueId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ProductModifierGroup_productId_groupId_key" ON "ProductModifierGroup"("productId", "groupId");
@@ -794,7 +902,25 @@ ALTER TABLE "StaffVenue" ADD CONSTRAINT "StaffVenue_staffId_fkey" FOREIGN KEY ("
 ALTER TABLE "StaffVenue" ADD CONSTRAINT "StaffVenue_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "MenuCategory" ADD CONSTRAINT "MenuCategory_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "MenuCategory" ADD CONSTRAINT "MenuCategory_parentId_fkey" FOREIGN KEY ("parentId") REFERENCES "MenuCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Menu" ADD CONSTRAINT "Menu_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "MenuCategoryAssignment" ADD CONSTRAINT "MenuCategoryAssignment_menuId_fkey" FOREIGN KEY ("menuId") REFERENCES "Menu"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "MenuCategoryAssignment" ADD CONSTRAINT "MenuCategoryAssignment_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "MenuCategory"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "Product" ADD CONSTRAINT "Product_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Product" ADD CONSTRAINT "Product_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "MenuCategory"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Inventory" ADD CONSTRAINT "Inventory_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -834,6 +960,9 @@ ALTER TABLE "OrderItem" ADD CONSTRAINT "OrderItem_orderId_fkey" FOREIGN KEY ("or
 
 -- AddForeignKey
 ALTER TABLE "OrderItem" ADD CONSTRAINT "OrderItem_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ModifierGroup" ADD CONSTRAINT "ModifierGroup_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Modifier" ADD CONSTRAINT "Modifier_groupId_fkey" FOREIGN KEY ("groupId") REFERENCES "ModifierGroup"("id") ON DELETE CASCADE ON UPDATE CASCADE;

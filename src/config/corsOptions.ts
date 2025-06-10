@@ -25,8 +25,20 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     production: ['https://pos.avoqado.com'],
   }
 
+  // Swagger/OpenAPI documentation origins
+  const swaggerOrigins = {
+    development: ['http://localhost:57777', 'http://127.0.0.1:57777'],
+    staging: [],
+    production: []
+  }
+
   // Combine all allowed origins for this environment
-  const allowedOrigins = [...(dashboardOrigins[env] || []), ...(mobileOrigins[env] || []), ...(posOrigins[env] || [])]
+  const allowedOrigins = [
+    ...(dashboardOrigins[env] || []), 
+    ...(mobileOrigins[env] || []), 
+    ...(posOrigins[env] || []),
+    ...(swaggerOrigins[env] || [])
+  ]
 
   return {
     origin: (origin, callback) => {
@@ -37,8 +49,20 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
         callback(new Error(`Origin ${origin} not allowed by CORS`))
       }
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-client-type', 'x-client-id'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type', 
+      'Authorization', 
+      'x-api-key', 
+      'x-client-type', 
+      'x-client-id',
+      'Origin',
+      'X-Requested-With',
+      'Accept',
+      'Access-Control-Allow-Headers',
+      'Access-Control-Request-Method',
+      'Access-Control-Request-Headers'
+    ],
     exposedHeaders: ['X-Client-Id'],
     credentials: true,
     optionsSuccessStatus: 200,
