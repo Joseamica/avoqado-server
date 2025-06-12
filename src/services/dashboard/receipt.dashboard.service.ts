@@ -1,7 +1,7 @@
 // services/dashboard/receipt.dashboard.service.ts
-import { DigitalReceipt, Payment, ReceiptStatus } from '@prisma/client'
+import { DigitalReceipt, ReceiptStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import AppError from '../../errors/AppError'
+import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 
 // Define types for the receipt snapshot
 import { ReceiptDataSnapshot } from '../../schemas/dashboard/receipt.schema'
@@ -14,7 +14,7 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
   })
 
   if (!payment) {
-    throw new AppError('Payment not found', 404)
+    throw new NotFoundError('Payment not found')
   }
 
   // Get venue data
@@ -33,7 +33,7 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
   })
 
   if (!venue) {
-    throw new AppError('Venue not found', 404)
+    throw new NotFoundError('Venue not found')
   }
 
   // Get order details
@@ -42,7 +42,7 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
   })
 
   if (!order) {
-    throw new AppError('Order not found', 404)
+    throw new NotFoundError('Order not found')
   }
 
   // Get order items separately
@@ -166,11 +166,11 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
   })
 
   if (!receipt) {
-    throw new AppError('Receipt not found', 404)
+    throw new BadRequestError('Receipt not found')
   }
 
   if (!receipt.recipientEmail) {
-    throw new AppError('No recipient email provided', 400)
+    throw new BadRequestError('No recipient email provided')
   }
 
   try {
@@ -202,7 +202,7 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
       where: { id: receiptId },
       data: { status: ReceiptStatus.ERROR },
     })
-    throw new AppError(`Failed to send receipt email: ${(error as Error).message}`, 500)
+    throw new InternalServerError(`Failed to send receipt email: ${(error as Error).message}`)
   }
 }
 
@@ -212,7 +212,7 @@ export async function getReceiptsByPaymentId(paymentId: string): Promise<Digital
   })
 
   if (!receipts) {
-    throw new AppError('Receipts not found', 404)
+    throw new NotFoundError('Receipts not found')
   }
 
   return receipts
@@ -225,7 +225,7 @@ export async function getReceiptByAccessKey(accessKey: string): Promise<DigitalR
   })
 
   if (!receipt) {
-    throw new AppError('Receipt not found', 404)
+    throw new NotFoundError('Receipt not found')
   }
 
   // Update view tracking if not already viewed

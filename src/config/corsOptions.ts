@@ -29,15 +29,17 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
   const swaggerOrigins = {
     development: ['http://localhost:57777', 'http://127.0.0.1:57777'],
     staging: [],
-    production: []
+    production: [],
   }
 
   // Combine all allowed origins for this environment
   const allowedOrigins = [
-    ...(dashboardOrigins[env] || []), 
-    ...(mobileOrigins[env] || []), 
+    // Add null origin to support login form in Swagger UI auth page
+    'null',
+    ...(dashboardOrigins[env] || []),
+    ...(mobileOrigins[env] || []),
     ...(posOrigins[env] || []),
-    ...(swaggerOrigins[env] || [])
+    ...(swaggerOrigins[env] || []),
   ]
 
   return {
@@ -51,17 +53,17 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: [
-      'Content-Type', 
-      'Authorization', 
-      'x-api-key', 
-      'x-client-type', 
+      'Content-Type',
+      'Authorization',
+      'x-api-key',
+      'x-client-type',
       'x-client-id',
       'Origin',
       'X-Requested-With',
       'Accept',
       'Access-Control-Allow-Headers',
       'Access-Control-Request-Method',
-      'Access-Control-Request-Headers'
+      'Access-Control-Request-Headers',
     ],
     exposedHeaders: ['X-Client-Id'],
     credentials: true,

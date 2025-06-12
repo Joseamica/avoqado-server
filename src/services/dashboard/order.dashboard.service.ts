@@ -3,7 +3,10 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schena'
-import { Order } from '@prisma/client'
+
+import { Order, OriginSystem } from '@prisma/client'
+
+// Este tipo debería estar en un archivo central de tipos
 
 export async function getOrders(venueId: string, page: number, pageSize: number): Promise<PaginatedOrdersResponse> {
   if (!venueId) {

@@ -14,7 +14,7 @@ CREATE TYPE "PosStatus" AS ENUM ('NOT_INTEGRATED', 'CONNECTING', 'CONNECTED', 'E
 CREATE TYPE "FeeType" AS ENUM ('PERCENTAGE', 'FIXED', 'TIERED');
 
 -- CreateEnum
-CREATE TYPE "StaffRole" AS ENUM ('OWNER', 'ADMIN', 'MANAGER', 'WAITER', 'CASHIER', 'KITCHEN', 'HOST', 'VIEWER');
+CREATE TYPE "StaffRole" AS ENUM ('SUPERADMIN', 'OWNER', 'ADMIN', 'MANAGER', 'WAITER', 'CASHIER', 'KITCHEN', 'HOST', 'VIEWER');
 
 -- CreateEnum
 CREATE TYPE "ProductType" AS ENUM ('FOOD', 'BEVERAGE', 'ALCOHOL', 'RETAIL', 'SERVICE', 'OTHER');
@@ -65,7 +65,7 @@ CREATE TYPE "ChargeType" AS ENUM ('TRANSACTION_FEE', 'FEATURE_FEE', 'SETUP_FEE',
 CREATE TYPE "InvoiceStatus" AS ENUM ('DRAFT', 'PENDING', 'PAID', 'OVERDUE', 'CANCELLED');
 
 -- CreateEnum
-CREATE TYPE "ReviewSource" AS ENUM ('AVOQADO', 'GOOGLE', 'TRIPADVISOR', 'FACEBOOK', 'YELP');
+CREATE TYPE "ReviewSource" AS ENUM ('AVOQADO', 'GOOGLE', 'TRIPADVISOR', 'FACEBOOK', 'YELP', 'TPV');
 
 -- CreateEnum
 CREATE TYPE "TerminalType" AS ENUM ('TPV_ANDROID', 'TPV_IOS', 'PRINTER_RECEIPT', 'PRINTER_KITCHEN', 'KDS');
@@ -77,7 +77,25 @@ CREATE TYPE "TerminalStatus" AS ENUM ('ACTIVE', 'INACTIVE', 'MAINTENANCE', 'RETI
 CREATE TYPE "SyncStatus" AS ENUM ('PENDING', 'SYNCING', 'SYNCED', 'FAILED', 'NOT_REQUIRED');
 
 -- CreateEnum
+CREATE TYPE "InvitationType" AS ENUM ('ORGANIZATION_ADMIN', 'VENUE_STAFF', 'VENUE_ADMIN');
+
+-- CreateEnum
+CREATE TYPE "InvitationStatus" AS ENUM ('PENDING', 'ACCEPTED', 'DECLINED', 'EXPIRED', 'REVOKED');
+
+-- CreateEnum
 CREATE TYPE "AuthProvider" AS ENUM ('EMAIL', 'GOOGLE', 'FACEBOOK', 'APPLE');
+
+-- CreateEnum
+CREATE TYPE "ReceiptStatus" AS ENUM ('PENDING', 'SENT', 'DELIVERED', 'VIEWED', 'ERROR');
+
+-- CreateEnum
+CREATE TYPE "OriginSystem" AS ENUM ('AVOQADO', 'POS_SOFTRESTAURANT');
+
+-- CreateEnum
+CREATE TYPE "CommandType" AS ENUM ('CREATE', 'UPDATE', 'DELETE', 'CANCEL');
+
+-- CreateEnum
+CREATE TYPE "CommandStatus" AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED');
 
 -- CreateTable
 CREATE TABLE "Organization" (
@@ -170,6 +188,8 @@ CREATE TABLE "Staff" (
     "photoUrl" TEXT,
     "active" BOOLEAN NOT NULL DEFAULT true,
     "emailVerified" BOOLEAN NOT NULL DEFAULT false,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "lastLoginAt" TIMESTAMP(3),
@@ -181,6 +201,7 @@ CREATE TABLE "Staff" (
 CREATE TABLE "StaffVenue" (
     "id" TEXT NOT NULL,
     "staffId" TEXT NOT NULL,
+    "posStaffId" TEXT,
     "venueId" TEXT NOT NULL,
     "role" "StaffRole" NOT NULL,
     "permissions" JSONB,
@@ -193,6 +214,31 @@ CREATE TABLE "StaffVenue" (
     "endDate" TIMESTAMP(3),
 
     CONSTRAINT "StaffVenue_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Invitation" (
+    "id" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "role" "StaffRole" NOT NULL,
+    "type" "InvitationType" NOT NULL DEFAULT 'VENUE_STAFF',
+    "organizationId" TEXT NOT NULL,
+    "venueId" TEXT,
+    "token" TEXT NOT NULL,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "status" "InvitationStatus" NOT NULL DEFAULT 'PENDING',
+    "acceptedAt" TIMESTAMP(3),
+    "declinedAt" TIMESTAMP(3),
+    "message" TEXT,
+    "permissions" JSONB,
+    "invitedById" TEXT NOT NULL,
+    "acceptedById" TEXT,
+    "attemptCount" INTEGER NOT NULL DEFAULT 0,
+    "lastAttemptAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Invitation_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -211,6 +257,8 @@ CREATE TABLE "MenuCategory" (
     "availableFrom" TEXT,
     "availableUntil" TEXT,
     "availableDays" TEXT[],
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -275,7 +323,8 @@ CREATE TABLE "Product" (
     "availableUntil" TIMESTAMP(3),
     "externalId" TEXT,
     "externalData" JSONB,
-    "fromPOS" BOOLEAN NOT NULL DEFAULT false,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "syncStatus" "SyncStatus" NOT NULL DEFAULT 'NOT_REQUIRED',
     "lastSyncAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -325,6 +374,9 @@ CREATE TABLE "Table" (
     "capacity" INTEGER NOT NULL,
     "qrCode" TEXT NOT NULL,
     "active" BOOLEAN NOT NULL DEFAULT true,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
+    "externalId" TEXT,
 
     CONSTRAINT "Table_pkey" PRIMARY KEY ("id")
 );
@@ -344,6 +396,9 @@ CREATE TABLE "Shift" (
     "totalOrders" INTEGER NOT NULL DEFAULT 0,
     "status" "ShiftStatus" NOT NULL DEFAULT 'OPEN',
     "notes" TEXT,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
+    "externalId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -373,6 +428,8 @@ CREATE TABLE "Order" (
     "kitchenStatus" "KitchenStatus" NOT NULL DEFAULT 'PENDING',
     "paymentStatus" "PaymentStatus" NOT NULL DEFAULT 'PENDING',
     "externalId" TEXT,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "syncStatus" "SyncStatus" NOT NULL DEFAULT 'PENDING',
     "syncedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -393,6 +450,8 @@ CREATE TABLE "OrderItem" (
     "taxAmount" DECIMAL(10,2) NOT NULL,
     "total" DECIMAL(10,2) NOT NULL,
     "notes" TEXT,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "sentToKitchenAt" TIMESTAMP(3),
     "preparedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -412,6 +471,8 @@ CREATE TABLE "ModifierGroup" (
     "maxSelections" INTEGER,
     "displayOrder" INTEGER NOT NULL DEFAULT 0,
     "active" BOOLEAN NOT NULL DEFAULT true,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -424,6 +485,8 @@ CREATE TABLE "Modifier" (
     "groupId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "price" DECIMAL(10,2) NOT NULL DEFAULT 0,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "active" BOOLEAN NOT NULL DEFAULT true,
 
     CONSTRAINT "Modifier_pkey" PRIMARY KEY ("id")
@@ -468,12 +531,41 @@ CREATE TABLE "Payment" (
     "feeAmount" DECIMAL(10,2) NOT NULL,
     "netAmount" DECIMAL(12,2) NOT NULL,
     "externalId" TEXT,
+    "originSystem" "OriginSystem" NOT NULL DEFAULT 'AVOQADO',
+    "posRawData" JSONB,
     "syncStatus" "SyncStatus" NOT NULL DEFAULT 'PENDING',
     "syncedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Payment_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "PaymentAllocation" (
+    "id" TEXT NOT NULL,
+    "paymentId" TEXT NOT NULL,
+    "orderItemId" TEXT,
+    "orderId" TEXT NOT NULL,
+    "amount" DECIMAL(12,2) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "PaymentAllocation_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "DigitalReceipt" (
+    "id" TEXT NOT NULL,
+    "accessKey" TEXT NOT NULL,
+    "paymentId" TEXT NOT NULL,
+    "dataSnapshot" JSONB NOT NULL,
+    "status" "ReceiptStatus" NOT NULL DEFAULT 'PENDING',
+    "recipientEmail" TEXT,
+    "sentAt" TIMESTAMP(3),
+    "viewedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "DigitalReceipt_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -585,6 +677,9 @@ CREATE TABLE "Review" (
     "customerEmail" TEXT,
     "source" "ReviewSource" NOT NULL DEFAULT 'AVOQADO',
     "externalId" TEXT,
+    "terminalId" TEXT,
+    "paymentId" TEXT,
+    "servedById" TEXT,
     "responseText" TEXT,
     "respondedAt" TIMESTAMP(3),
     "responseAutomated" BOOLEAN NOT NULL DEFAULT false,
@@ -646,6 +741,25 @@ CREATE TABLE "Customer" (
     CONSTRAINT "Customer_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "PosCommand" (
+    "id" TEXT NOT NULL,
+    "venueId" TEXT NOT NULL,
+    "entityType" TEXT NOT NULL,
+    "entityId" TEXT NOT NULL,
+    "commandType" "CommandType" NOT NULL,
+    "payload" JSONB NOT NULL,
+    "status" "CommandStatus" NOT NULL DEFAULT 'PENDING',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "lastAttemptAt" TIMESTAMP(3),
+    "errorMessage" TEXT,
+    "completedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "PosCommand_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "Venue_slug_key" ON "Venue"("slug");
 
@@ -683,7 +797,31 @@ CREATE INDEX "StaffVenue_venueId_idx" ON "StaffVenue"("venueId");
 CREATE INDEX "StaffVenue_role_idx" ON "StaffVenue"("role");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "StaffVenue_venueId_posStaffId_key" ON "StaffVenue"("venueId", "posStaffId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "StaffVenue_staffId_venueId_key" ON "StaffVenue"("staffId", "venueId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Invitation_token_key" ON "Invitation"("token");
+
+-- CreateIndex
+CREATE INDEX "Invitation_email_idx" ON "Invitation"("email");
+
+-- CreateIndex
+CREATE INDEX "Invitation_token_idx" ON "Invitation"("token");
+
+-- CreateIndex
+CREATE INDEX "Invitation_organizationId_idx" ON "Invitation"("organizationId");
+
+-- CreateIndex
+CREATE INDEX "Invitation_venueId_idx" ON "Invitation"("venueId");
+
+-- CreateIndex
+CREATE INDEX "Invitation_status_idx" ON "Invitation"("status");
+
+-- CreateIndex
+CREATE INDEX "Invitation_expiresAt_idx" ON "Invitation"("expiresAt");
 
 -- CreateIndex
 CREATE INDEX "MenuCategory_venueId_idx" ON "MenuCategory"("venueId");
@@ -752,6 +890,9 @@ CREATE UNIQUE INDEX "Table_qrCode_key" ON "Table"("qrCode");
 CREATE INDEX "Table_venueId_idx" ON "Table"("venueId");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "Table_venueId_externalId_key" ON "Table"("venueId", "externalId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "Table_venueId_number_key" ON "Table"("venueId", "number");
 
 -- CreateIndex
@@ -767,6 +908,9 @@ CREATE INDEX "Shift_status_idx" ON "Shift"("status");
 CREATE INDEX "Shift_startTime_idx" ON "Shift"("startTime");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "Shift_venueId_externalId_key" ON "Shift"("venueId", "externalId");
+
+-- CreateIndex
 CREATE INDEX "Order_venueId_idx" ON "Order"("venueId");
 
 -- CreateIndex
@@ -779,7 +923,7 @@ CREATE INDEX "Order_status_idx" ON "Order"("status");
 CREATE INDEX "Order_createdAt_idx" ON "Order"("createdAt");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Order_venueId_orderNumber_key" ON "Order"("venueId", "orderNumber");
+CREATE UNIQUE INDEX "Order_venueId_externalId_key" ON "Order"("venueId", "externalId");
 
 -- CreateIndex
 CREATE INDEX "OrderItem_orderId_idx" ON "OrderItem"("orderId");
@@ -807,6 +951,24 @@ CREATE INDEX "Payment_method_idx" ON "Payment"("method");
 
 -- CreateIndex
 CREATE INDEX "Payment_status_idx" ON "Payment"("status");
+
+-- CreateIndex
+CREATE INDEX "PaymentAllocation_paymentId_idx" ON "PaymentAllocation"("paymentId");
+
+-- CreateIndex
+CREATE INDEX "PaymentAllocation_orderItemId_idx" ON "PaymentAllocation"("orderItemId");
+
+-- CreateIndex
+CREATE INDEX "PaymentAllocation_orderId_idx" ON "PaymentAllocation"("orderId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "DigitalReceipt_accessKey_key" ON "DigitalReceipt"("accessKey");
+
+-- CreateIndex
+CREATE INDEX "DigitalReceipt_accessKey_idx" ON "DigitalReceipt"("accessKey");
+
+-- CreateIndex
+CREATE INDEX "DigitalReceipt_paymentId_idx" ON "DigitalReceipt"("paymentId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "VenueTransaction_paymentId_key" ON "VenueTransaction"("paymentId");
@@ -842,6 +1004,9 @@ CREATE INDEX "Invoice_organizationId_idx" ON "Invoice"("organizationId");
 CREATE INDEX "Invoice_status_idx" ON "Invoice"("status");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "Review_paymentId_key" ON "Review"("paymentId");
+
+-- CreateIndex
 CREATE INDEX "Review_venueId_idx" ON "Review"("venueId");
 
 -- CreateIndex
@@ -849,6 +1014,15 @@ CREATE INDEX "Review_overallRating_idx" ON "Review"("overallRating");
 
 -- CreateIndex
 CREATE INDEX "Review_createdAt_idx" ON "Review"("createdAt");
+
+-- CreateIndex
+CREATE INDEX "Review_terminalId_idx" ON "Review"("terminalId");
+
+-- CreateIndex
+CREATE INDEX "Review_paymentId_idx" ON "Review"("paymentId");
+
+-- CreateIndex
+CREATE INDEX "Review_servedById_idx" ON "Review"("servedById");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Terminal_serialNumber_key" ON "Terminal"("serialNumber");
@@ -883,6 +1057,15 @@ CREATE INDEX "Customer_email_idx" ON "Customer"("email");
 -- CreateIndex
 CREATE INDEX "Customer_phone_idx" ON "Customer"("phone");
 
+-- CreateIndex
+CREATE INDEX "PosCommand_venueId_status_idx" ON "PosCommand"("venueId", "status");
+
+-- CreateIndex
+CREATE INDEX "PosCommand_entityType_entityId_idx" ON "PosCommand"("entityType", "entityId");
+
+-- CreateIndex
+CREATE INDEX "PosCommand_status_createdAt_idx" ON "PosCommand"("status", "createdAt");
+
 -- AddForeignKey
 ALTER TABLE "Venue" ADD CONSTRAINT "Venue_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
@@ -900,6 +1083,15 @@ ALTER TABLE "StaffVenue" ADD CONSTRAINT "StaffVenue_staffId_fkey" FOREIGN KEY ("
 
 -- AddForeignKey
 ALTER TABLE "StaffVenue" ADD CONSTRAINT "StaffVenue_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_invitedById_fkey" FOREIGN KEY ("invitedById") REFERENCES "Staff"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "MenuCategory" ADD CONSTRAINT "MenuCategory_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -992,6 +1184,18 @@ ALTER TABLE "Payment" ADD CONSTRAINT "Payment_shiftId_fkey" FOREIGN KEY ("shiftI
 ALTER TABLE "Payment" ADD CONSTRAINT "Payment_processedById_fkey" FOREIGN KEY ("processedById") REFERENCES "Staff"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "PaymentAllocation" ADD CONSTRAINT "PaymentAllocation_paymentId_fkey" FOREIGN KEY ("paymentId") REFERENCES "Payment"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "PaymentAllocation" ADD CONSTRAINT "PaymentAllocation_orderItemId_fkey" FOREIGN KEY ("orderItemId") REFERENCES "OrderItem"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "PaymentAllocation" ADD CONSTRAINT "PaymentAllocation_orderId_fkey" FOREIGN KEY ("orderId") REFERENCES "Order"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "DigitalReceipt" ADD CONSTRAINT "DigitalReceipt_paymentId_fkey" FOREIGN KEY ("paymentId") REFERENCES "Payment"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "VenueTransaction" ADD CONSTRAINT "VenueTransaction_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -1016,7 +1220,19 @@ ALTER TABLE "InvoiceItem" ADD CONSTRAINT "InvoiceItem_invoiceId_fkey" FOREIGN KE
 ALTER TABLE "Review" ADD CONSTRAINT "Review_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "Review" ADD CONSTRAINT "Review_terminalId_fkey" FOREIGN KEY ("terminalId") REFERENCES "Terminal"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Review" ADD CONSTRAINT "Review_paymentId_fkey" FOREIGN KEY ("paymentId") REFERENCES "Payment"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Review" ADD CONSTRAINT "Review_servedById_fkey" FOREIGN KEY ("servedById") REFERENCES "Staff"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "Terminal" ADD CONSTRAINT "Terminal_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ActivityLog" ADD CONSTRAINT "ActivityLog_staffId_fkey" FOREIGN KEY ("staffId") REFERENCES "Staff"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "PosCommand" ADD CONSTRAINT "PosCommand_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

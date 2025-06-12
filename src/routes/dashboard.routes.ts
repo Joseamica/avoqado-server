@@ -15,6 +15,7 @@ import * as authDashboardController from '../controllers/dashboard/auth.dashboar
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
+import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import {
   CreateMenuCategorySchema,
   UpdateMenuCategorySchema,
@@ -835,6 +836,52 @@ router.get(
   authenticateTokenMiddleware,
   authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
   paymentController.getReceiptById,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs:
+ *   get:
+ *     tags: [Terminals]
+ *     summary: List all terminals (TPVs) for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: page, in: query, schema: { type: integer, default: 1 } }
+ *       - { name: pageSize, in: query, schema: { type: integer, default: 10 } }
+ *       - { name: status, in: query, schema: { type: string, enum: [ACTIVE, INACTIVE] } }
+ *       - { name: type, in: query, schema: { type: string, enum: [TPV_ANDROID, TPV_IOS, PRINTER_RECEIPT, PRINTER_KITCHEN, KDS]  } }
+ *     responses:
+ *       200:
+ *         description: A paginated list of terminals.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Terminal'
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     total:
+ *                       type: integer
+ *                     page:
+ *                       type: integer
+ *                     pageSize:
+ *                       type: integer
+ *                     pageCount:
+ *                       type: integer
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/tpvs',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  tpvController.getTerminals,
 )
 
 export default router
