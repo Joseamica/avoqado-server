@@ -7,7 +7,7 @@ import { posSyncStaffService } from './posSyncStaff.service'
 // Exportamos un objeto con todos los manejadores de eventos del POS
 export const posSyncService = {
   processPosOrderEvent, // Imported from posSyncOrder.service.ts
-  processPosStaffEvent: posSyncStaffService.processPosStaffEvent,
+  processPosStaffEvent: posSyncStaffService.processPosStaffEvent.bind(posSyncStaffService),
   processPosShiftEvent, // Imported from posSyncShift.service.ts
   processPosAreaEvent, // Imported from posSyncArea.service.ts
   // aquí irían: processPosPaymentEvent, etc.

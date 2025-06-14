@@ -35,6 +35,12 @@ export const dispatchPosEvent = async (routingKey: string, payload: any) => {
       }
       break
 
+    case 'area':
+      if (event === 'created' || event === 'updated') {
+        await posSyncService.processPosAreaEvent(payload)
+      }
+      break
+
     // ... otros casos para 'payment', 'product', etc.
 
     default:
