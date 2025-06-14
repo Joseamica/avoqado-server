@@ -77,6 +77,8 @@ const connectWithRetry = async (): Promise<void> => {
 
 // Función principal para iniciar y obtener la conexión
 export const connectToRabbitMQ = async (): Promise<void> => {
+  logger.info('🔌 Connecting to RabbitMQ...')
+
   if (!channel) {
     await connectWithRetry()
   }
@@ -84,16 +86,21 @@ export const connectToRabbitMQ = async (): Promise<void> => {
 
 export const closeRabbitMQConnection = async (): Promise<void> => {
   try {
+    let closedSomething = false;
     if (channel) {
       await channel.close()
       channel = null
+      closedSomething = true;
     }
     if (channelModel) {
-      await channelModel.close()
-      channelModel = null
-      connection = null
+      await channelModel.close();
+      channelModel = null;
+      connection = null;
+      closedSomething = true;
     }
-    logger.info('✅ Conexión con RabbitMQ cerrada correctamente.')
+    if (closedSomething) {
+      logger.info('✅ Conexión con RabbitMQ cerrada correctamente.');
+    }
   } catch (error) {
     logger.error('❌ Error al cerrar la conexión con RabbitMQ:', error)
   }

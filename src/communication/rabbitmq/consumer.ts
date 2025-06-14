@@ -24,6 +24,7 @@ const handleMessage = async (msg: ConsumeMessage | null) => {
 }
 
 export const startEventConsumer = async () => {
+  logger.info('👂 Starting POS event consumer...')
   try {
     const channel = getRabbitMQChannel()
     // El patrón de binding para recibir todos los eventos de todos los POS

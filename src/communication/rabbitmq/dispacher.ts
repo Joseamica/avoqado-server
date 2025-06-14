@@ -1,4 +1,4 @@
-import { posSyncService } from '../../services/integration/posSync.service'
+import { posSyncService } from '../../services/pos-sync/posSync.service'
 // Importa aquí los otros servicios que necesitarás (shiftService, paymentService, etc.)
 import logger from '../../config/logger'
 

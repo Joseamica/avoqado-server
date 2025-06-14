@@ -75,19 +75,15 @@ process.on('unhandledRejection', (reason, promise) => {
 const startApplication = async () => {
   try {
     // Connect to RabbitMQ and ensure topology
-    logger.info('🔌 Connecting to RabbitMQ...')
     await connectToRabbitMQ()
 
     // Start event consumer (listens to events from POS)
-    logger.info('👂 Starting POS event consumer...')
     startEventConsumer()
 
     // Start command listener (replaces polling worker)
-    logger.info('🎧 Starting PostgreSQL LISTEN/NOTIFY command listener...')
     await commandListener.start()
 
     // Start retry service for failed commands
-    logger.info('🔄 Starting command retry service...')
     commandRetryService.start()
 
     logger.info('✅ All communication services started successfully.')

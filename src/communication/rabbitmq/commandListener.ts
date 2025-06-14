@@ -1,3 +1,4 @@
+//src/communication/rabbitmq/commandListener.ts
 import { Client } from 'pg'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
@@ -12,7 +13,7 @@ export class CommandListener {
   constructor(private connectionString: string) {}
 
   async start(): Promise<void> {
-    logger.info('🚀 Starting PostgreSQL LISTEN/NOTIFY command listener...')
+    logger.info('🎧 Starting PostgreSQL LISTEN/NOTIFY command listener...')
     await this.connect()
   }
 
@@ -21,7 +22,11 @@ export class CommandListener {
 
     try {
       // Create a dedicated connection for LISTEN/NOTIFY
-      this.pgClient = new Client({ connectionString: this.connectionString })
+      this.pgClient = new Client({
+        connectionString: this.connectionString,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000, // Enviar la primera señal después de 10s de inactividad
+      })
 
       this.pgClient.on('error', err => {
         logger.error('❌ PostgreSQL client error:', err)
@@ -34,7 +39,7 @@ export class CommandListener {
       })
 
       await this.pgClient.connect()
-      logger.info('✅ Connected to PostgreSQL for LISTEN/NOTIFY')
+      logger.info('✅ Connected to PostgreSQL for LISTEN/NOTIFY (with Keep-Alive enabled)')
 
       // Listen for notifications
       await this.pgClient.query('LISTEN new_pos_command')

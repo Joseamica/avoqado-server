@@ -1,8 +1,8 @@
-import swaggerJsdoc from 'swagger-jsdoc';
-import swaggerUi from 'swagger-ui-express';
-import { PORT } from './env'; // Assuming PORT is exported from env.ts
-import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import swaggerJsdoc from 'swagger-jsdoc'
+import swaggerUi from 'swagger-ui-express'
+import { PORT } from './env' // Assuming PORT is exported from env.ts
+import { Request, Response, NextFunction } from 'express'
+import jwt from 'jsonwebtoken'
 
 const swaggerOptions: swaggerJsdoc.Options = {
   definition: {
@@ -13,8 +13,8 @@ const swaggerOptions: swaggerJsdoc.Options = {
       description: 'Documentación de la API para el backend de Avoqado. Gestiona venues, menús, pedidos, staff y más.',
       contact: {
         name: 'Avoqado Support',
-        url: 'https://avoqado.app',
-        email: 'support@avoqado.app',
+        url: 'https://avoqadoapp.com',
+        email: 'hola@avoqado.io',
       },
     },
     servers: [
@@ -62,6 +62,122 @@ const swaggerOptions: swaggerJsdoc.Options = {
           },
           required: ['message'],
         },
+        PosOrderPayload: {
+          type: 'object',
+          properties: {
+            externalId: {
+              type: 'string',
+              description: 'ID externo del sistema POS',
+              example: 'pos-12345'
+            },
+            venueId: {
+              type: 'string',
+              description: 'ID de la sede (formato CUID)',
+              example: 'clj0a1b2c3d4e5f6g7h8i9j0'
+            },
+            orderNumber: {
+              type: 'string',
+              description: 'Número de orden visible para el cliente',
+              example: 'ORDER-123'
+            },
+            subtotal: {
+              type: 'number',
+              description: 'Subtotal de la orden (sin impuestos)',
+              example: 100.50
+            },
+            taxAmount: {
+              type: 'number',
+              description: 'Monto de impuestos',
+              example: 16.08
+            },
+            total: {
+              type: 'number',
+              description: 'Total de la orden (con impuestos)',
+              example: 116.58
+            },
+            createdAt: {
+              type: 'string',
+              format: 'date-time',
+              description: 'Fecha y hora de creación de la orden',
+              example: '2023-06-13T10:15:30Z'
+            },
+            posRawData: {
+              type: 'object',
+              description: 'Datos brutos del sistema POS',
+              example: {
+                source: 'toast',
+                rawPayload: { /* datos específicos del POS */ }
+              }
+            },
+            discountAmount: {
+              type: 'number',
+              description: 'Monto del descuento aplicado',
+              example: 10.00
+            },
+            tipAmount: {
+              type: 'number',
+              description: 'Monto de propina',
+              example: 15.00
+            }
+          },
+          required: ['externalId', 'venueId', 'orderNumber', 'subtotal', 'taxAmount', 'total', 'createdAt']
+        },
+        Order: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              description: 'ID único de la orden (CUID)',
+              example: 'clj0a1b2c3d4e5f6g7h8i9j0'
+            },
+            orderNumber: {
+              type: 'string',
+              description: 'Número visible de la orden',
+              example: 'ORDER-123'
+            },
+            externalId: {
+              type: 'string',
+              description: 'ID en el sistema externo (POS)',
+              example: 'pos-12345'
+            },
+            venueId: {
+              type: 'string',
+              description: 'ID de la sede',
+              example: 'clj0a1b2c3d4e5f6g7h8i9j0'
+            },
+            subtotal: {
+              type: 'number',
+              description: 'Subtotal de la orden',
+              example: 100.50
+            },
+            taxAmount: {
+              type: 'number',
+              description: 'Impuestos aplicados',
+              example: 16.08
+            },
+            total: {
+              type: 'number',
+              description: 'Total de la orden',
+              example: 116.58
+            },
+            status: {
+              type: 'string',
+              enum: ['PENDING', 'PROCESSED', 'COMPLETED', 'CANCELLED'],
+              description: 'Estado actual de la orden'
+            },
+            createdAt: {
+              type: 'string',
+              format: 'date-time',
+              description: 'Fecha y hora de creación'
+            },
+            updatedAt: {
+              type: 'string',
+              format: 'date-time',
+              description: 'Fecha y hora de última actualización'
+            }
+          },
+          required: ['id', 'orderNumber', 'venueId', 'subtotal', 'taxAmount', 'total', 'status', 'createdAt', 'updatedAt']
+        },
       },
     },
   },
@@ -70,28 +186,28 @@ const swaggerOptions: swaggerJsdoc.Options = {
     './src/app.ts', // For definitions in the new app.ts
     './src/routes/**/*.ts',
   ],
-};
+}
 
-export const swaggerSpec = swaggerJsdoc(swaggerOptions);
+export const swaggerSpec = swaggerJsdoc(swaggerOptions)
 
 // Middleware to protect Swagger UI with authentication
 const swaggerAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
   try {
     // Check for cookie-based authentication first (Dashboard Web)
-    let token = req.cookies?.accessToken;
+    let token = req.cookies?.accessToken
 
     // If no cookie, check for Bearer token in Authorization header (TPV/API)
     if (!token) {
-      const authHeader = req.headers['authorization'];
+      const authHeader = req.headers['authorization']
       if (authHeader && authHeader.startsWith('Bearer ')) {
-        token = authHeader.substring(7);
+        token = authHeader.substring(7)
       }
     }
 
     // For development only: Allow access to API docs without authentication
     // Remove or comment this in production
     if (process.env.NODE_ENV === 'development' && process.env.ALLOW_DOCS_WITHOUT_AUTH === 'true') {
-      return next();
+      return next()
     }
 
     if (!token) {
@@ -176,16 +292,16 @@ const swaggerAuthMiddleware = (req: Request, res: Response, next: NextFunction) 
             <a href="/dashboard/login" class="link">Go to Dashboard Login Page</a>
           </body>
         </html>
-      `);
+      `)
     }
 
     // Verify the token
-    jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!);
-    next();
+    jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!)
+    next()
   } catch (error) {
     // Clear cookie if it exists but is invalid
     if (req.cookies?.accessToken) {
-      res.clearCookie('accessToken');
+      res.clearCookie('accessToken')
     }
 
     return res.status(401).send(`
@@ -269,9 +385,9 @@ const swaggerAuthMiddleware = (req: Request, res: Response, next: NextFunction) 
           <a href="/dashboard/login" class="link">Go to Dashboard Login Page</a>
         </body>
       </html>
-    `);
+    `)
   }
-};
+}
 
 export const setupSwaggerUI = (app: import('express').Express) => {
   app.use(
@@ -282,5 +398,5 @@ export const setupSwaggerUI = (app: import('express').Express) => {
       explorer: true,
       customSiteTitle: 'Avoqado API Docs',
     }),
-  );
-};
+  )
+}

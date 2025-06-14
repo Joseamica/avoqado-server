@@ -9,6 +9,7 @@ export class CommandRetryService {
   private intervalId: NodeJS.Timeout | null = null
 
   start(): void {
+    logger.info('🔄 Starting command retry service...')
     this.intervalId = setInterval(async () => {
       await this.retryFailedCommands()
     }, RETRY_INTERVAL_MS)

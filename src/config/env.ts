@@ -4,7 +4,7 @@ import logger from './logger' // Assuming logger is already in src/config
 dotenv.config() // Load .env file at the very beginning
 
 export const NODE_ENV = process.env.NODE_ENV || 'development'
-export const PORT = process.env.PORT || 57777
+export const PORT = process.env.PORT || 12344
 
 // Critical environment variables check
 const requiredEnvVars: string[] = [
