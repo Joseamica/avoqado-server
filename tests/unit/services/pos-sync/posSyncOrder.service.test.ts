@@ -1,7 +1,7 @@
 import { processPosOrderEvent } from '../../../../src/services/pos-sync/posSyncOrder.service';
 import prisma from '../../../../src/utils/prismaClient';
 import logger from '../../../../src/config/logger';
-import { syncPosStaff } from '../../../../src/services/pos-sync/posSyncStaff.service';
+import { posSyncStaffService } from '../../../../src/services/pos-sync/posSyncStaff.service';
 import { getOrCreatePosTable } from '../../../../src/services/pos-sync/posSyncTable.service';
 import { getOrCreatePosShift } from '../../../../src/services/pos-sync/posSyncShift.service';
 import { NotFoundError } from '../../../../src/errors/AppError';
@@ -28,7 +28,7 @@ jest.mock('../../../../src/services/pos-sync/posSyncShift.service');
 describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
   const mockPrismaVenueFindUnique = prisma.venue.findUnique as jest.Mock;
   const mockPrismaOrderUpsert = prisma.order.upsert as jest.Mock;
-  const mockSyncPosStaff = syncPosStaff as jest.Mock;
+  const mockSyncPosStaff = posSyncStaffService.syncPosStaff as jest.Mock;
   const mockGetOrCreatePosTable = getOrCreatePosTable as jest.Mock;
   const mockGetOrCreatePosShift = getOrCreatePosShift as jest.Mock;
   const mockLoggerInfo = logger.info as jest.Mock;

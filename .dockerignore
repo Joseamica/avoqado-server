@@ -1,0 +1,33 @@
+# Node and build artifacts
+node_modules
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+dist
+coverage
+
+# Local environment variables
+.env
+
+# Git
+.git
+.gitignore
+
+# Docker files (keep in context for change detection)
+# Dockerfile
+# docker-compose.yml
+
+# IDE / editor folders
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+.windsurf/
