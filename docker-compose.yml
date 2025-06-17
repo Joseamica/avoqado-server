@@ -9,7 +9,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - '65535:65535'
 
   api:
     build:
@@ -23,7 +23,8 @@ services:
       PORT: 3000
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     ports:
-      - "3000:3000"
+      - '3000:3000'
+      - '5555:5555'
     # The CMD is already defined in the Dockerfile (runs prisma migrate deploy + pm2)
 
 volumes:

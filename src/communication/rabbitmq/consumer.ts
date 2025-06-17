@@ -3,6 +3,43 @@ import { getRabbitMQChannel, POS_EVENTS_EXCHANGE, AVOQADO_EVENTS_QUEUE } from '.
 import { dispatchPosEvent } from './dispacher'
 import logger from '../../config/logger'
 
+// Deduplication cache: messageId -> timestamp with TTL (time to live)
+interface MessageCache {
+  [messageId: string]: {
+    timestamp: number;
+    externalId?: string;
+  };
+}
+
+// Cache for recently processed messages (last 5 minutes)
+const processedMessages: MessageCache = {};
+const MESSAGE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+// Clean up expired messages from cache every minute
+setInterval(() => {
+  const now = Date.now();
+  for (const messageId in processedMessages) {
+    if (now - processedMessages[messageId].timestamp > MESSAGE_CACHE_TTL) {
+      delete processedMessages[messageId];
+    }
+  }
+}, 60 * 1000);
+
+// Generate a message ID for deduplication from the message content
+const getMessageId = (msg: ConsumeMessage, payload: any): string => {
+  // Use message properties for deduplication
+  const routingKey = msg.fields.routingKey;
+  const deliveryTag = msg.fields.deliveryTag.toString();
+  
+  // If the payload contains an externalId (like for orders), include it
+  const externalId = payload?.orderData?.externalId || 
+                     payload?.externalId || 
+                     'no-external-id';
+  
+  // Combine values for a unique message fingerprint
+  return `${routingKey}:${externalId}:${msg.properties.messageId || deliveryTag}`;
+};
+
 const handleMessage = async (msg: ConsumeMessage | null) => {
   if (!msg) return
 
@@ -10,6 +47,23 @@ const handleMessage = async (msg: ConsumeMessage | null) => {
   try {
     const payload = JSON.parse(msg.content.toString())
     const routingKey = msg.fields.routingKey
+    
+    // Generate message ID for deduplication
+    const messageId = getMessageId(msg, payload);
+    const externalId = payload?.orderData?.externalId || payload?.externalId;
+    
+    // Check if we've already processed this message recently
+    if (processedMessages[messageId]) {
+      logger.info(`🔄 Duplicate message detected [${routingKey}] with ID ${messageId} (externalId: ${externalId}). Acknowledging without processing.`);
+      channel.ack(msg);
+      return;
+    }
+    
+    // Mark this message as processed
+    processedMessages[messageId] = { 
+      timestamp: Date.now(),
+      externalId
+    };
 
     logger.info(`📥 Mensaje recibido con routing key [${routingKey}]`)
 

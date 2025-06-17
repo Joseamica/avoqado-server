@@ -3,7 +3,7 @@ import { NotFoundError } from '../../errors/AppError'
 import { Prisma, Shift, ShiftStatus, OriginSystem } from '@prisma/client'
 import logger from '../../config/logger'
 import { PosShiftPayload } from '../../types/pos.types'
-import { posSyncStaffService } from './posSyncStaff.service'; // Import for staff synchronization
+import { posSyncStaffService } from './posSyncStaff.service' // Import for staff synchronization
 
 /**
  * Finds a Shift by its POS externalId for a specific Venue.
@@ -41,7 +41,11 @@ export async function processPosShiftEvent(payload: { venueId: string; shiftData
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
   if (!venue) throw new NotFoundError(`Venue con ID ${venueId} no encontrado.`)
 
-  const staffId = await posSyncStaffService.syncPosStaff({ externalId: shiftData.cajero, name: null, pin: null }, venueId, venue.organizationId)
+  const staffId = await posSyncStaffService.syncPosStaff(
+    { externalId: shiftData.cajero, name: null, pin: null },
+    venueId,
+    venue.organizationId,
+  )
   if (!staffId) throw new Error(`No se pudo sincronizar el cajero ${shiftData.cajero}.`)
 
   // --- Calcular Totales si el Turno se Cierra ---

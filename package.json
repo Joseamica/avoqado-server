@@ -100,6 +100,7 @@
     "typescript": "^5.8.3"
   },
   "prisma": {
+    "schema": "prisma/schema.prisma",
     "seed": "ts-node ./prisma/seed.ts"
   }
 }

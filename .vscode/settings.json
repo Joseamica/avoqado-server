@@ -17,5 +17,9 @@
     "titleBar.activeForeground": "#15202b",
     "titleBar.inactiveBackground": "#cf9fff99",
     "titleBar.inactiveForeground": "#15202b99"
-  }
+  },
+  "terminal.integrated.fontSize": 15,
+  "terminal.integrated.cursorBlinking": true,
+  "terminal.integrated.cursorStyle": "line",
+  "terminal.integrated.cursorWidth": 4
 }
