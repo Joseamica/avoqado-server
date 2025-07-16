@@ -1,14 +1,22 @@
-//src/services/posSync/posSync.service.ts
-import { processPosAreaEvent } from './posSyncArea.service'
+// src/services/pos-sync/posSync.service.ts
+
 import { processPosOrderEvent } from './posSyncOrder.service'
-import { processPosShiftEvent } from './posSyncShift.service' // getOrCreatePosShift is not directly used here anymore
+import { processPosOrderItemEvent } from './posSyncOrderItem.service'
+import { processPosShiftEvent } from './posSyncShift.service'
+
 import { posSyncStaffService } from './posSyncStaff.service'
+import { processPosAreaEvent } from './posSyncArea.service'
+import { processPosHeartbeat } from './posSyncHeartbeat.service'
 
 // Exportamos un objeto con todos los manejadores de eventos del POS
 export const posSyncService = {
-  processPosOrderEvent, // Imported from posSyncOrder.service.ts
+  // Manejadores de datos del POS
+  processPosOrderEvent,
+  processPosOrderItemEvent,
+  processPosShiftEvent,
+  processPosAreaEvent,
   processPosStaffEvent: posSyncStaffService.processPosStaffEvent.bind(posSyncStaffService),
-  processPosShiftEvent, // Imported from posSyncShift.service.ts
-  processPosAreaEvent, // Imported from posSyncArea.service.ts
-  // aquí irían: processPosPaymentEvent, etc.
+
+  // Manejador del sistema de monitoreo
+  processPosHeartbeat,
 }

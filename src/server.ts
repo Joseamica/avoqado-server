@@ -14,6 +14,7 @@ import { connectToRabbitMQ, closeRabbitMQConnection } from './communication/rabb
 import { CommandListener } from './communication/rabbitmq/commandListener'
 import { CommandRetryService } from './communication/rabbitmq/commandRetryService'
 import { startEventConsumer } from './communication/rabbitmq/consumer'
+import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 
 const httpServer = http.createServer(app)
 
@@ -63,8 +64,19 @@ const gracefulShutdown = async (signal: string) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 process.on('uncaughtException', error => {
-  logger.error('Uncaught Exception:', error)
-  gracefulShutdown('uncaughtException')
+  // Usa console.error como último recurso. No depende de streams que puedan cerrarse.
+  console.error('--- UNCAUGHT EXCEPTION ---')
+  console.error(error)
+
+  // Intenta el apagado controlado, pero no dejes que un fallo aquí cause otro crash
+  try {
+    // Intenta loguear con tu logger principal si aún funciona
+    logger.error('Uncaught Exception, initiating shutdown...', error)
+    gracefulShutdown('uncaughtException')
+  } catch (shutdownError) {
+    console.error('Error during graceful shutdown:', shutdownError)
+    process.exit(1) // Salida forzada si el apagado falla
+  }
 })
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('Unhandled Rejection at:', promise, 'reason:', reason)
@@ -85,6 +97,9 @@ const startApplication = async () => {
 
     // Start retry service for failed commands
     commandRetryService.start()
+
+    // Start POS connection monitor
+    startPosConnectionMonitor()
 
     logger.info('✅ All communication services started successfully.')
 

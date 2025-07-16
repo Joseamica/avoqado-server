@@ -86,22 +86,23 @@ model Venue {
   settings VenueSettings?
 
   // Relations
-  posCommands    PosCommand[]
-  invitations    Invitation[]
-  staff          StaffVenue[]
-  menuCategories MenuCategory[]
-  menus          Menu[]
-  products       Product[]
-  modifierGroups ModifierGroup[]
-  inventories    Inventory[]
-  tables         Table[]
-  areas          Area[]
-  shifts         Shift[]
-  orders         Order[]
-  payments       Payment[]
-  transactions   VenueTransaction[]
-  reviews        Review[]
-  terminals      Terminal[]
+  posCommands         PosCommand[]
+  posConnectionStatus PosConnectionStatus?
+  invitations         Invitation[]
+  staff               StaffVenue[]
+  menuCategories      MenuCategory[]
+  menus               Menu[]
+  products            Product[]
+  modifierGroups      ModifierGroup[]
+  inventories         Inventory[]
+  tables              Table[]
+  areas               Area[]
+  shifts              Shift[]
+  orders              Order[]
+  payments            Payment[]
+  transactions        VenueTransaction[]
+  reviews             Review[]
+  terminals           Terminal[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -143,6 +144,22 @@ model VenueSettings {
   tipSuggestions      Json? // [15, 18, 20, 25]
 
   updatedAt DateTime @updatedAt
+}
+
+model PosConnectionStatus {
+  id      String @id @default(cuid())
+  venueId String @unique // Solo puede haber un estado por Venue
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  status          PosConnectionState @default(OFFLINE)
+  instanceId      String? // El GUID único de la base de datos del POS
+  producerVersion String? // La versión de nuestro producer.ts
+  lastHeartbeatAt DateTime? // La última vez que recibimos un latido
+
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([lastHeartbeatAt])
 }
 
 // ==========================================
@@ -307,11 +324,15 @@ model MenuCategory {
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
+  externalId   String?
+  syncStatus   SyncStatus   @default(NOT_REQUIRED)
+  lastSyncAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([venueId, slug])
+  @@index([syncStatus])
   @@index([venueId])
   @@index([displayOrder])
   @@index([active])
@@ -434,6 +455,7 @@ model Product {
   @@index([categoryId])
   @@index([active])
   @@index([type])
+  @@index([syncStatus]) // ✅ NUEVO ÍNDICE
 }
 
 model Inventory {
@@ -651,15 +673,23 @@ model OrderItem {
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
+  syncStatus   SyncStatus   @default(NOT_REQUIRED) // ✅ NUEVO
+  lastSyncAt   DateTime? // ✅ NUEVO
+  externalId   String? // Para trackear "folio:idproducto" del POS
+  sequence     Int          @default(0) // Orden de los items en la cuenta
 
   // Kitchen
   sentToKitchenAt DateTime?
   preparedAt      DateTime?
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt // ✅ NUEVO
 
+  @@unique([orderId, externalId]) // Para evitar duplicados por externalId
   @@index([orderId])
   @@index([productId])
+  @@index([externalId]) // ✅ NUEVO
+  @@index([syncStatus]) // ✅ NUEVO
 }
 
 // ==========================================
@@ -1239,6 +1269,7 @@ enum OrderStatus {
   READY
   COMPLETED
   CANCELLED
+  DELETED
 }
 
 enum KitchenStatus {
@@ -1394,4 +1425,10 @@ enum CommandStatus {
   PROCESSING
   COMPLETED
   FAILED
+}
+
+enum PosConnectionState {
+  ONLINE // Recibiendo heartbeats normalmente
+  OFFLINE // No hemos recibido un heartbeat en mucho tiempo
+  NEEDS_RECONCILIATION // Se detectó un cambio de InstanceId (¡Alerta máxima!)
 }

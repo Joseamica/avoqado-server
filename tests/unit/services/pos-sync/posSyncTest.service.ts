@@ -39,6 +39,22 @@ export const processTestPosOrder = async (payload: PosOrderPayload): Promise<Ord
       externalId: null,
       startTime: null,
     },
+    payments: [
+      {
+        methodExternalId: 'PAY_METHOD_1',
+        amount: 100,
+        tipAmount: 10,
+        reference: 'REF_123',
+        posRawData: {},
+      },
+    ],
+    paymentMethodsCatalog: [
+      {
+        idformadepago: 'PAY_METHOD_1',
+        descripcion: 'Cash',
+        tipo: 1,
+      },
+    ],
   }
 
   // Call the actual service
