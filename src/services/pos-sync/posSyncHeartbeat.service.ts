@@ -39,7 +39,7 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
           lastHeartbeatAt: new Date(),
         },
       })
-      logger.info(`[Heartbeat Service] Estado de Venue ${venueId} actualizado a ONLINE.`)
+      // logger.info(`[Heartbeat Service] Estado de Venue ${venueId} actualizado a ONLINE.`)
     } else {
       // ¡ALERTA! El InstanceId ha cambiado. La BD del POS fue probablemente restaurada.
       await prisma.posConnectionStatus.update({

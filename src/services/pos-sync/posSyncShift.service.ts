@@ -31,22 +31,30 @@ export async function getOrCreatePosShift(shiftPayload: PosShiftPayload, venueId
 /**
  * Creates or updates a Shift in Avoqado based on events from the POS.
  * @param payload The event payload from the Producer.
- * @param event The type of event ('opened' or 'closed').
+ * @param event The type of event ('created' or 'updated').
  */
-export async function processPosShiftEvent(payload: { venueId: string; shiftData: any }, event: 'opened' | 'closed'): Promise<Shift> {
+export async function processPosShiftEvent(
+  payload: { venueId: string; shiftData: any },
+  event: 'created' | 'updated' | 'closed',
+): Promise<Shift> {
   const { venueId, shiftData } = payload
   logger.info(`[PosSyncService] Procesando evento '${event}' para Turno con externalId: ${shiftData.WorkspaceId}`)
+  logger.info(JSON.stringify(shiftData))
+  logger.info(`[PosSyncService] Evento: ${event} 🕒`)
 
   // --- Obtener IDs de Relaciones ---
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
   if (!venue) throw new NotFoundError(`Venue con ID ${venueId} no encontrado.`)
 
+  // Obtener el cajero desde posRawData si no está disponible directamente
+  const cajeroId = shiftData.staffId || shiftData.posRawData?.cajero || shiftData.cajero
+  
   const staffId = await posSyncStaffService.syncPosStaff(
-    { externalId: shiftData.cajero, name: null, pin: null },
+    { externalId: cajeroId, name: null, pin: null },
     venueId,
     venue.organizationId,
   )
-  if (!staffId) throw new Error(`No se pudo sincronizar el cajero ${shiftData.cajero}.`)
+  if (!staffId) throw new Error(`No se pudo sincronizar el cajero ${cajeroId}.`)
 
   // --- Calcular Totales si el Turno se Cierra ---
   let summaryData = {
@@ -67,17 +75,25 @@ export async function processPosShiftEvent(payload: { venueId: string; shiftData
     summaryData.totalOrders = summary._count.id || 0
   }
 
+  // --- Mapear datos desde la estructura correcta ---
+  const rawData = shiftData.posRawData || shiftData
+  const externalId = rawData.WorkspaceId || shiftData.externalId
+  const startTime = rawData.apertura || shiftData.startTime
+  const endTime = rawData.cierre || shiftData.endTime
+  const startingCash = rawData.fondo !== undefined ? rawData.fondo : shiftData.startingCash
+  const endingCash = rawData.efectivo !== undefined ? rawData.efectivo : shiftData.endingCash
+
   // --- Ejecutar el Upsert ---
   const shift = await prisma.shift.upsert({
     where: {
-      venueId_externalId: { venueId, externalId: shiftData.WorkspaceId },
+      venueId_externalId: { venueId, externalId },
     },
     // ✅ OBJETO DE ACTUALIZACIÓN EXPLÍCITO
     update: {
-      startTime: new Date(shiftData.apertura),
-      endTime: shiftData.cierre ? new Date(shiftData.cierre) : null,
-      startingCash: shiftData.fondo,
-      endingCash: shiftData.efectivo,
+      startTime: new Date(startTime),
+      endTime: endTime ? new Date(endTime) : null,
+      startingCash: startingCash || 0,
+      endingCash: endingCash,
       status: event === 'closed' ? ShiftStatus.CLOSED : ShiftStatus.OPEN,
       totalSales: summaryData.totalSales,
       totalTips: summaryData.totalTips,
@@ -87,11 +103,11 @@ export async function processPosShiftEvent(payload: { venueId: string; shiftData
     },
     // ✅ OBJETO DE CREACIÓN EXPLÍCITO
     create: {
-      externalId: shiftData.WorkspaceId,
-      startTime: new Date(shiftData.apertura),
-      endTime: shiftData.cierre ? new Date(shiftData.cierre) : null,
-      startingCash: shiftData.fondo,
-      endingCash: shiftData.efectivo,
+      externalId,
+      startTime: new Date(startTime),
+      endTime: endTime ? new Date(endTime) : null,
+      startingCash: startingCash || 0,
+      endingCash: endingCash,
       status: event === 'closed' ? ShiftStatus.CLOSED : ShiftStatus.OPEN,
       totalSales: summaryData.totalSales,
       totalTips: summaryData.totalTips,
