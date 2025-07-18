@@ -81,6 +81,7 @@ async function main() {
   await prisma.staffVenue.deleteMany()
   await prisma.venueSettings.deleteMany()
   await prisma.posCommand.deleteMany()
+  await prisma.posConnectionStatus.deleteMany()
 
   // ✅ CORRECTED ORDER: Delete Tables before Areas
   await prisma.table.deleteMany()
