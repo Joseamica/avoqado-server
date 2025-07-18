@@ -1,4 +1,5 @@
 import express, { RequestHandler } from 'express'
+import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { authorizeRole } from '../middlewares/authorizeRole.middleware' // Verifica esta ruta
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
@@ -16,6 +17,7 @@ import * as reviewController from '../controllers/dashboard/review.dashboard.con
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as generalStatsController from '../controllers/dashboard/generalStats.dashboard.controller'
 import {
   CreateMenuCategorySchema,
   UpdateMenuCategorySchema,
@@ -23,7 +25,34 @@ import {
   VenueIdParamsSchema, // For listing all under a venue or POST to a venue
   ReorderMenuCategoriesSchema,
 } from '../schemas/dashboard/menuCategory.schema'
+import {
+  // Menu schemas
+  CreateMenuSchema,
+  UpdateMenuSchema,
+  GetMenuParamsSchema,
+  CloneMenuSchema,
+  MenuQuerySchema,
+  ReorderMenusSchema,
+  // Product schemas
+  CreateProductSchema,
+  UpdateProductSchema,
+  GetProductParamsSchema,
+  ProductQuerySchema,
+  BulkUpdateProductsSchema,
+  // Modifier schemas
+  CreateModifierGroupSchema,
+  UpdateModifierGroupSchema,
+  GetModifierGroupParamsSchema,
+  ModifierGroupQuerySchema,
+  CreateModifierSchema,
+  UpdateModifierSchema,
+  GetModifierParamsSchema,
+  // Assignment schemas
+  AssignCategoryToMenuSchema,
+  AssignModifierGroupToProductSchema,
+} from '../schemas/dashboard/menu.schema'
 import { loginSchema, switchVenueSchema } from '../schemas/dashboard/auth.schema'
+import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
 
 const router = express.Router()
 
@@ -882,6 +911,158 @@ router.get(
   authenticateTokenMiddleware,
   authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
   tpvController.getTerminals,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/general-stats:
+ *   get:
+ *     tags: [Dashboard Analytics]
+ *     summary: Get general statistics for venue dashboard
+ *     description: Aggregated endpoint that provides payments, reviews, products, and metrics data for the dashboard home page
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: fromDate, in: query, schema: { type: string, format: date-time }, description: "Start date for data filtering (ISO 8601)" }
+ *       - { name: toDate, in: query, schema: { type: string, format: date-time }, description: "End date for data filtering (ISO 8601)" }
+ *     responses:
+ *       200:
+ *         description: General statistics data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 payments:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       amount: { type: number }
+ *                       method: { type: string }
+ *                       createdAt: { type: string, format: date-time }
+ *                       tips:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             amount: { type: number }
+ *                 feedbacks:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       stars: { type: integer, minimum: 1, maximum: 5 }
+ *                       createdAt: { type: string, format: date-time }
+ *                 products:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       name: { type: string }
+ *                       type: { type: string }
+ *                       quantity: { type: number }
+ *                       price: { type: number }
+ *                 extraMetrics:
+ *                   type: object
+ *                   properties:
+ *                     tablePerformance: { type: array }
+ *                     staffPerformanceMetrics: { type: array }
+ *                     productProfitability: { type: array }
+ *                     peakHoursData: { type: array }
+ *                     weeklyTrendsData: { type: array }
+ *                     prepTimesByCategory: { type: object }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { description: "Venue not found" }
+ */
+router.get(
+  '/venues/:venueId/general-stats',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(z.object({ query: GeneralStatsQuerySchema })),
+  generalStatsController.getGeneralStats,
+)
+
+// ==========================================
+// MENU SYSTEM ROUTES
+// ==========================================
+
+// --- Menu Routes ---
+router.get(
+  '/venues/:venueId/menus',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(MenuQuerySchema),
+  menuController.getMenusHandler,
+)
+
+router.post(
+  '/venues/:venueId/menus',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(CreateMenuSchema),
+  menuController.createMenuHandler,
+)
+
+router.get(
+  '/venues/:venueId/menus/:menuId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  validateRequest(GetMenuParamsSchema),
+  menuController.getMenuHandler,
+)
+
+router.patch(
+  '/venues/:venueId/menus/:menuId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(UpdateMenuSchema),
+  menuController.updateMenuHandler,
+)
+
+router.delete(
+  '/venues/:venueId/menus/:menuId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(GetMenuParamsSchema),
+  menuController.deleteMenuHandler,
+)
+
+router.post(
+  '/venues/:venueId/menus/:menuId/clone',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(CloneMenuSchema),
+  menuController.cloneMenuHandler,
+)
+
+router.post(
+  '/venues/:venueId/menus/reorder',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(ReorderMenusSchema),
+  menuController.reorderMenusHandler,
+)
+
+// Menu-Category assignments
+router.post(
+  '/venues/:venueId/menus/:menuId/categories',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(AssignCategoryToMenuSchema),
+  menuController.assignCategoryToMenuHandler,
+)
+
+router.delete(
+  '/venues/:venueId/menus/:menuId/categories/:categoryId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(GetMenuParamsSchema),
+  menuController.removeCategoryFromMenuHandler,
 )
 
 export default router

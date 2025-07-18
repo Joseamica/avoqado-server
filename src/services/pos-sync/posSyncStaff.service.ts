@@ -49,6 +49,38 @@ const posSyncStaffService = {
     } else {
       // --- LÓGICA DE CREACIÓN ---
       logger.info(`[PosSyncService] Creando nuevo Staff para posStaffId: ${staffPayload.externalId}`)
+      const email = `pos-${venueId}-${staffPayload.externalId}@avoqado.app`
+
+      const existingStaffByEmail = await prisma.staff.findUnique({
+        where: { email },
+      })
+
+      if (existingStaffByEmail) {
+        logger.info(`[PosSyncService] Staff with email ${email} already exists. Skipping creation.`)
+        // Ensure the staff is linked to the current venue if not already
+        const staffVenueLink = await prisma.staffVenue.findUnique({
+          where: {
+            staffId_venueId: {
+              staffId: existingStaffByEmail.id,
+              venueId: venueId,
+            },
+          },
+        })
+
+        if (!staffVenueLink) {
+          await prisma.staffVenue.create({
+            data: {
+              staffId: existingStaffByEmail.id,
+              venueId: venueId,
+              posStaffId: staffPayload.externalId,
+              role: StaffRole.WAITER,
+            },
+          })
+        }
+
+        return existingStaffByEmail.id
+      }
+
       const newStaff = await prisma.staff.create({
         data: {
           organizationId: organizationId,

@@ -9,42 +9,6 @@ import { RichPosPayload, PosPaymentMethod } from '@/types/pos.types'
 import { PaymentMethod } from '@prisma/client'
 
 /**
- * Mapea un ID de método de pago del POS a nuestro enum de Prisma,
- * utilizando un catálogo dinámico proporcionado desde el POS.
- * @param posMethodId - El ID del método de pago del POS (ej. 'CRE', 'EFE').
- * @param catalog - El catálogo completo de formas de pago desde el POS.
- * @returns El enum PaymentMethod correspondiente.
- */
-function mapPaymentMethodFromCatalog(posMethodId: string, catalog: PosPaymentMethod[]): PaymentMethod {
-  const methodInfo = catalog.find(m => m.idformadepago.trim() === posMethodId.trim())
-
-  if (!methodInfo) {
-    logger.warn(`[🥾 PosSyncOrder] Información para el método de pago '${posMethodId}' no encontrada en el catálogo. Usando 'OTHER'.`)
-    return PaymentMethod.OTHER
-  }
-
-  // La columna 'tipo' de formasdepago define la categoría del método de pago.
-  // 1: Efectivo, 2: Tarjeta, 3: Vales, 4: Otros.
-  switch (methodInfo.tipo) {
-    case 1:
-      return PaymentMethod.CASH
-    case 2:
-      // No podemos distinguir entre Crédito y Débito solo con el tipo.
-      // Usamos una heurística basada en la descripción para ser más precisos.
-      const description = methodInfo.descripcion.toUpperCase()
-      if (description.includes('DEB') || description.includes('DÉBITO')) {
-        return PaymentMethod.DEBIT_CARD
-      }
-      // Por defecto, cualquier tarjeta se considera de crédito.
-      return PaymentMethod.CREDIT_CARD
-    case 3: // Vales
-    case 4: // Otros
-    default:
-      return PaymentMethod.OTHER
-  }
-}
-
-/**
  * Procesa un evento de creación/actualización de una Orden desde el POS.
  * @param payload - Los datos mapeados de la orden desde el producer.
  */
@@ -212,4 +176,40 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
 
   logger.info(`[🥾 PosSyncOrder] Order ${updatedOrder.id} (externalId: ${updatedOrder.externalId}) marked as DELETED.`)
   return updatedOrder
+}
+
+/**
+ * Mapea un ID de método de pago del POS a nuestro enum de Prisma,
+ * utilizando un catálogo dinámico proporcionado desde el POS.
+ * @param posMethodId - El ID del método de pago del POS (ej. 'CRE', 'EFE').
+ * @param catalog - El catálogo completo de formas de pago desde el POS.
+ * @returns El enum PaymentMethod correspondiente.
+ */
+function mapPaymentMethodFromCatalog(posMethodId: string, catalog: PosPaymentMethod[]): PaymentMethod {
+  const methodInfo = catalog.find(m => m.idformadepago.trim() === posMethodId.trim())
+
+  if (!methodInfo) {
+    logger.warn(`[🥾 PosSyncOrder] Información para el método de pago '${posMethodId}' no encontrada en el catálogo. Usando 'OTHER'.`)
+    return PaymentMethod.OTHER
+  }
+
+  // La columna 'tipo' de formasdepago define la categoría del método de pago.
+  // 1: Efectivo, 2: Tarjeta, 3: Vales, 4: Otros.
+  switch (methodInfo.tipo) {
+    case 1:
+      return PaymentMethod.CASH
+    case 2:
+      // No podemos distinguir entre Crédito y Débito solo con el tipo.
+      // Usamos una heurística basada en la descripción para ser más precisos.
+      const description = methodInfo.descripcion.toUpperCase()
+      if (description.includes('DEB') || description.includes('DÉBITO')) {
+        return PaymentMethod.DEBIT_CARD
+      }
+      // Por defecto, cualquier tarjeta se considera de crédito.
+      return PaymentMethod.CREDIT_CARD
+    case 3: // Vales
+    case 4: // Otros
+    default:
+      return PaymentMethod.OTHER
+  }
 }

@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import { Menu, MenuCategory, Prisma } from '@prisma/client'
 import { CreateMenuCategoryDto, UpdateMenuCategoryDto, ReorderMenuCategoriesDto } from '../../schemas/dashboard/menuCategory.schema'
+import { CreateMenuDto, UpdateMenuDto, CloneMenuDto, ReorderMenusDto, AssignCategoryToMenuDto } from '../../schemas/dashboard/menu.schema'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 
@@ -73,7 +74,14 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
 export async function getMenuCategoryById(venueId: string, categoryId: string): Promise<MenuCategory> {
   const category = await prisma.menuCategory.findUnique({
     where: { id: categoryId, venueId },
-    include: { children: true, products: true }, // Include children and products as needed
+    include: {
+      products: true,
+      menus: {
+        include: {
+          menu: true,
+        },
+      },
+    }, // Include children and products as needed
   })
 
   if (!category) {
@@ -83,10 +91,12 @@ export async function getMenuCategoryById(venueId: string, categoryId: string): 
 }
 
 export async function listMenuCategoriesForVenue(venueId: string): Promise<MenuCategory[]> {
+  console.log(venueId)
   return prisma.menuCategory.findMany({
     where: { venueId, parentId: null }, // Fetch top-level categories
     orderBy: { displayOrder: 'asc' },
     include: {
+      menus: true,
       children: {
         // Recursively fetch children
         orderBy: { displayOrder: 'asc' },
@@ -195,4 +205,296 @@ export async function reorderMenuCategories(venueId: string, reorderData: Reorde
   // Note: updateMany doesn't throw if a record isn't found by default.
   // You might want to verify all IDs exist and belong to the venue before transaction for stricter validation.
   return prisma.$transaction(transactions)
+}
+
+// ==========================================
+// MENU SERVICES
+// ==========================================
+
+export async function createMenu(venueId: string, data: CreateMenuDto): Promise<Menu> {
+  const createData: Prisma.MenuCreateInput = {
+    venue: { connect: { id: venueId } },
+    name: data.name,
+    description: data.description,
+    type: data.type,
+    displayOrder: data.displayOrder ?? 0,
+    isDefault: data.isDefault ?? false,
+    active: data.active ?? true,
+    startDate: data.startDate,
+    endDate: data.endDate,
+    availableFrom: data.availableFrom,
+    availableUntil: data.availableUntil,
+    availableDays: data.availableDays ?? [],
+  }
+
+  return prisma.menu.create({
+    data: createData,
+    include: {
+      categories: {
+        orderBy: { displayOrder: 'asc' },
+        include: {
+          category: {
+            include: {
+              products: true,
+            },
+          },
+        },
+      },
+    },
+  })
+}
+
+export async function getMenuById(venueId: string, menuId: string): Promise<Menu> {
+  const menu = await prisma.menu.findUnique({
+    where: { id: menuId, venueId },
+    include: {
+      categories: {
+        orderBy: { displayOrder: 'asc' },
+        include: {
+          category: {
+            include: {
+              products: {
+                orderBy: { displayOrder: 'asc' },
+                include: {
+                  modifierGroups: {
+                    orderBy: { displayOrder: 'asc' },
+                    include: {
+                      group: {
+                        include: {
+                          modifiers: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  if (!menu) {
+    throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
+  }
+
+  return menu
+}
+
+export async function updateMenu(venueId: string, menuId: string, data: UpdateMenuDto): Promise<Menu> {
+  const menu = await prisma.menu.findUnique({
+    where: { id: menuId, venueId },
+  })
+
+  if (!menu) {
+    throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
+  }
+
+  const updateData: Prisma.MenuUpdateInput = {}
+
+  // Update fields if provided
+  if (data.name !== undefined) updateData.name = data.name
+  if (data.description !== undefined) updateData.description = data.description
+  if (data.type !== undefined) updateData.type = data.type
+  if (data.displayOrder !== undefined) updateData.displayOrder = data.displayOrder
+  if (data.isDefault !== undefined) updateData.isDefault = data.isDefault
+  if (data.active !== undefined) updateData.active = data.active
+  if (data.startDate !== undefined) updateData.startDate = data.startDate
+  if (data.endDate !== undefined) updateData.endDate = data.endDate
+  if (data.availableFrom !== undefined) updateData.availableFrom = data.availableFrom
+  if (data.availableUntil !== undefined) updateData.availableUntil = data.availableUntil
+  if (data.availableDays !== undefined) updateData.availableDays = data.availableDays
+
+  return prisma.menu.update({
+    where: { id: menuId, venueId },
+    data: updateData,
+    include: {
+      categories: {
+        orderBy: { displayOrder: 'asc' },
+        include: {
+          category: {
+            include: {
+              products: true,
+            },
+          },
+        },
+      },
+    },
+  })
+}
+
+export async function deleteMenu(venueId: string, menuId: string): Promise<Menu> {
+  const menu = await prisma.menu.findUnique({
+    where: { id: menuId, venueId },
+    include: {
+      categories: { include: { category: { include: { products: true } } } },
+    },
+  })
+
+  if (!menu) {
+    throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
+  }
+
+  // Check if it's the default menu
+  if (menu.isDefault) {
+    throw new BadRequestError('Cannot delete the default menu. Please set another menu as default first.')
+  }
+
+  // Delete menu (categories assignments will be deleted by cascade)
+  return prisma.menu.delete({
+    where: { id: menuId },
+  })
+}
+
+export async function cloneMenu(venueId: string, menuId: string, data: CloneMenuDto): Promise<Menu> {
+  const originalMenu = await prisma.menu.findUnique({
+    where: { id: menuId, venueId },
+    include: {
+      categories: {
+        include: {
+          category: true,
+        },
+      },
+    },
+  })
+
+  if (!originalMenu) {
+    throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
+  }
+
+  // Get the highest display order for new menu
+  const maxDisplayOrder = await prisma.menu.findFirst({
+    where: { venueId },
+    orderBy: { displayOrder: 'desc' },
+    select: { displayOrder: true },
+  })
+
+  const newDisplayOrder = (maxDisplayOrder?.displayOrder ?? 0) + 1
+
+  // Create the cloned menu
+  const clonedMenu = await prisma.menu.create({
+    data: {
+      venue: { connect: { id: venueId } },
+      name: data.name,
+      description: originalMenu.description,
+      type: originalMenu.type,
+      displayOrder: newDisplayOrder,
+      isDefault: false, // Cloned menu is never default
+      active: originalMenu.active,
+      startDate: originalMenu.startDate,
+      endDate: originalMenu.endDate,
+      availableFrom: originalMenu.availableFrom,
+      availableUntil: originalMenu.availableUntil,
+      availableDays: originalMenu.availableDays,
+    },
+  })
+
+  // Clone category assignments if copyCategories is true
+  if (data.copyCategories && originalMenu.categories.length > 0) {
+    const categoryAssignments = originalMenu.categories.map(assignment => ({
+      menuId: clonedMenu.id,
+      categoryId: assignment.categoryId,
+      displayOrder: assignment.displayOrder,
+    }))
+
+    await prisma.menuCategoryAssignment.createMany({
+      data: categoryAssignments,
+    })
+  }
+
+  // Return the cloned menu with its categories
+  return getMenuById(venueId, clonedMenu.id)
+}
+
+export async function reorderMenus(venueId: string, reorderData: ReorderMenusDto): Promise<Prisma.BatchPayload[]> {
+  const transactions = reorderData.map(item =>
+    prisma.menu.updateMany({
+      where: { id: item.id, venueId },
+      data: { displayOrder: item.displayOrder },
+    }),
+  )
+
+  return prisma.$transaction(transactions)
+}
+
+export async function assignCategoryToMenu(venueId: string, menuId: string, data: AssignCategoryToMenuDto): Promise<any> {
+  // Verify menu exists and belongs to venue
+  const menu = await prisma.menu.findUnique({
+    where: { id: menuId, venueId },
+  })
+
+  if (!menu) {
+    throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
+  }
+
+  // Verify category exists and belongs to venue
+  const category = await prisma.menuCategory.findUnique({
+    where: { id: data.categoryId, venueId },
+  })
+
+  if (!category) {
+    throw new NotFoundError(`Category with ID ${data.categoryId} not found in venue ${venueId}.`)
+  }
+
+  // Check if assignment already exists
+  const existingAssignment = await prisma.menuCategoryAssignment.findUnique({
+    where: {
+      menuId_categoryId: {
+        menuId: menuId,
+        categoryId: data.categoryId,
+      },
+    },
+  })
+
+  if (existingAssignment) {
+    throw new BadRequestError(`Category ${data.categoryId} is already assigned to menu ${menuId}.`)
+  }
+
+  // Create the assignment
+  return prisma.menuCategoryAssignment.create({
+    data: {
+      menuId: menuId,
+      categoryId: data.categoryId,
+      displayOrder: data.displayOrder ?? 0,
+    },
+    include: {
+      category: true,
+      menu: true,
+    },
+  })
+}
+
+export async function removeCategoryFromMenu(venueId: string, menuId: string, categoryId: string): Promise<void> {
+  // Verify menu exists and belongs to venue
+  const menu = await prisma.menu.findUnique({
+    where: { id: menuId, venueId },
+  })
+
+  if (!menu) {
+    throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
+  }
+
+  // Find and delete the assignment
+  const assignment = await prisma.menuCategoryAssignment.findUnique({
+    where: {
+      menuId_categoryId: {
+        menuId: menuId,
+        categoryId: categoryId,
+      },
+    },
+  })
+
+  if (!assignment) {
+    throw new NotFoundError(`Category ${categoryId} is not assigned to menu ${menuId}.`)
+  }
+
+  await prisma.menuCategoryAssignment.delete({
+    where: {
+      menuId_categoryId: {
+        menuId: menuId,
+        categoryId: categoryId,
+      },
+    },
+  })
 }

@@ -62,7 +62,12 @@ export async function processPosOrderItemEvent(payload: OrderItemPayload) {
   }
 
   // Encontrar o crear el producto asociado
-  const product = await getOrCreatePosProduct(itemData.productExternalId, itemData.productName || 'Producto Desconocido', venueId)
+  const product = await getOrCreatePosProduct(
+    itemData.productExternalId,
+    itemData.productName || 'Producto Desconocido',
+    itemData.unitPrice || 0,
+    venueId,
+  )
 
   const orderItem = await prisma.orderItem.upsert({
     where: { orderId_externalId: { orderId: parentOrder.id, externalId: itemData.externalId } },
@@ -104,15 +109,20 @@ export async function processPosOrderItemEvent(payload: OrderItemPayload) {
 /**
  * Función de utilidad para encontrar un producto por su ID del POS, o crearlo si no existe.
  */
-async function getOrCreatePosProduct(externalId: string, name: string, venueId: string): Promise<Product> {
+async function getOrCreatePosProduct(externalId: string, name: string, price: number, venueId: string): Promise<Product> {
   const existing = await prisma.product.findUnique({
     where: { venueId_externalId: { venueId, externalId } },
   })
   if (existing) return existing
 
   logger.info(`[🍔 PosSyncItem] Producto ${externalId} no encontrado. Creando placeholder...`)
-  return prisma.product.create({
-    data: {
+  return prisma.product.upsert({
+    where: { venueId_externalId: { venueId, externalId } },
+    update: {
+      price,
+      name,
+    },
+    create: {
       venue: { connect: { id: venueId } },
       category: {
         connectOrCreate: {
@@ -123,7 +133,7 @@ async function getOrCreatePosProduct(externalId: string, name: string, venueId: 
       externalId,
       name: name,
       sku: `pos-${externalId}`,
-      price: 0, // El precio real está en el OrderItem
+      price,
       originSystem: OriginSystem.POS_SOFTRESTAURANT,
       syncStatus: SyncStatus.SYNCED,
     },
