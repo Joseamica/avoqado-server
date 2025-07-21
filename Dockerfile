@@ -1,49 +1,54 @@
-# -------- Builder Stage --------
-FROM node:20-alpine AS builder
+# Use Node.js LTS version
+FROM node:20-alpine AS base
 
-# Install system deps needed for Prisma engines
-RUN apk add --no-cache openssl
-
+# Set working directory
 WORKDIR /app
 
-# Install all dependencies (including dev) first
+# Copy package files
 COPY package*.json ./
-COPY pnpm-lock.yaml* ./
-RUN npm ci --legacy-peer-deps
+COPY prisma ./prisma/
 
-# Copy the rest of the source code
-COPY tsconfig*.json ./
-COPY prisma ./prisma
-# Include tests (for shared helpers referenced in src)
-COPY tests ./tests
-COPY src ./src
-COPY ecosystem.config.js ./
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
 
-# Generate Prisma Client & compile TS
-RUN npx prisma generate
+# Development stage
+FROM base AS development
+RUN npm ci
+COPY . .
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
+
+# Build stage
+FROM base AS build
+RUN npm ci
+COPY . .
 RUN npm run build
 
-# -------- Production Stage --------
+# Production stage
 FROM node:20-alpine AS production
 
-# Create app directory
 WORKDIR /app
 
-# Only install production dependencies
-COPY package*.json ./
-RUN npm ci --only=production --legacy-peer-deps
+# Install dumb-init for proper signal handling
+RUN apk add --no-cache dumb-init
 
-# Copy compiled app and Prisma engines from builder
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/prisma ./prisma
-# PM2 is installed in node_modules as a prod dependency
-COPY --from=builder /app/node_modules ./node_modules
-# Include tests directory needed by some controllers
-COPY --from=builder /app/tests ./tests
-COPY ecosystem.config.js ./
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S avoqado -u 1001
 
-ENV NODE_ENV=production
+# Copy built application
+COPY --from=build --chown=avoqado:nodejs /app/dist ./dist
+COPY --from=build --chown=avoqado:nodejs /app/node_modules ./node_modules
+COPY --from=build --chown=avoqado:nodejs /app/package*.json ./
+COPY --from=build --chown=avoqado:nodejs /app/prisma ./prisma
+
+USER avoqado
+
 EXPOSE 3000
 
-# Ensure prisma migrations run, then start app with PM2
-CMD ["sh", "-c", "npx prisma migrate deploy && npx pm2-runtime ecosystem.config.js"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node --eval "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["npm", "start"]

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # Development version with hot reload
+  app:
+    build:
+      context: .
+      target: development
+    container_name: avoqado-server-dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://avoqado_user:avoqado_password@postgres:5432/avoqado_db
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://avoqado_user:avoqado_password@rabbitmq:5672
+      JWT_SECRET: dev_jwt_secret
+      SESSION_SECRET: dev_session_secret
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - ./logs:/app/logs
+    command: npx nodemon --watch 'src/**/*' --exec 'npx ts-node -r tsconfig-paths/register src/server.ts'
