@@ -39,7 +39,7 @@ export class CommandListener {
       })
 
       await this.pgClient.connect()
-      logger.info('✅ Connected to PostgreSQL for LISTEN/NOTIFY (with Keep-Alive enabled)')
+      logger.info('🐘 Connected to PostgreSQL for LISTEN/NOTIFY (with Keep-Alive enabled)')
 
       // Listen for notifications
       await this.pgClient.query('LISTEN new_pos_command')

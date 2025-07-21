@@ -15,6 +15,8 @@ import { CommandListener } from './communication/rabbitmq/commandListener'
 import { CommandRetryService } from './communication/rabbitmq/commandRetryService'
 import { startEventConsumer } from './communication/rabbitmq/consumer'
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
+// Import the new Socket.io system
+import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 
 const httpServer = http.createServer(app)
 
@@ -34,6 +36,10 @@ const gracefulShutdown = async (signal: string) => {
       logger.info('Stopping command services...')
       await commandListener.stop()
       commandRetryService.stop()
+
+      // Shutdown Socket.io server
+      logger.info('Shutting down Socket.io server...')
+      await shutdownSocketServer()
 
       // Close RabbitMQ connections
       logger.info('Closing RabbitMQ connections...')
@@ -84,7 +90,7 @@ process.on('unhandledRejection', (reason, promise) => {
 })
 
 // --- Application Startup Logic ---
-const startApplication = async () => {
+const startApplication = async (retries = 3) => {
   try {
     // Connect to RabbitMQ and ensure topology
     await connectToRabbitMQ()
@@ -112,10 +118,20 @@ const startApplication = async () => {
           logger.warn('⚠️  Application is running in Development mode.')
         }
       })
+
+      // Initialize Socket.io server after HTTP server starts
+      logger.info('📡 Initializing Socket.io server...')
+      const io = initializeSocketServer(httpServer)
+      logger.info('✅ 📡 Socket.io server initialized successfully')
     }
   } catch (error) {
-    logger.error('💥 Critical failure during application startup:', error)
-    process.exit(1)
+    if (retries > 0) {
+      logger.warn(`Startup failed, retrying... (${retries} attempts left)`)
+      setTimeout(() => startApplication(retries - 1), 5000)
+    } else {
+      logger.error('💥 Critical failure after all retries:', error)
+      process.exit(1)
+    }
   }
 }
 

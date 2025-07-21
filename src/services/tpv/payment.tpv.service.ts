@@ -40,14 +40,6 @@ export async function getPayments(
 ): Promise<PaginationResponse<Payment>> {
   const { fromDate, toDate, staffId } = filters
 
-  logger.info('Payment service - Request params:', {
-    venueId,
-    orgId,
-    pageSize,
-    pageNumber,
-    filters,
-  })
-
   // Build the query filters
   const whereClause: any = {
     venueId: venueId,
@@ -106,15 +98,10 @@ export async function getPayments(
   // Calculate pagination values
   const skip = (pageNumber - 1) * pageSize
 
-  // Log the final query for debugging
-  logger.info('Payment service - Query filters:', { whereClause })
-
   // Check total payments for venue for diagnostics
   const totalVenuePayments = await prisma.payment.count({
     where: { venueId },
   })
-
-  logger.info(`Total payments for venue '${venueId}': ${totalVenuePayments}`)
 
   // Execute the query with pagination
   const [payments, totalCount] = await prisma.$transaction([

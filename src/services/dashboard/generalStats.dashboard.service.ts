@@ -3,10 +3,7 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
 
-export async function getGeneralStatsData(
-  venueId: string,
-  filters: GeneralStatsQuery = {}
-): Promise<GeneralStatsResponse> {
+export async function getGeneralStatsData(venueId: string, filters: GeneralStatsQuery = {}): Promise<GeneralStatsResponse> {
   // Validate venue exists
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
@@ -28,14 +25,6 @@ export async function getGeneralStatsData(
     },
   }
 
-  // Fetch payments data with more flexible filtering
-  console.log('DEBUG: Fetching payments with:', {
-    venueId,
-    dateFilter,
-    fromDate: fromDate.toISOString(),
-    toDate: toDate.toISOString()
-  })
-  
   // First, let's check if there are any payments at all for this venue
   const allPayments = await prisma.payment.findMany({
     where: {
@@ -45,17 +34,7 @@ export async function getGeneralStatsData(
       createdAt: 'desc',
     },
   })
-  
-  console.log('DEBUG: Total payments for venue:', allPayments.length)
-  if (allPayments.length > 0) {
-    console.log('DEBUG: First payment sample:', {
-      id: allPayments[0].id,
-      amount: allPayments[0].amount,
-      status: allPayments[0].status,
-      createdAt: allPayments[0].createdAt
-    })
-  }
-  
+
   // Try with simplified filtering - remove status filter for now
   const payments = await prisma.payment.findMany({
     where: {
@@ -69,12 +48,9 @@ export async function getGeneralStatsData(
       createdAt: 'desc',
     },
   })
-  
-  console.log('DEBUG: Filtered payments (no status filter):', payments.length)
-  
+
   // Filter out pending payments in memory instead of in the query
   const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
-  console.log('DEBUG: Valid payments (after status filter):', validPayments.length)
 
   // Fetch reviews/feedback data
   const reviews = await prisma.review.findMany({
@@ -104,13 +80,13 @@ export async function getGeneralStatsData(
 
   // Process products data
   const productsMap = new Map<string, any>()
-  
+
   orders.forEach(order => {
     order.items.forEach(item => {
       if (item.product) {
         const productKey = `${item.product.id}-${item.product.name}`
         const existing = productsMap.get(productKey)
-        
+
         if (existing) {
           existing.quantity += item.quantity
         } else {
@@ -169,19 +145,19 @@ export async function getGeneralStatsData(
 async function generateExtraMetrics(venueId: string, fromDate: Date, toDate: Date) {
   // Fetch table performance data
   const tablePerformance = await generateTablePerformance(venueId, fromDate, toDate)
-  
+
   // Fetch staff performance data
   const staffPerformanceMetrics = await generateStaffPerformance(venueId, fromDate, toDate)
-  
+
   // Fetch product profitability data
   const productProfitability = await generateProductProfitability(venueId, fromDate, toDate)
-  
+
   // Generate peak hours data
   const peakHoursData = await generatePeakHoursData(venueId, fromDate, toDate)
-  
+
   // Generate weekly trends data
   const weeklyTrendsData = await generateWeeklyTrendsData(venueId, fromDate, toDate)
-  
+
   // Generate prep times by category (mock data for now)
   const prepTimesByCategory = {
     entradas: { avg: 8, target: 10 },
@@ -220,7 +196,7 @@ async function generateTablePerformance(venueId: string, fromDate: Date, toDate:
     if (order.table) {
       const tableKey = `${order.table.id}-${order.table.number}`
       const existing = tableStatsMap.get(tableKey)
-      
+
       if (existing) {
         existing.totalSales += Number(order.total)
         existing.orderCount += 1
@@ -276,7 +252,7 @@ async function generateStaffPerformance(venueId: string, fromDate: Date, toDate:
     if (order.servedBy) {
       const staffKey = order.servedBy.id
       const existing = staffStatsMap.get(staffKey)
-      
+
       if (existing) {
         existing.totalSales += Number(order.total)
         existing.orderCount += 1
@@ -325,10 +301,10 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
       if (item.product) {
         const productKey = item.product.id
         const existing = productStatsMap.get(productKey)
-        
+
         const itemRevenue = item.quantity * Number(item.unitPrice)
         const estimatedCost = Number(item.unitPrice) * 0.3 // Mock 30% cost ratio
-        
+
         if (existing) {
           existing.quantity += item.quantity
           existing.totalRevenue += itemRevenue
@@ -350,7 +326,7 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
   return Array.from(productStatsMap.values()).map(product => {
     const margin = product.totalRevenue - product.totalCost
     const marginPercentage = product.totalRevenue > 0 ? (margin / product.totalRevenue) * 100 : 0
-    
+
     return {
       ...product,
       cost: product.quantity > 0 ? product.totalCost / product.quantity : 0,
@@ -376,7 +352,7 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   orders.forEach(order => {
     const hour = order.createdAt.getHours()
     const existing = hourlyData.get(hour)
-    
+
     if (existing) {
       existing.sales += Number(order.total)
       existing.transactions += 1
@@ -398,7 +374,7 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
 async function generateWeeklyTrendsData(venueId: string, fromDate: Date, toDate: Date) {
   // Mock data for weekly trends
   const weekdays = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-  
+
   return weekdays.map(day => ({
     day,
     currentWeek: Math.floor(Math.random() * 1000) + 500,

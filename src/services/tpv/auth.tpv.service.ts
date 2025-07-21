@@ -1,6 +1,8 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { generateAccessToken, generateRefreshToken } from '../../security'
+import { v4 as uuidv4 } from 'uuid'
 
 /**
  * Staff sign-in using PIN for TPV access
@@ -9,6 +11,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
  * @returns Staff information with venue-specific data
  */
 export async function staffSignIn(venueId: string, pin: string) {
+  logger.info(`Staff sign-in request for venue ${venueId} with PIN ${pin}`)
   // Validate required fields
   if (!pin) {
     throw new BadRequestError('PIN is required')
@@ -18,13 +21,15 @@ export async function staffSignIn(venueId: string, pin: string) {
     throw new BadRequestError('Venue ID is required')
   }
 
-  // Find staff member with the given PIN who has access to the venue
-  const staffVenue = await prisma.staffVenue.findFirst({
+  // Find staff member with matching venue-specific PIN
+  const staffVenue = await prisma.staffVenue.findUnique({
     where: {
-      venueId,
+      venueId_pin: {
+        venueId: venueId,
+        pin: pin,
+      },
       active: true,
       staff: {
-        pin,
         active: true,
       },
     },
@@ -54,11 +59,33 @@ export async function staffSignIn(venueId: string, pin: string) {
     throw new NotFoundError('Staff member not found or not authorized for this venue')
   }
 
-  // Log successful sign-in
-  logger.info(`Staff signed in successfully: ${staffVenue.staff.firstName} ${staffVenue.staff.lastName} for venue ${venueId}`)
+  // Generate JWT tokens for socket authentication and API access
+  const correlationId = uuidv4()
 
-  // Return staff information with venue-specific data
+  const tokenPayload = {
+    userId: staffVenue.staff.id,
+    staffId: staffVenue.staffId,
+    venueId: staffVenue.venueId,
+    orgId: staffVenue.venueId, // Using venueId as orgId for consistency
+    role: staffVenue.role,
+    permissions: staffVenue.permissions,
+    correlationId,
+  }
+
+  const accessToken = generateAccessToken(tokenPayload)
+  const refreshToken = generateRefreshToken(tokenPayload)
+
+  // Log successful sign-in with token generation
+  logger.info(`Staff signed in successfully: ${staffVenue.staff.firstName} ${staffVenue.staff.lastName} for venue ${venueId}`, {
+    correlationId,
+    staffId: staffVenue.staff.id,
+    venueId,
+    role: staffVenue.role,
+  })
+
+  // Return staff information with venue-specific data and JWT tokens
   return {
+    // Existing staff data
     id: staffVenue.id,
     staffId: staffVenue.staffId,
     venueId: staffVenue.venueId,
@@ -70,5 +97,15 @@ export async function staffSignIn(venueId: string, pin: string) {
     totalOrders: staffVenue.totalOrders,
     staff: staffVenue.staff,
     venue: staffVenue.venue,
+
+    // JWT tokens for socket and API authentication
+    accessToken,
+    refreshToken,
+    expiresIn: 3600, // 1 hour in seconds
+    tokenType: 'Bearer',
+
+    // Metadata
+    correlationId,
+    issuedAt: new Date().toISOString(),
   }
 }

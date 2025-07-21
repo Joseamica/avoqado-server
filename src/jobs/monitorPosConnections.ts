@@ -22,7 +22,7 @@ async function checkPosConnections() {
 
     if (offlineVenues.length > 0) {
       const offlineVenueIds = offlineVenues.map(v => v.venueId)
-      logger.warn(`[Monitor Job] 🔌 Se detectaron ${offlineVenues.length} conexiones de POS inactivas: ${offlineVenueIds.join(', ')}`)
+      logger.warn(`[Monitor Job] 🐰 Se detectaron ${offlineVenues.length} conexiones de POS inactivas: ${offlineVenueIds.join(', ')}`)
 
       // Actualiza su estado a OFFLINE en la base de datos
       await prisma.posConnectionStatus.updateMany({

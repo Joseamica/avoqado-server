@@ -217,7 +217,7 @@ async function main() {
           organizationId: org.id,
           email: staffData.email,
           password: await bcrypt.hash(staffData.password, HASH_ROUNDS),
-          pin: faker.string.numeric(4),
+          // PIN removed - now venue-specific on StaffVenue
           firstName: staffData.firstName,
           lastName: staffData.lastName,
           phone: faker.phone.number(),
@@ -289,7 +289,13 @@ async function main() {
       for (const staffWithRole of createdStaffList) {
         if ([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN].includes(staffWithRole.assignedRole) || Math.random() > 0.3) {
           await prisma.staffVenue.create({
-            data: { staffId: staffWithRole.id, venueId: venue.id, role: staffWithRole.assignedRole, active: true },
+            data: { 
+              staffId: staffWithRole.id, 
+              venueId: venue.id, 
+              role: staffWithRole.assignedRole, 
+              active: true,
+              pin: faker.string.numeric(4), // Set venue-specific PIN
+            },
           })
         }
       }

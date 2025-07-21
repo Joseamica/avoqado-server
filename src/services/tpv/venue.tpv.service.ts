@@ -17,15 +17,23 @@ export async function getVenueById(venueId: string, orgId?: string): Promise<Ven
     },
     include: {
       staff: {
-        include: {
+        select: {
+          id: true,
+          pin: true, // PIN is now venue-specific on StaffVenue
+          role: true,
+          active: true,
           staff: {
             select: {
               id: true,
               firstName: true,
               lastName: true,
-              pin: true,
+              email: true,
+              employeeCode: true,
             },
           },
+        },
+        where: {
+          active: true,
         },
       },
       // Add other necessary relations based on TPV needs

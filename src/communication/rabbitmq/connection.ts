@@ -21,7 +21,7 @@ const connectWithRetry = async (): Promise<void> => {
   isConnecting = true
 
   try {
-    logger.info('🔌 Conectando a RabbitMQ...')
+    logger.info('🐰 Conectando a RabbitMQ...')
     channelModel = await connect(RABBITMQ_URL)
 
     // Get the actual connection from the channel model
@@ -34,7 +34,7 @@ const connectWithRetry = async (): Promise<void> => {
       throw new Error('No se pudo crear el canal.')
     }
 
-    logger.info('✅ Conexión con RabbitMQ establecida.')
+    logger.info('✅🐰 Conexión con RabbitMQ establecida.')
 
     // --- Configuración de la Topología ---
     await channel.assertExchange(DEAD_LETTER_EXCHANGE, 'direct', { durable: true })
@@ -51,7 +51,7 @@ const connectWithRetry = async (): Promise<void> => {
         'x-dead-letter-routing-key': 'dead-letter',
       },
     })
-    logger.info('✅ Topología de RabbitMQ asegurada.')
+    logger.info('🐰 Topología de RabbitMQ asegurada.')
 
     // --- Manejadores de Eventos de la Conexión ---
     connection.on('error', (err: Error) => {
@@ -77,7 +77,7 @@ const connectWithRetry = async (): Promise<void> => {
 
 // Función principal para iniciar y obtener la conexión
 export const connectToRabbitMQ = async (): Promise<void> => {
-  logger.info('🔌 Connecting to RabbitMQ...')
+  logger.info('🐰 Connecting to RabbitMQ...')
 
   if (!channel) {
     await connectWithRetry()
@@ -86,20 +86,20 @@ export const connectToRabbitMQ = async (): Promise<void> => {
 
 export const closeRabbitMQConnection = async (): Promise<void> => {
   try {
-    let closedSomething = false;
+    let closedSomething = false
     if (channel) {
       await channel.close()
       channel = null
-      closedSomething = true;
+      closedSomething = true
     }
     if (channelModel) {
-      await channelModel.close();
-      channelModel = null;
-      connection = null;
-      closedSomething = true;
+      await channelModel.close()
+      channelModel = null
+      connection = null
+      closedSomething = true
     }
     if (closedSomething) {
-      logger.info('✅ Conexión con RabbitMQ cerrada correctamente.');
+      logger.info('✅ Conexión con RabbitMQ cerrada correctamente.')
     }
   } catch (error) {
     logger.error('❌ Error al cerrar la conexión con RabbitMQ:', error)

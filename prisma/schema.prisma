@@ -174,7 +174,7 @@ model Staff {
   // Authentication
   email    String  @unique
   password String? // Null for PIN-only users
-  pin      String? // 4-6 digits for TPV access
+  // pin      String? // ❌ REMOVER - Se mueve a StaffVenue
 
   // Profile
   firstName    String
@@ -206,7 +206,7 @@ model Staff {
   lastLoginAt DateTime?
 
   @@index([email])
-  @@index([pin])
+  // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
   @@index([organizationId])
 }
 
@@ -217,6 +217,9 @@ model StaffVenue {
   posStaffId String?
   venueId    String
   venue      Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // ✅ PIN específico por venue
+  pin String? // 4-6 digits for TPV access per venue
 
   role        StaffRole
   permissions Json? // Custom permissions override
@@ -231,11 +234,13 @@ model StaffVenue {
   startDate DateTime  @default(now())
   endDate   DateTime?
 
-  @@unique([venueId, posStaffId]) // Asegura que no se duplique
-  @@unique([staffId, venueId])
+  @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
+  @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
+  @@unique([venueId, pin]) // ✅ PIN único por venue
   @@index([staffId])
   @@index([venueId])
   @@index([role])
+  @@index([pin]) // ✅ Índice para búsquedas de PIN
 }
 
 model Invitation {

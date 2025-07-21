@@ -36,15 +36,29 @@ const posSyncStaffService = {
     if (existingStaffVenue) {
       // --- LÓGICA DE ACTUALIZACIÓN ---
       logger.info(`[PosSyncService] Actualizando Staff existente con externalId: ${staffPayload.externalId}`)
+      
+      // Update staff basic info (no PIN - PIN is venue-specific now)
       const updatedStaff = await prisma.staff.update({
         where: {
           id: existingStaffVenue.staffId,
         },
         data: {
           firstName: staffPayload.name || `Mesero ${staffPayload.externalId}`,
-          pin: staffPayload.pin?.toString() || null,
         },
       })
+      
+      // Update venue-specific PIN on StaffVenue
+      if (staffPayload.pin) {
+        await prisma.staffVenue.update({
+          where: {
+            id: existingStaffVenue.id,
+          },
+          data: {
+            pin: staffPayload.pin.toString(),
+          },
+        })
+      }
+      
       return updatedStaff.id
     } else {
       // --- LÓGICA DE CREACIÓN ---
@@ -74,8 +88,21 @@ const posSyncStaffService = {
               venueId: venueId,
               posStaffId: staffPayload.externalId,
               role: StaffRole.WAITER,
+              pin: staffPayload.pin?.toString() || null, // Set venue-specific PIN
             },
           })
+        } else {
+          // Update existing staffVenue with PIN if provided
+          if (staffPayload.pin) {
+            await prisma.staffVenue.update({
+              where: {
+                id: staffVenueLink.id,
+              },
+              data: {
+                pin: staffPayload.pin.toString(),
+              },
+            })
+          }
         }
 
         return existingStaffByEmail.id
@@ -87,13 +114,14 @@ const posSyncStaffService = {
           email: `pos-${venueId}-${staffPayload.externalId}@avoqado.app`,
           firstName: staffPayload.name || `Mesero ${staffPayload.externalId}`,
           lastName: `(POS)`,
-          pin: staffPayload.pin?.toString() || null,
+          // PIN removed from Staff - now venue-specific on StaffVenue
           originSystem: OriginSystem.POS_SOFTRESTAURANT,
           venues: {
             create: {
               venueId: venueId,
               posStaffId: staffPayload.externalId,
               role: StaffRole.WAITER,
+              pin: staffPayload.pin?.toString() || null, // Set venue-specific PIN
             },
           },
         },

@@ -51,6 +51,24 @@ export interface AuthError {
 export type ProtectRouteResult = AuthSuccess | AuthError
 
 /**
+ * Tipo de resultado para la función protectRoute.
+ */
+export type AuthResult = AuthSuccess | AuthError
+
+/**
+ * Interface for token generation payload
+ */
+export interface TokenPayload {
+  userId: string
+  staffId: string
+  venueId: string
+  orgId: string
+  role: StaffRole
+  permissions?: any
+  correlationId?: string
+}
+
+/**
  * Tipo para los encabezados de una solicitud HTTP entrante (simplificado).
  */
 // HttpRequestHeaders is no longer needed as we use IncomingHttpHeaders directly
@@ -228,6 +246,86 @@ export function protectRoute(allowedRoles: StaffRole[]) {
     req.authContext = authContext
 
     next() // Continuar al siguiente middleware o manejador de ruta
+  }
+}
+
+// IV. JWT Token Generation Functions
+
+/**
+ * Generate JWT access token for authentication
+ * @param payload Token payload containing user information
+ * @returns JWT access token string
+ */
+export function generateAccessToken(payload: TokenPayload): string {
+  const jwtPayload: AvoqadoJwtPayload = {
+    sub: payload.userId,
+    orgId: payload.orgId,
+    venueId: payload.venueId,
+    role: payload.role,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + (60 * 60), // 1 hour expiry
+  }
+
+  const secret = process.env.ACCESS_TOKEN_SECRET
+  if (!secret) {
+    throw new Error('ACCESS_TOKEN_SECRET environment variable is not set')
+  }
+
+  return jwt.sign(jwtPayload, secret, {
+    algorithm: 'HS256',
+    issuer: 'avoqado-api',
+    audience: 'avoqado-clients'
+  })
+}
+
+/**
+ * Generate JWT refresh token for token renewal
+ * @param payload Token payload containing user information
+ * @returns JWT refresh token string
+ */
+export function generateRefreshToken(payload: TokenPayload): string {
+  const jwtPayload = {
+    sub: payload.userId,
+    orgId: payload.orgId,
+    venueId: payload.venueId,
+    type: 'refresh',
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7), // 7 days expiry
+  }
+
+  const secret = process.env.ACCESS_TOKEN_SECRET
+  if (!secret) {
+    throw new Error('ACCESS_TOKEN_SECRET environment variable is not set')
+  }
+
+  return jwt.sign(jwtPayload, secret, {
+    algorithm: 'HS256',
+    issuer: 'avoqado-api',
+    audience: 'avoqado-clients'
+  })
+}
+
+/**
+ * Verify and decode a JWT token
+ * @param token JWT token string
+ * @returns Decoded JWT payload or null if invalid
+ */
+export function verifyToken(token: string): AvoqadoJwtPayload | null {
+  try {
+    const secret = process.env.ACCESS_TOKEN_SECRET
+    if (!secret) {
+      throw new Error('ACCESS_TOKEN_SECRET environment variable is not set')
+    }
+
+    const decoded = jwt.verify(token, secret, {
+      algorithms: ['HS256'],
+      issuer: 'avoqado-api',
+      audience: 'avoqado-clients'
+    }) as AvoqadoJwtPayload
+
+    return decoded
+  } catch (error) {
+    return null
   }
 }
 
