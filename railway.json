@@ -1,0 +1,9 @@
+{
+  "deploy": {
+    "startCommand": "npm run railway:start",
+    "buildCommand": "npm run railway:build",
+    "watchPatterns": ["src/**/*", "prisma/**/*"],
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 100
+  }
+}

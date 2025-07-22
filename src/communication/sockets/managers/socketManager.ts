@@ -20,9 +20,9 @@ import logger from '../../../config/logger'
 import { v4 as uuidv4 } from 'uuid'
 
 // Import event controllers
-type ConnectionController = any
-type RoomController = any
-type BusinessEventController = any
+import { ConnectionController } from '../controllers/connection.controller'
+import { RoomController } from '../controllers/room.controller'
+import { BusinessEventController } from '../controllers/businessEvent.controller'
 
 /**
  * Main Socket Manager
@@ -46,10 +46,10 @@ export class SocketManager implements ISocketManager {
     this.config = { ...socketConfig, ...config }
     this.roomManager = new RoomManagerService()
 
-    // Initialize controllers - will be properly imported when modules are created
-    this.connectionController = {} as any // Placeholder
-    this.roomController = {} as any // Placeholder
-    this.businessEventController = {} as any // Placeholder
+    // Initialize controllers
+    this.connectionController = new ConnectionController(this.roomManager)
+    this.roomController = new RoomController(this.roomManager)
+    this.businessEventController = new BusinessEventController(this.roomManager)
   }
 
   /**
@@ -86,10 +86,10 @@ export class SocketManager implements ISocketManager {
     // Initialize broadcasting service
     this.broadcastingService = new BroadcastingService(this.io, this.roomManager)
 
-    // Provide broadcasting service to controllers (when properly implemented)
-    // this.connectionController.setBroadcastingService(this.broadcastingService)
-    // this.roomController.setBroadcastingService(this.broadcastingService)
-    // this.businessEventController.setBroadcastingService(this.broadcastingService)
+    // Provide broadcasting service to controllers
+    this.connectionController.setBroadcastingService(this.broadcastingService)
+    this.roomController.setBroadcastingService(this.broadcastingService)
+    this.businessEventController.setBroadcastingService(this.broadcastingService)
 
     logger.info('📡 Socket.io server initialized successfully', {
       correlationId: uuidv4(),
