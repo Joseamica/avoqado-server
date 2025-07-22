@@ -20,7 +20,8 @@ CMD ["npm", "run", "dev"]
 
 # Build stage
 FROM base AS build
-RUN npm ci
+# Install all dependencies including devDependencies for building
+RUN npm ci --include=dev
 COPY . .
 RUN npm run build
 

@@ -72,7 +72,7 @@ jest.config.js
 # Development tools
 .prettierrc
 .eslintrc*
-tsconfig.json
+# tsconfig.json - needed for Docker build
 
 # Temporary files
 tmp

@@ -1,14 +1,14 @@
 import { Request, Response, NextFunction } from 'express'
 
-import * as posSyncTestService from '../../../tests/unit/services/pos-sync/posSyncTest.service'
-import { PosOrderPayload } from '@/types/pos.types'
+import { processPosOrderEvent } from '../../services/pos-sync/posSyncOrder.service'
+import { RichPosPayload } from '@/types/pos.types'
 
 export const handlePosOrderTest = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const orderPayload: PosOrderPayload = req.body
-    const result = await posSyncTestService.processTestPosOrder(orderPayload)
+    const orderPayload: RichPosPayload = req.body
+    const result = await processPosOrderEvent(orderPayload)
     res.status(200).json({
-      message: 'Test order processed successfully',
+      message: 'POS order processed successfully',
       order: result,
     })
   } catch (error) {
