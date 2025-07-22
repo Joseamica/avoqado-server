@@ -33,9 +33,11 @@ WORKDIR /app
 # Install dumb-init for proper signal handling
 RUN apk add --no-cache dumb-init
 
-# Create non-root user
+# Create non-root user and logs directory
 RUN addgroup -g 1001 -S nodejs && \
-    adduser -S avoqado -u 1001
+    adduser -S avoqado -u 1001 && \
+    mkdir -p /app/logs && \
+    chown -R avoqado:nodejs /app/logs
 
 # Copy built application
 COPY --from=build --chown=avoqado:nodejs /app/dist ./dist
