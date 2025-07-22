@@ -65,6 +65,8 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
     staffData,
     tableData,
     shiftData,
+    payments: [],
+    paymentMethodsCatalog: [],
   };
 
   const mockStaffId = 'staff-prisma-id';

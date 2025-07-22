@@ -28,7 +28,7 @@ describe('SocketManager Integration Tests', () => {
     role: StaffRole.WAITER
   }
 
-  const generateTestToken = (payload = testUser): string => {
+  const generateTestToken = (payload: any = testUser): string => {
     return jwt.sign(payload, ACCESS_TOKEN_SECRET || 'test-secret', { expiresIn: '1h' })
   }
 
@@ -255,7 +255,7 @@ describe('SocketManager Integration Tests', () => {
       // Create token with role that doesn't have payment permissions
       const customerToken = generateTestToken({
         ...testUser,
-        role: StaffRole.CUSTOMER
+        role: StaffRole.VIEWER
       })
 
       const customerSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
@@ -299,8 +299,8 @@ describe('SocketManager Integration Tests', () => {
 
       // Wait for both to connect
       await Promise.all([
-        new Promise(resolve => clientSocket.on('connect', resolve)),
-        new Promise(resolve => clientSocket2.on('connect', resolve))
+        new Promise<void>(resolve => clientSocket.on('connect', () => resolve())),
+        new Promise<void>(resolve => clientSocket2.on('connect', () => resolve()))
       ])
     })
 
