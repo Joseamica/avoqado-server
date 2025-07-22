@@ -35,7 +35,12 @@ app.use('/api/v1/secure', orderRoutes) // Consider renaming '/secure' if it's fo
 const API_PREFIX = process.env.API_PREFIX || '/api/v1' // Define un prefijo base para tu API
 app.use(API_PREFIX, mainApiRouter)
 
-// Health check endpoint
+// Health check endpoints
+app.get('/health', (req: ExpressRequest, res: ExpressResponse) => {
+  // Simple health check for Railway
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() })
+})
+
 app.get('/api/public/healthcheck', (req: ExpressRequest, res: ExpressResponse) => {
   const correlationId = (req as any).correlationId || 'N/A'
   logger.info('Health check accessed.', { correlationId })
