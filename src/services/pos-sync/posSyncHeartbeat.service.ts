@@ -1,5 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { publishCommand } from '../../communication/rabbitmq/publisher'
 
 // Este es un placeholder para tu servicio de alertas real (email, Slack, etc.)
 async function sendHighPriorityAlert(venueId: string, reason: string) {
@@ -10,13 +11,55 @@ async function sendHighPriorityAlert(venueId: string, reason: string) {
 }
 
 /**
+ * Envía un comando de error de configuración al servicio POS de Windows
+ * indicando que debe corregir su configuración de venueId.
+ */
+async function sendConfigurationErrorCommand(venueId: string, instanceId: string, errorType: string, posType: string) {
+  try {
+    const routingKey = `command.${posType}.configuration.error`
+    
+    const commandPayload = {
+      entity: 'Configuration',
+      action: 'ERROR',
+      payload: {
+        errorType,
+        invalidVenueId: venueId,
+        instanceId,
+        message: `El venueId '${venueId}' no existe en la base de datos. Por favor, configure un venueId válido en el servicio POS.`,
+        timestamp: new Date().toISOString(),
+        requiresReconfiguration: true
+      }
+    }
+
+    await publishCommand(routingKey, commandPayload)
+    logger.info(`[Heartbeat Service] 📤 Comando de error de configuración enviado para venueId ${venueId}`)
+  } catch (error) {
+    logger.error(`[Heartbeat Service] Error enviando comando de configuración para venueId ${venueId}:`, error)
+  }
+}
+
+/**
  * Procesa un payload de heartbeat desde el producer del POS.
  */
-export async function processPosHeartbeat(payload: { venueId: string; instanceId: string; producerVersion: string }) {
+export async function processPosHeartbeat(payload: { venueId: string; instanceId: string; producerVersion: string }, posType?: string) {
   const { venueId, instanceId, producerVersion } = payload
   logger.info(`[Heartbeat Service] ❤️ Recibido latido para Venue ${venueId} con InstanceId ${instanceId}`)
 
   try {
+    // First verify that the venue exists
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+    })
+
+    if (!venue) {
+      logger.error(`[Heartbeat Service] Venue ${venueId} no existe en la base de datos. Enviando comando de error de configuración.`)
+      
+      // Send configuration error command back to the Windows POS service
+      // Use posType from routing key if available, otherwise default to 'softrestaurant'
+      await sendConfigurationErrorCommand(venueId, instanceId, 'INVALID_VENUE_ID', posType || 'softrestaurant')
+      return
+    }
+
     const existingStatus = await prisma.posConnectionStatus.findUnique({
       where: { venueId },
     })

@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client'
 // Configure PrismaClient with connection pooling for Railway
 // Note: Connection pooling is managed via DATABASE_URL parameters
 const prisma = new PrismaClient({
-  log: process.env.NODE_ENV === 'development' ? ['query', 'info', 'warn', 'error'] : ['error'],
+  // log: process.env.NODE_ENV === 'development' ? ['query', 'info', 'warn', 'error'] : ['error'],
 })
 
 // Graceful shutdown to close database connections

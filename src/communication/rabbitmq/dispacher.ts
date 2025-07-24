@@ -15,6 +15,7 @@ export const dispatchPosEvent = async (routingKey: string, payload: any) => {
   const keyParts = routingKey.split('.') // ej: ['pos', 'softrestaurant', 'order', 'created']
   if (keyParts.length < 4) return
 
+  const posType = keyParts[1]  // Extract posType from routing key
   const entity = keyParts[2]
   const event = keyParts[3]
 
@@ -63,7 +64,7 @@ export const dispatchPosEvent = async (routingKey: string, payload: any) => {
       break
     case 'system':
       if (event === 'heartbeat') {
-        await posSyncService.processPosHeartbeat(payload)
+        await posSyncService.processPosHeartbeat(payload, posType)
       }
       break
 
