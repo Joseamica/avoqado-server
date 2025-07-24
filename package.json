@@ -109,6 +109,7 @@
   },
   "prisma": {
     "schema": "prisma/schema.prisma",
-    "seed": "node ./dist/prisma/seed.js"
+    "seed": "node ./dist/prisma/seed.js",
+    "dev_seed": "ts-node ./prisma/seed.ts"
   }
 }

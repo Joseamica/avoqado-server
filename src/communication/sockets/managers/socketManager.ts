@@ -109,26 +109,27 @@ export class SocketManager implements ISocketManager {
     }
 
     try {
-      const { host, port, password, db } = this.config.redis
+      // ✅ FIXED: Support both URL and individual properties
+      let clientConfig: any
+
+      if (this.config.redis.url) {
+        // Use URL (Railway, Heroku style)
+        clientConfig = { url: this.config.redis.url }
+      } else {
+        // Use individual properties (traditional style)
+        clientConfig = {
+          socket: {
+            host: this.config.redis.host,
+            port: this.config.redis.port,
+          },
+          password: this.config.redis.password,
+          database: this.config.redis.db,
+        }
+      }
 
       // Create Redis clients
-      this.redisClient = createClient({
-        socket: {
-          host,
-          port,
-        },
-        password,
-        database: db,
-      })
-
-      this.redisSubscriber = createClient({
-        socket: {
-          host,
-          port,
-        },
-        password,
-        database: db,
-      })
+      this.redisClient = createClient(clientConfig)
+      this.redisSubscriber = createClient(clientConfig)
 
       // Connect clients
       await this.redisClient.connect()
@@ -139,9 +140,9 @@ export class SocketManager implements ISocketManager {
 
       logger.info('Redis adapter configured successfully', {
         correlationId: uuidv4(),
-        host,
-        port,
-        db,
+        redisConfigured: true,
+        connectionType: this.config.redis.url ? 'url' : 'individual-properties',
+        // Don't log sensitive connection details
       })
     } catch (error) {
       logger.error('Failed to setup Redis adapter', {
@@ -154,7 +155,6 @@ export class SocketManager implements ISocketManager {
       logger.warn('Continuing with memory adapter due to Redis setup failure')
     }
   }
-
   /**
    * Setup middleware chain
    */

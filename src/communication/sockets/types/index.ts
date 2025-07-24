@@ -27,7 +27,7 @@ export enum RoomType {
   TABLE = 'table',
   ROLE = 'role',
   USER = 'user',
-  GLOBAL = 'global'
+  GLOBAL = 'global',
 }
 
 export interface RoomIdentifier {
@@ -45,38 +45,38 @@ export enum SocketEventType {
   // Connection Events
   CONNECTION = 'connection',
   DISCONNECT = 'disconnect',
-  
+
   // Authentication Events
   AUTHENTICATE = 'authenticate',
   AUTHENTICATION_SUCCESS = 'authentication_success',
   AUTHENTICATION_ERROR = 'authentication_error',
-  
+
   // Room Management
   JOIN_ROOM = 'join_room',
   LEAVE_ROOM = 'leave_room',
   ROOM_JOINED = 'room_joined',
   ROOM_LEFT = 'room_left',
-  
+
   // Business Events - Payment
   PAYMENT_INITIATED = 'payment_initiated',
   PAYMENT_PROCESSING = 'payment_processing',
   PAYMENT_COMPLETED = 'payment_completed',
   PAYMENT_FAILED = 'payment_failed',
-  
+
   // Business Events - Orders
   ORDER_CREATED = 'order_created',
   ORDER_UPDATED = 'order_updated',
   ORDER_STATUS_CHANGED = 'order_status_changed',
   ORDER_DELETED = 'order_deleted',
-  
+
   // Business Events - System
   SYSTEM_ALERT = 'system_alert',
   VENUE_UPDATE = 'venue_update',
   TABLE_STATUS_CHANGE = 'table_status_change',
-  
+
   // Error Events
   ERROR = 'error',
-  RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded'
+  RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded',
 }
 
 /**
@@ -142,8 +142,9 @@ export interface SocketServerConfig {
     maxEventsPerWindow: number
   }
   redis?: {
-    host: string
-    port: number
+    url?: string // ✅ Railway/Heroku style
+    host?: string // ✅ Made optional
+    port?: number // ✅ Made optional
     password?: string
     db?: number
   }
@@ -169,13 +170,10 @@ export interface BroadcastOptions {
 export type SocketEventHandler<T = any> = (
   socket: AuthenticatedSocket,
   payload: T,
-  callback?: (response: any) => void
+  callback?: (response: any) => void,
 ) => Promise<void> | void
 
-export type SocketMiddleware = (
-  socket: AuthenticatedSocket,
-  next: (err?: Error) => void
-) => void
+export type SocketMiddleware = (socket: AuthenticatedSocket, next: (err?: Error) => void) => void
 
 /**
  * Socket Manager Interface

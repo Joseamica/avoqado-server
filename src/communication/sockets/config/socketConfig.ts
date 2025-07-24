@@ -59,15 +59,12 @@ const getSocketConfig = (): SocketServerConfig => {
       maxEventsPerWindow: isDevelopment ? 1000 : 100, // Events per window
     },
 
+    // ✅ FIXED: Use REDIS_URL directly instead of parsing individual components
     redis: process.env.REDIS_URL
       ? {
-          host: process.env.REDIS_HOST || 'localhost',
-          port: parseInt(process.env.REDIS_PORT || '6379'),
-          password: process.env.REDIS_PASSWORD,
-          db: parseInt(process.env.REDIS_DB || '0'),
+          url: process.env.REDIS_URL, // ✅ Use Railway's Redis URL
         }
       : undefined,
-
     authentication: {
       required: true,
       timeout: 10000, // 10 seconds to authenticate
