@@ -7,6 +7,7 @@ import * as authController from '../../../../src/controllers/dashboard/auth.dash
 import * as authService from '../../../../src/services/dashboard/auth.service'; // Import for direct mock reference
 import { AuthenticationError } from '../../../../src/errors/AppError';
 import { StaffRole } from '@prisma/client'
+import '../../../../src/types/express.d.ts' // Import the type declarations
 
 // Mock dependencies
 jest.mock('jsonwebtoken')
