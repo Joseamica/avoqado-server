@@ -9,7 +9,71 @@ import { RichPosPayload, PosPaymentMethod } from '@/types/pos.types'
 import { PaymentMethod } from '@prisma/client'
 
 /**
+ * Encuentra una orden existente usando lógica de resolución inteligente.
+ * Maneja el caso donde SoftRestaurant crea órdenes con idturno=0 inicialmente,
+ * luego las actualiza al idturno real durante el pago.
+ * @param externalId - El Entity ID actual de la orden
+ * @param venueId - ID del venue
+ * @param folio - Número de folio de la orden
+ * @returns La orden existente o null si no existe
+ */
+async function findExistingOrderWithSmartResolution(externalId: string, venueId: string, folio: string): Promise<Order | null> {
+  // Paso 1: Buscar por el externalId exacto
+  const exactMatch = await prisma.order.findUnique({
+    where: {
+      venueId_externalId: {
+        venueId: venueId,
+        externalId: externalId,
+      },
+    },
+  })
+
+  if (exactMatch) {
+    return exactMatch
+  }
+
+  // Paso 2: Si no encontramos coincidencia exacta, implementar lógica de resolución
+  // para el caso SoftRestaurant idturno=0 → idturno real
+  const entityParts = externalId.split(':')
+  if (entityParts.length === 3) {
+    const [instanceId, currentIdTurno, orderFolio] = entityParts
+
+    // Si el idturno actual no es 0, buscar si existe una orden con idturno=0
+    if (currentIdTurno !== '0') {
+      const zeroTurnoExternalId = `${instanceId}:0:${orderFolio}`
+
+      logger.info(`[🔍 SmartResolution] Buscando orden huérfana con idturno=0: ${zeroTurnoExternalId}`)
+
+      const orphanOrder = await prisma.order.findUnique({
+        where: {
+          venueId_externalId: {
+            venueId: venueId,
+            externalId: zeroTurnoExternalId,
+          },
+        },
+      })
+
+      if (orphanOrder) {
+        logger.info(`[🎯 SmartResolution] ¡Orden huérfana encontrada! Actualizando externalId de ${zeroTurnoExternalId} a ${externalId}`)
+
+        // Actualizar el externalId de la orden huérfana para que coincida con el real
+        const updatedOrder = await prisma.order.update({
+          where: { id: orphanOrder.id },
+          data: { externalId: externalId },
+        })
+
+        return updatedOrder
+      }
+    }
+  }
+
+  return null
+}
+
+/**
  * Procesa un evento de creación/actualización de una Orden desde el POS.
+ * Incluye lógica de resolución inteligente para manejar el caso SoftRestaurant
+ * donde las órdenes se crean con idturno=0 y luego se actualizan al idturno real.
  * @param payload - Los datos mapeados de la orden desde el producer.
  */
 export async function processPosOrderEvent(payload: RichPosPayload): Promise<Order> {
@@ -26,9 +90,13 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
   // 1. Sincronizar entidades relacionadas para obtener sus IDs de Prisma
   const staffId = await posSyncStaffService.syncPosStaff(staffData, venue.id, venue.organizationId)
   const tableId = await getOrCreatePosTable(tableData, venue.id) // Pasamos areaData
+
   const shiftId = await getOrCreatePosShift(shiftData, venue.id, staffId)
 
-  // 2. Ejecutar el upsert final de la Orden
+  // 2. Buscar orden existente con lógica de resolución inteligente
+  const existingOrder = await findExistingOrderWithSmartResolution(externalId, venue.id, orderData.orderNumber)
+
+  // 3. Ejecutar el upsert final de la Orden
   return prisma.$transaction(async tx => {
     const order = await tx.order.upsert({
       where: {
@@ -36,6 +104,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
           venueId: venue.id,
           externalId: externalId,
         },
+        status: { not: OrderStatus.DELETED },
       },
       update: {
         status: orderData.status,
@@ -141,6 +210,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 /**
  * Procesa un evento de eliminación de una Orden desde el POS.
  * En lugar de borrar, actualiza el estado a DELETED.
+ * Incluye lógica de resolución inteligente para encontrar la orden correcta.
  * @param payload - Los datos mapeados de la orden desde el producer.
  */
 export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promise<Order | null> {
@@ -149,17 +219,16 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
 
   logger.info(`[🥾 PosSyncOrder] Processing delete event for order ${externalId} at Venue ${venueId}`)
 
-  const order = await prisma.order.findUnique({
-    where: {
-      venueId_externalId: {
-        venueId: venueId,
-        externalId: externalId,
-      },
-    },
-  })
+  // Usar la misma lógica de resolución inteligente para encontrar la orden
+  const entityParts = externalId.split(':')
+  const folio = entityParts.length === 3 ? entityParts[2] : externalId
+
+  const order = await findExistingOrderWithSmartResolution(externalId, venueId, folio)
 
   if (!order) {
-    logger.warn(`[🥾 PosSyncOrder] Order with externalId ${externalId} not found at Venue ${venueId} for deletion.`)
+    logger.warn(
+      `[🥾 PosSyncOrder] Order with externalId ${externalId} not found at Venue ${venueId} for deletion (even with smart resolution).`,
+    )
     return null
   }
 
@@ -174,7 +243,9 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
     },
   })
 
-  logger.info(`[🥾 PosSyncOrder] Order ${updatedOrder.id} (externalId: ${updatedOrder.externalId}) marked as DELETED.`)
+  logger.info(
+    `[🥾 PosSyncOrder] Order ${updatedOrder.id} (externalId: ${updatedOrder.externalId}) marked as DELETED. Original request was for: ${externalId}`,
+  )
   return updatedOrder
 }
 

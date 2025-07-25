@@ -48,12 +48,8 @@ export async function processPosShiftEvent(
 
   // Obtener el cajero desde posRawData si no está disponible directamente
   const cajeroId = shiftData.staffId || shiftData.posRawData?.cajero || shiftData.cajero
-  
-  const staffId = await posSyncStaffService.syncPosStaff(
-    { externalId: cajeroId, name: null, pin: null },
-    venueId,
-    venue.organizationId,
-  )
+
+  const staffId = await posSyncStaffService.syncPosStaff({ externalId: cajeroId, name: null, pin: null }, venueId, venue.organizationId)
   if (!staffId) throw new Error(`No se pudo sincronizar el cajero ${cajeroId}.`)
 
   // --- Calcular Totales si el Turno se Cierra ---
@@ -77,7 +73,7 @@ export async function processPosShiftEvent(
 
   // --- Mapear datos desde la estructura correcta ---
   const rawData = shiftData.posRawData || shiftData
-  const externalId = rawData.WorkspaceId || shiftData.externalId
+  const externalId = shiftData.EntityId || shiftData.externalId
   const startTime = rawData.apertura || shiftData.startTime
   const endTime = rawData.cierre || shiftData.endTime
   const startingCash = rawData.fondo !== undefined ? rawData.fondo : shiftData.startingCash
