@@ -779,7 +779,7 @@ model Payment {
   venueId String
   venue   Venue   @relation(fields: [venueId], references: [id], onDelete: Restrict)
   orderId String
-  order   Order   @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   shiftId String?
   shift   Shift?  @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
@@ -832,7 +832,7 @@ model Payment {
 model PaymentAllocation {
   id        String  @id @default(cuid())
   paymentId String
-  payment   Payment @relation(fields: [paymentId], references: [id])
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 
   // A qué se asigna este pedazo del pago
   orderItemId String?
@@ -859,7 +859,7 @@ model DigitalReceipt {
 
   // Relación con el pago
   paymentId String
-  payment   Payment @relation(fields: [paymentId], references: [id])
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 
   // Snapshot de los datos en el momento de la creación
   // ¡Esta es la clave para la inmutabilidad!
@@ -882,7 +882,7 @@ model VenueTransaction {
   venueId   String
   venue     Venue   @relation(fields: [venueId], references: [id])
   paymentId String  @unique
-  payment   Payment @relation(fields: [paymentId], references: [id])
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 
   type TransactionType
 
@@ -1030,7 +1030,7 @@ model Review {
   terminal   Terminal? @relation(fields: [terminalId], references: [id])
 
   paymentId String?  @unique // Un pago solo puede tener un review directo
-  payment   Payment? @relation(fields: [paymentId], references: [id])
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 
   servedById String? // Para ligar al mesero
   servedBy   Staff?  @relation(fields: [servedById], references: [id])
