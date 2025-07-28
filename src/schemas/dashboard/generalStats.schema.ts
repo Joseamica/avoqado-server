@@ -84,13 +84,15 @@ export const PaymentSchema = z.object({
   amount: z.number(),
   method: z.string(),
   createdAt: z.string(),
-  tips: z.array(z.object({
-    amount: z.number(),
-  })),
+  tips: z.array(
+    z.object({
+      amount: z.number(),
+    }),
+  ),
 })
 
-// Feedback schema adapted from legacy structure
-export const FeedbackSchema = z.object({
+// Review schema adapted from legacy structure
+export const ReviewSchema = z.object({
   id: z.string(),
   stars: z.number(),
   createdAt: z.string(),
@@ -108,7 +110,7 @@ export const ProductSchema = z.object({
 // Main response schema
 export const GeneralStatsResponseSchema = z.object({
   payments: z.array(PaymentSchema),
-  feedbacks: z.array(FeedbackSchema),
+  reviews: z.array(ReviewSchema),
   products: z.array(ProductSchema),
   extraMetrics: ExtraMetricsSchema,
 })

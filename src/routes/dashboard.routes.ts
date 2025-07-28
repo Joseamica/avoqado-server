@@ -948,7 +948,7 @@ router.get(
  *                           type: object
  *                           properties:
  *                             amount: { type: number }
- *                 feedbacks:
+ *                 reviews:
  *                   type: array
  *                   items:
  *                     type: object

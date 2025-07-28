@@ -52,7 +52,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   // Filter out pending payments in memory instead of in the query
   const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
 
-  // Fetch reviews/feedback data
+  // Fetch reviews data
   const reviews = await prisma.review.findMany({
     where: {
       venueId,
@@ -120,7 +120,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
     ],
   }))
 
-  const transformedFeedbacks = reviews.map(review => ({
+  const transformedReviews = reviews.map(review => ({
     id: review.id,
     stars: review.overallRating,
     createdAt: review.createdAt.toISOString(),
@@ -136,7 +136,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
 
   return {
     payments: transformedPayments,
-    feedbacks: transformedFeedbacks,
+    reviews: transformedReviews,
     products: transformedProducts,
     extraMetrics,
   }

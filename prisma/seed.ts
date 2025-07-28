@@ -496,6 +496,7 @@ async function main() {
               tipAmount,
               method: paymentMethod,
               status: TransactionStatus.COMPLETED,
+              splitType: 'FULLPAYMENT', // Add required splitType field
               processor: paymentMethod !== 'CASH' ? 'stripe' : null,
               processorId: paymentMethod !== 'CASH' ? `pi_${faker.string.alphanumeric(24)}` : null,
               feePercentage,

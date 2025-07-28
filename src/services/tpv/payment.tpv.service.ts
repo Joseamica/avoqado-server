@@ -412,6 +412,30 @@ export async function recordOrderPayment(
     })
   }
 
+  // Create Review record if reviewRating is provided
+  if (paymentData.reviewRating) {
+    try {
+      const rating = parseInt(paymentData.reviewRating)
+      if (rating >= 1 && rating <= 5) {
+        await prisma.review.create({
+          data: {
+            venueId: activeOrder.venueId,
+            paymentId: payment.id,
+            overallRating: rating,
+            source: 'TPV',
+            servedById: paymentData.staffId, // Link to the staff who served
+          },
+        })
+        logger.info('Review created successfully', { paymentId: payment.id, rating })
+      } else {
+        logger.warn('Invalid review rating provided', { paymentId: payment.id, rating: paymentData.reviewRating })
+      }
+    } catch (error) {
+      logger.error('Failed to create review', { paymentId: payment.id, error })
+      // Don't fail the payment if review creation fails
+    }
+  }
+
   // TODO: Emit socket event for real-time updates
   // SocketManager.emitPaymentUpdate(venueId, tableNumber, payment)
 
@@ -514,6 +538,30 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       amount: totalAmount,
     },
   })
+
+  // Create Review record if reviewRating is provided
+  if (paymentData.reviewRating) {
+    try {
+      const rating = parseInt(paymentData.reviewRating)
+      if (rating >= 1 && rating <= 5) {
+        await prisma.review.create({
+          data: {
+            venueId: venueId,
+            paymentId: payment.id,
+            overallRating: rating,
+            source: 'TPV',
+            servedById: paymentData.staffId, // Link to the staff who served
+          },
+        })
+        logger.info('Review created successfully for fast payment', { paymentId: payment.id, rating })
+      } else {
+        logger.warn('Invalid review rating provided for fast payment', { paymentId: payment.id, rating: paymentData.reviewRating })
+      }
+    } catch (error) {
+      logger.error('Failed to create review for fast payment', { paymentId: payment.id, error })
+      // Don't fail the payment if review creation fails
+    }
+  }
 
   // TODO: Emit socket event for real-time updates
   // SocketManager.emitPaymentUpdate(venueId, 'FAST_PAYMENT', payment)

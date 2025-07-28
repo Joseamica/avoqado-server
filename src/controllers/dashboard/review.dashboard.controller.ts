@@ -1,12 +1,12 @@
-// src/controllers/dashboard/feedbacks.dashboard.controller.ts
+// src/controllers/dashboard/review.dashboard.controller.ts
 import { NextFunction, Request, Response } from 'express'
 import * as reviewsDashboardService from '../../services/dashboard/review.dashboard.service'
 import { DashboardWithDates } from '../../schemas/dashboard/home.schema'
 
 export async function getReviewsData(
-  req: Request<DashboardWithDates['params'], any, any, DashboardWithDates['query']>, 
-  res: Response, 
-  next: NextFunction
+  req: Request<DashboardWithDates['params'], any, any, DashboardWithDates['query']>,
+  res: Response,
+  next: NextFunction,
 ): Promise<void> {
   try {
     const { venueId } = req.params

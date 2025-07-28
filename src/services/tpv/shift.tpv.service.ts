@@ -382,28 +382,28 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     }
   }
 
-  // Get feedback count for these shifts
+  // Get review count for these shifts
   try {
-    const feedbackWhereClause: any = {
+    const reviewWhereClause: any = {
       venueId,
     }
 
     if (startTime) {
-      feedbackWhereClause.createdAt = { gte: new Date(startTime) }
+      reviewWhereClause.createdAt = { gte: new Date(startTime) }
     }
     if (endTime) {
-      feedbackWhereClause.createdAt = {
-        ...feedbackWhereClause.createdAt,
+      reviewWhereClause.createdAt = {
+        ...reviewWhereClause.createdAt,
         lte: new Date(endTime),
       }
     }
 
     totalRatings = await prisma.review.count({
-      where: feedbackWhereClause,
+      where: reviewWhereClause,
     })
   } catch (error) {
     logger.warn('Error counting reviews:', error)
-    // Continue without feedback count
+    // Continue without review count
   }
 
   // Calculate average tip percentage

@@ -1,4 +1,4 @@
-// src/services/dashboard/feedbacks.dashboard.service.ts
+// src/services/dashboard/review.dashboard.service.ts
 import prisma from '../../utils/prismaClient'
 import { DateFilter } from '../../schemas/dashboard/home.schema'
 import { NotFoundError } from '../../errors/AppError'
@@ -8,7 +8,7 @@ export async function getReviewsData(venueId: string, dateFilter: DateFilter): P
   // Verificar que el venue existe
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { id: true }
+    select: { id: true },
   })
 
   if (!venue) {
