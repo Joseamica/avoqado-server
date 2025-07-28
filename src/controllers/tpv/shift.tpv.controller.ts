@@ -44,7 +44,7 @@ export async function getShifts(req: Request, res: Response, next: NextFunction)
 
     // 6. Extract filter parameters
     const filters = {
-      waiterId: req.query.waiterId as string,
+      staffId: req.query.staffId as string,
       startTime: req.query.startTime as string,
       endTime: req.query.endTime as string,
     }
@@ -71,7 +71,7 @@ export async function getShiftsSummary(req: Request, res: Response, next: NextFu
 
     // 4. Extract filter parameters
     const filters = {
-      waiterId: req.query.waiterId as string,
+      staffId: req.query.staffId as string,
       startTime: req.query.startTime as string,
       endTime: req.query.endTime as string,
     }

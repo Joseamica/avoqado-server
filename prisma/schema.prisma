@@ -634,6 +634,9 @@ model Order {
   kitchenStatus KitchenStatus @default(PENDING)
   paymentStatus PaymentStatus @default(PENDING)
 
+  // Payment split type (set on first payment, enforces UI consistency)
+  splitType SplitType?
+
   // POS sync
   externalId   String? // POS order ID
   originSystem OriginSystem @default(AVOQADO)
@@ -791,8 +794,9 @@ model Payment {
   tipAmount Decimal @default(0) @db.Decimal(10, 2)
 
   // Payment info
-  method PaymentMethod
-  status TransactionStatus @default(PENDING)
+  method    PaymentMethod
+  status    TransactionStatus @default(PENDING)
+  splitType SplitType // How this payment was split (audit trail)
 
   // Processor info
   processor     String? // stripe, mercadopago, etc.
@@ -1436,4 +1440,11 @@ enum PosConnectionState {
   ONLINE // Recibiendo heartbeats normalmente
   OFFLINE // No hemos recibido un heartbeat en mucho tiempo
   NEEDS_RECONCILIATION // Se detectó un cambio de InstanceId (¡Alerta máxima!)
+}
+
+enum SplitType {
+  PERPRODUCT // Pay for specific products
+  EQUALPARTS // Split equally among people
+  CUSTOMAMOUNT // Custom payment amount
+  FULLPAYMENT // Pay the entire bill
 }

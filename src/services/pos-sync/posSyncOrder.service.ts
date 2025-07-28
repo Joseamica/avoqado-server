@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
-import { Order, OrderSource, OrderStatus, OriginSystem, Prisma, SyncStatus, TransactionStatus } from '@prisma/client'
+import { Order, OrderSource, OrderStatus, OriginSystem, Prisma, SplitType, SyncStatus, TransactionStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { posSyncStaffService } from './posSyncStaff.service'
 import { getOrCreatePosTable } from './posSyncTable.service'
@@ -175,6 +175,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
             tipAmount: posPayment.tipAmount,
             // ✅ LLAMADA A LA NUEVA FUNCIÓN DINÁMICA
             method: mapPaymentMethodFromCatalog(posPayment.methodExternalId, paymentMethodsCatalog),
+            splitType: SplitType.FULLPAYMENT,
             status: TransactionStatus.COMPLETED,
             feePercentage,
             feeAmount,

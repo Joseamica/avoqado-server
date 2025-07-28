@@ -8,6 +8,9 @@ import {
   shiftQuerySchema,
   shiftsQuerySchema,
   shiftsSummaryQuerySchema,
+  recordPaymentParamsSchema,
+  recordFastPaymentParamsSchema,
+  recordPaymentBodySchema,
 } from '../schemas/tpv.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
@@ -399,7 +402,7 @@ router.get('/venues/:venueId/orders/:orderId', validateRequest(orderParamsSchema
  *                 type: string
  *                 format: date-time
  *                 description: Filter payments to this date
- *               waiterId:
+ *               staffId:
  *                 type: string
  *                 description: Filter payments by staff member ID
  *     responses:
@@ -548,7 +551,7 @@ router.get('/venues/:venueId/shift', validateRequest(shiftQuerySchema), shiftCon
  *           default: 1
  *         description: Page number
  *       - in: query
- *         name: waiterId
+ *         name: staffId
  *         schema:
  *           type: string
  *         description: Filter by staff member ID
@@ -629,7 +632,7 @@ router.get('/venues/:venueId/shifts', validateRequest(shiftsQuerySchema), shiftC
  *           format: cuid
  *         description: The ID of the venue
  *       - in: query
- *         name: waiterId
+ *         name: staffId
  *         schema:
  *           type: string
  *         description: Filter by staff member ID
@@ -687,7 +690,7 @@ router.get('/venues/:venueId/shifts', validateRequest(shiftsQuerySchema), shiftC
  *                       items:
  *                         type: object
  *                         properties:
- *                           waiterId:
+ *                           staffId:
  *                             type: string
  *                           name:
  *                             type: string
@@ -805,5 +808,234 @@ router.get('/venues/:venueId/shifts-summary', validateRequest(shiftsSummaryQuery
  *         description: Internal server error
  */
 router.post('/venues/:venueId/auth', authController.staffSignIn)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}:
+ *   post:
+ *     tags: [TPV - Payments]
+ *     summary: Record a payment for a specific order
+ *     description: Records a payment transaction for a specific order with support for different split types
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The venue ID where the payment is being recorded
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The order ID for which the payment is being recorded
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - venueId
+ *               - amount
+ *               - tip
+ *               - status
+ *               - method
+ *               - splitType
+ *               - tpvId
+ *               - waiterName
+ *             properties:
+ *               venueId:
+ *                 type: string
+ *                 format: cuid
+ *               amount:
+ *                 type: integer
+ *                 description: Payment amount in cents
+ *               tip:
+ *                 type: integer
+ *                 description: Tip amount in cents
+ *               status:
+ *                 type: string
+ *                 enum: [ACCEPTED, PENDING, DECLINED]
+ *               method:
+ *                 type: string
+ *                 enum: [CASH, CARD]
+ *               splitType:
+ *                 type: string
+ *                 enum: [PERPRODUCT, EQUALPARTS, CUSTOMAMOUNT, FULLPAYMENT]
+ *               tpvId:
+ *                 type: string
+ *                 format: cuid
+ *               waiterName:
+ *                 type: string
+ *               paidProductsId:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               cardBrand:
+ *                 type: string
+ *               last4:
+ *                 type: string
+ *               typeOfCard:
+ *                 type: string
+ *                 enum: [CREDIT, DEBIT]
+ *               currency:
+ *                 type: string
+ *                 default: MXN
+ *               bank:
+ *                 type: string
+ *               mentaAuthorizationReference:
+ *                 type: string
+ *               mentaOperationId:
+ *                 type: string
+ *                 format: uuid
+ *               mentaTicketId:
+ *                 type: string
+ *               isInternational:
+ *                 type: boolean
+ *                 default: false
+ *               reviewRating:
+ *                 type: string
+ *               equalPartsPartySize:
+ *                 type: integer
+ *               equalPartsPayedFor:
+ *                 type: integer
+ *     responses:
+ *       201:
+ *         description: Payment recorded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: Bad request - Invalid payment data
+ *       404:
+ *         description: Table or order not found
+ *       500:
+ *         description: Internal server error
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId',
+  validateRequest(recordPaymentParamsSchema),
+  validateRequest(recordPaymentBodySchema),
+  paymentController.recordPayment,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/fast:
+ *   post:
+ *     tags: [TPV - Payments]
+ *     summary: Record a fast payment (without table association)
+ *     description: Records a fast payment transaction without associating it to a specific table
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - venueId
+ *               - amount
+ *               - tip
+ *               - status
+ *               - method
+ *               - splitType
+ *               - tpvId
+ *               - waiterName
+ *             properties:
+ *               venueId:
+ *                 type: string
+ *                 format: cuid
+ *               amount:
+ *                 type: integer
+ *                 description: Payment amount in cents
+ *               tip:
+ *                 type: integer
+ *                 description: Tip amount in cents
+ *               status:
+ *                 type: string
+ *                 enum: [ACCEPTED, PENDING, DECLINED]
+ *               method:
+ *                 type: string
+ *                 enum: [CASH, CARD]
+ *               splitType:
+ *                 type: string
+ *                 enum: [PERPRODUCT, EQUALPARTS, CUSTOMAMOUNT, FULLPAYMENT]
+ *               tpvId:
+ *                 type: string
+ *                 format: cuid
+ *               waiterName:
+ *                 type: string
+ *               paidProductsId:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               cardBrand:
+ *                 type: string
+ *               last4:
+ *                 type: string
+ *               typeOfCard:
+ *                 type: string
+ *                 enum: [CREDIT, DEBIT]
+ *               currency:
+ *                 type: string
+ *                 default: MXN
+ *               bank:
+ *                 type: string
+ *               mentaAuthorizationReference:
+ *                 type: string
+ *               mentaOperationId:
+ *                 type: string
+ *                 format: uuid
+ *               mentaTicketId:
+ *                 type: string
+ *               isInternational:
+ *                 type: boolean
+ *                 default: false
+ *               reviewRating:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Fast payment recorded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: Bad request - Invalid payment data
+ *       500:
+ *         description: Internal server error
+ */
+router.post(
+  '/venues/:venueId/fast',
+  validateRequest(recordFastPaymentParamsSchema),
+  validateRequest(recordPaymentBodySchema),
+  paymentController.recordFastPayment,
+)
 
 export default router

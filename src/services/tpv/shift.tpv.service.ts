@@ -4,7 +4,7 @@ import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import logger from '../../config/logger'
 
 interface ShiftFilters {
-  waiterId?: string
+  staffId?: string
   startTime?: string
   endTime?: string
 }
@@ -35,7 +35,7 @@ interface ShiftSummaryResponse {
     ratingsCount: number
   }
   waiterTips: Array<{
-    waiterId: string
+    staffId: string
     name: string
     amount: number
     count: number
@@ -81,7 +81,7 @@ export async function getShifts(
   filters: ShiftFilters = {},
   orgId?: string,
 ): Promise<PaginationResponse<any>> {
-  const { waiterId, startTime, endTime } = filters
+  const { staffId, startTime, endTime } = filters
 
   // Build the base query filters for shifts
   const whereClause: any = {
@@ -127,7 +127,7 @@ export async function getShifts(
         orders: {
           include: {
             payments: {
-              where: waiterId ? { processedById: waiterId } : undefined,
+              where: staffId ? { processedById: staffId } : undefined,
               include: {
                 allocations: true,
               },
@@ -135,7 +135,7 @@ export async function getShifts(
           },
         },
         payments: {
-          where: waiterId ? { processedById: waiterId } : undefined,
+          where: staffId ? { processedById: staffId } : undefined,
         },
       },
       orderBy: {
@@ -180,10 +180,10 @@ export async function getShifts(
       tipsCount: allPayments.filter(p => Number(p.tipAmount || 0) > 0).length,
       paymentSum: paymentSum,
       avgTipPercentage: Number(avgTipPercentage.toFixed(2)),
-      // Include waiter information if filtered by waiterId
-      waiterInfo: waiterId
+      // Include staff information if filtered by staffId
+      staffInfo: staffId
         ? {
-            waiterId: waiterId,
+            staffId: staffId,
             tipsCount: allPayments.filter(p => Number(p.tipAmount || 0) > 0).length,
             tipsSum: tipSum,
             avgTipPercentage: Number(avgTipPercentage.toFixed(2)),
@@ -218,7 +218,7 @@ export async function getShifts(
       totalVenueShifts,
       filters: {
         dateRange: startTime || endTime ? true : false,
-        waiterId: waiterId ? true : false,
+        staffId: staffId ? true : false,
       },
     }
 
@@ -233,11 +233,11 @@ export async function getShifts(
       diagnosticInfo.latestShiftDate = latestShift.createdAt
     }
 
-    // If waiterId was provided, check if staff member exists
-    if (waiterId) {
+    // If staffId was provided, check if staff member exists
+    if (staffId) {
       const staffMember = await prisma.staff.findFirst({
         where: {
-          id: waiterId,
+          id: staffId,
           venues: {
             some: {
               venueId: venueId,
@@ -270,7 +270,7 @@ export async function getShifts(
  * @returns Shift summary data
  */
 export async function getShiftsSummary(venueId: string, filters: ShiftFilters = {}, orgId?: string): Promise<ShiftSummaryResponse> {
-  const { waiterId, startTime, endTime } = filters
+  const { staffId, startTime, endTime } = filters
 
   // Build the base query filters for shifts
   const whereClause: any = {
@@ -329,7 +329,7 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
             },
           },
         },
-        ...(waiterId ? { where: { processedById: waiterId } } : {}),
+        ...(staffId ? { where: { processedById: staffId } } : {}),
       },
     },
   })
@@ -412,7 +412,7 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   // Convert staff tips map to sorted array
   const waiterTips = Array.from(staffTipsMap.entries())
     .map(([id, data]) => ({
-      waiterId: id,
+      staffId: id,
       name: data.name,
       amount: data.amount,
       count: data.count,
