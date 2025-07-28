@@ -8,7 +8,7 @@ import { NotFoundError } from '../../errors/AppError'
  * @param venueId Venue ID
  * @returns Array of orders with payment status PENDING or PARTIAL
  */
-export async function getOrders(orgId: string, venueId: string): Promise<Order[]> {
+export async function getOrders(venueId: string, orgId?: string): Promise<Order[]> {
   const orders = await prisma.order.findMany({
     where: {
       venueId,
@@ -63,7 +63,7 @@ export async function getOrders(orgId: string, venueId: string): Promise<Order[]
  * @param orderId Order ID (Order ID)
  * @returns Order with detailed payment information
  */
-export async function getOrder(orgId: string, venueId: string, orderId: string): Promise<Order & { amount_left: number }> {
+export async function getOrder(venueId: string, orderId: string, orgId?: string): Promise<Order & { amount_left: number }> {
   const order = await prisma.order.findUnique({
     where: {
       id: orderId,
