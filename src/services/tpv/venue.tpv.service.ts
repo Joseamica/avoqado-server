@@ -36,6 +36,7 @@ export async function getVenueById(venueId: string, orgId?: string): Promise<Ven
           active: true,
         },
       },
+      posConnectionStatus: true, // Include POS connection status for Android app
       // Add other necessary relations based on TPV needs
     },
   })
