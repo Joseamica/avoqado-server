@@ -796,7 +796,7 @@ model Payment {
   // Payment info
   method    PaymentMethod
   status    TransactionStatus @default(PENDING)
-  splitType SplitType // How this payment was split (audit trail)
+  splitType SplitType         @default(FULLPAYMENT) // How this payment was split (audit trail)
 
   // Processor info
   processor     String? // stripe, mercadopago, etc.
