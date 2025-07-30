@@ -1,7 +1,22 @@
 import prisma from '../../utils/prismaClient'
-import { Payment } from '@prisma/client'
+import { Payment, PaymentMethod, PaymentStatus, SplitType } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import logger from '../../config/logger'
+
+/**
+ * Convert TPV rating strings to numeric values for database storage
+ * @param tpvRating The rating string from TPV ("EXCELLENT", "GOOD", "POOR")
+ * @returns Numeric rating (1-5) or null if invalid
+ */
+function mapTpvRatingToNumeric(tpvRating: string): number | null {
+  const ratingMap: Record<string, number> = {
+    EXCELLENT: 5,
+    GOOD: 3,
+    POOR: 1,
+  }
+
+  return ratingMap[tpvRating.toUpperCase()] || null
+}
 
 interface PaymentFilters {
   fromDate?: string
@@ -236,7 +251,7 @@ interface PaymentCreationData {
   amount: number // Amount in cents
   tip: number // Tip in cents
   status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'PROCESSING' | 'REFUNDED'
-  method: 'CASH' | 'CARD'
+  method: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET'
   source: string
   splitType: 'PERPRODUCT' | 'EQUALPARTS' | 'CUSTOMAMOUNT' | 'FULLPAYMENT'
   tpvId: string
@@ -259,6 +274,12 @@ interface PaymentCreationData {
 
   // Additional fields
   reviewRating?: string
+
+  // Enhanced payment tracking fields (from new database migration)
+  authorizationNumber?: string
+  referenceNumber?: string
+  maskedPan?: string
+  entryMode?: string
 
   // Split payment specific fields
   equalPartsPartySize?: number
@@ -284,7 +305,7 @@ export async function recordOrderPayment(
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
 
   // Find the order directly by ID
-  const activeOrder = await prisma.order.findFirst({
+  const activeOrder = await prisma.order.findUnique({
     where: {
       id: orderId,
       venueId,
@@ -301,10 +322,19 @@ export async function recordOrderPayment(
 
   // Validate splitType business logic
   if (activeOrder.splitType && activeOrder.splitType !== paymentData.splitType) {
-    // Exception: FULLPAYMENT can override any previous splitType
-    if (paymentData.splitType !== 'FULLPAYMENT') {
+    // Define allowed transitions based on business rules
+    const allowedTransitions = {
+      PERPRODUCT: ['PERPRODUCT', 'FULLPAYMENT'], // Can only continue with same method or pay full
+      EQUALPARTS: ['EQUALPARTS', 'FULLPAYMENT'], // Can only continue with same method or pay full
+      CUSTOMAMOUNT: ['PERPRODUCT', 'EQUALPARTS', 'CUSTOMAMOUNT', 'FULLPAYMENT'], // Can use any method
+      FULLPAYMENT: ['FULLPAYMENT'], // Only full payment allowed (order should be completed)
+    }
+
+    const allowedMethods = allowedTransitions[activeOrder.splitType] || []
+
+    if (!allowedMethods.includes(paymentData.splitType)) {
       throw new BadRequestError(
-        `Order already has splitType ${activeOrder.splitType}. Cannot use ${paymentData.splitType}. Use FULLPAYMENT to pay remaining balance.`,
+        `Order has splitType ${activeOrder.splitType}. Cannot use ${paymentData.splitType}. Allowed methods: ${allowedMethods.join(', ')}`,
       )
     }
   }
@@ -318,6 +348,7 @@ export async function recordOrderPayment(
     where: {
       venueId,
       status: 'OPEN',
+      endTime: null,
     },
     orderBy: {
       startTime: 'desc',
@@ -334,24 +365,27 @@ export async function recordOrderPayment(
       orderId: activeOrder.id,
       amount: totalAmount,
       tipAmount,
-      method: paymentData.method as any, // Cast to PaymentMethod enum
+      method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
       status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
-      splitType: paymentData.splitType as any, // Cast to SplitType enum
-      processor: paymentData.method === 'CARD' ? 'menta' : null,
+      splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
+      processor: 'BANKAOOL',
       processorId: paymentData.mentaOperationId,
-      processorData:
-        paymentData.method === 'CARD'
-          ? {
-              cardBrand: paymentData.cardBrand,
-              last4: paymentData.last4,
-              typeOfCard: paymentData.typeOfCard,
-              bank: paymentData.bank,
-              currency: paymentData.currency,
-              mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
-              mentaTicketId: paymentData.mentaTicketId,
-              isInternational: paymentData.isInternational,
-            }
-          : undefined,
+      processorData: {
+        cardBrand: paymentData.cardBrand,
+        last4: paymentData.last4,
+        typeOfCard: paymentData.typeOfCard,
+        bank: paymentData.bank,
+        currency: paymentData.currency,
+        mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
+        mentaTicketId: paymentData.mentaTicketId,
+        isInternational: paymentData.isInternational,
+      },
+      // New enhanced fields in the Payment table
+      authorizationNumber: paymentData.authorizationNumber,
+      referenceNumber: paymentData.referenceNumber,
+      maskedPan: paymentData.maskedPan,
+      cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+      entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
       processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
       shiftId: currentShift?.id,
       feePercentage: 0, // TODO: Calculate based on payment processor
@@ -415,8 +449,8 @@ export async function recordOrderPayment(
   // Create Review record if reviewRating is provided
   if (paymentData.reviewRating) {
     try {
-      const rating = parseInt(paymentData.reviewRating)
-      if (rating >= 1 && rating <= 5) {
+      const rating = mapTpvRatingToNumeric(paymentData.reviewRating)
+      if (rating !== null) {
         await prisma.review.create({
           data: {
             venueId: activeOrder.venueId,
@@ -426,7 +460,7 @@ export async function recordOrderPayment(
             servedById: paymentData.staffId, // Link to the staff who served
           },
         })
-        logger.info('Review created successfully', { paymentId: payment.id, rating })
+        logger.info('Review created successfully', { paymentId: payment.id, rating, originalRating: paymentData.reviewRating })
       } else {
         logger.warn('Invalid review rating provided', { paymentId: payment.id, rating: paymentData.reviewRating })
       }
@@ -453,7 +487,7 @@ export async function recordOrderPayment(
  * @returns Created payment
  */
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, orgId?: string) {
-  logger.info('Recording fast payment', { venueId, amount: paymentData.amount })
+  logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
   const fastOrder = await prisma.order.create({
     data: {
       venueId,
@@ -478,6 +512,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     where: {
       venueId,
       status: 'OPEN',
+      endTime: null,
     },
     orderBy: {
       startTime: 'desc',
@@ -494,24 +529,28 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       orderId: fastOrder.id, // Fast payment - no order association
       amount: totalAmount,
       tipAmount,
-      method: paymentData.method as any, // Cast to PaymentMethod enum
+      method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
       status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
-      splitType: 'FULLPAYMENT' as any, // Fast payments are always full payments
-      processor: paymentData.method === 'CARD' ? 'menta' : null,
+      splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
+      processor: 'BANKAOOL',
+      type: 'FAST',
       processorId: paymentData.mentaOperationId,
-      processorData:
-        paymentData.method === 'CARD'
-          ? {
-              cardBrand: paymentData.cardBrand,
-              last4: paymentData.last4,
-              typeOfCard: paymentData.typeOfCard,
-              bank: paymentData.bank,
-              currency: paymentData.currency,
-              mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
-              mentaTicketId: paymentData.mentaTicketId,
-              isInternational: paymentData.isInternational,
-            }
-          : undefined,
+      processorData: {
+        cardBrand: paymentData.cardBrand,
+        last4: paymentData.last4,
+        typeOfCard: paymentData.typeOfCard,
+        bank: paymentData.bank,
+        currency: paymentData.currency,
+        authorizationNumber: paymentData.authorizationNumber,
+        referenceNumber: paymentData.referenceNumber,
+        isInternational: paymentData.isInternational,
+      },
+      // New enhanced fields in the Payment table
+      authorizationNumber: paymentData.authorizationNumber,
+      referenceNumber: paymentData.referenceNumber,
+      maskedPan: paymentData.maskedPan,
+      cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+      entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
       processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
       shiftId: currentShift?.id,
       feePercentage: 0, // TODO: Calculate based on payment processor
@@ -521,7 +560,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         splitType: 'FULLPAYMENT',
         staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
         source: paymentData.source || 'AVOQADO_TPV',
-        paymentType: 'FAST_PAYMENT',
+        paymentType: 'FAST',
         ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
       },
     },
@@ -542,8 +581,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Create Review record if reviewRating is provided
   if (paymentData.reviewRating) {
     try {
-      const rating = parseInt(paymentData.reviewRating)
-      if (rating >= 1 && rating <= 5) {
+      const rating = mapTpvRatingToNumeric(paymentData.reviewRating)
+      if (rating !== null) {
         await prisma.review.create({
           data: {
             venueId: venueId,
@@ -553,7 +592,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             servedById: paymentData.staffId, // Link to the staff who served
           },
         })
-        logger.info('Review created successfully for fast payment', { paymentId: payment.id, rating })
+        logger.info('Review created successfully for fast payment', {
+          paymentId: payment.id,
+          rating,
+          originalRating: paymentData.reviewRating,
+        })
       } else {
         logger.warn('Invalid review rating provided for fast payment', { paymentId: payment.id, rating: paymentData.reviewRating })
       }

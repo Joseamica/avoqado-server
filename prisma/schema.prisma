@@ -3,6 +3,7 @@
 
 generator client {
   provider = "prisma-client-js"
+  // output   = "../src/generated/prisma"
 }
 
 datasource db {
@@ -797,11 +798,20 @@ model Payment {
   method    PaymentMethod
   status    TransactionStatus @default(PENDING)
   splitType SplitType         @default(FULLPAYMENT) // How this payment was split (audit trail)
+  type      PaymentType?      @default(REGULAR) // How this payment was split (audit trail)
 
   // Processor info
   processor     String? // stripe, mercadopago, etc.
   processorId   String?
   processorData Json?
+
+  // authorization info
+  authorizationNumber String? // "502511"
+  referenceNumber     String? // "000000188231" 
+
+  cardBrand CardBrand? // MASTERCARD, VISA, etc.
+  maskedPan String? // "411111******1111"
+  entryMode CardEntryMode? // CONTACTLESS, CHIP, SWIPE, etc.
 
   // Fee calculation
   feePercentage Decimal @db.Decimal(5, 4)
@@ -826,6 +836,9 @@ model Payment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([authorizationNumber]) // ✅ NUEVO ÍNDICE
+  @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
+  @@index([cardBrand]) // ✅ NUEVO ÍNDICE
   @@index([venueId])
   @@index([orderId])
   @@index([shiftId])
@@ -1447,4 +1460,36 @@ enum SplitType {
   EQUALPARTS // Split equally among people
   CUSTOMAMOUNT // Custom payment amount
   FULLPAYMENT // Pay the entire bill
+}
+
+enum CardBrand {
+  VISA
+  MASTERCARD
+  AMERICAN_EXPRESS
+  DISCOVER
+  DINERS_CLUB
+  JCB
+  MAESTRO
+  UNIONPAY
+  ELO
+  HIPERCARD
+  OTHER
+}
+
+enum CardEntryMode {
+  CONTACTLESS // NFC/Tap
+  CONTACT // Magnetic stripe
+  CHIP // EMV Chip insert
+  SWIPE // Magnetic stripe
+  MANUAL // Keyed entry
+  FALLBACK // Chip fallback to swipe
+  ONLINE // E-commerce/online
+  OTHER
+}
+
+enum PaymentType {
+  REGULAR // Normal order-based payment
+  FAST // Quick payment without order items
+  REFUND // Future: refund payments
+  ADJUSTMENT // Future: manual adjustments
 }

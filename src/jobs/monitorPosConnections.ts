@@ -36,6 +36,18 @@ async function checkPosConnections() {
         },
       })
 
+      // También actualiza el posStatus del venue
+      await prisma.venue.updateMany({
+        where: {
+          id: {
+            in: offlineVenueIds,
+          },
+        },
+        data: {
+          posStatus: 'ERROR',
+        },
+      })
+
       // Aquí puedes enviar una alerta de baja prioridad al equipo de soporte
       // alertSupportTeam(`Los siguientes venues están OFFLINE: ${offlineVenueIds.join(', ')}`);
     } else {

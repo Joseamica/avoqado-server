@@ -62,6 +62,18 @@ export async function staffSignIn(venueId: string, pin: string) {
   // Generate JWT tokens for socket authentication and API access
   const correlationId = uuidv4()
 
+  await prisma.staffVenue.update({
+    where: {
+      id: staffVenue.id,
+    },
+    data: {
+      staff: {
+        update: {
+          lastLoginAt: new Date(),
+        },
+      },
+    },
+  })
   const tokenPayload = {
     userId: staffVenue.staff.id,
     staffId: staffVenue.staffId,

@@ -91,7 +91,7 @@ export const recordPaymentBodySchema = z.object({
     amount: z.number().int().positive({ message: 'El monto debe ser un número entero positivo (en centavos).' }),
     tip: z.number().int().min(0, { message: 'La propina debe ser un número entero no negativo (en centavos).' }),
     status: z.enum(['COMPLETED', 'PENDING', 'FAILED', 'PROCESSING', 'REFUNDED'], { message: 'Estado de pago inválido.' }),
-    method: z.enum(['CASH', 'CARD'], { message: 'Método de pago inválido.' }),
+    method: z.enum(['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'], { message: 'Método de pago inválido.' }),
     source: z.string().default('TPV'),
     splitType: z.enum(['PERPRODUCT', 'EQUALPARTS', 'CUSTOMAMOUNT', 'FULLPAYMENT'], { message: 'Tipo de división inválido.' }),
     // tpvId: z.string().cuid({ message: 'El ID del TPV debe ser un CUID válido.' }),
@@ -107,13 +107,19 @@ export const recordPaymentBodySchema = z.object({
 
     // Menta integration fields (optional)
     mentaAuthorizationReference: z.string().optional(),
-    mentaOperationId: z.string().uuid().optional(),
+    mentaOperationId: z.string().optional(),
     mentaTicketId: z.string().optional(),
     token: z.string().optional(),
     isInternational: z.boolean().default(false),
 
     // Additional fields
     reviewRating: z.string().optional(),
+
+    // Enhanced payment tracking fields (from new database migration)
+    authorizationNumber: z.string().optional(),
+    referenceNumber: z.string().optional(),
+    maskedPan: z.string().optional(),
+    entryMode: z.enum(['CONTACTLESS', 'CONTACT', 'CHIP', 'SWIPE', 'MANUAL', 'FALLBACK', 'ONLINE', 'OTHER']).optional(),
 
     // Split payment specific fields
     equalPartsPartySize: z.number().int().positive().optional(),

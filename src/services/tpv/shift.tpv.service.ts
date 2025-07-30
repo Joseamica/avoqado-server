@@ -137,6 +137,7 @@ export async function getShifts(
         payments: {
           where: staffId ? { processedById: staffId } : undefined,
         },
+        staff: true,
       },
       orderBy: {
         createdAt: 'desc',

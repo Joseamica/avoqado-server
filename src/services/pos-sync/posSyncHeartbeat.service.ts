@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
+import { PosStatus } from '@prisma/client'
 
 // Este es un placeholder para tu servicio de alertas real (email, Slack, etc.)
 async function sendHighPriorityAlert(venueId: string, reason: string) {
@@ -17,7 +18,6 @@ async function sendHighPriorityAlert(venueId: string, reason: string) {
 async function sendConfigurationErrorCommand(venueId: string, instanceId: string, errorType: string, posType: string) {
   try {
     const routingKey = `command.${posType}.configuration.error`
-    
     const commandPayload = {
       entity: 'Configuration',
       action: 'ERROR',
@@ -27,8 +27,8 @@ async function sendConfigurationErrorCommand(venueId: string, instanceId: string
         instanceId,
         message: `El venueId '${venueId}' no existe en la base de datos. Por favor, configure un venueId válido en el servicio POS.`,
         timestamp: new Date().toISOString(),
-        requiresReconfiguration: true
-      }
+        requiresReconfiguration: true,
+      },
     }
 
     await publishCommand(routingKey, commandPayload)
@@ -53,7 +53,7 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
 
     if (!venue) {
       logger.error(`[Heartbeat Service] Venue ${venueId} no existe en la base de datos. Enviando comando de error de configuración.`)
-      
+
       // Send configuration error command back to the Windows POS service
       // Use posType from routing key if available, otherwise default to 'softrestaurant'
       await sendConfigurationErrorCommand(venueId, instanceId, 'INVALID_VENUE_ID', posType || 'softrestaurant')
@@ -73,6 +73,11 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
           instanceId: instanceId,
           producerVersion: producerVersion,
           lastHeartbeatAt: new Date(),
+          venue: {
+            update: {
+              posStatus: PosStatus.CONNECTED,
+            },
+          },
         },
         create: {
           venue: { connect: { id: venueId } },
@@ -92,6 +97,11 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
           instanceId: instanceId, // Guardamos el nuevo InstanceId
           producerVersion: producerVersion,
           lastHeartbeatAt: new Date(),
+          venue: {
+            update: {
+              posStatus: PosStatus.ERROR,
+            },
+          },
         },
       })
 
