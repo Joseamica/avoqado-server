@@ -6,6 +6,7 @@ WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
+COPY prisma.config.ts ./
 COPY prisma ./prisma/
 
 # Install dependencies
@@ -43,6 +44,7 @@ RUN addgroup -g 1001 -S nodejs && \
 COPY --from=build --chown=avoqado:nodejs /app/dist ./dist
 COPY --from=build --chown=avoqado:nodejs /app/node_modules ./node_modules
 COPY --from=build --chown=avoqado:nodejs /app/package*.json ./
+COPY --from=build --chown=avoqado:nodejs /app/prisma.config.ts ./
 COPY --from=build --chown=avoqado:nodejs /app/prisma ./prisma
 
 USER avoqado

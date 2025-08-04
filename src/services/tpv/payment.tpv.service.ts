@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { Payment, PaymentMethod, PaymentStatus, SplitType } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -470,12 +471,34 @@ export async function recordOrderPayment(
     }
   }
 
+  // Generate digital receipt for TPV payments (AVOQADO origin)
+  let digitalReceipt = null
+  try {
+    digitalReceipt = await generateDigitalReceipt(payment.id)
+    logger.info('Digital receipt generated for payment', { 
+      paymentId: payment.id, 
+      receiptId: digitalReceipt.id,
+      accessKey: digitalReceipt.accessKey 
+    })
+  } catch (error) {
+    logger.error('Failed to generate digital receipt', { paymentId: payment.id, error })
+    // Don't fail the payment if receipt generation fails
+  }
+
   // TODO: Emit socket event for real-time updates
   // SocketManager.emitPaymentUpdate(venueId, tableNumber, payment)
 
   logger.info('Payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
-  return payment
+  // Add digital receipt info to payment response
+  return {
+    ...payment,
+    digitalReceipt: digitalReceipt ? {
+      id: digitalReceipt.id,
+      accessKey: digitalReceipt.accessKey,
+      receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`
+    } : null
+  }
 }
 
 /**
@@ -606,10 +629,32 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
   }
 
+  // Generate digital receipt for fast TPV payments (AVOQADO origin)
+  let digitalReceipt = null
+  try {
+    digitalReceipt = await generateDigitalReceipt(payment.id)
+    logger.info('Digital receipt generated for fast payment', { 
+      paymentId: payment.id, 
+      receiptId: digitalReceipt.id,
+      accessKey: digitalReceipt.accessKey 
+    })
+  } catch (error) {
+    logger.error('Failed to generate digital receipt for fast payment', { paymentId: payment.id, error })
+    // Don't fail the payment if receipt generation fails
+  }
+
   // TODO: Emit socket event for real-time updates
   // SocketManager.emitPaymentUpdate(venueId, 'FAST_PAYMENT', payment)
 
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
-  return payment
+  // Add digital receipt info to payment response
+  return {
+    ...payment,
+    digitalReceipt: digitalReceipt ? {
+      id: digitalReceipt.id,
+      accessKey: digitalReceipt.accessKey,
+      receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`
+    } : null
+  }
 }
