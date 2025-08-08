@@ -1,11 +1,11 @@
-import { z } from 'zod';
-import { MenuType, ProductType } from '@prisma/client';
+import { z } from 'zod'
+import { MenuType, ProductType } from '@prisma/client'
 
 // Common patterns and constants
-const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/; // HH:mm format
-const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const;
-const SKU_REGEX = /^[A-Z0-9_-]+$/; // Alphanumeric, underscores, hyphens
-const HEX_COLOR_REGEX = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
+const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
+const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
+const SKU_REGEX = /^[A-Z0-9_-]+$/ // Alphanumeric, underscores, hyphens
+const HEX_COLOR_REGEX = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/
 
 // ==========================================
 // MENU SCHEMAS
@@ -27,7 +27,7 @@ export const MenuSchema = z.object({
   availableDays: z.array(z.enum(DAYS_OF_WEEK)).max(7).default([]),
   createdAt: z.date(),
   updatedAt: z.date(),
-});
+})
 
 export const CreateMenuSchema = z.object({
   body: z.object({
@@ -47,8 +47,8 @@ export const CreateMenuSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
-export type CreateMenuDto = z.infer<typeof CreateMenuSchema>['body'];
+})
+export type CreateMenuDto = z.infer<typeof CreateMenuSchema>['body']
 
 export const UpdateMenuSchema = z.object({
   body: CreateMenuSchema.shape.body.partial(),
@@ -56,15 +56,15 @@ export const UpdateMenuSchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     menuId: z.string().cuid('Invalid menu ID format'),
   }),
-});
-export type UpdateMenuDto = z.infer<typeof UpdateMenuSchema>['body'];
+})
+export type UpdateMenuDto = z.infer<typeof UpdateMenuSchema>['body']
 
 export const GetMenuParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     menuId: z.string().cuid('Invalid menu ID format'),
   }),
-});
+})
 
 export const CloneMenuSchema = z.object({
   body: z.object({
@@ -77,12 +77,21 @@ export const CloneMenuSchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     menuId: z.string().cuid('Invalid menu ID format'),
   }),
-});
-export type CloneMenuDto = z.infer<typeof CloneMenuSchema>['body'];
+})
+export type CloneMenuDto = z.infer<typeof CloneMenuSchema>['body']
 
 // ==========================================
 // PRODUCT SCHEMAS
 // ==========================================
+
+export const createProductSchema = z.object({
+  body: z.object({
+    name: z.string().min(3, 'Product name must be at least 3 characters long'),
+    price: z.number().positive('Price must be a positive number'),
+    description: z.string().optional(),
+    // Add other product fields as necessary
+  }),
+})
 
 export const ProductSchema = z.object({
   id: z.string().cuid(),
@@ -110,7 +119,7 @@ export const ProductSchema = z.object({
   availableUntil: z.date().nullable().optional(),
   createdAt: z.date(),
   updatedAt: z.date(),
-});
+})
 
 export const CreateProductSchema = z.object({
   body: z.object({
@@ -140,8 +149,8 @@ export const CreateProductSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
-export type CreateProductDto = z.infer<typeof CreateProductSchema>['body'];
+})
+export type CreateProductDto = z.infer<typeof CreateProductSchema>['body']
 
 export const UpdateProductSchema = z.object({
   body: CreateProductSchema.shape.body.partial(),
@@ -149,15 +158,15 @@ export const UpdateProductSchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     productId: z.string().cuid('Invalid product ID format'),
   }),
-});
-export type UpdateProductDto = z.infer<typeof UpdateProductSchema>['body'];
+})
+export type UpdateProductDto = z.infer<typeof UpdateProductSchema>['body']
 
 export const GetProductParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     productId: z.string().cuid('Invalid product ID format'),
   }),
-});
+})
 
 // ==========================================
 // MODIFIER SCHEMAS
@@ -176,68 +185,86 @@ export const ModifierGroupSchema = z.object({
   active: z.boolean().default(true),
   createdAt: z.date(),
   updatedAt: z.date(),
-});
+})
 
 export const CreateModifierGroupSchema = z.object({
-  body: z.object({
-    name: z.string().min(1, 'Name is required').max(255),
-    description: z.string().optional().nullable(),
-    required: z.boolean().optional(),
-    allowMultiple: z.boolean().optional(),
-    minSelections: z.number().int().min(0).optional(),
-    maxSelections: z.number().int().positive().optional().nullable(),
-    displayOrder: z.number().int().min(0).optional(),
-    active: z.boolean().optional(),
-    modifiers: z.array(z.object({
-      name: z.string().min(1, 'Modifier name is required').max(255),
-      price: z.number().min(0).multipleOf(0.01).default(0),
+  body: z
+    .object({
+      name: z.string().min(1, 'Name is required').max(255),
+      description: z.string().optional().nullable(),
+      required: z.boolean().optional(),
+      allowMultiple: z.boolean().optional(),
+      minSelections: z.number().int().min(0).optional(),
+      maxSelections: z.number().int().positive().optional().nullable(),
+      displayOrder: z.number().int().min(0).optional(),
       active: z.boolean().optional(),
-    })).optional(),
-  }).refine((data) => {
-    // Validation: if maxSelections is provided, it should be >= minSelections
-    if (data.maxSelections && data.minSelections) {
-      return data.maxSelections >= data.minSelections;
-    }
-    return true;
-  }, {
-    message: 'maxSelections must be greater than or equal to minSelections',
-  }),
+      modifiers: z
+        .array(
+          z.object({
+            name: z.string().min(1, 'Modifier name is required').max(255),
+            price: z.number().min(0).multipleOf(0.01).default(0),
+            active: z.boolean().optional(),
+          }),
+        )
+        .optional(),
+    })
+    .refine(
+      data => {
+        // Validation: if maxSelections is provided, it should be >= minSelections
+        if (data.maxSelections && data.minSelections) {
+          return data.maxSelections >= data.minSelections
+        }
+        return true
+      },
+      {
+        message: 'maxSelections must be greater than or equal to minSelections',
+      },
+    ),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
-export type CreateModifierGroupDto = z.infer<typeof CreateModifierGroupSchema>['body'];
+})
+export type CreateModifierGroupDto = z.infer<typeof CreateModifierGroupSchema>['body']
 
 export const UpdateModifierGroupSchema = z.object({
-  body: z.object({
-    name: z.string().min(1, 'Name is required').max(255).optional(),
-    description: z.string().nullable().optional(),
-    required: z.boolean().optional(),
-    allowMultiple: z.boolean().optional(),
-    minSelections: z.number().int().min(0).optional(),
-    maxSelections: z.number().int().min(1).nullable().optional(),
-    displayOrder: z.number().int().min(0).optional(),
-    active: z.boolean().optional(),
-    modifiers: z.array(z.object({
-      name: z.string().min(1, 'Modifier name is required').max(255),
-      price: z.number().min(0).multipleOf(0.01).default(0),
+  body: z
+    .object({
+      name: z.string().min(1, 'Name is required').max(255).optional(),
+      description: z.string().nullable().optional(),
+      required: z.boolean().optional(),
+      allowMultiple: z.boolean().optional(),
+      minSelections: z.number().int().min(0).optional(),
+      maxSelections: z.number().int().min(1).nullable().optional(),
+      displayOrder: z.number().int().min(0).optional(),
       active: z.boolean().optional(),
-    })).optional(),
-  }).refine((data) => {
-    // Validation: if maxSelections is provided, it should be >= minSelections
-    if (data.maxSelections && data.minSelections) {
-      return data.maxSelections >= data.minSelections;
-    }
-    return true;
-  }, {
-    message: 'maxSelections must be greater than or equal to minSelections',
-  }),
+      modifiers: z
+        .array(
+          z.object({
+            name: z.string().min(1, 'Modifier name is required').max(255),
+            price: z.number().min(0).multipleOf(0.01).default(0),
+            active: z.boolean().optional(),
+          }),
+        )
+        .optional(),
+    })
+    .refine(
+      data => {
+        // Validation: if maxSelections is provided, it should be >= minSelections
+        if (data.maxSelections && data.minSelections) {
+          return data.maxSelections >= data.minSelections
+        }
+        return true
+      },
+      {
+        message: 'maxSelections must be greater than or equal to minSelections',
+      },
+    ),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
   }),
-});
-export type UpdateModifierGroupDto = z.infer<typeof UpdateModifierGroupSchema>['body'];
+})
+export type UpdateModifierGroupDto = z.infer<typeof UpdateModifierGroupSchema>['body']
 
 export const ModifierSchema = z.object({
   id: z.string().cuid(),
@@ -245,7 +272,7 @@ export const ModifierSchema = z.object({
   name: z.string().min(1, 'Name is required').max(255),
   price: z.number().min(0).multipleOf(0.01).default(0),
   active: z.boolean().default(true),
-});
+})
 
 export const CreateModifierSchema = z.object({
   body: z.object({
@@ -257,8 +284,8 @@ export const CreateModifierSchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
   }),
-});
-export type CreateModifierDto = z.infer<typeof CreateModifierSchema>['body'];
+})
+export type CreateModifierDto = z.infer<typeof CreateModifierSchema>['body']
 
 export const UpdateModifierSchema = z.object({
   body: CreateModifierSchema.shape.body.partial(),
@@ -267,8 +294,8 @@ export const UpdateModifierSchema = z.object({
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
     modifierId: z.string().cuid('Invalid modifier ID format'),
   }),
-});
-export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body'];
+})
+export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
 
 // ==========================================
 // ASSIGNMENT SCHEMAS
@@ -279,7 +306,7 @@ export const MenuCategoryAssignmentSchema = z.object({
   menuId: z.string().cuid(),
   categoryId: z.string().cuid(),
   displayOrder: z.number().int().min(0).default(0),
-});
+})
 
 export const AssignCategoryToMenuSchema = z.object({
   body: z.object({
@@ -290,15 +317,15 @@ export const AssignCategoryToMenuSchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     menuId: z.string().cuid('Invalid menu ID format'),
   }),
-});
-export type AssignCategoryToMenuDto = z.infer<typeof AssignCategoryToMenuSchema>['body'];
+})
+export type AssignCategoryToMenuDto = z.infer<typeof AssignCategoryToMenuSchema>['body']
 
 export const ProductModifierGroupAssignmentSchema = z.object({
   id: z.string().cuid(),
   productId: z.string().cuid(),
   groupId: z.string().cuid(),
   displayOrder: z.number().int().min(0).default(0),
-});
+})
 
 export const AssignModifierGroupToProductSchema = z.object({
   body: z.object({
@@ -309,8 +336,8 @@ export const AssignModifierGroupToProductSchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     productId: z.string().cuid('Invalid product ID format'),
   }),
-});
-export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroupToProductSchema>['body'];
+})
+export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroupToProductSchema>['body']
 
 // ==========================================
 // QUERY SCHEMAS
@@ -318,10 +345,22 @@ export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroup
 
 export const MenuQuerySchema = z.object({
   query: z.object({
-    page: z.string().transform(val => parseInt(val, 10)).pipe(z.number().int().min(1)).optional(),
-    limit: z.string().transform(val => parseInt(val, 10)).pipe(z.number().int().min(1).max(100)).optional(),
+    page: z
+      .string()
+      .transform(val => parseInt(val, 10))
+      .pipe(z.number().int().min(1))
+      .optional(),
+    limit: z
+      .string()
+      .transform(val => parseInt(val, 10))
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
     search: z.string().optional(),
-    active: z.string().transform(val => val === 'true').pipe(z.boolean()).optional(),
+    active: z
+      .string()
+      .transform(val => val === 'true')
+      .pipe(z.boolean())
+      .optional(),
     type: z.nativeEnum(MenuType).optional(),
     sortBy: z.enum(['name', 'displayOrder', 'createdAt', 'updatedAt']).optional(),
     sortOrder: z.enum(['asc', 'desc']).optional(),
@@ -329,73 +368,105 @@ export const MenuQuerySchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
+})
 
 export const ProductQuerySchema = z.object({
   query: z.object({
-    page: z.string().transform(val => parseInt(val, 10)).pipe(z.number().int().min(1)).optional(),
-    limit: z.string().transform(val => parseInt(val, 10)).pipe(z.number().int().min(1).max(100)).optional(),
+    page: z
+      .string()
+      .transform(val => parseInt(val, 10))
+      .pipe(z.number().int().min(1))
+      .optional(),
+    limit: z
+      .string()
+      .transform(val => parseInt(val, 10))
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
     search: z.string().optional(),
-    active: z.string().transform(val => val === 'true').pipe(z.boolean()).optional(),
+    active: z
+      .string()
+      .transform(val => val === 'true')
+      .pipe(z.boolean())
+      .optional(),
     categoryId: z.string().cuid().optional(),
     type: z.nativeEnum(ProductType).optional(),
-    featured: z.string().transform(val => val === 'true').pipe(z.boolean()).optional(),
+    featured: z
+      .string()
+      .transform(val => val === 'true')
+      .pipe(z.boolean())
+      .optional(),
     sortBy: z.enum(['name', 'price', 'displayOrder', 'createdAt', 'updatedAt']).optional(),
     sortOrder: z.enum(['asc', 'desc']).optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
+})
 
 export const ModifierGroupQuerySchema = z.object({
   query: z.object({
-    page: z.string().transform(val => parseInt(val, 10)).pipe(z.number().int().min(1)).optional(),
-    limit: z.string().transform(val => parseInt(val, 10)).pipe(z.number().int().min(1).max(100)).optional(),
+    page: z
+      .string()
+      .transform(val => parseInt(val, 10))
+      .pipe(z.number().int().min(1))
+      .optional(),
+    limit: z
+      .string()
+      .transform(val => parseInt(val, 10))
+      .pipe(z.number().int().min(1).max(100))
+      .optional(),
     search: z.string().optional(),
-    active: z.string().transform(val => val === 'true').pipe(z.boolean()).optional(),
+    active: z
+      .string()
+      .transform(val => val === 'true')
+      .pipe(z.boolean())
+      .optional(),
     sortBy: z.enum(['name', 'displayOrder', 'createdAt', 'updatedAt']).optional(),
     sortOrder: z.enum(['asc', 'desc']).optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
+})
 
 // ==========================================
 // BULK OPERATIONS SCHEMAS
 // ==========================================
 
 export const ReorderMenusSchema = z.object({
-  body: z.array(
-    z.object({
-      id: z.string().cuid(),
-      displayOrder: z.number().int().min(0),
-    })
-  ).min(1, 'At least one menu must be provided for reordering'),
+  body: z
+    .array(
+      z.object({
+        id: z.string().cuid(),
+        displayOrder: z.number().int().min(0),
+      }),
+    )
+    .min(1, 'At least one menu must be provided for reordering'),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
-export type ReorderMenusDto = z.infer<typeof ReorderMenusSchema>['body'];
+})
+export type ReorderMenusDto = z.infer<typeof ReorderMenusSchema>['body']
 
 export const BulkUpdateProductsSchema = z.object({
   body: z.object({
     productIds: z.array(z.string().cuid()).min(1, 'At least one product ID is required'),
-    updates: z.object({
-      active: z.boolean().optional(),
-      categoryId: z.string().cuid().optional(),
-      price: z.number().positive().multipleOf(0.01).optional(),
-      featured: z.boolean().optional(),
-    }).refine((data) => Object.keys(data).length > 0, {
-      message: 'At least one field must be provided for bulk update',
-    }),
+    updates: z
+      .object({
+        active: z.boolean().optional(),
+        categoryId: z.string().cuid().optional(),
+        price: z.number().positive().multipleOf(0.01).optional(),
+        featured: z.boolean().optional(),
+      })
+      .refine(data => Object.keys(data).length > 0, {
+        message: 'At least one field must be provided for bulk update',
+      }),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
-export type BulkUpdateProductsDto = z.infer<typeof BulkUpdateProductsSchema>['body'];
+})
+export type BulkUpdateProductsDto = z.infer<typeof BulkUpdateProductsSchema>['body']
 
 // ==========================================
 // COMMON PARAMETER SCHEMAS
@@ -405,14 +476,14 @@ export const VenueIdParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
+})
 
 export const GetModifierGroupParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
   }),
-});
+})
 
 export const GetModifierParamsSchema = z.object({
   params: z.object({
@@ -420,4 +491,4 @@ export const GetModifierParamsSchema = z.object({
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
     modifierId: z.string().cuid('Invalid modifier ID format'),
   }),
-});
+})

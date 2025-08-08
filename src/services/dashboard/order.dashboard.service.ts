@@ -2,7 +2,7 @@
 
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
-import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schena'
+import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 
 import { Order, OriginSystem } from '@prisma/client'
 
