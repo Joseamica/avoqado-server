@@ -81,6 +81,10 @@ module.exports = {
         '^.+\\.tsx?$': 'ts-jest',
       },
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
+      moduleNameMapper: {
+        '^@/(.*)$': '<rootDir>/src/$1',
+        '^@tests/(.*)$': '<rootDir>/tests/$1',
+      },
       // API tests might need longer timeout. If so, use jest.setTimeout() in test files.
     },
     {
@@ -90,6 +94,10 @@ module.exports = {
         '^.+\\.tsx?$': 'ts-jest',
       },
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
+      moduleNameMapper: {
+        '^@/(.*)$': '<rootDir>/src/$1',
+        '^@tests/(.*)$': '<rootDir>/tests/$1',
+      },
       // Workflow tests typically take longer. If so, use jest.setTimeout() in test files.
     },
   ],

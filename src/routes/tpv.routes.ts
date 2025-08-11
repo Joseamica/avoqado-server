@@ -1,5 +1,8 @@
 import express from 'express'
 import { validateRequest } from '../middlewares/validation'
+import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { authorizeRole } from '../middlewares/authorizeRole.middleware'
+import { StaffRole } from '@prisma/client'
 import {
   venueIdParamSchema,
   serialNumberParamSchema,
@@ -78,6 +81,8 @@ const router = express.Router()
  *       - TPV - Venues
  *     summary: Get venue details for TPV
  *     description: Retrieve venue information including staff details for TPV usage
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -93,6 +98,10 @@ const router = express.Router()
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/VenueTPVResponse'
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
  *       404:
  *         description: Venue not found
  *         content:
@@ -106,7 +115,17 @@ const router = express.Router()
  *       500:
  *         description: Internal server error
  */
-router.get('/venues/:venueId', venueController.getVenueById)
+/**
+ * SECURITY UPDATE: This endpoint now requires authentication and authorized staff roles.
+ * Middlewares order: authenticateTokenMiddleware -> authorizeRole -> validateRequest -> controller
+ */
+router.get(
+  '/venues/:venueId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(venueIdParamSchema),
+  venueController.getVenueById,
+)
 
 /**
  * @openapi
@@ -157,6 +176,8 @@ router.get('/serial-number/:serialNumber', validateRequest(serialNumberParamSche
  *       - TPV - Orders
  *     summary: Get all open orders for a venue
  *     description: Retrieve all open orders (orders with pending or partial payment status) for a specific venue
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -228,12 +249,22 @@ router.get('/serial-number/:serialNumber', validateRequest(serialNumberParamSche
  *                         type: string
  *                       lastName:
  *                         type: string
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
  *       404:
  *         description: Venue not found
  *       500:
  *         description: Internal server error
  */
-router.get('/venues/:venueId/orders', validateRequest(venueIdParamSchema), orderController.getOrders)
+router.get(
+  '/venues/:venueId/orders',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(venueIdParamSchema),
+  orderController.getOrders,
+)
 
 /**
  * @openapi
@@ -243,6 +274,8 @@ router.get('/venues/:venueId/orders', validateRequest(venueIdParamSchema), order
  *       - TPV - Orders
  *     summary: Get a specific order by ID
  *     description: Retrieve detailed information about a specific order including payment calculations
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -354,10 +387,20 @@ router.get('/venues/:venueId/orders', validateRequest(venueIdParamSchema), order
  *                 error:
  *                   type: string
  *                   example: "Order not found"
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
  *       500:
  *         description: Internal server error
  */
-router.get('/venues/:venueId/orders/:orderId', validateRequest(orderParamsSchema), orderController.getOrder)
+router.get(
+  '/venues/:venueId/orders/:orderId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(orderParamsSchema),
+  orderController.getOrder,
+)
 
 /**
  * @openapi
@@ -367,6 +410,8 @@ router.get('/venues/:venueId/orders/:orderId', validateRequest(orderParamsSchema
  *       - TPV - Payments
  *     summary: Get payments for a venue
  *     description: Retrieve payments with pagination and filtering options
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -461,12 +506,22 @@ router.get('/venues/:venueId/orders/:orderId', validateRequest(orderParamsSchema
  *                       type: boolean
  *                     hasPrevPage:
  *                       type: boolean
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
  *       400:
  *         description: Invalid pagination parameters or filters
  *       500:
  *         description: Internal server error
  */
-router.get('/venues/:venueId/payments', validateRequest(paymentsQuerySchema), paymentController.getPayments)
+router.get(
+  '/venues/:venueId/payments',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(paymentsQuerySchema),
+  paymentController.getPayments,
+)
 
 /**
  * @openapi
@@ -476,6 +531,8 @@ router.get('/venues/:venueId/payments', validateRequest(paymentsQuerySchema), pa
  *       - TPV - Shifts
  *     summary: Get current active shift
  *     description: Retrieve the current active shift for a venue
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -517,10 +574,20 @@ router.get('/venues/:venueId/payments', validateRequest(paymentsQuerySchema), pa
  *                     createdAt:
  *                       type: string
  *                       format: date-time
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
  *       500:
  *         description: Internal server error
  */
-router.get('/venues/:venueId/shift', validateRequest(shiftQuerySchema), shiftController.getCurrentShift)
+router.get(
+  '/venues/:venueId/shift',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(shiftQuerySchema),
+  shiftController.getCurrentShift,
+)
 
 /**
  * @openapi
@@ -530,6 +597,8 @@ router.get('/venues/:venueId/shift', validateRequest(shiftQuerySchema), shiftCon
  *       - TPV - Shifts
  *     summary: Get shifts with pagination
  *     description: Retrieve shifts with pagination and filtering options
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -608,12 +677,22 @@ router.get('/venues/:venueId/shift', validateRequest(shiftQuerySchema), shiftCon
  *                       type: integer
  *                     totalPages:
  *                       type: integer
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
  *       400:
  *         description: Invalid pagination parameters
  *       500:
  *         description: Internal server error
  */
-router.get('/venues/:venueId/shifts', validateRequest(shiftsQuerySchema), shiftController.getShifts)
+router.get(
+  '/venues/:venueId/shifts',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(shiftsQuerySchema),
+  shiftController.getShifts,
+)
 
 /**
  * @openapi
@@ -623,6 +702,8 @@ router.get('/venues/:venueId/shifts', validateRequest(shiftsQuerySchema), shiftC
  *       - TPV - Shifts
  *     summary: Get shift summary with totals
  *     description: Retrieve aggregated shift data with sales, tips, and staff breakdown
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -698,12 +779,22 @@ router.get('/venues/:venueId/shifts', validateRequest(shiftsQuerySchema), shiftC
  *                             type: number
  *                           count:
  *                             type: integer
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
  *       400:
  *         description: Invalid date filters
  *       500:
  *         description: Internal server error
  */
-router.get('/venues/:venueId/shifts-summary', validateRequest(shiftsSummaryQuerySchema), shiftController.getShiftsSummary)
+router.get(
+  '/venues/:venueId/shifts-summary',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(shiftsSummaryQuerySchema),
+  shiftController.getShiftsSummary,
+)
 
 /**
  * @openapi
@@ -814,8 +905,10 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
  * /tpv/venues/{venueId}/orders/{orderId}:
  *   post:
  *     tags: [TPV - Payments]
- *     summary: Record a payment for a specific order
- *     description: Records a payment transaction for a specific order with support for different split types
+ *     security:
+ *       - bearerAuth: []
+ *     summary: Record a payment for a specific table
+ *     description: Records a payment transaction for an order
  *     parameters:
  *       - in: path
  *         name: venueId
@@ -823,14 +916,14 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
  *         schema:
  *           type: string
  *           format: cuid
- *         description: The venue ID where the payment is being recorded
+ *         description: The venue ID
  *       - in: path
  *         name: orderId
  *         required: true
  *         schema:
  *           type: string
  *           format: cuid
- *         description: The order ID for which the payment is being recorded
+ *         description: The order ID
  *     requestBody:
  *       required: true
  *       content:
@@ -844,8 +937,7 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
  *               - status
  *               - method
  *               - splitType
- *               - tpvId
- *               - waiterName
+ *               - staffId
  *             properties:
  *               venueId:
  *                 type: string
@@ -858,18 +950,16 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
  *                 description: Tip amount in cents
  *               status:
  *                 type: string
- *                 enum: [ACCEPTED, PENDING, DECLINED]
+ *                 enum: [COMPLETED, PENDING, FAILED, PROCESSING, REFUNDED]
  *               method:
  *                 type: string
- *                 enum: [CASH, CARD]
+ *                 enum: [CASH, CREDIT_CARD, DEBIT_CARD, DIGITAL_WALLET]
  *               splitType:
  *                 type: string
  *                 enum: [PERPRODUCT, EQUALPARTS, CUSTOMAMOUNT, FULLPAYMENT]
- *               tpvId:
+ *               staffId:
  *                 type: string
  *                 format: cuid
- *               waiterName:
- *                 type: string
  *               paidProductsId:
  *                 type: array
  *                 items:
@@ -898,10 +988,6 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
  *                 default: false
  *               reviewRating:
  *                 type: string
- *               equalPartsPartySize:
- *                 type: integer
- *               equalPartsPayedFor:
- *                 type: integer
  *     responses:
  *       201:
  *         description: Payment recorded successfully
@@ -916,6 +1002,10 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
  *                   type: object
  *                 message:
  *                   type: string
+ *       401:
+ *         description: Unauthorized - Missing or invalid token
+ *       403:
+ *         description: Forbidden - Role not allowed
  *       400:
  *         description: Bad request - Invalid payment data
  *       404:
@@ -925,6 +1015,8 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
  */
 router.post(
   '/venues/:venueId/orders/:orderId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
   validateRequest(recordPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentController.recordPayment,
@@ -935,6 +1027,8 @@ router.post(
  * /tpv/venues/{venueId}/fast:
  *   post:
  *     tags: [TPV - Payments]
+ *     security:
+ *       - bearerAuth: []
  *     summary: Record a fast payment (without table association)
  *     description: Records a fast payment transaction without associating it to a specific table
  *     parameters:
@@ -1026,6 +1120,10 @@ router.post(
  *                   type: object
  *                 message:
  *                   type: string
+  *       401:
+  *         description: Unauthorized - Missing or invalid token
+  *       403:
+  *         description: Forbidden - Role not allowed
  *       400:
  *         description: Bad request - Invalid payment data
  *       500:
@@ -1033,6 +1131,8 @@ router.post(
  */
 router.post(
   '/venues/:venueId/fast',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentController.recordFastPayment,
