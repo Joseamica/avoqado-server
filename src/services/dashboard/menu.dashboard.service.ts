@@ -1,7 +1,19 @@
 import prisma from '../../utils/prismaClient'
-import { Menu, MenuCategory, Prisma } from '@prisma/client'
+import { Menu, MenuCategory, Prisma, ModifierGroup, Modifier, ProductModifierGroup } from '@prisma/client'
 import { CreateMenuCategoryDto, UpdateMenuCategoryDto, ReorderMenuCategoriesDto } from '../../schemas/dashboard/menuCategory.schema'
-import { CreateMenuDto, UpdateMenuDto, CloneMenuDto, ReorderMenusDto, AssignCategoryToMenuDto } from '../../schemas/dashboard/menu.schema'
+import {
+  CreateMenuDto,
+  UpdateMenuDto,
+  CloneMenuDto,
+  ReorderMenusDto,
+  ReorderProductsDto,
+  AssignCategoryToMenuDto,
+  CreateModifierGroupDto,
+  UpdateModifierGroupDto,
+  CreateModifierDto,
+  UpdateModifierDto,
+  AssignModifierGroupToProductDto,
+} from '../../schemas/dashboard/menu.schema'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 
@@ -36,7 +48,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   })
 
   if (existingCategory) {
-    throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
+    throw new BadRequestError(`Ya existe una categoría con el nombre '${data.name}' en este establecimiento.`)
   }
 
   const createData: Prisma.MenuCategoryCreateInput = {
@@ -65,10 +77,44 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   if (data.availableDays === null) {
     createData.availableDays = undefined // Treat null as 'not set' for create
   } else if (data.availableDays) {
-    createData.availableDays = data.availableDays
+    // If availableDays is an array of objects with value property (from MultiSelector)
+    if (Array.isArray(data.availableDays) && data.availableDays.length > 0 && typeof data.availableDays[0] === 'object' && 'value' in data.availableDays[0]) {
+      createData.availableDays = data.availableDays.map((day: any) => day.value)
+    } else {
+      createData.availableDays = data.availableDays
+    }
   }
 
-  return prisma.menuCategory.create({ data: createData })
+  const category = await prisma.menuCategory.create({ data: createData })
+
+  // Handle menu assignments
+  if (data.avoqadoMenus && data.avoqadoMenus.length > 0) {
+    const menuAssignments = data.avoqadoMenus.map(menu => ({
+      menuId: menu.value,
+      categoryId: category.id,
+    }))
+    
+    await prisma.menuCategoryAssignment.createMany({
+      data: menuAssignments,
+    })
+  }
+
+  // Handle product assignments
+  if (data.avoqadoProducts && data.avoqadoProducts.length > 0) {
+    const productIds = data.avoqadoProducts.map(product => product.value)
+    
+    await prisma.product.updateMany({
+      where: {
+        id: { in: productIds },
+        venueId: venueId,
+      },
+      data: {
+        categoryId: category.id,
+      },
+    })
+  }
+
+  return category
 }
 
 export async function getMenuCategoryById(venueId: string, categoryId: string): Promise<MenuCategory> {
@@ -139,15 +185,26 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   if (data.color !== undefined) updateData.color = data.color
   if (data.icon !== undefined) updateData.icon = data.icon
   if (data.active !== undefined) updateData.active = data.active
-  if (data.availableFrom !== undefined) updateData.availableFrom = data.availableFrom
-  if (data.availableUntil !== undefined) updateData.availableUntil = data.availableUntil
+  
+  // Handle time fields with explicit null/undefined handling
+  if (data.hasOwnProperty('availableFrom')) {
+    updateData.availableFrom = data.availableFrom || null
+  }
+  if (data.hasOwnProperty('availableUntil')) {
+    updateData.availableUntil = data.availableUntil || null
+  }
 
   // Handle availableDays specifically for null and array cases in update
   if (data.hasOwnProperty('availableDays')) {
     if (data.availableDays === null) {
       updateData.availableDays = { set: [] } // Explicitly set to empty array if DTO provides null
     } else if (Array.isArray(data.availableDays)) {
-      updateData.availableDays = data.availableDays // This implies { set: data.availableDays }
+      // If availableDays is an array of objects with value property (from MultiSelector)
+      if (data.availableDays.length > 0 && typeof data.availableDays[0] === 'object' && 'value' in data.availableDays[0]) {
+        updateData.availableDays = (data.availableDays as any[]).map((day: any) => day.value)
+      } else {
+        updateData.availableDays = data.availableDays // This implies { set: data.availableDays }
+      }
     }
     // If data.availableDays is undefined (but key was present), Prisma treats it as no-op for this field.
   }
@@ -497,4 +554,271 @@ export async function removeCategoryFromMenu(venueId: string, menuId: string, ca
       },
     },
   })
+}
+
+// ==========================================
+// MODIFIER GROUPS & MODIFIERS SERVICES
+// ==========================================
+
+type ModifierGroupQuery = {
+  page?: number
+  limit?: number
+  search?: string
+  active?: boolean
+  sortBy?: 'name' | 'displayOrder' | 'createdAt' | 'updatedAt'
+  sortOrder?: 'asc' | 'desc'
+}
+
+export async function getModifierGroups(venueId: string, query: ModifierGroupQuery = {}): Promise<ModifierGroup[]> {
+  const { page, limit, search, active, sortBy, sortOrder } = query
+
+  const where: Prisma.ModifierGroupWhereInput = {
+    venueId,
+    ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
+    ...(active !== undefined ? { active } : {}),
+  }
+
+  const order: Record<string, 'asc' | 'desc'> = {}
+  if (sortBy) {
+    order[sortBy] = sortOrder ?? 'asc'
+  } else {
+    order['displayOrder'] = 'asc'
+  }
+
+  const args: Prisma.ModifierGroupFindManyArgs = {
+    where,
+    orderBy: order as any,
+    include: { modifiers: true },
+  }
+  if (page && limit) {
+    args.skip = (page - 1) * limit
+    args.take = limit
+  }
+
+  return prisma.modifierGroup.findMany(args)
+}
+
+export async function createModifierGroup(venueId: string, data: CreateModifierGroupDto): Promise<ModifierGroup> {
+  const created = await prisma.modifierGroup.create({
+    data: {
+      venue: { connect: { id: venueId } },
+      name: data.name,
+      description: data.description ?? undefined,
+      required: data.required ?? false,
+      allowMultiple: data.allowMultiple ?? false,
+      minSelections: data.minSelections ?? 0,
+      maxSelections: data.maxSelections ?? undefined,
+      displayOrder: data.displayOrder ?? 0,
+      active: data.active ?? true,
+      ...(data.modifiers && data.modifiers.length
+        ? {
+            modifiers: {
+              create: data.modifiers.map(m => ({
+                name: m.name,
+                price: m.price,
+                active: m.active ?? true,
+              })),
+            },
+          }
+        : {}),
+    },
+    include: { modifiers: true },
+  })
+
+  return created
+}
+
+export async function getModifierGroupById(venueId: string, modifierGroupId: string): Promise<ModifierGroup & { modifiers: Modifier[] }> {
+  const group = await prisma.modifierGroup.findFirst({
+    where: { id: modifierGroupId, venueId },
+    include: { modifiers: true },
+  })
+
+  if (!group) {
+    throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+  }
+  return group
+}
+
+export async function updateModifierGroup(
+  venueId: string,
+  modifierGroupId: string,
+  data: UpdateModifierGroupDto,
+): Promise<ModifierGroup & { modifiers: Modifier[] }> {
+  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  if (!existing) {
+    throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+  }
+
+  const updateData: Prisma.ModifierGroupUpdateInput = {}
+  if (data.name !== undefined) updateData.name = data.name
+  if (data.description !== undefined) updateData.description = data.description
+  if (data.required !== undefined) updateData.required = data.required
+  if (data.allowMultiple !== undefined) updateData.allowMultiple = data.allowMultiple
+  if (data.minSelections !== undefined) updateData.minSelections = data.minSelections
+  if (data.maxSelections !== undefined) updateData.maxSelections = data.maxSelections
+  if (data.displayOrder !== undefined) updateData.displayOrder = data.displayOrder
+  if (data.active !== undefined) updateData.active = data.active
+
+  // Note: Modifiers should be managed via dedicated endpoints (create/update/delete modifier)
+
+  const updated = await prisma.modifierGroup.update({
+    where: { id: modifierGroupId },
+    data: updateData,
+    include: { modifiers: true },
+  })
+
+  return updated
+}
+
+export async function deleteModifierGroup(venueId: string, modifierGroupId: string): Promise<void> {
+  const existing = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  if (!existing) {
+    throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+  }
+
+  await prisma.modifierGroup.delete({ where: { id: modifierGroupId } })
+}
+
+export async function createModifier(
+  venueId: string,
+  modifierGroupId: string,
+  data: CreateModifierDto,
+): Promise<Modifier> {
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  if (!group) {
+    throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+  }
+
+  return prisma.modifier.create({
+    data: {
+      group: { connect: { id: modifierGroupId } },
+      name: data.name,
+      price: data.price,
+      active: data.active ?? true,
+    },
+  })
+}
+
+export async function getModifierById(
+  venueId: string,
+  modifierGroupId: string,
+  modifierId: string,
+): Promise<Modifier> {
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  if (!group) {
+    throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+  }
+
+  const modifier = await prisma.modifier.findFirst({ where: { id: modifierId, groupId: modifierGroupId } })
+  if (!modifier) {
+    throw new NotFoundError(`Modifier with ID ${modifierId} not found in group ${modifierGroupId}.`)
+  }
+  return modifier
+}
+
+export async function updateModifier(
+  venueId: string,
+  modifierGroupId: string,
+  modifierId: string,
+  data: UpdateModifierDto,
+): Promise<Modifier> {
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  if (!group) {
+    throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+  }
+
+  const existing = await prisma.modifier.findFirst({ where: { id: modifierId, groupId: modifierGroupId } })
+  if (!existing) {
+    throw new NotFoundError(`Modifier with ID ${modifierId} not found in group ${modifierGroupId}.`)
+  }
+
+  const updateData: Prisma.ModifierUpdateInput = {}
+  if (data.name !== undefined) updateData.name = data.name
+  if (data.price !== undefined) updateData.price = data.price
+  if (data.active !== undefined) updateData.active = data.active
+
+  return prisma.modifier.update({ where: { id: modifierId }, data: updateData })
+}
+
+export async function deleteModifier(venueId: string, modifierGroupId: string, modifierId: string): Promise<void> {
+  const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
+  if (!group) {
+    throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
+  }
+
+  const existing = await prisma.modifier.findFirst({ where: { id: modifierId, groupId: modifierGroupId } })
+  if (!existing) {
+    throw new NotFoundError(`Modifier with ID ${modifierId} not found in group ${modifierGroupId}.`)
+  }
+
+  await prisma.modifier.delete({ where: { id: modifierId } })
+}
+
+export async function assignModifierGroupToProduct(
+  venueId: string,
+  productId: string,
+  data: AssignModifierGroupToProductDto,
+): Promise<ProductModifierGroup> {
+  // Verify product belongs to venue
+  const product = await prisma.product.findFirst({ where: { id: productId, venueId } })
+  if (!product) {
+    throw new NotFoundError(`Product with ID ${productId} not found in venue ${venueId}.`)
+  }
+
+  // Verify group belongs to venue
+  const group = await prisma.modifierGroup.findFirst({ where: { id: data.modifierGroupId, venueId } })
+  if (!group) {
+    throw new NotFoundError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}.`)
+  }
+
+  // Check if assignment exists
+  const existing = await prisma.productModifierGroup.findUnique({
+    where: { productId_groupId: { productId, groupId: data.modifierGroupId } },
+  })
+  if (existing) {
+    throw new BadRequestError(`Modifier group ${data.modifierGroupId} is already assigned to product ${productId}.`)
+  }
+
+  return prisma.productModifierGroup.create({
+    data: {
+      product: { connect: { id: productId } },
+      group: { connect: { id: data.modifierGroupId } },
+      displayOrder: data.displayOrder ?? 0,
+    },
+  })
+}
+
+export async function removeModifierGroupFromProduct(
+  venueId: string,
+  productId: string,
+  modifierGroupId: string,
+): Promise<void> {
+  // Verify product belongs to venue
+  const product = await prisma.product.findFirst({ where: { id: productId, venueId } })
+  if (!product) {
+    throw new NotFoundError(`Product with ID ${productId} not found in venue ${venueId}.`)
+  }
+
+  const assignment = await prisma.productModifierGroup.findUnique({
+    where: { productId_groupId: { productId, groupId: modifierGroupId } },
+  })
+  if (!assignment) {
+    throw new NotFoundError(`Modifier group ${modifierGroupId} is not assigned to product ${productId}.`)
+  }
+
+  await prisma.productModifierGroup.delete({
+    where: { productId_groupId: { productId, groupId: modifierGroupId } },
+  })
+}
+
+export async function reorderProducts(venueId: string, reorderData: ReorderProductsDto): Promise<Prisma.BatchPayload[]> {
+  const transactions = reorderData.map(item =>
+    prisma.product.updateMany({
+      where: { id: item.id, venueId }, // Ensure product belongs to the venue
+      data: { displayOrder: item.displayOrder },
+    }),
+  )
+
+  return prisma.$transaction(transactions)
 }

@@ -33,9 +33,19 @@ export const CreateMenuCategorySchema = z.object({
     icon: z.string().optional().nullable(),
     parentId: z.string().cuid().optional().nullable(), // This can be string (cuid) or null
     active: z.boolean().optional(),
-    availableFrom: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').optional().nullable(),
-    availableUntil: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').optional().nullable(),
+    availableFrom: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
+    availableUntil: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
     availableDays: z.array(z.enum(DAYS_OF_WEEK)).max(7).optional().nullable(),
+    avoqadoMenus: z.array(z.object({
+      value: z.string().cuid(),
+      label: z.string(),
+      disabled: z.boolean().optional(),
+    })).optional(),
+    avoqadoProducts: z.array(z.object({
+      value: z.string().cuid(),
+      label: z.string(), 
+      disabled: z.boolean().optional(),
+    })).optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),

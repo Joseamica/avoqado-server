@@ -50,6 +50,8 @@ import {
   // Assignment schemas
   AssignCategoryToMenuSchema,
   AssignModifierGroupToProductSchema,
+  RemoveModifierGroupFromProductParamsSchema,
+  ReorderProductsSchema,
 } from '../schemas/dashboard/menu.schema'
 import { loginSchema, switchVenueSchema } from '../schemas/dashboard/auth.schema'
 import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
@@ -171,6 +173,39 @@ const router = express.Router()
  *           type: string
  *         message:
  *           type: string
+ *     Modifier:
+ *       type: object
+ *       properties:
+ *         id: { type: string, format: cuid }
+ *         groupId: { type: string, format: cuid }
+ *         name: { type: string }
+ *         price: { type: number, format: float }
+ *         active: { type: boolean }
+ *     ModifierGroup:
+ *       type: object
+ *       properties:
+ *         id: { type: string, format: cuid }
+ *         venueId: { type: string, format: cuid }
+ *         name: { type: string }
+ *         description: { type: string, nullable: true }
+ *         required: { type: boolean }
+ *         allowMultiple: { type: boolean }
+ *         minSelections: { type: integer, minimum: 0 }
+ *         maxSelections: { type: integer, minimum: 1, nullable: true }
+ *         displayOrder: { type: integer, minimum: 0 }
+ *         active: { type: boolean }
+ *         createdAt: { type: string, format: date-time }
+ *         updatedAt: { type: string, format: date-time }
+ *         modifiers:
+ *           type: array
+ *           items: { $ref: '#/components/schemas/Modifier' }
+ *     ProductModifierGroupAssignment:
+ *       type: object
+ *       properties:
+ *         id: { type: string, format: cuid }
+ *         productId: { type: string, format: cuid }
+ *         groupId: { type: string, format: cuid }
+ *         displayOrder: { type: integer, minimum: 0 }
  *   securitySchemes:
  *     bearerAuth:
  *       type: http
@@ -1048,6 +1083,14 @@ router.post(
   menuController.reorderMenusHandler,
 )
 
+router.put(
+  '/venues/:venueId/products/reorder',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(ReorderProductsSchema),
+  menuController.reorderProductsHandler,
+)
+
 // Menu-Category assignments
 router.post(
   '/venues/:venueId/menus/:menuId/categories',
@@ -1063,6 +1106,486 @@ router.delete(
   authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
   validateRequest(GetMenuParamsSchema),
   menuController.removeCategoryFromMenuHandler,
+)
+
+// --- Modifier Groups Routes ---
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups:
+ *   get:
+ *     tags: [Modifier Groups]
+ *     summary: List all modifier groups for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *       - in: query
+ *         name: active
+ *         schema: { type: boolean }
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, enum: [name, displayOrder, createdAt, updatedAt] }
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [asc, desc] }
+ *     responses:
+ *       200:
+ *         description: A list of modifier groups
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { $ref: '#/components/schemas/ModifierGroup' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/modifier-groups',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  validateRequest(ModifierGroupQuerySchema),
+  menuController.listModifierGroupsHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups:
+ *   post:
+ *     tags: [Modifier Groups]
+ *     summary: Create a new modifier group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ModifierGroup'
+ *     responses:
+ *       201:
+ *         description: The created modifier group
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ModifierGroup'
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/modifier-groups',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(CreateModifierGroupSchema),
+  menuController.createModifierGroupHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}:
+ *   get:
+ *     tags: [Modifier Groups]
+ *     summary: Get a modifier group by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: The requested modifier group
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ModifierGroup'
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/modifier-groups/:modifierGroupId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  validateRequest(GetModifierGroupParamsSchema),
+  menuController.getModifierGroupHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}:
+ *   patch:
+ *     tags: [Modifier Groups]
+ *     summary: Update a modifier group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ModifierGroup' # Simplified for example
+ *     responses:
+ *       200:
+ *         description: The updated modifier group
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ModifierGroup'
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.patch(
+  '/venues/:venueId/modifier-groups/:modifierGroupId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(UpdateModifierGroupSchema),
+  menuController.updateModifierGroupHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}:
+ *   put:
+ *     tags: [Modifier Groups]
+ *     summary: Update a modifier group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ModifierGroup'
+ *     responses:
+ *       200:
+ *         description: The updated modifier group
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ModifierGroup'
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/modifier-groups/:modifierGroupId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(UpdateModifierGroupSchema),
+  menuController.updateModifierGroupHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}:
+ *   delete:
+ *     tags: [Modifier Groups]
+ *     summary: Delete a modifier group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       204:
+ *         description: Modifier group deleted successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/modifier-groups/:modifierGroupId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(GetModifierGroupParamsSchema),
+  menuController.deleteModifierGroupHandler,
+)
+
+// --- Modifiers Routes ---
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}/modifiers:
+ *   get:
+ *     tags: [Modifiers]
+ *     summary: List modifiers in a modifier group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: A list of modifiers for the group
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Modifier'
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  validateRequest(GetModifierGroupParamsSchema),
+  menuController.listModifiersHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}/modifiers:
+ *   post:
+ *     tags: [Modifiers]
+ *     summary: Create a modifier within a group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/Modifier'
+ *     responses:
+ *       201:
+ *         description: The created modifier
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Modifier'
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(CreateModifierSchema),
+  menuController.createModifierHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}/modifiers/{modifierId}:
+ *   get:
+ *     tags: [Modifiers]
+ *     summary: Get a modifier by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: The requested modifier
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Modifier'
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  validateRequest(GetModifierParamsSchema),
+  menuController.getModifierHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}/modifiers/{modifierId}:
+ *   patch:
+ *     tags: [Modifiers]
+ *     summary: Update a modifier
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/Modifier' # Simplified for example
+ *     responses:
+ *       200:
+ *         description: The updated modifier
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Modifier'
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.patch(
+  '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(UpdateModifierSchema),
+  menuController.updateModifierHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}/modifiers/{modifierId}:
+ *   put:
+ *     tags: [Modifiers]
+ *     summary: Update a modifier
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/Modifier'
+ *     responses:
+ *       200:
+ *         description: The updated modifier
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Modifier'
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(UpdateModifierSchema),
+  menuController.updateModifierHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifier-groups/{modifierGroupId}/modifiers/{modifierId}:
+ *   delete:
+ *     tags: [Modifiers]
+ *     summary: Delete a modifier
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       204:
+ *         description: Modifier deleted successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(GetModifierParamsSchema),
+  menuController.deleteModifierHandler,
+)
+
+// --- Product <-> ModifierGroup assignments ---
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}/modifier-groups:
+ *   post:
+ *     tags: [Products]
+ *     summary: Assign a modifier group to a product
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: productId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               modifierGroupId: { type: string, format: cuid }
+ *               displayOrder: { type: integer, minimum: 0 }
+ *     responses:
+ *       201:
+ *         description: Assignment created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ProductModifierGroupAssignment'
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/products/:productId/modifier-groups',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(AssignModifierGroupToProductSchema),
+  menuController.assignModifierGroupToProductHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}/modifier-groups/{modifierGroupId}:
+ *   delete:
+ *     tags: [Products]
+ *     summary: Remove a modifier group from a product
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: productId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: modifierGroupId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       204:
+ *         description: Assignment removed successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/products/:productId/modifier-groups/:modifierGroupId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(RemoveModifierGroupFromProductParamsSchema),
+  menuController.removeModifierGroupFromProductHandler,
 )
 
 export default router

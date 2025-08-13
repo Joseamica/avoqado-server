@@ -2,12 +2,19 @@ import { Request, Response, NextFunction } from 'express'
 import * as menuCategoryService from '../../services/dashboard/menu.dashboard.service'
 import * as venueService from '../../services/dashboard/venue.dashboard.service' // To verify venue ownership
 import { CreateMenuCategoryDto, UpdateMenuCategoryDto, ReorderMenuCategoriesDto } from '../../schemas/dashboard/menuCategory.schema'
-import { 
+import {
   CreateMenuDto,
   UpdateMenuDto,
   CloneMenuDto,
   ReorderMenusDto,
-  AssignCategoryToMenuDto
+  ReorderProductsDto,
+  AssignCategoryToMenuDto,
+  // Modifier DTOs
+  CreateModifierGroupDto,
+  UpdateModifierGroupDto,
+  CreateModifierDto,
+  UpdateModifierDto,
+  AssignModifierGroupToProductDto,
 } from '../../schemas/dashboard/menu.schema'
 import { NotFoundError } from '../../errors/AppError'
 
@@ -33,6 +40,250 @@ export async function getMenusHandler(req: Request<{ venueId: string }>, res: Re
 
     const menus = await menuCategoryService.getMenus(venueId)
     res.status(200).json(menus)
+  } catch (error) {
+    next(error)
+  }
+}
+
+// ==========================================
+// MODIFIER GROUPS & MODIFIERS CONTROLLERS
+// ==========================================
+
+export async function listModifierGroupsHandler(
+  req: Request<{ venueId: string }, {}, {}, any>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const groups = await menuCategoryService.getModifierGroups(venueId, req.query as any)
+    res.status(200).json(groups)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function createModifierGroupHandler(
+  req: Request<{ venueId: string }, {}, CreateModifierGroupDto>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const created = await menuCategoryService.createModifierGroup(venueId, req.body)
+    res.status(201).json(created)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function getModifierGroupHandler(
+  req: Request<{ venueId: string; modifierGroupId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const group = await menuCategoryService.getModifierGroupById(venueId, modifierGroupId)
+    res.status(200).json(group)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function updateModifierGroupHandler(
+  req: Request<{ venueId: string; modifierGroupId: string }, {}, UpdateModifierGroupDto>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const updated = await menuCategoryService.updateModifierGroup(venueId, modifierGroupId, req.body)
+    res.status(200).json(updated)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function deleteModifierGroupHandler(
+  req: Request<{ venueId: string; modifierGroupId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    await menuCategoryService.deleteModifierGroup(venueId, modifierGroupId)
+    res.status(204).send()
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function listModifiersHandler(
+  req: Request<{ venueId: string; modifierGroupId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const group = await menuCategoryService.getModifierGroupById(venueId, modifierGroupId)
+    res.status(200).json(group.modifiers)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function createModifierHandler(
+  req: Request<{ venueId: string; modifierGroupId: string }, {}, CreateModifierDto>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const created = await menuCategoryService.createModifier(venueId, modifierGroupId, req.body)
+    res.status(201).json(created)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function getModifierHandler(
+  req: Request<{ venueId: string; modifierGroupId: string; modifierId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId, modifierId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const modifier = await menuCategoryService.getModifierById(venueId, modifierGroupId, modifierId)
+    res.status(200).json(modifier)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function updateModifierHandler(
+  req: Request<{ venueId: string; modifierGroupId: string; modifierId: string }, {}, UpdateModifierDto>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId, modifierId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const updated = await menuCategoryService.updateModifier(venueId, modifierGroupId, modifierId, req.body)
+    res.status(200).json(updated)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function deleteModifierHandler(
+  req: Request<{ venueId: string; modifierGroupId: string; modifierId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, modifierGroupId, modifierId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    await menuCategoryService.deleteModifier(venueId, modifierGroupId, modifierId)
+    res.status(204).send()
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function assignModifierGroupToProductHandler(
+  req: Request<{ venueId: string; productId: string }, {}, AssignModifierGroupToProductDto>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, productId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    const assignment = await menuCategoryService.assignModifierGroupToProduct(venueId, productId, req.body)
+    res.status(201).json(assignment)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function removeModifierGroupFromProductHandler(
+  req: Request<{ venueId: string; productId: string; modifierGroupId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, productId, modifierGroupId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    await menuCategoryService.removeModifierGroupFromProduct(venueId, productId, modifierGroupId)
+    res.status(204).send()
   } catch (error) {
     next(error)
   }
@@ -315,6 +566,26 @@ export async function removeCategoryFromMenuHandler(
 
     await menuCategoryService.removeCategoryFromMenu(venueId, menuId, categoryId)
     res.status(204).send()
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function reorderProductsHandler(
+  req: Request<{ venueId: string }, {}, ReorderProductsDto>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId)
+
+    await menuCategoryService.reorderProducts(venueId, req.body)
+    res.status(200).json({ message: 'Products reordered successfully.' })
   } catch (error) {
     next(error)
   }

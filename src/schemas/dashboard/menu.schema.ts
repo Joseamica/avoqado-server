@@ -266,6 +266,7 @@ export const UpdateModifierGroupSchema = z.object({
 })
 export type UpdateModifierGroupDto = z.infer<typeof UpdateModifierGroupSchema>['body']
 
+
 export const ModifierSchema = z.object({
   id: z.string().cuid(),
   groupId: z.string().cuid(),
@@ -296,6 +297,7 @@ export const UpdateModifierSchema = z.object({
   }),
 })
 export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
+
 
 // ==========================================
 // ASSIGNMENT SCHEMAS
@@ -338,6 +340,15 @@ export const AssignModifierGroupToProductSchema = z.object({
   }),
 })
 export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroupToProductSchema>['body']
+
+// Params schema for removing a modifier group assignment from a product
+export const RemoveModifierGroupFromProductParamsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('Invalid venue ID format'),
+    productId: z.string().cuid('Invalid product ID format'),
+    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+  }),
+})
 
 // ==========================================
 // QUERY SCHEMAS
@@ -447,6 +458,21 @@ export const ReorderMenusSchema = z.object({
   }),
 })
 export type ReorderMenusDto = z.infer<typeof ReorderMenusSchema>['body']
+
+export const ReorderProductsSchema = z.object({
+  body: z
+    .array(
+      z.object({
+        id: z.string().cuid(),
+        displayOrder: z.number().int().min(0),
+      }),
+    )
+    .min(1, 'At least one product must be provided for reordering'),
+  params: z.object({
+    venueId: z.string().cuid('Invalid venue ID format'),
+  }),
+})
+export type ReorderProductsDto = z.infer<typeof ReorderProductsSchema>['body']
 
 export const BulkUpdateProductsSchema = z.object({
   body: z.object({
