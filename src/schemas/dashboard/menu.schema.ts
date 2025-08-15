@@ -4,7 +4,7 @@ import { MenuType, ProductType } from '@prisma/client'
 // Common patterns and constants
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
 const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
-const SKU_REGEX = /^[A-Z0-9_-]+$/ // Alphanumeric, underscores, hyphens
+const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), underscores, hyphens
 const HEX_COLOR_REGEX = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/
 
 // ==========================================
@@ -131,7 +131,7 @@ export const CreateProductSchema = z.object({
     price: z.number().positive('Price must be positive').multipleOf(0.01),
     cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
     taxRate: z.number().min(0).max(1).optional(),
-    imageUrl: z.string().url().optional().nullable(),
+    imageUrl: z.string().url().nullable().optional(),
     displayOrder: z.number().int().min(0).optional(),
     featured: z.boolean().optional(),
     tags: z.array(z.string()).optional(),

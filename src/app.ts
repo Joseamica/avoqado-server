@@ -11,7 +11,6 @@ import AppError from './errors/AppError'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 
 // Import routes
-import productRoutes from './routes/products.routes'
 import publicMenuRoutes from './routes/publicMenu.routes'
 import orderRoutes from './routes/orders.routes'
 
@@ -27,7 +26,6 @@ configureCoreMiddlewares(app)
 setupSwaggerUI(app)
 
 // --- Application Routes ---
-app.use('/api/v1/venues/:venueId/products', productRoutes)
 app.use('/api/v1/venues/:venueId/public-menu', publicMenuRoutes)
 app.use('/api/v1/secure', orderRoutes) // Consider renaming '/secure' if it's for orders specifically
 

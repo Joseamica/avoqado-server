@@ -24,18 +24,34 @@ export const socketAuthenticationMiddleware = (socket: AuthenticatedSocket, next
     // Extract token from different sources (following HTTP middleware pattern)
     let token: string | undefined
 
-    // 1. Check socket handshake auth (from client connection)
-    if (socket.handshake.auth?.token) {
+    // 1. Check cookies first (Dashboard Web) - matching HTTP middleware pattern
+    if (socket.handshake.headers.cookie) {
+      const cookies = socket.handshake.headers.cookie
+        .split(';')
+        .map(cookie => cookie.trim())
+        .reduce((acc, cookie) => {
+          const [key, value] = cookie.split('=')
+          acc[key] = value
+          return acc
+        }, {} as Record<string, string>)
+      
+      if (cookies.accessToken) {
+        token = cookies.accessToken
+      }
+    }
+    
+    // 2. Check socket handshake auth (from client connection)
+    if (!token && socket.handshake.auth?.token) {
       token = socket.handshake.auth.token
     }
     
-    // 2. Check query parameters (fallback for some clients)
-    else if (socket.handshake.query?.token && typeof socket.handshake.query.token === 'string') {
+    // 3. Check query parameters (fallback for some clients)
+    else if (!token && socket.handshake.query?.token && typeof socket.handshake.query.token === 'string') {
       token = socket.handshake.query.token
     }
     
-    // 3. Check authorization header
-    else if (socket.handshake.headers.authorization) {
+    // 4. Check authorization header
+    else if (!token && socket.handshake.headers.authorization) {
       const authHeader = socket.handshake.headers.authorization
       if (authHeader.startsWith('Bearer ')) {
         token = authHeader.substring(7)

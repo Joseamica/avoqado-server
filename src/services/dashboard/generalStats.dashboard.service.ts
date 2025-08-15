@@ -396,3 +396,283 @@ function mapPaymentMethod(method: PaymentMethod): string {
       return 'OTHER'
   }
 }
+
+/**
+ * Get basic metrics data for initial dashboard load (priority data)
+ */
+export async function getBasicMetricsData(venueId: string, filters: GeneralStatsQuery = {}) {
+  // Validate venue exists
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // Set default date range (last 7 days) if not provided
+  const fromDate = filters.fromDate ? new Date(filters.fromDate) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  const toDate = filters.toDate ? new Date(filters.toDate) : new Date()
+
+  // Build where clause for date filtering
+  const dateFilter = {
+    createdAt: {
+      gte: fromDate,
+      lte: toDate,
+    },
+  }
+
+  // Fetch only essential data for basic metrics
+  const payments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      createdAt: {
+        gte: fromDate,
+        lte: toDate,
+      },
+    },
+    select: {
+      id: true,
+      amount: true,
+      method: true,
+      tipAmount: true,
+      status: true,
+      createdAt: true,
+    },
+    orderBy: {
+      createdAt: 'desc',
+    },
+  })
+
+  // Filter out pending payments
+  const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
+
+  // Fetch reviews for star rating
+  const reviews = await prisma.review.findMany({
+    where: {
+      venueId,
+      ...dateFilter,
+    },
+    select: {
+      id: true,
+      overallRating: true,
+      createdAt: true,
+    },
+  })
+
+  // Transform data for basic metrics
+  const transformedPayments = validPayments.map(payment => ({
+    id: payment.id,
+    amount: Number(payment.amount),
+    method: mapPaymentMethod(payment.method),
+    createdAt: payment.createdAt.toISOString(),
+    tips: [
+      {
+        amount: Number(payment.tipAmount),
+      },
+    ],
+  }))
+
+  const transformedReviews = reviews.map(review => ({
+    id: review.id,
+    stars: review.overallRating,
+    createdAt: review.createdAt.toISOString(),
+  }))
+
+  // Generate payment methods data for pie chart
+  const paymentMethodsData = generatePaymentMethodsData(transformedPayments)
+
+  return {
+    payments: transformedPayments,
+    reviews: transformedReviews,
+    paymentMethodsData,
+  }
+}
+
+/**
+ * Get specific chart data based on chart type
+ */
+export async function getChartData(venueId: string, chartType: string, filters: GeneralStatsQuery = {}) {
+  // Validate venue exists
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  const fromDate = filters.fromDate ? new Date(filters.fromDate) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  const toDate = filters.toDate ? new Date(filters.toDate) : new Date()
+
+  const dateFilter = {
+    createdAt: {
+      gte: fromDate,
+      lte: toDate,
+    },
+  }
+
+  switch (chartType) {
+    case 'best-selling-products':
+      return await getBestSellingProductsData(venueId, dateFilter)
+
+    case 'tips-over-time':
+      return await getTipsOverTimeData(venueId, dateFilter)
+
+    case 'sales-by-payment-method':
+      return await getSalesByPaymentMethodData(venueId, dateFilter)
+
+    case 'peak-hours':
+      return await generatePeakHoursData(venueId, fromDate, toDate)
+
+    case 'weekly-trends':
+      return await generateWeeklyTrendsData(venueId, fromDate, toDate)
+
+    default:
+      throw new NotFoundError(`Chart type '${chartType}' not found`)
+  }
+}
+
+/**
+ * Get extended metrics data based on metric type
+ */
+export async function getExtendedMetrics(venueId: string, metricType: string, filters: GeneralStatsQuery = {}) {
+  // Validate venue exists
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  const fromDate = filters.fromDate ? new Date(filters.fromDate) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  const toDate = filters.toDate ? new Date(filters.toDate) : new Date()
+
+  switch (metricType) {
+    case 'table-performance':
+      return await generateTablePerformance(venueId, fromDate, toDate)
+
+    case 'product-profitability':
+      return await generateProductProfitability(venueId, fromDate, toDate)
+
+    case 'staff-performance':
+      return await generateStaffPerformance(venueId, fromDate, toDate)
+
+    case 'prep-times':
+      return {
+        prepTimesByCategory: {
+          entradas: { avg: 8, target: 10 },
+          principales: { avg: 12, target: 15 },
+          postres: { avg: 4, target: 5 },
+          bebidas: { avg: 2, target: 3 },
+        },
+      }
+
+    default:
+      throw new NotFoundError(`Metric type '${metricType}' not found`)
+  }
+}
+
+// Helper functions for chart data
+async function getBestSellingProductsData(venueId: string, dateFilter: any) {
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      ...dateFilter,
+    },
+    include: {
+      items: {
+        include: {
+          product: true,
+        },
+      },
+    },
+  })
+
+  const productsMap = new Map<string, any>()
+
+  orders.forEach(order => {
+    order.items.forEach(item => {
+      if (item.product) {
+        const productKey = `${item.product.id}-${item.product.name}`
+        const existing = productsMap.get(productKey)
+
+        if (existing) {
+          existing.quantity += item.quantity
+        } else {
+          productsMap.set(productKey, {
+            id: item.product.id,
+            name: item.product.name,
+            type: item.product.type || ProductType.OTHER,
+            quantity: item.quantity,
+            price: Number(item.product.price),
+          })
+        }
+      }
+    })
+  })
+
+  const products = Array.from(productsMap.values())
+  return { products }
+}
+
+async function getTipsOverTimeData(venueId: string, dateFilter: any) {
+  const payments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      ...dateFilter,
+    },
+    select: {
+      tipAmount: true,
+      createdAt: true,
+      status: true,
+    },
+  })
+
+  const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
+
+  const transformedPayments = validPayments.map(payment => ({
+    createdAt: payment.createdAt.toISOString(),
+    tips: [{ amount: Number(payment.tipAmount) }],
+  }))
+
+  return { payments: transformedPayments }
+}
+
+async function getSalesByPaymentMethodData(venueId: string, dateFilter: any) {
+  const payments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      ...dateFilter,
+    },
+    select: {
+      amount: true,
+      method: true,
+      createdAt: true,
+      status: true,
+    },
+  })
+
+  const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
+
+  const transformedPayments = validPayments.map(payment => ({
+    amount: Number(payment.amount),
+    method: mapPaymentMethod(payment.method),
+    createdAt: payment.createdAt.toISOString(),
+  }))
+
+  return { payments: transformedPayments }
+}
+
+function generatePaymentMethodsData(payments: any[]) {
+  const methodTotals: Record<string, number> = {}
+
+  payments.forEach(payment => {
+    const methodKey = payment.method || 'OTHER'
+    const method = methodKey === 'CASH' ? 'Efectivo' : methodKey === 'CARD' ? 'Tarjeta' : 'Otro'
+    methodTotals[method] = (methodTotals[method] || 0) + Number(payment.amount)
+  })
+
+  return Object.entries(methodTotals).map(([method, total]) => ({ method, total }))
+}

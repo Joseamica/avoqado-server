@@ -18,6 +18,9 @@ import * as paymentController from '../controllers/dashboard/payment.dashboard.c
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import * as generalStatsController from '../controllers/dashboard/generalStats.dashboard.controller'
+import * as productController from '../controllers/dashboard/product.dashboard.controller'
+import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
+import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import {
   CreateMenuCategorySchema,
   UpdateMenuCategorySchema,
@@ -55,6 +58,14 @@ import {
 } from '../schemas/dashboard/menu.schema'
 import { loginSchema, switchVenueSchema } from '../schemas/dashboard/auth.schema'
 import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
+import {
+  VenueIdParamsSchema as TeamVenueIdParamsSchema,
+  TeamMemberParamsSchema,
+  InvitationParamsSchema,
+  TeamMembersQuerySchema,
+  InviteTeamMemberSchema,
+  UpdateTeamMemberSchema,
+} from '../schemas/dashboard/team.schema'
 
 const router = express.Router()
 
@@ -1022,6 +1033,133 @@ router.get(
   generalStatsController.getGeneralStats,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/basic-metrics:
+ *   get:
+ *     tags: [Dashboard Analytics]
+ *     summary: Get basic metrics for venue dashboard (priority load)
+ *     description: Returns essential metrics for initial dashboard load including sales, reviews, and payment methods
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Basic metrics data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 payments: { type: array }
+ *                 reviews: { type: array }
+ *                 paymentMethodsData: { type: array }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { description: "Venue not found" }
+ */
+router.get(
+  '/venues/:venueId/basic-metrics',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(z.object({ query: GeneralStatsQuerySchema })),
+  generalStatsController.getBasicMetrics,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/charts/{chartType}:
+ *   get:
+ *     tags: [Dashboard Analytics]
+ *     summary: Get specific chart data for progressive loading
+ *     description: Returns data for a specific chart type to enable progressive loading
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: chartType
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [best-selling-products, tips-over-time, sales-by-payment-method, peak-hours, weekly-trends]
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Chart data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { description: "Venue or chart type not found" }
+ */
+router.get(
+  '/venues/:venueId/charts/:chartType',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(z.object({ query: GeneralStatsQuerySchema })),
+  generalStatsController.getChartData,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/metrics/{metricType}:
+ *   get:
+ *     tags: [Dashboard Analytics]
+ *     summary: Get extended metrics data for progressive loading
+ *     description: Returns extended metrics for a specific type to enable progressive loading
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: metricType
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [table-performance, product-profitability, staff-performance, prep-times]
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Extended metrics data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { description: "Venue or metric type not found" }
+ */
+router.get(
+  '/venues/:venueId/metrics/:metricType',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(z.object({ query: GeneralStatsQuerySchema })),
+  generalStatsController.getExtendedMetrics,
+)
+
 // ==========================================
 // MENU SYSTEM ROUTES
 // ==========================================
@@ -1587,5 +1725,613 @@ router.delete(
   validateRequest(RemoveModifierGroupFromProductParamsSchema),
   menuController.removeModifierGroupFromProductHandler,
 )
+
+// ==========================================
+// PRODUCT ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products:
+ *   get:
+ *     tags: [Products]
+ *     summary: List all products for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *     responses:
+ *       200:
+ *         description: A list of products
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       name: { type: string }
+ *                       description: { type: string }
+ *                       price: { type: number }
+ *                       type: { type: string }
+ *                       imageUrl: { type: string }
+ *                       sku: { type: string }
+ *                       active: { type: boolean }
+ *                       displayOrder: { type: integer }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/products',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  validateRequest(VenueIdParamsSchema),
+  productController.getProductsHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products:
+ *   post:
+ *     tags: [Products]
+ *     summary: Create a new product
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CreateProduct'
+ *     responses:
+ *       201:
+ *         description: The created product
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/products',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(CreateProductSchema),
+  productController.createProductHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}:
+ *   get:
+ *     tags: [Products]
+ *     summary: Get a product by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: productId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: The requested product
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/products/:productId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  validateRequest(GetProductParamsSchema),
+  productController.getProductHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}:
+ *   put:
+ *     tags: [Products]
+ *     summary: Update a product
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: productId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateProduct'
+ *     responses:
+ *       200:
+ *         description: The updated product
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/products/:productId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(UpdateProductSchema),
+  productController.updateProductHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}:
+ *   delete:
+ *     tags: [Products]
+ *     summary: Delete a product
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: productId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Product deleted successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/products/:productId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(GetProductParamsSchema),
+  productController.deleteProductHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}/image:
+ *   patch:
+ *     tags: [Products]
+ *     summary: Remove/clear the image from a product
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: productId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Product image removed successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.patch(
+  '/venues/:venueId/products/:productId/image',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(GetProductParamsSchema),
+  productController.deleteProductImageHandler,
+)
+
+// ==========================================
+// TEAM MANAGEMENT ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team:
+ *   get:
+ *     tags: [Team Management]
+ *     summary: List all team members for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: A paginated list of team members
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       firstName: { type: string }
+ *                       lastName: { type: string }
+ *                       email: { type: string }
+ *                       role: { type: string, enum: [OWNER, ADMIN, MANAGER, WAITER, CASHIER, KITCHEN, HOST, VIEWER] }
+ *                       active: { type: boolean }
+ *                       startDate: { type: string, format: date-time }
+ *                       endDate: { type: string, format: date-time, nullable: true }
+ *                       totalSales: { type: number }
+ *                       totalTips: { type: number }
+ *                       totalOrders: { type: integer }
+ *                       averageRating: { type: number }
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     totalCount: { type: integer }
+ *                     pageSize: { type: integer }
+ *                     currentPage: { type: integer }
+ *                     totalPages: { type: integer }
+ *                     hasNextPage: { type: boolean }
+ *                     hasPrevPage: { type: boolean }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/team',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(z.object({ params: TeamVenueIdParamsSchema.shape.params, query: TeamMembersQuerySchema.shape.query })),
+  teamController.getTeamMembers,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team:
+ *   post:
+ *     tags: [Team Management]
+ *     summary: Invite a new team member
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - firstName
+ *               - lastName
+ *               - role
+ *             properties:
+ *               email: { type: string, format: email }
+ *               firstName: { type: string, minLength: 1, maxLength: 50 }
+ *               lastName: { type: string, minLength: 1, maxLength: 50 }
+ *               role: { type: string, enum: [OWNER, ADMIN, MANAGER, WAITER, CASHIER, KITCHEN, HOST, VIEWER] }
+ *               message: { type: string, maxLength: 500 }
+ *     responses:
+ *       201:
+ *         description: Team member invited successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 invitation: { type: object }
+ *                 emailSent: { type: boolean }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/team',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(InviteTeamMemberSchema),
+  teamController.inviteTeamMember,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team/invitations:
+ *   get:
+ *     tags: [Team Management]
+ *     summary: Get pending invitations for venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: List of pending invitations
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/team/invitations',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(TeamVenueIdParamsSchema),
+  teamController.getPendingInvitations,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team/invitations/{invitationId}:
+ *   delete:
+ *     tags: [Team Management]
+ *     summary: Cancel/revoke an invitation
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: invitationId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Invitation cancelled successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/team/invitations/:invitationId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(InvitationParamsSchema),
+  teamController.cancelInvitation,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team/invitations/{invitationId}/resend:
+ *   post:
+ *     tags: [Team Management]
+ *     summary: Resend an invitation (extends expiration and sends new email)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: invitationId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Invitation resent successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/team/invitations/:invitationId/resend',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(InvitationParamsSchema),
+  teamController.resendInvitation,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team/{teamMemberId}:
+ *   get:
+ *     tags: [Team Management]
+ *     summary: Get a specific team member
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: teamMemberId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Team member details
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/team/:teamMemberId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(TeamMemberParamsSchema),
+  teamController.getTeamMember,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team/{teamMemberId}:
+ *   patch:
+ *     tags: [Team Management]
+ *     summary: Update team member role or status
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: teamMemberId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               role: { type: string, enum: [OWNER, ADMIN, MANAGER, WAITER, CASHIER, KITCHEN, HOST, VIEWER] }
+ *               active: { type: boolean }
+ *               pin: { type: string, pattern: '^\d{4,6}$' }
+ *     responses:
+ *       200:
+ *         description: Team member updated successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.patch(
+  '/venues/:venueId/team/:teamMemberId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(UpdateTeamMemberSchema),
+  teamController.updateTeamMember,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/team/{teamMemberId}:
+ *   delete:
+ *     tags: [Team Management]
+ *     summary: Remove team member from venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: teamMemberId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Team member removed successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/team/:teamMemberId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  validateRequest(TeamMemberParamsSchema),
+  teamController.removeTeamMember,
+)
+
+// ==========================================
+// SHIFTS ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v2/dashboard/{venueId}/shifts:
+ *   get:
+ *     tags: [Shifts]
+ *     summary: List all shifts for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+ *       - in: query
+ *         name: staffId
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: startTime
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: endTime
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: A paginated list of shifts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       venueId: { type: string }
+ *                       staffId: { type: string }
+ *                       startTime: { type: string, format: date-time }
+ *                       endTime: { type: string, format: date-time, nullable: true }
+ *                       startingCash: { type: number }
+ *                       endingCash: { type: number, nullable: true }
+ *                       cashDifference: { type: number, nullable: true }
+ *                       totalSales: { type: number }
+ *                       totalTips: { type: number }
+ *                       totalOrders: { type: integer }
+ *                       status: { type: string, enum: [OPEN, CLOSING, CLOSED] }
+ *                       staff: { type: object }
+ *                       venue: { type: object }
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     totalCount: { type: integer }
+ *                     pageSize: { type: integer }
+ *                     currentPage: { type: integer }
+ *                     totalPages: { type: integer }
+ *                     hasNextPage: { type: boolean }
+ *                     hasPrevPage: { type: boolean }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/shifts',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  shiftController.getShifts,
+)
+
+/**
+ * @openapi
+ * /api/v2/dashboard/{venueId}/shifts/{shiftId}:
+ *   get:
+ *     tags: [Shifts]
+ *     summary: Get a shift by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: shiftId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: The requested shift
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/shifts/:shiftId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  shiftController.getShift,
+)
+
+/**
+ * @openapi
+ * /api/v2/dashboard/{venueId}/shifts/summary:
+ *   get:
+ *     tags: [Shifts]
+ *     summary: Get shifts summary with totals and waiter breakdown
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: staffId
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: startTime
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: endTime
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Shift summary data
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/shifts/summary',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  shiftController.getShiftsSummary,
+)
+
 
 export default router

@@ -6,7 +6,7 @@ import { authorizeRole } from '../middlewares/authorizeRole.middleware'
 import { StaffRole } from '@prisma/client' // Assuming StaffRole enum
 import AppError from '../errors/AppError' // For custom errors
 import logger from '../config/logger' // Winston logger
-import { CreateProductSchema } from '@/schemas/dashboard/menu.schema'
+import { CreateProductSchema, UpdateProductSchema, GetProductParamsSchema } from '@/schemas/dashboard/menu.schema'
 
 const router = Router({ mergeParams: true }) // IMPORTANT: mergeParams allows access to parent router params
 
@@ -102,6 +102,74 @@ router.post(
     res.status(201).json({
       message: `Product '${name}' created successfully for venue ${venueId}.`,
       data: newProduct,
+      correlationId: req.correlationId,
+    })
+  },
+)
+
+// PUT /api/v1/venues/:venueId/products/:productId
+// Update an existing product (Protected)
+router.put(
+  '/:productId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN]),
+  validateRequest(UpdateProductSchema),
+  (req: Request, res: Response, next: NextFunction) => {
+    const { venueId, productId } = req.params
+    const updates = req.body
+    logger.info(`User ${req.authContext?.userId} updating product ${productId} in venue ${venueId}`, {
+      correlationId: req.correlationId,
+      authContext: req.authContext,
+    })
+
+    if (!venueId || !productId) {
+      return next(new AppError('Venue ID and Product ID are required to update a product.', 400))
+    }
+
+    const index = mockProducts.findIndex(p => p.venueId === venueId && p.id === productId)
+    if (index === -1) {
+      return next(new AppError(`Product with ID ${productId} not found for venue ${venueId}.`, 404))
+    }
+
+    const updatedProduct = { ...mockProducts[index], ...updates }
+    mockProducts[index] = updatedProduct
+
+    res.status(200).json({
+      message: `Product '${updatedProduct.name}' updated successfully for venue ${venueId}.`,
+      data: updatedProduct,
+      correlationId: req.correlationId,
+    })
+  },
+)
+
+// DELETE /api/v1/venues/:venueId/products/:productId
+// Delete a product (Protected)
+router.delete(
+  '/:productId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN]),
+  validateRequest(GetProductParamsSchema),
+  (req: Request, res: Response, next: NextFunction) => {
+    const { venueId, productId } = req.params
+    logger.info(`User ${req.authContext?.userId} deleting product ${productId} in venue ${venueId}`, {
+      correlationId: req.correlationId,
+      authContext: req.authContext,
+    })
+
+    if (!venueId || !productId) {
+      return next(new AppError('Venue ID and Product ID are required to delete a product.', 400))
+    }
+
+    const index = mockProducts.findIndex(p => p.venueId === venueId && p.id === productId)
+    if (index === -1) {
+      return next(new AppError(`Product with ID ${productId} not found for venue ${venueId}.`, 404))
+    }
+
+    const [removed] = mockProducts.splice(index, 1)
+
+    res.status(200).json({
+      message: `Product '${removed.name}' deleted successfully for venue ${venueId}.`,
+      data: removed,
       correlationId: req.correlationId,
     })
   },
