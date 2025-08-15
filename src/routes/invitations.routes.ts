@@ -1,10 +1,7 @@
 import express from 'express'
 import { validateRequest } from '../middlewares/validation'
 import * as invitationController from '../controllers/invitation.controller'
-import {
-  InvitationTokenParamsSchema,
-  AcceptInvitationSchema,
-} from '../schemas/invitation.schema'
+import { InvitationTokenParamsSchema, AcceptInvitationSchema } from '../schemas/invitation.schema'
 
 const router = express.Router()
 
@@ -40,11 +37,7 @@ const router = express.Router()
  *       410:
  *         description: Invitation has expired
  */
-router.get(
-  '/:token',
-  validateRequest(InvitationTokenParamsSchema),
-  invitationController.getInvitationByToken,
-)
+router.get('/:token', validateRequest(InvitationTokenParamsSchema), invitationController.getInvitationByToken)
 
 /**
  * @openapi
@@ -92,10 +85,6 @@ router.get(
  *       410:
  *         description: Invitation has expired
  */
-router.post(
-  '/:token/accept',
-  validateRequest(AcceptInvitationSchema),
-  invitationController.acceptInvitation,
-)
+router.post('/:token/accept', validateRequest(AcceptInvitationSchema), invitationController.acceptInvitation)
 
 export default router

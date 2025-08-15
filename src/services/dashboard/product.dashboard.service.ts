@@ -41,11 +41,11 @@ export async function getProducts(venueId: string): Promise<Product[]> {
       category: true,
       modifierGroups: {
         include: {
-          group: true
-        }
-      }
+          group: true,
+        },
+      },
     },
-    orderBy: { displayOrder: 'asc' }
+    orderBy: { displayOrder: 'asc' },
   })
 
   return products
@@ -56,9 +56,9 @@ export async function getProducts(venueId: string): Promise<Product[]> {
  */
 export async function getProduct(venueId: string, productId: string): Promise<Product | null> {
   const product = await prisma.product.findFirst({
-    where: { 
-      id: productId, 
-      venueId 
+    where: {
+      id: productId,
+      venueId,
     },
     include: {
       category: true,
@@ -66,13 +66,13 @@ export async function getProduct(venueId: string, productId: string): Promise<Pr
         include: {
           group: {
             include: {
-              modifiers: true
-            }
-          }
+              modifiers: true,
+            },
+          },
         },
-        orderBy: { displayOrder: 'asc' }
-      }
-    }
+        orderBy: { displayOrder: 'asc' },
+      },
+    },
   })
 
   return product
@@ -88,7 +88,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
   const maxOrder = await prisma.product.findFirst({
     where: { venueId },
     orderBy: { displayOrder: 'desc' },
-    select: { displayOrder: true }
+    select: { displayOrder: true },
   })
 
   const displayOrder = (maxOrder?.displayOrder || 0) + 1
@@ -105,21 +105,23 @@ export async function createProduct(venueId: string, productData: CreateProductD
       venueId,
       displayOrder,
       active: true,
-      modifierGroups: modifierGroupIds?.length ? {
-        create: modifierGroupIds.map((groupId, index) => ({
-          groupId,
-          displayOrder: index
-        }))
-      } : undefined
+      modifierGroups: modifierGroupIds?.length
+        ? {
+            create: modifierGroupIds.map((groupId, index) => ({
+              groupId,
+              displayOrder: index,
+            })),
+          }
+        : undefined,
     },
     include: {
       category: true,
       modifierGroups: {
         include: {
-          group: true
-        }
-      }
-    }
+          group: true,
+        },
+      },
+    },
   })
 
   return product
@@ -133,7 +135,7 @@ export async function updateProduct(venueId: string, productId: string, productD
 
   // First check if product exists and belongs to venue
   const existingProduct = await prisma.product.findFirst({
-    where: { id: productId, venueId }
+    where: { id: productId, venueId },
   })
 
   if (!existingProduct) {
@@ -149,9 +151,9 @@ export async function updateProduct(venueId: string, productId: string, productD
       const validModifierGroups = await prisma.modifierGroup.findMany({
         where: {
           id: { in: modifierGroupIds },
-          venueId
+          venueId,
         },
-        select: { id: true }
+        select: { id: true },
       })
 
       const validGroupIds = validModifierGroups.map(group => group.id)
@@ -165,13 +167,13 @@ export async function updateProduct(venueId: string, productId: string, productD
         deleteMany: {}, // Remove all existing relationships
         create: validGroupIds.map((groupId, index) => ({
           groupId,
-          displayOrder: index
-        }))
+          displayOrder: index,
+        })),
       }
     } else {
       // No modifier groups selected, just remove all existing relationships
       updateData.modifierGroups = {
-        deleteMany: {} // Remove all existing relationships
+        deleteMany: {}, // Remove all existing relationships
       }
     }
   }
@@ -183,10 +185,10 @@ export async function updateProduct(venueId: string, productId: string, productD
       category: true,
       modifierGroups: {
         include: {
-          group: true
-        }
-      }
-    }
+          group: true,
+        },
+      },
+    },
   })
 
   return product
@@ -198,7 +200,7 @@ export async function updateProduct(venueId: string, productId: string, productD
 export async function deleteProduct(venueId: string, productId: string): Promise<void> {
   // First check if product exists and belongs to venue
   const existingProduct = await prisma.product.findFirst({
-    where: { id: productId, venueId }
+    where: { id: productId, venueId },
   })
 
   if (!existingProduct) {
@@ -206,7 +208,7 @@ export async function deleteProduct(venueId: string, productId: string): Promise
   }
 
   await prisma.product.delete({
-    where: { id: productId }
+    where: { id: productId },
   })
 }
 
@@ -228,13 +230,13 @@ export async function reorderProducts(venueId: string, reorderData: ReorderProdu
  * Assign a modifier group to a product
  */
 export async function assignModifierGroupToProduct(
-  venueId: string, 
-  productId: string, 
-  data: { modifierGroupId: string; displayOrder?: number }
+  venueId: string,
+  productId: string,
+  data: { modifierGroupId: string; displayOrder?: number },
 ): Promise<any> {
   // Check if product exists and belongs to venue
   const product = await prisma.product.findFirst({
-    where: { id: productId, venueId }
+    where: { id: productId, venueId },
   })
 
   if (!product) {
@@ -243,7 +245,7 @@ export async function assignModifierGroupToProduct(
 
   // Check if modifier group exists and belongs to venue
   const modifierGroup = await prisma.modifierGroup.findFirst({
-    where: { id: data.modifierGroupId, venueId }
+    where: { id: data.modifierGroupId, venueId },
   })
 
   if (!modifierGroup) {
@@ -256,7 +258,7 @@ export async function assignModifierGroupToProduct(
     const maxOrder = await prisma.productModifierGroup.findFirst({
       where: { productId },
       orderBy: { displayOrder: 'desc' },
-      select: { displayOrder: true }
+      select: { displayOrder: true },
     })
     displayOrder = (maxOrder?.displayOrder || 0) + 1
   }
@@ -265,11 +267,11 @@ export async function assignModifierGroupToProduct(
     data: {
       productId,
       groupId: data.modifierGroupId,
-      displayOrder
+      displayOrder,
     },
     include: {
-      group: true
-    }
+      group: true,
+    },
   })
 
   return assignment
@@ -278,14 +280,10 @@ export async function assignModifierGroupToProduct(
 /**
  * Remove a modifier group from a product
  */
-export async function removeModifierGroupFromProduct(
-  venueId: string, 
-  productId: string, 
-  modifierGroupId: string
-): Promise<void> {
+export async function removeModifierGroupFromProduct(venueId: string, productId: string, modifierGroupId: string): Promise<void> {
   // Check if product exists and belongs to venue
   const product = await prisma.product.findFirst({
-    where: { id: productId, venueId }
+    where: { id: productId, venueId },
   })
 
   if (!product) {
@@ -295,7 +293,7 @@ export async function removeModifierGroupFromProduct(
   await prisma.productModifierGroup.deleteMany({
     where: {
       productId,
-      groupId: modifierGroupId
-    }
+      groupId: modifierGroupId,
+    },
   })
 }

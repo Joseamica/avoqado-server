@@ -15,7 +15,7 @@ export const dispatchPosEvent = async (routingKey: string, payload: any) => {
   const keyParts = routingKey.split('.') // ej: ['pos', 'softrestaurant', 'order', 'created']
   if (keyParts.length < 4) return
 
-  const posType = keyParts[1]  // Extract posType from routing key
+  const posType = keyParts[1] // Extract posType from routing key
   const entity = keyParts[2]
   const event = keyParts[3]
 

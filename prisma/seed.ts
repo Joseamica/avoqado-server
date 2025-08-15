@@ -289,10 +289,10 @@ async function main() {
       for (const staffWithRole of createdStaffList) {
         if ([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN].includes(staffWithRole.assignedRole) || Math.random() > 0.3) {
           await prisma.staffVenue.create({
-            data: { 
-              staffId: staffWithRole.id, 
-              venueId: venue.id, 
-              role: staffWithRole.assignedRole, 
+            data: {
+              staffId: staffWithRole.id,
+              venueId: venue.id,
+              role: staffWithRole.assignedRole,
               active: true,
               pin: faker.string.numeric(4), // Set venue-specific PIN
             },

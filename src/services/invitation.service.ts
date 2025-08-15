@@ -78,10 +78,7 @@ export async function getInvitationByToken(token: string) {
   }
 }
 
-export async function acceptInvitation(
-  token: string,
-  userData: AcceptInvitationData
-): Promise<AcceptInvitationResult> {
+export async function acceptInvitation(token: string, userData: AcceptInvitationData): Promise<AcceptInvitationResult> {
   // Start a transaction to ensure data consistency
   return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     // Get and validate invitation
@@ -264,7 +261,7 @@ export async function acceptInvitation(
         where: { staffId: staff.id },
         include: { venue: true },
       })
-      
+
       if (firstVenueAssignment) {
         venueId = firstVenueAssignment.venueId
         role = firstVenueAssignment.role
@@ -272,9 +269,7 @@ export async function acceptInvitation(
     }
 
     const tokens = {
-      accessToken: venueId 
-        ? generateAccessToken(staff.id, staff.organizationId, venueId, role)
-        : null,
+      accessToken: venueId ? generateAccessToken(staff.id, staff.organizationId, venueId, role) : null,
       refreshToken: generateRefreshToken(staff.id, staff.organizationId),
     }
 

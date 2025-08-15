@@ -40,10 +40,7 @@ export const InviteTeamMemberSchema = z.object({
     email: z.string().email('Invalid email format'),
     firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
     lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long'),
-    role: z.nativeEnum(StaffRole).refine(
-      role => role !== StaffRole.SUPERADMIN,
-      'Cannot invite SUPERADMIN role',
-    ),
+    role: z.nativeEnum(StaffRole).refine(role => role !== StaffRole.SUPERADMIN, 'Cannot invite SUPERADMIN role'),
     message: z.string().max(500, 'Message too long').optional(),
   }),
 })
@@ -53,21 +50,16 @@ export const UpdateTeamMemberSchema = z.object({
     venueId: z.string().cuid(),
     teamMemberId: z.string().cuid(),
   }),
-  body: z.object({
-    role: z.nativeEnum(StaffRole).refine(
-      role => role !== StaffRole.SUPERADMIN,
-      'Cannot assign SUPERADMIN role',
-    ).optional(),
-    active: z.boolean().optional(),
-    pin: z.union([
-      z.string().regex(/^\d{4,6}$/, 'PIN must be 4-6 digits'),
-      z.literal(''),
-      z.null(),
-    ]).optional(),
-  }).refine(
-    data => Object.keys(data).length > 0,
-    'At least one field is required for update',
-  ),
+  body: z
+    .object({
+      role: z
+        .nativeEnum(StaffRole)
+        .refine(role => role !== StaffRole.SUPERADMIN, 'Cannot assign SUPERADMIN role')
+        .optional(),
+      active: z.boolean().optional(),
+      pin: z.union([z.string().regex(/^\d{4,6}$/, 'PIN must be 4-6 digits'), z.literal(''), z.null()]).optional(),
+    })
+    .refine(data => Object.keys(data).length > 0, 'At least one field is required for update'),
 })
 
 // Type exports for TypeScript usage

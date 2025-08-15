@@ -528,6 +528,22 @@ export async function getChartData(venueId: string, chartType: string, filters: 
     case 'weekly-trends':
       return await generateWeeklyTrendsData(venueId, fromDate, toDate)
 
+    // Strategic Analytics Chart Types
+    case 'revenue-trends':
+      return await getRevenueTrendsData(venueId, fromDate, toDate)
+
+    case 'aov-trends':
+      return await getAOVTrendsData(venueId, fromDate, toDate)
+
+    case 'order-frequency':
+      return await getOrderFrequencyData(venueId, fromDate, toDate)
+
+    case 'customer-satisfaction':
+      return await getCustomerSatisfactionData(venueId, fromDate, toDate)
+
+    case 'kitchen-performance':
+      return await getKitchenPerformanceData(venueId, fromDate, toDate)
+
     default:
       throw new NotFoundError(`Chart type '${chartType}' not found`)
   }
@@ -568,6 +584,16 @@ export async function getExtendedMetrics(venueId: string, metricType: string, fi
           bebidas: { avg: 2, target: 3 },
         },
       }
+
+    // Strategic Analytics Metric Types
+    case 'staff-efficiency':
+      return { staffPerformance: await generateStaffPerformance(venueId, fromDate, toDate) }
+
+    case 'table-efficiency':
+      return { tablePerformance: await generateTablePerformance(venueId, fromDate, toDate) }
+
+    case 'product-analytics':
+      return { productProfitability: await generateProductProfitability(venueId, fromDate, toDate) }
 
     default:
       throw new NotFoundError(`Metric type '${metricType}' not found`)
@@ -675,4 +701,207 @@ function generatePaymentMethodsData(payments: any[]) {
   })
 
   return Object.entries(methodTotals).map(([method, total]) => ({ method, total }))
+}
+
+// Strategic Analytics Chart Data Functions
+async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Date) {
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      createdAt: {
+        gte: fromDate,
+        lte: toDate,
+      },
+    },
+    include: {
+      payments: true,
+    },
+  })
+
+  const revenueByDate = new Map<string, number>()
+
+  orders.forEach(order => {
+    const dateStr = order.createdAt.toISOString().split('T')[0]
+    const revenue = order.payments
+      .filter(payment => payment.status !== TransactionStatus.PENDING)
+      .reduce((sum, payment) => sum + Number(payment.amount), 0)
+
+    revenueByDate.set(dateStr, (revenueByDate.get(dateStr) || 0) + revenue)
+  })
+
+  const revenue = Array.from(revenueByDate.entries())
+    .map(([date, amount]) => ({
+      date,
+      revenue: amount,
+      formattedDate: new Date(date).toLocaleDateString('es-ES', {
+        month: 'short',
+        day: 'numeric',
+      }),
+    }))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+
+  return { revenue }
+}
+
+async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      createdAt: {
+        gte: fromDate,
+        lte: toDate,
+      },
+    },
+    include: {
+      payments: true,
+    },
+  })
+
+  const aovByDate = new Map<string, { total: number; count: number }>()
+
+  orders.forEach(order => {
+    const dateStr = order.createdAt.toISOString().split('T')[0]
+    const revenue = order.payments
+      .filter(payment => payment.status !== TransactionStatus.PENDING)
+      .reduce((sum, payment) => sum + Number(payment.amount), 0)
+
+    if (revenue > 0) {
+      const existing = aovByDate.get(dateStr) || { total: 0, count: 0 }
+      existing.total += revenue
+      existing.count += 1
+      aovByDate.set(dateStr, existing)
+    }
+  })
+
+  const aov = Array.from(aovByDate.entries())
+    .map(([date, data]) => ({
+      date,
+      aov: data.count > 0 ? data.total / data.count : 0,
+      orderCount: data.count,
+      formattedDate: new Date(date).toLocaleDateString('es-ES', {
+        month: 'short',
+        day: 'numeric',
+      }),
+    }))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+
+  return { aov }
+}
+
+async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Date) {
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      createdAt: {
+        gte: fromDate,
+        lte: toDate,
+      },
+    },
+  })
+
+  const frequencyByHour = new Map<number, number>()
+
+  orders.forEach(order => {
+    const hour = order.createdAt.getHours()
+    frequencyByHour.set(hour, (frequencyByHour.get(hour) || 0) + 1)
+  })
+
+  const frequency = Array.from(frequencyByHour.entries())
+    .map(([hour, count]) => ({
+      hour: `${hour}:00`,
+      orders: count,
+      hourNum: hour,
+    }))
+    .sort((a, b) => a.hourNum - b.hourNum)
+
+  return { frequency }
+}
+
+async function getCustomerSatisfactionData(venueId: string, fromDate: Date, toDate: Date) {
+  const reviews = await prisma.review.findMany({
+    where: {
+      venueId,
+      createdAt: {
+        gte: fromDate,
+        lte: toDate,
+      },
+    },
+  })
+
+  const satisfactionByDate = new Map<string, { totalRating: number; count: number }>()
+
+  reviews.forEach(review => {
+    const dateStr = review.createdAt.toISOString().split('T')[0]
+    const existing = satisfactionByDate.get(dateStr) || { totalRating: 0, count: 0 }
+    existing.totalRating += review.overallRating
+    existing.count += 1
+    satisfactionByDate.set(dateStr, existing)
+  })
+
+  const satisfaction = Array.from(satisfactionByDate.entries())
+    .map(([date, data]) => ({
+      date,
+      rating: data.count > 0 ? (data.totalRating / data.count).toFixed(1) : 0,
+      reviewCount: data.count,
+      formattedDate: new Date(date).toLocaleDateString('es-ES', {
+        month: 'short',
+        day: 'numeric',
+      }),
+    }))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+
+  return { satisfaction }
+}
+
+async function getKitchenPerformanceData(venueId: string, fromDate: Date, toDate: Date) {
+  // Mock kitchen performance data based on product categories
+  // In a real implementation, you would track order preparation times
+  const products = await prisma.product.findMany({
+    where: {
+      venueId,
+    },
+    include: {
+      orderItems: {
+        where: {
+          order: {
+            venueId,
+            createdAt: {
+              gte: fromDate,
+              lte: toDate,
+            },
+          },
+        },
+      },
+    },
+  })
+
+  const performanceByCategory = new Map<string, { orders: number; avgPrepTime: number }>()
+
+  products.forEach(product => {
+    const category = product.type || ProductType.OTHER
+    const orderCount = product.orderItems.length
+
+    if (orderCount > 0) {
+      const existing = performanceByCategory.get(category) || { orders: 0, avgPrepTime: 0 }
+      existing.orders += orderCount
+      // Mock prep time based on category
+      const basePrepTime = category === ProductType.FOOD ? 12 : category === ProductType.BEVERAGE ? 3 : 8
+      existing.avgPrepTime = basePrepTime + Math.floor(Math.random() * 5)
+      performanceByCategory.set(category, existing)
+    }
+  })
+
+  const kitchen = Array.from(performanceByCategory.entries()).map(([category, data]) => {
+    const categoryName = category === ProductType.FOOD ? 'Comida' : category === ProductType.BEVERAGE ? 'Bebidas' : 'Otros'
+    const target = category === ProductType.FOOD ? 15 : category === ProductType.BEVERAGE ? 5 : 10
+
+    return {
+      category: categoryName,
+      prepTime: data.avgPrepTime,
+      target,
+      orders: data.orders,
+    }
+  })
+
+  return { kitchen }
 }

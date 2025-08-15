@@ -283,7 +283,7 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
 
     if (startTime || endTime) {
       reviewWhereClause.createdAt = {}
-      
+
       if (startTime) {
         reviewWhereClause.createdAt.gte = new Date(startTime)
       }

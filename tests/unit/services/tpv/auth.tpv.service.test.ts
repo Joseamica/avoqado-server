@@ -10,22 +10,22 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     staffVenue: {
-      findUnique: jest.fn()
-    }
-  }
+      findUnique: jest.fn(),
+    },
+  },
 }))
 
 jest.mock('../../../../src/security', () => ({
   __esModule: true,
   generateAccessToken: jest.fn(),
-  generateRefreshToken: jest.fn()
+  generateRefreshToken: jest.fn(),
 }))
 
 jest.mock('../../../../src/config/logger', () => ({
   __esModule: true,
   default: {
-    info: jest.fn()
-  }
+    info: jest.fn(),
+  },
 }))
 
 describe('TPV Auth Service - Venue-Specific PIN', () => {
@@ -52,12 +52,12 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       phone: '+1234567890',
       employeeCode: 'EMP001',
       photoUrl: null,
-      active: true
+      active: true,
     },
     venue: {
       id: 'venue-1',
-      name: 'Test Restaurant'
-    }
+      name: 'Test Restaurant',
+    },
   }
 
   beforeEach(() => {

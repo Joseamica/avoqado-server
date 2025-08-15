@@ -104,7 +104,6 @@ module.exports = {
 
   // 🔥 NEW: Better error handling and reporting
   errorOnDeprecated: true,
-  
 
   // 🔥 NEW: Performance and memory settings
   maxWorkers: '50%',

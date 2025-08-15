@@ -7,23 +7,10 @@ import logger from '../../config/logger'
  * Submit a review from digital receipt
  * POST /api/public/receipt/:accessKey/review
  */
-export async function submitReviewFromReceipt(
-  req: Request<{ accessKey: string }>,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
+export async function submitReviewFromReceipt(req: Request<{ accessKey: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { accessKey } = req.params
-    const {
-      overallRating,
-      foodRating,
-      serviceRating,
-      ambienceRating,
-      comment,
-      customerName,
-      customerEmail,
-      customerPhone,
-    } = req.body
+    const { overallRating, foodRating, serviceRating, ambienceRating, comment, customerName, customerEmail, customerPhone } = req.body
 
     // Validate required fields
     if (!overallRating) {
@@ -74,11 +61,7 @@ export async function submitReviewFromReceipt(
  * Check if review can be submitted for receipt
  * GET /api/public/receipt/:accessKey/review/status
  */
-export async function checkReviewStatus(
-  req: Request<{ accessKey: string }>,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
+export async function checkReviewStatus(req: Request<{ accessKey: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { accessKey } = req.params
 
@@ -101,11 +84,7 @@ export async function checkReviewStatus(
  * Get existing review for receipt
  * GET /api/public/receipt/:accessKey/review
  */
-export async function getReviewForReceipt(
-  req: Request<{ accessKey: string }>,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
+export async function getReviewForReceipt(req: Request<{ accessKey: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { accessKey } = req.params
 

@@ -174,7 +174,8 @@ model Staff {
 
   // Authentication
   email    String  @unique
-  password String? // Null for PIN-only users
+  password String? // Null for PIN-only users or OAuth users
+  googleId String? @unique // Google OAuth ID
   // pin      String? // ❌ REMOVER - Se mueve a StaffVenue
 
   // Profile

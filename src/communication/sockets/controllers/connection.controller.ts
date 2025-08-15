@@ -29,12 +29,12 @@ export class ConnectionController {
    */
   public handleConnection(socket: AuthenticatedSocket): void {
     const correlationId = socket.correlationId || uuidv4()
-    
+
     try {
       // If already authenticated (via middleware), register immediately
       if (socket.authContext) {
         this.registerAuthenticatedSocket(socket)
-        
+
         // Emit authentication success
         socket.emit(SocketEventType.AUTHENTICATION_SUCCESS, {
           correlationId,
@@ -42,9 +42,9 @@ export class ConnectionController {
             userId: socket.authContext.userId,
             venueId: socket.authContext.venueId,
             role: socket.authContext.role,
-            orgId: socket.authContext.orgId
+            orgId: socket.authContext.orgId,
           },
-          connectedAt: socket.authContext.connectedAt
+          connectedAt: socket.authContext.connectedAt,
         })
       }
 
@@ -53,24 +53,23 @@ export class ConnectionController {
         socketId: socket.id,
         authenticated: !!socket.authContext,
         userId: socket.authContext?.userId,
-        venueId: socket.authContext?.venueId
+        venueId: socket.authContext?.venueId,
       })
-
     } catch (error) {
       logger.error('Error handling socket connection', {
         correlationId,
         socketId: socket.id,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
 
       // Emit error and disconnect
       socket.emit(SocketEventType.ERROR, {
         correlationId,
         error: 'Connection handling failed',
-        message: 'An error occurred while establishing connection'
+        message: 'An error occurred while establishing connection',
       })
-      
+
       socket.disconnect(true)
     }
   }
@@ -78,18 +77,14 @@ export class ConnectionController {
   /**
    * Handle manual authentication (if not done via middleware)
    */
-  public handleAuthentication(
-    socket: AuthenticatedSocket, 
-    payload: AuthenticationPayload, 
-    callback?: (response: any) => void
-  ): void {
+  public handleAuthentication(socket: AuthenticatedSocket, payload: AuthenticationPayload, callback?: (response: any) => void): void {
     const correlationId = socket.correlationId || uuidv4()
-    
+
     try {
       logger.info('Manual socket authentication attempt', {
         correlationId,
         socketId: socket.id,
-        hasToken: !!payload.token
+        hasToken: !!payload.token,
       })
 
       // If already authenticated, return success
@@ -98,9 +93,9 @@ export class ConnectionController {
           correlationId,
           success: true,
           message: 'Already authenticated',
-          authContext: socket.authContext
+          authContext: socket.authContext,
         }
-        
+
         if (callback) callback(response)
         socket.emit(SocketEventType.AUTHENTICATION_SUCCESS, response)
         return
@@ -111,8 +106,8 @@ export class ConnectionController {
         ...socket,
         handshake: {
           ...socket.handshake,
-          auth: { token: payload.token }
-        }
+          auth: { token: payload.token },
+        },
       } as unknown as AuthenticatedSocket
 
       socketAuthenticationMiddleware(mockSocket, (error?: Error) => {
@@ -120,13 +115,13 @@ export class ConnectionController {
           logger.warn('Manual socket authentication failed', {
             correlationId,
             socketId: socket.id,
-            error: error.message
+            error: error.message,
           })
 
           const response = {
             correlationId,
             success: false,
-            error: error.message
+            error: error.message,
           }
 
           if (callback) callback(response)
@@ -137,17 +132,17 @@ export class ConnectionController {
 
         // Copy auth context from mock socket
         socket.authContext = mockSocket.authContext
-        
+
         if (socket.authContext) {
           this.registerAuthenticatedSocket(socket)
-          
+
           const response = {
             correlationId,
             success: true,
             message: 'Authentication successful',
-            authContext: socket.authContext
+            authContext: socket.authContext,
           }
-          
+
           if (callback) callback(response)
           socket.emit(SocketEventType.AUTHENTICATION_SUCCESS, response)
 
@@ -155,23 +150,22 @@ export class ConnectionController {
             correlationId,
             socketId: socket.id,
             userId: socket.authContext.userId,
-            venueId: socket.authContext.venueId
+            venueId: socket.authContext.venueId,
           })
         }
       })
-
     } catch (error) {
       logger.error('Error during manual socket authentication', {
         correlationId,
         socketId: socket.id,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
 
       const response = {
         correlationId,
         success: false,
-        error: 'Authentication processing failed'
+        error: 'Authentication processing failed',
       }
 
       if (callback) callback(response)
@@ -185,7 +179,7 @@ export class ConnectionController {
    */
   public handleDisconnection(socket: AuthenticatedSocket, reason: string): void {
     const correlationId = socket.correlationId || uuidv4()
-    
+
     try {
       logger.info('Socket disconnection', {
         correlationId,
@@ -193,15 +187,13 @@ export class ConnectionController {
         reason,
         userId: socket.authContext?.userId,
         venueId: socket.authContext?.venueId,
-        duration: socket.authContext ? 
-          Date.now() - socket.authContext.connectedAt.getTime() : 
-          undefined
+        duration: socket.authContext ? Date.now() - socket.authContext.connectedAt.getTime() : undefined,
       })
 
       // Unregister from room manager
       if (socket.authContext) {
         this.roomManager.unregisterSocket(socket)
-        
+
         // Notify venue about user disconnection (optional)
         if (this.broadcastingService && socket.authContext.venueId) {
           this.broadcastingService.broadcastToVenue(
@@ -211,20 +203,19 @@ export class ConnectionController {
               type: 'user_disconnected',
               userId: socket.authContext.userId,
               role: socket.authContext.role,
-              timestamp: new Date()
+              timestamp: new Date(),
             },
-            { excludeSocket: socket.id }
+            { excludeSocket: socket.id },
           )
         }
       }
-
     } catch (error) {
       logger.error('Error handling socket disconnection', {
         correlationId,
         socketId: socket.id,
         reason,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
     }
   }
@@ -241,7 +232,7 @@ export class ConnectionController {
     return {
       totalConnections: stats.totalConnections,
       authenticatedConnections: stats.totalConnections, // All registered are authenticated
-      venueConnections: stats.venueConnections
+      venueConnections: stats.venueConnections,
     }
   }
 
@@ -264,7 +255,7 @@ export class ConnectionController {
 
     // Track activity on events
     const originalEmit = socket.emit.bind(socket)
-    socket.emit = function(...args: Parameters<typeof originalEmit>) {
+    socket.emit = function (...args: Parameters<typeof originalEmit>) {
       updateActivity()
       return originalEmit(...args)
     }
@@ -283,9 +274,9 @@ export class ConnectionController {
           type: 'user_connected',
           userId: socket.authContext.userId,
           role: socket.authContext.role,
-          timestamp: socket.authContext.connectedAt
+          timestamp: socket.authContext.connectedAt,
         },
-        { excludeSocket: socket.id }
+        { excludeSocket: socket.id },
       )
     }
   }

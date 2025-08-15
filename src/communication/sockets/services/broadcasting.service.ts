@@ -1,13 +1,13 @@
 import { Server } from 'socket.io'
 import { StaffRole } from '@prisma/client'
-import { 
-  SocketEventType, 
-  BroadcastOptions, 
-  PaymentEventPayload, 
-  OrderEventPayload, 
+import {
+  SocketEventType,
+  BroadcastOptions,
+  PaymentEventPayload,
+  OrderEventPayload,
   SystemAlertPayload,
   BaseEventPayload,
-  AuthenticatedSocket
+  AuthenticatedSocket,
 } from '../types'
 import { RoomManagerService } from './roomManager.service'
 import logger from '../../../config/logger'
@@ -30,20 +30,15 @@ export class BroadcastingService {
   /**
    * Broadcast to entire venue
    */
-  public broadcastToVenue(
-    venueId: string, 
-    event: SocketEventType, 
-    payload: any, 
-    options: BroadcastOptions = {}
-  ): void {
+  public broadcastToVenue(venueId: string, event: SocketEventType, payload: any, options: BroadcastOptions = {}): void {
     const correlationId = uuidv4()
-    
+
     try {
       const sockets = this.roomManager.getVenueSockets(venueId)
       const filteredSockets = this.roomManager.filterSocketsByOptions(sockets, options)
-      
+
       const enrichedPayload = this.enrichPayload(payload, correlationId, venueId)
-      
+
       // Emit to each filtered socket
       filteredSockets.forEach(socket => {
         socket.emit(event, enrichedPayload)
@@ -55,16 +50,15 @@ export class BroadcastingService {
         event,
         totalSockets: sockets.length,
         filteredSockets: filteredSockets.length,
-        options: this.sanitizeOptions(options)
+        options: this.sanitizeOptions(options),
       })
-
     } catch (error) {
       logger.error('Error broadcasting to venue', {
         correlationId,
         venueId,
         event,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
     }
   }
@@ -72,21 +66,15 @@ export class BroadcastingService {
   /**
    * Broadcast to specific table
    */
-  public broadcastToTable(
-    venueId: string, 
-    tableId: string, 
-    event: SocketEventType, 
-    payload: any, 
-    options: BroadcastOptions = {}
-  ): void {
+  public broadcastToTable(venueId: string, tableId: string, event: SocketEventType, payload: any, options: BroadcastOptions = {}): void {
     const correlationId = uuidv4()
-    
+
     try {
       const sockets = this.roomManager.getTableSockets(venueId, tableId)
       const filteredSockets = this.roomManager.filterSocketsByOptions(sockets, options)
-      
+
       const enrichedPayload = this.enrichPayload(payload, correlationId, venueId)
-      
+
       filteredSockets.forEach(socket => {
         socket.emit(event, enrichedPayload)
       })
@@ -98,9 +86,8 @@ export class BroadcastingService {
         event,
         totalSockets: sockets.length,
         filteredSockets: filteredSockets.length,
-        options: this.sanitizeOptions(options)
+        options: this.sanitizeOptions(options),
       })
-
     } catch (error) {
       logger.error('Error broadcasting to table', {
         correlationId,
@@ -108,7 +95,7 @@ export class BroadcastingService {
         tableId,
         event,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
     }
   }
@@ -116,21 +103,15 @@ export class BroadcastingService {
   /**
    * Broadcast to users with specific role
    */
-  public broadcastToRole(
-    role: StaffRole, 
-    event: SocketEventType, 
-    payload: any, 
-    venueId?: string,
-    options: BroadcastOptions = {}
-  ): void {
+  public broadcastToRole(role: StaffRole, event: SocketEventType, payload: any, venueId?: string, options: BroadcastOptions = {}): void {
     const correlationId = uuidv4()
-    
+
     try {
       const sockets = this.roomManager.getRoleSockets(role, venueId)
       const filteredSockets = this.roomManager.filterSocketsByOptions(sockets, options)
-      
+
       const enrichedPayload = this.enrichPayload(payload, correlationId, venueId)
-      
+
       filteredSockets.forEach(socket => {
         socket.emit(event, enrichedPayload)
       })
@@ -142,9 +123,8 @@ export class BroadcastingService {
         event,
         totalSockets: sockets.length,
         filteredSockets: filteredSockets.length,
-        options: this.sanitizeOptions(options)
+        options: this.sanitizeOptions(options),
       })
-
     } catch (error) {
       logger.error('Error broadcasting to role', {
         correlationId,
@@ -152,7 +132,7 @@ export class BroadcastingService {
         venueId,
         event,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
     }
   }
@@ -160,20 +140,15 @@ export class BroadcastingService {
   /**
    * Broadcast to specific user
    */
-  public broadcastToUser(
-    userId: string, 
-    event: SocketEventType, 
-    payload: any, 
-    options: BroadcastOptions = {}
-  ): void {
+  public broadcastToUser(userId: string, event: SocketEventType, payload: any, options: BroadcastOptions = {}): void {
     const correlationId = uuidv4()
-    
+
     try {
       const sockets = this.roomManager.getUserSockets(userId)
       const filteredSockets = this.roomManager.filterSocketsByOptions(sockets, options)
-      
+
       const enrichedPayload = this.enrichPayload(payload, correlationId)
-      
+
       filteredSockets.forEach(socket => {
         socket.emit(event, enrichedPayload)
       })
@@ -184,16 +159,15 @@ export class BroadcastingService {
         event,
         totalSockets: sockets.length,
         filteredSockets: filteredSockets.length,
-        options: this.sanitizeOptions(options)
+        options: this.sanitizeOptions(options),
       })
-
     } catch (error) {
       logger.error('Error broadcasting to user', {
         correlationId,
         userId,
         event,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
     }
   }
@@ -207,20 +181,20 @@ export class BroadcastingService {
     venueId: string,
     eventType: 'initiated' | 'processing' | 'completed' | 'failed',
     paymentData: Omit<PaymentEventPayload, 'correlationId' | 'timestamp' | 'status'>,
-    options?: BroadcastOptions
+    options?: BroadcastOptions,
   ): void {
     const eventMap = {
       initiated: SocketEventType.PAYMENT_INITIATED,
       processing: SocketEventType.PAYMENT_PROCESSING,
       completed: SocketEventType.PAYMENT_COMPLETED,
-      failed: SocketEventType.PAYMENT_FAILED
+      failed: SocketEventType.PAYMENT_FAILED,
     }
 
     const payload: PaymentEventPayload = {
       ...paymentData,
       correlationId: uuidv4(),
       timestamp: new Date(),
-      status: eventType
+      status: eventType,
     }
 
     // Broadcast to venue (dashboards, admin panels)
@@ -239,19 +213,19 @@ export class BroadcastingService {
     venueId: string,
     eventType: 'created' | 'updated' | 'status_changed' | 'deleted',
     orderData: Omit<OrderEventPayload, 'correlationId' | 'timestamp'>,
-    options?: BroadcastOptions
+    options?: BroadcastOptions,
   ): void {
     const eventMap = {
       created: SocketEventType.ORDER_CREATED,
       updated: SocketEventType.ORDER_UPDATED,
       status_changed: SocketEventType.ORDER_STATUS_CHANGED,
-      deleted: SocketEventType.ORDER_DELETED
+      deleted: SocketEventType.ORDER_DELETED,
     }
 
     const payload: OrderEventPayload = {
       ...orderData,
       correlationId: uuidv4(),
-      timestamp: new Date()
+      timestamp: new Date(),
     }
 
     // Broadcast to venue
@@ -275,12 +249,12 @@ export class BroadcastingService {
   public broadcastSystemAlert(
     venueId: string,
     alertData: Omit<SystemAlertPayload, 'correlationId' | 'timestamp'>,
-    options?: BroadcastOptions
+    options?: BroadcastOptions,
   ): void {
     const payload: SystemAlertPayload = {
       ...alertData,
       correlationId: uuidv4(),
-      timestamp: new Date()
+      timestamp: new Date(),
     }
 
     // If specific roles are targeted, broadcast to those roles
@@ -308,8 +282,8 @@ export class BroadcastingService {
       connectionStats: this.roomManager.getConnectionStats(),
       serverStats: {
         connectedClients: this.io.sockets.sockets.size,
-        rooms: this.io.sockets.adapter.rooms.size
-      }
+        rooms: this.io.sockets.adapter.rooms.size,
+      },
     }
   }
 
@@ -319,7 +293,7 @@ export class BroadcastingService {
     const enriched = {
       ...payload,
       correlationId,
-      timestamp: payload.timestamp || new Date()
+      timestamp: payload.timestamp || new Date(),
     }
 
     if (venueId && !enriched.venueId) {
@@ -334,7 +308,7 @@ export class BroadcastingService {
       excludeSocket: options.excludeSocket ? '***' : undefined,
       includeRoles: options.includeRoles,
       excludeRoles: options.excludeRoles,
-      hasMetadata: !!options.metadata
+      hasMetadata: !!options.metadata,
     }
   }
 }

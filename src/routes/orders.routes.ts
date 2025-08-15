@@ -1,9 +1,9 @@
-import express, { Request, Response, Router } from 'express';
-import { StaffRole } from '@prisma/client'; // StaffRole from Prisma
-import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware';
-import { authorizeRole } from '../middlewares/authorizeRole.middleware'; // Corrected import
+import express, { Request, Response, Router } from 'express'
+import { StaffRole } from '@prisma/client' // StaffRole from Prisma
+import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { authorizeRole } from '../middlewares/authorizeRole.middleware' // Corrected import
 
-const router: Router = express.Router({ mergeParams: true });
+const router: Router = express.Router({ mergeParams: true })
 
 /**
  * @openapi
@@ -154,14 +154,15 @@ const router: Router = express.Router({ mergeParams: true });
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/venues/:venueId/orders',
+router.post(
+  '/venues/:venueId/orders',
   authenticateTokenMiddleware, // Apply authentication middleware
   authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]), // Apply authorization middleware
   (req: Request, res: Response) => {
-    const { venueId } = req.params;
-    const orderData = req.body; // Debería coincidir con CreateOrderRequest
+    const { venueId } = req.params
+    const orderData = req.body // Debería coincidir con CreateOrderRequest
 
-    // Lógica para crear el pedido... 
+    // Lógica para crear el pedido...
     // Validar datos, interactuar con la base de datos, etc.
     // Aquí se asumiría que req.authContext está disponible si los middlewares de auth se ejecutan antes
 
@@ -171,16 +172,16 @@ router.post('/venues/:venueId/orders',
       venueId: venueId,
       tableNumber: orderData.tableNumber,
       status: 'PENDING',
-      totalAmount: orderData.items.reduce((sum: number, item: any) => sum + (item.quantity * 10), 0), // Precio mock
+      totalAmount: orderData.items.reduce((sum: number, item: any) => sum + item.quantity * 10, 0), // Precio mock
       createdAt: new Date().toISOString(),
       items: orderData.items,
-    };
+    }
 
     res.status(201).json({
       message: 'Pedido creado exitosamente.',
       order: mockCreatedOrder,
-    });
-  }
-);
+    })
+  },
+)
 
-export default router;
+export default router

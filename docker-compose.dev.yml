@@ -23,7 +23,7 @@ services:
       JWT_SECRET: dev_jwt_secret
       SESSION_SECRET: dev_session_secret
     ports:
-      - "3000:3000"
+      - '3000:3000'
     volumes:
       - .:/app
       - /app/node_modules

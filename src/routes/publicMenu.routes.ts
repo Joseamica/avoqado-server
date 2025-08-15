@@ -1,6 +1,6 @@
-import express, { Request, Response, Router } from 'express';
+import express, { Request, Response, Router } from 'express'
 
-const router: Router = express.Router({ mergeParams: true });
+const router: Router = express.Router({ mergeParams: true })
 
 /**
  * @openapi
@@ -100,7 +100,7 @@ const router: Router = express.Router({ mergeParams: true });
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get('/venues/:venueId/menu', (req: Request, res: Response) => {
-  const { venueId } = req.params;
+  const { venueId } = req.params
   // Lógica para obtener el menú del venueId
   // Ejemplo de respuesta mock:
   const mockMenu: any = {
@@ -109,21 +109,19 @@ router.get('/venues/:venueId/menu', (req: Request, res: Response) => {
       {
         id: 'cat1',
         name: 'Entradas',
-        items: [
-          { id: 'item1', name: 'Bruschetta', description: 'Pan tostado con tomate y ajo', price: 7.50 },
-        ],
+        items: [{ id: 'item1', name: 'Bruschetta', description: 'Pan tostado con tomate y ajo', price: 7.5 }],
       },
       {
         id: 'cat2',
         name: 'Platos Fuertes',
         items: [
-          { id: 'item2', name: 'Lasaña', description: 'Lasaña de carne tradicional', price: 15.00 },
-          { id: 'item3', name: 'Salmón a la parrilla', description: 'Con vegetales de temporada', price: 18.50 },
+          { id: 'item2', name: 'Lasaña', description: 'Lasaña de carne tradicional', price: 15.0 },
+          { id: 'item3', name: 'Salmón a la parrilla', description: 'Con vegetales de temporada', price: 18.5 },
         ],
       },
     ],
-  };
-  res.status(200).json(mockMenu);
-});
+  }
+  res.status(200).json(mockMenu)
+})
 
-export default router;
+export default router

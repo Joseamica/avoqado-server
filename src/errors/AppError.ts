@@ -64,4 +64,10 @@ export class ForbiddenError extends AppError {
   }
 }
 
+export class ValidationError extends AppError {
+  constructor(message: string = 'Error de validación') {
+    super(message, 422)
+  }
+}
+
 export default AppError // Keep default export for the base class if used elsewhere

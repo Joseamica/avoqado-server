@@ -22,7 +22,7 @@ export class RoomManagerService {
     if (!socket.authContext) {
       logger.error('Cannot register socket without authentication context', {
         socketId: socket.id,
-        correlationId: socket.correlationId
+        correlationId: socket.correlationId,
       })
       return
     }
@@ -34,10 +34,10 @@ export class RoomManagerService {
 
     // Add to venue room
     this.addToVenueRoom(venueId, socketId)
-    
+
     // Add to role room
     this.addToRoleRoom(role, socketId)
-    
+
     // Add to user room
     this.addToUserRoom(userId, socketId)
 
@@ -47,7 +47,7 @@ export class RoomManagerService {
       venueId,
       role,
       correlationId: socket.correlationId,
-      totalConnections: this.connectedSockets.size
+      totalConnections: this.connectedSockets.size,
     })
   }
 
@@ -70,7 +70,7 @@ export class RoomManagerService {
     this.removeFromVenueRoom(venueId, socketId)
     this.removeFromRoleRoom(role, socketId)
     this.removeFromUserRoom(userId, socketId)
-    
+
     // Remove from all table rooms
     this.removeFromAllTableRooms(socketId)
 
@@ -80,7 +80,7 @@ export class RoomManagerService {
       venueId,
       role,
       correlationId: socket.correlationId,
-      remainingConnections: this.connectedSockets.size
+      remainingConnections: this.connectedSockets.size,
     })
   }
 
@@ -97,7 +97,7 @@ export class RoomManagerService {
 
     // Join Socket.io room
     socket.join(this.getTableRoomName(venueId, tableId))
-    
+
     // Track in our collections
     this.addToTableRoom(roomKey, socketId)
 
@@ -106,7 +106,7 @@ export class RoomManagerService {
       venueId,
       tableId,
       roomName: this.getTableRoomName(venueId, tableId),
-      correlationId: socket.correlationId
+      correlationId: socket.correlationId,
     })
   }
 
@@ -123,7 +123,7 @@ export class RoomManagerService {
 
     // Leave Socket.io room
     socket.leave(this.getTableRoomName(venueId, tableId))
-    
+
     // Remove from our collections
     this.removeFromTableRoom(roomKey, socketId)
 
@@ -132,7 +132,7 @@ export class RoomManagerService {
       venueId,
       tableId,
       roomName: this.getTableRoomName(venueId, tableId),
-      correlationId: socket.correlationId
+      correlationId: socket.correlationId,
     })
   }
 
@@ -197,16 +197,12 @@ export class RoomManagerService {
 
     // Include only specific roles
     if (options.includeRoles && options.includeRoles.length > 0) {
-      filteredSockets = filteredSockets.filter(socket => 
-        socket.authContext && options.includeRoles!.includes(socket.authContext.role)
-      )
+      filteredSockets = filteredSockets.filter(socket => socket.authContext && options.includeRoles!.includes(socket.authContext.role))
     }
 
     // Exclude specific roles
     if (options.excludeRoles && options.excludeRoles.length > 0) {
-      filteredSockets = filteredSockets.filter(socket => 
-        socket.authContext && !options.excludeRoles!.includes(socket.authContext.role)
-      )
+      filteredSockets = filteredSockets.filter(socket => socket.authContext && !options.excludeRoles!.includes(socket.authContext.role))
     }
 
     return filteredSockets
@@ -234,7 +230,7 @@ export class RoomManagerService {
     return {
       totalConnections: this.connectedSockets.size,
       venueConnections,
-      roleConnections
+      roleConnections,
     }
   }
 

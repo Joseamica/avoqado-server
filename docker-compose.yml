@@ -11,11 +11,11 @@ services:
       POSTGRES_USER: avoqado_user
       POSTGRES_PASSWORD: avoqado_password
     ports:
-      - "5434:5432"
+      - '5434:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U avoqado_user -d avoqado_db"]
+      test: ['CMD-SHELL', 'pg_isready -U avoqado_user -d avoqado_db']
       interval: 30s
       timeout: 10s
       retries: 5
@@ -27,11 +27,11 @@ services:
     restart: unless-stopped
     command: redis-server --appendonly yes
     ports:
-      - "6379:6379"
+      - '6379:6379'
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 30s
       timeout: 10s
       retries: 5
@@ -45,12 +45,12 @@ services:
       RABBITMQ_DEFAULT_USER: avoqado_user
       RABBITMQ_DEFAULT_PASS: avoqado_password
     ports:
-      - "5672:5672"   # AMQP port
-      - "15672:15672" # Management UI
+      - '5672:5672' # AMQP port
+      - '15672:15672' # Management UI
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      test: ['CMD', 'rabbitmq-diagnostics', 'ping']
       interval: 30s
       timeout: 10s
       retries: 5
@@ -77,11 +77,11 @@ services:
       JWT_SECRET: your_jwt_secret_here
       SESSION_SECRET: your_session_secret_here
     ports:
-      - "3000:3000"
+      - '3000:3000'
     volumes:
       - ./logs:/app/logs
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:3000/health']
       interval: 30s
       timeout: 10s
       retries: 3
@@ -108,7 +108,7 @@ services:
       JWT_SECRET: dev_jwt_secret
       SESSION_SECRET: dev_session_secret
     ports:
-      - "3001:3000"
+      - '3001:3000'
     volumes:
       - .:/app
       - /app/node_modules

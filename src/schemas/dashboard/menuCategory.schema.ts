@@ -1,8 +1,8 @@
-import { z } from 'zod';
-import { StaffRole } from '@prisma/client'; // Assuming StaffRole is in @prisma/client
+import { z } from 'zod'
+import { StaffRole } from '@prisma/client' // Assuming StaffRole is in @prisma/client
 
-const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/; // HH:mm format
-const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const;
+const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
+const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
 
 export const MenuCategorySchema = z.object({
   id: z.string().cuid(),
@@ -21,7 +21,7 @@ export const MenuCategorySchema = z.object({
   availableDays: z.array(z.enum(DAYS_OF_WEEK)).nullable().optional(),
   createdAt: z.date(),
   updatedAt: z.date(),
-});
+})
 
 export const CreateMenuCategorySchema = z.object({
   body: z.object({
@@ -36,22 +36,30 @@ export const CreateMenuCategorySchema = z.object({
     availableFrom: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
     availableUntil: z.union([z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm'), z.null()]).optional(),
     availableDays: z.array(z.enum(DAYS_OF_WEEK)).max(7).optional().nullable(),
-    avoqadoMenus: z.array(z.object({
-      value: z.string().cuid(),
-      label: z.string(),
-      disabled: z.boolean().optional(),
-    })).optional(),
-    avoqadoProducts: z.array(z.object({
-      value: z.string().cuid(),
-      label: z.string(), 
-      disabled: z.boolean().optional(),
-    })).optional(),
+    avoqadoMenus: z
+      .array(
+        z.object({
+          value: z.string().cuid(),
+          label: z.string(),
+          disabled: z.boolean().optional(),
+        }),
+      )
+      .optional(),
+    avoqadoProducts: z
+      .array(
+        z.object({
+          value: z.string().cuid(),
+          label: z.string(),
+          disabled: z.boolean().optional(),
+        }),
+      )
+      .optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
-export type CreateMenuCategoryDto = z.infer<typeof CreateMenuCategorySchema>['body'];
+})
+export type CreateMenuCategoryDto = z.infer<typeof CreateMenuCategorySchema>['body']
 
 export const UpdateMenuCategorySchema = z.object({
   body: CreateMenuCategorySchema.shape.body.partial(), // All fields optional
@@ -59,8 +67,8 @@ export const UpdateMenuCategorySchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     categoryId: z.string().cuid('Invalid category ID format'),
   }),
-});
-export type UpdateMenuCategoryDto = z.infer<typeof UpdateMenuCategorySchema>['body'];
+})
+export type UpdateMenuCategoryDto = z.infer<typeof UpdateMenuCategorySchema>['body']
 
 // Schema for validating just the parameters for routes like GET /:venueId/menucategories/:categoryId
 export const GetMenuCategoryParamsSchema = z.object({
@@ -68,24 +76,26 @@ export const GetMenuCategoryParamsSchema = z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     categoryId: z.string().cuid('Invalid category ID format'),
   }),
-});
+})
 
 // Schema for validating venueId param, used in list or top-level POST for a venue
 export const VenueIdParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
+})
 
 export const ReorderMenuCategoriesSchema = z.object({
-  body: z.array(
-    z.object({
-      id: z.string().cuid(),
-      displayOrder: z.number().int(),
-    })
-  ).min(1, 'At least one category must be provided for reordering'),
+  body: z
+    .array(
+      z.object({
+        id: z.string().cuid(),
+        displayOrder: z.number().int(),
+      }),
+    )
+    .min(1, 'At least one category must be provided for reordering'),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
-});
-export type ReorderMenuCategoriesDto = z.infer<typeof ReorderMenuCategoriesSchema>['body'];
+})
+export type ReorderMenuCategoriesDto = z.infer<typeof ReorderMenuCategoriesSchema>['body']

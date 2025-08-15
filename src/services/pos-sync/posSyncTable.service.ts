@@ -1,7 +1,7 @@
-import prisma from '../../utils/prismaClient';
-import { OriginSystem } from '@prisma/client';
-import logger from '../../config/logger';
-import { PosTablePayload } from '../../types/pos.types';
+import prisma from '../../utils/prismaClient'
+import { OriginSystem } from '@prisma/client'
+import logger from '../../config/logger'
+import { PosTablePayload } from '../../types/pos.types'
 
 /**
  * Finds a Table by its POS externalId for a specific Venue.
@@ -9,11 +9,11 @@ import { PosTablePayload } from '../../types/pos.types';
  */
 export async function getOrCreatePosTable(tablePayload: PosTablePayload, venueId: string): Promise<string | null> {
   if (!tablePayload || !tablePayload.externalId) {
-    logger.warn(`[PosSyncTableService] Invalid Table payload or missing externalId for venue ${venueId}. Cannot synchronize.`);
-    return null;
+    logger.warn(`[PosSyncTableService] Invalid Table payload or missing externalId for venue ${venueId}. Cannot synchronize.`)
+    return null
   }
 
-  logger.info(`[PosSyncTableService] Getting or creating table with externalId: ${tablePayload.externalId} for venue ${venueId}`);
+  logger.info(`[PosSyncTableService] Getting or creating table with externalId: ${tablePayload.externalId} for venue ${venueId}`)
   const table = await prisma.table.upsert({
     where: {
       venueId_number: { venueId, number: tablePayload.externalId }, // Assuming externalId is used as 'number'
@@ -27,6 +27,6 @@ export async function getOrCreatePosTable(tablePayload: PosTablePayload, venueId
       originSystem: OriginSystem.POS_SOFTRESTAURANT,
       // posRawData: tablePayload, // Consider if you want to store the raw payload
     },
-  });
-  return table.id;
+  })
+  return table.id
 }

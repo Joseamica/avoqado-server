@@ -25,7 +25,7 @@ describe('SocketManager Integration Tests', () => {
     sub: 'test-user-123',
     orgId: 'test-org-123',
     venueId: 'test-venue-123',
-    role: StaffRole.WAITER
+    role: StaffRole.WAITER,
   }
 
   const generateTestToken = (payload: any = testUser): string => {
@@ -35,17 +35,17 @@ describe('SocketManager Integration Tests', () => {
   beforeAll(async () => {
     // Create HTTP server
     httpServer = createServer()
-    
+
     // Initialize socket manager
     socketManager = new SocketManager({
       authentication: { required: true, timeout: 5000 },
-      rateLimit: { windowMs: 60000, maxConnections: 100, maxEventsPerWindow: 50 }
+      rateLimit: { windowMs: 60000, maxConnections: 100, maxEventsPerWindow: 50 },
     })
-    
+
     const io = socketManager.initialize(httpServer)
-    
+
     // Start server
-    await new Promise<void>((resolve) => {
+    await new Promise<void>(resolve => {
       httpServer.listen(() => {
         httpServerAddr = httpServer.address() as AddressInfo
         resolve()
@@ -72,11 +72,11 @@ describe('SocketManager Integration Tests', () => {
   })
 
   describe('Authentication', () => {
-    it('should authenticate with valid JWT token', (done) => {
+    it('should authenticate with valid JWT token', done => {
       const token = generateTestToken()
-      
+
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token }
+        auth: { token },
       })
 
       clientSocket.on('connect', () => {
@@ -84,21 +84,21 @@ describe('SocketManager Integration Tests', () => {
         done()
       })
 
-      clientSocket.on(SocketEventType.AUTHENTICATION_SUCCESS, (data) => {
+      clientSocket.on(SocketEventType.AUTHENTICATION_SUCCESS, data => {
         expect(data.success).toBe(true)
         expect(data.authContext.userId).toBe(testUser.sub)
         expect(data.authContext.venueId).toBe(testUser.venueId)
         expect(data.authContext.role).toBe(testUser.role)
       })
 
-      clientSocket.on('connect_error', (error) => {
+      clientSocket.on('connect_error', error => {
         done(error)
       })
     })
 
-    it('should reject invalid JWT token', (done) => {
+    it('should reject invalid JWT token', done => {
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token: 'invalid-token' }
+        auth: { token: 'invalid-token' },
       })
 
       clientSocket.on('connect', () => {
@@ -106,37 +106,33 @@ describe('SocketManager Integration Tests', () => {
         done(new Error('Should not connect with invalid token'))
       })
 
-      clientSocket.on('connect_error', (error) => {
+      clientSocket.on('connect_error', error => {
         expect(error.message).toContain('authentication')
         done()
       })
     })
 
-    it('should reject connection without token', (done) => {
+    it('should reject connection without token', done => {
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`)
 
       clientSocket.on('connect', () => {
         done(new Error('Should not connect without token'))
       })
 
-      clientSocket.on('connect_error', (error) => {
+      clientSocket.on('connect_error', error => {
         expect(error.message).toContain('authentication')
         done()
       })
     })
 
-    it('should handle expired token', (done) => {
-      const expiredToken = jwt.sign(
-        testUser, 
-        ACCESS_TOKEN_SECRET || 'test-secret', 
-        { expiresIn: '-1h' }
-      )
-      
+    it('should handle expired token', done => {
+      const expiredToken = jwt.sign(testUser, ACCESS_TOKEN_SECRET || 'test-secret', { expiresIn: '-1h' })
+
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token: expiredToken }
+        auth: { token: expiredToken },
       })
 
-      clientSocket.on('connect_error', (error) => {
+      clientSocket.on('connect_error', error => {
         expect(error.message).toContain('expired')
         done()
       })
@@ -144,84 +140,100 @@ describe('SocketManager Integration Tests', () => {
   })
 
   describe('Room Management', () => {
-    beforeEach((done) => {
+    beforeEach(done => {
       const token = generateTestToken()
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token }
+        auth: { token },
       })
       clientSocket.on('connect', done)
     })
 
-    it('should join table room successfully', (done) => {
+    it('should join table room successfully', done => {
       const tableId = 'table-001'
-      
-      clientSocket.emit(SocketEventType.JOIN_ROOM, {
-        roomType: 'table',
-        venueId: testUser.venueId,
-        tableId
-      }, (response: any) => {
-        expect(response.success).toBe(true)
-        expect(response.tableId).toBe(tableId)
-        expect(response.roomType).toBe('table')
-        done()
-      })
-    })
 
-    it('should leave table room successfully', (done) => {
-      const tableId = 'table-001'
-      
-      // First join the room
-      clientSocket.emit(SocketEventType.JOIN_ROOM, {
-        roomType: 'table',
-        venueId: testUser.venueId,
-        tableId
-      }, () => {
-        // Then leave the room
-        clientSocket.emit(SocketEventType.LEAVE_ROOM, {
+      clientSocket.emit(
+        SocketEventType.JOIN_ROOM,
+        {
           roomType: 'table',
           venueId: testUser.venueId,
-          tableId
-        }, (response: any) => {
+          tableId,
+        },
+        (response: any) => {
           expect(response.success).toBe(true)
           expect(response.tableId).toBe(tableId)
+          expect(response.roomType).toBe('table')
           done()
-        })
-      })
+        },
+      )
     })
 
-    it('should reject room access to different venue', (done) => {
-      clientSocket.emit(SocketEventType.JOIN_ROOM, {
-        roomType: 'table',
-        venueId: 'different-venue-id',
-        tableId: 'table-001'
-      }, (response: any) => {
-        expect(response.success).toBe(false)
-        expect(response.error).toContain('Access denied')
-        done()
-      })
+    it('should leave table room successfully', done => {
+      const tableId = 'table-001'
+
+      // First join the room
+      clientSocket.emit(
+        SocketEventType.JOIN_ROOM,
+        {
+          roomType: 'table',
+          venueId: testUser.venueId,
+          tableId,
+        },
+        () => {
+          // Then leave the room
+          clientSocket.emit(
+            SocketEventType.LEAVE_ROOM,
+            {
+              roomType: 'table',
+              venueId: testUser.venueId,
+              tableId,
+            },
+            (response: any) => {
+              expect(response.success).toBe(true)
+              expect(response.tableId).toBe(tableId)
+              done()
+            },
+          )
+        },
+      )
+    })
+
+    it('should reject room access to different venue', done => {
+      clientSocket.emit(
+        SocketEventType.JOIN_ROOM,
+        {
+          roomType: 'table',
+          venueId: 'different-venue-id',
+          tableId: 'table-001',
+        },
+        (response: any) => {
+          expect(response.success).toBe(false)
+          expect(response.error).toContain('Access denied')
+          done()
+        },
+      )
     })
   })
 
   describe('Business Events', () => {
-    beforeEach((done) => {
+    beforeEach(done => {
       const token = generateTestToken()
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token }
+        auth: { token },
       })
       clientSocket.on('connect', done)
     })
 
-    it('should broadcast payment event successfully', (done) => {
+    it('should broadcast payment event successfully', done => {
       const paymentData = {
         paymentId: 'payment-123',
-        amount: 100.50,
+        amount: 100.5,
         currency: 'USD',
         venueId: testUser.venueId,
-        orderId: 'order-123'
+        orderId: 'order-123',
       }
 
       // Listen for the broadcasted event
-      clientSocket.on(SocketEventType.PAYMENT_COMPLETED, (data) => {
+      clientSocket.on(SocketEventType.PAYMENT_COMPLETED, data => {
         expect(data.paymentId).toBe(paymentData.paymentId)
         expect(data.amount).toBe(paymentData.amount)
         expect(data.status).toBe('completed')
@@ -232,16 +244,16 @@ describe('SocketManager Integration Tests', () => {
       clientSocket.emit(SocketEventType.PAYMENT_COMPLETED, paymentData)
     })
 
-    it('should broadcast order event successfully', (done) => {
+    it('should broadcast order event successfully', done => {
       const orderData = {
         orderId: 'order-456',
         venueId: testUser.venueId,
         tableId: 'table-001',
         items: [{ id: 'item-1', name: 'Test Item', quantity: 1 }],
-        total: 25.99
+        total: 25.99,
       }
 
-      clientSocket.on(SocketEventType.ORDER_CREATED, (data) => {
+      clientSocket.on(SocketEventType.ORDER_CREATED, data => {
         expect(data.orderId).toBe(orderData.orderId)
         expect(data.total).toBe(orderData.total)
         expect(data.items).toHaveLength(1)
@@ -251,29 +263,33 @@ describe('SocketManager Integration Tests', () => {
       clientSocket.emit(SocketEventType.ORDER_CREATED, orderData)
     })
 
-    it('should reject unauthorized payment event', (done) => {
+    it('should reject unauthorized payment event', done => {
       // Create token with role that doesn't have payment permissions
       const customerToken = generateTestToken({
         ...testUser,
-        role: StaffRole.VIEWER
+        role: StaffRole.VIEWER,
       })
 
       const customerSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token: customerToken }
+        auth: { token: customerToken },
       })
 
       customerSocket.on('connect', () => {
-        customerSocket.emit(SocketEventType.PAYMENT_COMPLETED, {
-          paymentId: 'payment-123',
-          amount: 100,
-          currency: 'USD',
-          venueId: testUser.venueId
-        }, (response: any) => {
-          expect(response.success).toBe(false)
-          expect(response.error).toContain('not authorized')
-          customerSocket.disconnect()
-          done()
-        })
+        customerSocket.emit(
+          SocketEventType.PAYMENT_COMPLETED,
+          {
+            paymentId: 'payment-123',
+            amount: 100,
+            currency: 'USD',
+            venueId: testUser.venueId,
+          },
+          (response: any) => {
+            expect(response.success).toBe(false)
+            expect(response.error).toContain('not authorized')
+            customerSocket.disconnect()
+            done()
+          },
+        )
       })
     })
   })
@@ -285,22 +301,22 @@ describe('SocketManager Integration Tests', () => {
       // Connect first client
       const token1 = generateTestToken()
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token: token1 }
+        auth: { token: token1 },
       })
 
       // Connect second client
       const token2 = generateTestToken({
         ...testUser,
-        sub: 'test-user-456'
+        sub: 'test-user-456',
       })
       clientSocket2 = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token: token2 }
+        auth: { token: token2 },
       })
 
       // Wait for both to connect
       await Promise.all([
         new Promise<void>(resolve => clientSocket.on('connect', () => resolve())),
-        new Promise<void>(resolve => clientSocket2.on('connect', () => resolve()))
+        new Promise<void>(resolve => clientSocket2.on('connect', () => resolve())),
       ])
     })
 
@@ -310,16 +326,16 @@ describe('SocketManager Integration Tests', () => {
       }
     })
 
-    it('should broadcast venue-wide events', (done) => {
+    it('should broadcast venue-wide events', done => {
       const alertData = {
         level: 'info',
         title: 'Test Alert',
         message: 'This is a test alert',
-        venueId: testUser.venueId
+        venueId: testUser.venueId,
       }
 
       // Second client should receive the alert
-      clientSocket2.on(SocketEventType.SYSTEM_ALERT, (data) => {
+      clientSocket2.on(SocketEventType.SYSTEM_ALERT, data => {
         expect(data.title).toBe(alertData.title)
         expect(data.level).toBe(alertData.level)
         done()
@@ -328,11 +344,11 @@ describe('SocketManager Integration Tests', () => {
       // First client sends the alert (with manager role)
       const managerToken = generateTestToken({
         ...testUser,
-        role: StaffRole.MANAGER
+        role: StaffRole.MANAGER,
       })
-      
+
       const managerSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token: managerToken }
+        auth: { token: managerToken },
       })
 
       managerSocket.on('connect', () => {
@@ -340,12 +356,12 @@ describe('SocketManager Integration Tests', () => {
       })
     })
 
-    it('should not broadcast to excluded socket', (done) => {
+    it('should not broadcast to excluded socket', done => {
       const alertData = {
         level: 'info',
         title: 'Test Alert',
         message: 'This is a test alert',
-        venueId: testUser.venueId
+        venueId: testUser.venueId,
       }
 
       let alertReceived = false
@@ -357,12 +373,7 @@ describe('SocketManager Integration Tests', () => {
 
       // Use socket manager directly to test exclusion
       setTimeout(() => {
-        socketManager.broadcastToVenue(
-          testUser.venueId,
-          SocketEventType.SYSTEM_ALERT,
-          alertData,
-          { excludeSocket: clientSocket.id }
-        )
+        socketManager.broadcastToVenue(testUser.venueId, SocketEventType.SYSTEM_ALERT, alertData, { excludeSocket: clientSocket.id })
 
         // Wait and check that first client didn't receive the event
         setTimeout(() => {
@@ -374,42 +385,50 @@ describe('SocketManager Integration Tests', () => {
   })
 
   describe('Error Handling', () => {
-    beforeEach((done) => {
+    beforeEach(done => {
       const token = generateTestToken()
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token }
+        auth: { token },
       })
       clientSocket.on('connect', done)
     })
 
-    it('should handle invalid event payload', (done) => {
-      clientSocket.emit(SocketEventType.PAYMENT_INITIATED, {
-        // Missing required fields
-        venueId: testUser.venueId
-      }, (response: any) => {
-        expect(response.success).toBe(false)
-        expect(response.error).toContain('required')
-        done()
-      })
+    it('should handle invalid event payload', done => {
+      clientSocket.emit(
+        SocketEventType.PAYMENT_INITIATED,
+        {
+          // Missing required fields
+          venueId: testUser.venueId,
+        },
+        (response: any) => {
+          expect(response.success).toBe(false)
+          expect(response.error).toContain('required')
+          done()
+        },
+      )
     })
 
-    it('should handle malformed room join request', (done) => {
-      clientSocket.emit(SocketEventType.JOIN_ROOM, {
-        // Missing required fields
-        roomType: 'table'
-      }, (response: any) => {
-        expect(response.success).toBe(false)
-        expect(response.error).toContain('required')
-        done()
-      })
+    it('should handle malformed room join request', done => {
+      clientSocket.emit(
+        SocketEventType.JOIN_ROOM,
+        {
+          // Missing required fields
+          roomType: 'table',
+        },
+        (response: any) => {
+          expect(response.success).toBe(false)
+          expect(response.error).toContain('required')
+          done()
+        },
+      )
     })
   })
 
   describe('Rate Limiting', () => {
-    beforeEach((done) => {
+    beforeEach(done => {
       const token = generateTestToken()
       clientSocket = ioClient(`http://localhost:${httpServerAddr.port}`, {
-        auth: { token }
+        auth: { token },
       })
       clientSocket.on('connect', done)
     })
@@ -423,14 +442,14 @@ describe('SocketManager Integration Tests', () => {
         for (let i = 0; i < maxConnections + 5; i++) {
           const token = generateTestToken({
             ...testUser,
-            sub: `user-${i}`
+            sub: `user-${i}`,
           })
-          
+
           const socket = ioClient(`http://localhost:${httpServerAddr.port}`, {
             auth: { token },
-            timeout: 1000
+            timeout: 1000,
           })
-          
+
           connections.push(socket)
         }
 
@@ -440,7 +459,6 @@ describe('SocketManager Integration Tests', () => {
         // Some connections should be rejected due to rate limiting
         const connectedSockets = connections.filter(s => s.connected)
         expect(connectedSockets.length).toBeLessThan(maxConnections + 5)
-
       } finally {
         // Clean up all connections
         connections.forEach(socket => socket.disconnect())
@@ -451,7 +469,7 @@ describe('SocketManager Integration Tests', () => {
   describe('Connection Statistics', () => {
     it('should track connection statistics', () => {
       const stats = socketManager.getServerStats()
-      
+
       expect(stats).toBeDefined()
       expect(stats?.connectionStats).toBeDefined()
       expect(typeof stats?.connectionStats.totalConnections).toBe('number')

@@ -1,11 +1,11 @@
 // tests/unit/controllers/dashboard/auth.dashboard.controller.test.ts
-import { Request, Response, NextFunction } from 'express';
-import { Session, SessionData } from 'express-session';
+import { Request, Response, NextFunction } from 'express'
+import { Session, SessionData } from 'express-session'
 import jwt from 'jsonwebtoken'
 import prisma from '../../../../src/utils/prismaClient' // Adjusted path
-import * as authController from '../../../../src/controllers/dashboard/auth.dashboard.controller';
-import * as authService from '../../../../src/services/dashboard/auth.service'; // Import for direct mock reference
-import { AuthenticationError } from '../../../../src/errors/AppError';
+import * as authController from '../../../../src/controllers/dashboard/auth.dashboard.controller'
+import * as authService from '../../../../src/services/dashboard/auth.service' // Import for direct mock reference
+import { AuthenticationError } from '../../../../src/errors/AppError'
 import { StaffRole } from '@prisma/client'
 import '../../../../src/types/express.d.ts' // Import the type declarations
 
@@ -32,13 +32,13 @@ const mockRequest = (
   params: Partial<Request['params']> = {},
   query: Partial<Request['query']> = {},
   sessionArgs: Partial<SessionData> = {},
-  authContextArgs?: Request['authContext'] // Make it optional
+  authContextArgs?: Request['authContext'], // Make it optional
 ): Partial<Request> => {
-  const req: Partial<Request> = {};
-  req.cookies = cookiesArgs;
-  req.body = body;
-  req.params = params as Request['params'];
-  req.query = query;
+  const req: Partial<Request> = {}
+  req.cookies = cookiesArgs
+  req.body = body
+  req.params = params as Request['params']
+  req.query = query
   req.session = {
     id: 'mock-session-id',
     cookie: {
@@ -50,7 +50,7 @@ const mockRequest = (
       secure: false, // Adjust if testing over HTTPS
       sameSite: false, // Adjust based on your needs
       domain: undefined,
-      encode: (val: string) => val 
+      encode: (val: string) => val,
     } as any, // Cast to any for simplicity, or import CookieOptions and fill properly
     destroy: jest.fn(),
     regenerate: jest.fn(),
@@ -58,16 +58,16 @@ const mockRequest = (
     save: jest.fn(),
     touch: jest.fn(),
     resetMaxAge: jest.fn(), // Added missing resetMaxAge
-    ...sessionArgs
-  } as Session;
+    ...sessionArgs,
+  } as Session
   if (authContextArgs) {
-    req.authContext = authContextArgs;
+    req.authContext = authContextArgs
   }
   return req
 }
 
 const mockResponse = (): Partial<Response> => {
-  const res: Partial<Response> = {};
+  const res: Partial<Response> = {}
   res.status = jest.fn().mockReturnValue(res)
   res.json = jest.fn().mockReturnValue(res)
   res.clearCookie = jest.fn().mockReturnValue(res)
@@ -88,7 +88,7 @@ describe('Dashboard Auth Controller', () => {
       const req = mockRequest()
       const res = mockResponse()
 
-      await authController.getAuthStatus(req as Request, res as Response);
+      await authController.getAuthStatus(req as Request, res as Response)
 
       expect(res.status).toHaveBeenCalledWith(200)
       expect(res.json).toHaveBeenCalledWith({
@@ -104,7 +104,7 @@ describe('Dashboard Auth Controller', () => {
         throw new Error('jwt malformed')
       })
 
-      await authController.getAuthStatus(req as Request, res as Response);
+      await authController.getAuthStatus(req as Request, res as Response)
 
       expect(jwt.verify).toHaveBeenCalledWith('invalid-token', process.env.ACCESS_TOKEN_SECRET!)
       // Since jwt.verify throws, it should be caught and handled
@@ -122,7 +122,7 @@ describe('Dashboard Auth Controller', () => {
       ;(jwt.verify as jest.Mock).mockReturnValue({ sub: 'user-id-not-found' })
       ;(prisma.staff.findUnique as jest.Mock).mockResolvedValue(null)
 
-      await authController.getAuthStatus(req as Request, res as Response);
+      await authController.getAuthStatus(req as Request, res as Response)
       expect(prisma.staff.findUnique).toHaveBeenCalledWith({
         where: { id: 'user-id-not-found' },
         select: expect.any(Object), // Check controller for exact select fields
@@ -173,7 +173,7 @@ describe('Dashboard Auth Controller', () => {
         },
       ])
 
-      await authController.getAuthStatus(req as Request, res as Response);
+      await authController.getAuthStatus(req as Request, res as Response)
 
       expect(jwt.verify).toHaveBeenCalledWith('valid-token', process.env.ACCESS_TOKEN_SECRET!)
       expect(prisma.staff.findUnique).toHaveBeenCalledWith({
@@ -202,213 +202,213 @@ describe('Dashboard Auth Controller', () => {
 
   // TODO: Add describe blocks for dashboardLoginController, dashboardLogoutController, switchVenueController
   describe('dashboardLoginController', () => {
-  const mockLoginData = { email: 'test@example.com', password: 'password123' };
-  const mockStaff = {
-    id: 'staff-123',
-    firstName: 'Test',
-    lastName: 'User',
-    email: 'test@example.com',
-    // ... other relevant staff properties
-  };
-  const mockAccessToken = 'mock-access-token';
-  const mockRefreshToken = 'mock-refresh-token';
+    const mockLoginData = { email: 'test@example.com', password: 'password123' }
+    const mockStaff = {
+      id: 'staff-123',
+      firstName: 'Test',
+      lastName: 'User',
+      email: 'test@example.com',
+      // ... other relevant staff properties
+    }
+    const mockAccessToken = 'mock-access-token'
+    const mockRefreshToken = 'mock-refresh-token'
 
-  beforeEach(() => {
-    jest.clearAllMocks();
-    // Mock NODE_ENV for cookie secure flag
-    process.env.NODE_ENV = 'development'; // Default to development
-  });
+    beforeEach(() => {
+      jest.clearAllMocks()
+      // Mock NODE_ENV for cookie secure flag
+      process.env.NODE_ENV = 'development' // Default to development
+    })
 
-  it('should successfully login, set cookies, and return user data', async () => {
-    const req = mockRequest({}, mockLoginData);
-    const res = mockResponse();
-    const next = mockNext;
+    it('should successfully login, set cookies, and return user data', async () => {
+      const req = mockRequest({}, mockLoginData)
+      const res = mockResponse()
+      const next = mockNext
 
-    (authService.loginStaff as jest.Mock).mockResolvedValue({
-      accessToken: mockAccessToken,
-      refreshToken: mockRefreshToken,
-      staff: mockStaff,
-    });
+      ;(authService.loginStaff as jest.Mock).mockResolvedValue({
+        accessToken: mockAccessToken,
+        refreshToken: mockRefreshToken,
+        staff: mockStaff,
+      })
 
-    await authController.dashboardLoginController(req as Request, res as Response, next);
+      await authController.dashboardLoginController(req as Request, res as Response, next)
 
-    expect(authService.loginStaff).toHaveBeenCalledWith(mockLoginData);
-    expect(res.cookie).toHaveBeenCalledTimes(2);
-    expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockAccessToken, {
-      httpOnly: true,
-      secure: false, // NODE_ENV = 'development'
-      sameSite: 'strict',
-      maxAge: 15 * 60 * 1000,
-      path: '/',
-    });
-    expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockRefreshToken, {
-      httpOnly: true,
-      secure: false, // NODE_ENV = 'development'
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: '/',
-    });
-    expect(res.status).toHaveBeenCalledWith(200);
-    expect(res.json).toHaveBeenCalledWith({
-      success: true,
-      message: 'Login exitoso',
-      user: mockStaff,
-    });
-    expect(next).not.toHaveBeenCalled();
-  });
+      expect(authService.loginStaff).toHaveBeenCalledWith(mockLoginData)
+      expect(res.cookie).toHaveBeenCalledTimes(2)
+      expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockAccessToken, {
+        httpOnly: true,
+        secure: false, // NODE_ENV = 'development'
+        sameSite: 'strict',
+        maxAge: 15 * 60 * 1000,
+        path: '/',
+      })
+      expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockRefreshToken, {
+        httpOnly: true,
+        secure: false, // NODE_ENV = 'development'
+        sameSite: 'strict',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        path: '/',
+      })
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.json).toHaveBeenCalledWith({
+        success: true,
+        message: 'Login exitoso',
+        user: mockStaff,
+      })
+      expect(next).not.toHaveBeenCalled()
+    })
 
-  it('should set secure cookies if NODE_ENV is production', async () => {
-    process.env.NODE_ENV = 'production';
-    const req = mockRequest({}, mockLoginData);
-    const res = mockResponse();
-    const next = mockNext;
+    it('should set secure cookies if NODE_ENV is production', async () => {
+      process.env.NODE_ENV = 'production'
+      const req = mockRequest({}, mockLoginData)
+      const res = mockResponse()
+      const next = mockNext
 
-    (authService.loginStaff as jest.Mock).mockResolvedValue({
-      accessToken: mockAccessToken,
-      refreshToken: mockRefreshToken,
-      staff: mockStaff,
-    });
+      ;(authService.loginStaff as jest.Mock).mockResolvedValue({
+        accessToken: mockAccessToken,
+        refreshToken: mockRefreshToken,
+        staff: mockStaff,
+      })
 
-    await authController.dashboardLoginController(req as Request, res as Response, next);
+      await authController.dashboardLoginController(req as Request, res as Response, next)
 
-    expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockAccessToken, expect.objectContaining({ secure: true }));
-    expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockRefreshToken, expect.objectContaining({ secure: true }));
-  });
+      expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockAccessToken, expect.objectContaining({ secure: true }))
+      expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockRefreshToken, expect.objectContaining({ secure: true }))
+    })
 
-  it('should call next with error if authService.loginStaff throws AuthenticationError', async () => {
-    const req = mockRequest({}, mockLoginData);
-    const res = mockResponse();
-    const next = mockNext;
-    const authError = new AuthenticationError('Invalid credentials');
+    it('should call next with error if authService.loginStaff throws AuthenticationError', async () => {
+      const req = mockRequest({}, mockLoginData)
+      const res = mockResponse()
+      const next = mockNext
+      const authError = new AuthenticationError('Invalid credentials')
 
-    (authService.loginStaff as jest.Mock).mockRejectedValue(authError);
+      ;(authService.loginStaff as jest.Mock).mockRejectedValue(authError)
 
-    await authController.dashboardLoginController(req as Request, res as Response, next);
+      await authController.dashboardLoginController(req as Request, res as Response, next)
 
-    expect(authService.loginStaff).toHaveBeenCalledWith(mockLoginData);
-    expect(res.cookie).not.toHaveBeenCalled();
-    expect(res.status).not.toHaveBeenCalled();
-    expect(res.json).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalledWith(authError);
-  });
+      expect(authService.loginStaff).toHaveBeenCalledWith(mockLoginData)
+      expect(res.cookie).not.toHaveBeenCalled()
+      expect(res.status).not.toHaveBeenCalled()
+      expect(res.json).not.toHaveBeenCalled()
+      expect(next).toHaveBeenCalledWith(authError)
+    })
 
-  it('should call next with error if authService.loginStaff throws an unexpected error', async () => {
-    const req = mockRequest({}, mockLoginData);
-    const res = mockResponse();
-    const next = mockNext;
-    const unexpectedError = new Error('Something went wrong');
+    it('should call next with error if authService.loginStaff throws an unexpected error', async () => {
+      const req = mockRequest({}, mockLoginData)
+      const res = mockResponse()
+      const next = mockNext
+      const unexpectedError = new Error('Something went wrong')
 
-    (authService.loginStaff as jest.Mock).mockRejectedValue(unexpectedError);
+      ;(authService.loginStaff as jest.Mock).mockRejectedValue(unexpectedError)
 
-    await authController.dashboardLoginController(req as Request, res as Response, next);
+      await authController.dashboardLoginController(req as Request, res as Response, next)
 
-    expect(next).toHaveBeenCalledWith(unexpectedError);
-  });
-})
+      expect(next).toHaveBeenCalledWith(unexpectedError)
+    })
+  })
   describe('dashboardLogoutController', () => {
     beforeEach(() => {
-      jest.clearAllMocks();
-      process.env.NODE_ENV = 'development'; // Default to development
+      jest.clearAllMocks()
+      process.env.NODE_ENV = 'development' // Default to development
       // Mock console.error for tests that might trigger it
-      jest.spyOn(console, 'error').mockImplementation(() => {});
-    });
+      jest.spyOn(console, 'error').mockImplementation(() => {})
+    })
 
     afterEach(() => {
       // Restore console.error mock
-      (console.error as jest.Mock).mockRestore();
-    });
+      ;(console.error as jest.Mock).mockRestore()
+    })
 
     it('should clear cookies, destroy session, and return success', async () => {
-      const mockSessionDestroy = jest.fn(callback => callback());
-      const req = mockRequest();
-      req.session = { destroy: mockSessionDestroy } as any; // Mock session object
-      const res = mockResponse();
+      const mockSessionDestroy = jest.fn(callback => callback())
+      const req = mockRequest()
+      req.session = { destroy: mockSessionDestroy } as any // Mock session object
+      const res = mockResponse()
 
-      await authController.dashboardLogoutController(req as Request, res as Response);
+      await authController.dashboardLogoutController(req as Request, res as Response)
 
-      expect(res.clearCookie).toHaveBeenCalledTimes(2);
+      expect(res.clearCookie).toHaveBeenCalledTimes(2)
       expect(res.clearCookie).toHaveBeenNthCalledWith(1, 'accessToken', {
         httpOnly: true,
         secure: false,
         sameSite: 'strict',
         path: '/',
-      });
+      })
       expect(res.clearCookie).toHaveBeenNthCalledWith(2, 'refreshToken', {
         httpOnly: true,
         secure: false,
         sameSite: 'strict',
         path: '/',
-      });
-      expect(mockSessionDestroy).toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' });
-    });
+      })
+      expect(mockSessionDestroy).toHaveBeenCalled()
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
+    })
 
     it('should clear cookies and return success if no session exists', async () => {
-      const req = mockRequest();
-      req.session = undefined; // No session
-      const res = mockResponse();
+      const req = mockRequest()
+      req.session = undefined // No session
+      const res = mockResponse()
 
-      await authController.dashboardLogoutController(req as Request, res as Response);
+      await authController.dashboardLogoutController(req as Request, res as Response)
 
-      expect(res.clearCookie).toHaveBeenCalledTimes(2);
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' });
-    });
+      expect(res.clearCookie).toHaveBeenCalledTimes(2)
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
+    })
 
     it('should log an error if session destruction fails but still return success', async () => {
-      const mockSessionError = new Error('Session destruction failed');
-      const mockSessionDestroy = jest.fn(callback => callback(mockSessionError));
-      const req = mockRequest();
-      req.session = { destroy: mockSessionDestroy } as any;
-      const res = mockResponse();
+      const mockSessionError = new Error('Session destruction failed')
+      const mockSessionDestroy = jest.fn(callback => callback(mockSessionError))
+      const req = mockRequest()
+      req.session = { destroy: mockSessionDestroy } as any
+      const res = mockResponse()
 
-      await authController.dashboardLogoutController(req as Request, res as Response);
+      await authController.dashboardLogoutController(req as Request, res as Response)
 
-      expect(mockSessionDestroy).toHaveBeenCalled();
-      expect(console.error).toHaveBeenCalledWith('Error al destruir sesión:', mockSessionError);
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' });
-    });
+      expect(mockSessionDestroy).toHaveBeenCalled()
+      expect(console.error).toHaveBeenCalledWith('Error al destruir sesión:', mockSessionError)
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
+    })
 
     it('should set secure cookies if NODE_ENV is production', async () => {
-      process.env.NODE_ENV = 'production';
-      const req = mockRequest();
-      req.session = { destroy: jest.fn(cb => cb()) } as any;
-      const res = mockResponse();
+      process.env.NODE_ENV = 'production'
+      const req = mockRequest()
+      req.session = { destroy: jest.fn(cb => cb()) } as any
+      const res = mockResponse()
 
-      await authController.dashboardLogoutController(req as Request, res as Response);
+      await authController.dashboardLogoutController(req as Request, res as Response)
 
-      expect(res.clearCookie).toHaveBeenNthCalledWith(1, 'accessToken', expect.objectContaining({ secure: true }));
-      expect(res.clearCookie).toHaveBeenNthCalledWith(2, 'refreshToken', expect.objectContaining({ secure: true }));
-    });
+      expect(res.clearCookie).toHaveBeenNthCalledWith(1, 'accessToken', expect.objectContaining({ secure: true }))
+      expect(res.clearCookie).toHaveBeenNthCalledWith(2, 'refreshToken', expect.objectContaining({ secure: true }))
+    })
 
     it('should throw AuthenticationError if res.clearCookie fails', async () => {
-      const req = mockRequest();
-      const res = mockResponse();
-      const clearCookieError = new Error('Failed to clear cookie');
-      (res.clearCookie as jest.Mock).mockImplementation(() => {
-        throw clearCookieError;
-      });
+      const req = mockRequest()
+      const res = mockResponse()
+      const clearCookieError = new Error('Failed to clear cookie')
+      ;(res.clearCookie as jest.Mock).mockImplementation(() => {
+        throw clearCookieError
+      })
 
       // We need to wrap the async call in a try/catch or expect.toThrow for async errors
       await expect(authController.dashboardLogoutController(req as Request, res as Response)).rejects.toThrow(
-        new AuthenticationError('Error al cerrar sesión')
-      );
-      expect(console.error).toHaveBeenCalledWith('Error en logout:', clearCookieError);
-    });
-  });
+        new AuthenticationError('Error al cerrar sesión'),
+      )
+      expect(console.error).toHaveBeenCalledWith('Error en logout:', clearCookieError)
+    })
+  })
   describe('switchVenueController', () => {
-    const mockTargetVenueId = 'venue-target-456';
-    const mockStaffId = 'staff-123';
-    const mockOrgId = 'org-789';
-    const mockNewAccessToken = 'new-access-token';
-    const mockNewRefreshToken = 'new-refresh-token';
+    const mockTargetVenueId = 'venue-target-456'
+    const mockStaffId = 'staff-123'
+    const mockOrgId = 'org-789'
+    const mockNewAccessToken = 'new-access-token'
+    const mockNewRefreshToken = 'new-refresh-token'
 
     beforeEach(() => {
-      jest.clearAllMocks();
-      process.env.NODE_ENV = 'development';
-    });
+      jest.clearAllMocks()
+      process.env.NODE_ENV = 'development'
+    })
 
     it('should switch venue, set new cookies, and return success', async () => {
       const req = mockRequest(
@@ -417,61 +417,61 @@ describe('Dashboard Auth Controller', () => {
         {},
         {},
         {},
-        { userId: mockStaffId, orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' }
-      );
-      const res = mockResponse();
-      const next = mockNext;
+        { userId: mockStaffId, orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' },
+      )
+      const res = mockResponse()
+      const next = mockNext
 
-      (authService.switchVenueForStaff as jest.Mock).mockResolvedValue({
+      ;(authService.switchVenueForStaff as jest.Mock).mockResolvedValue({
         accessToken: mockNewAccessToken,
         refreshToken: mockNewRefreshToken,
-      });
+      })
 
-      await authController.switchVenueController(req as Request, res as Response, next);
+      await authController.switchVenueController(req as Request, res as Response, next)
 
-      expect(authService.switchVenueForStaff).toHaveBeenCalledWith(mockStaffId, mockOrgId, mockTargetVenueId);
-      expect(res.cookie).toHaveBeenCalledTimes(2);
+      expect(authService.switchVenueForStaff).toHaveBeenCalledWith(mockStaffId, mockOrgId, mockTargetVenueId)
+      expect(res.cookie).toHaveBeenCalledTimes(2)
       expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockNewAccessToken, {
         httpOnly: true,
         secure: false,
         sameSite: 'strict',
         maxAge: 15 * 60 * 1000,
         path: '/',
-      });
+      })
       expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockNewRefreshToken, {
         httpOnly: true,
         secure: false,
         sameSite: 'strict',
         maxAge: 7 * 24 * 60 * 60 * 1000,
         path: '/',
-      });
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Contexto de venue actualizado correctamente.' });
-      expect(next).not.toHaveBeenCalled();
-    });
+      })
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Contexto de venue actualizado correctamente.' })
+      expect(next).not.toHaveBeenCalled()
+    })
 
     it('should set secure cookies if NODE_ENV is production', async () => {
-      process.env.NODE_ENV = 'production';
+      process.env.NODE_ENV = 'production'
       const req = mockRequest(
         {},
         { venueId: mockTargetVenueId },
         {},
         {},
         {},
-        { userId: mockStaffId, orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' }
-      );
-      const res = mockResponse();
-      const next = mockNext;
+        { userId: mockStaffId, orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' },
+      )
+      const res = mockResponse()
+      const next = mockNext
 
-      (authService.switchVenueForStaff as jest.Mock).mockResolvedValue({
+      ;(authService.switchVenueForStaff as jest.Mock).mockResolvedValue({
         accessToken: mockNewAccessToken,
         refreshToken: mockNewRefreshToken,
-      });
+      })
 
-      await authController.switchVenueController(req as Request, res as Response, next);
-      expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockNewAccessToken, expect.objectContaining({ secure: true }));
-      expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockNewRefreshToken, expect.objectContaining({ secure: true }));
-    });
+      await authController.switchVenueController(req as Request, res as Response, next)
+      expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockNewAccessToken, expect.objectContaining({ secure: true }))
+      expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockNewRefreshToken, expect.objectContaining({ secure: true }))
+    })
 
     it('should call next with AuthenticationError if authContext.userId is missing', async () => {
       const req = mockRequest(
@@ -480,16 +480,16 @@ describe('Dashboard Auth Controller', () => {
         {},
         {},
         {},
-        { orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' } as any // No userId, cast to any to satisfy partial type
-      );
-      const res = mockResponse();
-      const next = mockNext;
+        { orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' } as any, // No userId, cast to any to satisfy partial type
+      )
+      const res = mockResponse()
+      const next = mockNext
 
-      await authController.switchVenueController(req as Request, res as Response, next);
+      await authController.switchVenueController(req as Request, res as Response, next)
 
-      expect(next).toHaveBeenCalledWith(new AuthenticationError('Contexto de autenticación inválido.'));
-      expect(authService.switchVenueForStaff).not.toHaveBeenCalled();
-    });
+      expect(next).toHaveBeenCalledWith(new AuthenticationError('Contexto de autenticación inválido.'))
+      expect(authService.switchVenueForStaff).not.toHaveBeenCalled()
+    })
 
     it('should call next with AuthenticationError if authContext.orgId is missing', async () => {
       const req = mockRequest(
@@ -498,35 +498,35 @@ describe('Dashboard Auth Controller', () => {
         {},
         {},
         {},
-        { userId: mockStaffId, role: StaffRole.WAITER, venueId: 'venue-current-123' } as any // No orgId, cast to any
-      );
-      const res = mockResponse();
-      const next = mockNext;
+        { userId: mockStaffId, role: StaffRole.WAITER, venueId: 'venue-current-123' } as any, // No orgId, cast to any
+      )
+      const res = mockResponse()
+      const next = mockNext
 
-      await authController.switchVenueController(req as Request, res as Response, next);
+      await authController.switchVenueController(req as Request, res as Response, next)
 
-      expect(next).toHaveBeenCalledWith(new AuthenticationError('Contexto de autenticación inválido.'));
-      expect(authService.switchVenueForStaff).not.toHaveBeenCalled();
-    });
+      expect(next).toHaveBeenCalledWith(new AuthenticationError('Contexto de autenticación inválido.'))
+      expect(authService.switchVenueForStaff).not.toHaveBeenCalled()
+    })
 
     it('should call next with error if authService.switchVenueForStaff throws an error', async () => {
-      const serviceError = new Error('Service failed');
+      const serviceError = new Error('Service failed')
       const req = mockRequest(
         {},
         { venueId: mockTargetVenueId },
         {},
         {},
         {},
-        { userId: mockStaffId, orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' }
-      );
-      const res = mockResponse();
-      const next = mockNext;
+        { userId: mockStaffId, orgId: mockOrgId, role: StaffRole.WAITER, venueId: 'venue-current-123' },
+      )
+      const res = mockResponse()
+      const next = mockNext
 
-      (authService.switchVenueForStaff as jest.Mock).mockRejectedValue(serviceError);
+      ;(authService.switchVenueForStaff as jest.Mock).mockRejectedValue(serviceError)
 
-      await authController.switchVenueController(req as Request, res as Response, next);
+      await authController.switchVenueController(req as Request, res as Response, next)
 
-      expect(next).toHaveBeenCalledWith(serviceError);
-    });
-  });
+      expect(next).toHaveBeenCalledWith(serviceError)
+    })
+  })
 })

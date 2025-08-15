@@ -13,6 +13,7 @@ import { createVenueSchema, listVenuesQuerySchema } from '../schemas/dashboard/v
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
+import * as googleOAuthController from '../controllers/dashboard/googleOAuth.controller'
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
@@ -21,6 +22,7 @@ import * as generalStatsController from '../controllers/dashboard/generalStats.d
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
+import superadminRoutes from './dashboard/superadmin.routes'
 import {
   CreateMenuCategorySchema,
   UpdateMenuCategorySchema,
@@ -68,6 +70,9 @@ import {
 } from '../schemas/dashboard/team.schema'
 
 const router = express.Router()
+
+// Superadmin routes - highest priority
+router.use('/superadmin', superadminRoutes)
 
 /**
  * @openapi
@@ -373,6 +378,120 @@ router.post(
   validateRequest(switchVenueSchema), // Validate the request body (changed from validateRequestMiddleware)
   authDashboardController.switchVenueController,
 )
+
+// --- Google OAuth Routes ---
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/google/url:
+ *   get:
+ *     tags: [Authentication]
+ *     summary: Get Google OAuth authorization URL
+ *     description: Returns the Google OAuth URL for client-side redirection
+ *     responses:
+ *       200:
+ *         description: Google OAuth URL retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 authUrl:
+ *                   type: string
+ */
+router.get('/auth/google/url', googleOAuthController.getGoogleAuthUrl)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/google/callback:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Handle Google OAuth callback
+ *     description: Process Google OAuth authorization code or ID token to authenticate user
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               code:
+ *                 type: string
+ *                 description: Google OAuth authorization code
+ *               token:
+ *                 type: string
+ *                 description: Google ID token (alternative to code)
+ *     responses:
+ *       200:
+ *         description: Successfully authenticated with Google
+ *         headers:
+ *           Set-Cookie:
+ *             schema:
+ *               type: string
+ *               example: accessToken=abc123; Path=/; HttpOnly; SameSite=Strict
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 user:
+ *                   type: object
+ *                 isNewUser:
+ *                   type: boolean
+ *       400:
+ *         description: Invalid request or missing parameters
+ *       403:
+ *         description: No invitation found for this email
+ *       401:
+ *         description: Authentication failed
+ */
+router.post('/auth/google/callback', googleOAuthController.googleOAuthCallback)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/google/check-invitation:
+ *   get:
+ *     tags: [Authentication]
+ *     summary: Check if email has pending invitation
+ *     description: Checks if the provided email has a pending team invitation
+ *     parameters:
+ *       - name: email
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: email
+ *     responses:
+ *       200:
+ *         description: Invitation status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 hasInvitation:
+ *                   type: boolean
+ *                 venue:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     name:
+ *                       type: string
+ *                     slug:
+ *                       type: string
+ *                 role:
+ *                   type: string
+ *                   enum: [ADMIN, MANAGER, WAITER, CASHIER]
+ */
+router.get('/auth/google/check-invitation', googleOAuthController.checkInvitation)
 
 // --- Menu Category Routes ---
 
@@ -2332,6 +2451,5 @@ router.get(
   authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
   shiftController.getShiftsSummary,
 )
-
 
 export default router

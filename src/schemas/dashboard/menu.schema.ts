@@ -266,7 +266,6 @@ export const UpdateModifierGroupSchema = z.object({
 })
 export type UpdateModifierGroupDto = z.infer<typeof UpdateModifierGroupSchema>['body']
 
-
 export const ModifierSchema = z.object({
   id: z.string().cuid(),
   groupId: z.string().cuid(),
@@ -297,7 +296,6 @@ export const UpdateModifierSchema = z.object({
   }),
 })
 export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
-
 
 // ==========================================
 // ASSIGNMENT SCHEMAS

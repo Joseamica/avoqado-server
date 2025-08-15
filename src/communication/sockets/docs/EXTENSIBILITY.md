@@ -1,6 +1,7 @@
 # Socket.io Extensibility Guide
 
-This guide demonstrates how to easily add new real-time events to the Avoqado Socket.io system while maintaining consistency with existing patterns.
+This guide demonstrates how to easily add new real-time events to the Avoqado Socket.io system while maintaining consistency with existing
+patterns.
 
 ## Overview
 
@@ -20,17 +21,17 @@ Add new event types to `src/communication/sockets/types/index.ts`:
 ```typescript
 export enum SocketEventType {
   // Existing events...
-  
+
   // New events for menu management
   MENU_ITEM_ADDED = 'menu_item_added',
   MENU_ITEM_UPDATED = 'menu_item_updated',
   MENU_ITEM_REMOVED = 'menu_item_removed',
-  
+
   // New events for table management
   TABLE_RESERVED = 'table_reserved',
   TABLE_FREED = 'table_freed',
   TABLE_REQUEST_ASSISTANCE = 'table_request_assistance',
-  
+
   // New events for kitchen operations
   KITCHEN_ORDER_READY = 'kitchen_order_ready',
   KITCHEN_DELAY_ALERT = 'kitchen_delay_alert',
@@ -99,10 +100,10 @@ public handleMenuEvent(
 
     // Authorize menu event access (only managers/admins)
     this.authorizeMenuAccess(socket, eventType)
-    
+
     // Validate payload
     this.validateMenuPayload(payload)
-    
+
     // Verify venue access
     if (payload.venueId !== socket.authContext.venueId) {
       const error = new UnauthorizedError('Access denied to specified venue')
@@ -164,7 +165,7 @@ public handleMenuEvent(
 
 private authorizeMenuAccess(socket: AuthenticatedSocket, eventType: string): void {
   const { role } = socket.authContext!
-  
+
   // Only managers and admins can modify menu
   const allowedRoles = [StaffRole.ADMIN, StaffRole.MANAGER]
 
@@ -295,7 +296,7 @@ export function broadcastMenuEvent(
   venueId: string,
   eventType: 'added' | 'updated' | 'removed',
   menuData: any,
-  options?: BroadcastOptions
+  options?: BroadcastOptions,
 ): void {
   const broadcastingService = socketManager.getServer()?.['broadcastingService']
   if (broadcastingService) {
@@ -304,7 +305,7 @@ export function broadcastMenuEvent(
     logger.warn('Socket broadcasting service not available for menu event', {
       venueId,
       eventType,
-      menuItemId: menuData.menuItemId
+      menuItemId: menuData.menuItemId,
     })
   }
 }
@@ -318,17 +319,14 @@ export function broadcastMenuEvent(
 // src/services/dashboard/menu.dashboard.service.ts
 import { broadcastMenuEvent } from '../../communication/sockets'
 
-export async function createMenuItem(
-  venueId: string, 
-  menuItemData: CreateMenuItemData
-): Promise<MenuItem> {
+export async function createMenuItem(venueId: string, menuItemData: CreateMenuItemData): Promise<MenuItem> {
   try {
     // Create menu item in database
     const menuItem = await prisma.menuItem.create({
       data: {
         ...menuItemData,
-        venueId
-      }
+        venueId,
+      },
     })
 
     // Broadcast real-time event
@@ -338,15 +336,14 @@ export async function createMenuItem(
       price: menuItem.price,
       categoryId: menuItem.categoryId,
       availability: menuItem.available,
-      venueId
+      venueId,
     })
 
     return menuItem
-
   } catch (error) {
     logger.error('Error creating menu item', {
       venueId,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
     throw error
   }
@@ -359,11 +356,7 @@ export async function createMenuItem(
 // src/services/dashboard/table.dashboard.service.ts
 import { broadcastTableEvent } from '../../communication/sockets'
 
-export async function requestTableAssistance(
-  venueId: string,
-  tableId: string,
-  customerId?: string
-): Promise<void> {
+export async function requestTableAssistance(venueId: string, tableId: string, customerId?: string): Promise<void> {
   try {
     // Log assistance request
     await prisma.tableAssistanceRequest.create({
@@ -371,8 +364,8 @@ export async function requestTableAssistance(
         tableId,
         venueId,
         customerId,
-        requestedAt: new Date()
-      }
+        requestedAt: new Date(),
+      },
     })
 
     // Broadcast real-time event
@@ -382,15 +375,14 @@ export async function requestTableAssistance(
       venueId,
       metadata: {
         requestedBy: customerId ? 'customer' : 'system',
-        priority: 'normal'
-      }
+        priority: 'normal',
+      },
     })
-
   } catch (error) {
     logger.error('Error requesting table assistance', {
       venueId,
       tableId,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
     throw error
   }

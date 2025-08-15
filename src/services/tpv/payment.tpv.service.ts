@@ -475,10 +475,10 @@ export async function recordOrderPayment(
   let digitalReceipt = null
   try {
     digitalReceipt = await generateDigitalReceipt(payment.id)
-    logger.info('Digital receipt generated for payment', { 
-      paymentId: payment.id, 
+    logger.info('Digital receipt generated for payment', {
+      paymentId: payment.id,
       receiptId: digitalReceipt.id,
-      accessKey: digitalReceipt.accessKey 
+      accessKey: digitalReceipt.accessKey,
     })
   } catch (error) {
     logger.error('Failed to generate digital receipt', { paymentId: payment.id, error })
@@ -493,11 +493,13 @@ export async function recordOrderPayment(
   // Add digital receipt info to payment response
   return {
     ...payment,
-    digitalReceipt: digitalReceipt ? {
-      id: digitalReceipt.id,
-      accessKey: digitalReceipt.accessKey,
-      receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`
-    } : null
+    digitalReceipt: digitalReceipt
+      ? {
+          id: digitalReceipt.id,
+          accessKey: digitalReceipt.accessKey,
+          receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`,
+        }
+      : null,
   }
 }
 
@@ -633,10 +635,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   let digitalReceipt = null
   try {
     digitalReceipt = await generateDigitalReceipt(payment.id)
-    logger.info('Digital receipt generated for fast payment', { 
-      paymentId: payment.id, 
+    logger.info('Digital receipt generated for fast payment', {
+      paymentId: payment.id,
       receiptId: digitalReceipt.id,
-      accessKey: digitalReceipt.accessKey 
+      accessKey: digitalReceipt.accessKey,
     })
   } catch (error) {
     logger.error('Failed to generate digital receipt for fast payment', { paymentId: payment.id, error })
@@ -651,10 +653,12 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Add digital receipt info to payment response
   return {
     ...payment,
-    digitalReceipt: digitalReceipt ? {
-      id: digitalReceipt.id,
-      accessKey: digitalReceipt.accessKey,
-      receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`
-    } : null
+    digitalReceipt: digitalReceipt
+      ? {
+          id: digitalReceipt.id,
+          accessKey: digitalReceipt.accessKey,
+          receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`,
+        }
+      : null,
   }
 }

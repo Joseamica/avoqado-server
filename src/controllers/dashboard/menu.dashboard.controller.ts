@@ -431,11 +431,7 @@ export async function createMenuHandler(
   }
 }
 
-export async function getMenuHandler(
-  req: Request<{ venueId: string; menuId: string }>,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getMenuHandler(req: Request<{ venueId: string; menuId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, menuId } = req.params
     const orgId = req.authContext?.orgId

@@ -36,7 +36,7 @@ const posSyncStaffService = {
     if (existingStaffVenue) {
       // --- LÓGICA DE ACTUALIZACIÓN ---
       logger.info(`[PosSyncService] Actualizando Staff existente con externalId: ${staffPayload.externalId}`)
-      
+
       // Update staff basic info (no PIN - PIN is venue-specific now)
       const updatedStaff = await prisma.staff.update({
         where: {
@@ -46,7 +46,7 @@ const posSyncStaffService = {
           firstName: staffPayload.name || `Mesero ${staffPayload.externalId}`,
         },
       })
-      
+
       // Update venue-specific PIN on StaffVenue
       if (staffPayload.pin) {
         await prisma.staffVenue.update({
@@ -58,7 +58,7 @@ const posSyncStaffService = {
           },
         })
       }
-      
+
       return updatedStaff.id
     } else {
       // --- LÓGICA DE CREACIÓN ---

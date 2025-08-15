@@ -189,13 +189,13 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
             }
           : undefined,
       },
-      items: paymentData.order.items.map((item) => ({
+      items: paymentData.order.items.map(item => ({
         id: item.id,
         productName: item.product.name,
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
-        modifiers: item.modifiers.map((modifier) => ({
+        modifiers: item.modifiers.map(modifier => ({
           name: modifier.modifier.name,
           quantity: modifier.quantity,
           price: Number(modifier.price),

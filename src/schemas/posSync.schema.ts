@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod'
 
 export const posOrderPayloadSchema = z.object({
   externalId: z.string().min(1, 'External ID is required'),
@@ -11,4 +11,4 @@ export const posOrderPayloadSchema = z.object({
   posRawData: z.any(),
   discountAmount: z.number().min(0, 'Discount amount cannot be negative'),
   tipAmount: z.number().min(0, 'Tip amount cannot be negative'),
-});
+})

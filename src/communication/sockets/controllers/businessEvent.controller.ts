@@ -1,11 +1,5 @@
 import { StaffRole } from '@prisma/client'
-import { 
-  AuthenticatedSocket, 
-  SocketEventType, 
-  PaymentEventPayload, 
-  OrderEventPayload, 
-  SystemAlertPayload 
-} from '../types'
+import { AuthenticatedSocket, SocketEventType, PaymentEventPayload, OrderEventPayload, SystemAlertPayload } from '../types'
 import { RoomManagerService } from '../services/roomManager.service'
 import { BroadcastingService } from '../services/broadcasting.service'
 import logger from '../../../config/logger'
@@ -37,7 +31,7 @@ export class BusinessEventController {
     socket: AuthenticatedSocket,
     eventType: 'initiated' | 'processing' | 'completed' | 'failed',
     payload: Omit<PaymentEventPayload, 'correlationId' | 'timestamp' | 'status'>,
-    callback?: (response: any) => void
+    callback?: (response: any) => void,
   ): void {
     const correlationId = socket.correlationId || uuidv4()
 
@@ -70,17 +64,12 @@ export class BusinessEventController {
         correlationId,
         timestamp: new Date(),
         status: eventType,
-        userId
+        userId,
       }
 
       // Broadcast payment event
       if (this.broadcastingService) {
-        this.broadcastingService.broadcastPaymentEvent(
-          venueId,
-          eventType,
-          enrichedPayload,
-          { excludeSocket: socket.id }
-        )
+        this.broadcastingService.broadcastPaymentEvent(venueId, eventType, enrichedPayload, { excludeSocket: socket.id })
       }
 
       // Send success response
@@ -89,7 +78,7 @@ export class BusinessEventController {
         success: true,
         message: `Payment ${eventType} event broadcasted`,
         eventType,
-        paymentId: payload.paymentId
+        paymentId: payload.paymentId,
       }
 
       if (callback) callback(response)
@@ -102,9 +91,8 @@ export class BusinessEventController {
         role,
         eventType,
         paymentId: payload.paymentId,
-        amount: payload.amount
+        amount: payload.amount,
       })
-
     } catch (error) {
       logger.error('Error processing payment event', {
         correlationId,
@@ -112,15 +100,10 @@ export class BusinessEventController {
         eventType,
         payload,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
 
-      this.sendErrorResponse(
-        error instanceof Error ? error : new Error('Payment event failed'),
-        correlationId,
-        callback,
-        socket
-      )
+      this.sendErrorResponse(error instanceof Error ? error : new Error('Payment event failed'), correlationId, callback, socket)
     }
   }
 
@@ -131,7 +114,7 @@ export class BusinessEventController {
     socket: AuthenticatedSocket,
     eventType: 'created' | 'updated' | 'status_changed' | 'deleted',
     payload: Omit<OrderEventPayload, 'correlationId' | 'timestamp'>,
-    callback?: (response: any) => void
+    callback?: (response: any) => void,
   ): void {
     const correlationId = socket.correlationId || uuidv4()
 
@@ -162,17 +145,12 @@ export class BusinessEventController {
         ...payload,
         correlationId,
         timestamp: new Date(),
-        userId
+        userId,
       }
 
       // Broadcast order event
       if (this.broadcastingService) {
-        this.broadcastingService.broadcastOrderEvent(
-          venueId,
-          eventType,
-          enrichedPayload,
-          { excludeSocket: socket.id }
-        )
+        this.broadcastingService.broadcastOrderEvent(venueId, eventType, enrichedPayload, { excludeSocket: socket.id })
       }
 
       // Send success response
@@ -181,7 +159,7 @@ export class BusinessEventController {
         success: true,
         message: `Order ${eventType} event broadcasted`,
         eventType,
-        orderId: payload.orderId
+        orderId: payload.orderId,
       }
 
       if (callback) callback(response)
@@ -194,9 +172,8 @@ export class BusinessEventController {
         role,
         eventType,
         orderId: payload.orderId,
-        tableId: payload.tableId
+        tableId: payload.tableId,
       })
-
     } catch (error) {
       logger.error('Error processing order event', {
         correlationId,
@@ -204,15 +181,10 @@ export class BusinessEventController {
         eventType,
         payload,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
 
-      this.sendErrorResponse(
-        error instanceof Error ? error : new Error('Order event failed'),
-        correlationId,
-        callback,
-        socket
-      )
+      this.sendErrorResponse(error instanceof Error ? error : new Error('Order event failed'), correlationId, callback, socket)
     }
   }
 
@@ -222,7 +194,7 @@ export class BusinessEventController {
   public handleSystemAlert(
     socket: AuthenticatedSocket,
     payload: Omit<SystemAlertPayload, 'correlationId' | 'timestamp'>,
-    callback?: (response: any) => void
+    callback?: (response: any) => void,
   ): void {
     const correlationId = socket.correlationId || uuidv4()
 
@@ -253,16 +225,12 @@ export class BusinessEventController {
         ...payload,
         correlationId,
         timestamp: new Date(),
-        userId
+        userId,
       }
 
       // Broadcast system alert
       if (this.broadcastingService) {
-        this.broadcastingService.broadcastSystemAlert(
-          venueId,
-          enrichedPayload,
-          { excludeSocket: socket.id }
-        )
+        this.broadcastingService.broadcastSystemAlert(venueId, enrichedPayload, { excludeSocket: socket.id })
       }
 
       // Send success response
@@ -271,7 +239,7 @@ export class BusinessEventController {
         success: true,
         message: 'System alert broadcasted',
         level: payload.level,
-        title: payload.title
+        title: payload.title,
       }
 
       if (callback) callback(response)
@@ -284,24 +252,18 @@ export class BusinessEventController {
         role,
         level: payload.level,
         title: payload.title,
-        targetRoles: payload.targetRoles
+        targetRoles: payload.targetRoles,
       })
-
     } catch (error) {
       logger.error('Error processing system alert', {
         correlationId,
         socketId: socket.id,
         payload,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
 
-      this.sendErrorResponse(
-        error instanceof Error ? error : new Error('System alert failed'),
-        correlationId,
-        callback,
-        socket
-      )
+      this.sendErrorResponse(error instanceof Error ? error : new Error('System alert failed'), correlationId, callback, socket)
     }
   }
 
@@ -309,15 +271,9 @@ export class BusinessEventController {
 
   private authorizePaymentAccess(socket: AuthenticatedSocket, eventType: string): void {
     const { role } = socket.authContext!
-    
+
     // Define which roles can trigger payment events
-    const allowedRoles: StaffRole[] = [
-      StaffRole.ADMIN,
-      StaffRole.SUPERADMIN,
-      StaffRole.MANAGER,
-      StaffRole.WAITER,
-      StaffRole.CASHIER
-    ]
+    const allowedRoles: StaffRole[] = [StaffRole.ADMIN, StaffRole.SUPERADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]
 
     if (!allowedRoles.includes(role)) {
       throw new UnauthorizedError(`Role ${role} not authorized for payment events`)
@@ -325,12 +281,7 @@ export class BusinessEventController {
 
     // Additional authorization logic based on event type
     if (eventType === 'failed' || eventType === 'completed') {
-      const criticalRoles: StaffRole[] = [
-        StaffRole.ADMIN, 
-        StaffRole.SUPERADMIN, 
-        StaffRole.MANAGER, 
-        StaffRole.CASHIER
-      ]
+      const criticalRoles: StaffRole[] = [StaffRole.ADMIN, StaffRole.SUPERADMIN, StaffRole.MANAGER, StaffRole.CASHIER]
       if (!criticalRoles.includes(role)) {
         throw new UnauthorizedError(`Role ${role} not authorized for ${eventType} payment events`)
       }
@@ -339,15 +290,9 @@ export class BusinessEventController {
 
   private authorizeOrderAccess(socket: AuthenticatedSocket, eventType: string): void {
     const { role } = socket.authContext!
-    
+
     // Define which roles can trigger order events
-    const allowedRoles: StaffRole[] = [
-      StaffRole.ADMIN,
-      StaffRole.SUPERADMIN,
-      StaffRole.MANAGER,
-      StaffRole.WAITER,
-      StaffRole.KITCHEN
-    ]
+    const allowedRoles: StaffRole[] = [StaffRole.ADMIN, StaffRole.SUPERADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.KITCHEN]
 
     if (!allowedRoles.includes(role)) {
       throw new UnauthorizedError(`Role ${role} not authorized for order events`)
@@ -355,11 +300,7 @@ export class BusinessEventController {
 
     // Additional authorization logic
     if (eventType === 'deleted') {
-      const deleteRoles: StaffRole[] = [
-        StaffRole.ADMIN, 
-        StaffRole.SUPERADMIN, 
-        StaffRole.MANAGER
-      ]
+      const deleteRoles: StaffRole[] = [StaffRole.ADMIN, StaffRole.SUPERADMIN, StaffRole.MANAGER]
       if (!deleteRoles.includes(role)) {
         throw new UnauthorizedError(`Role ${role} not authorized to delete orders`)
       }
@@ -368,13 +309,9 @@ export class BusinessEventController {
 
   private authorizeSystemAlertAccess(socket: AuthenticatedSocket): void {
     const { role } = socket.authContext!
-    
+
     // Only admin and managers can send system alerts
-    const allowedRoles: StaffRole[] = [
-      StaffRole.ADMIN, 
-      StaffRole.SUPERADMIN, 
-      StaffRole.MANAGER
-    ]
+    const allowedRoles: StaffRole[] = [StaffRole.ADMIN, StaffRole.SUPERADMIN, StaffRole.MANAGER]
 
     if (!allowedRoles.includes(role)) {
       throw new UnauthorizedError(`Role ${role} not authorized to send system alerts`)
@@ -428,21 +365,14 @@ export class BusinessEventController {
     }
   }
 
-  private sendErrorResponse(
-    error: Error,
-    correlationId: string,
-    callback?: (response: any) => void,
-    socket?: AuthenticatedSocket
-  ): void {
-    const statusCode = error instanceof BadRequestError ? 400 :
-                     error instanceof UnauthorizedError ? 401 :
-                     500
+  private sendErrorResponse(error: Error, correlationId: string, callback?: (response: any) => void, socket?: AuthenticatedSocket): void {
+    const statusCode = error instanceof BadRequestError ? 400 : error instanceof UnauthorizedError ? 401 : 500
 
     const response = {
       correlationId,
       success: false,
       error: error.message,
-      statusCode
+      statusCode,
     }
 
     if (callback) callback(response)
@@ -457,10 +387,10 @@ export class BusinessEventController {
     totalEvents: number
   } {
     const connectionStats = this.roomManager.getConnectionStats()
-    
+
     return {
       connectionsByRole: connectionStats.roleConnections,
-      totalEvents: 0 // Would need to track this in a real implementation
+      totalEvents: 0, // Would need to track this in a real implementation
     }
   }
 }

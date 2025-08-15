@@ -78,7 +78,12 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     createData.availableDays = undefined // Treat null as 'not set' for create
   } else if (data.availableDays) {
     // If availableDays is an array of objects with value property (from MultiSelector)
-    if (Array.isArray(data.availableDays) && data.availableDays.length > 0 && typeof data.availableDays[0] === 'object' && 'value' in data.availableDays[0]) {
+    if (
+      Array.isArray(data.availableDays) &&
+      data.availableDays.length > 0 &&
+      typeof data.availableDays[0] === 'object' &&
+      'value' in data.availableDays[0]
+    ) {
       createData.availableDays = data.availableDays.map((day: any) => day.value)
     } else {
       createData.availableDays = data.availableDays
@@ -93,7 +98,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
       menuId: menu.value,
       categoryId: category.id,
     }))
-    
+
     await prisma.menuCategoryAssignment.createMany({
       data: menuAssignments,
     })
@@ -102,7 +107,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   // Handle product assignments
   if (data.avoqadoProducts && data.avoqadoProducts.length > 0) {
     const productIds = data.avoqadoProducts.map(product => product.value)
-    
+
     await prisma.product.updateMany({
       where: {
         id: { in: productIds },
@@ -185,7 +190,7 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   if (data.color !== undefined) updateData.color = data.color
   if (data.icon !== undefined) updateData.icon = data.icon
   if (data.active !== undefined) updateData.active = data.active
-  
+
   // Handle time fields with explicit null/undefined handling
   if (data.hasOwnProperty('availableFrom')) {
     updateData.availableFrom = data.availableFrom || null
@@ -680,11 +685,7 @@ export async function deleteModifierGroup(venueId: string, modifierGroupId: stri
   await prisma.modifierGroup.delete({ where: { id: modifierGroupId } })
 }
 
-export async function createModifier(
-  venueId: string,
-  modifierGroupId: string,
-  data: CreateModifierDto,
-): Promise<Modifier> {
+export async function createModifier(venueId: string, modifierGroupId: string, data: CreateModifierDto): Promise<Modifier> {
   const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
@@ -700,11 +701,7 @@ export async function createModifier(
   })
 }
 
-export async function getModifierById(
-  venueId: string,
-  modifierGroupId: string,
-  modifierId: string,
-): Promise<Modifier> {
+export async function getModifierById(venueId: string, modifierGroupId: string, modifierId: string): Promise<Modifier> {
   const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId } })
   if (!group) {
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
@@ -789,11 +786,7 @@ export async function assignModifierGroupToProduct(
   })
 }
 
-export async function removeModifierGroupFromProduct(
-  venueId: string,
-  productId: string,
-  modifierGroupId: string,
-): Promise<void> {
+export async function removeModifierGroupFromProduct(venueId: string, productId: string, modifierGroupId: string): Promise<void> {
   // Verify product belongs to venue
   const product = await prisma.product.findFirst({ where: { id: productId, venueId } })
   if (!product) {

@@ -5,7 +5,7 @@ import * as paymentDashboardService from '../../services/dashboard/payment.dashb
 import * as receiptDashboardService from '../../services/dashboard/receipt.dashboard.service'
 
 import prisma from '../../utils/prismaClient'
-import { NotFoundError } from '../../errors/AppError';
+import { NotFoundError } from '../../errors/AppError'
 
 // Ruta: GET /venues/:venueId/payments
 export async function getPaymentsData(
@@ -76,7 +76,7 @@ export async function sendPaymentReceipt(
 export async function getPaymentReceipts(
   req: Request<{ paymentId: string; venueId: string }>,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ): Promise<void> {
   try {
     const { paymentId, venueId } = req.params
@@ -86,8 +86,8 @@ export async function getPaymentReceipts(
     const payment = await prisma.payment.findFirst({
       where: {
         id: paymentId,
-        venueId
-      }
+        venueId,
+      },
     })
 
     if (!payment) {
@@ -110,7 +110,7 @@ export async function getReceiptById(req: Request<{ receiptId: string }>, res: R
     const receipt = await prisma.digitalReceipt.findUnique({
       where: { id: receiptId },
       // incluimos el pago para referencia pero lo importante es el dataSnapshot que ya contiene toda la info
-      include: { payment: true }
+      include: { payment: true },
     })
 
     if (!receipt) {

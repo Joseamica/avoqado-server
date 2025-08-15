@@ -18,7 +18,7 @@ export const getProductsHandler = async (req: Request, res: Response, next: Next
     res.status(200).json({
       message: `Products for venue ${venueId}`,
       data: products,
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -44,7 +44,7 @@ export const getProductHandler = async (req: Request, res: Response, next: NextF
     res.status(200).json({
       message: `Product ${productId} details`,
       data: product,
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -60,10 +60,10 @@ export const createProductHandler = async (req: Request, res: Response, next: Ne
     const productData = req.body
     const correlationId = (req as any).correlationId
 
-    logger.info(`Creating product in venue ${venueId}`, { 
-      correlationId, 
+    logger.info(`Creating product in venue ${venueId}`, {
+      correlationId,
       productName: productData.name,
-      authContext: req.authContext 
+      authContext: req.authContext,
     })
 
     const product = await productService.createProduct(venueId, productData)
@@ -71,7 +71,7 @@ export const createProductHandler = async (req: Request, res: Response, next: Ne
     res.status(201).json({
       message: `Product '${product.name}' created successfully`,
       data: product,
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -87,9 +87,9 @@ export const updateProductHandler = async (req: Request, res: Response, next: Ne
     const productData = req.body
     const correlationId = (req as any).correlationId
 
-    logger.info(`Updating product ${productId} in venue ${venueId}`, { 
+    logger.info(`Updating product ${productId} in venue ${venueId}`, {
       correlationId,
-      authContext: req.authContext 
+      authContext: req.authContext,
     })
 
     const product = await productService.updateProduct(venueId, productId, productData)
@@ -97,7 +97,7 @@ export const updateProductHandler = async (req: Request, res: Response, next: Ne
     res.status(200).json({
       message: `Product '${product.name}' updated successfully`,
       data: product,
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -112,16 +112,16 @@ export const deleteProductHandler = async (req: Request, res: Response, next: Ne
     const { venueId, productId } = req.params
     const correlationId = (req as any).correlationId
 
-    logger.info(`Deleting product ${productId} in venue ${venueId}`, { 
+    logger.info(`Deleting product ${productId} in venue ${venueId}`, {
       correlationId,
-      authContext: req.authContext 
+      authContext: req.authContext,
     })
 
     await productService.deleteProduct(venueId, productId)
 
     res.status(200).json({
       message: `Product deleted successfully`,
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -137,16 +137,16 @@ export const reorderProductsHandler = async (req: Request, res: Response, next: 
     const reorderData = req.body
     const correlationId = (req as any).correlationId
 
-    logger.info(`Reordering products in venue ${venueId}`, { 
+    logger.info(`Reordering products in venue ${venueId}`, {
       correlationId,
-      itemCount: reorderData.length 
+      itemCount: reorderData.length,
     })
 
     await productService.reorderProducts(venueId, reorderData)
 
     res.status(200).json({
       message: 'Products reordered successfully',
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -162,9 +162,9 @@ export const assignModifierGroupToProductHandler = async (req: Request, res: Res
     const assignmentData = req.body
     const correlationId = (req as any).correlationId
 
-    logger.info(`Assigning modifier group to product ${productId} in venue ${venueId}`, { 
+    logger.info(`Assigning modifier group to product ${productId} in venue ${venueId}`, {
       correlationId,
-      modifierGroupId: assignmentData.modifierGroupId 
+      modifierGroupId: assignmentData.modifierGroupId,
     })
 
     const assignment = await productService.assignModifierGroupToProduct(venueId, productId, assignmentData)
@@ -172,7 +172,7 @@ export const assignModifierGroupToProductHandler = async (req: Request, res: Res
     res.status(201).json({
       message: 'Modifier group assigned to product successfully',
       data: assignment,
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -187,15 +187,15 @@ export const removeModifierGroupFromProductHandler = async (req: Request, res: R
     const { venueId, productId, modifierGroupId } = req.params
     const correlationId = (req as any).correlationId
 
-    logger.info(`Removing modifier group ${modifierGroupId} from product ${productId} in venue ${venueId}`, { 
-      correlationId 
+    logger.info(`Removing modifier group ${modifierGroupId} from product ${productId} in venue ${venueId}`, {
+      correlationId,
     })
 
     await productService.removeModifierGroupFromProduct(venueId, productId, modifierGroupId)
 
     res.status(200).json({
       message: 'Modifier group removed from product successfully',
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)
@@ -210,9 +210,9 @@ export const deleteProductImageHandler = async (req: Request, res: Response, nex
     const { venueId, productId } = req.params
     const correlationId = (req as any).correlationId
 
-    logger.info(`Removing image from product ${productId} in venue ${venueId}`, { 
+    logger.info(`Removing image from product ${productId} in venue ${venueId}`, {
       correlationId,
-      authContext: req.authContext 
+      authContext: req.authContext,
     })
 
     const product = await productService.updateProduct(venueId, productId, { imageUrl: null })
@@ -220,7 +220,7 @@ export const deleteProductImageHandler = async (req: Request, res: Response, nex
     res.status(200).json({
       message: 'Product image removed successfully',
       data: product,
-      correlationId
+      correlationId,
     })
   } catch (error) {
     next(error)

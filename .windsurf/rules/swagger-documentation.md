@@ -1,15 +1,19 @@
 # Swagger Documentation Rule
 
 ## Rule ID
+
 swagger-documentation-required
 
 ## Description
+
 This rule ensures that all API routes are properly documented with OpenAPI/Swagger specifications.
 
 ## Files
+
 - `src/routes/**/*.ts`
 
 ## Requirements
+
 1. Every route definition must be preceded by an OpenAPI/Swagger documentation block
 2. The documentation block must include:
    - `@openapi` tag
@@ -50,15 +54,17 @@ This rule ensures that all API routes are properly documented with OpenAPI/Swagg
  *       401:
  *         $ref: '#/components/responses/Unauthorized'
  */
-router.get('/api/example', exampleController.handler);
+router.get('/api/example', exampleController.handler)
 ```
 
 ## Error Messages
+
 - `Missing Swagger documentation for route [%s]` - When a route is missing its Swagger documentation
 - `Missing required field [%s] in Swagger documentation for [%s]` - When a required field is missing from the documentation
 - `Invalid HTTP method in Swagger documentation for [%s]` - When an unsupported HTTP method is used
 
 ## Configuration
+
 This rule can be configured in `.windsurfrules.json`:
 
 ```json
@@ -74,6 +80,7 @@ This rule can be configured in `.windsurfrules.json`:
 ```
 
 ## Why This Matters
+
 - Ensures API consistency and discoverability
 - Improves developer experience with auto-generated documentation
 - Helps maintain up-to-date API specifications

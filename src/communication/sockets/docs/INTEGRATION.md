@@ -28,14 +28,13 @@ const startApplication = async () => {
       logger.info(`🚀 Server is running on port ${PORT}`, {
         environment: NODE_ENV,
         database: DATABASE_URL ? 'Connected' : 'Not configured',
-        socketio: 'Enabled'
+        socketio: 'Enabled',
       })
     })
-
   } catch (error) {
     logger.error('Failed to start application', {
       error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined
+      stack: error instanceof Error ? error.stack : undefined,
     })
     process.exit(1)
   }
@@ -60,7 +59,7 @@ const gracefulShutdown = async (signal: string) => {
       process.exit(0)
     } catch (error) {
       logger.error('Error during graceful shutdown', {
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.message : 'Unknown error',
       })
       process.exit(1)
     }
@@ -78,18 +77,15 @@ import { broadcastPaymentEvent } from '../../communication/sockets'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 
-export async function processPayment(
-  venueId: string,
-  paymentData: ProcessPaymentData
-): Promise<Payment> {
+export async function processPayment(venueId: string, paymentData: ProcessPaymentData): Promise<Payment> {
   const correlationId = uuidv4()
-  
+
   try {
     logger.info('Processing payment', {
       correlationId,
       venueId,
       paymentId: paymentData.id,
-      amount: paymentData.amount
+      amount: paymentData.amount,
     })
 
     // Broadcast payment initiated
@@ -99,12 +95,12 @@ export async function processPayment(
       currency: paymentData.currency,
       venueId,
       tableId: paymentData.tableId,
-      orderId: paymentData.orderId
+      orderId: paymentData.orderId,
     })
 
     // Process payment (your existing logic)
     const payment = await prisma.payment.create({
-      data: paymentData
+      data: paymentData,
     })
 
     // Update payment status to processing
@@ -114,7 +110,7 @@ export async function processPayment(
       currency: payment.currency,
       venueId,
       tableId: payment.tableId,
-      orderId: payment.orderId
+      orderId: payment.orderId,
     })
 
     // Simulate payment processing
@@ -124,7 +120,7 @@ export async function processPayment(
       // Update database
       const updatedPayment = await prisma.payment.update({
         where: { id: payment.id },
-        data: { status: 'COMPLETED', completedAt: new Date() }
+        data: { status: 'COMPLETED', completedAt: new Date() },
       })
 
       // Broadcast success
@@ -135,7 +131,7 @@ export async function processPayment(
         venueId,
         tableId: payment.tableId,
         orderId: payment.orderId,
-        metadata: { completedAt: updatedPayment.completedAt }
+        metadata: { completedAt: updatedPayment.completedAt },
       })
 
       return updatedPayment
@@ -143,7 +139,7 @@ export async function processPayment(
       // Handle failure
       await prisma.payment.update({
         where: { id: payment.id },
-        data: { status: 'FAILED', failedAt: new Date() }
+        data: { status: 'FAILED', failedAt: new Date() },
       })
 
       broadcastPaymentEvent(venueId, 'failed', {
@@ -153,18 +149,17 @@ export async function processPayment(
         venueId,
         tableId: payment.tableId,
         orderId: payment.orderId,
-        metadata: { failureReason: 'Payment gateway declined' }
+        metadata: { failureReason: 'Payment gateway declined' },
       })
 
       throw new BadRequestError('Payment failed')
     }
-
   } catch (error) {
     logger.error('Payment processing error', {
       correlationId,
       venueId,
       paymentId: paymentData.id,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
 
     // Broadcast failure
@@ -173,7 +168,7 @@ export async function processPayment(
       amount: paymentData.amount,
       currency: paymentData.currency,
       venueId,
-      metadata: { failureReason: 'Internal processing error' }
+      metadata: { failureReason: 'Internal processing error' },
     })
 
     throw error
@@ -187,19 +182,15 @@ export async function processPayment(
 // src/services/dashboard/order.dashboard.service.ts
 import { broadcastOrderEvent } from '../../communication/sockets'
 
-export async function createOrder(
-  venueId: string,
-  orderData: CreateOrderData,
-  authContext: AuthContext
-): Promise<Order> {
+export async function createOrder(venueId: string, orderData: CreateOrderData, authContext: AuthContext): Promise<Order> {
   const correlationId = uuidv4()
-  
+
   try {
     logger.info('Creating new order', {
       correlationId,
       venueId,
       tableId: orderData.tableId,
-      userId: authContext.userId
+      userId: authContext.userId,
     })
 
     const order = await prisma.order.create({
@@ -207,12 +198,12 @@ export async function createOrder(
         ...orderData,
         venueId,
         createdById: authContext.userId,
-        status: 'PENDING'
+        status: 'PENDING',
       },
       include: {
         items: true,
-        table: true
-      }
+        table: true,
+      },
     })
 
     // Broadcast order created event
@@ -226,37 +217,32 @@ export async function createOrder(
       total: order.total,
       metadata: {
         createdBy: authContext.role,
-        tableNumber: order.table?.tableNumber
-      }
+        tableNumber: order.table?.tableNumber,
+      },
     })
 
     logger.info('Order created successfully', {
       correlationId,
       orderId: order.id,
       venueId,
-      total: order.total
+      total: order.total,
     })
 
     return order
-
   } catch (error) {
     logger.error('Order creation failed', {
       correlationId,
       venueId,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
     throw error
   }
 }
 
-export async function updateOrderStatus(
-  orderId: string,
-  newStatus: string,
-  authContext: AuthContext
-): Promise<Order> {
+export async function updateOrderStatus(orderId: string, newStatus: string, authContext: AuthContext): Promise<Order> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { items: true }
+    include: { items: true },
   })
 
   if (!order) {
@@ -266,7 +252,7 @@ export async function updateOrderStatus(
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: { status: newStatus, updatedAt: new Date() },
-    include: { items: true }
+    include: { items: true },
   })
 
   // Broadcast status change
@@ -280,8 +266,8 @@ export async function updateOrderStatus(
     total: updatedOrder.total,
     metadata: {
       previousStatus: order.status,
-      updatedBy: authContext.role
-    }
+      updatedBy: authContext.role,
+    },
   })
 
   return updatedOrder
@@ -295,11 +281,7 @@ export async function updateOrderStatus(
 import { broadcastSystemAlert } from '../../communication/sockets'
 import { StaffRole } from '@prisma/client'
 
-export async function sendMaintenanceAlert(
-  venueId: string,
-  maintenanceInfo: MaintenanceInfo,
-  authContext: AuthContext
-): Promise<void> {
+export async function sendMaintenanceAlert(venueId: string, maintenanceInfo: MaintenanceInfo, authContext: AuthContext): Promise<void> {
   try {
     // Only admins/managers can send system alerts
     if (![StaffRole.ADMIN, StaffRole.MANAGER].includes(authContext.role)) {
@@ -314,8 +296,8 @@ export async function sendMaintenanceAlert(
         title: 'Scheduled Maintenance',
         message: `System maintenance scheduled: ${maintenanceInfo.description}`,
         createdById: authContext.userId,
-        targetRoles: [StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]
-      }
+        targetRoles: [StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER],
+      },
     })
 
     // Broadcast alert
@@ -329,21 +311,20 @@ export async function sendMaintenanceAlert(
       metadata: {
         startTime: maintenanceInfo.startTime,
         endTime: maintenanceInfo.endTime,
-        estimatedDuration: maintenanceInfo.estimatedDuration
-      }
+        estimatedDuration: maintenanceInfo.estimatedDuration,
+      },
     })
 
     logger.info('Maintenance alert sent', {
       venueId,
       userId: authContext.userId,
-      startTime: maintenanceInfo.startTime
+      startTime: maintenanceInfo.startTime,
     })
-
   } catch (error) {
     logger.error('Failed to send maintenance alert', {
       venueId,
       userId: authContext.userId,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
     throw error
   }
@@ -358,18 +339,14 @@ Update your existing controllers to trigger real-time events:
 // src/controllers/dashboard/order.dashboard.controller.ts
 import { broadcastOrderEvent } from '../../communication/sockets'
 
-export async function updateOrder(
-  req: Request<{ orderId: string }>, 
-  res: Response, 
-  next: NextFunction
-) {
+export async function updateOrder(req: Request<{ orderId: string }>, res: Response, next: NextFunction) {
   try {
     const updatedOrder = await orderDashboardService.updateOrder(
-      req.params.orderId, 
+      req.params.orderId,
       req.body,
-      req.authContext // Pass auth context for real-time events
+      req.authContext, // Pass auth context for real-time events
     )
-    
+
     res.status(200).json(updatedOrder)
   } catch (error) {
     next(error)
@@ -409,7 +386,7 @@ class SocketService {
   connect(token: string) {
     this.socket = io(process.env.REACT_APP_SOCKET_URL, {
       auth: { token },
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
     })
 
     this.socket.on('connect', () => {
@@ -417,24 +394,24 @@ class SocketService {
       // Join venue room for dashboard updates
       this.socket?.emit('join_room', {
         roomType: 'venue',
-        venueId: getUserVenueId()
+        venueId: getUserVenueId(),
       })
     })
 
     // Listen for real-time events
-    this.socket.on('payment_completed', (data) => {
+    this.socket.on('payment_completed', data => {
       // Update dashboard with payment completion
       updatePaymentStatus(data.paymentId, 'completed')
       showNotification(`Payment of ${data.amount} ${data.currency} completed`)
     })
 
-    this.socket.on('order_created', (data) => {
+    this.socket.on('order_created', data => {
       // Add new order to dashboard
       addOrderToList(data)
       showNotification(`New order #${data.orderId} from table ${data.tableId}`)
     })
 
-    this.socket.on('system_alert', (data) => {
+    this.socket.on('system_alert', data => {
       // Show system alert
       showAlert(data.level, data.title, data.message)
     })
@@ -511,16 +488,17 @@ import { getConnectionStats } from './communication/sockets'
 // In your monitoring service
 export async function getSystemHealth() {
   const socketStats = getConnectionStats()
-  
+
   return {
     sockets: {
       totalConnections: socketStats?.connectionStats.totalConnections || 0,
       venueConnections: socketStats?.connectionStats.venueConnections || {},
-      roleDistribution: socketStats?.connectionStats.roleConnections || {}
+      roleDistribution: socketStats?.connectionStats.roleConnections || {},
     },
     // ... other health metrics
   }
 }
 ```
 
-This integration provides a complete real-time communication layer that seamlessly works with your existing Avoqado backend architecture while maintaining all your established patterns for security, logging, and error handling.
+This integration provides a complete real-time communication layer that seamlessly works with your existing Avoqado backend architecture
+while maintaining all your established patterns for security, logging, and error handling.

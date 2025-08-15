@@ -263,7 +263,7 @@ export function generateAccessToken(payload: TokenPayload): string {
     venueId: payload.venueId,
     role: payload.role,
     iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + (60 * 60), // 1 hour expiry
+    exp: Math.floor(Date.now() / 1000) + 60 * 60, // 1 hour expiry
   }
 
   const secret = process.env.ACCESS_TOKEN_SECRET
@@ -274,7 +274,7 @@ export function generateAccessToken(payload: TokenPayload): string {
   return jwt.sign(jwtPayload, secret, {
     algorithm: 'HS256',
     issuer: 'avoqado-api',
-    audience: 'avoqado-clients'
+    audience: 'avoqado-clients',
   })
 }
 
@@ -290,7 +290,7 @@ export function generateRefreshToken(payload: TokenPayload): string {
     venueId: payload.venueId,
     type: 'refresh',
     iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7), // 7 days expiry
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7, // 7 days expiry
   }
 
   const secret = process.env.ACCESS_TOKEN_SECRET
@@ -301,7 +301,7 @@ export function generateRefreshToken(payload: TokenPayload): string {
   return jwt.sign(jwtPayload, secret, {
     algorithm: 'HS256',
     issuer: 'avoqado-api',
-    audience: 'avoqado-clients'
+    audience: 'avoqado-clients',
   })
 }
 
@@ -320,7 +320,7 @@ export function verifyToken(token: string): AvoqadoJwtPayload | null {
     const decoded = jwt.verify(token, secret, {
       algorithms: ['HS256'],
       issuer: 'avoqado-api',
-      audience: 'avoqado-clients'
+      audience: 'avoqado-clients',
     }) as AvoqadoJwtPayload
 
     return decoded

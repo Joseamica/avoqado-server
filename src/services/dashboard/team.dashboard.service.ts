@@ -114,10 +114,7 @@ export async function getTeamMembers(
           },
         },
       },
-      orderBy: [
-        { role: 'asc' },
-        { staff: { firstName: 'asc' } },
-      ],
+      orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }],
       skip,
       take: pageSize,
     }),
@@ -313,7 +310,7 @@ export async function inviteTeamMember(
 
   // Send invitation email
   const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`
-  
+
   const emailSent = await emailService.sendTeamInvitation(request.email, {
     inviterName: `${inviter.firstName} ${inviter.lastName}`,
     organizationName: venue.organization.name,
@@ -346,11 +343,7 @@ export async function inviteTeamMember(
 /**
  * Update team member role or status
  */
-export async function updateTeamMember(
-  venueId: string,
-  teamMemberId: string,
-  updates: UpdateTeamMemberRequest,
-): Promise<TeamMember> {
+export async function updateTeamMember(venueId: string, teamMemberId: string, updates: UpdateTeamMemberRequest): Promise<TeamMember> {
   // Validate role if updating - can't assign SUPERADMIN
   if (updates.role === StaffRole.SUPERADMIN) {
     throw new BadRequestError('Cannot assign SUPERADMIN role')
@@ -574,7 +567,7 @@ export async function resendInvitation(venueId: string, invitationId: string, in
 
   // Send email again
   const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`
-  
+
   try {
     await emailService.sendTeamInvitation(invitation.email, {
       inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,
@@ -583,7 +576,7 @@ export async function resendInvitation(venueId: string, invitationId: string, in
       role: invitation.role,
       inviteLink,
     })
-    
+
     logger.info('Team invitation resent', {
       invitationId: invitation.id,
       email: invitation.email,

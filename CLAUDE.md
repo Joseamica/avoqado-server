@@ -5,15 +5,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Commands
 
 ### Build and Development
+
 - `npm run build` - Compile TypeScript to `dist/` directory using tsc and tsc-alias
 - `npm run dev` - Start development server with hot reload using nodemon and pino-pretty logging
 - `npm start` - Start production server from compiled JavaScript in dist/
 
 ### Database Operations
+
 - `npm run migrate` - Run Prisma database migrations (`prisma migrate dev`)
 - `npm run studio` - Launch Prisma Studio for database exploration
 
 ### Testing
+
 - `npm test` - Run all tests with Jest
 - `npm run test:unit` - Run only unit tests (`tests/unit`)
 - `npm run test:api` - Run only API integration tests (`tests/api-tests`)
@@ -23,6 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run test:ci` - Run tests in CI mode (no watch, with coverage)
 
 ### Module-Specific Testing
+
 - `npm run test:dashboard` - Test dashboard functionality
 - `npm run test:pos-sync` - Test POS synchronization features
 - `npm run test:tpv` - Test TPV (Terminal Portátil de Ventas) functionality
@@ -31,6 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run test:communication` - Test socket and RabbitMQ communication
 
 ### Code Quality
+
 - `npm run lint` - Run ESLint on TypeScript files
 - `npm run lint:fix` - Run ESLint with auto-fix
 - `npm run format` - Format code with Prettier
@@ -40,6 +45,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a restaurant management platform backend with multi-tenant architecture supporting:
 
 ### Core Business Domains
+
 - **Organizations** - Multi-tenant root entities
 - **Venues** - Individual restaurant locations
 - **Staff Management** - Role-based access control (ADMIN, MANAGER, CASHIER, VIEWER)
@@ -49,6 +55,7 @@ This is a restaurant management platform backend with multi-tenant architecture 
 - **Payment Processing** - Transaction and payment management
 
 ### Technical Stack
+
 - **Framework**: Express.js with TypeScript
 - **Database**: PostgreSQL with Prisma ORM
 - **Real-time Communication**: Socket.IO for live updates
@@ -59,7 +66,9 @@ This is a restaurant management platform backend with multi-tenant architecture 
 - **Testing**: Jest with comprehensive unit, API, and workflow tests
 
 ### Layered Architecture
+
 The codebase follows a clean layered architecture:
+
 ```
 Routes → Middleware → Controllers → Services → Prisma (Database)
 ```
@@ -71,13 +80,16 @@ Routes → Middleware → Controllers → Services → Prisma (Database)
 - **Schemas** (`/src/schemas/`) - Zod validation schemas and TypeScript types
 
 ### Key Service Areas
+
 - **Dashboard Services** (`/src/services/dashboard/`) - Admin interface logic
 - **TPV Services** (`/src/services/tpv/`) - Point-of-sale terminal operations
 - **POS Sync Services** (`/src/services/pos-sync/`) - External POS system integration
 - **Communication** (`/src/communication/`) - Socket.IO and RabbitMQ handlers
 
 ### Database Schema
+
 Multi-tenant PostgreSQL schema managed by Prisma:
+
 - Organization → Venue hierarchy
 - Staff with venue-specific roles
 - Product catalog with categories
@@ -85,11 +97,13 @@ Multi-tenant PostgreSQL schema managed by Prisma:
 - POS synchronization tracking
 
 ### Real-time Features
+
 - Socket.IO server for live updates (`/src/communication/sockets/`)
 - Room-based broadcasting for venue-specific events
 - Business event controllers for order/payment notifications
 
 ### Message Processing
+
 - RabbitMQ integration for POS command queuing
 - Command listener for database-triggered events
 - Retry service for failed command processing
@@ -98,21 +112,24 @@ Multi-tenant PostgreSQL schema managed by Prisma:
 ## Docker Environment
 
 The project includes comprehensive Docker setup:
+
 - Development: `docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d`
 - Production: `docker-compose up -d`
 - Database migrations in container: `docker exec avoqado-server-dev npx prisma migrate deploy`
 
 Services:
+
 - **avoqado-server-dev** (port 3000) - Main application
-- **avoqado-postgres** (port 5434) - PostgreSQL database  
+- **avoqado-postgres** (port 5434) - PostgreSQL database
 - **avoqado-redis** (port 6379) - Session storage
 - **avoqado-rabbitmq** (ports 5672, 15672) - Message broker
 
 ## Testing Strategy
 
 Comprehensive test suite organized by type:
+
 - **Unit Tests** (`tests/unit/`) - Service and utility function testing
-- **API Tests** (`tests/api-tests/`) - HTTP endpoint integration testing  
+- **API Tests** (`tests/api-tests/`) - HTTP endpoint integration testing
 - **Workflow Tests** (`tests/workflows/`) - End-to-end business process testing
 
 Test configuration includes coverage thresholds (70% global, 80% for critical services) and project-based Jest setup for parallel execution.

@@ -26,11 +26,7 @@ export class RoomController {
    * Handle join room request
    * Following the same error handling pattern as HTTP controllers
    */
-  public handleJoinRoom(
-    socket: AuthenticatedSocket,
-    payload: RoomJoinPayload,
-    callback?: (response: any) => void
-  ): void {
+  public handleJoinRoom(socket: AuthenticatedSocket, payload: RoomJoinPayload, callback?: (response: any) => void): void {
     const correlationId = socket.correlationId || uuidv4()
 
     try {
@@ -88,35 +84,25 @@ export class RoomController {
         roomType,
         tableId,
         role,
-        metadata
+        metadata,
       })
-
     } catch (error) {
       logger.error('Error processing join room request', {
         correlationId,
         socketId: socket.id,
         payload,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
 
-      this.sendErrorResponse(
-        error instanceof Error ? error : new Error('Join room failed'),
-        correlationId,
-        callback,
-        socket
-      )
+      this.sendErrorResponse(error instanceof Error ? error : new Error('Join room failed'), correlationId, callback, socket)
     }
   }
 
   /**
    * Handle leave room request
    */
-  public handleLeaveRoom(
-    socket: AuthenticatedSocket,
-    payload: RoomJoinPayload,
-    callback?: (response: any) => void
-  ): void {
+  public handleLeaveRoom(socket: AuthenticatedSocket, payload: RoomJoinPayload, callback?: (response: any) => void): void {
     const correlationId = socket.correlationId || uuidv4()
 
     try {
@@ -151,9 +137,9 @@ export class RoomController {
             success: true,
             message: `Left ${roomType} room`,
             roomType,
-            venueId
+            venueId,
           }
-          
+
           if (callback) callback(response)
           socket.emit(SocketEventType.ROOM_LEFT, response)
       }
@@ -165,24 +151,18 @@ export class RoomController {
         venueId,
         roomType,
         tableId,
-        role
+        role,
       })
-
     } catch (error) {
       logger.error('Error processing leave room request', {
         correlationId,
         socketId: socket.id,
         payload,
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
 
-      this.sendErrorResponse(
-        error instanceof Error ? error : new Error('Leave room failed'),
-        correlationId,
-        callback,
-        socket
-      )
+      this.sendErrorResponse(error instanceof Error ? error : new Error('Leave room failed'), correlationId, callback, socket)
     }
   }
 
@@ -192,7 +172,7 @@ export class RoomController {
     socket: AuthenticatedSocket,
     tableId: string,
     correlationId: string,
-    callback?: (response: any) => void
+    callback?: (response: any) => void,
   ): void {
     if (!tableId) {
       throw new BadRequestError('Table ID required for table room')
@@ -207,7 +187,7 @@ export class RoomController {
       message: `Joined table room: ${tableId}`,
       roomType: RoomType.TABLE,
       venueId: socket.authContext!.venueId,
-      tableId
+      tableId,
     }
 
     if (callback) callback(response)
@@ -224,9 +204,9 @@ export class RoomController {
           userId: socket.authContext!.userId,
           role: socket.authContext!.role,
           tableId,
-          timestamp: new Date()
+          timestamp: new Date(),
         },
-        { excludeSocket: socket.id }
+        { excludeSocket: socket.id },
       )
     }
   }
@@ -235,7 +215,7 @@ export class RoomController {
     socket: AuthenticatedSocket,
     tableId: string,
     correlationId: string,
-    callback?: (response: any) => void
+    callback?: (response: any) => void,
   ): void {
     if (!tableId) {
       throw new BadRequestError('Table ID required for table room')
@@ -250,7 +230,7 @@ export class RoomController {
       message: `Left table room: ${tableId}`,
       roomType: RoomType.TABLE,
       venueId: socket.authContext!.venueId,
-      tableId
+      tableId,
     }
 
     if (callback) callback(response)
@@ -267,36 +247,28 @@ export class RoomController {
           userId: socket.authContext!.userId,
           role: socket.authContext!.role,
           tableId,
-          timestamp: new Date()
+          timestamp: new Date(),
         },
-        { excludeSocket: socket.id }
+        { excludeSocket: socket.id },
       )
     }
   }
 
-  private handleJoinVenueRoom(
-    socket: AuthenticatedSocket,
-    correlationId: string,
-    callback?: (response: any) => void
-  ): void {
+  private handleJoinVenueRoom(socket: AuthenticatedSocket, correlationId: string, callback?: (response: any) => void): void {
     // Users are automatically in venue rooms
     const response = {
       correlationId,
       success: true,
       message: `Already in venue room: ${socket.authContext!.venueId}`,
       roomType: RoomType.VENUE,
-      venueId: socket.authContext!.venueId
+      venueId: socket.authContext!.venueId,
     }
 
     if (callback) callback(response)
     socket.emit(SocketEventType.ROOM_JOINED, response)
   }
 
-  private handleJoinRoleRoom(
-    socket: AuthenticatedSocket,
-    correlationId: string,
-    callback?: (response: any) => void
-  ): void {
+  private handleJoinRoleRoom(socket: AuthenticatedSocket, correlationId: string, callback?: (response: any) => void): void {
     // Users are automatically in role rooms
     const response = {
       correlationId,
@@ -304,18 +276,14 @@ export class RoomController {
       message: `Already in role room: ${socket.authContext!.role}`,
       roomType: RoomType.ROLE,
       venueId: socket.authContext!.venueId,
-      role: socket.authContext!.role
+      role: socket.authContext!.role,
     }
 
     if (callback) callback(response)
     socket.emit(SocketEventType.ROOM_JOINED, response)
   }
 
-  private handleJoinUserRoom(
-    socket: AuthenticatedSocket,
-    correlationId: string,
-    callback?: (response: any) => void
-  ): void {
+  private handleJoinUserRoom(socket: AuthenticatedSocket, correlationId: string, callback?: (response: any) => void): void {
     // Users are automatically in their user rooms
     const response = {
       correlationId,
@@ -323,7 +291,7 @@ export class RoomController {
       message: `Already in user room: ${socket.authContext!.userId}`,
       roomType: RoomType.USER,
       venueId: socket.authContext!.venueId,
-      userId: socket.authContext!.userId
+      userId: socket.authContext!.userId,
     }
 
     if (callback) callback(response)
@@ -368,25 +336,18 @@ export class RoomController {
       userId: socket.authContext!.userId,
       role,
       roomType,
-      venueId: payload.venueId
+      venueId: payload.venueId,
     })
   }
 
-  private sendErrorResponse(
-    error: Error,
-    correlationId: string,
-    callback?: (response: any) => void,
-    socket?: AuthenticatedSocket
-  ): void {
-    const statusCode = error instanceof BadRequestError ? 400 :
-                     error instanceof UnauthorizedError ? 401 :
-                     500
+  private sendErrorResponse(error: Error, correlationId: string, callback?: (response: any) => void, socket?: AuthenticatedSocket): void {
+    const statusCode = error instanceof BadRequestError ? 400 : error instanceof UnauthorizedError ? 401 : 500
 
     const response = {
       correlationId,
       success: false,
       error: error.message,
-      statusCode
+      statusCode,
     }
 
     if (callback) callback(response)
@@ -406,15 +367,15 @@ export class RoomController {
     }
   } {
     const connectionStats = this.roomManager.getConnectionStats()
-    
+
     return {
       connectionStats,
       roomCounts: {
         venues: Object.keys(connectionStats.venueConnections).length,
         tables: 0, // Would need to track this in room manager
         roles: Object.keys(connectionStats.roleConnections).length,
-        users: connectionStats.totalConnections // Each connection is a user
-      }
+        users: connectionStats.totalConnections, // Each connection is a user
+      },
     }
   }
 }

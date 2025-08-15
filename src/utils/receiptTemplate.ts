@@ -71,7 +71,7 @@ interface ReceiptData {
 function formatCurrency(amount: number, currency: string = 'MXN'): string {
   return new Intl.NumberFormat('es-MX', {
     style: 'currency',
-    currency: currency
+    currency: currency,
   }).format(amount)
 }
 
@@ -86,7 +86,7 @@ function formatDate(dateString: string): string {
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: true
+    hour12: true,
   })
 }
 
@@ -97,7 +97,7 @@ function formatPaymentMethod(method: string, cardBrand?: string, maskedPan?: str
   if (method === 'CASH') {
     return 'Efectivo'
   }
-  
+
   let methodText = ''
   switch (method) {
     case 'CREDIT_CARD':
@@ -112,14 +112,14 @@ function formatPaymentMethod(method: string, cardBrand?: string, maskedPan?: str
     default:
       methodText = method
   }
-  
+
   if (cardBrand || maskedPan) {
     const parts = []
     if (cardBrand) parts.push(cardBrand)
     if (maskedPan) parts.push(maskedPan)
     methodText += ` (${parts.join(' ')})`
   }
-  
+
   return methodText
 }
 
@@ -128,7 +128,7 @@ function formatPaymentMethod(method: string, cardBrand?: string, maskedPan?: str
  */
 function formatEntryMode(entryMode?: string): string {
   if (!entryMode) return ''
-  
+
   switch (entryMode.toUpperCase()) {
     case 'CONTACTLESS':
       return 'Sin contacto (NFC)'
@@ -151,7 +151,7 @@ function formatEntryMode(entryMode?: string): string {
 export function generateReceiptHTML(data: ReceiptData): string {
   const primaryColor = data.venue.primaryColor || '#2563eb'
   const currency = data.receiptInfo.currency || 'MXN'
-  
+
   return `
 <!DOCTYPE html>
 <html lang="es">
@@ -645,38 +645,58 @@ export function generateReceiptHTML(data: ReceiptData): string {
                     <h3>Fecha y Hora</h3>
                     <p>${formatDate(data.payment.createdAt)}</p>
                 </div>
-                ${data.order.table ? `
+                ${
+                  data.order.table
+                    ? `
                 <div class="info-group">
                     <h3>Mesa</h3>
                     <p>${data.order.table.number}${data.order.table.area ? ` - ${data.order.table.area}` : ''}</p>
-                </div>` : ''}
-                ${data.processedBy ? `
+                </div>`
+                    : ''
+                }
+                ${
+                  data.processedBy
+                    ? `
                 <div class="info-group">
                     <h3>Atendido por</h3>
                     <p>${data.processedBy.firstName} ${data.processedBy.lastName}</p>
-                </div>` : ''}
+                </div>`
+                    : ''
+                }
             </div>
             
-            ${data.items.length > 0 ? `
+            ${
+              data.items.length > 0
+                ? `
             <div class="order-items">
                 <h2 class="section-title">Productos</h2>
-                ${data.items.map(item => `
+                ${data.items
+                  .map(
+                    item => `
                     <div class="item">
                         <div class="item-details">
                             <div class="item-name">${item.productName}</div>
                             <div class="item-quantity">Cantidad: ${item.quantity}</div>
-                            ${item.modifiers && item.modifiers.length > 0 ? `
+                            ${
+                              item.modifiers && item.modifiers.length > 0
+                                ? `
                                 <div class="item-modifiers">
                                     ${item.modifiers.map(mod => `+ ${mod.name} (${formatCurrency(mod.price, currency)})`).join('<br>')}
                                 </div>
-                            ` : ''}
+                            `
+                                : ''
+                            }
                         </div>
                         <div class="item-price">
                             ${formatCurrency(item.total, currency)}
                         </div>
                     </div>
-                `).join('')}
-            </div>` : ''}
+                `,
+                  )
+                  .join('')}
+            </div>`
+                : ''
+            }
             
             <div class="totals">
                 <div class="total-row">
@@ -687,11 +707,15 @@ export function generateReceiptHTML(data: ReceiptData): string {
                     <span>IVA (${(data.receiptInfo.taxRate * 100).toFixed(0)}%):</span>
                     <span>${formatCurrency(data.order.taxAmount, currency)}</span>
                 </div>
-                ${data.payment.tipAmount > 0 ? `
+                ${
+                  data.payment.tipAmount > 0
+                    ? `
                 <div class="total-row">
                     <span>Propina:</span>
                     <span>${formatCurrency(data.payment.tipAmount, currency)}</span>
-                </div>` : ''}
+                </div>`
+                    : ''
+                }
                 <div class="total-row final">
                     <span>Total:</span>
                     <span>${formatCurrency(data.payment.amount + data.payment.tipAmount, currency)}</span>

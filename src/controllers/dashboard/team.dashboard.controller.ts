@@ -42,8 +42,8 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
 
     // Validate required fields
     if (!email || !firstName || !lastName || !role) {
-      res.status(400).json({ 
-        error: 'Missing required fields: email, firstName, lastName, role' 
+      res.status(400).json({
+        error: 'Missing required fields: email, firstName, lastName, role',
       })
       return
     }

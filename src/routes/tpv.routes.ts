@@ -1120,10 +1120,10 @@ router.post(
  *                   type: object
  *                 message:
  *                   type: string
-  *       401:
-  *         description: Unauthorized - Missing or invalid token
-  *       403:
-  *         description: Forbidden - Role not allowed
+ *       401:
+ *         description: Unauthorized - Missing or invalid token
+ *       403:
+ *         description: Forbidden - Role not allowed
  *       400:
  *         description: Bad request - Invalid payment data
  *       500:

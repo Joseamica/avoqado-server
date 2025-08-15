@@ -76,7 +76,7 @@ class EmailService {
 
   async sendTeamInvitation(email: string, data: InvitationEmailData): Promise<boolean> {
     const subject = `Invitación para unirte al equipo de ${data.venueName}`
-    
+
     const html = `
       <!DOCTYPE html>
       <html>
