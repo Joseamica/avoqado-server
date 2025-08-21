@@ -105,6 +105,10 @@ model Venue {
   reviews             Review[]
   terminals           Terminal[]
 
+  // Notifications
+  notifications           Notification[]
+  notificationPreferences NotificationPreference[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -198,6 +202,10 @@ model Staff {
   paymentsProcessed Payment[]
   activities        ActivityLog[]
   reviewsReceived   Review[]
+
+  // Notifications
+  notifications           Notification[]
+  notificationPreferences NotificationPreference[]
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -1155,6 +1163,107 @@ model Customer {
   @@index([phone])
 }
 
+// ==========================================
+// NOTE: NOTIFICATIONS SYSTEM
+// ==========================================
+
+model Notification {
+  id String @id @default(cuid())
+
+  // Recipient
+  recipientId String
+  recipient   Staff  @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  // Context
+  venueId String?
+  venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Notification content
+  type        NotificationType
+  title       String
+  message     String
+  actionUrl   String?          // Deep link or route
+  actionLabel String?          // Button text like "View Order"
+
+  // Metadata
+  entityType String? // "Order", "Payment", "Review", etc.
+  entityId   String? // ID of related entity
+  metadata   Json?   // Additional context data
+
+  // Status
+  isRead   Boolean   @default(false)
+  readAt   DateTime?
+  priority NotificationPriority @default(NORMAL)
+
+  // Delivery channels
+  channels NotificationChannel[] @default([IN_APP])
+
+  // Tracking
+  sentAt    DateTime?
+  failedAt  DateTime?
+  errorMsg  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([recipientId])
+  @@index([venueId])
+  @@index([type])
+  @@index([isRead])
+  @@index([createdAt])
+  @@index([entityType, entityId])
+}
+
+model NotificationPreference {
+  id String @id @default(cuid())
+
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  venueId String?
+  venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Notification type settings
+  type     NotificationType
+  enabled  Boolean                @default(true)
+  channels NotificationChannel[]  @default([IN_APP])
+  priority NotificationPriority   @default(NORMAL)
+
+  // Scheduling
+  quietStart String? // "22:00" - don't send notifications after this time
+  quietEnd   String? // "08:00" - don't send notifications before this time
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([staffId, venueId, type])
+  @@index([staffId])
+  @@index([type])
+}
+
+model NotificationTemplate {
+  id String @id @default(cuid())
+
+  type        NotificationType
+  language    String           @default("es")
+  title       String
+  message     String
+  actionLabel String?
+
+  // Variables that can be used in templates
+  // e.g., "{{customerName}} left a {{rating}}-star review"
+  variables String[] @default([])
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([type, language])
+  @@index([type])
+  @@index([active])
+}
+
 model PosCommand {
   id            String        @id @default(cuid())
   venueId       String
@@ -1493,4 +1602,60 @@ enum PaymentType {
   FAST // Quick payment without order items
   REFUND // Future: refund payments
   ADJUSTMENT // Future: manual adjustments
+}
+
+enum NotificationType {
+  // Order notifications
+  NEW_ORDER
+  ORDER_UPDATED
+  ORDER_READY
+  ORDER_CANCELLED
+
+  // Payment notifications
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  REFUND_PROCESSED
+
+  // Review notifications
+  NEW_REVIEW
+  BAD_REVIEW
+  REVIEW_RESPONSE_NEEDED
+
+  // Staff notifications
+  SHIFT_REMINDER
+  SHIFT_ENDED
+  NEW_STAFF_JOINED
+
+  // System notifications
+  POS_DISCONNECTED
+  POS_RECONNECTED
+  LOW_INVENTORY
+  SYSTEM_MAINTENANCE
+  FEATURE_UPDATED
+
+  // Admin notifications
+  VENUE_APPROVAL_NEEDED
+  VENUE_SUSPENDED
+  HIGH_COMMISSION_ALERT
+  REVENUE_MILESTONE
+
+  // General
+  ANNOUNCEMENT
+  REMINDER
+  ALERT
+}
+
+enum NotificationPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum NotificationChannel {
+  IN_APP    // Dashboard notifications
+  EMAIL     // Email notifications
+  SMS       // SMS notifications (future)
+  PUSH      // Push notifications (future)
+  WEBHOOK   // Webhook notifications (future)
 }

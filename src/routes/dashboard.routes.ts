@@ -22,6 +22,7 @@ import * as generalStatsController from '../controllers/dashboard/generalStats.d
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
+import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
 import superadminRoutes from './dashboard/superadmin.routes'
 import {
   CreateMenuCategorySchema,
@@ -880,6 +881,63 @@ router.get(
   authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
   venueController.getVenueById,
 )
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}:
+ *   put:
+ *     tags: [Venues]
+ *     summary: Update a venue by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateVenue'
+ *     responses:
+ *       200:
+ *         description: Venue updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Venue'
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  venueController.updateVenue,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}:
+ *   delete:
+ *     tags: [Venues]
+ *     summary: Delete a venue by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Venue deleted successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  venueController.deleteVenue,
+)
+
 //Rutas de Payment para el Dashboard
 /**
  * @openapi
@@ -2450,6 +2508,285 @@ router.get(
   authenticateTokenMiddleware,
   authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
   shiftController.getShiftsSummary,
+)
+
+// ==========================================
+// NOTIFICATIONS ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: Get user notifications
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+ *       - in: query
+ *         name: isRead
+ *         schema: { type: boolean }
+ *       - in: query
+ *         name: type
+ *         schema: { type: string }
+ *       - in: query
+ *         name: priority
+ *         schema: { type: string, enum: [LOW, NORMAL, HIGH, URGENT] }
+ *     responses:
+ *       200:
+ *         description: List of notifications
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 notifications: { type: array }
+ *                 pagination: { type: object }
+ *                 unreadCount: { type: integer }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/notifications', authenticateTokenMiddleware, notificationController.getUserNotifications)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/unread-count:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: Get unread notifications count
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Unread count
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count: { type: integer }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/notifications/unread-count', authenticateTokenMiddleware, notificationController.getUnreadCount)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/{id}/read:
+ *   patch:
+ *     tags: [Notifications]
+ *     summary: Mark notification as read
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: id, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Notification marked as read
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.patch('/notifications/:id/read', authenticateTokenMiddleware, notificationController.markAsRead)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/mark-all-read:
+ *   patch:
+ *     tags: [Notifications]
+ *     summary: Mark all notifications as read
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: All notifications marked as read
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.patch('/notifications/mark-all-read', authenticateTokenMiddleware, notificationController.markAllAsRead)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/{id}:
+ *   delete:
+ *     tags: [Notifications]
+ *     summary: Delete notification
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: id, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       204:
+ *         description: Notification deleted successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete('/notifications/:id', authenticateTokenMiddleware, notificationController.deleteNotification)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/preferences:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: Get notification preferences
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: User notification preferences
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/notifications/preferences', authenticateTokenMiddleware, notificationController.getPreferences)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/preferences:
+ *   put:
+ *     tags: [Notifications]
+ *     summary: Update notification preferences
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               type: { type: string }
+ *               enabled: { type: boolean }
+ *               channels: { type: array, items: { type: string } }
+ *               priority: { type: string }
+ *               quietStart: { type: string }
+ *               quietEnd: { type: string }
+ *     responses:
+ *       200:
+ *         description: Preferences updated successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.put('/notifications/preferences', authenticateTokenMiddleware, notificationController.updatePreferences)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/types:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: Get available notification types
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: List of notification types
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/notifications/types', authenticateTokenMiddleware, notificationController.getNotificationTypes)
+
+// Admin-only notification routes
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications:
+ *   post:
+ *     tags: [Notifications]
+ *     summary: Create a notification (admin only)
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - recipientId
+ *               - type
+ *               - title
+ *               - message
+ *             properties:
+ *               recipientId: { type: string }
+ *               venueId: { type: string }
+ *               type: { type: string }
+ *               title: { type: string }
+ *               message: { type: string }
+ *               actionUrl: { type: string }
+ *               actionLabel: { type: string }
+ *               priority: { type: string }
+ *     responses:
+ *       201:
+ *         description: Notification created successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/notifications',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN]),
+  notificationController.createNotification,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/bulk:
+ *   post:
+ *     tags: [Notifications]
+ *     summary: Send bulk notifications (admin only)
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - recipientIds
+ *               - type
+ *               - title
+ *               - message
+ *             properties:
+ *               recipientIds: { type: array, items: { type: string } }
+ *               type: { type: string }
+ *               title: { type: string }
+ *               message: { type: string }
+ *     responses:
+ *       201:
+ *         description: Bulk notifications sent successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/notifications/bulk',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN]),
+  notificationController.sendBulkNotification,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/notifications/venue/{venueId}:
+ *   post:
+ *     tags: [Notifications]
+ *     summary: Send notification to all venue staff (admin only)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - type
+ *               - title
+ *               - message
+ *             properties:
+ *               type: { type: string }
+ *               title: { type: string }
+ *               message: { type: string }
+ *               roles: { type: array, items: { type: string } }
+ *     responses:
+ *       201:
+ *         description: Venue notifications sent successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/notifications/venue/:venueId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN]),
+  notificationController.sendVenueNotification,
 )
 
 export default router

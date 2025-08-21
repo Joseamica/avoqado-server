@@ -5,11 +5,15 @@ import { validateRequest } from '../../middlewares/validation'
 
 import { z } from 'zod'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
+import { authorizeRole } from '@/middlewares/authorizeRole.middleware'
+import { StaffRole } from '@/security'
 
 const router = Router()
 
 // All superadmin routes require authentication
 router.use(authenticateTokenMiddleware)
+// And must be SUPERADMIN
+router.use(authorizeRole([StaffRole.SUPERADMIN]))
 
 // Schema for venue suspension
 const suspendVenueSchema = z.object({
@@ -50,5 +54,9 @@ router.get('/features', superadminController.getAllFeatures)
 router.post('/features', validateRequest(createFeatureSchema), superadminController.createFeature)
 router.post('/venues/:venueId/features/:featureCode/enable', superadminController.enableFeatureForVenue)
 router.delete('/venues/:venueId/features/:featureCode/disable', superadminController.disableFeatureForVenue)
+
+// Revenue tracking routes
+router.get('/revenue/metrics', superadminController.getRevenueMetrics)
+router.get('/revenue/breakdown', superadminController.getRevenueBreakdown)
 
 export default router

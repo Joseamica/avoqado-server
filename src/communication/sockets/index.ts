@@ -60,6 +60,7 @@ export type {
   PaymentEventPayload,
   OrderEventPayload,
   SystemAlertPayload,
+  NotificationEventPayload,
   BaseEventPayload,
   AuthenticationPayload,
   RoomJoinPayload,

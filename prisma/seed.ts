@@ -8,6 +8,9 @@ import {
   KitchenStatus,
   MenuType,
   MovementType,
+  NotificationChannel,
+  NotificationPriority,
+  NotificationType,
   OrderSource,
   OrderStatus,
   OrderType,
@@ -55,6 +58,17 @@ function getRandomSample<T>(arr: T[], count: number): T[] {
   return shuffled.slice(0, count)
 }
 
+// --- Date helpers for realistic time distribution ---
+function daysAgo(n: number): Date {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return d
+}
+
+function randomDateBetween(from: Date, to: Date): Date {
+  return faker.date.between({ from, to })
+}
+
 async function main() {
   console.log(`Start seeding ...`)
 
@@ -82,6 +96,11 @@ async function main() {
   await prisma.venueSettings.deleteMany()
   await prisma.posCommand.deleteMany()
   await prisma.posConnectionStatus.deleteMany()
+
+  // Clean notification system
+  await prisma.notification.deleteMany()
+  await prisma.notificationPreference.deleteMany()
+  await prisma.notificationTemplate.deleteMany()
 
   // ✅ CORRECTED ORDER: Delete Tables before Areas
   await prisma.table.deleteMany()
@@ -156,6 +175,77 @@ async function main() {
     ],
   })
   console.log(`  Created 2 sample customers.`)
+
+  // --- Notification Templates ---
+  const notificationTemplates = [
+    {
+      type: NotificationType.NEW_ORDER,
+      language: 'es',
+      title: 'Nueva Orden Recibida',
+      message: 'Nueva orden #{{orderNumber}} recibida en mesa {{tableNumber}}.',
+      actionLabel: 'Ver Orden',
+      variables: ['orderNumber', 'tableNumber'],
+    },
+    {
+      type: NotificationType.ORDER_READY,
+      language: 'es',
+      title: 'Orden Lista',
+      message: 'La orden #{{orderNumber}} está lista para servir.',
+      actionLabel: 'Marcar como Servida',
+      variables: ['orderNumber'],
+    },
+    {
+      type: NotificationType.PAYMENT_RECEIVED,
+      language: 'es',
+      title: 'Pago Recibido',
+      message: 'Pago de ${{amount}} recibido para la orden #{{orderNumber}}.',
+      actionLabel: 'Ver Detalles',
+      variables: ['amount', 'orderNumber'],
+    },
+    {
+      type: NotificationType.LOW_INVENTORY,
+      language: 'es',
+      title: 'Stock Bajo',
+      message: 'El producto {{productName}} tiene stock bajo ({{currentStock}} unidades).',
+      actionLabel: 'Gestionar Inventario',
+      variables: ['productName', 'currentStock'],
+    },
+    {
+      type: NotificationType.NEW_REVIEW,
+      language: 'es',
+      title: 'Nueva Reseña',
+      message: 'Nueva reseña de {{rating}} estrellas: "{{comment}}"',
+      actionLabel: 'Ver Reseña',
+      variables: ['rating', 'comment'],
+    },
+    {
+      type: NotificationType.SHIFT_REMINDER,
+      language: 'es',
+      title: 'Recordatorio de Turno',
+      message: 'Tu turno comienza en 30 minutos.',
+      actionLabel: 'Ver Horario',
+      variables: [],
+    },
+    {
+      type: NotificationType.POS_DISCONNECTED,
+      language: 'es',
+      title: 'TPV Desconectado',
+      message: 'El terminal {{terminalName}} se ha desconectado.',
+      actionLabel: 'Verificar Conexión',
+      variables: ['terminalName'],
+    },
+    {
+      type: NotificationType.ANNOUNCEMENT,
+      language: 'es',
+      title: 'Anuncio Importante',
+      message: '{{announcementText}}',
+      actionLabel: 'Leer Más',
+      variables: ['announcementText'],
+    },
+  ]
+
+  await prisma.notificationTemplate.createMany({ data: notificationTemplates })
+  console.log(`  Created ${notificationTemplates.length} notification templates.`)
 
   // --- 1. Organizaciones ---
   console.log('Seeding organizations...')
@@ -297,9 +387,61 @@ async function main() {
               pin: faker.string.numeric(4), // Set venue-specific PIN
             },
           })
+
+          // Create notification preferences for this staff member at this venue
+          const notificationTypes = [
+            NotificationType.NEW_ORDER,
+            NotificationType.ORDER_READY,
+            NotificationType.PAYMENT_RECEIVED,
+            NotificationType.LOW_INVENTORY,
+            NotificationType.NEW_REVIEW,
+            NotificationType.SHIFT_REMINDER,
+            NotificationType.POS_DISCONNECTED,
+            NotificationType.ANNOUNCEMENT,
+          ]
+
+          for (const type of notificationTypes) {
+            // Different roles get different notification preferences
+            let enabled = true
+            let priority: NotificationPriority = NotificationPriority.NORMAL
+            let channels: NotificationChannel[] = [NotificationChannel.IN_APP]
+
+            // Customize based on role
+            if (staffWithRole.assignedRole === StaffRole.ADMIN || staffWithRole.assignedRole === StaffRole.OWNER) {
+              channels = [NotificationChannel.IN_APP, NotificationChannel.EMAIL]
+              if (type === NotificationType.POS_DISCONNECTED || type === NotificationType.LOW_INVENTORY) {
+                priority = NotificationPriority.HIGH
+              }
+            } else if (staffWithRole.assignedRole === StaffRole.MANAGER) {
+              if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+                priority = NotificationPriority.HIGH
+                channels = [NotificationChannel.IN_APP, NotificationChannel.PUSH]
+              }
+            } else if (staffWithRole.assignedRole === StaffRole.WAITER) {
+              if (type === NotificationType.LOW_INVENTORY) {
+                enabled = false // Waiters don't need inventory alerts
+              }
+              if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+                priority = NotificationPriority.HIGH
+              }
+            }
+
+            await prisma.notificationPreference.create({
+              data: {
+                staffId: staffWithRole.id,
+                venueId: venue.id,
+                type,
+                enabled,
+                channels,
+                priority,
+                quietStart: faker.helpers.arrayElement(['22:00', '23:00', null]),
+                quietEnd: faker.helpers.arrayElement(['07:00', '08:00', null]),
+              },
+            })
+          }
         }
       }
-      console.log(`      - Assigned staff to ${venue.name}.`)
+      console.log(`      - Assigned staff to ${venue.name} and created notification preferences.`)
 
       // Settings y Features
       await prisma.venueSettings.create({ data: { venueId: venue.id, trackInventory: true, allowReservations: true } })
@@ -419,131 +561,313 @@ async function main() {
       if (venueWaiters.length === 0) continue
 
       const activeWaiter = getRandomItem(venueWaiters)
-      const shift = await prisma.shift.create({
-        data: { venueId: venue.id, staffId: activeWaiter.staffId, startTime: faker.date.recent({ days: 3 }) },
-      })
 
-      console.log('      - Creating shifts, orders, payments...')
-      for (let k = 0; k < 10; k++) {
-        const orderStatus = getRandomItem([OrderStatus.COMPLETED, OrderStatus.COMPLETED, OrderStatus.PENDING, OrderStatus.CANCELLED])
-        const order = await prisma.order.create({
-          data: {
-            venueId: venue.id,
-            shiftId: shift.id,
-            orderNumber: `ORD-${faker.string.alphanumeric(8).toUpperCase()}`,
-            type: getRandomItem([OrderType.DINE_IN, OrderType.TAKEOUT]),
-            source: getRandomItem([OrderSource.TPV, OrderSource.QR]),
-            tableId: getRandomItem(tables).id,
-            createdById: activeWaiter.staffId,
-            servedById: activeWaiter.staffId,
-            subtotal: 0,
-            taxAmount: 0,
-            total: 0,
-            status: orderStatus,
-            paymentStatus: orderStatus === OrderStatus.COMPLETED ? PaymentStatus.PAID : PaymentStatus.PENDING,
-            kitchenStatus: orderStatus === OrderStatus.COMPLETED ? KitchenStatus.SERVED : KitchenStatus.PENDING,
-            completedAt: orderStatus === OrderStatus.COMPLETED ? faker.date.recent({ days: 1 }) : undefined,
-          },
+      console.log('      - Creating shifts, orders, payments over the last 60 days...')
+      const shiftsToCreate = faker.number.int({ min: 8, max: 16 })
+      for (let s = 0; s < shiftsToCreate; s++) {
+        const startTime = randomDateBetween(daysAgo(60), new Date())
+        const shiftDurationHours = faker.number.int({ min: 5, max: 9 })
+        const rawEndTime = new Date(startTime.getTime() + shiftDurationHours * 60 * 60 * 1000)
+        const endTime = new Date(Math.min(rawEndTime.getTime(), Date.now()))
+
+        const shift = await prisma.shift.create({
+          data: { venueId: venue.id, staffId: activeWaiter.staffId, startTime, endTime },
         })
 
-        let subtotal = 0
-        const numItems = faker.number.int({ min: 1, max: 4 })
-        for (let j = 0; j < numItems; j++) {
-          if (sellableProducts.length === 0) continue // Evitar error si no hay productos vendibles
-          const product = getRandomItem(sellableProducts)
-          const quantity = faker.number.int({ min: 1, max: 2 })
-          const itemTotal = parseFloat(product.price.toString()) * quantity
-          subtotal += itemTotal
+        const ordersInShift = faker.number.int({ min: 6, max: 14 })
+        for (let k = 0; k < ordersInShift; k++) {
+          const orderStatus = getRandomItem([OrderStatus.COMPLETED, OrderStatus.COMPLETED, OrderStatus.PENDING, OrderStatus.CANCELLED])
 
-          const orderItem = await prisma.orderItem.create({
-            data: {
-              orderId: order.id,
-              productId: product.id,
-              quantity,
-              unitPrice: product.price,
-              taxAmount: itemTotal * 0.16,
-              total: itemTotal,
-            },
-          })
-          if (Math.random() < 0.2) {
-            const modifier = getRandomItem(modifiers)
-            await prisma.orderItemModifier.create({
-              data: { orderItemId: orderItem.id, modifierId: modifier.id, quantity: 1, price: modifier.price },
-            })
-            subtotal += parseFloat(modifier.price.toString())
-          }
-        }
+          const orderCreatedAt = randomDateBetween(startTime, endTime)
+          const orderCompletedAt =
+            orderStatus === OrderStatus.COMPLETED
+              ? randomDateBetween(orderCreatedAt, new Date(Math.min(endTime.getTime() + 60 * 60 * 1000, Date.now())))
+              : undefined
 
-        const taxAmount = subtotal * 0.16
-        const tipAmount = order.status === OrderStatus.COMPLETED ? subtotal * getRandomItem([0.1, 0.15, 0.2]) : 0
-        const total = subtotal + taxAmount + tipAmount
-
-        await prisma.order.update({ where: { id: order.id }, data: { subtotal, taxAmount, tipAmount, total } })
-
-        if (order.status === OrderStatus.COMPLETED) {
-          const paymentMethod = getRandomItem([PaymentMethod.CASH, PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD])
-          const feePercentage = parseFloat(venue.feeValue.toString())
-          const feeAmount = total * feePercentage
-          const netAmount = total - feeAmount
-
-          const payment = await prisma.payment.create({
+          const order = await prisma.order.create({
             data: {
               venueId: venue.id,
-              orderId: order.id,
               shiftId: shift.id,
-              processedById: activeWaiter.staffId,
-              amount: total,
-              tipAmount,
-              method: paymentMethod,
-              status: TransactionStatus.COMPLETED,
-              splitType: 'FULLPAYMENT', // Add required splitType field
-              processor: paymentMethod !== 'CASH' ? 'stripe' : null,
-              processorId: paymentMethod !== 'CASH' ? `pi_${faker.string.alphanumeric(24)}` : null,
-              feePercentage,
-              feeAmount,
-              netAmount,
-              allocations: { create: { orderId: order.id, amount: total } },
+              orderNumber: `ORD-${faker.string.alphanumeric(8).toUpperCase()}`,
+              type: getRandomItem([OrderType.DINE_IN, OrderType.TAKEOUT]),
+              source: getRandomItem([OrderSource.TPV, OrderSource.QR]),
+              tableId: getRandomItem(tables).id,
+              createdById: activeWaiter.staffId,
+              servedById: activeWaiter.staffId,
+              subtotal: 0,
+              taxAmount: 0,
+              total: 0,
+              status: orderStatus,
+              paymentStatus: orderStatus === OrderStatus.COMPLETED ? PaymentStatus.PAID : PaymentStatus.PENDING,
+              kitchenStatus: orderStatus === OrderStatus.COMPLETED ? KitchenStatus.SERVED : KitchenStatus.PENDING,
+              createdAt: orderCreatedAt,
+              completedAt: orderCompletedAt,
             },
           })
 
-          await prisma.digitalReceipt.create({
-            data: {
-              paymentId: payment.id,
-              dataSnapshot: { venueName: venue.name, orderNumber: order.orderNumber, total, paymentMethod },
-              status: ReceiptStatus.SENT,
-              recipientEmail: faker.internet.email(),
-              sentAt: new Date(),
-            },
-          })
+          let subtotal = 0
+          const numItems = faker.number.int({ min: 1, max: 4 })
+          for (let j = 0; j < numItems; j++) {
+            if (sellableProducts.length === 0) continue // Evitar error si no hay productos vendibles
+            const product = getRandomItem(sellableProducts)
+            const quantity = faker.number.int({ min: 1, max: 2 })
+            const itemTotal = parseFloat(product.price.toString()) * quantity
+            subtotal += itemTotal
 
-          await prisma.venueTransaction.create({
-            data: {
-              venueId: venue.id,
-              paymentId: payment.id,
-              type: TransactionType.PAYMENT,
-              grossAmount: total,
-              feeAmount,
-              netAmount,
-              status: SettlementStatus.PENDING,
-            },
-          })
+            const orderItem = await prisma.orderItem.create({
+              data: {
+                orderId: order.id,
+                productId: product.id,
+                quantity,
+                unitPrice: product.price,
+                taxAmount: itemTotal * 0.16,
+                total: itemTotal,
+                createdAt: orderCreatedAt,
+              },
+            })
+            if (Math.random() < 0.2) {
+              const modifier = getRandomItem(modifiers)
+              await prisma.orderItemModifier.create({
+                data: { orderItemId: orderItem.id, modifierId: modifier.id, quantity: 1, price: modifier.price },
+              })
+              subtotal += parseFloat(modifier.price.toString())
+            }
+          }
 
-          if (Math.random() > 0.5) {
-            await prisma.review.create({
+          const taxAmount = subtotal * 0.16
+          const tipAmount = order.status === OrderStatus.COMPLETED ? subtotal * getRandomItem([0.1, 0.15, 0.2]) : 0
+          const total = subtotal + taxAmount + tipAmount
+
+          await prisma.order.update({ where: { id: order.id }, data: { subtotal, taxAmount, tipAmount, total } })
+
+          if (order.status === OrderStatus.COMPLETED) {
+            const paymentMethod = getRandomItem([PaymentMethod.CASH, PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD])
+            const feePercentage = parseFloat(venue.feeValue.toString())
+            const feeAmount = total * feePercentage
+            const netAmount = total - feeAmount
+
+            const paymentCreatedAt = randomDateBetween(
+              orderCompletedAt ?? orderCreatedAt,
+              new Date(Math.min((orderCompletedAt ?? orderCreatedAt).getTime() + 30 * 60 * 1000, Date.now())),
+            )
+
+            const payment = await prisma.payment.create({
+              data: {
+                venueId: venue.id,
+                orderId: order.id,
+                shiftId: shift.id,
+                processedById: activeWaiter.staffId,
+                amount: total,
+                tipAmount,
+                method: paymentMethod,
+                status: TransactionStatus.COMPLETED,
+                splitType: 'FULLPAYMENT', // Add required splitType field
+                processor: paymentMethod !== 'CASH' ? 'stripe' : null,
+                processorId: paymentMethod !== 'CASH' ? `pi_${faker.string.alphanumeric(24)}` : null,
+                feePercentage,
+                feeAmount,
+                netAmount,
+                createdAt: paymentCreatedAt,
+                allocations: { create: { orderId: order.id, amount: total, createdAt: paymentCreatedAt } },
+              },
+            })
+
+            await prisma.digitalReceipt.create({
+              data: {
+                paymentId: payment.id,
+                dataSnapshot: { venueName: venue.name, orderNumber: order.orderNumber, total, paymentMethod },
+                status: ReceiptStatus.SENT,
+                recipientEmail: faker.internet.email(),
+                sentAt: paymentCreatedAt,
+                createdAt: paymentCreatedAt,
+              },
+            })
+
+            const transactionCreatedAt = randomDateBetween(
+              paymentCreatedAt,
+              new Date(Math.min(paymentCreatedAt.getTime() + 2 * 24 * 60 * 60 * 1000, Date.now())),
+            )
+
+            await prisma.venueTransaction.create({
               data: {
                 venueId: venue.id,
                 paymentId: payment.id,
-                terminalId: getRandomItem(terminals).id,
-                servedById: activeWaiter.staffId,
-                overallRating: faker.number.int({ min: 3, max: 5 }),
-                comment: faker.lorem.sentence(),
-                source: ReviewSource.AVOQADO,
+                type: TransactionType.PAYMENT,
+                grossAmount: total,
+                feeAmount,
+                netAmount,
+                status: SettlementStatus.PENDING,
+                createdAt: transactionCreatedAt,
               },
             })
+
+            if (Math.random() > 0.5) {
+              const reviewCreatedAt = randomDateBetween(
+                paymentCreatedAt,
+                new Date(Math.min(paymentCreatedAt.getTime() + 3 * 60 * 60 * 1000, Date.now())),
+              )
+              await prisma.review.create({
+                data: {
+                  venueId: venue.id,
+                  paymentId: payment.id,
+                  terminalId: getRandomItem(terminals).id,
+                  servedById: activeWaiter.staffId,
+                  overallRating: faker.number.int({ min: 3, max: 5 }),
+                  comment: faker.lorem.sentence(),
+                  source: ReviewSource.AVOQADO,
+                  createdAt: reviewCreatedAt,
+                },
+              })
+            }
           }
         }
       }
-      console.log(`      - Finished creating orders and related data for one shift.`)
+      console.log(`      - Finished creating orders and related data across multiple shifts.`)
+
+      // Create sample notifications for this venue
+      const venueStaff = await prisma.staffVenue.findMany({
+        where: { venueId: venue.id, active: true },
+        include: { staff: true },
+      })
+
+      if (venueStaff.length > 0) {
+        const notifications = []
+
+        // Create different types of notifications
+        for (let n = 0; n < 15; n++) {
+          const recipient = getRandomItem(venueStaff)
+          const notificationType = getRandomItem([
+            NotificationType.NEW_ORDER,
+            NotificationType.ORDER_READY,
+            NotificationType.PAYMENT_RECEIVED,
+            NotificationType.LOW_INVENTORY,
+            NotificationType.NEW_REVIEW,
+            NotificationType.SHIFT_REMINDER,
+            NotificationType.ANNOUNCEMENT,
+          ])
+
+          let title, message, actionUrl, actionLabel, entityType, entityId, metadata
+
+          switch (notificationType) {
+            case NotificationType.NEW_ORDER:
+              const orderNumber = `ORD-${faker.string.alphanumeric(6).toUpperCase()}`
+              const tableNumber = `M${faker.number.int({ min: 1, max: 10 })}`
+              title = 'Nueva Orden Recibida'
+              message = `Nueva orden #${orderNumber} recibida en mesa ${tableNumber}.`
+              actionUrl = `/orders/${orderNumber}`
+              actionLabel = 'Ver Orden'
+              entityType = 'order'
+              entityId = faker.string.uuid()
+              metadata = { orderNumber, tableNumber }
+              break
+
+            case NotificationType.ORDER_READY:
+              const readyOrderNumber = `ORD-${faker.string.alphanumeric(6).toUpperCase()}`
+              title = 'Orden Lista'
+              message = `La orden #${readyOrderNumber} está lista para servir.`
+              actionUrl = `/orders/${readyOrderNumber}`
+              actionLabel = 'Marcar como Servida'
+              entityType = 'order'
+              entityId = faker.string.uuid()
+              metadata = { orderNumber: readyOrderNumber }
+              break
+
+            case NotificationType.PAYMENT_RECEIVED:
+              const amount = faker.commerce.price({ min: 50, max: 500 })
+              const paymentOrderNumber = `ORD-${faker.string.alphanumeric(6).toUpperCase()}`
+              title = 'Pago Recibido'
+              message = `Pago de $${amount} recibido para la orden #${paymentOrderNumber}.`
+              actionUrl = `/payments/${faker.string.uuid()}`
+              actionLabel = 'Ver Detalles'
+              entityType = 'payment'
+              entityId = faker.string.uuid()
+              metadata = { amount, orderNumber: paymentOrderNumber }
+              break
+
+            case NotificationType.LOW_INVENTORY:
+              const productName = faker.commerce.productName()
+              const currentStock = faker.number.int({ min: 1, max: 9 })
+              title = 'Stock Bajo'
+              message = `El producto ${productName} tiene stock bajo (${currentStock} unidades).`
+              actionUrl = '/inventory'
+              actionLabel = 'Gestionar Inventario'
+              entityType = 'inventory'
+              entityId = faker.string.uuid()
+              metadata = { productName, currentStock }
+              break
+
+            case NotificationType.NEW_REVIEW:
+              const rating = faker.number.int({ min: 1, max: 5 })
+              const comment = faker.lorem.sentence()
+              title = 'Nueva Reseña'
+              message = `Nueva reseña de ${rating} estrellas: "${comment}"`
+              actionUrl = '/reviews'
+              actionLabel = 'Ver Reseña'
+              entityType = 'review'
+              entityId = faker.string.uuid()
+              metadata = { rating, comment }
+              break
+
+            case NotificationType.SHIFT_REMINDER:
+              title = 'Recordatorio de Turno'
+              message = 'Tu turno comienza en 30 minutos.'
+              actionUrl = '/schedule'
+              actionLabel = 'Ver Horario'
+              entityType = 'shift'
+              entityId = faker.string.uuid()
+              break
+
+            case NotificationType.ANNOUNCEMENT:
+              const announcementTexts = [
+                'Nueva actualización del sistema disponible',
+                'Reunión de equipo programada para mañana',
+                'Nuevo menú especial disponible',
+                'Promoción de fin de semana activa',
+                'Mantenimiento programado este domingo',
+              ]
+              const announcementText = getRandomItem(announcementTexts)
+              title = 'Anuncio Importante'
+              message = announcementText
+              actionUrl = '/announcements'
+              actionLabel = 'Leer Más'
+              entityType = 'announcement'
+              entityId = faker.string.uuid()
+              metadata = { announcementText }
+              break
+          }
+
+          const isRead = faker.datatype.boolean({ probability: 0.7 }) // 70% read
+          const sentDate = faker.date.recent({ days: 7 })
+
+          notifications.push({
+            recipientId: recipient.staffId,
+            venueId: venue.id,
+            type: notificationType,
+            title,
+            message,
+            actionUrl,
+            actionLabel,
+            entityType,
+            entityId,
+            metadata,
+            isRead,
+            readAt: isRead ? faker.date.between({ from: sentDate, to: new Date() }) : null,
+            priority: getRandomItem([
+              NotificationPriority.LOW,
+              NotificationPriority.NORMAL,
+              NotificationPriority.NORMAL,
+              NotificationPriority.HIGH,
+            ]) as NotificationPriority,
+            channels: [NotificationChannel.IN_APP],
+            sentAt: sentDate,
+            createdAt: sentDate,
+            updatedAt: sentDate,
+          })
+        }
+
+        await prisma.notification.createMany({ data: notifications })
+        console.log(`      - Created ${notifications.length} sample notifications for ${venue.name}.`)
+      }
     }
 
     if (orgIndex === 0) {

@@ -57,3 +57,45 @@ export async function getVenueById(req: Request<{ venueId: string }>, res: Respo
     next(error) // 6. Manejo de error HTTP (Controller)
   }
 }
+
+export async function updateVenue(req: Request<{ venueId: string }, any, any>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+    const updateData = req.body
+
+    const updatedVenue = await venueDashboardService.updateVenue(orgId, venueId, updateData)
+
+    res.status(200).json({
+      success: true,
+      data: updatedVenue,
+      message: 'Venue updated successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function deleteVenue(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+
+    await venueDashboardService.deleteVenue(orgId, venueId)
+
+    res.status(200).json({
+      success: true,
+      message: 'Venue deleted successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}

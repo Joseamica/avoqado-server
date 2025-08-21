@@ -397,6 +397,13 @@ export class SocketManager implements ISocketManager {
   }
 
   /**
+   * Get the broadcasting service
+   */
+  public getBroadcastingService(): BroadcastingService | null {
+    return this.broadcastingService
+  }
+
+  /**
    * Get the Socket.io server instance
    */
   public getServer(): Server | null {

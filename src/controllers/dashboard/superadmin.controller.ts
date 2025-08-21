@@ -2,31 +2,20 @@ import type { Request, Response, NextFunction } from 'express'
 import * as superadminService from '../../services/dashboard/superadmin.service'
 import logger from '../../config/logger'
 
-// Extend Request interface to include user property
-interface AuthenticatedRequest extends Request {
-  user?: any
-}
-
 /**
  * Get superadmin dashboard overview data
  */
-export async function getDashboardData(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+export async function getDashboardData(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    logger.info('Getting superadmin dashboard data', { userId: req.user?.id })
-
-    // Verify superadmin access
-    if (!superadminService.verifySuperadminAccess(req.user!)) {
-      res.status(403).json({ success: false, message: 'Access denied. Superadmin privileges required.' })
-      return
-    }
+    logger.info('Getting superadmin dashboard data', { userId: req.authContext?.userId })
 
     const dashboardData = await superadminService.getSuperadminDashboardData()
-    
+
     res.json({ success: true, data: dashboardData, message: 'Dashboard data retrieved successfully' })
   } catch (error) {
-    logger.error('Error getting superadmin dashboard data', { 
+    logger.error('Error getting superadmin dashboard data', {
       error: error instanceof Error ? error.message : 'Unknown error',
-      userId: req.user?.id 
+      userId: req.authContext?.userId,
     })
     next(error)
   }
@@ -35,23 +24,17 @@ export async function getDashboardData(req: AuthenticatedRequest, res: Response,
 /**
  * Get all venues with detailed management information
  */
-export async function getAllVenues(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+export async function getAllVenues(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    logger.info('Getting all venues for superadmin', { userId: req.user?.id })
-
-    // Verify superadmin access
-    if (!superadminService.verifySuperadminAccess(req.user!)) {
-      res.status(403).json({ success: false, message: 'Access denied. Superadmin privileges required.' })
-      return
-    }
+    logger.info('Getting all venues for superadmin', { userId: req.authContext?.userId })
 
     const venues = await superadminService.getAllVenuesForSuperadmin()
-    
+
     res.json({ success: true, data: venues, message: 'Venues retrieved successfully' })
   } catch (error) {
-    logger.error('Error getting venues for superadmin', { 
+    logger.error('Error getting venues for superadmin', {
       error: error instanceof Error ? error.message : 'Unknown error',
-      userId: req.user?.id 
+      userId: req.authContext?.userId,
     })
     next(error)
   }
@@ -60,23 +43,17 @@ export async function getAllVenues(req: AuthenticatedRequest, res: Response, nex
 /**
  * Get all platform features
  */
-export async function getAllFeatures(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+export async function getAllFeatures(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    logger.info('Getting all platform features', { userId: req.user?.id })
-
-    // Verify superadmin access
-    if (!superadminService.verifySuperadminAccess(req.user!)) {
-      res.status(403).json({ success: false, message: 'Access denied. Superadmin privileges required.' })
-      return
-    }
+    logger.info('Getting all platform features', { userId: req.authContext?.userId })
 
     const features = await superadminService.getAllPlatformFeatures()
-    
+
     res.json({ success: true, data: features, message: 'Features retrieved successfully' })
   } catch (error) {
-    logger.error('Error getting platform features', { 
+    logger.error('Error getting platform features', {
       error: error instanceof Error ? error.message : 'Unknown error',
-      userId: req.user?.id 
+      userId: req.authContext?.userId,
     })
     next(error)
   }
@@ -85,26 +62,20 @@ export async function getAllFeatures(req: AuthenticatedRequest, res: Response, n
 /**
  * Approve a venue for platform access
  */
-export async function approveVenue(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+export async function approveVenue(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    logger.info('Approving venue', { venueId, userId: req.user?.id })
+    logger.info('Approving venue', { venueId, userId: req.authContext?.userId })
 
-    // Verify superadmin access
-    if (!superadminService.verifySuperadminAccess(req.user!)) {
-      res.status(403).json({ success: false, message: 'Access denied. Superadmin privileges required.' })
-      return
-    }
+    await superadminService.approveVenue(venueId, req.authContext!.userId)
 
-    await superadminService.approveVenue(venueId, req.user!.id)
-    
-    logger.info('Venue approved successfully', { venueId, approvedBy: req.user!.id })
+    logger.info('Venue approved successfully', { venueId, approvedBy: req.authContext!.userId })
     res.json({ success: true, data: { venueId }, message: 'Venue approved successfully' })
   } catch (error) {
-    logger.error('Error approving venue', { 
+    logger.error('Error approving venue', {
       venueId: req.params.venueId,
       error: error instanceof Error ? error.message : 'Unknown error',
-      userId: req.user?.id 
+      userId: req.authContext?.userId,
     })
     next(error)
   }
@@ -113,16 +84,10 @@ export async function approveVenue(req: AuthenticatedRequest, res: Response, nex
 /**
  * Create a new platform feature
  */
-export async function createFeature(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+export async function createFeature(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { name, code, description, category, pricingModel, basePrice, isCore } = req.body
-    logger.info('Creating new platform feature', { code, name, userId: req.user?.id })
-
-    // Verify superadmin access
-    if (!superadminService.verifySuperadminAccess(req.user!)) {
-      res.status(403).json({ success: false, message: 'Access denied. Superadmin privileges required.' })
-      return
-    }
+    logger.info('Creating new platform feature', { code, name, userId: req.authContext?.userId })
 
     // Validate required fields
     if (!name || !code || !description || !category || !pricingModel) {
@@ -142,15 +107,170 @@ export async function createFeature(req: AuthenticatedRequest, res: Response, ne
       isCore: isCore || false,
       status: 'ACTIVE',
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }
-    
-    logger.info('Feature created successfully', { featureId: newFeature.id, code, createdBy: req.user!.id })
+
+    logger.info('Feature created successfully', { featureId: newFeature.id, code, createdBy: req.authContext!.userId })
     res.status(201).json({ success: true, data: newFeature, message: 'Feature created successfully' })
   } catch (error) {
-    logger.error('Error creating feature', { 
+    logger.error('Error creating feature', {
       error: error instanceof Error ? error.message : 'Unknown error',
-      userId: req.user?.id 
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get detailed information for a specific venue
+ */
+export async function getVenueDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    logger.info('Getting venue details', { venueId, userId: req.authContext?.userId })
+
+    const venue = await superadminService.getVenueDetails(venueId)
+    if (!venue) {
+      res.status(404).json({ success: false, message: 'Venue not found' })
+      return
+    }
+
+    res.json({ success: true, data: venue, message: 'Venue details retrieved successfully' })
+  } catch (error) {
+    logger.error('Error getting venue details', {
+      venueId: req.params.venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Suspend a venue
+ */
+export async function suspendVenue(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { reason } = req.body
+    logger.info('Suspending venue', { venueId, reason, userId: req.authContext?.userId })
+
+    await superadminService.suspendVenue(venueId, reason)
+    res.json({ success: true, data: { venueId }, message: 'Venue suspended successfully' })
+  } catch (error) {
+    logger.error('Error suspending venue', {
+      venueId: req.params.venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Enable a feature for a venue
+ */
+export async function enableFeatureForVenue(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, featureCode } = req.params
+    logger.info('Enabling feature for venue', { venueId, featureCode, userId: req.authContext?.userId })
+
+    await superadminService.enableFeatureForVenue(venueId, featureCode)
+    res.json({ success: true, data: { venueId, featureCode }, message: 'Feature enabled successfully' })
+  } catch (error) {
+    logger.error('Error enabling feature for venue', {
+      venueId: req.params.venueId,
+      featureCode: req.params.featureCode,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Disable a feature for a venue
+ */
+export async function disableFeatureForVenue(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, featureCode } = req.params
+    logger.info('Disabling feature for venue', { venueId, featureCode, userId: req.authContext?.userId })
+
+    await superadminService.disableFeatureForVenue(venueId, featureCode)
+    // No content response is appropriate for successful DELETE
+    res.status(204).send()
+  } catch (error) {
+    logger.error('Error disabling feature for venue', {
+      venueId: req.params.venueId,
+      featureCode: req.params.featureCode,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get revenue metrics for a date range
+ */
+export async function getRevenueMetrics(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { startDate, endDate } = req.query
+
+    const start = startDate ? new Date(startDate as string) : undefined
+    const end = endDate ? new Date(endDate as string) : undefined
+
+    const metrics = await superadminService.getRevenueMetrics(start, end)
+
+    logger.info('Revenue metrics retrieved successfully', {
+      startDate: start?.toISOString(),
+      endDate: end?.toISOString(),
+      totalRevenue: metrics.totalRevenue,
+      userId: req.authContext?.userId,
+    })
+
+    res.json({
+      success: true,
+      data: metrics,
+      message: 'Revenue metrics retrieved successfully',
+    })
+  } catch (error) {
+    logger.error('Error getting revenue metrics', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get detailed revenue breakdown
+ */
+export async function getRevenueBreakdown(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { startDate, endDate } = req.query
+
+    const start = startDate ? new Date(startDate as string) : undefined
+    const end = endDate ? new Date(endDate as string) : undefined
+
+    const breakdown = await superadminService.getRevenueBreakdown(start, end)
+
+    logger.info('Revenue breakdown retrieved successfully', {
+      startDate: start?.toISOString(),
+      endDate: end?.toISOString(),
+      venueCount: breakdown.byVenue.length,
+      userId: req.authContext?.userId,
+    })
+
+    res.json({
+      success: true,
+      data: breakdown,
+      message: 'Revenue breakdown retrieved successfully',
+    })
+  } catch (error) {
+    logger.error('Error getting revenue breakdown', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
     })
     next(error)
   }

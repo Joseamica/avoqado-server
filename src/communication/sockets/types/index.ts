@@ -74,6 +74,12 @@ export enum SocketEventType {
   VENUE_UPDATE = 'venue_update',
   TABLE_STATUS_CHANGE = 'table_status_change',
 
+  // Business Events - Notifications
+  NOTIFICATION_NEW = 'notification_new',
+  NOTIFICATION_READ = 'notification_read',
+  NOTIFICATION_DELETED = 'notification_deleted',
+  NOTIFICATION_COUNT_UPDATED = 'notification_count_updated',
+
   // Error Events
   ERROR = 'error',
   RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded',
@@ -124,6 +130,19 @@ export interface SystemAlertPayload extends BaseEventPayload {
   title: string
   message: string
   targetRoles?: StaffRole[]
+  metadata?: Record<string, any>
+}
+
+export interface NotificationEventPayload extends BaseEventPayload {
+  notificationId: string
+  recipientId: string
+  type: string
+  title: string
+  message: string
+  priority: 'LOW' | 'NORMAL' | 'HIGH'
+  isRead: boolean
+  actionUrl?: string
+  actionLabel?: string
   metadata?: Record<string, any>
 }
 

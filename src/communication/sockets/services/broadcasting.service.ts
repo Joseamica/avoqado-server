@@ -6,6 +6,7 @@ import {
   PaymentEventPayload,
   OrderEventPayload,
   SystemAlertPayload,
+  NotificationEventPayload,
   BaseEventPayload,
   AuthenticatedSocket,
 } from '../types'
@@ -266,6 +267,114 @@ export class BroadcastingService {
       // Broadcast to entire venue if no specific roles
       this.broadcastToVenue(venueId, SocketEventType.SYSTEM_ALERT, payload, options)
     }
+  }
+
+  /**
+   * Notification Events
+   */
+  public broadcastNewNotification(
+    notification: Omit<NotificationEventPayload, 'correlationId' | 'timestamp'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: NotificationEventPayload = {
+      ...notification,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to specific user
+    this.broadcastToUser(notification.recipientId, SocketEventType.NOTIFICATION_NEW, payload, options)
+
+    // Also broadcast count update to venue
+    this.broadcastToVenue(
+      notification.venueId,
+      SocketEventType.NOTIFICATION_COUNT_UPDATED,
+      {
+        ...payload,
+        action: 'increment',
+      },
+      options,
+    )
+
+    logger.info('New notification broadcasted', {
+      correlationId: payload.correlationId,
+      notificationId: notification.notificationId,
+      recipientId: notification.recipientId,
+      venueId: notification.venueId,
+      title: notification.title,
+      priority: notification.priority,
+    })
+  }
+
+  public broadcastNotificationRead(notificationId: string, recipientId: string, venueId: string, options?: BroadcastOptions): void {
+    const payload: Partial<NotificationEventPayload> = {
+      notificationId,
+      recipientId,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to specific user
+    this.broadcastToUser(recipientId, SocketEventType.NOTIFICATION_READ, payload, options)
+
+    // Also broadcast count update to venue
+    this.broadcastToVenue(
+      venueId,
+      SocketEventType.NOTIFICATION_COUNT_UPDATED,
+      {
+        ...payload,
+        action: 'decrement',
+      },
+      options,
+    )
+
+    logger.info('Notification read status broadcasted', {
+      correlationId: payload.correlationId,
+      notificationId,
+      recipientId,
+      venueId,
+    })
+  }
+
+  public broadcastNotificationDeleted(
+    notificationId: string,
+    recipientId: string,
+    venueId: string,
+    wasUnread: boolean,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: Partial<NotificationEventPayload> = {
+      notificationId,
+      recipientId,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to specific user
+    this.broadcastToUser(recipientId, SocketEventType.NOTIFICATION_DELETED, payload, options)
+
+    // Also broadcast count update to venue if was unread
+    if (wasUnread) {
+      this.broadcastToVenue(
+        venueId,
+        SocketEventType.NOTIFICATION_COUNT_UPDATED,
+        {
+          ...payload,
+          action: 'decrement',
+        },
+        options,
+      )
+    }
+
+    logger.info('Notification deleted status broadcasted', {
+      correlationId: payload.correlationId,
+      notificationId,
+      recipientId,
+      venueId,
+      wasUnread,
+    })
   }
 
   /**

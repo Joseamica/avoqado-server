@@ -27,7 +27,7 @@ import request from 'supertest'
 import jwt from 'jsonwebtoken'
 
 // Import the real Express app after env + mocks are set
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+
 const app = require('../../../src/app').default
 
 const API_PREFIX = '/api/v1/tpv'
