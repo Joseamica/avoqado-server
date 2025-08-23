@@ -54,6 +54,17 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 name: true,
                 slug: true,
                 logo: true,
+                features: {
+                  select: {
+                    active: true,
+                    feature: {
+                      select: {
+                        code: true,
+                        name: true,
+                      },
+                    },
+                  },
+                },
               },
             },
           },
@@ -77,16 +88,27 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       logo: string | null
     }
 
+    // Define venue type with features and role
+    interface VenueWithFeatures {
+      id: string
+      name: string
+      slug: string
+      logo: string | null
+      role?: any
+      features?: any[]
+    }
+
     // Check if user is a SUPERADMIN in any venue
     const isSuperAdmin = staff.venues.some(sv => sv.role === StaffRole.SUPERADMIN)
     const isOwner = staff.venues.some(sv => sv.role === StaffRole.OWNER)
-    let allVenues: SimpleVenue[] = []
-    let directVenues = staff.venues.map(sv => ({
+    let allVenues: VenueWithFeatures[] = []
+    let directVenues: VenueWithFeatures[] = staff.venues.map(sv => ({
       id: sv.venue.id,
       name: sv.venue.name,
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       role: sv.role,
+      features: sv.venue.features, // Incluir las features
     }))
 
     // Create a map of venue IDs that user already has a direct relationship with
@@ -101,6 +123,17 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
+          features: {
+            select: {
+              active: true,
+              feature: {
+                select: {
+                  code: true,
+                  name: true,
+                },
+              },
+            },
+          },
         },
       })
 
@@ -109,6 +142,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
+        features: venue.features,
       }))
 
       // Add all system venues to user's venues array (if not already there)
@@ -133,6 +167,17 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
+          features: {
+            select: {
+              active: true,
+              feature: {
+                select: {
+                  code: true,
+                  name: true,
+                },
+              },
+            },
+          },
         },
       })
 
@@ -141,6 +186,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
+        features: venue.features,
       }))
 
       // Add all organization venues to user's venues array (if not already there)
@@ -210,7 +256,7 @@ export async function dashboardLoginController(req: Request, res: Response, next
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
     })
@@ -218,7 +264,7 @@ export async function dashboardLoginController(req: Request, res: Response, next
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/',
     })
@@ -240,14 +286,14 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     res.clearCookie('accessToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
       path: '/',
     })
 
     res.clearCookie('refreshToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
       path: '/',
     })
 
@@ -288,7 +334,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
     })
@@ -296,7 +342,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/', // Ajusta el path si tu ruta de refresh es específica
     })

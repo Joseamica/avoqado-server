@@ -23,6 +23,7 @@ import * as productController from '../controllers/dashboard/product.dashboard.c
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
+import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
 import superadminRoutes from './dashboard/superadmin.routes'
 import {
   CreateMenuCategorySchema,
@@ -69,6 +70,7 @@ import {
   InviteTeamMemberSchema,
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
+import { assistantQuerySchema } from '../schemas/dashboard/assistant.schema'
 
 const router = express.Router()
 
@@ -525,7 +527,7 @@ router.get('/auth/google/check-invitation', googleOAuthController.checkInvitatio
 router.get(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(VenueIdParamsSchema), // Validate venueId from params
   menuController.listMenuCategoriesHandler,
 )
@@ -567,7 +569,7 @@ router.get(
 router.post(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(CreateMenuCategorySchema),
   menuController.createMenuCategoryHandler,
 )
@@ -636,7 +638,7 @@ router.post(
 router.get(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.getMenuCategoryHandler,
 )
@@ -672,7 +674,7 @@ router.get(
 router.patch(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateMenuCategorySchema),
   menuController.updateMenuCategoryHandler,
 )
@@ -697,7 +699,7 @@ router.patch(
 router.delete(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.deleteMenuCategoryHandler,
 )
@@ -706,13 +708,13 @@ router.delete(
 router.get(
   '/venues/:venueId/menus',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   menuController.getMenusHandler,
 )
 router.post(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(CreateMenuCategorySchema),
   menuController.createMenuCategoryHandler,
 )
@@ -720,7 +722,7 @@ router.post(
 router.get(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(VenueIdParamsSchema), // Validate venueId from params
   menuController.listMenuCategoriesHandler,
 )
@@ -728,7 +730,7 @@ router.get(
 router.post(
   '/venues/:venueId/menucategories/reorder',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(ReorderMenuCategoriesSchema),
   menuController.reorderMenuCategoriesHandler,
 )
@@ -736,7 +738,7 @@ router.post(
 router.get(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.getMenuCategoryHandler,
 )
@@ -744,7 +746,7 @@ router.get(
 router.patch(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateMenuCategorySchema),
   menuController.updateMenuCategoryHandler,
 )
@@ -752,7 +754,7 @@ router.patch(
 router.delete(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.deleteMenuCategoryHandler,
 )
@@ -1345,7 +1347,7 @@ router.get(
 router.get(
   '/venues/:venueId/menus',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(MenuQuerySchema),
   menuController.getMenusHandler,
 )
@@ -1353,7 +1355,7 @@ router.get(
 router.post(
   '/venues/:venueId/menus',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(CreateMenuSchema),
   menuController.createMenuHandler,
 )
@@ -1361,7 +1363,7 @@ router.post(
 router.get(
   '/venues/:venueId/menus/:menuId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(GetMenuParamsSchema),
   menuController.getMenuHandler,
 )
@@ -1369,7 +1371,7 @@ router.get(
 router.patch(
   '/venues/:venueId/menus/:menuId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateMenuSchema),
   menuController.updateMenuHandler,
 )
@@ -1377,7 +1379,7 @@ router.patch(
 router.delete(
   '/venues/:venueId/menus/:menuId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetMenuParamsSchema),
   menuController.deleteMenuHandler,
 )
@@ -1385,7 +1387,7 @@ router.delete(
 router.post(
   '/venues/:venueId/menus/:menuId/clone',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(CloneMenuSchema),
   menuController.cloneMenuHandler,
 )
@@ -1393,7 +1395,7 @@ router.post(
 router.post(
   '/venues/:venueId/menus/reorder',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(ReorderMenusSchema),
   menuController.reorderMenusHandler,
 )
@@ -1401,7 +1403,7 @@ router.post(
 router.put(
   '/venues/:venueId/products/reorder',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(ReorderProductsSchema),
   menuController.reorderProductsHandler,
 )
@@ -1410,7 +1412,7 @@ router.put(
 router.post(
   '/venues/:venueId/menus/:menuId/categories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(AssignCategoryToMenuSchema),
   menuController.assignCategoryToMenuHandler,
 )
@@ -1418,7 +1420,7 @@ router.post(
 router.delete(
   '/venues/:venueId/menus/:menuId/categories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetMenuParamsSchema),
   menuController.removeCategoryFromMenuHandler,
 )
@@ -1469,7 +1471,7 @@ router.delete(
 router.get(
   '/venues/:venueId/modifier-groups',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(ModifierGroupQuerySchema),
   menuController.listModifierGroupsHandler,
 )
@@ -1506,7 +1508,7 @@ router.get(
 router.post(
   '/venues/:venueId/modifier-groups',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(CreateModifierGroupSchema),
   menuController.createModifierGroupHandler,
 )
@@ -1535,7 +1537,7 @@ router.post(
 router.get(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(GetModifierGroupParamsSchema),
   menuController.getModifierGroupHandler,
 )
@@ -1571,7 +1573,7 @@ router.get(
 router.patch(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateModifierGroupSchema),
   menuController.updateModifierGroupHandler,
 )
@@ -1607,7 +1609,7 @@ router.patch(
 router.put(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateModifierGroupSchema),
   menuController.updateModifierGroupHandler,
 )
@@ -1632,7 +1634,7 @@ router.put(
 router.delete(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetModifierGroupParamsSchema),
   menuController.deleteModifierGroupHandler,
 )
@@ -1665,7 +1667,7 @@ router.delete(
 router.get(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(GetModifierGroupParamsSchema),
   menuController.listModifiersHandler,
 )
@@ -1701,7 +1703,7 @@ router.get(
 router.post(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(CreateModifierSchema),
   menuController.createModifierHandler,
 )
@@ -1731,7 +1733,7 @@ router.post(
 router.get(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(GetModifierParamsSchema),
   menuController.getModifierHandler,
 )
@@ -1768,7 +1770,7 @@ router.get(
 router.patch(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateModifierSchema),
   menuController.updateModifierHandler,
 )
@@ -1805,7 +1807,7 @@ router.patch(
 router.put(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateModifierSchema),
   menuController.updateModifierHandler,
 )
@@ -1831,7 +1833,7 @@ router.put(
 router.delete(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetModifierParamsSchema),
   menuController.deleteModifierHandler,
 )
@@ -1872,7 +1874,7 @@ router.delete(
 router.post(
   '/venues/:venueId/products/:productId/modifier-groups',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(AssignModifierGroupToProductSchema),
   menuController.assignModifierGroupToProductHandler,
 )
@@ -1898,7 +1900,7 @@ router.post(
 router.delete(
   '/venues/:venueId/products/:productId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(RemoveModifierGroupFromProductParamsSchema),
   menuController.removeModifierGroupFromProductHandler,
 )
@@ -1948,7 +1950,7 @@ router.delete(
 router.get(
   '/venues/:venueId/products',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
   validateRequest(VenueIdParamsSchema),
   productController.getProductsHandler,
 )
@@ -1981,7 +1983,7 @@ router.get(
 router.post(
   '/venues/:venueId/products',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(CreateProductSchema),
   productController.createProductHandler,
 )
@@ -2038,7 +2040,7 @@ router.get(
 router.put(
   '/venues/:venueId/products/:productId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(UpdateProductSchema),
   productController.updateProductHandler,
 )
@@ -2063,7 +2065,7 @@ router.put(
 router.delete(
   '/venues/:venueId/products/:productId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetProductParamsSchema),
   productController.deleteProductHandler,
 )
@@ -2088,7 +2090,7 @@ router.delete(
 router.patch(
   '/venues/:venueId/products/:productId/image',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
   validateRequest(GetProductParamsSchema),
   productController.deleteProductImageHandler,
 )
@@ -2448,7 +2450,7 @@ router.delete(
 router.get(
   '/venues/:venueId/shifts',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
   shiftController.getShifts,
 )
 
@@ -2472,7 +2474,7 @@ router.get(
 router.get(
   '/venues/:venueId/shifts/:shiftId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
   shiftController.getShift,
 )
 
@@ -2506,7 +2508,7 @@ router.get(
 router.get(
   '/venues/:venueId/shifts/summary',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
   shiftController.getShiftsSummary,
 )
 
@@ -2788,5 +2790,97 @@ router.post(
   authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN]),
   notificationController.sendVenueNotification,
 )
+
+// ==========================================
+// ASSISTANT AI ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/assistant/query:
+ *   post:
+ *     tags: [AI Assistant]
+ *     summary: Process a query with the AI assistant
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - message
+ *             properties:
+ *               message:
+ *                 type: string
+ *                 minLength: 1
+ *                 maxLength: 2000
+ *                 description: The query message for the assistant
+ *               conversationHistory:
+ *                 type: array
+ *                 maxItems: 50
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     role:
+ *                       type: string
+ *                       enum: [user, assistant]
+ *                     content:
+ *                       type: string
+ *                     timestamp:
+ *                       type: string
+ *                       format: date-time
+ *     responses:
+ *       200:
+ *         description: Assistant response
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     response: { type: string }
+ *                     suggestions:
+ *                       type: array
+ *                       items: { type: string }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       500: { $ref: '#/components/responses/InternalServerError' }
+ */
+router.post(
+  '/assistant/query',
+  authenticateTokenMiddleware,
+  validateRequest(assistantQuerySchema),
+  assistantController.processAssistantQuery,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/assistant/suggestions:
+ *   get:
+ *     tags: [AI Assistant]
+ *     summary: Get predefined suggestions for the assistant
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: List of suggested queries
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     suggestions:
+ *                       type: array
+ *                       items: { type: string }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/assistant/suggestions', authenticateTokenMiddleware, assistantController.getAssistantSuggestions)
 
 export default router

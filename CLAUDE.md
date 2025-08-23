@@ -48,11 +48,78 @@ This is a restaurant management platform backend with multi-tenant architecture 
 
 - **Organizations** - Multi-tenant root entities
 - **Venues** - Individual restaurant locations
-- **Staff Management** - Role-based access control (ADMIN, MANAGER, CASHIER, VIEWER)
+- **Staff Management** - Role-based access control with hierarchical permission system
 - **Menu & Product Management** - Menu categories, products, and pricing
 - **Order Processing** - Order lifecycle management
 - **POS Integration** - Real-time synchronization with Point-of-Sale systems
 - **Payment Processing** - Transaction and payment management
+
+### User Role Hierarchy
+
+The system implements a hierarchical role-based access control (RBAC) system with the following roles in descending order of permissions:
+
+#### 1. **SUPERADMIN** (Highest Level)
+- **Scope**: Full system access across all organizations and venues
+- **Permissions**: Complete administrative control, can access any venue/organization
+- **Use Case**: System administrators, platform maintainers
+- **Restrictions**: Cannot be invited through normal team invitation flow
+- **Special Access**: Maintains SUPERADMIN privileges when switching between venues
+
+#### 2. **OWNER** 
+- **Scope**: Full access to all venues within their organization
+- **Permissions**: Organization-wide management, can create/manage venues, full staff management
+- **Use Case**: Restaurant chain owners, franchise owners
+- **Special Access**: Can access any venue within their organization, maintains OWNER privileges across venues
+- **Hierarchy**: Can manage all roles except SUPERADMIN
+
+#### 3. **ADMIN**
+- **Scope**: Full venue access within assigned venues
+- **Permissions**: Complete venue management, staff management, financial reports, system configuration
+- **Use Case**: General managers, venue administrators
+- **Limitations**: Limited to assigned venues only
+
+#### 4. **MANAGER**
+- **Scope**: Operations access within assigned venues
+- **Permissions**: Shift management, staff scheduling, operations reports, inventory management
+- **Use Case**: Shift managers, assistant managers
+- **Focus**: Day-to-day operations and staff coordination
+
+#### 5. **WAITER**
+- **Scope**: Service access within assigned venues
+- **Permissions**: Order management, table service, basic customer interaction
+- **Use Case**: Waitstaff, servers
+- **Focus**: Customer service and order processing
+
+#### 6. **CASHIER**
+- **Scope**: Payment access within assigned venues
+- **Permissions**: Payment processing, basic order management, POS operations
+- **Use Case**: Cashiers, front desk staff
+- **Focus**: Payment processing and customer checkout
+
+#### 7. **KITCHEN**
+- **Scope**: Kitchen display access within assigned venues
+- **Permissions**: Kitchen display system, order preparation tracking
+- **Use Case**: Kitchen staff, cooks
+- **Focus**: Food preparation and kitchen operations
+
+#### 8. **HOST**
+- **Scope**: Reservations and seating access within assigned venues
+- **Permissions**: Reservation management, seating arrangements, customer greeting
+- **Use Case**: Host/hostess, reception staff
+- **Focus**: Customer reception and table management
+
+#### 9. **VIEWER** (Lowest Level)
+- **Scope**: Read-only access within assigned venues
+- **Permissions**: View-only access to reports and data
+- **Use Case**: Observers, trainees, external auditors
+- **Limitations**: Cannot modify any data or perform operations
+
+#### Permission Inheritance
+- **Higher roles inherit permissions from lower roles**
+- **SUPERADMIN** has unrestricted access across the entire platform
+- **OWNER** has organization-wide access but cannot manage SUPERADMINs
+- **Role-based middleware** automatically enforces permissions at the API level
+- **Special handling** for cross-venue access based on role hierarchy
 
 ### Technical Stack
 

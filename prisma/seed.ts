@@ -143,6 +143,13 @@ async function main() {
       monthlyPrice: 19.99,
     },
     {
+      code: 'AI_ASSISTANT_BUBBLE',
+      name: 'Asistente IA',
+      description: 'Asistente inteligente para análisis de datos y consultas sobre el restaurante.',
+      category: FeatureCategory.ANALYTICS,
+      monthlyPrice: 39.99,
+    },
+    {
       code: 'INVENTORY_TRACKING',
       name: 'Control de Inventario',
       description: 'Gestión de stock de productos y alertas.',
@@ -150,7 +157,15 @@ async function main() {
       monthlyPrice: 24.99,
     },
   ]
-  await prisma.feature.createMany({ data: featuresData })
+
+  // Usar upsert para crear o actualizar características
+  for (const featureData of featuresData) {
+    await prisma.feature.upsert({
+      where: { code: featureData.code },
+      update: featureData,
+      create: featureData,
+    })
+  }
   const allFeatures = await prisma.feature.findMany()
   console.log(`  Created ${allFeatures.length} global features.`)
 
