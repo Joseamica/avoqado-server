@@ -34,6 +34,12 @@ interface IntentAnalysis {
   originalQuery: string
 }
 
+interface AdvancedAnalysis {
+  type: string
+  insights: any[]
+  recommendations: any[]
+}
+
 class AssistantDashboardService {
   private openai: OpenAI
   private systemPrompt: string
@@ -167,7 +173,7 @@ Tu conocimiento se basa exclusivamente en la siguiente arquitectura y funcionali
 
 ## [MECANISMO DE DATOS]
 
-En cada consulta del usuario, el sistema te proporcionará un bloque de datos JSON (\`[DATOS_EN_VIVO]\`) con la información relevante y actualizada para responder a la pregunta. Tu tarea es interpretar la pregunta del usuario, analizar los datos proporcionados en \`[DATOS_EN_VIVO]\`, y formular una respuesta clara y útil en lenguaje natural. Nunca expongas los datos JSON crudos al usuario.
+En cada consulta del usuario, el sistema te proporcionará un bloque de datos JSON ([DATOS_EN_VIVO]) con la información relevante y actualizada para responder a la pregunta. Tu tarea es interpretar la pregunta del usuario, analizar los datos proporcionados en [DATOS_EN_VIVO], y formular una respuesta clara y útil en lenguaje natural. Nunca expongas los datos JSON crudos al usuario.
 
 ---
 
@@ -193,6 +199,13 @@ Debes ser capaz de realizar las siguientes tareas:
 **6. Soporte Funcional (Platform Guidance):**
    - Explicar cómo usar las funcionalidades de Avoqado basándote en la documentación provista.
 
+**7. Análisis de Reseñas y Satisfacción del Cliente (Reviews Analysis):**
+   - Analizar distribución de calificaciones (1-5 estrellas)
+   - Identificar patrones en feedback de clientes
+   - Detectar reseñas que requieren atención (especialmente 3 estrellas o menos)
+   - Comparar promedios de calificación entre diferentes períodos
+   - Proporcionar insights sobre satisfacción del cliente por mesero, comida, y servicio
+
 ---
 
 ## [REGLAS CRÍTICAS DE SEGURIDAD Y PRIVACIDAD]
@@ -206,9 +219,27 @@ Debes ser capaz de realizar las siguientes tareas:
 ## [FORMATO DE RESPUESTA]
 
 - Utiliza Markdown para mejorar la legibilidad
-- Sé claro y conciso
+- Sé claro y conciso con números específicos
+- Para consultas de reseñas, siempre incluye:
+  - **Números específicos** (ej: "En los últimos 7 días has recibido **5 reseñas de 5 estrellas**")
+  - **Distribución completa** cuando sea relevante (1★: X, 2★: Y, 3★: Z, 4★: A, 5★: B)
+  - **Comparaciones temporales** si hay datos disponibles
 - Sugiere preguntas de seguimiento relevantes
 - Usa el historial para entender el contexto
+- **Responde de forma directa a preguntas numéricas específicas**
+
+## [MANEJO DE CONSULTAS ESPECÍFICAS]
+
+**Para reseñas:**
+- Si preguntan por "reseñas de 5 estrellas en X días", busca en los datos "distribucion[5]" y aplica el filtro temporal
+- Si preguntan por total de reseñas, usa el campo "totalResenas"
+- Si mencionan "reseñas sin responder", usa "alertas.sinResponder"
+- Siempre proporciona números exactos cuando estén disponibles
+
+**Para ventas:**
+- Usa los campos exactos de los datos (hoy, ayer, semana, mes)
+- Incluye la moneda en los valores monetarios
+- Menciona el período específico de los datos
 
 IMPORTANTE: Solo utiliza los datos en [DATOS_EN_VIVO] que correspondan al restaurante específico del usuario. Si faltan datos, indica que no están disponibles en este momento.`
   }
@@ -244,6 +275,15 @@ IMPORTANTE: Solo utiliza los datos en [DATOS_EN_VIVO] que correspondan al restau
       const liveData = await this.getDataBasedOnIntent(query.venueId, intentAnalysis)
       logger.info('Live data obtained based on intent', { dataTypes: Object.keys(liveData) })
 
+      // Paso 2.5: Realizar análisis avanzado de los datos obtenidos
+      if (intentAnalysis.category === 'reviews' || intentAnalysis.category === 'sales') {
+        const advancedAnalysis = this.performAdvancedAnalysis(liveData, intentAnalysis.category)
+        if (advancedAnalysis) {
+          liveData.analisisAvanzado = advancedAnalysis
+          logger.info('Advanced analysis added', { analysisType: intentAnalysis.category })
+        }
+      }
+
       // Paso 3: Construir el historial de conversación con los datos relevantes
       const messages = this.buildConversationMessages(query.message, query.conversationHistory || [], liveData)
 
@@ -256,6 +296,35 @@ IMPORTANTE: Solo utiliza los datos en [DATOS_EN_VIVO] que correspondan al restau
       })
 
       const response = completion.choices[0]?.message?.content || 'Lo siento, no pude procesar tu consulta.'
+
+      // Logging detallado para análisis de mejoras
+      logger.info('🤖 ASSISTANT CONVERSATION LOG', {
+        venueId: query.venueId,
+        userId: query.userId,
+        timestamp: new Date().toISOString(),
+        query: {
+          message: query.message,
+          intent: intentAnalysis,
+          dataTypesRequested: Object.keys(liveData),
+        },
+        response: {
+          content: response.substring(0, 200) + '...',
+          tokenUsage: completion.usage,
+          model: 'gpt-4o'
+        },
+        performance: {
+          intentDetection: intentAnalysis.confidence,
+          dataRetrieved: Object.keys(liveData).length > 0
+        }
+      })
+
+      // Almacenar patrón exitoso para autoaprendizaje
+      await this.storeSuccessfulQueryPattern(
+        query.message,
+        intentAnalysis,
+        Object.keys(liveData),
+        query.venueId
+      )
 
       logger.info('Assistant query processed successfully', {
         venueId: query.venueId,
@@ -880,18 +949,50 @@ ${JSON.stringify(liveData, null, 2)}`
     }
   }
 
-  private async getReviewsData(venueId: string): Promise<any> {
+  private async getReviewsData(venueId: string, timeframe?: string): Promise<any> {
     logger.info('Accessing real reviews data from database', { 
       venueId, 
+      timeframe,
       timestamp: new Date().toISOString() 
     })
     
     try {
+      // Calcular fechas según timeframe
+      let dateFilter: any = {}
+      const now = new Date()
+      
+      if (timeframe) {
+        if (timeframe === 'today') {
+          const todayStart = new Date(now)
+          todayStart.setHours(0, 0, 0, 0)
+          const todayEnd = new Date(now)
+          todayEnd.setHours(23, 59, 59, 999)
+          dateFilter = { gte: todayStart, lte: todayEnd }
+        } else if (timeframe === 'yesterday') {
+          const yesterday = new Date(now)
+          yesterday.setDate(yesterday.getDate() - 1)
+          yesterday.setHours(0, 0, 0, 0)
+          const yesterdayEnd = new Date(yesterday)
+          yesterdayEnd.setHours(23, 59, 59, 999)
+          dateFilter = { gte: yesterday, lte: yesterdayEnd }
+        } else if (timeframe === 'week' || timeframe.includes('7') || timeframe.includes('semana')) {
+          const weekAgo = new Date(now)
+          weekAgo.setDate(weekAgo.getDate() - 7)
+          dateFilter = { gte: weekAgo }
+        } else if (timeframe === 'month' || timeframe.includes('30') || timeframe.includes('mes')) {
+          const monthAgo = new Date(now)
+          monthAgo.setDate(monthAgo.getDate() - 30)
+          dateFilter = { gte: monthAgo }
+        }
+      }
       // Obtener estadísticas generales de reseñas
+      const baseWhereClause = {
+        venueId,
+        ...(Object.keys(dateFilter).length > 0 && { createdAt: dateFilter })
+      }
+      
       const reviewStats = await prisma.review.aggregate({
-        where: {
-          venueId
-        },
+        where: baseWhereClause,
         _avg: {
           overallRating: true,
           foodRating: true,
@@ -905,9 +1006,7 @@ ${JSON.stringify(liveData, null, 2)}`
       // Obtener distribución de calificaciones
       const distribucionQuery = await prisma.review.groupBy({
         by: ['overallRating'],
-        where: {
-          venueId
-        },
+        where: baseWhereClause,
         _count: {
           overallRating: true
         }
@@ -926,9 +1025,7 @@ ${JSON.stringify(liveData, null, 2)}`
 
       // Obtener reseñas recientes (últimas 10)
       const resenasRecientes = await prisma.review.findMany({
-        where: {
-          venueId
-        },
+        where: baseWhereClause,
         orderBy: {
           createdAt: 'desc'
         },
@@ -946,7 +1043,7 @@ ${JSON.stringify(liveData, null, 2)}`
       // Contar reseñas sin responder (rating <= 3)
       const resenasNegativasSinResponder = await prisma.review.count({
         where: {
-          venueId,
+          ...baseWhereClause,
           overallRating: {
             lte: 3
           },
@@ -1009,7 +1106,12 @@ ${JSON.stringify(liveData, null, 2)}`
           anterior: Number(previousAvg._avg.overallRating?.toFixed(2) || 0),
           mejorando: (recentAvg._avg.overallRating || 0) > (previousAvg._avg.overallRating || 0)
         },
-        nota: `Reseñas reales exclusivas del restaurante ${venueId}`
+        nota: `Reseñas reales exclusivas del restaurante ${venueId}`,
+        rangoDeFechas: timeframe ? {
+          filtroAplicado: timeframe,
+          desde: dateFilter.gte?.toISOString() || 'N/A',
+          hasta: dateFilter.lte?.toISOString() || 'N/A'
+        } : 'Todos los tiempos'
       }
 
       logger.info('Real reviews data retrieved successfully', {
@@ -1046,6 +1148,120 @@ ${JSON.stringify(liveData, null, 2)}`
     }
 
     return suggestions.slice(0, 2) // Limitar a 2 sugerencias
+  }
+
+  /**
+   * Helper function para análisis avanzado de datos
+   */
+  private performAdvancedAnalysis(data: any, analysisType: string): AdvancedAnalysis | null {
+    try {
+      const analysis: AdvancedAnalysis = {
+        type: analysisType,
+        insights: [],
+        recommendations: []
+      }
+
+      if (analysisType === 'reviews' && data.resenas) {
+        const reviews = data.resenas
+        
+        // Análisis de distribución de calificaciones
+        const total = reviews.totalResenas
+        const dist = reviews.distribucion
+        
+        if (total > 0) {
+          // Calcular porcentajes de distribución
+          const porcentajes = {
+            excelente: ((dist[5] || 0) / total * 100).toFixed(1),
+            bueno: ((dist[4] || 0) / total * 100).toFixed(1),
+            regular: ((dist[3] || 0) / total * 100).toFixed(1),
+            malo: (((dist[2] || 0) + (dist[1] || 0)) / total * 100).toFixed(1)
+          }
+
+          analysis.insights.push({
+            tipo: 'distribucion_calificaciones',
+            porcentajes,
+            resumen: `${porcentajes.excelente}% de reseñas son de 5 estrellas, ${porcentajes.malo}% son negativas`
+          })
+
+          // Recomendaciones basadas en los datos
+          if (parseFloat(porcentajes.malo) > 20) {
+            analysis.recommendations.push({
+              prioridad: 'alta',
+              accion: 'Atender urgentemente las reseñas negativas para identificar problemas de servicio',
+              razon: `${porcentajes.malo}% de reseñas son negativas (2 estrellas o menos)`
+            })
+          }
+
+          if (reviews.alertas?.sinResponder > 0) {
+            analysis.recommendations.push({
+              prioridad: 'media',
+              accion: `Responder a ${reviews.alertas.sinResponder} reseñas pendientes`,
+              razon: 'Las respuestas a reseñas mejoran la percepción del cliente'
+            })
+          }
+
+          // Análisis de tendencia si está disponible
+          if (reviews.tendencia) {
+            const mejorando = reviews.tendencia.mejorando
+            analysis.insights.push({
+              tipo: 'tendencia',
+              direccion: mejorando ? 'positiva' : 'negativa',
+              actual: reviews.tendencia.actual,
+              anterior: reviews.tendencia.anterior
+            })
+          }
+        }
+      }
+
+      if (analysisType === 'sales' && data.ventas) {
+        const sales = data.ventas
+        
+        // Análisis comparativo de ventas
+        if (sales.hoy !== undefined && sales.ayer !== undefined) {
+          const cambio = ((sales.hoy - sales.ayer) / sales.ayer * 100).toFixed(1)
+          analysis.insights.push({
+            tipo: 'comparacion_diaria',
+            cambio_porcentual: cambio,
+            direccion: parseFloat(cambio) >= 0 ? 'positiva' : 'negativa',
+            diferencia_absoluta: sales.hoy - sales.ayer
+          })
+        }
+      }
+
+      return analysis
+
+    } catch (error) {
+      logger.warn('Error in advanced analysis', { error, analysisType })
+      return null
+    }
+  }
+
+  /**
+   * Almacena patrones de consultas para autoaprendizaje
+   */
+  private async storeSuccessfulQueryPattern(query: string, intent: IntentAnalysis, dataTypes: string[], venueId: string) {
+    try {
+      // Crear un patrón de consulta exitosa que podríamos usar para mejorar futuras respuestas
+      const pattern = {
+        queryText: query.toLowerCase().trim(),
+        detectedIntent: intent.category,
+        timeframe: intent.timeframe,
+        dataTypesUsed: dataTypes,
+        confidence: intent.confidence,
+        venueId: venueId,
+        timestamp: new Date(),
+        queryHash: Buffer.from(query.toLowerCase()).toString('base64').substring(0, 16) // Hash simple
+      }
+
+      // Por ahora solo lo loggeamos, pero en el futuro podríamos almacenarlo en base de datos
+      logger.info('📚 SUCCESSFUL QUERY PATTERN', pattern)
+
+      // TODO: Implementar almacenamiento en base de datos para análisis posterior
+      // await prisma.assistantQueryPattern.create({ data: pattern })
+      
+    } catch (error) {
+      logger.warn('Error storing query pattern', { error, query })
+    }
   }
 
   /**
@@ -1136,7 +1352,10 @@ ${JSON.stringify(liveData, null, 2)}`
       if (category === 'general') category = 'products'
     }
     
-    if (messageLower.includes('reseña') || messageLower.includes('calificaci') || messageLower.includes('cliente')) {
+    if (messageLower.includes('reseña') || messageLower.includes('calificaci') || messageLower.includes('cliente') || 
+        messageLower.includes('review') || messageLower.includes('estrella') || messageLower.includes('star') ||
+        messageLower.includes('opinión') || messageLower.includes('comentario') || messageLower.includes('feedback') ||
+        messageLower.includes('satisfacción') || messageLower.includes('rating') || messageLower.includes('puntuación')) {
       dataTypes.push('reviews')
       if (category === 'general') category = 'reviews'
     }
@@ -1201,7 +1420,7 @@ ${JSON.stringify(liveData, null, 2)}`
             liveData.productos = await this.getProductsData(venueId)
             break
           case 'reviews':
-            liveData.resenas = await this.getReviewsData(venueId)
+            liveData.resenas = await this.getReviewsData(venueId, intent.timeframe)
             break
           case 'operations':
             liveData.alertas = await this.getAlertsData(venueId)

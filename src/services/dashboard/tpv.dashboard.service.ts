@@ -1,7 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
-import { PaginatedTerminalsResponse } from '../../schemas/dashboard/tpv.schema'
-import { TerminalStatus, TerminalType } from '@prisma/client'
+import { PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
+import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 
 /**
  * Obtiene los datos de las terminales para un venue, con paginación y filtros.
@@ -37,9 +37,7 @@ export async function getTerminalsData(
   // 4. Ejecutar las consultas a la base de datos en paralelo
   const [terminals, total] = await prisma.$transaction([
     prisma.terminal.findMany({
-      where: {
-        venueId,
-      },
+      where: whereClause,
       orderBy: {
         name: 'asc', // Ordenar alfabéticamente por nombre
       },
@@ -61,4 +59,87 @@ export async function getTerminalsData(
       pageCount: Math.ceil(total / pageSize),
     },
   }
+}
+
+/**
+ * Obtiene una terminal específica por ID y venueId.
+ * @param venueId - El ID del venue.
+ * @param tpvId - El ID de la terminal.
+ * @returns La terminal encontrada.
+ */
+export async function getTpvById(venueId: string, tpvId: string): Promise<Terminal> {
+  // 1. Validar parámetros de entrada
+  if (!venueId) {
+    throw new NotFoundError('El ID del Venue es requerido.')
+  }
+  if (!tpvId) {
+    throw new NotFoundError('El ID del TPV es requerido.')
+  }
+
+  // 2. Buscar la terminal en la base de datos
+  const terminal = await prisma.terminal.findFirst({
+    where: {
+      id: tpvId,
+      venueId: venueId,
+    },
+  })
+
+  // 3. Verificar si la terminal existe
+  if (!terminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
+  }
+
+  return terminal
+}
+
+/**
+ * Actualiza una terminal específica.
+ * @param venueId - El ID del venue.
+ * @param tpvId - El ID de la terminal.
+ * @param updateData - Los datos a actualizar.
+ * @returns La terminal actualizada.
+ */
+export async function updateTpv(venueId: string, tpvId: string, updateData: UpdateTpvBody): Promise<Terminal> {
+  // 1. Validar parámetros de entrada
+  if (!venueId) {
+    throw new NotFoundError('El ID del Venue es requerido.')
+  }
+  if (!tpvId) {
+    throw new NotFoundError('El ID del TPV es requerido.')
+  }
+
+  // 2. Verificar que la terminal existe y pertenece al venue
+  const existingTerminal = await prisma.terminal.findFirst({
+    where: {
+      id: tpvId,
+      venueId: venueId,
+    },
+  })
+
+  if (!existingTerminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
+  }
+
+  // 3. Preparar los datos de actualización
+  const updatePayload: any = { ...updateData, updatedAt: new Date() }
+  
+  // Si hay configuración como string, intentar parsearla como JSON
+  if (updateData.config && typeof updateData.config === 'string') {
+    try {
+      updatePayload.config = JSON.parse(updateData.config)
+    } catch (error) {
+      // Si no es JSON válido, guardarlo como string
+      updatePayload.config = updateData.config
+    }
+  }
+
+  // 4. Actualizar la terminal
+  const updatedTerminal = await prisma.terminal.update({
+    where: {
+      id: tpvId,
+    },
+    data: updatePayload,
+  })
+
+  return updatedTerminal
 }

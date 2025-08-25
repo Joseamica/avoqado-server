@@ -24,6 +24,7 @@ import * as shiftController from '../controllers/dashboard/shift.dashboard.contr
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
 import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
+import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import superadminRoutes from './dashboard/superadmin.routes'
 import {
   CreateMenuCategorySchema,
@@ -1136,6 +1137,131 @@ router.get(
   authenticateTokenMiddleware,
   authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
   tpvController.getTerminals,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}:
+ *   get:
+ *     tags: [TPV Management]
+ *     summary: Get a specific terminal (TPV) by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The venue ID
+ *       - name: tpvId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The TPV ID
+ *     responses:
+ *       200:
+ *         description: Terminal retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Terminal'
+ *       404:
+ *         description: Terminal not found
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+router.get(
+  '/venues/:venueId/tpv/:tpvId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  tpvController.getTpvById,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}:
+ *   put:
+ *     tags: [TPV Management]
+ *     summary: Update a specific terminal (TPV)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The venue ID
+ *       - name: tpvId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The TPV ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 description: Terminal name
+ *               version:
+ *                 type: string
+ *                 description: Terminal version
+ *               serial:
+ *                 type: string
+ *                 description: Terminal serial number
+ *               tradeMark:
+ *                 type: string
+ *                 description: Terminal brand/trademark
+ *               model:
+ *                 type: string
+ *                 description: Terminal model
+ *               idMenta:
+ *                 type: string
+ *                 description: Menta integration ID
+ *               customerId:
+ *                 type: string
+ *                 description: Customer ID
+ *               configuration:
+ *                 type: string
+ *                 description: Terminal configuration JSON
+ *               status:
+ *                 type: string
+ *                 enum: [ACTIVE, INACTIVE, MAINTENANCE]
+ *                 description: Terminal status
+ *               type:
+ *                 type: string
+ *                 enum: [TPV_ANDROID, TPV_IOS, PRINTER_RECEIPT, PRINTER_KITCHEN, KDS]
+ *                 description: Terminal type
+ *     responses:
+ *       200:
+ *         description: Terminal updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Terminal'
+ *       404:
+ *         description: Terminal not found
+ *       400:
+ *         description: Invalid request data
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+router.put(
+  '/venues/:venueId/tpv/:tpvId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  tpvController.updateTpv,
 )
 
 /**
@@ -2855,6 +2981,91 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(assistantQuerySchema),
   assistantController.processAssistantQuery,
+)
+
+
+/**
+ * @openapi
+ * /api/v1/dashboard/assistant/text-to-sql:
+ *   post:
+ *     tags: [AI Assistant]
+ *     summary: Process queries using Text-to-SQL AI (dynamic SQL generation)
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               message:
+ *                 type: string
+ *                 description: Natural language query
+ *                 example: "¿Cuántas reseñas de 5 estrellas tengo en los últimos 49 días?"
+ *               conversationHistory:
+ *                 type: array
+ *                 description: Previous conversation context
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     role:
+ *                       type: string
+ *                       enum: [user, assistant]
+ *                     content:
+ *                       type: string
+ *                     timestamp:
+ *                       type: string
+ *                       format: date-time
+ *             required: [message]
+ *     responses:
+ *       200:
+ *         description: Successful SQL-generated response
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     response:
+ *                       type: string
+ *                       description: Natural language interpretation of results
+ *                     suggestions:
+ *                       type: array
+ *                       items:
+ *                         type: string
+ *                     metadata:
+ *                       type: object
+ *                       properties:
+ *                         confidence:
+ *                           type: number
+ *                         queryGenerated:
+ *                           type: boolean
+ *                         queryExecuted:
+ *                           type: boolean
+ *                         rowsReturned:
+ *                           type: number
+ *                         executionTime:
+ *                           type: number
+ *                         dataSourcesUsed:
+ *                           type: array
+ *                           items:
+ *                             type: string
+ *                         sqlQuery:
+ *                           type: string
+ *                           description: Generated SQL query (development only)
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       500: { $ref: '#/components/responses/InternalServerError' }
+ */
+router.post(
+  '/assistant/text-to-sql',
+  authenticateTokenMiddleware,
+  validateRequest(assistantQuerySchema),
+  textToSqlAssistantController.processTextToSqlQuery,
 )
 
 /**

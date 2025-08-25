@@ -18,3 +18,13 @@ export type GetTerminalsQuery = {
   status?: TerminalStatus
   type?: TerminalType
 }
+
+// Define el tipo para actualizar un TPV (basado en el schema real de Prisma)
+export type UpdateTpvBody = {
+  name?: string
+  serialNumber?: string
+  type?: TerminalType
+  status?: TerminalStatus
+  lastHeartbeat?: Date
+  config?: any // JSON field in Prisma
+}
