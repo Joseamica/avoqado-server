@@ -1,8 +1,10 @@
 import OpenAI from 'openai'
 
-import logger from '@/config/logger'
-import AppError from '@/errors/AppError'
-import prisma from '@/utils/prismaClient'
+import AppError from '../../errors/AppError'
+import logger from '../../config/logger'
+import prisma from '../../utils/prismaClient'
+import { StaffRole } from '@prisma/client'
+import { AILearningService } from './ai-learning.service'
 
 interface AssistantQuery {
   message: string
@@ -20,6 +22,7 @@ interface ConversationEntry {
 interface AssistantResponse {
   response: string
   suggestions?: string[]
+  trainingDataId?: string
 }
 
 interface LiveData {
@@ -42,6 +45,7 @@ interface AdvancedAnalysis {
 
 class AssistantDashboardService {
   private openai: OpenAI
+  private aiLearningService: AILearningService
   private systemPrompt: string
 
   constructor() {
@@ -50,10 +54,16 @@ class AssistantDashboardService {
       throw new AppError('OPENAI_API_KEY is required in environment variables', 500)
     }
 
-    this.openai = new OpenAI({
-      apiKey: apiKey,
-    })
+    try {
+      this.openai = new OpenAI({
+        apiKey: apiKey,
+      })
+    } catch (error) {
+      logger.error('Failed to initialize OpenAI client. The API key may be invalid or missing.', { error })
+      throw new AppError('Failed to initialize OpenAI client. Please check the OPENAI_API_KEY.', 500)
+    }
 
+    this.aiLearningService = new AILearningService()
     this.systemPrompt = this.buildSystemPrompt()
   }
 
@@ -245,6 +255,7 @@ IMPORTANTE: Solo utiliza los datos en [DATOS_EN_VIVO] que correspondan al restau
   }
 
   async processQuery(query: AssistantQuery): Promise<AssistantResponse> {
+    const startTime = Date.now()
     try {
       // Log de seguridad crítico para auditoría
       logger.info('🔍 Processing assistant query with security validation', {
@@ -310,30 +321,39 @@ IMPORTANTE: Solo utiliza los datos en [DATOS_EN_VIVO] que correspondan al restau
         response: {
           content: response.substring(0, 200) + '...',
           tokenUsage: completion.usage,
-          model: 'gpt-4o'
+          model: 'gpt-4o',
         },
         performance: {
           intentDetection: intentAnalysis.confidence,
-          dataRetrieved: Object.keys(liveData).length > 0
-        }
+          dataRetrieved: Object.keys(liveData).length > 0,
+        },
       })
 
       // Almacenar patrón exitoso para autoaprendizaje
-      await this.storeSuccessfulQueryPattern(
-        query.message,
-        intentAnalysis,
-        Object.keys(liveData),
-        query.venueId
-      )
+      await this.storeSuccessfulQueryPattern(query.message, intentAnalysis, Object.keys(liveData), query.venueId)
+
+      // Registrar la interacción para aprendizaje de IA
+      const trainingDataId = await this.aiLearningService.recordChatInteraction({
+        venueId: query.venueId,
+        userId: query.userId,
+        userQuestion: query.message,
+        aiResponse: response,
+        confidence: intentAnalysis.confidence,
+        executionTime: Date.now() - startTime,
+        rowsReturned: 0, // No SQL query in general assistant
+        sessionId: `assistant-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      })
 
       logger.info('Assistant query processed successfully', {
         venueId: query.venueId,
         userId: query.userId,
+        trainingDataId,
       })
 
       return {
         response,
         suggestions: this.generateSuggestions(query.message),
+        trainingDataId,
       }
     } catch (error) {
       logger.error('Error processing assistant query', {
@@ -368,7 +388,7 @@ IMPORTANTE: Solo utiliza los datos en [DATOS_EN_VIVO] que correspondan al restau
 
     // Agregar el mensaje actual con los datos en vivo filtrados por venue
     const securityNote = `IMPORTANTE: Todos los datos siguientes pertenecen EXCLUSIVAMENTE al restaurante con venueId: ${liveData._metadata?.venueId || 'UNDEFINED'}. No compartas información de otros restaurantes.`
-    
+
     const messageWithData = `${currentMessage}
 
 ${securityNote}
@@ -384,13 +404,12 @@ ${JSON.stringify(liveData, null, 2)}`
     return messages
   }
 
-
   private async getSalesData(venueId: string, timeframe?: string): Promise<any> {
     // Log de seguridad para auditoria
-    logger.info('🔍 Accessing real sales data from database', { 
-      venueId, 
+    logger.info('🔍 Accessing real sales data from database', {
+      venueId,
       timeframe,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     })
 
     // Log crítico para debugging
@@ -406,28 +425,28 @@ ${JSON.stringify(liveData, null, 2)}`
     try {
       // Usar EXACTAMENTE la misma lógica que el dashboard Home.tsx
       const now = new Date()
-      
+
       // HOY: desde las 00:00:00 hasta 23:59:59 de hoy
       const hoyInicio = new Date(now.setHours(0, 0, 0, 0))
       const hoyFin = new Date(new Date().setHours(23, 59, 59, 999))
-      
+
       // AYER: desde las 00:00:00 hasta 23:59:59 de ayer
       const ayerInicio = new Date(hoyInicio)
       ayerInicio.setDate(ayerInicio.getDate() - 1)
       const ayerFin = new Date(ayerInicio)
       ayerFin.setHours(23, 59, 59, 999)
-      
+
       // ÚLTIMOS 7 DÍAS: exactamente como en Home.tsx (líneas 140-143)
       const semanaInicio = new Date(new Date().setHours(0, 0, 0, 0) - 7 * 24 * 60 * 60 * 1000)
       const semanaFin = new Date(new Date().setHours(23, 59, 59, 999))
-      
+
       // ÚLTIMOS 30 DÍAS: similar lógica
       const mesInicio = new Date(new Date().setHours(0, 0, 0, 0) - 30 * 24 * 60 * 60 * 1000)
       const mesFin = new Date(new Date().setHours(23, 59, 59, 999))
 
       // IMPORTANTE: Usar Payment como en Home.tsx, NO Order
       // El dashboard suma payment.amount, no order.total
-      
+
       // Obtener payments de HOY
       const paymentsHoy = await prisma.payment.aggregate({
         where: {
@@ -435,25 +454,25 @@ ${JSON.stringify(liveData, null, 2)}`
           status: 'COMPLETED' as const,
           createdAt: {
             gte: hoyInicio,
-            lte: hoyFin
-          }
+            lte: hoyFin,
+          },
         },
         _sum: { amount: true },
-        _count: true
+        _count: true,
       })
 
-      // Obtener payments de AYER  
+      // Obtener payments de AYER
       const paymentsAyer = await prisma.payment.aggregate({
         where: {
           venueId,
           status: 'COMPLETED' as const,
           createdAt: {
             gte: ayerInicio,
-            lte: ayerFin
-          }
+            lte: ayerFin,
+          },
         },
         _sum: { amount: true },
-        _count: true
+        _count: true,
       })
 
       // Obtener payments de ÚLTIMOS 7 DÍAS (como Home.tsx)
@@ -463,11 +482,11 @@ ${JSON.stringify(liveData, null, 2)}`
           status: 'COMPLETED' as const,
           createdAt: {
             gte: semanaInicio,
-            lte: semanaFin
-          }
+            lte: semanaFin,
+          },
         },
         _sum: { amount: true },
-        _count: true
+        _count: true,
       })
 
       // Obtener payments del MES
@@ -477,17 +496,17 @@ ${JSON.stringify(liveData, null, 2)}`
           status: 'COMPLETED' as const,
           createdAt: {
             gte: mesInicio,
-            lte: mesFin
-          }
+            lte: mesFin,
+          },
         },
         _sum: { amount: true },
-        _count: true
+        _count: true,
       })
 
       // Obtener información de la venue para la moneda
       const venue = await prisma.venue.findUnique({
         where: { id: venueId },
-        select: { currency: true, name: true }
+        select: { currency: true, name: true },
       })
 
       // Log crítico para verificar qué venue está devolviendo
@@ -515,15 +534,15 @@ ${JSON.stringify(liveData, null, 2)}`
           hoy: paymentsHoy._count,
           ayer: paymentsAyer._count,
           semana: paymentsSemana._count,
-          mes: paymentsMes._count
+          mes: paymentsMes._count,
         },
         rangosFechas: {
           hoyInicio: hoyInicio.toISOString(),
           hoyFin: hoyFin.toISOString(),
           semanaInicio: semanaInicio.toISOString(),
-          semanaFin: semanaFin.toISOString()
+          semanaFin: semanaFin.toISOString(),
         },
-        nota: `Datos reales de payments (como Home.tsx) - exclusivos del restaurante ${venueId}`
+        nota: `Datos reales de payments (como Home.tsx) - exclusivos del restaurante ${venueId}`,
       }
 
       // Ajustar datos según el timeframe específico
@@ -545,11 +564,10 @@ ${JSON.stringify(liveData, null, 2)}`
         hoy: salesData.hoy,
         semana: salesData.semana,
         totalPagos: salesData.pagos.semana,
-        rangoSemana: `${semanaInicio.toISOString()} - ${semanaFin.toISOString()}`
+        rangoSemana: `${semanaInicio.toISOString()} - ${semanaFin.toISOString()}`,
       })
 
       return salesData
-
     } catch (error) {
       logger.error('Error retrieving real sales data', { error, venueId })
       throw new AppError(`Error al obtener datos de ventas: ${(error as Error).message}`, 500)
@@ -557,49 +575,49 @@ ${JSON.stringify(liveData, null, 2)}`
   }
 
   private async getStaffData(venueId: string): Promise<any> {
-    logger.info('Accessing real staff data from database', { 
-      venueId, 
-      timestamp: new Date().toISOString() 
+    logger.info('Accessing real staff data from database', {
+      venueId,
+      timestamp: new Date().toISOString(),
     })
-    
+
     try {
       // Obtener staff activo del venue
       const staffActivo = await prisma.staffVenue.findMany({
         where: {
           venueId,
-          active: true
+          active: true,
         },
         include: {
           staff: {
             select: {
               firstName: true,
               lastName: true,
-              active: true
-            }
-          }
-        }
+              active: true,
+            },
+          },
+        },
       })
 
       // Obtener turnos abiertos hoy
       const today = new Date()
       today.setHours(0, 0, 0, 0)
-      
+
       const turnosHoy = await prisma.shift.findMany({
         where: {
           venueId,
           startTime: {
-            gte: today
+            gte: today,
           },
-          status: 'OPEN'
+          status: 'OPEN',
         },
         include: {
           staff: {
             select: {
               firstName: true,
-              lastName: true
-            }
-          }
-        }
+              lastName: true,
+            },
+          },
+        },
       })
 
       // Obtener ranking de staff por ventas y propinas (últimos 30 días)
@@ -609,7 +627,7 @@ ${JSON.stringify(liveData, null, 2)}`
       const staffRanking = await prisma.staffVenue.findMany({
         where: {
           venueId,
-          active: true
+          active: true,
         },
         include: {
           staff: {
@@ -619,61 +637,59 @@ ${JSON.stringify(liveData, null, 2)}`
               paymentsProcessed: {
                 where: {
                   createdAt: {
-                    gte: thirtyDaysAgo
+                    gte: thirtyDaysAgo,
                   },
-                  venueId
+                  venueId,
                 },
                 select: {
                   tipAmount: true,
-                  amount: true
-                }
+                  amount: true,
+                },
               },
               ordersCreated: {
                 where: {
                   createdAt: {
-                    gte: thirtyDaysAgo
+                    gte: thirtyDaysAgo,
                   },
-                  venueId
+                  venueId,
                 },
                 select: {
-                  total: true
-                }
-              }
-            }
-          }
-        }
+                  total: true,
+                },
+              },
+            },
+          },
+        },
       })
 
       // Procesar datos para el ranking
-      const ranking = staffRanking.map((staffVenue: any) => {
-        const totalPropinas = staffVenue.staff.paymentsProcessed.reduce(
-          (sum: number, payment: any) => sum + Number(payment.tipAmount), 0
-        )
-        const totalOrdenes = staffVenue.staff.ordersCreated.length
-        const totalVentas = staffVenue.staff.ordersCreated.reduce(
-          (sum: number, order: any) => sum + Number(order.total), 0
-        )
-        
-        return {
-          nombre: `${staffVenue.staff.firstName} ${staffVenue.staff.lastName}`,
-          propinas: totalPropinas,
-          ordenes: totalOrdenes,
-          ventas: totalVentas,
-          promedio: totalOrdenes > 0 ? totalPropinas / totalOrdenes : 0,
-          role: staffVenue.role
-        }
-      }).sort((a: any, b: any) => b.propinas - a.propinas) // Ordenar por propinas desc
+      const ranking = staffRanking
+        .map((staffVenue: any) => {
+          const totalPropinas = staffVenue.staff.paymentsProcessed.reduce((sum: number, payment: any) => sum + Number(payment.tipAmount), 0)
+          const totalOrdenes = staffVenue.staff.ordersCreated.length
+          const totalVentas = staffVenue.staff.ordersCreated.reduce((sum: number, order: any) => sum + Number(order.total), 0)
+
+          return {
+            nombre: `${staffVenue.staff.firstName} ${staffVenue.staff.lastName}`,
+            propinas: totalPropinas,
+            ordenes: totalOrdenes,
+            ventas: totalVentas,
+            promedio: totalOrdenes > 0 ? totalPropinas / totalOrdenes : 0,
+            role: staffVenue.role,
+          }
+        })
+        .sort((a: any, b: any) => b.propinas - a.propinas) // Ordenar por propinas desc
 
       // Formatear turnos activos
       const activos = turnosHoy.map((turno: any) => ({
         nombre: `${turno.staff.firstName} ${turno.staff.lastName}`,
         turno: 'Abierto',
-        horaInicio: turno.startTime.toLocaleTimeString('es-MX', { 
-          hour: '2-digit', 
-          minute: '2-digit' 
+        horaInicio: turno.startTime.toLocaleTimeString('es-MX', {
+          hour: '2-digit',
+          minute: '2-digit',
         }),
         ventasTurno: Number(turno.totalSales),
-        propinasTurno: Number(turno.totalTips)
+        propinasTurno: Number(turno.totalTips),
       }))
 
       const staffData = {
@@ -685,18 +701,17 @@ ${JSON.stringify(liveData, null, 2)}`
           turnosAbiertos: turnosHoy.length,
           promedioPropinasDiarias: ranking.reduce((sum: number, staff: any) => sum + staff.propinas, 0) / (ranking.length || 1),
         },
-        nota: `Personal real exclusivo del restaurante ${venueId}`
+        nota: `Personal real exclusivo del restaurante ${venueId}`,
       }
 
       logger.info('Real staff data retrieved successfully', {
         venueId,
         totalStaff: staffActivo.length,
         turnosAbiertos: turnosHoy.length,
-        topStaff: ranking[0]?.nombre || 'Sin staff'
+        topStaff: ranking[0]?.nombre || 'Sin staff',
       })
 
       return staffData
-
     } catch (error) {
       logger.error('Error retrieving real staff data', { error, venueId })
       throw new AppError(`Error al obtener datos de personal: ${(error as Error).message}`, 500)
@@ -704,11 +719,11 @@ ${JSON.stringify(liveData, null, 2)}`
   }
 
   private async getProductsData(venueId: string): Promise<any> {
-    logger.info('Accessing real products data from database', { 
-      venueId, 
-      timestamp: new Date().toISOString() 
+    logger.info('Accessing real products data from database', {
+      venueId,
+      timestamp: new Date().toISOString(),
     })
-    
+
     try {
       // Rango para análisis (últimos 30 días)
       const thirtyDaysAgo = new Date()
@@ -721,23 +736,23 @@ ${JSON.stringify(liveData, null, 2)}`
           order: {
             venueId,
             createdAt: {
-              gte: thirtyDaysAgo
+              gte: thirtyDaysAgo,
             },
-            paymentStatus: 'PAID'
-          }
+            paymentStatus: 'PAID',
+          },
         },
         _sum: {
           quantity: true,
-          total: true
+          total: true,
         },
         _count: {
-          id: true
+          id: true,
         },
         orderBy: {
           _sum: {
-            quantity: 'desc'
-          }
-        }
+            quantity: 'desc',
+          },
+        },
       })
 
       // Obtener información de los productos
@@ -745,17 +760,17 @@ ${JSON.stringify(liveData, null, 2)}`
       const productos = await prisma.product.findMany({
         where: {
           id: {
-            in: productIds
+            in: productIds,
           },
-          venueId
+          venueId,
         },
         select: {
           id: true,
           name: true,
           price: true,
           type: true,
-          active: true
-        }
+          active: true,
+        },
       })
 
       // Combinar datos de ventas con información del producto
@@ -768,7 +783,7 @@ ${JSON.stringify(liveData, null, 2)}`
           cantidad: venta._sum.quantity || 0,
           ingresos: Number(venta._sum.total || 0),
           precio: Number(producto?.price || 0),
-          ordenesConProducto: venta._count.id
+          ordenesConProducto: venta._count.id,
         }
       })
 
@@ -781,20 +796,20 @@ ${JSON.stringify(liveData, null, 2)}`
         where: {
           venueId,
           product: {
-            active: true
-          }
+            active: true,
+          },
         },
         include: {
           product: {
             select: {
               name: true,
-              unit: true
-            }
-          }
+              unit: true,
+            },
+          },
         },
         orderBy: {
-          currentStock: 'asc'
-        }
+          currentStock: 'asc',
+        },
       })
 
       const stockBajo = productosConInventario
@@ -804,7 +819,7 @@ ${JSON.stringify(liveData, null, 2)}`
           cantidad: Number(inv.currentStock),
           minimo: Number(inv.minimumStock),
           unidad: inv.product.unit || 'pza',
-          estado: Number(inv.currentStock) === 0 ? 'agotado' : 'crítico'
+          estado: Number(inv.currentStock) === 0 ? 'agotado' : 'crítico',
         }))
 
       const productsData = {
@@ -817,20 +832,19 @@ ${JSON.stringify(liveData, null, 2)}`
           productosConVentas: productosConVentas.length,
           productosStockBajo: stockBajo.length,
           ingresosTotales: productosConVentas.reduce((sum, p) => sum + p.ingresos, 0),
-          cantidadTotalVendida: productosConVentas.reduce((sum, p) => sum + p.cantidad, 0)
+          cantidadTotalVendida: productosConVentas.reduce((sum, p) => sum + p.cantidad, 0),
         },
-        nota: `Productos reales exclusivos del restaurante ${venueId}`
+        nota: `Productos reales exclusivos del restaurante ${venueId}`,
       }
 
       logger.info('Real products data retrieved successfully', {
         venueId,
         totalProductos: productos.length,
         masVendido: masVendidos[0]?.nombre || 'Sin datos',
-        stockBajo: stockBajo.length
+        stockBajo: stockBajo.length,
       })
 
       return productsData
-
     } catch (error) {
       logger.error('Error retrieving real products data', { error, venueId })
       throw new AppError(`Error al obtener datos de productos: ${(error as Error).message}`, 500)
@@ -838,21 +852,21 @@ ${JSON.stringify(liveData, null, 2)}`
   }
 
   private async getAlertsData(venueId: string): Promise<any> {
-    logger.info('Accessing real alerts data from database', { 
-      venueId, 
-      timestamp: new Date().toISOString() 
+    logger.info('Accessing real alerts data from database', {
+      venueId,
+      timestamp: new Date().toISOString(),
     })
-    
+
     try {
       // Reseñas negativas sin responder (rating <= 3)
       const resenasNegativas = await prisma.review.count({
         where: {
           venueId,
           overallRating: {
-            lte: 3
+            lte: 3,
           },
-          responseText: null
-        }
+          responseText: null,
+        },
       })
 
       // Productos con stock bajo
@@ -860,27 +874,27 @@ ${JSON.stringify(liveData, null, 2)}`
         where: {
           venueId,
           product: {
-            active: true
-          }
+            active: true,
+          },
         },
         include: {
           product: {
             select: {
-              name: true
-            }
-          }
+              name: true,
+            },
+          },
         },
         orderBy: {
-          currentStock: 'asc'
-        }
+          currentStock: 'asc',
+        },
       })
 
       // Turnos abiertos
       const turnosAbiertos = await prisma.shift.count({
         where: {
           venueId,
-          status: 'OPEN'
-        }
+          status: 'OPEN',
+        },
       })
 
       // Órdenes pendientes de completar
@@ -888,30 +902,30 @@ ${JSON.stringify(liveData, null, 2)}`
         where: {
           venueId,
           status: {
-            in: ['PENDING', 'CONFIRMED', 'PREPARING']
-          }
-        }
+            in: ['PENDING', 'CONFIRMED', 'PREPARING'],
+          },
+        },
       })
 
       // Pagos fallidos en las últimas 24 horas
       const yesterday = new Date()
       yesterday.setDate(yesterday.getDate() - 1)
-      
+
       const pagosFallidos = await prisma.payment.count({
         where: {
           venueId,
           status: 'FAILED',
           createdAt: {
-            gte: yesterday
-          }
-        }
+            gte: yesterday,
+          },
+        },
       })
 
       // POS connection status
       const posStatus = await prisma.posConnectionStatus.findUnique({
         where: {
-          venueId
-        }
+          venueId,
+        },
       })
 
       const alertsData = {
@@ -920,7 +934,7 @@ ${JSON.stringify(liveData, null, 2)}`
         productosStockBajo: productosStockBajo.map(inv => ({
           nombre: inv.product.name,
           stock: Number(inv.currentStock),
-          minimo: Number(inv.minimumStock)
+          minimo: Number(inv.minimumStock),
         })),
         turnosAbiertos,
         ordenesPendientes,
@@ -929,20 +943,19 @@ ${JSON.stringify(liveData, null, 2)}`
         ultimoLatidoPOS: posStatus?.lastHeartbeatAt,
         resumen: {
           totalAlertas: resenasNegativas + productosStockBajo.length + (posStatus?.status !== 'ONLINE' ? 1 : 0),
-          criticidad: productosStockBajo.length > 5 ? 'alta' : productosStockBajo.length > 0 ? 'media' : 'baja'
+          criticidad: productosStockBajo.length > 5 ? 'alta' : productosStockBajo.length > 0 ? 'media' : 'baja',
         },
-        nota: `Alertas reales exclusivas del restaurante ${venueId}`
+        nota: `Alertas reales exclusivas del restaurante ${venueId}`,
       }
 
       logger.info('Real alerts data retrieved successfully', {
         venueId,
         totalAlertas: alertsData.resumen.totalAlertas,
         resenasNegativas,
-        productosStockBajo: productosStockBajo.length
+        productosStockBajo: productosStockBajo.length,
       })
 
       return alertsData
-
     } catch (error) {
       logger.error('Error retrieving real alerts data', { error, venueId })
       throw new AppError(`Error al obtener datos de alertas: ${(error as Error).message}`, 500)
@@ -950,17 +963,17 @@ ${JSON.stringify(liveData, null, 2)}`
   }
 
   private async getReviewsData(venueId: string, timeframe?: string): Promise<any> {
-    logger.info('Accessing real reviews data from database', { 
-      venueId, 
+    logger.info('Accessing real reviews data from database', {
+      venueId,
       timeframe,
-      timestamp: new Date().toISOString() 
+      timestamp: new Date().toISOString(),
     })
-    
+
     try {
       // Calcular fechas según timeframe
       let dateFilter: any = {}
       const now = new Date()
-      
+
       if (timeframe) {
         if (timeframe === 'today') {
           const todayStart = new Date(now)
@@ -988,19 +1001,19 @@ ${JSON.stringify(liveData, null, 2)}`
       // Obtener estadísticas generales de reseñas
       const baseWhereClause = {
         venueId,
-        ...(Object.keys(dateFilter).length > 0 && { createdAt: dateFilter })
+        ...(Object.keys(dateFilter).length > 0 && { createdAt: dateFilter }),
       }
-      
+
       const reviewStats = await prisma.review.aggregate({
         where: baseWhereClause,
         _avg: {
           overallRating: true,
           foodRating: true,
-          serviceRating: true
+          serviceRating: true,
         },
         _count: {
-          id: true
-        }
+          id: true,
+        },
       })
 
       // Obtener distribución de calificaciones
@@ -1008,14 +1021,18 @@ ${JSON.stringify(liveData, null, 2)}`
         by: ['overallRating'],
         where: baseWhereClause,
         _count: {
-          overallRating: true
-        }
+          overallRating: true,
+        },
       })
 
       const distribucion = {
-        5: 0, 4: 0, 3: 0, 2: 0, 1: 0
+        5: 0,
+        4: 0,
+        3: 0,
+        2: 0,
+        1: 0,
       }
-      
+
       distribucionQuery.forEach((item: any) => {
         const rating = item.overallRating as 1 | 2 | 3 | 4 | 5
         if (rating >= 1 && rating <= 5) {
@@ -1027,17 +1044,17 @@ ${JSON.stringify(liveData, null, 2)}`
       const resenasRecientes = await prisma.review.findMany({
         where: baseWhereClause,
         orderBy: {
-          createdAt: 'desc'
+          createdAt: 'desc',
         },
         take: 10,
         include: {
           servedBy: {
             select: {
               firstName: true,
-              lastName: true
-            }
-          }
-        }
+              lastName: true,
+            },
+          },
+        },
       })
 
       // Contar reseñas sin responder (rating <= 3)
@@ -1045,10 +1062,10 @@ ${JSON.stringify(liveData, null, 2)}`
         where: {
           ...baseWhereClause,
           overallRating: {
-            lte: 3
+            lte: 3,
           },
-          responseText: null
-        }
+          responseText: null,
+        },
       })
 
       // Obtener tendencia (últimos 30 vs 30 días anteriores)
@@ -1061,12 +1078,12 @@ ${JSON.stringify(liveData, null, 2)}`
         where: {
           venueId,
           createdAt: {
-            gte: thirtyDaysAgo
-          }
+            gte: thirtyDaysAgo,
+          },
         },
         _avg: {
-          overallRating: true
-        }
+          overallRating: true,
+        },
       })
 
       const previousAvg = await prisma.review.aggregate({
@@ -1074,12 +1091,12 @@ ${JSON.stringify(liveData, null, 2)}`
           venueId,
           createdAt: {
             gte: sixtyDaysAgo,
-            lt: thirtyDaysAgo
-          }
+            lt: thirtyDaysAgo,
+          },
         },
         _avg: {
-          overallRating: true
-        }
+          overallRating: true,
+        },
       })
 
       const reviewsData = {
@@ -1096,33 +1113,34 @@ ${JSON.stringify(liveData, null, 2)}`
           comentario: review.comment || 'Sin comentario',
           mesero: review.servedBy ? `${review.servedBy.firstName} ${review.servedBy.lastName}` : null,
           respondida: !!review.responseText,
-          fuente: review.source
+          fuente: review.source,
         })),
         alertas: {
-          sinResponder: resenasNegativasSinResponder
+          sinResponder: resenasNegativasSinResponder,
         },
         tendencia: {
           actual: Number(recentAvg._avg.overallRating?.toFixed(2) || 0),
           anterior: Number(previousAvg._avg.overallRating?.toFixed(2) || 0),
-          mejorando: (recentAvg._avg.overallRating || 0) > (previousAvg._avg.overallRating || 0)
+          mejorando: (recentAvg._avg.overallRating || 0) > (previousAvg._avg.overallRating || 0),
         },
         nota: `Reseñas reales exclusivas del restaurante ${venueId}`,
-        rangoDeFechas: timeframe ? {
-          filtroAplicado: timeframe,
-          desde: dateFilter.gte?.toISOString() || 'N/A',
-          hasta: dateFilter.lte?.toISOString() || 'N/A'
-        } : 'Todos los tiempos'
+        rangoDeFechas: timeframe
+          ? {
+              filtroAplicado: timeframe,
+              desde: dateFilter.gte?.toISOString() || 'N/A',
+              hasta: dateFilter.lte?.toISOString() || 'N/A',
+            }
+          : 'Todos los tiempos',
       }
 
       logger.info('Real reviews data retrieved successfully', {
         venueId,
         totalResenas: reviewStats._count.id,
         promedioGeneral: reviewsData.promedioGeneral,
-        sinResponder: resenasNegativasSinResponder
+        sinResponder: resenasNegativasSinResponder,
       })
 
       return reviewsData
-
     } catch (error) {
       logger.error('Error retrieving real reviews data', { error, venueId })
       throw new AppError(`Error al obtener datos de reseñas: ${(error as Error).message}`, 500)
@@ -1158,29 +1176,29 @@ ${JSON.stringify(liveData, null, 2)}`
       const analysis: AdvancedAnalysis = {
         type: analysisType,
         insights: [],
-        recommendations: []
+        recommendations: [],
       }
 
       if (analysisType === 'reviews' && data.resenas) {
         const reviews = data.resenas
-        
+
         // Análisis de distribución de calificaciones
         const total = reviews.totalResenas
         const dist = reviews.distribucion
-        
+
         if (total > 0) {
           // Calcular porcentajes de distribución
           const porcentajes = {
-            excelente: ((dist[5] || 0) / total * 100).toFixed(1),
-            bueno: ((dist[4] || 0) / total * 100).toFixed(1),
-            regular: ((dist[3] || 0) / total * 100).toFixed(1),
-            malo: (((dist[2] || 0) + (dist[1] || 0)) / total * 100).toFixed(1)
+            excelente: (((dist[5] || 0) / total) * 100).toFixed(1),
+            bueno: (((dist[4] || 0) / total) * 100).toFixed(1),
+            regular: (((dist[3] || 0) / total) * 100).toFixed(1),
+            malo: ((((dist[2] || 0) + (dist[1] || 0)) / total) * 100).toFixed(1),
           }
 
           analysis.insights.push({
             tipo: 'distribucion_calificaciones',
             porcentajes,
-            resumen: `${porcentajes.excelente}% de reseñas son de 5 estrellas, ${porcentajes.malo}% son negativas`
+            resumen: `${porcentajes.excelente}% de reseñas son de 5 estrellas, ${porcentajes.malo}% son negativas`,
           })
 
           // Recomendaciones basadas en los datos
@@ -1188,7 +1206,7 @@ ${JSON.stringify(liveData, null, 2)}`
             analysis.recommendations.push({
               prioridad: 'alta',
               accion: 'Atender urgentemente las reseñas negativas para identificar problemas de servicio',
-              razon: `${porcentajes.malo}% de reseñas son negativas (2 estrellas o menos)`
+              razon: `${porcentajes.malo}% de reseñas son negativas (2 estrellas o menos)`,
             })
           }
 
@@ -1196,7 +1214,7 @@ ${JSON.stringify(liveData, null, 2)}`
             analysis.recommendations.push({
               prioridad: 'media',
               accion: `Responder a ${reviews.alertas.sinResponder} reseñas pendientes`,
-              razon: 'Las respuestas a reseñas mejoran la percepción del cliente'
+              razon: 'Las respuestas a reseñas mejoran la percepción del cliente',
             })
           }
 
@@ -1207,7 +1225,7 @@ ${JSON.stringify(liveData, null, 2)}`
               tipo: 'tendencia',
               direccion: mejorando ? 'positiva' : 'negativa',
               actual: reviews.tendencia.actual,
-              anterior: reviews.tendencia.anterior
+              anterior: reviews.tendencia.anterior,
             })
           }
         }
@@ -1215,21 +1233,20 @@ ${JSON.stringify(liveData, null, 2)}`
 
       if (analysisType === 'sales' && data.ventas) {
         const sales = data.ventas
-        
+
         // Análisis comparativo de ventas
         if (sales.hoy !== undefined && sales.ayer !== undefined) {
-          const cambio = ((sales.hoy - sales.ayer) / sales.ayer * 100).toFixed(1)
+          const cambio = (((sales.hoy - sales.ayer) / sales.ayer) * 100).toFixed(1)
           analysis.insights.push({
             tipo: 'comparacion_diaria',
             cambio_porcentual: cambio,
             direccion: parseFloat(cambio) >= 0 ? 'positiva' : 'negativa',
-            diferencia_absoluta: sales.hoy - sales.ayer
+            diferencia_absoluta: sales.hoy - sales.ayer,
           })
         }
       }
 
       return analysis
-
     } catch (error) {
       logger.warn('Error in advanced analysis', { error, analysisType })
       return null
@@ -1250,7 +1267,7 @@ ${JSON.stringify(liveData, null, 2)}`
         confidence: intent.confidence,
         venueId: venueId,
         timestamp: new Date(),
-        queryHash: Buffer.from(query.toLowerCase()).toString('base64').substring(0, 16) // Hash simple
+        queryHash: Buffer.from(query.toLowerCase()).toString('base64').substring(0, 16), // Hash simple
       }
 
       // Por ahora solo lo loggeamos, pero en el futuro podríamos almacenarlo en base de datos
@@ -1258,7 +1275,6 @@ ${JSON.stringify(liveData, null, 2)}`
 
       // TODO: Implementar almacenamiento en base de datos para análisis posterior
       // await prisma.assistantQueryPattern.create({ data: pattern })
-      
     } catch (error) {
       logger.warn('Error storing query pattern', { error, query })
     }
@@ -1293,10 +1309,12 @@ ${JSON.stringify(liveData, null, 2)}`
 
       const response = await this.openai.chat.completions.create({
         model: 'gpt-4o',
-        messages: [{
-          role: 'user',
-          content: intentPrompt
-        }],
+        messages: [
+          {
+            role: 'user',
+            content: intentPrompt,
+          },
+        ],
         temperature: 0.1,
         max_tokens: 200,
       })
@@ -1307,21 +1325,20 @@ ${JSON.stringify(liveData, null, 2)}`
       }
 
       const analysis = JSON.parse(content) as IntentAnalysis
-      
+
       // Validaciones básicas
       if (!analysis.dataTypes || !Array.isArray(analysis.dataTypes)) {
         throw new Error('Invalid dataTypes in response')
       }
-      
+
       if (!analysis.category || !analysis.confidence) {
         throw new Error('Missing required fields in response')
       }
 
       return analysis
-
     } catch (error) {
       logger.error('Error analyzing user intent', { error, message })
-      
+
       // Fallback: análisis básico por palabras clave
       return this.fallbackIntentAnalysis(message)
     }
@@ -1341,25 +1358,35 @@ ${JSON.stringify(liveData, null, 2)}`
       dataTypes.push('sales')
       category = 'sales'
     }
-    
+
     if (messageLower.includes('mesero') || messageLower.includes('personal') || messageLower.includes('propina')) {
       dataTypes.push('staff')
       if (category === 'general') category = 'staff'
     }
-    
+
     if (messageLower.includes('producto') || messageLower.includes('menu') || messageLower.includes('plato')) {
       dataTypes.push('products')
       if (category === 'general') category = 'products'
     }
-    
-    if (messageLower.includes('reseña') || messageLower.includes('calificaci') || messageLower.includes('cliente') || 
-        messageLower.includes('review') || messageLower.includes('estrella') || messageLower.includes('star') ||
-        messageLower.includes('opinión') || messageLower.includes('comentario') || messageLower.includes('feedback') ||
-        messageLower.includes('satisfacción') || messageLower.includes('rating') || messageLower.includes('puntuación')) {
+
+    if (
+      messageLower.includes('reseña') ||
+      messageLower.includes('calificaci') ||
+      messageLower.includes('cliente') ||
+      messageLower.includes('review') ||
+      messageLower.includes('estrella') ||
+      messageLower.includes('star') ||
+      messageLower.includes('opinión') ||
+      messageLower.includes('comentario') ||
+      messageLower.includes('feedback') ||
+      messageLower.includes('satisfacción') ||
+      messageLower.includes('rating') ||
+      messageLower.includes('puntuación')
+    ) {
       dataTypes.push('reviews')
       if (category === 'general') category = 'reviews'
     }
-    
+
     if (messageLower.includes('alerta') || messageLower.includes('problema') || messageLower.includes('stock')) {
       dataTypes.push('operations')
       if (category === 'general') category = 'operations'
@@ -1386,7 +1413,7 @@ ${JSON.stringify(liveData, null, 2)}`
       category,
       timeframe,
       confidence: 0.6, // Menor confianza para fallback
-      originalQuery: message
+      originalQuery: message,
     }
   }
 
@@ -1395,15 +1422,15 @@ ${JSON.stringify(liveData, null, 2)}`
    */
   private async getDataBasedOnIntent(venueId: string, intent: IntentAnalysis): Promise<LiveData> {
     const liveData: LiveData = {}
-    
+
     logger.info('Getting data based on intent analysis', {
       venueId,
       intent: {
         dataTypes: intent.dataTypes,
         category: intent.category,
         timeframe: intent.timeframe,
-        confidence: intent.confidence
-      }
+        confidence: intent.confidence,
+      },
     })
 
     try {
@@ -1436,9 +1463,8 @@ ${JSON.stringify(liveData, null, 2)}`
       liveData._metadata = {
         intentAnalysis: intent,
         timestamp: new Date().toISOString(),
-        venueId
+        venueId,
       }
-
     } catch (error) {
       logger.error('Error getting data based on intent', { error, venueId, intent })
       // En caso de error, retornar datos básicos
@@ -1452,11 +1478,11 @@ ${JSON.stringify(liveData, null, 2)}`
    * Obtiene un resumen general del restaurante
    */
   private async getGeneralSummary(venueId: string): Promise<any> {
-    logger.info('Accessing real general summary from database', { 
-      venueId, 
-      timestamp: new Date().toISOString() 
+    logger.info('Accessing real general summary from database', {
+      venueId,
+      timestamp: new Date().toISOString(),
     })
-    
+
     try {
       const today = new Date()
       today.setHours(0, 0, 0, 0)
@@ -1466,27 +1492,27 @@ ${JSON.stringify(liveData, null, 2)}`
         where: {
           venueId,
           createdAt: {
-            gte: today
+            gte: today,
           },
-          paymentStatus: 'PAID'
+          paymentStatus: 'PAID',
         },
         _sum: {
-          total: true
+          total: true,
         },
         _count: {
-          id: true
-        }
+          id: true,
+        },
       })
 
       // Obtener información de mesas
       const mesasInfo = await prisma.table.aggregate({
         where: {
           venueId,
-          active: true
+          active: true,
         },
         _count: {
-          id: true
-        }
+          id: true,
+        },
       })
 
       // Mesas con órdenes activas (aproximación de ocupadas)
@@ -1494,30 +1520,30 @@ ${JSON.stringify(liveData, null, 2)}`
         where: {
           venueId,
           status: {
-            in: ['PENDING' as const, 'CONFIRMED' as const, 'PREPARING' as const]
+            in: ['PENDING' as const, 'CONFIRMED' as const, 'PREPARING' as const],
           },
           tableId: {
-            not: null
-          }
-        }
+            not: null,
+          },
+        },
       })
 
       // Turnos activos
       const turnosActivos = await prisma.shift.count({
         where: {
           venueId,
-          status: 'OPEN'
-        }
+          status: 'OPEN',
+        },
       })
 
       // Promedio de calificaciones
       const calificacionPromedio = await prisma.review.aggregate({
         where: {
-          venueId
+          venueId,
         },
         _avg: {
-          overallRating: true
-        }
+          overallRating: true,
+        },
       })
 
       // Alertas pendientes (stock bajo + reseñas negativas sin responder)
@@ -1526,38 +1552,38 @@ ${JSON.stringify(liveData, null, 2)}`
           where: {
             venueId,
             currentStock: {
-              lte: 5 // Considerar stock bajo cuando hay 5 o menos unidades
-            }
-          }
+              lte: 5, // Considerar stock bajo cuando hay 5 o menos unidades
+            },
+          },
         }),
         prisma.review.count({
           where: {
             venueId,
             overallRating: {
-              lte: 3
+              lte: 3,
             },
-            responseText: null
-          }
-        })
+            responseText: null,
+          },
+        }),
       ])
 
       // Estado del POS
       const posStatus = await prisma.posConnectionStatus.findUnique({
         where: {
-          venueId
-        }
+          venueId,
+        },
       })
 
       // Información del venue
       const venue = await prisma.venue.findUnique({
         where: {
-          id: venueId
+          id: venueId,
         },
         select: {
           name: true,
           currency: true,
-          active: true
-        }
+          active: true,
+        },
       })
 
       const summaryData = {
@@ -1578,23 +1604,94 @@ ${JSON.stringify(liveData, null, 2)}`
         desglose: {
           alertasStockBajo: stockBajo,
           alertasResenasNegativas: resenasNegativas,
-          alertasPOS: posStatus?.status !== 'ONLINE' ? 1 : 0
+          alertasPOS: posStatus?.status !== 'ONLINE' ? 1 : 0,
         },
-        nota: `Resumen real exclusivo del restaurante ${venueId}`
+        nota: `Resumen real exclusivo del restaurante ${venueId}`,
       }
 
       logger.info('Real general summary retrieved successfully', {
         venueId,
         ventasHoy: summaryData.ventasHoy,
         turnosActivos,
-        alertasPendientes: summaryData.alertasPendientes
+        alertasPendientes: summaryData.alertasPendientes,
       })
 
       return summaryData
-
     } catch (error) {
       logger.error('Error retrieving real general summary', { error, venueId })
       throw new AppError(`Error al obtener resumen general: ${(error as Error).message}`, 500)
+    }
+  }
+
+  /**
+   * Genera un título descriptivo para una conversación usando LLM
+   * @param conversationSummary - Resumen de la conversación con mensajes de usuario y asistente
+   * @returns Título generado por el LLM
+   */
+  async generateConversationTitle(conversationSummary: string): Promise<string> {
+    try {
+      const titlePrompt = `
+Analiza la siguiente conversación y genera un título corto y descriptivo (máximo 6 palabras) que capture el tema principal.
+
+Conversación:
+${conversationSummary}
+
+Instrucciones:
+- El título debe ser claro y específico
+- Usa términos relacionados con restaurantes, ventas, staff, productos, etc.
+- Evita títulos genéricos como "Pregunta sobre el restaurante"
+- Si hay fechas o períodos específicos, inclúyelos
+- Ejemplos de buenos títulos: "Ventas de esta semana", "Staff con más propinas", "Productos con stock bajo"
+
+Título:`.trim()
+
+      const completion = await this.openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Eres un asistente especializado en generar títulos concisos y descriptivos para conversaciones de restaurantes.'
+          },
+          {
+            role: 'user',
+            content: titlePrompt
+          }
+        ],
+        max_tokens: 50,
+        temperature: 0.3,
+      })
+
+      let title = completion.choices[0]?.message?.content?.trim() || ''
+      
+      // Clean up the title - remove quotes and extra formatting
+      title = title.replace(/^["']|["']$/g, '').trim()
+      
+      // Ensure it's not too long (fallback safety)
+      if (title.length > 60) {
+        title = title.substring(0, 57) + '...'
+      }
+
+      // If empty or too generic, provide fallback
+      if (!title || title.toLowerCase().includes('conversación') || title.length < 5) {
+        title = `Consulta del ${new Date().toLocaleDateString()}`
+      }
+
+      logger.info('Conversation title generated successfully', {
+        originalLength: conversationSummary.length,
+        generatedTitle: title,
+        titleLength: title.length
+      })
+
+      return title
+
+    } catch (error) {
+      logger.error('Error generating conversation title with LLM', { 
+        error, 
+        conversationLength: conversationSummary.length 
+      })
+      
+      // Fallback to simple title based on current date
+      return `Consulta del ${new Date().toLocaleDateString()}`
     }
   }
 }

@@ -3,13 +3,75 @@
 // This file is executed once per test file after the test framework is setup
 // but before the tests are run.
 
-// You can add global mocks, setup, or configuration here.
-// For example, you might want to mock a global module:
-// jest.mock('some-module', () => ({
-//   // ...mock implementation
-// }));
-
-// Or setup a test database connection if needed for integration tests
+// Prisma Mock Setup
+const prismaMock = {
+  staff: {
+    findUnique: jest.fn(),
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    count: jest.fn()
+  },
+  venue: {
+    findUnique: jest.fn(),
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn()
+  },
+  notification: {
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    createMany: jest.fn(),
+    update: jest.fn(),
+    updateMany: jest.fn(),
+    delete: jest.fn(),
+    deleteMany: jest.fn(),
+    count: jest.fn(),
+    aggregate: jest.fn(),
+    groupBy: jest.fn()
+  },
+  notificationPreference: {
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    upsert: jest.fn()
+  },
+  notificationTemplate: {
+    findFirst: jest.fn(),
+    findMany: jest.fn()
+  },
+  staffVenue: {
+    findMany: jest.fn()
+  },
+  chatTrainingData: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+    aggregate: jest.fn(),
+    groupBy: jest.fn()
+  },
+  chatFeedback: {
+    findFirst: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn()
+  },
+  learnedPatterns: {
+    findMany: jest.fn(),
+    upsert: jest.fn(),
+    update: jest.fn(),
+    updateMany: jest.fn(),
+    count: jest.fn()
+  }
+}
 
 console.log('Jest global setup file loaded.')
 
@@ -18,7 +80,4 @@ beforeEach(() => {
   jest.clearAllMocks()
 })
 
-// You can also add global afterEach or afterAll hooks if necessary
-// afterAll(async () => {
-//   // Clean up resources, e.g., close database connections
-// });
+export { prismaMock }

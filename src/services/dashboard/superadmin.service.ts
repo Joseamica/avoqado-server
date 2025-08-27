@@ -11,12 +11,18 @@ export interface SuperadminDashboardData {
     churnRate: number
     growthRate: number
     systemUptime: number
-  }
-  revenueMetrics: {
-    totalPlatformRevenue: number
+    // Platform earnings
     totalCommissionRevenue: number
     subscriptionRevenue: number
     featureRevenue: number
+  }
+  revenueMetrics: {
+    totalPlatformRevenue: number // Total money Avoqado actually earns
+    totalCommissionRevenue: number // Fees from transactions
+    subscriptionRevenue: number // Monthly subscription fees from venues
+    featureRevenue: number // Premium feature fees
+    invoicedRevenue: number // Formally billed revenue
+    settledRevenue: number // Actually received revenue
     transactionCount: number
     newVenues: number
     churnedVenues: number
@@ -141,8 +147,18 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
 
     // Calculate commission (assuming 15% average commission rate)
     const totalCommissionRevenue = totalRevenue * 0.15
-    const subscriptionRevenue = totalRevenue * 0.6 // 60% from subscriptions
-    const featureRevenue = totalRevenue * 0.25 // 25% from features
+    
+    // Calculate actual subscription revenue from venue monthly fees
+    const subscriptionRevenue = await calculateSubscriptionRevenue(
+      new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      new Date()
+    )
+    
+    // Calculate actual feature revenue from premium features
+    const featureRevenue = await calculateFeatureRevenue(
+      new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      new Date()
+    )
 
     // Get recent venue registrations for growth metrics
     const recentVenues = await prisma.venue.findMany({
@@ -167,6 +183,12 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
     // Get top performing venues
     const topVenues = await getTopPerformingVenues()
 
+    // Calculate actual platform revenue (what we earn)
+    const platformRevenueMetrics = await calculatePlatformRevenue(
+      new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      new Date()
+    )
+
     return {
       kpis: {
         totalRevenue,
@@ -174,16 +196,22 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
         totalVenues,
         activeVenues,
         totalUsers,
-        averageRevenuePerUser,
+        averageRevenuePerUser: totalUsers > 0 ? platformRevenueMetrics.totalPlatformRevenue / totalUsers : 0,
         churnRate,
         growthRate,
         systemUptime,
+        // Add platform revenue to KPIs
+        totalCommissionRevenue: platformRevenueMetrics.actualCommissionRevenue,
+        subscriptionRevenue: platformRevenueMetrics.subscriptionRevenue,
+        featureRevenue: platformRevenueMetrics.featureRevenue,
       },
       revenueMetrics: {
-        totalPlatformRevenue: totalRevenue,
-        totalCommissionRevenue,
-        subscriptionRevenue,
-        featureRevenue,
+        totalPlatformRevenue: platformRevenueMetrics.totalPlatformRevenue,
+        totalCommissionRevenue: platformRevenueMetrics.actualCommissionRevenue,
+        subscriptionRevenue: platformRevenueMetrics.subscriptionRevenue,
+        featureRevenue: platformRevenueMetrics.featureRevenue,
+        invoicedRevenue: platformRevenueMetrics.invoicedRevenue,
+        settledRevenue: platformRevenueMetrics.settledRevenue,
         transactionCount,
         newVenues,
         churnedVenues: 0, // Would calculate based on cancellations
@@ -682,25 +710,43 @@ export async function getRevenueBreakdown(startDate?: Date, endDate?: Date): Pro
 }
 
 /**
- * Calculate subscription revenue from venue monthly fees
+ * Calculate subscription revenue from venue monthly fees (prorated)
  */
 async function calculateSubscriptionRevenue(startDate: Date, endDate: Date): Promise<number> {
-  // This would calculate based on venue subscription fees
-  // For now, we'll calculate based on active venues and their plan pricing
-  const activeVenues = await prisma.venue.count({
+  // Get venues that were active during the period
+  const activeVenues = await prisma.venue.findMany({
     where: {
       active: true,
       createdAt: {
         lte: endDate,
       },
     },
+    select: {
+      id: true,
+      createdAt: true,
+    },
   })
 
-  // Assuming average monthly subscription of $99 per venue
   const monthlyFeePerVenue = 99
-  const monthsInPeriod = Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30)))
+  const totalDaysInPeriod = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
+  let totalSubscriptionRevenue = 0
 
-  return activeVenues * monthlyFeePerVenue * monthsInPeriod
+  // Calculate prorated revenue for each venue based on when it was created
+  for (const venue of activeVenues) {
+    // Find when the venue became active within our period
+    const venueActiveStartDate = venue.createdAt > startDate ? venue.createdAt : startDate
+    
+    // Calculate days the venue was active in this period
+    const daysActive = Math.ceil((endDate.getTime() - venueActiveStartDate.getTime()) / (1000 * 60 * 60 * 24))
+    
+    // Calculate prorated monthly fee (daily rate × days active)
+    const dailyRate = monthlyFeePerVenue / 30 // Assuming 30 days per month
+    const proratedRevenue = dailyRate * Math.max(0, daysActive)
+    
+    totalSubscriptionRevenue += proratedRevenue
+  }
+
+  return Math.round(totalSubscriptionRevenue * 100) / 100 // Round to 2 decimal places
 }
 
 /**
@@ -956,6 +1002,106 @@ async function getCommissionAnalysis(startDate: Date, endDate: Date): Promise<Co
       averageCommissionRate: 0,
       commissionByVenue: [],
       projectedMonthlyCommission: 0,
+    }
+  }
+}
+
+/**
+ * Calculate actual platform revenue (what Avoqado earns)
+ */
+async function calculatePlatformRevenue(startDate: Date, endDate: Date): Promise<{
+  totalPlatformRevenue: number
+  actualCommissionRevenue: number
+  subscriptionRevenue: number
+  featureRevenue: number
+  invoicedRevenue: number
+  settledRevenue: number
+}> {
+  try {
+    // 1. Calculate actual commission revenue from fees collected
+    const commissionRevenue = await prisma.payment.aggregate({
+      where: {
+        createdAt: {
+          gte: startDate,
+          lte: endDate,
+        },
+        status: 'COMPLETED',
+      },
+      _sum: {
+        feeAmount: true,
+      },
+    })
+
+    // 2. Calculate subscription revenue from venue subscription fees
+    const subscriptionRevenue = await calculateSubscriptionRevenue(startDate, endDate)
+
+    // 3. Calculate feature revenue from premium features
+    const featureRevenue = await calculateFeatureRevenue(startDate, endDate)
+
+    // 4. Calculate settled revenue (money actually received)
+    const settledRevenue = await prisma.venueTransaction.aggregate({
+      where: {
+        createdAt: {
+          gte: startDate,
+          lte: endDate,
+        },
+        status: 'SETTLED',
+        type: 'PAYMENT',
+      },
+      _sum: {
+        feeAmount: true,
+      },
+    })
+
+    // 5. Calculate invoiced revenue (formal billing)
+    const invoicedRevenue = await prisma.invoiceItem.aggregate({
+      where: {
+        invoice: {
+          periodStart: {
+            gte: startDate,
+          },
+          periodEnd: {
+            lte: endDate,
+          },
+          status: {
+            in: ['PENDING', 'PAID'],
+          },
+        },
+        type: {
+          in: ['TRANSACTION_FEE', 'FEATURE_FEE'],
+        },
+      },
+      _sum: {
+        amount: true,
+      },
+    })
+
+    const actualCommissionRevenue = Number(commissionRevenue._sum.feeAmount || 0)
+    const actualFeatureRevenue = Number(featureRevenue)
+    const actualSubscriptionRevenue = Number(subscriptionRevenue)
+    const actualInvoicedRevenue = Number(invoicedRevenue._sum.amount || 0)
+    const actualSettledRevenue = Number(settledRevenue._sum.feeAmount || 0)
+
+    // Total platform revenue = all revenue streams that we actually earn
+    const totalPlatformRevenue = actualCommissionRevenue + actualSubscriptionRevenue + actualFeatureRevenue
+
+    return {
+      totalPlatformRevenue,
+      actualCommissionRevenue,
+      subscriptionRevenue: actualSubscriptionRevenue,
+      featureRevenue: actualFeatureRevenue,
+      invoicedRevenue: actualInvoicedRevenue,
+      settledRevenue: actualSettledRevenue,
+    }
+  } catch (error) {
+    console.error('Error calculating platform revenue:', error)
+    return {
+      totalPlatformRevenue: 0,
+      actualCommissionRevenue: 0,
+      subscriptionRevenue: 0,
+      featureRevenue: 0,
+      invoicedRevenue: 0,
+      settledRevenue: 0,
     }
   }
 }

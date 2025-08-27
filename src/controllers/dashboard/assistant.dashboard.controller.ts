@@ -1,8 +1,11 @@
 import { NextFunction, Request, Response } from 'express'
 import assistantService from '../../services/dashboard/assistant.dashboard.service'
-import { AssistantQueryDto } from '../../schemas/dashboard/assistant.schema'
+import { AILearningService } from '../../services/dashboard/ai-learning.service'
+import { AssistantQueryDto, FeedbackSubmissionDto } from '../../schemas/dashboard/assistant.schema'
 import { UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
+
+const aiLearningService = new AILearningService()
 
 /**
  * Interface para el usuario autenticado en la request
@@ -104,6 +107,102 @@ export const getAssistantSuggestions = async (req: AuthenticatedRequest, res: Re
       venueId: req.authContext?.venueId,
     })
 
+    next(error)
+  }
+}
+
+/**
+ * Procesa feedback del usuario sobre una respuesta del asistente
+ *
+ * @param {AuthenticatedRequest} req - El objeto de la solicitud de Express con usuario autenticado
+ * @param {Response} res - El objeto de la respuesta de Express
+ * @param {NextFunction} next - La función next de Express
+ */
+export const submitFeedback = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { trainingDataId, feedbackType, correctedResponse, correctedSql, userNotes }: FeedbackSubmissionDto = req.body
+
+    // Verificar que el usuario esté autenticado
+    if (!req.authContext?.userId || !req.authContext?.venueId) {
+      throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    // Procesar el feedback usando el servicio de aprendizaje
+    await aiLearningService.processFeedback({
+      trainingDataId,
+      feedbackType: feedbackType as any, // El enum ya está validado por Zod
+      correctedResponse,
+      correctedSql,
+      adminNotes: userNotes,
+    })
+
+    logger.info('User feedback processed successfully', {
+      userId: req.authContext.userId,
+      venueId: req.authContext.venueId,
+      trainingDataId,
+      feedbackType,
+    })
+
+    res.status(200).json({
+      success: true,
+      message: 'Feedback procesado correctamente',
+    })
+  } catch (error) {
+    logger.error('Error in submitFeedback controller', {
+      error,
+      userId: req.authContext?.userId,
+      venueId: req.authContext?.venueId,
+    })
+
+    next(error)
+  }
+}
+
+/**
+ * Genera un título para una conversación basado en su contenido usando LLM
+ * 
+ * @param {AuthenticatedRequest} req - El objeto de la solicitud de Express con usuario autenticado
+ * @param {Response} res - El objeto de la respuesta de Express  
+ * @param {NextFunction} next - La función next de Express
+ */
+export const generateConversationTitle = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { conversationSummary } = req.body
+
+    // Verificar que el usuario esté autenticado
+    if (!req.authContext?.userId || !req.authContext?.venueId) {
+      throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    if (!conversationSummary) {
+      res.status(400).json({
+        success: false,
+        error: 'conversationSummary is required',
+      })
+      return
+    }
+
+    // Generar título usando el servicio de asistente
+    const title = await assistantService.generateConversationTitle(conversationSummary)
+
+    logger.info('Conversation title generated successfully', {
+      userId: req.authContext.userId,
+      venueId: req.authContext.venueId,
+      titleLength: title.length,
+    })
+
+    res.status(200).json({
+      success: true,
+      data: {
+        title,
+      },
+    })
+  } catch (error) {
+    logger.error('Error in generateConversationTitle controller', {
+      error,
+      userId: req.authContext?.userId,
+      venueId: req.authContext?.venueId,
+    })
     next(error)
   }
 }

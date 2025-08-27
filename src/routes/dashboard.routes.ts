@@ -71,7 +71,7 @@ import {
   InviteTeamMemberSchema,
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
-import { assistantQuerySchema } from '../schemas/dashboard/assistant.schema'
+import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 
 const router = express.Router()
 
@@ -2983,6 +2983,52 @@ router.post(
   assistantController.processAssistantQuery,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/assistant/generate-title:
+ *   post:
+ *     tags: [AI Assistant]
+ *     summary: Generate a conversation title using LLM
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - conversationSummary
+ *             properties:
+ *               conversationSummary:
+ *                 type: string
+ *                 description: Summary of the conversation messages
+ *                 example: "Usuario: ¿Cuáles fueron las ventas de hoy?\nAsistente: Las ventas de hoy fueron $1,250 MXN..."
+ *     responses:
+ *       200:
+ *         description: Title generated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     title:
+ *                       type: string
+ *                       example: "Ventas de hoy"
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       500: { $ref: '#/components/responses/InternalServerError' }
+ */
+router.post(
+  '/assistant/generate-title',
+  authenticateTokenMiddleware,
+  assistantController.generateConversationTitle,
+)
 
 /**
  * @openapi
@@ -3093,5 +3139,62 @@ router.post(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  */
 router.get('/assistant/suggestions', authenticateTokenMiddleware, assistantController.getAssistantSuggestions)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/assistant/feedback:
+ *   post:
+ *     tags: [AI Assistant]
+ *     summary: Submit user feedback for AI assistant responses
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - trainingDataId
+ *               - feedbackType
+ *             properties:
+ *               trainingDataId:
+ *                 type: string
+ *                 description: ID of the training data record to provide feedback for
+ *               feedbackType:
+ *                 type: string
+ *                 enum: [CORRECT, INCORRECT, PARTIALLY_CORRECT]
+ *                 description: Type of feedback for the AI response
+ *               correctedResponse:
+ *                 type: string
+ *                 description: What the response should have been (optional)
+ *               correctedSql:
+ *                 type: string
+ *                 description: What the SQL should have been (optional)
+ *               userNotes:
+ *                 type: string
+ *                 description: Additional notes from the user (optional)
+ *     responses:
+ *       200:
+ *         description: Feedback submitted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       500: { $ref: '#/components/responses/InternalServerError' }
+ */
+router.post(
+  '/assistant/feedback',
+  authenticateTokenMiddleware,
+  validateRequest(feedbackSubmissionSchema),
+  assistantController.submitFeedback,
+)
 
 export default router

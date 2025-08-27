@@ -34,9 +34,28 @@ export const assistantResponseSchema = z.object({
   response: z.string(),
   suggestions: z.array(z.string()).optional(),
   conversationId: z.string().optional(),
+  trainingDataId: z.string().optional(),
+})
+
+export const feedbackSubmissionSchema = z.object({
+  body: z.object({
+    trainingDataId: z
+      .string({
+        required_error: 'El ID de datos de entrenamiento es requerido.',
+      })
+      .min(1, 'El ID de datos de entrenamiento no puede estar vacío.'),
+    feedbackType: z.enum(['CORRECT', 'INCORRECT', 'PARTIALLY_CORRECT'], {
+      required_error: 'El tipo de feedback es requerido.',
+      invalid_type_error: 'El tipo de feedback debe ser CORRECT, INCORRECT o PARTIALLY_CORRECT.',
+    }),
+    correctedResponse: z.string().optional(),
+    correctedSql: z.string().optional(),
+    userNotes: z.string().optional(),
+  }),
 })
 
 // Inferimos los tipos para usarlos en el controlador y servicio
 export type ConversationEntryDto = z.infer<typeof conversationEntrySchema>
 export type AssistantQueryDto = z.infer<typeof assistantQuerySchema.shape.body>
 export type AssistantResponseDto = z.infer<typeof assistantResponseSchema>
+export type FeedbackSubmissionDto = z.infer<typeof feedbackSubmissionSchema.shape.body>

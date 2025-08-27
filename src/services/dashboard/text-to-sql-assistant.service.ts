@@ -2,6 +2,8 @@ import OpenAI from 'openai'
 import logger from '@/config/logger'
 import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { AILearningService } from './ai-learning.service'
+import { randomUUID } from 'crypto'
 
 interface TextToSqlQuery {
   message: string
@@ -29,6 +31,7 @@ interface TextToSqlResponse {
     dataSourcesUsed: string[]
   }
   suggestions?: string[]
+  trainingDataId?: string
 }
 
 interface SqlGenerationResult {
@@ -42,6 +45,7 @@ interface SqlGenerationResult {
 class TextToSqlAssistantService {
   private openai: OpenAI
   private schemaContext: string
+  private learningService: AILearningService
 
   constructor() {
     const apiKey = process.env.OPENAI_API_KEY
@@ -51,6 +55,7 @@ class TextToSqlAssistantService {
 
     this.openai = new OpenAI({ apiKey })
     this.schemaContext = this.buildSchemaContext()
+    this.learningService = new AILearningService()
   }
 
   // ============================
@@ -80,6 +85,8 @@ class TextToSqlAssistantService {
 - Key fields: id, venueId, orderNumber, total, subtotal, taxAmount, tipAmount, status, createdAt
 - Relations: venue (Venue), items (OrderItem[]), payments (Payment[]), createdBy (Staff)
 - Use for: order analysis, sales breakdown
+- Status enum values: PENDING, CONFIRMED, PREPARING, READY, COMPLETED, CANCELLED, DELETED
+- Active/Open orders: PENDING, CONFIRMED, PREPARING, READY (not COMPLETED, CANCELLED, or DELETED)
 
 ### Staff Table
 - Table: Staff + StaffVenue (junction)
@@ -93,14 +100,33 @@ class TextToSqlAssistantService {
 - Relations: category (MenuCategory), orderItems (OrderItem[])
 - Use for: product sales, menu analysis
 
+### Shifts Table (STAFF WORK SHIFTS)
+- Table: Shift
+- Key fields: id, venueId, staffId, startTime, endTime, status, totalSales, totalTips, totalOrders, startingCash, endingCash
+- Relations: venue (Venue), staff (Staff), orders (Order[]), payments (Payment[])
+- Status enum values: OPEN, CLOSING, CLOSED
+- Use for: staff shift management, work schedules, cash handling
+- SEMANTIC: "turnos" (shifts) refers to staff work periods, NOT customer orders
+
 ### Venues Table
 - Table: Venue
 - Key fields: id, name, currency, organizationId, active
 - Use for: venue information, filtering by venue
 
+## SEMANTIC MAPPING (CRITICAL FOR SPANISH QUERIES):
+**TURNOS/SHIFTS = Staff Work Periods (Shift table)**
+- "turnos", "shifts", "turnos abiertos", "shifts open" → Query Shift table with status = 'OPEN'
+- "cuantos turnos", "how many shifts" → COUNT(*) FROM "Shift" WHERE status = 'OPEN'
+- "turnos cerrados", "closed shifts" → Query Shift table with status = 'CLOSED'
+
+**ÓRDENES/PEDIDOS = Customer Orders (Order table)**  
+- "órdenes", "pedidos", "orders" → Query Order table
+- "órdenes abiertas", "open orders" → Query Order table with status IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY')
+- "pedidos completados", "completed orders" → Query Order table with status = 'COMPLETED'
+
 ## Important Rules:
 1. ALWAYS filter by "venueId" = '{venueId}' for data isolation (use double quotes around column names)
-2. Use proper date filtering with "createdAt" field
+2. Use proper date filtering with "createdAt" field for Orders/Payments, "startTime" for Shifts
 3. For ratings, use "overallRating" field (1-5 scale)
 4. For sales, use Payment."amount" for actual money received
 5. Join tables properly using foreign keys
@@ -120,6 +146,8 @@ class TextToSqlAssistantService {
 - Reviews by rating: SELECT COUNT(*) FROM "Review" WHERE "venueId" = '{venueId}' AND "overallRating" = 5
 - Sales totals: SELECT SUM("amount") FROM "Payment" WHERE "venueId" = '{venueId}' AND "status" = 'COMPLETED'
 - Staff performance: JOIN with Staff and Payment tables using "processedById"
+- Open shifts: SELECT COUNT(*) FROM "Shift" WHERE "venueId" = '{venueId}' AND "status" = 'OPEN'
+- Active orders: SELECT COUNT(*) FROM "Order" WHERE "venueId" = '{venueId}' AND "status" IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY')
 
 CRITICAL: 
 - All table names in PostgreSQL must be quoted with double quotes: "Review", "Payment", etc.
@@ -131,7 +159,7 @@ CRITICAL:
   // TEXT-TO-SQL GENERATION
   // ============================
 
-  private async generateSqlFromText(message: string, venueId: string): Promise<SqlGenerationResult> {
+  private async generateSqlFromText(message: string, venueId: string, suggestedTemplate?: string): Promise<SqlGenerationResult> {
     const sqlPrompt = `
 You are an expert SQL query generator for restaurant data analysis.
 
@@ -145,6 +173,18 @@ SECURITY RULES:
 4. Validate that query is read-only and safe
 
 USER QUESTION: "${message}"
+
+${
+  suggestedTemplate
+    ? `
+LEARNED GUIDANCE: 
+Based on similar successful queries, consider this SQL template:
+${suggestedTemplate}
+
+You can adapt this template or create a new query as appropriate.
+`
+    : ''
+}
 
 Generate a PostgreSQL query to answer this question. Respond with a JSON object:
 
@@ -177,6 +217,12 @@ IMPORTANT SCHEMA CORRECTIONS:
 - CORRECT percentage query: SUM(Order.tipAmount) / SUM(Order.total) * 100
 - WRONG: Using Payment table for tip calculations
 - ALWAYS filter by venueId and appropriate date ranges
+
+CRITICAL ENUM VALUES:
+- OrderStatus valid values: 'PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'COMPLETED', 'CANCELLED', 'DELETED'
+- For "open" or "active" orders use: status IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY')
+- For "closed" or "completed" orders use: status IN ('COMPLETED', 'CANCELLED', 'DELETED')
+- NEVER use 'OPEN' or 'CLOSED' as these are not valid enum values
 `
 
     try {
@@ -184,7 +230,7 @@ IMPORTANT SCHEMA CORRECTIONS:
         model: 'gpt-4o',
         messages: [{ role: 'user', content: sqlPrompt }],
         temperature: 0.1, // Low temperature for more consistent SQL generation
-        max_tokens: 800
+        max_tokens: 800,
       })
 
       const response = completion.choices[0]?.message?.content
@@ -200,7 +246,7 @@ IMPORTANT SCHEMA CORRECTIONS:
         if (codeBlockMatch) {
           jsonString = codeBlockMatch[1]
         }
-        
+
         result = JSON.parse(jsonString) as SqlGenerationResult
       } catch (parseError) {
         logger.error('Failed to parse OpenAI JSON response', { response, parseError })
@@ -218,7 +264,7 @@ IMPORTANT SCHEMA CORRECTIONS:
         logger.error('Generated query missing venueId column', { sql: result.sql })
         throw new Error('Generated query missing venueId column')
       }
-      
+
       if (!sqlLower.includes(venueId.toLowerCase())) {
         logger.error('Generated query missing venue ID value', { sql: result.sql, venueId })
         throw new Error('Generated query missing venue ID value')
@@ -232,26 +278,25 @@ IMPORTANT SCHEMA CORRECTIONS:
         /\bdrop\s+table\b/,
         /\bcreate\s+table\b/,
         /\balter\s+table\b/,
-        /\btruncate\s+table\b/
+        /\btruncate\s+table\b/,
       ]
-      
+
       for (const pattern of unsafePatterns) {
         if (pattern.test(sqlLowerTrimmed)) {
-          logger.error('Generated query contains unsafe operations', { 
-            sql: result.sql, 
-            matchedPattern: pattern.toString() 
+          logger.error('Generated query contains unsafe operations', {
+            sql: result.sql,
+            matchedPattern: pattern.toString(),
           })
           throw new Error('Generated query contains unsafe operations')
         }
       }
 
       return result
-
     } catch (error) {
-      logger.error('Failed to generate SQL from text', { 
+      logger.error('Failed to generate SQL from text', {
         error: error instanceof Error ? error.message : 'Unknown error',
         message,
-        venueId 
+        venueId,
       })
       throw new Error('No pude generar una consulta SQL válida para tu pregunta')
     }
@@ -261,13 +306,13 @@ IMPORTANT SCHEMA CORRECTIONS:
   // SQL EXECUTION WITH SAFETY
   // ============================
 
-  private async executeSafeQuery(sqlQuery: string, venueId: string): Promise<{ result: any, metadata: any }> {
+  private async executeSafeQuery(sqlQuery: string, venueId: string): Promise<{ result: any; metadata: any }> {
     const startTime = Date.now()
-    
+
     try {
       // Double-check security before execution
       const normalizedQuery = sqlQuery.toLowerCase()
-      
+
       if (!normalizedQuery.includes('select')) {
         throw new Error('Query must be a SELECT statement')
       }
@@ -278,19 +323,21 @@ IMPORTANT SCHEMA CORRECTIONS:
 
       // Execute the raw SQL query
       const rawResult = await prisma.$queryRawUnsafe(sqlQuery)
-      
+
       // Convert BigInt to regular numbers for JSON serialization
-      const result = Array.isArray(rawResult) ? rawResult.map(row => {
-        const convertedRow: any = {}
-        for (const [key, value] of Object.entries(row as any)) {
-          convertedRow[key] = typeof value === 'bigint' ? Number(value) : value
-        }
-        return convertedRow
-      }) : rawResult
-      
+      const result = Array.isArray(rawResult)
+        ? rawResult.map(row => {
+            const convertedRow: any = {}
+            for (const [key, value] of Object.entries(row as any)) {
+              convertedRow[key] = typeof value === 'bigint' ? Number(value) : value
+            }
+            return convertedRow
+          })
+        : rawResult
+
       // PRECISION VALIDATION: Cross-verify mathematical calculations
       // const validationResult = await this.validateCalculationPrecision(sqlQuery, result, venueId)
-      
+
       const executionTime = Date.now() - startTime
       const rowsReturned = Array.isArray(result) ? result.length : 1
 
@@ -298,7 +345,7 @@ IMPORTANT SCHEMA CORRECTIONS:
         venueId,
         executionTime,
         rowsReturned,
-        queryPreview: sqlQuery.substring(0, 100) + '...'
+        queryPreview: sqlQuery.substring(0, 100) + '...',
       })
 
       return {
@@ -306,16 +353,15 @@ IMPORTANT SCHEMA CORRECTIONS:
         metadata: {
           executionTime,
           rowsReturned,
-          queryExecuted: true
+          queryExecuted: true,
           // validationResult // Include precision validation
-        }
+        },
       }
-
     } catch (error) {
       logger.error('❌ SQL query execution failed', {
         error: error instanceof Error ? error.message : 'Unknown error',
         venueId,
-        sqlQuery
+        sqlQuery,
       })
       throw new Error('Error ejecutando la consulta: ' + (error instanceof Error ? error.message : 'Error desconocido'))
     }
@@ -325,11 +371,7 @@ IMPORTANT SCHEMA CORRECTIONS:
   // RESULT INTERPRETATION
   // ============================
 
-  private async interpretQueryResult(
-    originalQuestion: string, 
-    sqlResult: any, 
-    sqlExplanation: string
-  ): Promise<string> {
+  private async interpretQueryResult(originalQuestion: string, sqlResult: any, sqlExplanation: string): Promise<string> {
     const interpretPrompt = `
 Eres un asistente de restaurante que interpreta resultados de bases de datos.
 
@@ -363,11 +405,10 @@ Ejemplos de respuestas CORRECTAS:
         model: 'gpt-4o',
         messages: [{ role: 'user', content: interpretPrompt }],
         temperature: 0.3,
-        max_tokens: 300
+        max_tokens: 300,
       })
 
       return completion.choices[0]?.message?.content || 'Consulta ejecutada exitosamente.'
-
     } catch (error) {
       logger.warn('Failed to interpret query result, using fallback', { error })
       return `Consulta ejecutada. Resultado: ${JSON.stringify(sqlResult)}`
@@ -380,31 +421,117 @@ Ejemplos de respuestas CORRECTAS:
 
   async processQuery(query: TextToSqlQuery): Promise<TextToSqlResponse> {
     const startTime = Date.now()
-    
+    const sessionId = randomUUID()
+
     try {
       logger.info('🔍 Processing Text-to-SQL query', {
         venueId: query.venueId,
         userId: query.userId,
-        message: query.message.substring(0, 100) + '...'
+        message: query.message.substring(0, 100) + '...',
+        sessionId,
       })
 
-      // Step 1: Generate SQL from natural language
-      const sqlGeneration = await this.generateSqlFromText(query.message, query.venueId)
-      
-      if (sqlGeneration.confidence < 0.7) {
+      // Step 0: Check if this is a conversational message or a data query
+      if (!this.isDataQuery(query.message)) {
+        // Handle conversational messages
+        logger.info('🗣️ Processing conversational message (not data query)', {
+          message: query.message,
+          venueId: query.venueId
+        })
+
+        const conversationalResponses = {
+          'hola': '¡Hola! Soy tu asistente de análisis de datos del restaurante. ¿En qué puedo ayudarte hoy? Puedo responder preguntas sobre ventas, reseñas, productos, personal y más.',
+          'hello': '¡Hello! I\'m your restaurant data assistant. How can I help you today? I can answer questions about sales, reviews, products, staff and more.',
+          'hi': '¡Hi! I\'m here to help you analyze your restaurant data. What would you like to know?',
+          'gracias': '¡De nada! ¿Hay algo más en lo que pueda ayudarte con los datos de tu restaurante?',
+          'thanks': 'You\'re welcome! Is there anything else I can help you with regarding your restaurant data?',
+          'buenos días': '¡Buenos días! ¿Cómo puedo ayudarte hoy con el análisis de tu restaurante?',
+          'buenas tardes': '¡Buenas tardes! ¿En qué puedo asistirte con los datos de tu restaurante?',
+          'buenas noches': '¡Buenas noches! ¿Cómo puedo ayudarte con la información de tu restaurante?'
+        }
+
+        const lowerMessage = query.message.toLowerCase().trim()
+        const response = conversationalResponses[lowerMessage as keyof typeof conversationalResponses] || 
+          '¡Hola! Soy tu asistente de análisis de datos. Puedo ayudarte con información sobre ventas, reseñas, productos y más. ¿Qué te gustaría saber?'
+
+        // Record the conversational interaction for learning
+        let trainingDataId: string | undefined
+        try {
+          trainingDataId = await this.learningService.recordChatInteraction({
+            venueId: query.venueId,
+            userId: query.userId,
+            userQuestion: query.message,
+            aiResponse: response,
+            confidence: 0.9, // High confidence for conversational responses
+            executionTime: Date.now() - startTime,
+            rowsReturned: 0,
+            sessionId
+          })
+        } catch (learningError) {
+          logger.warn('🧠 Failed to record conversational interaction:', learningError)
+        }
+
         return {
-          response: 'No pude entender completamente tu pregunta sobre datos del restaurante. ¿Podrías ser más específico? Por ejemplo: "¿Cuántas reseñas de 5 estrellas tengo esta semana?"',
+          response,
+          confidence: 0.9,
+          metadata: {
+            queryGenerated: false,
+            queryExecuted: false,
+            dataSourcesUsed: [],
+          },
+          suggestions: [
+            '¿Cuántas reseñas de 5 estrellas tengo?',
+            '¿Cuáles fueron mis ventas de ayer?',
+            '¿Qué productos son los más vendidos?',
+            '¿Cómo están las propinas este mes?'
+          ],
+          trainingDataId
+        }
+      }
+
+      // Step 1: Check for learned guidance from previous interactions
+      const category = this.categorizeQuestion(query.message)
+      const learnedGuidance = await this.learningService.getLearnedGuidance(query.message, category)
+
+      if (learnedGuidance.suggestedSqlTemplate) {
+        logger.info('🧠 Using learned pattern for improved response', {
+          patternMatch: learnedGuidance.patternMatch,
+          confidenceBoost: learnedGuidance.confidenceBoost
+        })
+      }
+
+      // Step 1: Generate SQL from natural language (with learned guidance)
+      const sqlGeneration = await this.generateSqlFromText(query.message, query.venueId, learnedGuidance.suggestedSqlTemplate)
+
+      if (sqlGeneration.confidence < 0.7) {
+        // Still record the interaction for learning, even if confidence is low
+        let trainingDataId: string | undefined
+        try {
+          trainingDataId = await this.learningService.recordChatInteraction({
+            venueId: query.venueId,
+            userId: query.userId,
+            userQuestion: query.message,
+            aiResponse: 'No pude entender completamente tu pregunta sobre datos del restaurante. ¿Podrías ser más específico?',
+            confidence: sqlGeneration.confidence,
+            executionTime: Date.now() - startTime,
+            rowsReturned: 0,
+            sessionId
+          })
+        } catch (learningError) {
+          logger.warn('🧠 Failed to record learning data for low confidence query:', learningError)
+        }
+
+        return {
+          response:
+            'No pude entender completamente tu pregunta sobre datos del restaurante. ¿Podrías ser más específico? Por ejemplo: "¿Cuántas reseñas de 5 estrellas tengo esta semana?"',
           confidence: sqlGeneration.confidence,
           metadata: {
             queryGenerated: false,
             queryExecuted: false,
-            dataSourcesUsed: []
+            dataSourcesUsed: [],
           },
-          suggestions: [
-            '¿Cuántas ventas tuve hoy?',
-            '¿Cuál es mi promedio de reseñas?',
-            '¿Qué mesero tiene más propinas este mes?'
-          ]
+          suggestions: ['¿Cuántas ventas tuve hoy?', '¿Cuál es mi promedio de reseñas?', '¿Qué mesero tiene más propinas este mes?'],
+          trainingDataId,
         }
       }
 
@@ -416,40 +543,41 @@ Ejemplos de respuestas CORRECTAS:
       let finalConfidence = originalConfidence
       let validationWarnings: string[] = []
       let bulletproofValidationPerformed = false
-      
+
       // BULLETPROOF VALIDATION: Critical query detection
-      if (query.message.toLowerCase().includes('porcentaje') || 
-          query.message.toLowerCase().includes('promedio') ||
-          query.message.toLowerCase().includes('total') ||
-          sqlGeneration.sql.toLowerCase().includes('/')) {
-        
+      if (
+        query.message.toLowerCase().includes('porcentaje') ||
+        query.message.toLowerCase().includes('promedio') ||
+        query.message.toLowerCase().includes('total') ||
+        sqlGeneration.sql.toLowerCase().includes('/')
+      ) {
         bulletproofValidationPerformed = true
         logger.info('🛡️ BULLETPROOF validation triggered for critical query', {
           originalConfidence,
-          queryType: query.message.toLowerCase().includes('porcentaje') ? 'PERCENTAGE' : 'MATHEMATICAL'
+          queryType: query.message.toLowerCase().includes('porcentaje') ? 'PERCENTAGE' : 'MATHEMATICAL',
         })
-        
+
         // Apply bulletproof confidence adjustments
         if (query.message.toLowerCase().includes('porcentaje')) {
           finalConfidence = Math.min(finalConfidence, 0.7) // Max confidence for percentages
           validationWarnings.push('Percentage calculation - reduced confidence for safety')
         }
-        
+
         if (sqlGeneration.sql.toLowerCase().includes('/') && !sqlGeneration.sql.toLowerCase().includes('case')) {
           finalConfidence = Math.min(finalConfidence, 0.8) // Reduce for division without zero check
           validationWarnings.push('Mathematical division detected - exercise caution')
         }
-        
+
         if (query.message.toLowerCase().includes('promedio')) {
           finalConfidence = Math.min(finalConfidence, 0.75) // Reduce for averages
           validationWarnings.push('Average calculation - potential for zero division')
         }
-        
+
         logger.info('🛡️ BULLETPROOF validation completed', {
           originalConfidence,
           finalConfidence,
           warningsGenerated: validationWarnings.length,
-          confidenceReduced: originalConfidence > finalConfidence
+          confidenceReduced: originalConfidence > finalConfidence,
         })
       }
 
@@ -459,9 +587,9 @@ Ejemplos de respuestas CORRECTAS:
       if (finalConfidence < 0.5) {
         logger.warn('⚠️ Low confidence detected, providing cautious response', {
           finalConfidence,
-          validationWarnings
+          validationWarnings,
         })
-        
+
         return {
           response: `Tengo una respuesta para tu pregunta, pero mi nivel de confianza es bajo (${(finalConfidence * 100).toFixed(1)}%). 
           
@@ -477,31 +605,26 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
             rowsReturned: execution.metadata.rowsReturned,
             executionTime: totalTime,
             dataSourcesUsed: sqlGeneration.tables,
-            fallbackMode: true
+            fallbackMode: true,
           } as any,
           suggestions: [
             '¿Puedes ser más específico con las fechas?',
             '¿Te refieres a algún período en particular?',
-            '¿Necesitas datos de una tabla específica?'
-          ]
+            '¿Necesitas datos de una tabla específica?',
+          ],
         }
       }
 
       // Step 4.5: CRITICAL SQL RESULT VALIDATION - Prevent false data generation
-      const resultValidation = await this.validateSqlResults(
-        query.message,
-        sqlGeneration.sql,
-        execution.result,
-        query.venueId
-      )
-      
+      const resultValidation = await this.validateSqlResults(query.message, sqlGeneration.sql, execution.result, query.venueId)
+
       if (!resultValidation.isValid) {
         logger.error('🚨 SQL result validation FAILED - preventing false data generation', {
           query: query.message,
           validationErrors: resultValidation.errors,
-          resultPreview: JSON.stringify(execution.result).substring(0, 200)
+          resultPreview: JSON.stringify(execution.result).substring(0, 200),
         })
-        
+
         return {
           response: `No pude encontrar datos confiables para responder tu pregunta. ${resultValidation.errors[0]}. ¿Puedes ser más específico con las fechas o criterios de búsqueda?`,
           confidence: 0.1, // Very low confidence for failed validation
@@ -519,14 +642,14 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
               warningsCount: resultValidation.errors.length,
               originalConfidence: originalConfidence,
               finalConfidence: 0.1,
-              systemStatus: 'RESULT_VALIDATION_FAILED'
-            }
+              systemStatus: 'RESULT_VALIDATION_FAILED',
+            },
           } as any,
           suggestions: [
             '¿Puedes especificar un rango de fechas?',
             '¿Te refieres a un período específico?',
-            '¿Necesitas datos de los últimos días/semanas/meses?'
-          ]
+            '¿Necesitas datos de los últimos días/semanas/meses?',
+          ],
         }
       }
 
@@ -537,11 +660,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       // Step 5: Interpret the results naturally (only if validation passed)
-      const naturalResponse = await this.interpretQueryResult(
-        query.message,
-        execution.result,
-        sqlGeneration.explanation
-      )
+      const naturalResponse = await this.interpretQueryResult(query.message, execution.result, sqlGeneration.explanation)
 
       logger.info('✅ Text-to-SQL query completed successfully', {
         venueId: query.venueId,
@@ -550,10 +669,11 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         validationWarnings: validationWarnings.length,
         bulletproofValidationPerformed,
         totalTime,
-        rowsReturned: execution.metadata.rowsReturned
+        rowsReturned: execution.metadata.rowsReturned,
       })
 
-      return {
+      // 🧠 STEP: Record interaction for continuous learning
+      const response = {
         response: naturalResponse,
         sqlQuery: sqlGeneration.sql,
         queryResult: execution.result,
@@ -570,32 +690,75 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
             warningsCount: validationWarnings.length,
             originalConfidence: originalConfidence,
             finalConfidence: finalConfidence,
-            systemStatus: 'SIMPLIFIED_BULLETPROOF_ACTIVE'
-          }
+            systemStatus: 'SIMPLIFIED_BULLETPROOF_ACTIVE',
+          },
         } as any,
-        suggestions: this.generateSmartSuggestions(query.message)
+        suggestions: this.generateSmartSuggestions(query.message),
       }
 
+      // Record this interaction for AI learning (sync to get trainingDataId)
+      let trainingDataId: string | undefined
+      try {
+        trainingDataId = await this.learningService.recordChatInteraction({
+          venueId: query.venueId,
+          userId: query.userId,
+          userQuestion: query.message,
+          aiResponse: naturalResponse,
+          sqlQuery: sqlGeneration.sql,
+          sqlResult: execution.result,
+          confidence: finalConfidence + (learnedGuidance.confidenceBoost || 0),
+          executionTime: totalTime,
+          rowsReturned: execution.metadata.rowsReturned,
+          sessionId
+        })
+      } catch (learningError) {
+        logger.warn('🧠 Failed to record learning data:', learningError)
+      }
+
+      // Add trainingDataId to response for feedback functionality
+      return {
+        ...response,
+        trainingDataId
+      }
     } catch (error) {
       logger.error('❌ Text-to-SQL processing failed', {
         error: error instanceof Error ? error.message : 'Unknown error',
         venueId: query.venueId,
-        message: query.message
+        message: query.message,
       })
 
+      // Record error interaction for learning (optional)
+      let errorTrainingDataId: string | undefined
+      try {
+        errorTrainingDataId = await this.learningService.recordChatInteraction({
+          venueId: query.venueId,
+          userId: query.userId,
+          userQuestion: query.message,
+          aiResponse: 'Hubo un problema procesando tu consulta. ' + (error instanceof Error ? error.message : 'Por favor intenta con una pregunta más específica.'),
+          confidence: 0.1,
+          executionTime: Date.now() - startTime,
+          sessionId
+        })
+      } catch (learningError) {
+        logger.warn('🧠 Failed to record error interaction for learning:', learningError)
+      }
+
       return {
-        response: 'Hubo un problema procesando tu consulta. ' + (error instanceof Error ? error.message : 'Por favor intenta con una pregunta más específica.'),
+        response:
+          'Hubo un problema procesando tu consulta. ' +
+          (error instanceof Error ? error.message : 'Por favor intenta con una pregunta más específica.'),
         confidence: 0.1,
         metadata: {
           queryGenerated: false,
           queryExecuted: false,
-          dataSourcesUsed: []
+          dataSourcesUsed: [],
         },
         suggestions: [
           '¿Cuántas reseñas de 5 estrellas tengo?',
           '¿Cuáles fueron mis ventas de ayer?',
-          '¿Qué productos son los más vendidos?'
-        ]
+          '¿Qué productos son los más vendidos?',
+        ],
+        trainingDataId: errorTrainingDataId,
       }
     }
   }
@@ -603,16 +766,14 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
   private generateSmartSuggestions(originalMessage: string): string[] {
     const suggestions = [
       '¿Cuántas reseñas de 4 estrellas tengo este mes?',
-      '¿Cuál fue mi total de ventas la semana pasada?', 
+      '¿Cuál fue mi total de ventas la semana pasada?',
       '¿Qué mesero procesó más pagos hoy?',
       '¿Cuántos pedidos tuve en los últimos 7 días?',
-      '¿Cuál es mi promedio de calificaciones este año?'
+      '¿Cuál es mi promedio de calificaciones este año?',
     ]
 
     // Filter out similar suggestions to avoid repetition
-    return suggestions.filter(suggestion => 
-      !suggestion.toLowerCase().includes(originalMessage.toLowerCase().split(' ')[0])
-    ).slice(0, 3)
+    return suggestions.filter(suggestion => !suggestion.toLowerCase().includes(originalMessage.toLowerCase().split(' ')[0])).slice(0, 3)
   }
 
   // ============================
@@ -623,10 +784,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     question: string,
     sql: string,
     result: any,
-    venueId: string
+    venueId: string,
   ): Promise<{
-    isValid: boolean,
-    errors: string[],
+    isValid: boolean
+    errors: string[]
     confidenceAdjustment?: number
   }> {
     const errors: string[] = []
@@ -673,20 +834,19 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       logger.info('✅ SQL result validation passed', {
         question: question.substring(0, 50),
         hasConfidenceAdjustment: !!confidenceAdjustment,
-        validationsPassed: 5 - errors.length
+        validationsPassed: 5 - errors.length,
       })
 
       return {
         isValid: errors.length === 0,
         errors,
-        confidenceAdjustment
+        confidenceAdjustment,
       }
-
     } catch (error) {
       logger.error('Error in SQL result validation', { error: error instanceof Error ? error.message : 'Unknown error' })
       return {
         isValid: false,
-        errors: ['Error interno en la validación de resultados']
+        errors: ['Error interno en la validación de resultados'],
       }
     }
   }
@@ -694,16 +854,16 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
   private containsFutureDates(result: any): boolean {
     const today = new Date()
     const resultStr = JSON.stringify(result).toLowerCase()
-    
+
     // Check for obvious future years
     if (resultStr.includes('2026') || resultStr.includes('2027')) {
       return true
     }
-    
+
     // Check for future months in 2025
     const currentMonth = today.getMonth() + 1
     const currentYear = today.getFullYear()
-    
+
     if (currentYear === 2025) {
       // Check if result contains months beyond current month
       const monthsRegex = /(202[5-9]-(?:0[9-9]|1[0-2]))/
@@ -713,52 +873,51 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         return resultMonth > currentMonth
       }
     }
-    
+
     return false
   }
 
-  private detectUnrealisticValues(question: string, result: any): { isValid: boolean, errors: string[] } {
+  private detectUnrealisticValues(question: string, result: any): { isValid: boolean; errors: string[] } {
     const errors: string[] = []
     const resultStr = JSON.stringify(result)
-    
+
     // Check for unrealistic monetary amounts (over $100,000 for a single day/transaction)
     const moneyPattern = /(\d+\.?\d*)/g
     const numbers = resultStr.match(moneyPattern)?.map(Number) || []
-    
+
     if (question.toLowerCase().includes('día') && numbers.some(n => n > 100000)) {
       errors.push('Valores monetarios irrealmente altos detectados')
     }
-    
+
     // Check for impossible percentages
     if (question.toLowerCase().includes('porcentaje') && numbers.some(n => n > 100)) {
       errors.push('Porcentajes imposibles (>100%) detectados')
     }
-    
+
     // Check for negative values where they shouldn't exist
-    if ((question.toLowerCase().includes('venta') || question.toLowerCase().includes('total')) && 
-        numbers.some(n => n < 0)) {
+    if ((question.toLowerCase().includes('venta') || question.toLowerCase().includes('total')) && numbers.some(n => n < 0)) {
       errors.push('Valores negativos detectados donde no deberían existir')
     }
-    
+
     return { isValid: errors.length === 0, errors }
   }
 
-  private async validateTopDayResult(result: any, venueId: string): Promise<{ isValid: boolean, errors: string[] }> {
+  private async validateTopDayResult(result: any, venueId: string): Promise<{ isValid: boolean; errors: string[] }> {
     const errors: string[] = []
-    
+
     try {
       // Extract the date from the result
       const resultStr = JSON.stringify(result)
       const datePattern = /202[0-9]-[0-1][0-9]-[0-3][0-9]/
       const dateMatch = resultStr.match(datePattern)
-      
+
       if (!dateMatch) {
         errors.push('No se pudo extraer fecha del resultado')
         return { isValid: false, errors }
       }
-      
+
       const claimedDate = dateMatch[0]
-      
+
       // Quick validation: check if this date actually has any orders
       const validationQuery = `
         SELECT COUNT(*) as order_count, SUM("total") as total_sales
@@ -767,7 +926,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           AND DATE("createdAt") = $2
           AND "status" = 'COMPLETED'
       `
-      
+
       const validationResult = await prisma.$queryRaw`
         SELECT COUNT(*) as order_count, SUM("total") as total_sales
         FROM "Order" 
@@ -775,36 +934,35 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           AND DATE("createdAt") = ${claimedDate}::date
           AND "status" = 'COMPLETED'
       `
-      
+
       const validationData = validationResult as any[]
       if (!validationData || validationData.length === 0 || Number(validationData[0].order_count) === 0) {
         errors.push(`No existen órdenes para la fecha ${claimedDate}`)
         return { isValid: false, errors }
       }
-      
+
       logger.info('✅ Top day validation passed', {
         claimedDate,
         actualOrders: Number(validationData[0].order_count),
-        actualSales: Number(validationData[0].total_sales)
+        actualSales: Number(validationData[0].total_sales),
       })
-      
     } catch (error) {
       logger.error('Error validating top day result', { error: error instanceof Error ? error.message : 'Unknown error' })
       errors.push('Error validando la fecha del día con más ventas')
       return { isValid: false, errors }
     }
-    
+
     return { isValid: errors.length === 0, errors }
   }
 
-  private validatePercentageRange(result: any): { isValid: boolean, errors: string[] } {
+  private validatePercentageRange(result: any): { isValid: boolean; errors: string[] } {
     const errors: string[] = []
     const resultStr = JSON.stringify(result)
-    
+
     // Extract percentage values
     const percentagePattern = /(\d+\.?\d*)%?/g
     const numbers = resultStr.match(percentagePattern)?.map(match => parseFloat(match.replace('%', ''))) || []
-    
+
     for (const num of numbers) {
       if (num < 0 || num > 100) {
         errors.push(`Porcentaje fuera de rango válido: ${num}%`)
@@ -813,7 +971,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         errors.push(`Porcentaje de propinas sospechosamente alto: ${num}%`)
       }
     }
-    
+
     return { isValid: errors.length === 0, errors }
   }
 
@@ -825,10 +983,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     question: string,
     sqlQuery: string,
     _result: any,
-    _venueId: string
+    _venueId: string,
   ): Promise<{
-    confidence: number,
-    warnings: string[],
+    confidence: number
+    warnings: string[]
     validationPassed: boolean
   }> {
     const warnings: string[] = []
@@ -838,11 +996,11 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     try {
       // 1. CRITICAL QUERY DETECTION
       const isCritical = this.detectCriticalQuery(question, sqlQuery)
-      
+
       if (isCritical) {
         logger.info('🚨 Critical query detected, performing bulletproof validation', {
           question: question.substring(0, 50),
-          queryType: this.getCriticalQueryType(question)
+          queryType: this.getCriticalQueryType(question),
         })
 
         // 2. PERCENTAGE CALCULATION VALIDATION
@@ -853,7 +1011,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           validationPassed = validationPassed && percentageValidation.isValid
         }
 
-        // 3. MATHEMATICAL OPERATION VALIDATION  
+        // 3. MATHEMATICAL OPERATION VALIDATION
         if (this.hasMathematicalOperations(sqlQuery)) {
           const mathValidation = this.validateMathematicalOperations(sqlQuery, _result)
           confidence = Math.min(confidence, mathValidation.confidence)
@@ -877,15 +1035,14 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       return {
         confidence,
         warnings,
-        validationPassed
+        validationPassed,
       }
-
     } catch (error) {
       logger.error('Bulletproof validation failed', { error })
       return {
         confidence: 0.2,
         warnings: ['Validation system error - manual review required'],
-        validationPassed: false
+        validationPassed: false,
       }
     }
   }
@@ -900,15 +1057,15 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       sql.toLowerCase().includes('round'),
       sql.toLowerCase().includes('avg'),
       question.toLowerCase().includes('cuánto dinero'),
-      question.toLowerCase().includes('total')
+      question.toLowerCase().includes('total'),
     ]
-    
+
     return criticalIndicators.filter(Boolean).length >= 1
   }
 
   private getCriticalQueryType(question: string): string {
     if (question.toLowerCase().includes('porcentaje')) return 'percentage_calculation'
-    if (question.toLowerCase().includes('promedio')) return 'average_calculation' 
+    if (question.toLowerCase().includes('promedio')) return 'average_calculation'
     if (question.toLowerCase().includes('propina')) return 'tip_analysis'
     if (question.toLowerCase().includes('total')) return 'sum_calculation'
     return 'critical_calculation'
@@ -918,9 +1075,13 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return question.toLowerCase().includes('porcentaje') || question.toLowerCase().includes('%')
   }
 
-  private async validatePercentageCalculation(sql: string, result: any, venueId: string): Promise<{
-    confidence: number,
-    warnings: string[],
+  private async validatePercentageCalculation(
+    sql: string,
+    result: any,
+    venueId: string,
+  ): Promise<{
+    confidence: number
+    warnings: string[]
     isValid: boolean
   }> {
     const warnings: string[] = []
@@ -930,7 +1091,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     try {
       // Extract percentage value from result
       const percentage = this.extractPercentageFromResult(result)
-      
+
       if (percentage === null) {
         warnings.push('Could not extract percentage from result')
         return { confidence: 0.3, warnings, isValid: false }
@@ -939,10 +1100,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       // Perform cross-validation with direct calculation
       if (sql.toLowerCase().includes('tip') && sql.toLowerCase().includes('order')) {
         const crossValidation = await this.crossValidateTipPercentage(venueId, sql)
-        
+
         if (crossValidation) {
           const difference = Math.abs(percentage - crossValidation.expectedPercentage)
-          
+
           if (difference > 2.0) {
             warnings.push(`Significant discrepancy: ${percentage}% vs expected ${crossValidation.expectedPercentage}%`)
             confidence = 0.2
@@ -956,7 +1117,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
             reported: percentage,
             expected: crossValidation.expectedPercentage,
             difference,
-            isValid
+            isValid,
           })
         }
       }
@@ -969,13 +1130,12 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       return { confidence, warnings, isValid }
-
     } catch (error) {
       logger.warn('Percentage validation failed', { error })
-      return { 
-        confidence: 0.4, 
-        warnings: ['Percentage validation encountered errors'], 
-        isValid: false 
+      return {
+        confidence: 0.4,
+        warnings: ['Percentage validation encountered errors'],
+        isValid: false,
       }
     }
   }
@@ -985,8 +1145,11 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return mathOperators.some(op => sql.toLowerCase().includes(op))
   }
 
-  private validateMathematicalOperations(sql: string, _result: any): {
-    confidence: number,
+  private validateMathematicalOperations(
+    sql: string,
+    _result: any,
+  ): {
+    confidence: number
     warnings: string[]
   } {
     const warnings: string[] = []
@@ -1007,8 +1170,12 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return { confidence, warnings }
   }
 
-  private validateBusinessLogic(question: string, sql: string, _result: any): {
-    confidence: number,
+  private validateBusinessLogic(
+    question: string,
+    sql: string,
+    _result: any,
+  ): {
+    confidence: number
     warnings: string[]
   } {
     const warnings: string[] = []
@@ -1031,8 +1198,11 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return { confidence, warnings }
   }
 
-  private performSanityCheck(result: any, question: string): {
-    passed: boolean,
+  private performSanityCheck(
+    result: any,
+    question: string,
+  ): {
+    passed: boolean
     warning: string
   } {
     try {
@@ -1072,13 +1242,13 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       if (question.toLowerCase().includes('reseñas') || question.toLowerCase().includes('reviews')) {
-        if (value < 0 || value > 10000) { // Reasonable upper bound
+        if (value < 0 || value > 10000) {
+          // Reasonable upper bound
           return { passed: false, warning: `Unrealistic review count: ${value}` }
         }
       }
 
       return { passed: true, warning: '' }
-
     } catch (error) {
       return { passed: false, warning: 'Sanity check failed due to error' }
     }
@@ -1089,15 +1259,14 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       if (Array.isArray(result) && result[0]) {
         const firstRow = result[0]
         for (const [key, value] of Object.entries(firstRow)) {
-          if (typeof value === 'number' && (
-            key.toLowerCase().includes('percentage') ||
-            key.toLowerCase().includes('percent') ||
-            key.toLowerCase().includes('porcentaje')
-          )) {
+          if (
+            typeof value === 'number' &&
+            (key.toLowerCase().includes('percentage') || key.toLowerCase().includes('percent') || key.toLowerCase().includes('porcentaje'))
+          ) {
             return Number(value)
           }
         }
-        
+
         // If no percentage column found, return first numerical value
         for (const [key, value] of Object.entries(firstRow)) {
           if (typeof value === 'number' && !key.includes('id')) {
@@ -1111,14 +1280,17 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
   }
 
-  private async crossValidateTipPercentage(venueId: string, originalSQL: string): Promise<{
-    expectedPercentage: number,
-    components: { tips: number, sales: number }
+  private async crossValidateTipPercentage(
+    venueId: string,
+    originalSQL: string,
+  ): Promise<{
+    expectedPercentage: number
+    components: { tips: number; sales: number }
   } | null> {
     try {
       // Determine the correct query based on what the original used
       const useCompletedFilter = originalSQL.toLowerCase().includes('completed')
-      
+
       const validationQuery = `
         SELECT 
           SUM("tipAmount") as tips,
@@ -1134,7 +1306,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           ${useCompletedFilter ? 'AND "status" = \'COMPLETED\'' : ''}
       `
 
-      const validationResult = await prisma.$queryRawUnsafe(validationQuery) as any[]
+      const validationResult = (await prisma.$queryRawUnsafe(validationQuery)) as any[]
       const row = validationResult[0]
 
       if (row) {
@@ -1142,8 +1314,8 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           expectedPercentage: Number(row.expected_percentage || 0),
           components: {
             tips: Number(row.tips || 0),
-            sales: Number(row.sales || 0)
-          }
+            sales: Number(row.sales || 0),
+          },
         }
       }
 
@@ -1154,6 +1326,87 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
   }
 
+  // Helper method for categorizing questions (used by learning service)
+  private categorizeQuestion(question: string): string {
+    const categories = {
+      sales: ['vendi', 'ventas', 'ingresos', 'ganancias'],
+      staff: ['mesero', 'empleado', 'equipo', 'trabajador'],
+      products: ['producto', 'plato', 'menu', 'categoria'],
+      financial: ['propinas', 'pagos', 'dinero', 'total'],
+      temporal: ['hoy', 'ayer', 'semana', 'mes', 'dia'],
+      analytics: ['mejor', 'promedio', 'analisis', 'tendencia', 'comparar']
+    }
+
+    const lowerQuestion = question.toLowerCase()
+    for (const [category, keywords] of Object.entries(categories)) {
+      if (keywords.some(keyword => lowerQuestion.includes(keyword))) {
+        return category
+      }
+    }
+
+    return 'general'
+  }
+
+  /**
+   * Determines if a message is conversational (greeting, thanks, etc.) or a data query
+   */
+  private isDataQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase().trim()
+    
+    // Simple greetings that should NOT trigger SQL queries
+    const greetingPatterns = [
+      /^hola$/,
+      /^hello$/,
+      /^hi$/,
+      /^buenos días$/,
+      /^buenas tardes$/,
+      /^buenas noches$/,
+      /^gracias$/,
+      /^thanks$/,
+      /^ok$/,
+      /^okay$/,
+      /^sí$/,
+      /^si$/,
+      /^no$/,
+      /^adiós$/,
+      /^bye$/,
+      /^chau$/
+    ]
+
+    // Check if it matches any greeting pattern
+    if (greetingPatterns.some(pattern => pattern.test(lowerMessage))) {
+      return false
+    }
+
+    // Very short messages (1-3 characters) are likely conversational
+    if (lowerMessage.length <= 3) {
+      return false
+    }
+
+    // Check for question words or data-related terms that indicate a data query
+    const dataQueryIndicators = [
+      'cuánto', 'cuánta', 'cuántos', 'cuántas', 'cuanto', 'cuanta', 'cuantos', 'cuantas', // how much/many (with/without accents)
+      'qué', 'cuál', 'cuáles', 'que', 'cual', 'cuales', // what/which (with/without accents)
+      'dónde', 'cuándo', 'cómo', 'por qué', 'donde', 'cuando', 'como', 'por que', // where/when/how/why
+      'mostrar', 'dame', 'quiero', 'necesito', 'muestra', 'enseña', // show me/give me/want/need
+      'ventas', 'reseñas', 'productos', 'staff', 'personal', 'empleados', // business terms
+      'dinero', 'propinas', 'pedidos', 'órdenes', 'ordenes', // business terms
+      'total', 'promedio', 'mejor', 'peor', 'suma', 'cantidad', // analytical terms
+      'hoy', 'ayer', 'semana', 'mes', 'año', 'dia', 'mañana', // time references
+      'tpv', 'tpvs', 'terminal', 'terminales', 'pos', 'punto', 'venta', // POS/TPV terms
+      'mesa', 'mesas', 'cocina', 'kitchen', 'orden', 'factura', 'ticket', // restaurant terms
+      'turno', 'turnos', 'shift', 'shifts', 'abierto', 'abiertos', 'cerrado', 'cerrados', // shift/status terms
+      'cliente', 'clientes', 'usuario', 'usuarios', 'guest', // customer terms
+      'pago', 'pagos', 'efectivo', 'tarjeta', 'transferencia', // payment terms
+      'menu', 'menú', 'categoria', 'categoría', 'precio', 'precios' // menu terms
+    ]
+
+    const hasDataIndicators = dataQueryIndicators.some(indicator => 
+      lowerMessage.includes(indicator)
+    )
+
+    return hasDataIndicators
+  }
 }
 
 export default new TextToSqlAssistantService()

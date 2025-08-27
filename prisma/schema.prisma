@@ -109,6 +109,9 @@ model Venue {
   notifications           Notification[]
   notificationPreferences NotificationPreference[]
 
+  // AI Training
+  chatTrainingData ChatTrainingData[] @relation("VenueChatTraining")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -206,6 +209,9 @@ model Staff {
   // Notifications
   notifications           Notification[]
   notificationPreferences NotificationPreference[]
+
+  // AI Training
+  chatTrainingData ChatTrainingData[] @relation("UserChatTraining")
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -1182,16 +1188,16 @@ model Notification {
   type        NotificationType
   title       String
   message     String
-  actionUrl   String?          // Deep link or route
-  actionLabel String?          // Button text like "View Order"
+  actionUrl   String? // Deep link or route
+  actionLabel String? // Button text like "View Order"
 
   // Metadata
   entityType String? // "Order", "Payment", "Review", etc.
   entityId   String? // ID of related entity
-  metadata   Json?   // Additional context data
+  metadata   Json? // Additional context data
 
   // Status
-  isRead   Boolean   @default(false)
+  isRead   Boolean              @default(false)
   readAt   DateTime?
   priority NotificationPriority @default(NORMAL)
 
@@ -1199,9 +1205,9 @@ model Notification {
   channels NotificationChannel[] @default([IN_APP])
 
   // Tracking
-  sentAt    DateTime?
-  failedAt  DateTime?
-  errorMsg  String?
+  sentAt   DateTime?
+  failedAt DateTime?
+  errorMsg String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1225,9 +1231,9 @@ model NotificationPreference {
 
   // Notification type settings
   type     NotificationType
-  enabled  Boolean                @default(true)
-  channels NotificationChannel[]  @default([IN_APP])
-  priority NotificationPriority   @default(NORMAL)
+  enabled  Boolean               @default(true)
+  channels NotificationChannel[] @default([IN_APP])
+  priority NotificationPriority  @default(NORMAL)
 
   // Scheduling
   quietStart String? // "22:00" - don't send notifications after this time
@@ -1653,9 +1659,90 @@ enum NotificationPriority {
 }
 
 enum NotificationChannel {
-  IN_APP    // Dashboard notifications
-  EMAIL     // Email notifications
-  SMS       // SMS notifications (future)
-  PUSH      // Push notifications (future)
-  WEBHOOK   // Webhook notifications (future)
+  IN_APP // Dashboard notifications
+  EMAIL // Email notifications
+  SMS // SMS notifications (future)
+  PUSH // Push notifications (future)
+  WEBHOOK // Webhook notifications (future)
+}
+
+// ============================
+// AI TRAINING TABLES
+// ============================
+
+model ChatTrainingData {
+  id               String   @id @default(cuid())
+  venueId          String
+  venue            Venue    @relation("VenueChatTraining", fields: [venueId], references: [id], onDelete: Cascade)
+  userId           String
+  user             Staff    @relation("UserChatTraining", fields: [userId], references: [id], onDelete: Cascade)
+  userQuestion     String
+  aiResponse       String
+  sqlQuery         String?
+  sqlResult        Json?
+  confidence       Float
+  executionTime    Int?
+  rowsReturned     Int?
+  wasCorrect       Boolean? // User feedback: was this response correct?
+  userFeedback     String? // Optional user feedback text
+  responseCategory String? // sales, staff, inventory, etc.
+  sessionId        String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  feedback ChatFeedback[]
+
+  @@index([venueId])
+  @@index([userId])
+  @@index([responseCategory])
+  @@index([confidence])
+  @@index([createdAt])
+}
+
+model LearnedPatterns {
+  id                 String    @id @default(cuid())
+  questionPattern    String // Regex or keywords that match questions
+  category           String // sales, staff, inventory, etc.
+  optimalSqlTemplate String // Best SQL template for this pattern
+  averageConfidence  Float
+  successRate        Float // % of correct responses
+  totalUsages        Int       @default(0)
+  lastUsed           DateTime?
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([questionPattern, category])
+  @@index([category])
+  @@index([successRate])
+  @@index([isActive])
+}
+
+model ChatFeedback {
+  id                String               @id @default(cuid())
+  trainingDataId    String               @unique // Only one feedback per training data
+  trainingData      ChatTrainingData     @relation(fields: [trainingDataId], references: [id], onDelete: Cascade)
+  feedbackType      ChatFeedbackType
+  correctedResponse String? // What the response should have been
+  correctedSql      String? // What the SQL should have been
+  adminNotes        String?
+  processingStatus  ChatProcessingStatus @default(PENDING)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  @@index([processingStatus])
+}
+
+enum ChatFeedbackType {
+  CORRECT
+  INCORRECT
+  PARTIALLY_CORRECT
+  CLARIFICATION_NEEDED
+}
+
+enum ChatProcessingStatus {
+  PENDING
+  PROCESSED
+  APPLIED
 }
