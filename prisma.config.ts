@@ -7,7 +7,7 @@ export default {
   migrations: {
     path: path.join('prisma', 'migrations'),
     seed: process.env.NODE_ENV === 'production' 
-      ? `node ${path.join(process.cwd(), 'dist', 'prisma', 'seed.js')}`
+      ? `node ${path.resolve('dist/prisma/seed.js')}`
       : 'ts-node prisma/seed.ts',
   },
   views: {
