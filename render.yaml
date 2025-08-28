@@ -4,9 +4,8 @@ services:
     env: node
     plan: free
     region: oregon
-    buildCommand: npm ci --include=dev && npx prisma generate && npm run build
+    buildCommand: npm ci --include=dev && npx prisma generate && npm run build && npx prisma migrate deploy
     startCommand: npm start
-    preDeployCommand: npx prisma migrate deploy
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
