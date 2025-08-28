@@ -7,22 +7,22 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
   // Define allowed origins based on environment
   const dashboardOrigins = {
     development: ['http://localhost:3000', 'http://localhost:8080'],
-    staging: ['https://staging-dashboard.avoqado.com'],
-    production: ['https://dashboard.avoqado.com'],
+    staging: ['https://staging-dashboard.avoqado.io'],
+    production: ['https://dashboard.avoqado.io'],
   }
 
   // Mobile apps use capacitor/webview origins on dev
   const mobileOrigins = {
     development: ['capacitor://localhost', 'http://localhost'],
-    staging: ['https://staging-app.avoqado.com'],
-    production: ['https://app.avoqado.com'],
+    staging: ['https://staging-app.avoqado.io'],
+    production: ['https://app.avoqado.io'],
   }
 
   // TPV/POS client is Kotlin-based, no CORS required but listed for completeness
   const posOrigins = {
     development: ['http://localhost:7000'],
-    staging: ['https://staging-pos.avoqado.com'],
-    production: ['https://pos.avoqado.com'],
+    staging: ['https://staging-pos.avoqado.io'],
+    production: ['https://pos.avoqado.io'],
   }
 
   // Swagger/OpenAPI documentation origins
