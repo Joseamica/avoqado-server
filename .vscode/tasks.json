@@ -1,0 +1,122 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Iniciar terminales divididas",
+      "dependsOn": ["NPM", "Libre", "Codex", "Claude", "Prisma Studio"],
+      "dependsOrder": "sequence",
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": {
+        "group": "miGrupoDeTerminales",
+        "reveal": "always",
+        "panel": "new",
+        "clear": true
+      }
+    },
+
+    {
+      "label": "NPM",
+      "type": "shell",
+      "command": "echo READY:NPM && npm run dev",
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "npm-dev",
+          "pattern": { "regexp": "^$" },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "READY:NPM",
+            "endsPattern": "READY:NPM"
+          }
+        }
+      ],
+      "options": { "cwd": "${workspaceFolder:avoqado-server}" },
+      "presentation": { "panel": "new", "group": "miGrupoDeTerminales", "reveal": "always" },
+      "icon": { "id": "package", "color": "terminal.ansiRed" }
+    },
+
+    {
+      "label": "Libre",
+      "type": "shell",
+      "command": "echo READY:LIBRE && ${env:SHELL}",
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "libre",
+          "pattern": { "regexp": "^$" },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "READY:LIBRE",
+            "endsPattern": "READY:LIBRE"
+          }
+        }
+      ],
+      "options": { "cwd": "${workspaceFolder:avoqado-server}" },
+      "presentation": { "panel": "new", "group": "miGrupoDeTerminales", "reveal": "never" },
+      "icon": { "id": "terminal", "color": "terminal.ansiBlack" }
+    },
+
+    {
+      "label": "Codex",
+      "type": "shell",
+      "command": "echo READY:CODEX && codex --config model_reasoning_effort='high'",
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "codex",
+          "pattern": { "regexp": "^$" },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "READY:CODEX",
+            "endsPattern": "READY:CODEX"
+          }
+        }
+      ],
+      "options": { "cwd": "${workspaceFolder:avoqado-server}" },
+      "presentation": { "panel": "new", "group": "miGrupoDeTerminales", "reveal": "never" },
+      "icon": { "id": "book", "color": "terminal.ansiBlue" }
+    },
+
+    {
+      "label": "Claude",
+      "type": "shell",
+      "command": "echo READY:CLAUDE && claude",
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "claude",
+          "pattern": { "regexp": "^$" },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "READY:CLAUDE",
+            "endsPattern": "READY:CLAUDE"
+          }
+        }
+      ],
+      "options": { "cwd": "${workspaceFolder:avoqado-server}" },
+      "presentation": { "panel": "new", "group": "miGrupoDeTerminales", "reveal": "never" },
+      "icon": { "id": "comment", "color": "terminal.ansiYellow" }
+    },
+
+    {
+      "label": "Prisma Studio",
+      "type": "shell",
+      "command": "echo READY:PRISMA && npx prisma studio",
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "owner": "prisma",
+          "pattern": { "regexp": "^$" },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "READY:PRISMA",
+            "endsPattern": "READY:PRISMA"
+          }
+        }
+      ],
+      "options": { "cwd": "${workspaceFolder:avoqado-server}" },
+      "presentation": { "panel": "new", "group": "prisma", "reveal": "silent" },
+      "icon": { "id": "database", "color": "terminal.ansiGreen" }
+    }
+  ]
+}

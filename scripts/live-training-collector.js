@@ -14,6 +14,7 @@ class LiveTrainingCollector {
   constructor() {
     this.baseURL = 'http://localhost:12344/api'
     this.collectedData = []
+    this.token = null
     this.trainingMetrics = {
       totalInteractions: 0,
       successfulResponses: 0,
@@ -58,15 +59,17 @@ class LiveTrainingCollector {
       
       try {
         const response = await this.testQuestion(question)
+        
         this.processTrainingData(question, response)
         
-        // Show real-time results
-        const confidence = response.confidence * 100
+        // Show real-time results  
+        const confidence = (response.data?.confidence || response.confidence || 0) * 100
         const confidenceColor = confidence >= 80 ? 'green' : confidence >= 60 ? 'yellow' : 'red'
         console.log(`   ✅ Confidence: ${confidence.toFixed(1)}%`[confidenceColor])
         
-        if (response.sqlQuery) {
-          console.log(`   📋 SQL Generated: ${response.sqlQuery.substring(0, 50)}...`.gray)
+        if (response.sqlQuery || response.data?.sqlQuery) {
+          const sqlQuery = response.sqlQuery || response.data?.sqlQuery
+          console.log(`   📋 SQL Generated: ${sqlQuery.substring(0, 50)}...`.gray)
         }
         
         await this.sleep(1000) // Realistic delay between questions
@@ -83,17 +86,45 @@ class LiveTrainingCollector {
   }
 
   /**
+   * Generate authentication token
+   */
+  async generateToken() {
+    if (this.token) return this.token
+
+    const tokenPayload = {
+      sub: 'test-user-123',
+      orgId: 'test-org-456', 
+      venueId: 'cmeniwgjm01qo9k32da7wcmhu',
+      role: 'ADMIN',
+      expiresIn: '1h'
+    }
+
+    const response = await axios.post(`${this.baseURL}/dev/generate-token`, tokenPayload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 10000
+    })
+
+    this.token = response.data.token
+    return this.token
+  }
+
+  /**
    * Test a single question and collect metrics
    */
   async testQuestion(question) {
+    const token = await this.generateToken()
+    
     const payload = {
       message: question,
       venueId: 'cmeniwgjm01qo9k32da7wcmhu', // Your test venue
       conversationHistory: []
     }
 
-    const response = await axios.post(`${this.baseURL}/dashboard/text-to-sql-assistant`, payload, {
-      headers: { 'Content-Type': 'application/json' },
+    const response = await axios.post(`${this.baseURL}/v1/dashboard/assistant/text-to-sql`, payload, {
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
       timeout: 30000
     })
 
@@ -104,13 +135,14 @@ class LiveTrainingCollector {
    * Process and analyze training data
    */
   processTrainingData(question, response) {
+    const data = response.data || response
     const trainingPoint = {
       question,
-      response: response.response,
-      confidence: response.confidence,
-      sqlGenerated: response.metadata?.queryGenerated || false,
-      executionTime: response.metadata?.executionTime || 0,
-      rowsReturned: response.metadata?.rowsReturned || 0,
+      response: data.response,
+      confidence: data.confidence || 0,
+      sqlGenerated: data.metadata?.queryGenerated || false,
+      executionTime: data.metadata?.executionTime || 0,
+      rowsReturned: data.metadata?.rowsReturned || 0,
       timestamp: new Date(),
       category: this.categorizeQuestion(question)
     }
@@ -118,14 +150,15 @@ class LiveTrainingCollector {
     this.collectedData.push(trainingPoint)
 
     // Update metrics
-    if (response.confidence >= 0.8) {
+    const confidence = data.confidence || 0
+    if (confidence >= 0.8) {
       this.trainingMetrics.successfulResponses++
-    } else if (response.confidence < 0.6) {
+    } else if (confidence < 0.6) {
       this.trainingMetrics.lowConfidenceResponses++
     }
 
     this.trainingMetrics.averageConfidence = 
-      (this.trainingMetrics.averageConfidence * (this.collectedData.length - 1) + response.confidence) / 
+      (this.trainingMetrics.averageConfidence * (this.collectedData.length - 1) + confidence) / 
       this.collectedData.length
   }
 
