@@ -10,11 +10,15 @@ import { OrderSource, OriginSystem, OrderStatus, PaymentStatus, Prisma } from '@
 
 // Mocks
 jest.mock('../../../../src/utils/prismaClient', () => ({
-  venue: {
-    findUnique: jest.fn(),
-  },
-  order: {
-    upsert: jest.fn(),
+  __esModule: true,
+  default: {
+    venue: {
+      findUnique: jest.fn(),
+    },
+    order: {
+      findUnique: jest.fn(),
+      upsert: jest.fn(),
+    },
   },
 }))
 jest.mock('../../../../src/config/logger', () => ({
@@ -27,6 +31,7 @@ jest.mock('../../../../src/services/pos-sync/posSyncShift.service')
 
 describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
   const mockPrismaVenueFindUnique = prisma.venue.findUnique as jest.Mock
+  const mockPrismaOrderFindUnique = prisma.order.findUnique as jest.Mock
   const mockPrismaOrderUpsert = prisma.order.upsert as jest.Mock
   const mockSyncPosStaff = posSyncStaffService.syncPosStaff as jest.Mock
   const mockGetOrCreatePosTable = getOrCreatePosTable as jest.Mock
@@ -35,6 +40,9 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    
+    // Default mock setup
+    mockPrismaOrderFindUnique.mockResolvedValue(null) // No existing order by default
   })
 
   const venueId = 'test-venue-id'

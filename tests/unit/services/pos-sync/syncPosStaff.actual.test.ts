@@ -13,6 +13,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     staffVenue: {
       findUnique: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
     },
     staff: {
       findUnique: jest.fn(),
@@ -33,6 +34,7 @@ jest.mock('../../../../src/config/logger', () => ({
 describe('syncPosStaff (Actual Implementation Tests)', () => {
   const mockPrismaStaffVenueFindUnique = prisma.staffVenue.findUnique as jest.Mock
   const mockPrismaStaffVenueCreate = prisma.staffVenue.create as jest.Mock
+  const mockPrismaStaffVenueUpdate = prisma.staffVenue.update as jest.Mock
   const mockPrismaStaffFindUnique = prisma.staff.findUnique as jest.Mock
   const mockPrismaStaffUpdate = prisma.staff.update as jest.Mock
   const mockPrismaStaffCreate = prisma.staff.create as jest.Mock
@@ -83,6 +85,7 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
     beforeEach(() => {
       mockPrismaStaffVenueFindUnique.mockResolvedValue(existingStaffVenue)
       mockPrismaStaffUpdate.mockResolvedValue(updatedStaffData)
+      mockPrismaStaffVenueUpdate.mockResolvedValue(existingStaffVenue)
     })
 
     it('should find existing StaffVenue and update staff details', async () => {
