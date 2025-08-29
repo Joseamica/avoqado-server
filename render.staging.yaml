@@ -1,11 +1,11 @@
 services:
   - type: web
-    name: staging-avoqado-server
+    name: avoqado-server-staging
     env: node
     plan: free
     region: oregon
     autoDeploy: true
-    branch: main
+    branch: develop
     buildCommand: npm ci --include=dev && npx prisma generate && npm run build && npx prisma migrate deploy
     startCommand: npm start
     healthCheckPath: /health

@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: production-avoqado-server
+    name: avoqado-server
     env: node
     plan: free
     region: oregon
