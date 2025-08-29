@@ -160,9 +160,9 @@ export const submitFeedback = async (req: AuthenticatedRequest, res: Response, n
 
 /**
  * Genera un título para una conversación basado en su contenido usando LLM
- * 
+ *
  * @param {AuthenticatedRequest} req - El objeto de la solicitud de Express con usuario autenticado
- * @param {Response} res - El objeto de la respuesta de Express  
+ * @param {Response} res - El objeto de la respuesta de Express
  * @param {NextFunction} next - La función next de Express
  */
 export const generateConversationTitle = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {

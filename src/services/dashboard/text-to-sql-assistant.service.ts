@@ -436,22 +436,24 @@ Ejemplos de respuestas CORRECTAS:
         // Handle conversational messages
         logger.info('🗣️ Processing conversational message (not data query)', {
           message: query.message,
-          venueId: query.venueId
+          venueId: query.venueId,
         })
 
         const conversationalResponses = {
-          'hola': '¡Hola! Soy tu asistente de análisis de datos del restaurante. ¿En qué puedo ayudarte hoy? Puedo responder preguntas sobre ventas, reseñas, productos, personal y más.',
-          'hello': '¡Hello! I\'m your restaurant data assistant. How can I help you today? I can answer questions about sales, reviews, products, staff and more.',
-          'hi': '¡Hi! I\'m here to help you analyze your restaurant data. What would you like to know?',
-          'gracias': '¡De nada! ¿Hay algo más en lo que pueda ayudarte con los datos de tu restaurante?',
-          'thanks': 'You\'re welcome! Is there anything else I can help you with regarding your restaurant data?',
+          hola: '¡Hola! Soy tu asistente de análisis de datos del restaurante. ¿En qué puedo ayudarte hoy? Puedo responder preguntas sobre ventas, reseñas, productos, personal y más.',
+          hello:
+            "¡Hello! I'm your restaurant data assistant. How can I help you today? I can answer questions about sales, reviews, products, staff and more.",
+          hi: "¡Hi! I'm here to help you analyze your restaurant data. What would you like to know?",
+          gracias: '¡De nada! ¿Hay algo más en lo que pueda ayudarte con los datos de tu restaurante?',
+          thanks: "You're welcome! Is there anything else I can help you with regarding your restaurant data?",
           'buenos días': '¡Buenos días! ¿Cómo puedo ayudarte hoy con el análisis de tu restaurante?',
           'buenas tardes': '¡Buenas tardes! ¿En qué puedo asistirte con los datos de tu restaurante?',
-          'buenas noches': '¡Buenas noches! ¿Cómo puedo ayudarte con la información de tu restaurante?'
+          'buenas noches': '¡Buenas noches! ¿Cómo puedo ayudarte con la información de tu restaurante?',
         }
 
         const lowerMessage = query.message.toLowerCase().trim()
-        const response = conversationalResponses[lowerMessage as keyof typeof conversationalResponses] || 
+        const response =
+          conversationalResponses[lowerMessage as keyof typeof conversationalResponses] ||
           '¡Hola! Soy tu asistente de análisis de datos. Puedo ayudarte con información sobre ventas, reseñas, productos y más. ¿Qué te gustaría saber?'
 
         // Record the conversational interaction for learning
@@ -465,7 +467,7 @@ Ejemplos de respuestas CORRECTAS:
             confidence: 0.9, // High confidence for conversational responses
             executionTime: Date.now() - startTime,
             rowsReturned: 0,
-            sessionId
+            sessionId,
           })
         } catch (learningError) {
           logger.warn('🧠 Failed to record conversational interaction:', learningError)
@@ -483,9 +485,9 @@ Ejemplos de respuestas CORRECTAS:
             '¿Cuántas reseñas de 5 estrellas tengo?',
             '¿Cuáles fueron mis ventas de ayer?',
             '¿Qué productos son los más vendidos?',
-            '¿Cómo están las propinas este mes?'
+            '¿Cómo están las propinas este mes?',
           ],
-          trainingDataId
+          trainingDataId,
         }
       }
 
@@ -496,7 +498,7 @@ Ejemplos de respuestas CORRECTAS:
       if (learnedGuidance.suggestedSqlTemplate) {
         logger.info('🧠 Using learned pattern for improved response', {
           patternMatch: learnedGuidance.patternMatch,
-          confidenceBoost: learnedGuidance.confidenceBoost
+          confidenceBoost: learnedGuidance.confidenceBoost,
         })
       }
 
@@ -515,7 +517,7 @@ Ejemplos de respuestas CORRECTAS:
             confidence: sqlGeneration.confidence,
             executionTime: Date.now() - startTime,
             rowsReturned: 0,
-            sessionId
+            sessionId,
           })
         } catch (learningError) {
           logger.warn('🧠 Failed to record learning data for low confidence query:', learningError)
@@ -539,9 +541,9 @@ Ejemplos de respuestas CORRECTAS:
       const execution = await this.executeSafeQuery(sqlGeneration.sql, query.venueId)
 
       // Step 3: BULLETPROOF VALIDATION SYSTEM (simplified for stability)
-      let originalConfidence = Math.max(sqlGeneration.confidence, 0.8) // Ensure reasonable base confidence
+      const originalConfidence = Math.max(sqlGeneration.confidence, 0.8) // Ensure reasonable base confidence
       let finalConfidence = originalConfidence
-      let validationWarnings: string[] = []
+      const validationWarnings: string[] = []
       let bulletproofValidationPerformed = false
 
       // BULLETPROOF VALIDATION: Critical query detection
@@ -709,7 +711,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           confidence: finalConfidence + (learnedGuidance.confidenceBoost || 0),
           executionTime: totalTime,
           rowsReturned: execution.metadata.rowsReturned,
-          sessionId
+          sessionId,
         })
       } catch (learningError) {
         logger.warn('🧠 Failed to record learning data:', learningError)
@@ -718,7 +720,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       // Add trainingDataId to response for feedback functionality
       return {
         ...response,
-        trainingDataId
+        trainingDataId,
       }
     } catch (error) {
       logger.error('❌ Text-to-SQL processing failed', {
@@ -734,10 +736,12 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           venueId: query.venueId,
           userId: query.userId,
           userQuestion: query.message,
-          aiResponse: 'Hubo un problema procesando tu consulta. ' + (error instanceof Error ? error.message : 'Por favor intenta con una pregunta más específica.'),
+          aiResponse:
+            'Hubo un problema procesando tu consulta. ' +
+            (error instanceof Error ? error.message : 'Por favor intenta con una pregunta más específica.'),
           confidence: 0.1,
           executionTime: Date.now() - startTime,
-          sessionId
+          sessionId,
         })
       } catch (learningError) {
         logger.warn('🧠 Failed to record error interaction for learning:', learningError)
@@ -1334,7 +1338,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       products: ['producto', 'plato', 'menu', 'categoria'],
       financial: ['propinas', 'pagos', 'dinero', 'total'],
       temporal: ['hoy', 'ayer', 'semana', 'mes', 'dia'],
-      analytics: ['mejor', 'promedio', 'analisis', 'tendencia', 'comparar']
+      analytics: ['mejor', 'promedio', 'analisis', 'tendencia', 'comparar'],
     }
 
     const lowerQuestion = question.toLowerCase()
@@ -1352,7 +1356,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
    */
   private isDataQuery(message: string): boolean {
     const lowerMessage = message.toLowerCase().trim()
-    
+
     // Simple greetings that should NOT trigger SQL queries
     const greetingPatterns = [
       /^hola$/,
@@ -1370,7 +1374,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       /^no$/,
       /^adiós$/,
       /^bye$/,
-      /^chau$/
+      /^chau$/,
     ]
 
     // Check if it matches any greeting pattern
@@ -1385,25 +1389,99 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
     // Check for question words or data-related terms that indicate a data query
     const dataQueryIndicators = [
-      'cuánto', 'cuánta', 'cuántos', 'cuántas', 'cuanto', 'cuanta', 'cuantos', 'cuantas', // how much/many (with/without accents)
-      'qué', 'cuál', 'cuáles', 'que', 'cual', 'cuales', // what/which (with/without accents)
-      'dónde', 'cuándo', 'cómo', 'por qué', 'donde', 'cuando', 'como', 'por que', // where/when/how/why
-      'mostrar', 'dame', 'quiero', 'necesito', 'muestra', 'enseña', // show me/give me/want/need
-      'ventas', 'reseñas', 'productos', 'staff', 'personal', 'empleados', // business terms
-      'dinero', 'propinas', 'pedidos', 'órdenes', 'ordenes', // business terms
-      'total', 'promedio', 'mejor', 'peor', 'suma', 'cantidad', // analytical terms
-      'hoy', 'ayer', 'semana', 'mes', 'año', 'dia', 'mañana', // time references
-      'tpv', 'tpvs', 'terminal', 'terminales', 'pos', 'punto', 'venta', // POS/TPV terms
-      'mesa', 'mesas', 'cocina', 'kitchen', 'orden', 'factura', 'ticket', // restaurant terms
-      'turno', 'turnos', 'shift', 'shifts', 'abierto', 'abiertos', 'cerrado', 'cerrados', // shift/status terms
-      'cliente', 'clientes', 'usuario', 'usuarios', 'guest', // customer terms
-      'pago', 'pagos', 'efectivo', 'tarjeta', 'transferencia', // payment terms
-      'menu', 'menú', 'categoria', 'categoría', 'precio', 'precios' // menu terms
+      'cuánto',
+      'cuánta',
+      'cuántos',
+      'cuántas',
+      'cuanto',
+      'cuanta',
+      'cuantos',
+      'cuantas', // how much/many (with/without accents)
+      'qué',
+      'cuál',
+      'cuáles',
+      'que',
+      'cual',
+      'cuales', // what/which (with/without accents)
+      'dónde',
+      'cuándo',
+      'cómo',
+      'por qué',
+      'donde',
+      'cuando',
+      'como',
+      'por que', // where/when/how/why
+      'mostrar',
+      'dame',
+      'quiero',
+      'necesito',
+      'muestra',
+      'enseña', // show me/give me/want/need
+      'ventas',
+      'reseñas',
+      'productos',
+      'staff',
+      'personal',
+      'empleados', // business terms
+      'dinero',
+      'propinas',
+      'pedidos',
+      'órdenes',
+      'ordenes', // business terms
+      'total',
+      'promedio',
+      'mejor',
+      'peor',
+      'suma',
+      'cantidad', // analytical terms
+      'hoy',
+      'ayer',
+      'semana',
+      'mes',
+      'año',
+      'dia',
+      'mañana', // time references
+      'tpv',
+      'tpvs',
+      'terminal',
+      'terminales',
+      'pos',
+      'punto',
+      'venta', // POS/TPV terms
+      'mesa',
+      'mesas',
+      'cocina',
+      'kitchen',
+      'orden',
+      'factura',
+      'ticket', // restaurant terms
+      'turno',
+      'turnos',
+      'shift',
+      'shifts',
+      'abierto',
+      'abiertos',
+      'cerrado',
+      'cerrados', // shift/status terms
+      'cliente',
+      'clientes',
+      'usuario',
+      'usuarios',
+      'guest', // customer terms
+      'pago',
+      'pagos',
+      'efectivo',
+      'tarjeta',
+      'transferencia', // payment terms
+      'menu',
+      'menú',
+      'categoria',
+      'categoría',
+      'precio',
+      'precios', // menu terms
     ]
 
-    const hasDataIndicators = dataQueryIndicators.some(indicator => 
-      lowerMessage.includes(indicator)
-    )
+    const hasDataIndicators = dataQueryIndicators.some(indicator => lowerMessage.includes(indicator))
 
     return hasDataIndicators
   }

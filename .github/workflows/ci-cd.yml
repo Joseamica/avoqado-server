@@ -67,7 +67,7 @@ jobs:
         
       - name: Health check
         run: |
-          curl -f ${{ secrets.STAGING_API_URL }}/health || exit 1
+          curl -f ${{ vars.STAGING_API_URL }}/health || exit 1
           echo "✅ Staging deployment successful!"
 
   # Deploy to Production (main branch)
@@ -90,7 +90,7 @@ jobs:
         
       - name: Health check
         run: |
-          curl -f ${{ secrets.PRODUCTION_API_URL }}/health || exit 1
+          curl -f ${{ vars.PRODUCTION_API_URL }}/health || exit 1
           echo "✅ Production deployment successful!"
 
   # Optional: Deploy preview for PR

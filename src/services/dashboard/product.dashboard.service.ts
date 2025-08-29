@@ -143,7 +143,7 @@ export async function updateProduct(venueId: string, productId: string, productD
   }
 
   // If modifierGroupIds is provided, update the relationships
-  let updateData: any = productFields
+  const updateData: any = productFields
 
   if (modifierGroupIds !== undefined) {
     // Validate that all provided modifier group IDs exist and belong to the venue

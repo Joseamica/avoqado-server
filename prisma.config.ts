@@ -7,9 +7,7 @@ export default {
   migrations: {
     path: path.join('prisma', 'migrations'),
     // Execute from repo root; use compiled JS in production
-    seed: process.env.NODE_ENV === 'production'
-      ? 'node dist/prisma/seed.js'
-      : 'ts-node prisma/seed.ts'
+    seed: process.env.NODE_ENV === 'production' ? 'node dist/prisma/seed.js' : 'ts-node prisma/seed.ts',
   },
   views: {
     path: path.join('prisma', 'views'),

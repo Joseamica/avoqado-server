@@ -41,7 +41,7 @@ export function generateSlug(text: string): string {
     .toLowerCase()
     .trim()
     .replace(/\s+/g, '-') // Replace spaces with -
-    .replace(/[&\/\\#,+()$~%.'":*?<>{}]/g, '') // Remove special characters
+    .replace(/[&/\\#,+()$~%.'":*?<>{}]/g, '') // Remove special characters
     .replace(/--+/g, '-') // Replace multiple - with single -
     .replace(/^-+/, '') // Trim - from start of text
     .replace(/-+$/, '') // Trim - from end of text
@@ -276,7 +276,7 @@ async function main() {
   for (const [orgIndex, org] of organizations.entries()) {
     console.log(`\nSeeding for Organization: ${org.name} (ID: ${org.id})`)
 
-    let createdStaffList: (any & { assignedRole: StaffRole })[] = []
+    const createdStaffList: (any & { assignedRole: StaffRole })[] = []
 
     // --- Staff de la Organización ---
     const staffToCreate =

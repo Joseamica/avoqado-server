@@ -10,29 +10,90 @@ import logger from '../../config/logger'
 const isSensitiveQuery = (message: string): boolean => {
   const sensitiveIndicators = [
     // User/Role management queries
-    'roles', 'role', 'usuario', 'usuarios', 'user', 'users', 'staff', 'empleado', 'empleados',
-    'admin', 'administrador', 'superadmin', 'owner', 'propietario', 'manager', 'gerente',
-    
+    'roles',
+    'role',
+    'usuario',
+    'usuarios',
+    'user',
+    'users',
+    'staff',
+    'empleado',
+    'empleados',
+    'admin',
+    'administrador',
+    'superadmin',
+    'owner',
+    'propietario',
+    'manager',
+    'gerente',
+
     // System/Organization queries
-    'organización', 'organizacion', 'organization', 'sistema', 'system', 'configuración', 'configuration',
-    'permisos', 'permissions', 'acceso', 'access', 'seguridad', 'security',
-    
-    // Database/Technical queries  
-    'tabla', 'tablas', 'table', 'tables', 'esquema', 'schema', 'base de datos', 'database',
-    'estructura', 'structure', 'columna', 'columnas', 'column', 'columns',
-    
+    'organización',
+    'organizacion',
+    'organization',
+    'sistema',
+    'system',
+    'configuración',
+    'configuration',
+    'permisos',
+    'permissions',
+    'acceso',
+    'access',
+    'seguridad',
+    'security',
+
+    // Database/Technical queries
+    'tabla',
+    'tablas',
+    'table',
+    'tables',
+    'esquema',
+    'schema',
+    'base de datos',
+    'database',
+    'estructura',
+    'structure',
+    'columna',
+    'columnas',
+    'column',
+    'columns',
+
     // Sensitive business data
-    'contraseña', 'password', 'token', 'api', 'clave', 'key', 'secret', 'secreto',
-    'credenciales', 'credentials', 'login', 'sesión', 'session',
-    
+    'contraseña',
+    'password',
+    'token',
+    'api',
+    'clave',
+    'key',
+    'secret',
+    'secreto',
+    'credenciales',
+    'credentials',
+    'login',
+    'sesión',
+    'session',
+
     // Financial/Audit queries
-    'audit', 'auditoria', 'log', 'logs', 'historial completo', 'todos los registros',
-    'información confidencial', 'datos sensibles', 'privado', 'private',
-    
+    'audit',
+    'auditoria',
+    'log',
+    'logs',
+    'historial completo',
+    'todos los registros',
+    'información confidencial',
+    'datos sensibles',
+    'privado',
+    'private',
+
     // System queries that could reveal architecture
-    'cuántos', 'cuantos', 'todos los', 'all', 'lista completa', 'complete list'
+    'cuántos',
+    'cuantos',
+    'todos los',
+    'all',
+    'lista completa',
+    'complete list',
   ]
-  
+
   const lowerMessage = message.toLowerCase().trim()
   return sensitiveIndicators.some(indicator => lowerMessage.includes(indicator))
 }
@@ -64,8 +125,10 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
         role: req.authContext.role,
         query: message.substring(0, 100), // Solo los primeros 100 caracteres por seguridad
       })
-      
-      throw new ForbiddenError('Acceso denegado: Esta consulta requiere permisos de SUPERADMIN para acceder a información sensible del sistema.')
+
+      throw new ForbiddenError(
+        'Acceso denegado: Esta consulta requiere permisos de SUPERADMIN para acceder a información sensible del sistema.',
+      )
     }
 
     // Log de auditoría de seguridad
@@ -114,14 +177,13 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
           executionTime: response.metadata.executionTime,
           dataSourcesUsed: response.metadata.dataSourcesUsed,
           // Include SQL query in development for debugging
-          ...(process.env.NODE_ENV === 'development' && { 
+          ...(process.env.NODE_ENV === 'development' && {
             sqlQuery: response.sqlQuery,
-            queryResult: response.queryResult 
-          })
-        }
-      }
+            queryResult: response.queryResult,
+          }),
+        },
+      },
     })
-
   } catch (error) {
     // Log del error para análisis
     logger.error('🔍 Text-to-SQL query failed', {

@@ -32,14 +32,14 @@
     "test:ci": "jest --ci --coverage --watchAll=false --passWithNoTests",
     "test:debug": "node --inspect-brk node_modules/.bin/jest --runInBand",
     "format": "prettier --write .",
-    "lint": "eslint . --ext .ts",
-    "lint:fix": "eslint . --ext .json --fix"
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "engines": {
-    "node": "24.x"
+    "node": ">=20.x"
   },
   "dependencies": {
     "@google-cloud/local-auth": "^3.0.1",
@@ -50,12 +50,12 @@
     "amqplib": "^0.10.8",
     "axios": "^1.11.0",
     "bcrypt": "^5.1.1",
+    "bcryptjs": "^3.0.2",
     "compression": "^1.8.0",
     "connect-pg-simple": "^10.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
-    "bcryptjs": "^3.0.2",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "express-session": "^1.18.1",
@@ -78,6 +78,7 @@
     "uuid": "^11.1.0",
     "vitest": "^3.2.4",
     "winston": "^3.17.0",
+    "yaml": "^2.8.1",
     "zod": "^3.25.51"
   },
   "devDependencies": {
@@ -116,6 +117,7 @@
     "ts-jest": "^29.3.4",
     "ts-node": "^10.9.2",
     "tsc-alias": "^1.8.16",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.41.0"
   }
 }

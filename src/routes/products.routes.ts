@@ -19,7 +19,7 @@ interface Product {
   description?: string
 }
 
-let mockProducts: Product[] = [
+const mockProducts: Product[] = [
   { id: 'prod_1', venueId: 'venue_123', name: 'Pizza Margherita', price: 12.99, description: 'Classic cheese and tomato pizza' },
   { id: 'prod_2', venueId: 'venue_123', name: 'Coca-Cola', price: 2.5 },
   { id: 'prod_3', venueId: 'venue_456', name: 'Espresso', price: 3.0 },

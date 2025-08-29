@@ -1650,22 +1650,22 @@ Título:`.trim()
         messages: [
           {
             role: 'system',
-            content: 'Eres un asistente especializado en generar títulos concisos y descriptivos para conversaciones de restaurantes.'
+            content: 'Eres un asistente especializado en generar títulos concisos y descriptivos para conversaciones de restaurantes.',
           },
           {
             role: 'user',
-            content: titlePrompt
-          }
+            content: titlePrompt,
+          },
         ],
         max_tokens: 50,
         temperature: 0.3,
       })
 
       let title = completion.choices[0]?.message?.content?.trim() || ''
-      
+
       // Clean up the title - remove quotes and extra formatting
       title = title.replace(/^["']|["']$/g, '').trim()
-      
+
       // Ensure it's not too long (fallback safety)
       if (title.length > 60) {
         title = title.substring(0, 57) + '...'
@@ -1679,17 +1679,16 @@ Título:`.trim()
       logger.info('Conversation title generated successfully', {
         originalLength: conversationSummary.length,
         generatedTitle: title,
-        titleLength: title.length
+        titleLength: title.length,
       })
 
       return title
-
     } catch (error) {
-      logger.error('Error generating conversation title with LLM', { 
-        error, 
-        conversationLength: conversationSummary.length 
+      logger.error('Error generating conversation title with LLM', {
+        error,
+        conversationLength: conversationSummary.length,
       })
-      
+
       // Fallback to simple title based on current date
       return `Consulta del ${new Date().toLocaleDateString()}`
     }

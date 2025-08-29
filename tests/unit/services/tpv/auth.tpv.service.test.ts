@@ -11,6 +11,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     staffVenue: {
       findUnique: jest.fn(),
+      update: jest.fn(),
     },
   },
 }))
@@ -69,6 +70,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
     // Setup default mocks
     ;(security.generateAccessToken as jest.Mock).mockReturnValue('mock-access-token')
     ;(security.generateRefreshToken as jest.Mock).mockReturnValue('mock-refresh-token')
+    ;(prisma.staffVenue.update as jest.Mock).mockResolvedValue(mockStaffVenue)
   })
 
   afterEach(() => {

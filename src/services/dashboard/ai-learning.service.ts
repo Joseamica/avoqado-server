@@ -105,7 +105,7 @@ export class AILearningService {
             updatedAt: new Date(),
           },
         })
-        
+
         logger.info('📝 Updated existing feedback', {
           trainingDataId: feedback.trainingDataId,
           feedbackType: feedback.feedbackType,
@@ -125,7 +125,7 @@ export class AILearningService {
             createdAt: new Date(),
           },
         })
-        
+
         logger.info('📝 Created new feedback', {
           trainingDataId: feedback.trainingDataId,
           feedbackType: feedback.feedbackType,

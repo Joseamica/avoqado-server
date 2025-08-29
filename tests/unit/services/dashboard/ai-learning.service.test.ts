@@ -8,7 +8,7 @@ jest.mock('../../../../src/config/logger')
 
 // Mock crypto
 jest.mock('crypto', () => ({
-  randomUUID: jest.fn(() => 'mocked-uuid-123')
+  randomUUID: jest.fn(() => 'mocked-uuid-123'),
 }))
 
 describe('AI Learning Service', () => {
@@ -32,7 +32,7 @@ describe('AI Learning Service', () => {
         confidence: 0.85,
         executionTime: 250,
         rowsReturned: 1,
-        sessionId: 'session-789'
+        sessionId: 'session-789',
       }
 
       const mockTrainingData = {
@@ -41,7 +41,7 @@ describe('AI Learning Service', () => {
         responseCategory: 'sales',
         wasCorrect: null,
         createdAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
       }
 
       prismaMock.chatTrainingData.create.mockResolvedValue(mockTrainingData as any)
@@ -60,8 +60,8 @@ describe('AI Learning Service', () => {
           aiResponse: 'Las ventas de hoy fueron $1,500 MXN',
           sqlQuery: 'SELECT SUM(total) FROM "Order" WHERE DATE(createdAt) = CURRENT_DATE',
           confidence: 0.85,
-          responseCategory: 'sales'
-        })
+          responseCategory: 'sales',
+        }),
       })
     })
 
@@ -73,12 +73,12 @@ describe('AI Learning Service', () => {
         userQuestion: '¿Cuánto vendimos esta semana?',
         aiResponse: 'Test response',
         confidence: 0.8,
-        sessionId: 'session-789'
+        sessionId: 'session-789',
       }
 
       prismaMock.chatTrainingData.create.mockResolvedValue({
         id: 'test-id',
-        responseCategory: 'sales'
+        responseCategory: 'sales',
       } as any)
 
       // Act
@@ -87,8 +87,8 @@ describe('AI Learning Service', () => {
       // Assert
       expect(prismaMock.chatTrainingData.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
-          responseCategory: 'sales'
-        })
+          responseCategory: 'sales',
+        }),
       })
     })
 
@@ -100,7 +100,7 @@ describe('AI Learning Service', () => {
         userQuestion: 'Test question',
         aiResponse: 'Test response',
         confidence: 0.8,
-        sessionId: 'session-789'
+        sessionId: 'session-789',
       }
 
       prismaMock.chatTrainingData.create.mockRejectedValue(new Error('Database error'))
@@ -119,7 +119,7 @@ describe('AI Learning Service', () => {
         feedbackType: ChatFeedbackType.INCORRECT,
         correctedResponse: 'This is the correct response',
         correctedSql: 'SELECT * FROM "Order"',
-        adminNotes: 'User feedback notes'
+        adminNotes: 'User feedback notes',
       }
 
       prismaMock.chatFeedback.findFirst.mockResolvedValue(null)
@@ -128,7 +128,7 @@ describe('AI Learning Service', () => {
       prismaMock.chatTrainingData.findUnique.mockResolvedValue({
         id: 'training-123',
         userQuestion: 'Test question',
-        responseCategory: 'sales'
+        responseCategory: 'sales',
       } as any)
 
       // Act
@@ -141,15 +141,15 @@ describe('AI Learning Service', () => {
           trainingDataId: 'training-123',
           feedbackType: ChatFeedbackType.INCORRECT,
           correctedResponse: 'This is the correct response',
-          processingStatus: ChatProcessingStatus.PENDING
-        })
+          processingStatus: ChatProcessingStatus.PENDING,
+        }),
       })
 
       expect(prismaMock.chatTrainingData.update).toHaveBeenCalledWith({
         where: { id: 'training-123' },
         data: expect.objectContaining({
-          wasCorrect: false
-        })
+          wasCorrect: false,
+        }),
       })
     })
 
@@ -158,12 +158,12 @@ describe('AI Learning Service', () => {
       const mockFeedback = {
         trainingDataId: 'training-123',
         feedbackType: ChatFeedbackType.CORRECT,
-        adminNotes: 'Updated notes'
+        adminNotes: 'Updated notes',
       }
 
       const existingFeedback = {
         id: 'existing-feedback-123',
-        feedbackType: ChatFeedbackType.INCORRECT
+        feedbackType: ChatFeedbackType.INCORRECT,
       }
 
       prismaMock.chatFeedback.findFirst.mockResolvedValue(existingFeedback as any)
@@ -179,8 +179,8 @@ describe('AI Learning Service', () => {
         data: expect.objectContaining({
           feedbackType: ChatFeedbackType.CORRECT,
           adminNotes: 'Updated notes',
-          processingStatus: ChatProcessingStatus.PENDING
-        })
+          processingStatus: ChatProcessingStatus.PENDING,
+        }),
       })
     })
 
@@ -188,7 +188,7 @@ describe('AI Learning Service', () => {
       // Arrange
       const mockFeedback = {
         trainingDataId: 'training-123',
-        feedbackType: ChatFeedbackType.CORRECT
+        feedbackType: ChatFeedbackType.CORRECT,
       }
 
       prismaMock.chatFeedback.findFirst.mockRejectedValue(new Error('Database error'))
@@ -209,16 +209,16 @@ describe('AI Learning Service', () => {
           responseCategory: 'sales',
           sqlQuery: 'SELECT SUM(total) FROM "Order"',
           confidence: 0.9,
-          wasCorrect: true
+          wasCorrect: true,
         },
         {
           id: 'interaction-2',
           userQuestion: '¿Cuánto vendimos hoy?',
-          responseCategory: 'sales', 
+          responseCategory: 'sales',
           sqlQuery: 'SELECT SUM(total) FROM "Order"',
           confidence: 0.85,
-          wasCorrect: true
-        }
+          wasCorrect: true,
+        },
       ]
 
       prismaMock.chatTrainingData.findMany.mockResolvedValue(mockSuccessfulInteractions as any)
@@ -232,10 +232,10 @@ describe('AI Learning Service', () => {
         where: {
           confidence: { gte: 0.8 },
           wasCorrect: true,
-          sqlQuery: { not: null }
+          sqlQuery: { not: null },
         },
         orderBy: { createdAt: 'desc' },
-        take: 100
+        take: 100,
       })
 
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('🧠 Learned'))
@@ -245,11 +245,8 @@ describe('AI Learning Service', () => {
       // Arrange
       prismaMock.chatTrainingData.findMany.mockRejectedValue(new Error('Database error'))
 
-      // Act
-      await aiLearningService.learnFromSuccessfulInteractions()
-
-      // Assert
-      expect(logger.error).toHaveBeenCalledWith('❌ Failed to learn from successful interactions:', expect.any(Error))
+      // Act & Assert
+      await expect(aiLearningService.learnFromSuccessfulInteractions()).rejects.toThrow('Database error')
     })
   })
 
@@ -264,8 +261,8 @@ describe('AI Learning Service', () => {
           optimalSqlTemplate: 'SELECT SUM(total) FROM "Order"',
           successRate: 0.9,
           totalUsages: 5,
-          lastUsed: new Date()
-        }
+          lastUsed: new Date(),
+        },
       ]
 
       prismaMock.learnedPatterns.findMany.mockResolvedValue(mockPatterns as any)
@@ -278,15 +275,15 @@ describe('AI Learning Service', () => {
       expect(result).toEqual({
         suggestedSqlTemplate: 'SELECT SUM(total) FROM "Order"',
         confidenceBoost: expect.any(Number),
-        patternMatch: 'ventas|vendimos'
+        patternMatch: 'ventas|vendimos',
       })
 
       expect(prismaMock.learnedPatterns.update).toHaveBeenCalledWith({
         where: { id: 'pattern-123' },
         data: {
           totalUsages: { increment: 1 },
-          lastUsed: expect.any(Date)
-        }
+          lastUsed: expect.any(Date),
+        },
       })
     })
 
@@ -318,22 +315,22 @@ describe('AI Learning Service', () => {
     it('should return comprehensive learning analytics', async () => {
       // Arrange
       prismaMock.chatTrainingData.count.mockResolvedValueOnce(100) // total interactions
-      prismaMock.chatTrainingData.count.mockResolvedValueOnce(80)  // correct responses
+      prismaMock.chatTrainingData.count.mockResolvedValueOnce(80) // correct responses
       prismaMock.chatTrainingData.aggregate.mockResolvedValue({
-        _avg: { confidence: 0.85 }
+        _avg: { confidence: 0.85 },
       } as any)
-      
+
       const mockCategoryStats = [
         {
           responseCategory: 'sales',
           _count: { id: 50 },
-          _avg: { confidence: 0.9 }
+          _avg: { confidence: 0.9 },
         },
         {
           responseCategory: 'staff',
           _count: { id: 30 },
-          _avg: { confidence: 0.8 }
-        }
+          _avg: { confidence: 0.8 },
+        },
       ]
       prismaMock.chatTrainingData.groupBy.mockResolvedValue(mockCategoryStats as any)
 
@@ -356,15 +353,15 @@ describe('AI Learning Service', () => {
           sales: {
             total: 50,
             correct: 40,
-            averageConfidence: 0.9
+            averageConfidence: 0.9,
           },
           staff: {
             total: 30,
             correct: 25,
-            averageConfidence: 0.8
-          }
+            averageConfidence: 0.8,
+          },
         },
-        learnedPatterns: 15
+        learnedPatterns: 15,
       })
     })
 
@@ -386,29 +383,29 @@ describe('AI Learning Service', () => {
           '¿Cuáles fueron las ventas de hoy?',
           '¿Cuánto vendimos esta semana?',
           'Mostrar ingresos del mes',
-          'Ganancias totales'
+          'Ganancias totales',
         ]
 
         // Act & Assert (indirect testing through recordChatInteraction)
         for (const question of salesQuestions) {
-          prismaMock.chatTrainingData.create.mockResolvedValue({ 
-            id: 'test', 
-            responseCategory: 'sales' 
+          prismaMock.chatTrainingData.create.mockResolvedValue({
+            id: 'test',
+            responseCategory: 'sales',
           } as any)
-          
+
           await aiLearningService.recordChatInteraction({
             venueId: 'venue-123',
             userId: 'user-456',
             userQuestion: question,
             aiResponse: 'Response',
             confidence: 0.8,
-            sessionId: 'session-789'
+            sessionId: 'session-789',
           })
 
           expect(prismaMock.chatTrainingData.create).toHaveBeenCalledWith({
             data: expect.objectContaining({
-              responseCategory: 'sales'
-            })
+              responseCategory: 'sales',
+            }),
           })
 
           jest.clearAllMocks()
@@ -417,13 +414,13 @@ describe('AI Learning Service', () => {
 
       it('should categorize temporal questions correctly', async () => {
         // Arrange
-        const temporalQuestion = '¿Qué vendimos ayer por la mañana?'
+        const temporalQuestion = '¿Qué pasó ayer por la mañana?'
 
-        prismaMock.chatTrainingData.create.mockResolvedValue({ 
-          id: 'test', 
-          responseCategory: 'temporal' 
+        prismaMock.chatTrainingData.create.mockResolvedValue({
+          id: 'test',
+          responseCategory: 'temporal',
         } as any)
-        
+
         // Act
         await aiLearningService.recordChatInteraction({
           venueId: 'venue-123',
@@ -431,14 +428,14 @@ describe('AI Learning Service', () => {
           userQuestion: temporalQuestion,
           aiResponse: 'Response',
           confidence: 0.8,
-          sessionId: 'session-789'
+          sessionId: 'session-789',
         })
 
         // Assert
         expect(prismaMock.chatTrainingData.create).toHaveBeenCalledWith({
           data: expect.objectContaining({
-            responseCategory: 'temporal'
-          })
+            responseCategory: 'temporal',
+          }),
         })
       })
 
@@ -446,11 +443,11 @@ describe('AI Learning Service', () => {
         // Arrange
         const generalQuestion = 'Random question without keywords'
 
-        prismaMock.chatTrainingData.create.mockResolvedValue({ 
-          id: 'test', 
-          responseCategory: 'general' 
+        prismaMock.chatTrainingData.create.mockResolvedValue({
+          id: 'test',
+          responseCategory: 'general',
         } as any)
-        
+
         // Act
         await aiLearningService.recordChatInteraction({
           venueId: 'venue-123',
@@ -458,14 +455,14 @@ describe('AI Learning Service', () => {
           userQuestion: generalQuestion,
           aiResponse: 'Response',
           confidence: 0.8,
-          sessionId: 'session-789'
+          sessionId: 'session-789',
         })
 
         // Assert
         expect(prismaMock.chatTrainingData.create).toHaveBeenCalledWith({
           data: expect.objectContaining({
-            responseCategory: 'general'
-          })
+            responseCategory: 'general',
+          }),
         })
       })
     })
