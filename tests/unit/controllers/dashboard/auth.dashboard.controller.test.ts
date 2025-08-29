@@ -237,14 +237,14 @@ describe('Dashboard Auth Controller', () => {
       expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockAccessToken, {
         httpOnly: true,
         secure: false, // NODE_ENV = 'development'
-        sameSite: 'strict',
+        sameSite: 'lax',
         maxAge: 15 * 60 * 1000,
         path: '/',
       })
       expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockRefreshToken, {
         httpOnly: true,
         secure: false, // NODE_ENV = 'development'
-        sameSite: 'strict',
+        sameSite: 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000,
         path: '/',
       })
@@ -330,13 +330,13 @@ describe('Dashboard Auth Controller', () => {
       expect(res.clearCookie).toHaveBeenNthCalledWith(1, 'accessToken', {
         httpOnly: true,
         secure: false,
-        sameSite: 'strict',
+        sameSite: 'lax',
         path: '/',
       })
       expect(res.clearCookie).toHaveBeenNthCalledWith(2, 'refreshToken', {
         httpOnly: true,
         secure: false,
-        sameSite: 'strict',
+        sameSite: 'lax',
         path: '/',
       })
       expect(mockSessionDestroy).toHaveBeenCalled()
@@ -434,14 +434,14 @@ describe('Dashboard Auth Controller', () => {
       expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockNewAccessToken, {
         httpOnly: true,
         secure: false,
-        sameSite: 'strict',
+        sameSite: 'lax',
         maxAge: 15 * 60 * 1000,
         path: '/',
       })
       expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockNewRefreshToken, {
         httpOnly: true,
         secure: false,
-        sameSite: 'strict',
+        sameSite: 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000,
         path: '/',
       })

@@ -3,6 +3,14 @@
 // This file is executed once per test file after the test framework is setup
 // but before the tests are run.
 
+// Set required environment variables for tests
+process.env.NODE_ENV = 'test'
+process.env.ACCESS_TOKEN_SECRET = 'test-access-token-secret'
+process.env.SESSION_SECRET = 'test-session-secret'
+process.env.COOKIE_SECRET = 'test-cookie-secret'
+process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test'
+process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
+
 // Prisma Mock Setup
 const prismaMock = {
   staff: {
@@ -72,6 +80,20 @@ const prismaMock = {
     count: jest.fn(),
   },
 }
+
+// Mock Prisma Client globally
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: prismaMock,
+}))
+
+// Mock logger to prevent console noise during tests
+jest.mock('@/config/logger', () => ({
+  info: jest.fn(),
+  error: jest.fn(),
+  warn: jest.fn(),
+  debug: jest.fn(),
+}))
 
 console.log('Jest global setup file loaded.')
 
