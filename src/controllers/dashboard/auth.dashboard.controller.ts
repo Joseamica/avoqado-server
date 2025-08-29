@@ -256,17 +256,19 @@ export async function dashboardLoginController(req: Request, res: Response, next
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // Use 'none' for cross-domain in production
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
+      // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
 
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // Use 'none' for cross-domain in production
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/',
+      // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
 
     // Respuesta exitosa
@@ -286,15 +288,17 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     res.clearCookie('accessToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // Use 'none' for cross-domain in production
       path: '/',
+      // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
 
     res.clearCookie('refreshToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // Use 'none' for cross-domain in production
       path: '/',
+      // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
 
     // Destruir sesión si existe
@@ -334,17 +338,19 @@ export async function switchVenueController(req: Request, res: Response, next: N
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // Use 'none' for cross-domain in production
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
+      // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
 
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // Use 'none' for cross-domain in production
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/', // Ajusta el path si tu ruta de refresh es específica
+      // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
 
     res.status(200).json({ success: true, message: 'Contexto de venue actualizado correctamente.' })
