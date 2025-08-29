@@ -1,6 +1,11 @@
 node_modules
 # Keep environment variables out of version control
 .env
+.env.*
+.env.staging
+.env.production
+.env.local
+.env.development
 
 # Log files
 logs/
