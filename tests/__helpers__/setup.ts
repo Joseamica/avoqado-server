@@ -12,7 +12,7 @@ const prismaMock = {
     create: jest.fn(),
     update: jest.fn(),
     delete: jest.fn(),
-    count: jest.fn()
+    count: jest.fn(),
   },
   venue: {
     findUnique: jest.fn(),
@@ -20,7 +20,7 @@ const prismaMock = {
     findMany: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
-    delete: jest.fn()
+    delete: jest.fn(),
   },
   notification: {
     findFirst: jest.fn(),
@@ -33,21 +33,21 @@ const prismaMock = {
     deleteMany: jest.fn(),
     count: jest.fn(),
     aggregate: jest.fn(),
-    groupBy: jest.fn()
+    groupBy: jest.fn(),
   },
   notificationPreference: {
     findFirst: jest.fn(),
     findMany: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
-    upsert: jest.fn()
+    upsert: jest.fn(),
   },
   notificationTemplate: {
     findFirst: jest.fn(),
-    findMany: jest.fn()
+    findMany: jest.fn(),
   },
   staffVenue: {
-    findMany: jest.fn()
+    findMany: jest.fn(),
   },
   chatTrainingData: {
     findUnique: jest.fn(),
@@ -56,21 +56,21 @@ const prismaMock = {
     update: jest.fn(),
     count: jest.fn(),
     aggregate: jest.fn(),
-    groupBy: jest.fn()
+    groupBy: jest.fn(),
   },
   chatFeedback: {
     findFirst: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
-    count: jest.fn()
+    count: jest.fn(),
   },
   learnedPatterns: {
     findMany: jest.fn(),
     upsert: jest.fn(),
     update: jest.fn(),
     updateMany: jest.fn(),
-    count: jest.fn()
-  }
+    count: jest.fn(),
+  },
 }
 
 console.log('Jest global setup file loaded.')

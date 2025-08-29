@@ -36,16 +36,12 @@ export async function getTerminals(
 /**
  * Controlador para obtener una terminal específica por ID.
  */
-export async function getTpvById(
-  req: Request<{ venueId: string; tpvId: string }>,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getTpvById(req: Request<{ venueId: string; tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, tpvId } = req.params
 
     const tpv = await tpvDashboardService.getTpvById(venueId, tpvId)
-    
+
     res.status(200).json(tpv)
   } catch (error) {
     next(error)
@@ -65,7 +61,7 @@ export async function updateTpv(
     const updateData = req.body
 
     const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData)
-    
+
     res.status(200).json(updatedTpv)
   } catch (error) {
     next(error)

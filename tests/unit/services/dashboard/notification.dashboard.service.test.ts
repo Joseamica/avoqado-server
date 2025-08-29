@@ -5,7 +5,7 @@ import {
   markAllNotificationsAsRead,
   deleteNotification,
   sendVenueNotification,
-  cleanupOldNotifications
+  cleanupOldNotifications,
 } from '../../../../src/services/dashboard/notification.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import { NotificationType, NotificationPriority, NotificationChannel, Notification } from '@prisma/client'
@@ -14,8 +14,8 @@ import { NotificationType, NotificationPriority, NotificationChannel, Notificati
 jest.mock('../../../../src/communication/sockets', () => ({
   default: {
     broadcastToUser: jest.fn(),
-    broadcastToVenue: jest.fn()
-  }
+    broadcastToVenue: jest.fn(),
+  },
 }))
 
 describe('Notification Dashboard Service', () => {
@@ -33,7 +33,7 @@ describe('Notification Dashboard Service', () => {
         title: 'New Order',
         message: 'You have a new order #123',
         priority: NotificationPriority.NORMAL,
-        channels: [NotificationChannel.IN_APP]
+        channels: [NotificationChannel.IN_APP],
       }
 
       const mockCreatedNotification = {
@@ -46,7 +46,7 @@ describe('Notification Dashboard Service', () => {
         actionLabel: null,
         entityType: null,
         entityId: null,
-        metadata: null
+        metadata: null,
       } as Notification
 
       prismaMock.notification.create.mockResolvedValue(mockCreatedNotification)
@@ -62,8 +62,8 @@ describe('Notification Dashboard Service', () => {
           venueId: 'venue-456',
           type: NotificationType.ORDER_UPDATED,
           title: 'New Order',
-          message: 'You have a new order #123'
-        })
+          message: 'You have a new order #123',
+        }),
       })
     })
 
@@ -73,7 +73,7 @@ describe('Notification Dashboard Service', () => {
         recipientId: 'user-123',
         type: NotificationType.ORDER_UPDATED,
         title: 'Test',
-        message: 'Test message'
+        message: 'Test message',
       }
 
       prismaMock.notification.create.mockRejectedValue(new Error('Database error'))
@@ -94,16 +94,16 @@ describe('Notification Dashboard Service', () => {
           title: 'Notification 1',
           message: 'Message 1',
           isRead: false,
-          createdAt: new Date()
+          createdAt: new Date(),
         },
         {
-          id: 'notif-2', 
+          id: 'notif-2',
           recipientId: userId,
           title: 'Notification 2',
           message: 'Message 2',
           isRead: true,
-          createdAt: new Date()
-        }
+          createdAt: new Date(),
+        },
       ]
 
       prismaMock.notification.findMany.mockResolvedValue(mockNotifications)
@@ -124,20 +124,20 @@ describe('Notification Dashboard Service', () => {
               id: true,
               firstName: true,
               lastName: true,
-              email: true
-            }
+              email: true,
+            },
           },
           venue: {
             select: {
               id: true,
               name: true,
-              slug: true
-            }
-          }
+              slug: true,
+            },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip: 0,
-        take: 10
+        take: 10,
       })
     })
   })
@@ -151,13 +151,13 @@ describe('Notification Dashboard Service', () => {
         id: notificationId,
         recipientId: userId,
         isRead: true,
-        updatedAt: new Date()
+        updatedAt: new Date(),
       } as Notification
 
       prismaMock.notification.findFirst.mockResolvedValue({
         id: notificationId,
         recipientId: userId,
-        isRead: false
+        isRead: false,
       } as any)
 
       prismaMock.notification.update.mockResolvedValue(mockUpdatedNotification)
@@ -169,10 +169,10 @@ describe('Notification Dashboard Service', () => {
       expect(result).toEqual(mockUpdatedNotification)
       expect(prismaMock.notification.update).toHaveBeenCalledWith({
         where: { id: notificationId },
-        data: { 
+        data: {
           isRead: true,
-          readAt: expect.any(Date)
-        }
+          readAt: expect.any(Date),
+        },
       })
     })
 
@@ -181,8 +181,7 @@ describe('Notification Dashboard Service', () => {
       prismaMock.notification.findFirst.mockResolvedValue(null)
 
       // Act & Assert
-      await expect(markNotificationAsRead('invalid-id', 'user-123'))
-        .rejects.toThrow('Notification not found or access denied')
+      await expect(markNotificationAsRead('invalid-id', 'user-123')).rejects.toThrow('Notification not found or access denied')
     })
   })
 
@@ -200,12 +199,12 @@ describe('Notification Dashboard Service', () => {
       expect(prismaMock.notification.updateMany).toHaveBeenCalledWith({
         where: {
           recipientId: userId,
-          isRead: false
+          isRead: false,
         },
         data: {
           isRead: true,
-          readAt: expect.any(Date)
-        }
+          readAt: expect.any(Date),
+        },
       })
     })
   })
@@ -218,7 +217,7 @@ describe('Notification Dashboard Service', () => {
 
       prismaMock.notification.findFirst.mockResolvedValue({
         id: notificationId,
-        recipientId: userId
+        recipientId: userId,
       } as any)
 
       prismaMock.notification.delete.mockResolvedValue({} as any)
@@ -228,7 +227,7 @@ describe('Notification Dashboard Service', () => {
 
       // Assert
       expect(prismaMock.notification.delete).toHaveBeenCalledWith({
-        where: { id: notificationId }
+        where: { id: notificationId },
       })
     })
   })
@@ -237,22 +236,19 @@ describe('Notification Dashboard Service', () => {
     it('should send notification to all venue staff', async () => {
       // Arrange
       const venueId = 'venue-123'
-      const mockStaff = [
-        { staffId: 'staff-1' },
-        { staffId: 'staff-2' }
-      ]
+      const mockStaff = [{ staffId: 'staff-1' }, { staffId: 'staff-2' }]
 
       const mockNotificationData = {
         type: NotificationType.ANNOUNCEMENT,
         title: 'Venue Update',
-        message: 'Important announcement'
+        message: 'Important announcement',
       }
 
       prismaMock.staffVenue.findMany.mockResolvedValue(mockStaff as any)
       prismaMock.notification.createMany.mockResolvedValue({ count: 2 })
       prismaMock.notification.findMany.mockResolvedValue([
         { id: 'notif-1', recipientId: 'staff-1' },
-        { id: 'notif-2', recipientId: 'staff-2' }
+        { id: 'notif-2', recipientId: 'staff-2' },
       ] as any)
 
       // Act
@@ -263,15 +259,15 @@ describe('Notification Dashboard Service', () => {
       expect(prismaMock.staffVenue.findMany).toHaveBeenCalledWith({
         where: {
           venueId,
-          active: true
+          active: true,
         },
         include: {
           staff: {
             select: {
-              id: true
-            }
-          }
-        }
+              id: true,
+            },
+          },
+        },
       })
     })
   })
@@ -290,9 +286,9 @@ describe('Notification Dashboard Service', () => {
       expect(prismaMock.notification.deleteMany).toHaveBeenCalledWith({
         where: {
           createdAt: {
-            lt: expect.any(Date)
-          }
-        }
+            lt: expect.any(Date),
+          },
+        },
       })
     })
   })

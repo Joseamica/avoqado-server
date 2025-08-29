@@ -122,7 +122,7 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
 
   // 3. Preparar los datos de actualización
   const updatePayload: any = { ...updateData, updatedAt: new Date() }
-  
+
   // Si hay configuración como string, intentar parsearla como JSON
   if (updateData.config && typeof updateData.config === 'string') {
     try {

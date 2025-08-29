@@ -147,18 +147,12 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
 
     // Calculate commission (assuming 15% average commission rate)
     const totalCommissionRevenue = totalRevenue * 0.15
-    
+
     // Calculate actual subscription revenue from venue monthly fees
-    const subscriptionRevenue = await calculateSubscriptionRevenue(
-      new Date(new Date().getFullYear(), new Date().getMonth(), 1),
-      new Date()
-    )
-    
+    const subscriptionRevenue = await calculateSubscriptionRevenue(new Date(new Date().getFullYear(), new Date().getMonth(), 1), new Date())
+
     // Calculate actual feature revenue from premium features
-    const featureRevenue = await calculateFeatureRevenue(
-      new Date(new Date().getFullYear(), new Date().getMonth(), 1),
-      new Date()
-    )
+    const featureRevenue = await calculateFeatureRevenue(new Date(new Date().getFullYear(), new Date().getMonth(), 1), new Date())
 
     // Get recent venue registrations for growth metrics
     const recentVenues = await prisma.venue.findMany({
@@ -184,10 +178,7 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
     const topVenues = await getTopPerformingVenues()
 
     // Calculate actual platform revenue (what we earn)
-    const platformRevenueMetrics = await calculatePlatformRevenue(
-      new Date(new Date().getFullYear(), new Date().getMonth(), 1),
-      new Date()
-    )
+    const platformRevenueMetrics = await calculatePlatformRevenue(new Date(new Date().getFullYear(), new Date().getMonth(), 1), new Date())
 
     return {
       kpis: {
@@ -735,14 +726,14 @@ async function calculateSubscriptionRevenue(startDate: Date, endDate: Date): Pro
   for (const venue of activeVenues) {
     // Find when the venue became active within our period
     const venueActiveStartDate = venue.createdAt > startDate ? venue.createdAt : startDate
-    
+
     // Calculate days the venue was active in this period
     const daysActive = Math.ceil((endDate.getTime() - venueActiveStartDate.getTime()) / (1000 * 60 * 60 * 24))
-    
+
     // Calculate prorated monthly fee (daily rate × days active)
     const dailyRate = monthlyFeePerVenue / 30 // Assuming 30 days per month
     const proratedRevenue = dailyRate * Math.max(0, daysActive)
-    
+
     totalSubscriptionRevenue += proratedRevenue
   }
 
@@ -1009,7 +1000,10 @@ async function getCommissionAnalysis(startDate: Date, endDate: Date): Promise<Co
 /**
  * Calculate actual platform revenue (what Avoqado earns)
  */
-async function calculatePlatformRevenue(startDate: Date, endDate: Date): Promise<{
+async function calculatePlatformRevenue(
+  startDate: Date,
+  endDate: Date,
+): Promise<{
   totalPlatformRevenue: number
   actualCommissionRevenue: number
   subscriptionRevenue: number

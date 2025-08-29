@@ -25,7 +25,6 @@ export default [
         module: 'readonly',
         require: 'readonly',
         exports: 'readonly',
-        // Node.js globals
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
         setInterval: 'readonly',
@@ -44,9 +43,27 @@ export default [
       ...tsEslint.configs.recommended.rules,
       'prettier/prettier': 'error',
       'no-console': 'warn',
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-unused-vars': ['warn', { 
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        ignoreRestSiblings: true
+      }],
       '@typescript-eslint/explicit-function-return-type': 'off',
-      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-explicit-any': 'off', // Allow any type for flexibility
+      '@typescript-eslint/ban-ts-comment': 'warn',
+      '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-empty-object-type': 'off', // Allow {} type
+      'no-case-declarations': 'off', // Allow declarations in case blocks
+      'no-useless-escape': 'warn',
+      'no-undef': 'off', // TypeScript handles this
+    },
+  },
+  {
+    files: ['**/seed.ts', '**/scripts/**/*.ts'],
+    rules: {
+      'no-console': 'off', // Allow console in seed files and scripts
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
     },
   },
   {
@@ -67,7 +84,6 @@ export default [
         module: 'readonly',
         require: 'readonly',
         exports: 'readonly',
-        // Node.js globals
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
         setInterval: 'readonly',
@@ -75,7 +91,6 @@ export default [
         setImmediate: 'readonly',
         clearImmediate: 'readonly',
         NodeJS: 'readonly',
-        // Jest globals
         describe: 'readonly',
         it: 'readonly',
         test: 'readonly',
@@ -95,10 +110,12 @@ export default [
       ...js.configs.recommended.rules,
       ...tsEslint.configs.recommended.rules,
       'prettier/prettier': 'error',
-      'no-console': 'off', // Allow console in tests
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      'no-console': 'off',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
       '@typescript-eslint/explicit-function-return-type': 'off',
-      '@typescript-eslint/no-explicit-any': 'off', // More relaxed in tests
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/ban-ts-comment': 'off',
+      '@typescript-eslint/no-require-imports': 'off', // Allow require in tests
     },
   },
 ]

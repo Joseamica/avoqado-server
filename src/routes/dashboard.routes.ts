@@ -3024,11 +3024,7 @@ router.post(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       500: { $ref: '#/components/responses/InternalServerError' }
  */
-router.post(
-  '/assistant/generate-title',
-  authenticateTokenMiddleware,
-  assistantController.generateConversationTitle,
-)
+router.post('/assistant/generate-title', authenticateTokenMiddleware, assistantController.generateConversationTitle)
 
 /**
  * @openapi
