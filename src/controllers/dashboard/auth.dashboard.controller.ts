@@ -256,7 +256,7 @@ export async function dashboardLoginController(req: Request, res: Response, next
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
     })
@@ -264,7 +264,7 @@ export async function dashboardLoginController(req: Request, res: Response, next
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/',
     })
@@ -286,14 +286,14 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     res.clearCookie('accessToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
       path: '/',
     })
 
     res.clearCookie('refreshToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
       path: '/',
     })
 
@@ -334,7 +334,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
     })
@@ -342,7 +342,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      sameSite: 'lax', // Changed from 'strict' to 'lax' for production compatibility
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/', // Ajusta el path si tu ruta de refresh es específica
     })

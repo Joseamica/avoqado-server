@@ -6,6 +6,6 @@ services:
     region: oregon
     autoDeploy: true
     branch: main
-    buildCommand: npm ci --include=dev && npx prisma generate && npm run build npx prisma migrate deploy && node dist/prisma/seed.js
+    buildCommand: npm ci --include=dev && npx prisma generate && npm run build npx prisma migrate deploy
     startCommand: npm start
     healthCheckPath: /health
