@@ -1,17 +1,17 @@
 services:
   - type: web
-    name: avoqado-server
+    name: avoqado-server-staging
     env: node
     plan: free
     region: oregon
     autoDeploy: true
-    branch: main
+    branch: develop
     buildCommand: npm ci --include=dev && npx prisma generate && npm run build && npx prisma migrate deploy
     startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
-        value: production
+        value: staging
       - key: DATABASE_URL
         sync: false
       - key: ACCESS_TOKEN_SECRET
@@ -39,4 +39,4 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: FRONTEND_URL
-        value: https://dashboard.avoqado.io
+        value: https://staging.dashboard.avoqado.io
