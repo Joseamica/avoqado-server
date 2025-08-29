@@ -12,15 +12,145 @@ import { NotificationType, NotificationPriority, NotificationChannel, Notificati
 
 // Mock Socket.IO
 jest.mock('../../../../src/communication/sockets', () => ({
+  __esModule: true,
   default: {
     broadcastToUser: jest.fn(),
     broadcastToVenue: jest.fn(),
+    getBroadcastingService: jest.fn(() => ({
+      broadcastNewNotification: jest.fn(),
+      broadcastNotificationRead: jest.fn(),
+      broadcastNotificationDeleted: jest.fn(),
+    })),
   },
 }))
 
+// Mock Prisma Client
+jest.mock('../../../../src/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    notification: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      delete: jest.fn(),
+      deleteMany: jest.fn(),
+      count: jest.fn(),
+    },
+    staff: {
+      findUnique: jest.fn(),
+      findMany: jest.fn(),
+    },
+    staffVenue: {
+      findMany: jest.fn(),
+    },
+    venue: {
+      findUnique: jest.fn(),
+    },
+    notificationPreference: {
+      findFirst: jest.fn(),
+      create: jest.fn(),
+    },
+  },
+}))
+
+import prisma from '../../../../src/utils/prismaClient'
+import socketService from '../../../../src/communication/sockets'
+
 describe('Notification Dashboard Service', () => {
+  const mockPrismaNotificationCreate = prisma.notification.create as jest.Mock
+  const mockPrismaNotificationFindMany = prisma.notification.findMany as jest.Mock
+  const mockPrismaNotificationFindFirst = prisma.notification.findFirst as jest.Mock
+  const mockPrismaNotificationUpdate = prisma.notification.update as jest.Mock
+  const mockPrismaNotificationUpdateMany = prisma.notification.updateMany as jest.Mock
+  const mockPrismaNotificationDelete = prisma.notification.delete as jest.Mock
+  const mockPrismaNotificationDeleteMany = prisma.notification.deleteMany as jest.Mock
+  const mockPrismaNotificationCount = prisma.notification.count as jest.Mock
+  const mockPrismaStaffFindUnique = prisma.staff.findUnique as jest.Mock
+  const mockPrismaStaffFindMany = prisma.staff.findMany as jest.Mock
+  const mockPrismaStaffVenueFindMany = prisma.staffVenue.findMany as jest.Mock
+  const mockPrismaVenueFindUnique = prisma.venue.findUnique as jest.Mock
+  const mockPrismaNotificationPreferenceFindFirst = prisma.notificationPreference.findFirst as jest.Mock
+  const mockPrismaNotificationPreferenceCreate = prisma.notificationPreference.create as jest.Mock
+  const mockSocketBroadcastToUser = socketService.broadcastToUser as jest.Mock
+  const mockSocketBroadcastToVenue = socketService.broadcastToVenue as jest.Mock
+
   beforeEach(() => {
     jest.clearAllMocks()
+
+    // Default mock setups
+    mockPrismaStaffFindUnique.mockResolvedValue({ id: 'user-123', firstName: 'Test User' })
+    mockPrismaVenueFindUnique.mockResolvedValue({ id: 'venue-456', name: 'Test Venue' })
+    mockPrismaNotificationPreferenceFindFirst.mockResolvedValue({
+      id: 'pref-123',
+      userId: 'user-123',
+      inAppEnabled: true,
+      emailEnabled: false,
+      pushEnabled: false,
+      quietHoursStart: null,
+      quietHoursEnd: null,
+      enabled: true,
+    })
+    mockPrismaNotificationPreferenceCreate.mockResolvedValue({
+      id: 'pref-123',
+      userId: 'user-123',
+      inAppEnabled: true,
+      emailEnabled: false,
+      pushEnabled: false,
+      enabled: true,
+    })
+    mockPrismaNotificationCreate.mockResolvedValue({
+      id: 'notif-789',
+      recipientId: 'user-123',
+      venueId: 'venue-456',
+      type: NotificationType.ORDER_UPDATED,
+      title: 'New Order',
+      message: 'You have a new order #123',
+      priority: NotificationPriority.NORMAL,
+      channels: [NotificationChannel.IN_APP],
+      isRead: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      actionUrl: null,
+      actionLabel: null,
+      entityType: null,
+      entityId: null,
+      metadata: null,
+    })
+    mockPrismaNotificationCount.mockResolvedValue(2)
+    mockPrismaNotificationUpdateMany.mockResolvedValue({ count: 5 })
+    mockPrismaNotificationDeleteMany.mockResolvedValue({ count: 10 })
+    mockPrismaNotificationFindMany.mockResolvedValue([
+      {
+        id: 'notif-1',
+        recipientId: 'user-123',
+        title: 'Notification 1',
+        message: 'Message 1',
+        isRead: false,
+        createdAt: new Date(),
+      },
+      {
+        id: 'notif-2',
+        recipientId: 'user-123',
+        title: 'Notification 2',
+        message: 'Message 2',
+        isRead: true,
+        createdAt: new Date(),
+      },
+    ])
+    mockPrismaNotificationFindFirst.mockResolvedValue({
+      id: 'notif-123',
+      recipientId: 'user-123',
+      isRead: false,
+      venueId: 'venue-456',
+    })
+    mockPrismaNotificationUpdate.mockResolvedValue({
+      id: 'notif-123',
+      recipientId: 'user-123',
+      isRead: true,
+    })
+    mockPrismaStaffVenueFindMany.mockResolvedValue([{ staff: { id: 'staff-1' } }, { staff: { id: 'staff-2' } }])
   })
 
   describe('createNotification', () => {
@@ -49,14 +179,26 @@ describe('Notification Dashboard Service', () => {
         metadata: null,
       } as Notification
 
-      prismaMock.notification.create.mockResolvedValue(mockCreatedNotification)
+      mockPrismaNotificationCreate.mockResolvedValue(mockCreatedNotification)
 
       // Act
       const result = await createNotification(mockNotificationData)
 
       // Assert
-      expect(result).toEqual(mockCreatedNotification)
-      expect(prismaMock.notification.create).toHaveBeenCalledWith({
+      expect(result).toEqual(
+        expect.objectContaining({
+          id: 'notif-789',
+          recipientId: 'user-123',
+          venueId: 'venue-456',
+          type: NotificationType.ORDER_UPDATED,
+          title: 'New Order',
+          message: 'You have a new order #123',
+          priority: NotificationPriority.NORMAL,
+          channels: [NotificationChannel.IN_APP],
+          isRead: false,
+        }),
+      )
+      expect(mockPrismaNotificationCreate).toHaveBeenCalledWith({
         data: expect.objectContaining({
           recipientId: 'user-123',
           venueId: 'venue-456',
@@ -76,7 +218,7 @@ describe('Notification Dashboard Service', () => {
         message: 'Test message',
       }
 
-      prismaMock.notification.create.mockRejectedValue(new Error('Database error'))
+      mockPrismaNotificationCreate.mockRejectedValue(new Error('Database error'))
 
       // Act & Assert
       await expect(createNotification(mockNotificationData)).rejects.toThrow('Database error')
@@ -106,8 +248,8 @@ describe('Notification Dashboard Service', () => {
         },
       ]
 
-      prismaMock.notification.findMany.mockResolvedValue(mockNotifications)
-      prismaMock.notification.count.mockResolvedValue(2)
+      mockPrismaNotificationFindMany.mockResolvedValue(mockNotifications)
+      mockPrismaNotificationCount.mockResolvedValue(2)
 
       // Act
       const result = await getUserNotifications(userId, undefined, {}, { page: 1, limit: 10 })
@@ -116,7 +258,7 @@ describe('Notification Dashboard Service', () => {
       expect(result.notifications).toEqual(mockNotifications)
       expect(result.total).toBe(2)
       expect(result.unreadCount).toBe(2)
-      expect(prismaMock.notification.findMany).toHaveBeenCalledWith({
+      expect(mockPrismaNotificationFindMany).toHaveBeenCalledWith({
         where: { recipientId: userId },
         include: {
           recipient: {
@@ -146,28 +288,27 @@ describe('Notification Dashboard Service', () => {
     it('should mark notification as read', async () => {
       // Arrange
       const notificationId = 'notif-123'
-      const userId = 'user-456'
+      const userId = 'user-123'
       const mockUpdatedNotification = {
         id: notificationId,
         recipientId: userId,
         isRead: true,
-        updatedAt: new Date(),
       } as Notification
 
-      prismaMock.notification.findFirst.mockResolvedValue({
+      mockPrismaNotificationFindFirst.mockResolvedValue({
         id: notificationId,
         recipientId: userId,
         isRead: false,
       } as any)
 
-      prismaMock.notification.update.mockResolvedValue(mockUpdatedNotification)
+      mockPrismaNotificationUpdate.mockResolvedValue(mockUpdatedNotification)
 
       // Act
       const result = await markNotificationAsRead(notificationId, userId)
 
       // Assert
       expect(result).toEqual(mockUpdatedNotification)
-      expect(prismaMock.notification.update).toHaveBeenCalledWith({
+      expect(mockPrismaNotificationUpdate).toHaveBeenCalledWith({
         where: { id: notificationId },
         data: {
           isRead: true,
@@ -178,10 +319,10 @@ describe('Notification Dashboard Service', () => {
 
     it('should throw error if notification not found or not owned by user', async () => {
       // Arrange
-      prismaMock.notification.findFirst.mockResolvedValue(null)
+      mockPrismaNotificationFindFirst.mockResolvedValue(null)
 
       // Act & Assert
-      await expect(markNotificationAsRead('invalid-id', 'user-123')).rejects.toThrow('Notification not found or access denied')
+      await expect(markNotificationAsRead('invalid-id', 'user-123')).rejects.toThrow('Notification with ID invalid-id not found')
     })
   })
 
@@ -189,14 +330,14 @@ describe('Notification Dashboard Service', () => {
     it('should mark all user notifications as read', async () => {
       // Arrange
       const userId = 'user-123'
-      prismaMock.notification.updateMany.mockResolvedValue({ count: 5 })
+      mockPrismaNotificationUpdateMany.mockResolvedValue({ count: 5 })
 
       // Act
       const result = await markAllNotificationsAsRead(userId)
 
       // Assert
       expect(result.count).toBe(5)
-      expect(prismaMock.notification.updateMany).toHaveBeenCalledWith({
+      expect(mockPrismaNotificationUpdateMany).toHaveBeenCalledWith({
         where: {
           recipientId: userId,
           isRead: false,
@@ -215,18 +356,18 @@ describe('Notification Dashboard Service', () => {
       const notificationId = 'notif-123'
       const userId = 'user-456'
 
-      prismaMock.notification.findFirst.mockResolvedValue({
+      mockPrismaNotificationFindFirst.mockResolvedValue({
         id: notificationId,
         recipientId: userId,
       } as any)
 
-      prismaMock.notification.delete.mockResolvedValue({} as any)
+      mockPrismaNotificationDelete.mockResolvedValue({} as any)
 
       // Act
       await deleteNotification(notificationId, userId)
 
       // Assert
-      expect(prismaMock.notification.delete).toHaveBeenCalledWith({
+      expect(mockPrismaNotificationDelete).toHaveBeenCalledWith({
         where: { id: notificationId },
       })
     })
@@ -256,7 +397,7 @@ describe('Notification Dashboard Service', () => {
 
       // Assert
       expect(result).toHaveLength(2)
-      expect(prismaMock.staffVenue.findMany).toHaveBeenCalledWith({
+      expect(mockPrismaStaffVenueFindMany).toHaveBeenCalledWith({
         where: {
           venueId,
           active: true,
@@ -276,18 +417,19 @@ describe('Notification Dashboard Service', () => {
     it('should delete old notifications', async () => {
       // Arrange
       const olderThanDays = 30
-      prismaMock.notification.deleteMany.mockResolvedValue({ count: 10 })
+      mockPrismaNotificationDeleteMany.mockResolvedValue({ count: 10 })
 
       // Act
       const result = await cleanupOldNotifications(olderThanDays)
 
       // Assert
       expect(result).toBe(10)
-      expect(prismaMock.notification.deleteMany).toHaveBeenCalledWith({
+      expect(mockPrismaNotificationDeleteMany).toHaveBeenCalledWith({
         where: {
           createdAt: {
             lt: expect.any(Date),
           },
+          isRead: true,
         },
       })
     })

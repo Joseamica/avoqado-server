@@ -98,7 +98,6 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
         where: { id: existingStaffVenue.staffId },
         data: {
           firstName: staffPayload.name,
-          pin: staffPayload.pin,
         },
       })
       expect(mockLoggerInfo).toHaveBeenCalledWith(

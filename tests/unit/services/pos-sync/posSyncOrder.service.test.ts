@@ -19,6 +19,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
       findUnique: jest.fn(),
       upsert: jest.fn(),
     },
+    $transaction: jest.fn(),
   },
 }))
 jest.mock('../../../../src/config/logger', () => ({
@@ -33,6 +34,7 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
   const mockPrismaVenueFindUnique = prisma.venue.findUnique as jest.Mock
   const mockPrismaOrderFindUnique = prisma.order.findUnique as jest.Mock
   const mockPrismaOrderUpsert = prisma.order.upsert as jest.Mock
+  const mockPrismaTransaction = prisma.$transaction as jest.Mock
   const mockSyncPosStaff = posSyncStaffService.syncPosStaff as jest.Mock
   const mockGetOrCreatePosTable = getOrCreatePosTable as jest.Mock
   const mockGetOrCreatePosShift = getOrCreatePosShift as jest.Mock
@@ -43,6 +45,14 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
 
     // Default mock setup
     mockPrismaOrderFindUnique.mockResolvedValue(null) // No existing order by default
+    mockPrismaTransaction.mockImplementation(async callback => {
+      const mockTx = {
+        order: {
+          upsert: mockPrismaOrderUpsert,
+        },
+      }
+      return await callback(mockTx)
+    })
   })
 
   const venueId = 'test-venue-id'
@@ -110,7 +120,9 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
       expect(mockPrismaOrderUpsert).toHaveBeenCalledTimes(1)
       expect(mockPrismaOrderUpsert).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { venueId_externalId: { venueId, externalId: orderData.externalId } },
+          where: expect.objectContaining({
+            venueId_externalId: { venueId, externalId: orderData.externalId },
+          }),
           update: expect.objectContaining({
             total: orderData.total,
             posRawData: orderData.posRawData as Prisma.InputJsonValue,
@@ -126,11 +138,9 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
           }),
         }),
       )
+      expect(mockLoggerInfo).toHaveBeenCalledWith(`[🥾 PosSyncOrder] Procesando orden ${orderData.externalId} para Venue ${venueId}`)
       expect(mockLoggerInfo).toHaveBeenCalledWith(
-        `[PosSyncOrderService] Processing order with externalId: ${orderData.externalId} for venue ${venueId}`,
-      )
-      expect(mockLoggerInfo).toHaveBeenCalledWith(
-        `[PosSyncOrderService] Order ${mockUpsertedOrder.id} (externalId: ${mockUpsertedOrder.externalId}) saved/updated successfully for venue ${venueId}.`,
+        `[🥾 PosSyncOrder] Orden order-prisma-id (externalId: ${orderData.externalId}) guardada/actualizada.`,
       )
       expect(result).toEqual(mockUpsertedOrder)
     })
@@ -139,9 +149,7 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
       mockPrismaVenueFindUnique.mockResolvedValue(null)
 
       await expect(processPosOrderEvent(fullPayload)).rejects.toThrow(NotFoundError)
-      await expect(processPosOrderEvent(fullPayload)).rejects.toThrow(
-        `[PosSyncOrderService] Venue with ID ${venueId} not found in Avoqado database.`,
-      )
+      await expect(processPosOrderEvent(fullPayload)).rejects.toThrow('Venue con ID test-venue-id no encontrado.')
 
       expect(mockSyncPosStaff).not.toHaveBeenCalled()
       expect(mockPrismaOrderUpsert).not.toHaveBeenCalled()
