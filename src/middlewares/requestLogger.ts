@@ -19,13 +19,19 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
   const start = process.hrtime()
   const { method, url, ip } = req
 
-  logger.info(`Request Start: ${method} ${url}`, {
-    correlationId,
-    method,
-    url,
-    ip,
-    userAgent: req.headers['user-agent'],
-  })
+  // Skip logging health checks in production to reduce log noise
+  const isHealthCheck = url === '/health'
+  const shouldSkipLogging = isHealthCheck && process.env.NODE_ENV === 'production'
+
+  if (!shouldSkipLogging) {
+    logger.info(`Request Start: ${method} ${url}`, {
+      correlationId,
+      method,
+      url,
+      ip,
+      userAgent: req.headers['user-agent'],
+    })
+  }
 
   res.on('finish', () => {
     const diff = process.hrtime(start)
@@ -34,20 +40,22 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
 
     const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
 
-    logger.log(level, `Request End: ${method} ${url} - ${statusCode} [${duration}ms]`, {
-      correlationId,
-      method,
-      url,
-      statusCode,
-      durationMs: parseFloat(duration),
-      ip,
-    })
+    if (!shouldSkipLogging) {
+      logger.log(level, `Request End: ${method} ${url} - ${statusCode} [${duration}ms]`, {
+        correlationId,
+        method,
+        url,
+        statusCode,
+        durationMs: parseFloat(duration),
+        ip,
+      })
+    }
   })
 
   res.on('close', () => {
     // Este evento se dispara si la conexión se cierra prematuramente (cliente se desconecta)
     // 'finish' podría no dispararse en este caso.
-    if (!res.writableEnded) {
+    if (!res.writableEnded && !shouldSkipLogging) {
       // writableEnded es true si finish se disparó
       const diff = process.hrtime(start)
       const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3)
