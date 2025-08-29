@@ -111,7 +111,7 @@ describe('RabbitMQ Connection', () => {
       // Logging
       expect(mockLogger.info).toHaveBeenCalledWith('🐰 Connecting to RabbitMQ...') // From connectToRabbitMQ
       expect(mockLogger.info).toHaveBeenCalledWith('🐰 Conectando a RabbitMQ...') // From connectWithRetry
-      expect(mockLogger.info).toHaveBeenCalledWith('🐰 Conexión con RabbitMQ establecida.')
+      expect(mockLogger.info).toHaveBeenCalledWith('✅🐰 Conexión con RabbitMQ establecida.')
       expect(mockLogger.info).toHaveBeenCalledWith('🐰 Topología de RabbitMQ asegurada.')
 
       // Check channel and connection getters
@@ -250,7 +250,7 @@ describe('RabbitMQ Connection', () => {
       await Promise.resolve()
 
       expect(mockAmqplibConnect).toHaveBeenCalledTimes(2) // Initial + retry
-      expect(mockLogger.info).toHaveBeenCalledWith('✅ Conexión con RabbitMQ establecida.')
+      expect(mockLogger.info).toHaveBeenCalledWith('✅🐰 Conexión con RabbitMQ establecida.')
       expect(getRabbitMQChannel()).toBe(mockChannel)
     })
 
@@ -281,7 +281,7 @@ describe('RabbitMQ Connection', () => {
       await Promise.resolve()
       await Promise.resolve()
       expect(mockAmqplibConnect).toHaveBeenCalledTimes(3)
-      expect(mockLogger.info).toHaveBeenCalledWith('✅ Conexión con RabbitMQ establecida.')
+      expect(mockLogger.info).toHaveBeenCalledWith('✅🐰 Conexión con RabbitMQ establecida.')
       expect(getRabbitMQChannel()).toBe(mockChannel)
     })
 
@@ -303,7 +303,7 @@ describe('RabbitMQ Connection', () => {
 
       // amqplib.connect should only have been called once because of the isConnecting flag
       expect(mockAmqplibConnect).toHaveBeenCalledTimes(1)
-      expect(mockLogger.info).toHaveBeenCalledWith('✅ Conexión con RabbitMQ establecida.')
+      expect(mockLogger.info).toHaveBeenCalledWith('✅🐰 Conexión con RabbitMQ establecida.')
     })
   })
 

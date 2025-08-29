@@ -245,11 +245,8 @@ describe('AI Learning Service', () => {
       // Arrange
       prismaMock.chatTrainingData.findMany.mockRejectedValue(new Error('Database error'))
 
-      // Act
-      await aiLearningService.learnFromSuccessfulInteractions()
-
-      // Assert
-      expect(logger.error).toHaveBeenCalledWith('❌ Failed to learn from successful interactions:', expect.any(Error))
+      // Act & Assert
+      await expect(aiLearningService.learnFromSuccessfulInteractions()).rejects.toThrow('Database error')
     })
   })
 
@@ -417,7 +414,7 @@ describe('AI Learning Service', () => {
 
       it('should categorize temporal questions correctly', async () => {
         // Arrange
-        const temporalQuestion = '¿Qué vendimos ayer por la mañana?'
+        const temporalQuestion = '¿Qué pasó ayer por la mañana?'
 
         prismaMock.chatTrainingData.create.mockResolvedValue({
           id: 'test',

@@ -8,17 +8,20 @@ import { posSyncStaffService } from '../../../../src/services/pos-sync/posSyncSt
 
 // Mocks for external dependencies
 jest.mock('../../../../src/utils/prismaClient', () => ({
-  staffVenue: {
-    findUnique: jest.fn(),
-  },
-  staff: {
-    update: jest.fn(),
-    create: jest.fn(),
-  },
-  // venue mock is not strictly needed for syncPosStaff directly, but keeping for consistency if other utils are called internally
-  // If syncPosStaff were to evolve and use prisma.venue, this would be ready.
-  venue: {
-    findUnique: jest.fn(), // Though not directly used by syncPosStaff, good to have for completeness
+  __esModule: true,
+  default: {
+    staffVenue: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+    },
+    staff: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
+      create: jest.fn(),
+    },
+    venue: {
+      findUnique: jest.fn(),
+    },
   },
 }))
 jest.mock('../../../../src/config/logger', () => ({
@@ -29,6 +32,8 @@ jest.mock('../../../../src/config/logger', () => ({
 
 describe('syncPosStaff (Actual Implementation Tests)', () => {
   const mockPrismaStaffVenueFindUnique = prisma.staffVenue.findUnique as jest.Mock
+  const mockPrismaStaffVenueCreate = prisma.staffVenue.create as jest.Mock
+  const mockPrismaStaffFindUnique = prisma.staff.findUnique as jest.Mock
   const mockPrismaStaffUpdate = prisma.staff.update as jest.Mock
   const mockPrismaStaffCreate = prisma.staff.create as jest.Mock
   // mockPrismaVenueFindUnique is not used by syncPosStaff directly
@@ -106,20 +111,22 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
       await posSyncStaffService.syncPosStaff(payloadWithoutName, venueId, organizationId)
       expect(mockPrismaStaffUpdate).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: { firstName: `Mesero ${payloadWithoutName.externalId}`, pin: payloadWithoutName.pin },
+          data: { firstName: `Mesero ${payloadWithoutName.externalId}` },
         }),
       )
     })
 
     it('should set pin to null if staffPayload.pin is null', async () => {
       const payloadWithoutPin = { ...staffPayload, pin: null }
-      mockPrismaStaffUpdate.mockResolvedValueOnce({ ...updatedStaffData, pin: null })
+      mockPrismaStaffUpdate.mockResolvedValueOnce({ ...updatedStaffData })
       await posSyncStaffService.syncPosStaff(payloadWithoutPin, venueId, organizationId)
       expect(mockPrismaStaffUpdate).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: { firstName: payloadWithoutPin.name, pin: null },
+          data: { firstName: payloadWithoutPin.name },
         }),
       )
+      // PIN should not be updated on staffVenue when it's null
+      expect(mockPrismaStaffVenueCreate).not.toHaveBeenCalled()
     })
   })
 
@@ -137,7 +144,16 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
 
     beforeEach(() => {
       mockPrismaStaffVenueFindUnique.mockResolvedValue(null) // Simulate staff not found
+      mockPrismaStaffFindUnique.mockResolvedValue(null) // Simulate staff not found by email
       mockPrismaStaffCreate.mockResolvedValue(createdStaffData)
+      mockPrismaStaffVenueCreate.mockResolvedValue({
+        id: 'new-staff-venue-id',
+        staffId: newStaffId,
+        venueId,
+        posStaffId: staffPayload.externalId,
+        role: StaffRole.WAITER,
+        pin: staffPayload.pin?.toString() || null,
+      })
     })
 
     it('should create a new staff and staffVenue record', async () => {
@@ -152,13 +168,13 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
           email: `pos-${venueId}-${staffPayload.externalId}@avoqado.app`,
           firstName: staffPayload.name,
           lastName: '(POS)',
-          pin: staffPayload.pin,
           originSystem: OriginSystem.POS_SOFTRESTAURANT,
           venues: {
             create: {
               venueId: venueId,
               posStaffId: staffPayload.externalId,
               role: StaffRole.WAITER,
+              pin: staffPayload.pin?.toString() || null,
             },
           },
         },
@@ -181,11 +197,16 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
 
     it('should set pin to null if staffPayload.pin is null during creation', async () => {
       const payloadWithoutPin = { ...staffPayload, pin: null }
-      mockPrismaStaffCreate.mockResolvedValueOnce({ ...createdStaffData, pin: null })
       await posSyncStaffService.syncPosStaff(payloadWithoutPin, venueId, organizationId)
       expect(mockPrismaStaffCreate).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ pin: null }),
+          data: expect.objectContaining({
+            venues: expect.objectContaining({
+              create: expect.objectContaining({
+                pin: null,
+              }),
+            }),
+          }),
         }),
       )
     })
