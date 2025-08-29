@@ -102,7 +102,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
     const isSuperAdmin = staff.venues.some(sv => sv.role === StaffRole.SUPERADMIN)
     const isOwner = staff.venues.some(sv => sv.role === StaffRole.OWNER)
     let allVenues: VenueWithFeatures[] = []
-    let directVenues: VenueWithFeatures[] = staff.venues.map(sv => ({
+    const directVenues: VenueWithFeatures[] = staff.venues.map(sv => ({
       id: sv.venue.id,
       name: sv.venue.name,
       slug: sv.venue.slug,

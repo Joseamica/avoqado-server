@@ -53,7 +53,7 @@ export async function processPosShiftEvent(
   if (!staffId) throw new Error(`No se pudo sincronizar el cajero ${cajeroId}.`)
 
   // --- Calcular Totales si el Turno se Cierra ---
-  let summaryData = {
+  const summaryData = {
     totalSales: new Prisma.Decimal(0),
     totalTips: new Prisma.Decimal(0),
     totalOrders: 0,

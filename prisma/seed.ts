@@ -276,7 +276,7 @@ async function main() {
   for (const [orgIndex, org] of organizations.entries()) {
     console.log(`\nSeeding for Organization: ${org.name} (ID: ${org.id})`)
 
-    let createdStaffList: (any & { assignedRole: StaffRole })[] = []
+    const createdStaffList: (any & { assignedRole: StaffRole })[] = []
 
     // --- Staff de la Organización ---
     const staffToCreate =

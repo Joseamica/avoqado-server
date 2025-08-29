@@ -1,4 +1,3 @@
-import * as amqplib from 'amqplib'
 import type ActualLogger from '../../../../src/config/logger' // Import type for casting
 
 // Import constants to be used in assertions

@@ -541,9 +541,9 @@ Ejemplos de respuestas CORRECTAS:
       const execution = await this.executeSafeQuery(sqlGeneration.sql, query.venueId)
 
       // Step 3: BULLETPROOF VALIDATION SYSTEM (simplified for stability)
-      let originalConfidence = Math.max(sqlGeneration.confidence, 0.8) // Ensure reasonable base confidence
+      const originalConfidence = Math.max(sqlGeneration.confidence, 0.8) // Ensure reasonable base confidence
       let finalConfidence = originalConfidence
-      let validationWarnings: string[] = []
+      const validationWarnings: string[] = []
       let bulletproofValidationPerformed = false
 
       // BULLETPROOF VALIDATION: Critical query detection
