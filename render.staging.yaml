@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: production-avoqado-server
+    name: staging-avoqado-server
     env: node
     plan: free
     region: oregon
@@ -11,7 +11,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
-        value: production
+        value: staging
       - key: DATABASE_URL
         sync: false
       - key: ACCESS_TOKEN_SECRET
@@ -39,4 +39,4 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: FRONTEND_URL
-        value: https://dashboard.avoqado.io
+        value: https://staging.dashboard.avoqado.io
