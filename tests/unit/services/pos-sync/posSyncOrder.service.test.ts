@@ -40,7 +40,7 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    
+
     // Default mock setup
     mockPrismaOrderFindUnique.mockResolvedValue(null) // No existing order by default
   })
