@@ -11,75 +11,53 @@ process.env.COOKIE_SECRET = 'test-cookie-secret'
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test'
 process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
 
-// Prisma Mock Setup
-const prismaMock = {
-  staff: {
-    findUnique: jest.fn(),
-    findFirst: jest.fn(),
-    findMany: jest.fn(),
-    create: jest.fn(),
-    update: jest.fn(),
-    delete: jest.fn(),
-    count: jest.fn(),
-  },
-  venue: {
-    findUnique: jest.fn(),
-    findFirst: jest.fn(),
-    findMany: jest.fn(),
-    create: jest.fn(),
-    update: jest.fn(),
-    delete: jest.fn(),
-  },
-  notification: {
-    findFirst: jest.fn(),
-    findMany: jest.fn(),
-    create: jest.fn(),
-    createMany: jest.fn(),
-    update: jest.fn(),
-    updateMany: jest.fn(),
-    delete: jest.fn(),
-    deleteMany: jest.fn(),
-    count: jest.fn(),
-    aggregate: jest.fn(),
-    groupBy: jest.fn(),
-  },
-  notificationPreference: {
-    findFirst: jest.fn(),
-    findMany: jest.fn(),
-    create: jest.fn(),
-    update: jest.fn(),
-    upsert: jest.fn(),
-  },
-  notificationTemplate: {
-    findFirst: jest.fn(),
-    findMany: jest.fn(),
-  },
-  staffVenue: {
-    findMany: jest.fn(),
-  },
-  chatTrainingData: {
-    findUnique: jest.fn(),
-    findMany: jest.fn(),
-    create: jest.fn(),
-    update: jest.fn(),
-    count: jest.fn(),
-    aggregate: jest.fn(),
-    groupBy: jest.fn(),
-  },
-  chatFeedback: {
-    findFirst: jest.fn(),
-    create: jest.fn(),
-    update: jest.fn(),
-    count: jest.fn(),
-  },
-  learnedPatterns: {
-    findMany: jest.fn(),
-    upsert: jest.fn(),
-    update: jest.fn(),
-    updateMany: jest.fn(),
-    count: jest.fn(),
-  },
+// Comprehensive Prisma Mock Setup
+const createMockModel = () => ({
+  findUnique: jest.fn(),
+  findFirst: jest.fn(),
+  findMany: jest.fn(),
+  create: jest.fn(),
+  createMany: jest.fn(),
+  update: jest.fn(),
+  updateMany: jest.fn(),
+  upsert: jest.fn(),
+  delete: jest.fn(),
+  deleteMany: jest.fn(),
+  count: jest.fn(),
+  aggregate: jest.fn(),
+  groupBy: jest.fn(),
+})
+
+const prismaMock: any = {
+  staff: createMockModel(),
+  venue: createMockModel(),
+  notification: createMockModel(),
+  notificationPreference: createMockModel(),
+  notificationTemplate: createMockModel(),
+  staffVenue: createMockModel(),
+  chatTrainingData: createMockModel(),
+  chatFeedback: createMockModel(),
+  learnedPatterns: createMockModel(),
+  area: createMockModel(),
+  order: createMockModel(),
+  orderItem: createMockModel(),
+  payment: createMockModel(),
+  paymentAllocation: createMockModel(),
+  shift: createMockModel(),
+  product: createMockModel(),
+  menuCategory: createMockModel(),
+  organization: createMockModel(),
+  review: createMockModel(),
+  digitalReceipt: createMockModel(),
+  venueTransaction: createMockModel(),
+  billV2: createMockModel(),
+  // Add $connect and $disconnect for connection management
+  $connect: jest.fn(),
+  $disconnect: jest.fn(),
 }
+
+// Add $transaction after the object is created to avoid circular reference
+prismaMock.$transaction = jest.fn((callback: any) => callback(prismaMock))
 
 // Mock Prisma Client globally
 jest.mock('@/utils/prismaClient', () => ({
