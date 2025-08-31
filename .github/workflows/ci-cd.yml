@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main, develop]
 
+permissions:
+  contents: write
+  actions: read
+  security-events: write
+
 jobs:
   # First job: Test, lint and build
   test-and-build:
