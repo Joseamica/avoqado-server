@@ -37,16 +37,16 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
     // Set cookies
     res.cookie('accessToken', result.accessToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
+      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax',
       maxAge: 15 * 60 * 1000, // 15 minutes
       path: '/',
     })
 
     res.cookie('refreshToken', result.refreshToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+      secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
+      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
       path: '/',
     })
