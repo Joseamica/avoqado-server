@@ -256,7 +256,7 @@ export async function dashboardLoginController(req: Request, res: Response, next
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
@@ -265,7 +265,7 @@ export async function dashboardLoginController(req: Request, res: Response, next
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
@@ -288,7 +288,7 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     res.clearCookie('accessToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
@@ -296,7 +296,7 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     res.clearCookie('refreshToken', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
@@ -338,7 +338,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
       maxAge: 15 * 60 * 1000, // 15 minutos
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
@@ -347,7 +347,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
       path: '/', // Ajusta el path si tu ruta de refresh es específica
       // No domain specified for cross-domain deployment (Cloudflare + Render)

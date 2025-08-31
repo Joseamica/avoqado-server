@@ -38,7 +38,7 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
     res.cookie('accessToken', result.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax',
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
       maxAge: 15 * 60 * 1000, // 15 minutes
       path: '/',
     })
@@ -46,7 +46,7 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
     res.cookie('refreshToken', result.refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') ? 'none' : 'lax',
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
       path: '/',
     })
