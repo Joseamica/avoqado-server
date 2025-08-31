@@ -1,0 +1,243 @@
+name: 📊 Service Monitoring & Health Checks
+
+on:
+  schedule:
+    # Run health checks every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      check_type:
+        description: 'Type of check to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - production
+          - staging
+          - database
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+env:
+  PRODUCTION_URL: https://avoqado-server.onrender.com
+  STAGING_URL: https://avoqado-server-staging-cm35.onrender.com
+
+jobs:
+  # 🏥 Health Check Production
+  health-check-production:
+    name: 🏥 Production Health Check
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && 
+       (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'production'))
+    
+    steps:
+      - name: 🔍 Production API Health Check
+        id: prod-health
+        run: |
+          echo "🔍 Checking production health..."
+          
+          # Basic health check
+          HEALTH_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code};TIME:%{time_total}" $PRODUCTION_URL/health || echo "FAILED")
+          
+          if [[ $HEALTH_RESPONSE == *"HTTPSTATUS:200"* ]]; then
+            echo "✅ Production health check passed"
+            echo "Response: $HEALTH_RESPONSE"
+            echo "status=healthy" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Production health check failed"
+            echo "Response: $HEALTH_RESPONSE"
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+            
+            # Try to get more details
+            curl -v $PRODUCTION_URL/health || echo "Complete failure"
+          fi
+          
+      - name: 🔍 Production API Endpoints Check
+        if: steps.prod-health.outputs.status == 'healthy'
+        run: |
+          echo "🔍 Testing production API endpoints..."
+          
+          # Test auth endpoint (should return 401 without token)
+          AUTH_RESPONSE=$(curl -s -w "%{http_code}" $PRODUCTION_URL/api/auth/me -o /dev/null || echo "FAILED")
+          if [[ $AUTH_RESPONSE == "401" ]]; then
+            echo "✅ Auth endpoint responding correctly (401 without token)"
+          else
+            echo "⚠️ Auth endpoint unexpected response: $AUTH_RESPONSE"
+          fi
+          
+          # Test CORS headers
+          CORS_HEADERS=$(curl -s -H "Origin: https://app.avoqado.io" -I $PRODUCTION_URL/health | grep -i "access-control" || echo "No CORS headers")
+          echo "🌐 CORS headers: $CORS_HEADERS"
+          
+      - name: 📊 Production Performance Check
+        if: steps.prod-health.outputs.status == 'healthy'
+        run: |
+          echo "📊 Checking production performance..."
+          
+          # Measure response time
+          RESPONSE_TIME=$(curl -s -w "%{time_total}" -o /dev/null $PRODUCTION_URL/health || echo "0")
+          echo "⏱️ Response time: ${RESPONSE_TIME}s"
+          
+          # Check if response time is acceptable (< 3 seconds)
+          if (( $(echo "$RESPONSE_TIME < 3.0" | bc -l) )); then
+            echo "✅ Response time is acceptable"
+          else
+            echo "⚠️ Response time is slow: ${RESPONSE_TIME}s"
+          fi
+          
+      - name: 🚨 Production Alert
+        if: steps.prod-health.outputs.status == 'unhealthy'
+        run: |
+          echo "🚨 PRODUCTION ALERT: Health check failed!"
+          echo "Time: $(date -u)"
+          echo "Service: Production API"
+          echo "URL: $PRODUCTION_URL/health"
+          exit 1
+
+  # 🧪 Health Check Staging
+  health-check-staging:
+    name: 🧪 Staging Health Check
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && 
+       (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'staging'))
+    
+    steps:
+      - name: 🔍 Staging API Health Check
+        id: staging-health
+        run: |
+          echo "🔍 Checking staging health..."
+          
+          HEALTH_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code};TIME:%{time_total}" $STAGING_URL/health || echo "FAILED")
+          
+          if [[ $HEALTH_RESPONSE == *"HTTPSTATUS:200"* ]]; then
+            echo "✅ Staging health check passed"
+            echo "Response: $HEALTH_RESPONSE"
+            echo "status=healthy" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Staging health check failed (non-critical)"
+            echo "Response: $HEALTH_RESPONSE"
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: 🔍 Staging API Endpoints Check
+        if: steps.staging-health.outputs.status == 'healthy'
+        run: |
+          echo "🔍 Testing staging API endpoints..."
+          
+          # Test basic endpoints
+          curl -s -f $STAGING_URL/health > /dev/null && echo "✅ Health endpoint OK"
+          
+      - name: ⚠️ Staging Warning
+        if: steps.staging-health.outputs.status == 'unhealthy'
+        run: |
+          echo "⚠️ STAGING WARNING: Health check failed!"
+          echo "Time: $(date -u)"
+          echo "Service: Staging API"
+          echo "URL: $STAGING_URL/health"
+          echo "This is non-critical but should be investigated"
+
+  # 🗄️ Database Health Check
+  database-health-check:
+    name: 🗄️ Database Health Check
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && 
+       (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'database'))
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: 📦 Install dependencies
+        run: npm ci
+        
+      - name: 🗄️ Check database connectivity
+        run: |
+          echo "🗄️ Checking database health via API..."
+          
+          # Check if the API can connect to database by testing a simple endpoint
+          # The /health endpoint should include database connectivity status
+          
+          PROD_DB_CHECK=$(curl -s $PRODUCTION_URL/health | jq -r '.database // "unknown"' || echo "failed")
+          STAGING_DB_CHECK=$(curl -s $STAGING_URL/health | jq -r '.database // "unknown"' || echo "failed")
+          
+          echo "📊 Production database status: $PROD_DB_CHECK"
+          echo "📊 Staging database status: $STAGING_DB_CHECK"
+          
+          if [[ $PROD_DB_CHECK == "healthy" || $PROD_DB_CHECK == "ok" ]]; then
+            echo "✅ Production database is healthy"
+          else
+            echo "❌ Production database issue detected"
+            exit 1
+          fi
+
+  # 📊 Generate Health Report
+  health-report:
+    name: 📊 Generate Health Report
+    runs-on: ubuntu-latest
+    needs: [health-check-production, health-check-staging, database-health-check]
+    if: always() && github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: 📊 Generate comprehensive health report
+        run: |
+          echo "# 📊 Avoqado System Health Report"
+          echo "Generated at: $(date -u)"
+          echo ""
+          
+          echo "## 🏭 Production Status"
+          if [[ "${{ needs.health-check-production.result }}" == "success" ]]; then
+            echo "✅ Production: Healthy"
+          else
+            echo "❌ Production: Issues detected"
+          fi
+          
+          echo ""
+          echo "## 🧪 Staging Status"
+          if [[ "${{ needs.health-check-staging.result }}" == "success" ]]; then
+            echo "✅ Staging: Healthy"
+          else
+            echo "⚠️ Staging: Issues detected"
+          fi
+          
+          echo ""
+          echo "## 🗄️ Database Status"
+          if [[ "${{ needs.database-health-check.result }}" == "success" ]]; then
+            echo "✅ Database: Healthy"
+          else
+            echo "❌ Database: Issues detected"
+          fi
+          
+          echo ""
+          echo "## 🔍 Next Steps"
+          if [[ "${{ needs.health-check-production.result }}" != "success" ]]; then
+            echo "1. ⚠️ **URGENT**: Investigate production issues immediately"
+            echo "2. Check Render.com dashboard for production service status"
+            echo "3. Review recent deployments and changes"
+          fi
+          
+          if [[ "${{ needs.database-health-check.result }}" != "success" ]]; then
+            echo "1. ⚠️ Check database connectivity and performance"
+            echo "2. Review database logs in provider dashboard"
+            echo "3. Check for any ongoing maintenance"
+          fi
+          
+          if [[ "${{ needs.health-check-staging.result }}" != "success" ]]; then
+            echo "1. 🔧 Investigate staging issues (lower priority)"
+            echo "2. Ensure staging environment is properly configured"
+          fi

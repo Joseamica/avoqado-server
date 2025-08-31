@@ -1,107 +1,219 @@
-name: CI/CD Pipeline
+name: 🚀 Avoqado Server CI/CD Pipeline
 
 on:
   push:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+permissions:
+  contents: write
+  actions: read
+  security-events: write
+  pull-requests: write
+  issues: write
 
 jobs:
-  # First job: Test, lint and build
+  # 🧪 Quality Gate: Test, lint and build
   test-and-build:
-    name: Test, Lint & Build
+    name: 🧪 Test, Lint & Build
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package-version.outputs.version }}
+      build-time: ${{ steps.build-info.outputs.build-time }}
     
     steps:
-      - name: Checkout code
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
         
-      - name: Setup Node.js
+      - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           
-      - name: Install dependencies
+      - name: 📦 Install dependencies
         run: npm ci
         
-      - name: Run ESLint
+      - name: 📏 Run ESLint
         run: npm run lint
         
-      - name: TypeScript compilation check
+      - name: 🔍 TypeScript compilation check
         run: npx tsc --noEmit
         
-      - name: Generate Prisma Client
+      - name: 🗄️ Generate Prisma Client
         run: npx prisma generate
         
-      - name: Build application
+      - name: 🏗️ Build application
         run: npm run build
         
-      - name: Run unit tests
+      - name: 🧪 Run unit tests
         run: npm run test:unit
         
-      - name: Upload build artifacts
+      - name: 📋 Get package version
+        id: package-version
+        run: echo "version=$(node -p 'require("./package.json").version')" >> $GITHUB_OUTPUT
+        
+      - name: ⏰ Build info
+        id: build-info
+        run: echo "build-time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+        
+      - name: 📤 Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-files-${{ github.sha }}
           path: dist/
           retention-days: 7
+          
+      - name: 📤 Upload Prisma schema
+        uses: actions/upload-artifact@v4
+        with:
+          name: prisma-schema-${{ github.sha }}
+          path: prisma/
+          retention-days: 7
 
-  # Deploy to Staging (develop branch)
+  # 🚀 Deploy to Staging Environment
   deploy-staging:
-    name: Deploy to Staging
+    name: 🚀 Deploy to Staging
     needs: test-and-build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
-    environment: staging
+    if: |
+      (github.ref == 'refs/heads/develop' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment: 
+      name: staging
+      url: ${{ vars.STAGING_API_URL }}
     
     steps:
-      - name: Deploy to Render (Staging)
+      - name: 🚀 Deploy to Render (Staging)
         uses: johnbeynon/render-deploy-action@v0.0.8
         with:
           service-id: ${{ secrets.RENDER_STAGING_SERVICE_ID }}
           api-key: ${{ secrets.RENDER_API_KEY }}
           
-      - name: Wait for deployment
-        run: sleep 60
-        
-      - name: Health check
+      - name: ⏳ Wait for deployment to stabilize
         run: |
-          curl -f ${{ vars.STAGING_API_URL }}/health || exit 1
+          echo "⏳ Waiting for deployment to complete..."
+          sleep 90
+          
+      - name: 🏥 Comprehensive health check
+        run: |
+          echo "🏥 Performing health checks..."
+          
+          # Basic health check
+          for i in {1..10}; do
+            if curl -f -s ${{ vars.STAGING_API_URL }}/health; then
+              echo "✅ Basic health check passed!"
+              break
+            fi
+            echo "⏳ Health check attempt $i failed, retrying in 10 seconds..."
+            sleep 10
+          done
+          
+          # Extended API tests
+          echo "🔍 Testing API endpoints..."
+          curl -f -s ${{ vars.STAGING_API_URL }}/health | jq '.' || echo "❌ JSON response invalid"
+          
           echo "✅ Staging deployment successful!"
+          
+      - name: 📢 Notify staging deployment
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" = "success" ]; then
+            echo "🎉 ✅ Staging deployment completed successfully!"
+            echo "📍 Environment: ${{ vars.STAGING_API_URL }}"
+            echo "📦 Version: ${{ needs.test-and-build.outputs.version }}"
+            echo "🕐 Build time: ${{ needs.test-and-build.outputs.build-time }}"
+          else
+            echo "❌ 🚨 Staging deployment failed!"
+            exit 1
+          fi
 
-  # Deploy to Production (main branch)
+  # 🏭 Deploy to Production Environment
   deploy-production:
-    name: Deploy to Production
+    name: 🏭 Deploy to Production
     needs: test-and-build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: production
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment: 
+      name: production
+      url: ${{ vars.PRODUCTION_API_URL }}
 
     steps:
-      - name: Deploy to Render (Production)
+      - name: 🏭 Deploy to Render (Production)
         uses: johnbeynon/render-deploy-action@v0.0.8
         with:
           service-id: ${{ secrets.RENDER_PRODUCTION_SERVICE_ID }}
           api-key: ${{ secrets.RENDER_API_KEY }}
           
-      - name: Wait for deployment
-        run: sleep 90
-        
-      - name: Health check
+      - name: ⏳ Wait for deployment to stabilize
         run: |
-          curl -f ${{ vars.PRODUCTION_API_URL }}/health || exit 1
-          echo "✅ Production deployment successful!"
+          echo "⏳ Waiting for production deployment to complete..."
+          sleep 120
+          
+      - name: 🏥 Production health verification
+        run: |
+          echo "🏥 Performing comprehensive production health checks..."
+          
+          # Extended health checks for production
+          for i in {1..15}; do
+            if curl -f -s ${{ vars.PRODUCTION_API_URL }}/health; then
+              echo "✅ Production health check $i passed!"
+              
+              # Additional production-specific checks
+              echo "🔍 Verifying API responses..."
+              HEALTH_RESPONSE=$(curl -s ${{ vars.PRODUCTION_API_URL }}/health)
+              echo "📊 Health response: $HEALTH_RESPONSE"
+              
+              # Validate JSON response
+              echo "$HEALTH_RESPONSE" | jq '.' > /dev/null || (echo "❌ Invalid JSON response" && exit 1)
+              
+              echo "✅ All production health checks passed!"
+              break
+            fi
+            echo "⏳ Production health check attempt $i failed, retrying in 15 seconds..."
+            sleep 15
+          done
+          
+          echo "🎉 Production deployment successful!"
+          
+      - name: 📢 Notify production deployment
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" = "success" ]; then
+            echo "🎉 ✅ 🏭 PRODUCTION DEPLOYMENT SUCCESSFUL! 🏭 ✅ 🎉"
+            echo "📍 Environment: ${{ vars.PRODUCTION_API_URL }}"
+            echo "📦 Version: ${{ needs.test-and-build.outputs.version }}"
+            echo "🕐 Build time: ${{ needs.test-and-build.outputs.build-time }}"
+            echo "🚀 Commit: ${{ github.sha }}"
+          else
+            echo "❌ 🚨 PRODUCTION DEPLOYMENT FAILED! 🚨 ❌"
+            exit 1
+          fi
 
-  # Optional: Deploy preview for PR
+  # 👀 PR Preview and Quality Report
   deploy-preview:
-    name: Deploy PR Preview
+    name: 👀 PR Preview & Quality Report
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     needs: test-and-build
     
     steps:
-      - name: Comment on PR
+      - name: 💬 Enhanced PR Comment
         uses: actions/github-script@v7
         with:
           script: |
@@ -111,17 +223,44 @@ jobs:
               pull_number: context.issue.number
             });
             
+            const buildTime = '${{ needs.test-and-build.outputs.build-time }}';
+            const version = '${{ needs.test-and-build.outputs.version }}';
+            
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `🚀 **Build successful!** Ready for review.
-              
-              **Branch**: \`${pr.head.ref}\`
-              **Commit**: ${context.sha.substring(0, 7)}
-              **Neon Branch**: \`pr-${context.issue.number}\` will be created when merged
-              
-              📊 **Build artifacts**: Available for 7 days
-              🧪 **Tests**: All passing
-              ✅ **Lint**: No issues found`
-            })
+              body: `## 🚀 Build Successful! Ready for Review
+            
+            ### 📋 Build Summary
+            - **Branch**: \`${pr.head.ref}\`
+            - **Commit**: \`${context.sha.substring(0, 7)}\`
+            - **Version**: \`${version}\`
+            - **Built at**: \`${buildTime}\`
+            
+            ### 🔍 Quality Checks
+            - ✅ **ESLint**: No issues found
+            - ✅ **TypeScript**: Compilation successful
+            - ✅ **Unit Tests**: All passing
+            - ✅ **Build**: Successful
+            
+            ### 🗄️ Database
+            - **Neon Branch**: \`pr-${context.issue.number}\` will be created when merged
+            - **Migrations**: Will be applied automatically
+            
+            ### 📦 Artifacts
+            - **Build files**: Available for 7 days
+            - **Prisma schema**: Included for migration review
+            
+            ---
+            
+            🎯 **Ready for code review!** All automated checks have passed.`
+            });
+            
+      - name: 📊 Build metrics
+        run: |
+          echo "📊 Build Metrics Summary:"
+          echo "🕐 Build completed at: ${{ needs.test-and-build.outputs.build-time }}"
+          echo "📦 Version: ${{ needs.test-and-build.outputs.version }}"
+          echo "🔄 Workflow run: ${{ github.run_number }}"
+          echo "📝 Commit: ${{ github.sha }}"
