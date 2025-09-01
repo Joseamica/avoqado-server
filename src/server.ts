@@ -70,18 +70,12 @@ const gracefulShutdown = async (signal: string) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 process.on('uncaughtException', error => {
-  // Usa console.error como último recurso. No depende de streams que puedan cerrarse.
-  console.error('--- UNCAUGHT EXCEPTION ---')
-  console.error(error)
-
-  // Intenta el apagado controlado, pero no dejes que un fallo aquí cause otro crash
   try {
-    // Intenta loguear con tu logger principal si aún funciona
     logger.error('Uncaught Exception, initiating shutdown...', error)
     gracefulShutdown('uncaughtException')
   } catch (shutdownError) {
-    console.error('Error during graceful shutdown:', shutdownError)
-    process.exit(1) // Salida forzada si el apagado falla
+    logger.error('Error during graceful shutdown:', shutdownError)
+    process.exit(1)
   }
 })
 process.on('unhandledRejection', (reason, promise) => {
@@ -121,7 +115,7 @@ const startApplication = async (retries = 3) => {
 
       // Initialize Socket.io server after HTTP server starts
       logger.info('📡 Initializing Socket.io server...')
-      const io = initializeSocketServer(httpServer)
+      initializeSocketServer(httpServer)
       logger.info('✅ 📡 Socket.io server initialized successfully')
     }
   } catch (error) {

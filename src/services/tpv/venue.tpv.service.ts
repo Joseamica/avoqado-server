@@ -9,7 +9,7 @@ import logger from '@/config/logger'
  * @param venueId Venue ID
  * @returns Venue with staff and related data
  */
-export async function getVenueById(venueId: string, orgId?: string): Promise<Venue> {
+export async function getVenueById(venueId: string, _orgId?: string): Promise<Venue> {
   logger.info(`Getting venue by ID: ${venueId}`)
   const venue = await prisma.venue.findUnique({
     where: {

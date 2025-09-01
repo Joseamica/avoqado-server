@@ -1,4 +1,3 @@
-import { NextFunction } from 'express'
 import { AuthenticatedSocket, SocketEventType, AuthenticationPayload, SocketAuthenticationError } from '../types'
 import { RoomManagerService } from '../services/roomManager.service'
 import { BroadcastingService } from '../services/broadcasting.service'

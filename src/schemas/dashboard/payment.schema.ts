@@ -1,4 +1,4 @@
-import { Payment, Order, Staff, TransactionStatus } from '@prisma/client'
+import { Order, Payment, Staff } from '@prisma/client'
 
 export type PaginatedPaymentsResponse = {
   data: (Payment & { processedBy: Staff | null; order: Order | null })[]

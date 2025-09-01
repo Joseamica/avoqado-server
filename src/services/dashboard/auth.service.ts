@@ -167,15 +167,7 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
     roleInNewVenue = staffVenueAccess.role
   }
 
-  // 2. Preparar el nuevo payload para el token de acceso
-  const payloadForToken = {
-    sub: staffId,
-    orgId: orgId,
-    venueId: targetVenueId, // <-- El nuevo venueId
-    role: roleInNewVenue, // <-- El rol en ese nuevo venue
-  }
-
-  // 3. Generar un nuevo set de tokens
+  // 2. Generar un nuevo set de tokens
   const accessToken = jwtService.generateAccessToken(staffId, orgId, targetVenueId, roleInNewVenue)
   const refreshToken = jwtService.generateRefreshToken(staffId, orgId)
 

@@ -38,7 +38,6 @@ export async function updateOrder(req: Request<{ orderId: string }>, res: Respon
 }
 
 export async function deleteOrder(req: Request<{ orderId: string }>, res: Response, next: NextFunction) {
-  console.log(req.params.orderId)
   try {
     await orderDashboardService.deleteOrder(req.params.orderId)
     res.status(204).send() // 204 No Content es una respuesta común para DELETE exitoso

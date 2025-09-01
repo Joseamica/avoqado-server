@@ -1,7 +1,7 @@
-import prisma from '../../utils/prismaClient'
 import { Shift } from '@prisma/client'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import { BadRequestError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 
 interface ShiftFilters {
   staffId?: string
@@ -49,7 +49,7 @@ interface ShiftSummaryResponse {
  * @param posName POS name (optional)
  * @returns Current active shift or null
  */
-export async function getCurrentShift(venueId: string, orgId?: string, posName?: string): Promise<Shift | null> {
+export async function getCurrentShift(venueId: string, _orgId?: string, _posName?: string): Promise<Shift | null> {
   // Look up shift in database
   const shift = await prisma.shift.findFirst({
     where: {
@@ -79,7 +79,7 @@ export async function getShifts(
   pageSize: number,
   pageNumber: number,
   filters: ShiftFilters = {},
-  orgId?: string,
+  _orgId?: string,
 ): Promise<PaginationResponse<any>> {
   const { staffId, startTime, endTime } = filters
 
@@ -270,7 +270,7 @@ export async function getShifts(
  * @param filters Filter options
  * @returns Shift summary data
  */
-export async function getShiftsSummary(venueId: string, filters: ShiftFilters = {}, orgId?: string): Promise<ShiftSummaryResponse> {
+export async function getShiftsSummary(venueId: string, filters: ShiftFilters = {}, _orgId?: string): Promise<ShiftSummaryResponse> {
   const { staffId, startTime, endTime } = filters
 
   // Build the base query filters for shifts

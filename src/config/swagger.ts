@@ -300,7 +300,7 @@ const swaggerAuthMiddleware = (req: Request, res: Response, next: NextFunction) 
     // Verify the token
     jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!)
     next()
-  } catch (error) {
+  } catch {
     // Clear cookie if it exists but is invalid
     if (req.cookies?.accessToken) {
       res.clearCookie('accessToken')

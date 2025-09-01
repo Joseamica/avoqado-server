@@ -1,3 +1,4 @@
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
 export interface SuperadminDashboardData {
@@ -143,16 +144,19 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
     const totalRevenue = payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
     const monthlyRecurringRevenue = totalRevenue // Simplified for now
     const transactionCount = payments.length
-    const averageRevenuePerUser = totalUsers > 0 ? totalRevenue / totalUsers : 0
+    const _averageRevenuePerUser = totalUsers > 0 ? totalRevenue / totalUsers : 0
 
     // Calculate commission (assuming 15% average commission rate)
-    const totalCommissionRevenue = totalRevenue * 0.15
+    const _totalCommissionRevenue = totalRevenue * 0.15
 
     // Calculate actual subscription revenue from venue monthly fees
-    const subscriptionRevenue = await calculateSubscriptionRevenue(new Date(new Date().getFullYear(), new Date().getMonth(), 1), new Date())
+    const _subscriptionRevenue = await calculateSubscriptionRevenue(
+      new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      new Date(),
+    )
 
     // Calculate actual feature revenue from premium features
-    const featureRevenue = await calculateFeatureRevenue(new Date(new Date().getFullYear(), new Date().getMonth(), 1), new Date())
+    const _featureRevenue = await calculateFeatureRevenue(new Date(new Date().getFullYear(), new Date().getMonth(), 1), new Date())
 
     // Get recent venue registrations for growth metrics
     const recentVenues = await prisma.venue.findMany({
@@ -212,7 +216,7 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
       topVenues,
     }
   } catch (error) {
-    console.error('Error getting superadmin dashboard data:', error)
+    logger.error('Error getting superadmin dashboard data:', error)
     throw new Error('Failed to fetch dashboard data')
   }
 }
@@ -319,7 +323,7 @@ export async function getAllVenuesForSuperadmin(): Promise<SuperadminVenue[]> {
       }
     })
   } catch (error) {
-    console.error('Error getting venues for superadmin:', error)
+    logger.error('Error getting venues for superadmin:', error)
     throw new Error('Failed to fetch venues data')
   }
 }
@@ -386,9 +390,9 @@ export async function approveVenue(venueId: string, approvedBy: string): Promise
     })
 
     // Would also create an approval record in a real implementation
-    console.log(`Venue ${venueId} approved by ${approvedBy}`)
+    logger.info(`Venue ${venueId} approved by ${approvedBy}`)
   } catch (error) {
-    console.error('Error approving venue:', error)
+    logger.error('Error approving venue:', error)
     throw new Error('Failed to approve venue')
   }
 }
@@ -407,9 +411,9 @@ export async function suspendVenue(venueId: string, reason: string): Promise<voi
     })
 
     // Would also create a suspension record in a real implementation
-    console.log(`Venue ${venueId} suspended. Reason: ${reason}`)
+    logger.info(`Venue ${venueId} suspended. Reason: ${reason}`)
   } catch (error) {
-    console.error('Error suspending venue:', error)
+    logger.error('Error suspending venue:', error)
     throw new Error('Failed to suspend venue')
   }
 }
@@ -448,7 +452,7 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
       },
     })
   } catch (error) {
-    console.error('Error enabling feature for venue:', error)
+    logger.error('Error enabling feature for venue:', error)
     throw new Error('Failed to enable feature for venue')
   }
 }
@@ -479,7 +483,7 @@ export async function disableFeatureForVenue(venueId: string, featureCode: strin
       },
     })
   } catch (error) {
-    console.error('Error disabling feature for venue:', error)
+    logger.error('Error disabling feature for venue:', error)
     throw new Error('Failed to disable feature for venue')
   }
 }
@@ -492,7 +496,7 @@ export async function getVenueDetails(venueId: string): Promise<SuperadminVenue 
     const venues = await getAllVenuesForSuperadmin()
     return venues.find(venue => venue.id === venueId) || null
   } catch (error) {
-    console.error('Error getting venue details:', error)
+    logger.error('Error getting venue details:', error)
     throw new Error('Failed to fetch venue details')
   }
 }
@@ -668,7 +672,7 @@ export async function getRevenueMetrics(startDate?: Date, endDate?: Date): Promi
       averageOrderValue,
     }
   } catch (error) {
-    console.error('Error calculating revenue metrics:', error)
+    logger.error('Error calculating revenue metrics:', error)
     throw new Error('Failed to calculate revenue metrics')
   }
 }
@@ -695,7 +699,7 @@ export async function getRevenueBreakdown(startDate?: Date, endDate?: Date): Pro
       commissionAnalysis,
     }
   } catch (error) {
-    console.error('Error getting revenue breakdown:', error)
+    logger.error('Error getting revenue breakdown:', error)
     throw new Error('Failed to get revenue breakdown')
   }
 }
@@ -719,7 +723,7 @@ async function calculateSubscriptionRevenue(startDate: Date, endDate: Date): Pro
   })
 
   const monthlyFeePerVenue = 99
-  const totalDaysInPeriod = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
+  const _totalDaysInPeriod = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
   let totalSubscriptionRevenue = 0
 
   // Calculate prorated revenue for each venue based on when it was created
@@ -764,7 +768,7 @@ async function calculateFeatureRevenue(startDate: Date, endDate: Date): Promise<
       return sum + monthlyPrice * monthsInPeriod
     }, 0)
   } catch (error) {
-    console.error('Error calculating feature revenue:', error)
+    logger.error('Error calculating feature revenue:', error)
     return 0
   }
 }
@@ -786,7 +790,7 @@ async function calculateGrowthRate(startDate: Date, endDate: Date): Promise<numb
     if (previousRevenue === 0) return 0
     return ((currentRevenue - previousRevenue) / previousRevenue) * 100
   } catch (error) {
-    console.error('Error calculating growth rate:', error)
+    logger.error('Error calculating growth rate:', error)
     return 0
   }
 }
@@ -862,7 +866,7 @@ async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueR
 
     return Array.from(venueRevenueMap.values()).sort((a, b) => b.revenue - a.revenue)
   } catch (error) {
-    console.error('Error getting revenue by venue:', error)
+    logger.error('Error getting revenue by venue:', error)
     return []
   }
 }
@@ -907,7 +911,7 @@ async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<Perio
 
     return Array.from(periodMap.values()).sort((a, b) => a.date.localeCompare(b.date))
   } catch (error) {
-    console.error('Error getting revenue by period:', error)
+    logger.error('Error getting revenue by period:', error)
     return []
   }
 }
@@ -955,7 +959,7 @@ async function getRevenueByFeature(startDate: Date, endDate: Date): Promise<Feat
 
     return Array.from(featureRevenueMap.values()).sort((a, b) => b.totalRevenue - a.totalRevenue)
   } catch (error) {
-    console.error('Error getting revenue by feature:', error)
+    logger.error('Error getting revenue by feature:', error)
     return []
   }
 }
@@ -987,7 +991,7 @@ async function getCommissionAnalysis(startDate: Date, endDate: Date): Promise<Co
       projectedMonthlyCommission,
     }
   } catch (error) {
-    console.error('Error getting commission analysis:', error)
+    logger.error('Error getting commission analysis:', error)
     return {
       totalCommission: 0,
       averageCommissionRate: 0,
@@ -1088,7 +1092,7 @@ async function calculatePlatformRevenue(
       settledRevenue: actualSettledRevenue,
     }
   } catch (error) {
-    console.error('Error calculating platform revenue:', error)
+    logger.error('Error calculating platform revenue:', error)
     return {
       totalPlatformRevenue: 0,
       actualCommissionRevenue: 0,

@@ -3,7 +3,6 @@ import OpenAI from 'openai'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import { StaffRole } from '@prisma/client'
 import { AILearningService } from './ai-learning.service'
 
 interface AssistantQuery {

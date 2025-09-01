@@ -9,7 +9,6 @@ export async function getPaymentsData(venueId: string, page: number, pageSize: n
   if (!venueId) {
     throw new NotFoundError('Venue ID es requerido')
   }
-  console.log('Venue ID:', venueId)
 
   // Calculamos skip y take aquí para mantener la lógica de paginación en el servicio
   const skip = (page - 1) * pageSize

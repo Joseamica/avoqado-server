@@ -1,7 +1,7 @@
-import prisma from '../../utils/prismaClient'
-import { OrderItem, Prisma, Product, SyncStatus, OriginSystem } from '@prisma/client'
+import { OriginSystem, Prisma, Product, SyncStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 
 interface OrderItemPayload {
   venueId: string

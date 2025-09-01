@@ -1,8 +1,5 @@
+import { VenueType } from '@prisma/client' // Importa enums directamente de Prisma
 import { z } from 'zod'
-import {
-  VenueType,
-  StaffRole, // Asegúrate de que StaffRole también se importe si es necesario para otros schemas aquí
-} from '@prisma/client' // Importa enums directamente de Prisma
 
 // Schema de Zod para la creación de Venues
 export const createVenueSchema = z.object({

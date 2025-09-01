@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
+import logger from '@/config/logger'
 
 /**
  * Obtiene los datos de las terminales para un venue, con paginación y filtros.
@@ -129,6 +130,7 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
       updatePayload.config = JSON.parse(updateData.config)
     } catch (error) {
       // Si no es JSON válido, guardarlo como string
+      logger.error('Error al parsear la configuración:', error)
       updatePayload.config = updateData.config
     }
   }

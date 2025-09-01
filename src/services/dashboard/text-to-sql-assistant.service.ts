@@ -922,15 +922,6 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
       const claimedDate = dateMatch[0]
 
-      // Quick validation: check if this date actually has any orders
-      const validationQuery = `
-        SELECT COUNT(*) as order_count, SUM("total") as total_sales
-        FROM "Order" 
-        WHERE "venueId" = $1 
-          AND DATE("createdAt") = $2
-          AND "status" = 'COMPLETED'
-      `
-
       const validationResult = await prisma.$queryRaw`
         SELECT COUNT(*) as order_count, SUM("total") as total_sales
         FROM "Order" 
@@ -1253,7 +1244,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       return { passed: true, warning: '' }
-    } catch (error) {
+    } catch {
       return { passed: false, warning: 'Sanity check failed due to error' }
     }
   }

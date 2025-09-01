@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { StaffRole } from '@prisma/client' // Assuming StaffRole is in @prisma/client
 
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
 const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const

@@ -22,37 +22,42 @@ export const switchVenueSchema = z.object({
 })
 
 export const updateAccountSchema = z.object({
-  body: z.object({
-    id: z.string().cuid().optional(),
-    firstName: z.string().min(1, { message: 'El nombre es requerido.' }).optional(),
-    lastName: z.string().min(1, { message: 'El apellido es requerido.' }).optional(),
-    email: z.string().email({ message: 'Email inválido.' }).optional(),
-    phone: z.string().optional(), // Phone is completely optional
-    old_password: z.string().optional(),
-    password: z.string().optional(),
-  }).refine((data) => {
-    // Only validate password fields if either is provided
-    if (data.password || data.old_password) {
-      // If trying to change password, both fields are required
-      if (data.password && !data.old_password) {
-        return false;
-      }
-      if (data.old_password && !data.password) {
-        return false;
-      }
-      // Validate minimum lengths only when changing password
-      if (data.password && data.password.length < 4) {
-        return false;
-      }
-      if (data.old_password && data.old_password.length < 4) {
-        return false;
-      }
-    }
-    return true;
-  }, {
-    message: 'Para cambiar la contraseña, ambos campos son requeridos y deben tener al menos 4 caracteres.',
-    path: ['password'],
-  }),
+  body: z
+    .object({
+      id: z.string().cuid().optional(),
+      firstName: z.string().min(1, { message: 'El nombre es requerido.' }).optional(),
+      lastName: z.string().min(1, { message: 'El apellido es requerido.' }).optional(),
+      email: z.string().email({ message: 'Email inválido.' }).optional(),
+      phone: z.string().optional(), // Phone is completely optional
+      old_password: z.string().optional(),
+      password: z.string().optional(),
+    })
+    .refine(
+      data => {
+        // Only validate password fields if either is provided
+        if (data.password || data.old_password) {
+          // If trying to change password, both fields are required
+          if (data.password && !data.old_password) {
+            return false
+          }
+          if (data.old_password && !data.password) {
+            return false
+          }
+          // Validate minimum lengths only when changing password
+          if (data.password && data.password.length < 4) {
+            return false
+          }
+          if (data.old_password && data.old_password.length < 4) {
+            return false
+          }
+        }
+        return true
+      },
+      {
+        message: 'Para cambiar la contraseña, ambos campos son requeridos y deben tener al menos 4 caracteres.',
+        path: ['password'],
+      },
+    ),
 })
 
 // Inferimos el tipo para usarlo en el controlador y servicio

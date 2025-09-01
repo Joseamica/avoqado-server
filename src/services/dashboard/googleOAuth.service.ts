@@ -3,10 +3,11 @@ import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { StaffRole } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
+import logger from '@/config/logger'
 
 // Validate Google OAuth configuration
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
-  console.warn('Google OAuth not configured. Missing environment variables: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, or FRONTEND_URL')
+  logger.warn('Google OAuth not configured. Missing environment variables: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, or FRONTEND_URL')
 }
 
 const client = new OAuth2Client(
@@ -69,6 +70,7 @@ async function verifyGoogleToken(token: string): Promise<GoogleUserInfo> {
       email_verified: payload.email_verified || false,
     }
   } catch (error) {
+    logger.error('Error verifying Google token', { error: error instanceof Error ? error.message : 'Unknown error' })
     throw new AuthenticationError('Failed to verify Google token')
   }
 }
@@ -86,6 +88,7 @@ async function getGoogleUserFromCode(code: string): Promise<GoogleUserInfo> {
 
     return await verifyGoogleToken(tokens.id_token)
   } catch (error) {
+    logger.error('Error exchanging Google authorization code', { error: error instanceof Error ? error.message : 'Unknown error' })
     throw new AuthenticationError('Failed to exchange Google authorization code')
   }
 }
@@ -156,6 +159,10 @@ export async function loginWithGoogle(
       throw new ForbiddenError('No invitation found for this email. Please contact your administrator to get invited.')
     }
 
+    if (!invitation.venue) {
+      throw new ForbiddenError('Invitation is missing venue information. Please contact your administrator.')
+    }
+
     // Create new staff from invitation
     staff = await prisma.staff.create({
       data: {
@@ -164,7 +171,7 @@ export async function loginWithGoogle(
         lastName: googleUser.family_name || googleUser.name.split(' ').slice(1).join(' ') || '',
         photoUrl: googleUser.picture,
         emailVerified: true,
-        organizationId: invitation.venue?.organizationId!,
+        organizationId: invitation.venue.organizationId,
         googleId: googleUser.id,
         active: true,
         lastLoginAt: new Date(),
@@ -191,7 +198,7 @@ export async function loginWithGoogle(
     await prisma.staffVenue.create({
       data: {
         staffId: staff.id,
-        venueId: invitation.venueId!,
+        venueId: invitation.venueId || invitation.venue.id,
         role: invitation.role,
         active: true,
       },

@@ -5,6 +5,7 @@ import { BadRequestError, InternalServerError, NotFoundError } from '../../error
 
 // Define types for the receipt snapshot
 import { ReceiptDataSnapshot } from '../../schemas/dashboard/receipt.schema'
+import logger from '@/config/logger'
 
 // Main function to generate and store a digital receipt
 export async function generateAndStoreReceipt(paymentId: string, recipientEmail?: string): Promise<DigitalReceipt> {
@@ -79,7 +80,7 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
     }
   } catch (error) {
     // Silently handle if customer relation doesn't exist
-    console.log('Customer relation might not exist in schema:', error)
+    logger.error('Customer relation might not exist in schema:', error)
   }
 
   // Get processed by staff if available
@@ -186,7 +187,7 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
     // });
 
     // For now, we'll simulate a successful email send
-    console.log(`Email would be sent to ${receipt.recipientEmail} with receipt link: /r/${receipt.accessKey}`)
+    logger.info(`Email would be sent to ${receipt.recipientEmail} with receipt link: /r/${receipt.accessKey}`)
 
     // Update receipt status
     return prisma.digitalReceipt.update({

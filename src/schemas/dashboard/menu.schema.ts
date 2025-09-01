@@ -5,7 +5,6 @@ import { MenuType, ProductType } from '@prisma/client'
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
 const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
 const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), underscores, hyphens
-const HEX_COLOR_REGEX = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/
 
 // ==========================================
 // MENU SCHEMAS

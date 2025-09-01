@@ -6,6 +6,7 @@ import * as receiptDashboardService from '../../services/dashboard/receipt.dashb
 
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
+import logger from '../../config/logger'
 
 // Ruta: GET /venues/:venueId/payments
 export async function getPaymentsData(
@@ -57,7 +58,7 @@ export async function sendPaymentReceipt(
       try {
         await receiptDashboardService.sendReceiptByEmail(receipt.id)
       } catch (error) {
-        console.error('Error sending receipt email:', error)
+        logger.error('Error sending receipt email:', error)
       }
     }, 0)
 

@@ -1,7 +1,7 @@
 // src/middlewares/validation.ts
-import { Request, Response, NextFunction } from 'express'
-import { ZodError, z, AnyZodObject } from 'zod' // Import AnyZodObject
-import AppError, { BadRequestError, InternalServerError } from '../errors/AppError'
+import { NextFunction, Request, Response } from 'express'
+import { AnyZodObject, ZodError, z } from 'zod' // Import AnyZodObject
+import { BadRequestError, InternalServerError } from '../errors/AppError'
 
 export const validateRequest = (schema: AnyZodObject) => async (req: Request, res: Response, next: NextFunction) => {
   try {

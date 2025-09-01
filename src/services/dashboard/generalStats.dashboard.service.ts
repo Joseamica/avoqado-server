@@ -25,16 +25,6 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
     },
   }
 
-  // First, let's check if there are any payments at all for this venue
-  const allPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
-  })
-
   // Try with simplified filtering - remove status filter for now
   const payments = await prisma.payment.findMany({
     where: {
@@ -371,8 +361,7 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   }))
 }
 
-async function generateWeeklyTrendsData(venueId: string, fromDate: Date, toDate: Date) {
-  // Mock data for weekly trends
+async function generateWeeklyTrendsData(_venueId: string, _fromDate: Date, _toDate: Date) {
   const weekdays = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 
   return weekdays.map(day => ({

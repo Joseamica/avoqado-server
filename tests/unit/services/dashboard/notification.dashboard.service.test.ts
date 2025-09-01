@@ -56,7 +56,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 }))
 
 import prisma from '../../../../src/utils/prismaClient'
-import socketService from '../../../../src/communication/sockets'
+// const socketService = require('../../communication/sockets/services/broadcasting.service')
 
 describe('Notification Dashboard Service', () => {
   const mockPrismaNotificationCreate = prisma.notification.create as jest.Mock
@@ -68,13 +68,13 @@ describe('Notification Dashboard Service', () => {
   const mockPrismaNotificationDeleteMany = prisma.notification.deleteMany as jest.Mock
   const mockPrismaNotificationCount = prisma.notification.count as jest.Mock
   const mockPrismaStaffFindUnique = prisma.staff.findUnique as jest.Mock
-  const mockPrismaStaffFindMany = prisma.staff.findMany as jest.Mock
+  // const mockPrismaStaffFindMany = prisma.staff.findMany as jest.Mock
   const mockPrismaStaffVenueFindMany = prisma.staffVenue.findMany as jest.Mock
   const mockPrismaVenueFindUnique = prisma.venue.findUnique as jest.Mock
   const mockPrismaNotificationPreferenceFindFirst = prisma.notificationPreference.findFirst as jest.Mock
   const mockPrismaNotificationPreferenceCreate = prisma.notificationPreference.create as jest.Mock
-  const mockSocketBroadcastToUser = socketService.broadcastToUser as jest.Mock
-  const mockSocketBroadcastToVenue = socketService.broadcastToVenue as jest.Mock
+  // const mockSocketBroadcastToUser = socketService.broadcastToUser as jest.Mock
+  // const mockSocketBroadcastToVenue = socketService.broadcastToVenue as jest.Mock
 
   beforeEach(() => {
     jest.clearAllMocks()

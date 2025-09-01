@@ -1,5 +1,5 @@
 import express, { Express, Request as ExpressRequest, Response as ExpressResponse, NextFunction } from 'express'
-import jwt, { SignOptions } from 'jsonwebtoken'
+import jwt from 'jsonwebtoken'
 import type { StringValue } from 'ms'
 import { StaffRole } from '@prisma/client' // Assuming Prisma client is set up
 
@@ -95,7 +95,7 @@ if (NODE_ENV === 'development') {
 
 // --- Global Error Handling Middleware ---
 // This must be the last middleware added to the app.
-app.use((err: Error, req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunction) => {
   const correlationId = (req as any).correlationId || 'N/A'
 
   if (err instanceof AppError) {

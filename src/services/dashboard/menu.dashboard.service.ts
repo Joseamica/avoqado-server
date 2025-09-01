@@ -142,7 +142,6 @@ export async function getMenuCategoryById(venueId: string, categoryId: string): 
 }
 
 export async function listMenuCategoriesForVenue(venueId: string): Promise<MenuCategory[]> {
-  console.log(venueId)
   return prisma.menuCategory.findMany({
     where: { venueId, parentId: null }, // Fetch top-level categories
     orderBy: { displayOrder: 'asc' },
@@ -192,15 +191,15 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   if (data.active !== undefined) updateData.active = data.active
 
   // Handle time fields with explicit null/undefined handling
-  if (data.hasOwnProperty('availableFrom')) {
+  if ('availableFrom' in data) {
     updateData.availableFrom = data.availableFrom || null
   }
-  if (data.hasOwnProperty('availableUntil')) {
+  if ('availableUntil' in data) {
     updateData.availableUntil = data.availableUntil || null
   }
 
   // Handle availableDays specifically for null and array cases in update
-  if (data.hasOwnProperty('availableDays')) {
+  if ('availableDays' in data) {
     if (data.availableDays === null) {
       updateData.availableDays = { set: [] } // Explicitly set to empty array if DTO provides null
     } else if (Array.isArray(data.availableDays)) {
@@ -215,7 +214,7 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   }
 
   // Handle parentId explicitly
-  if (data.hasOwnProperty('parentId')) {
+  if ('parentId' in data) {
     // parentId was present in the input DTO
     if (data.parentId === null) {
       // Client wants to remove parent

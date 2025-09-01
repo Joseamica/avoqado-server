@@ -45,8 +45,6 @@ import {
   CreateProductSchema,
   UpdateProductSchema,
   GetProductParamsSchema,
-  ProductQuerySchema,
-  BulkUpdateProductsSchema,
   // Modifier schemas
   CreateModifierGroupSchema,
   UpdateModifierGroupSchema,

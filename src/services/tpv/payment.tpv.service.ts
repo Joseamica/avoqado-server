@@ -1,7 +1,7 @@
-import prisma from '../../utils/prismaClient'
-import { Payment, PaymentMethod, PaymentStatus, SplitType } from '@prisma/client'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
+import { Payment, PaymentMethod, SplitType } from '@prisma/client'
 import logger from '../../config/logger'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 
 /**
@@ -84,7 +84,7 @@ export async function getPayments(
   pageSize: number,
   pageNumber: number,
   filters: PaymentFilters = {},
-  orgId?: string,
+  _orgId?: string,
 ): Promise<PaginationResponse<Payment>> {
   const { fromDate, toDate, staffId } = filters
 
@@ -301,7 +301,7 @@ export async function recordOrderPayment(
   orderId: string,
   paymentData: PaymentCreationData,
   userId?: string,
-  orgId?: string,
+  _orgId?: string,
 ) {
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
 
@@ -511,7 +511,7 @@ export async function recordOrderPayment(
  * @param orgId Organization ID
  * @returns Created payment
  */
-export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, orgId?: string) {
+export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
   const fastOrder = await prisma.order.create({
     data: {

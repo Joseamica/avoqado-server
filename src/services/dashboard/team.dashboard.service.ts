@@ -528,7 +528,7 @@ export async function getPendingInvitations(venueId: string) {
 /**
  * Resend an invitation (extends expiration and sends new email)
  */
-export async function resendInvitation(venueId: string, invitationId: string, invitedById: string): Promise<void> {
+export async function resendInvitation(venueId: string, invitationId: string, _invitedById: string): Promise<void> {
   const invitation = await prisma.invitation.findFirst({
     where: {
       id: invitationId,
@@ -584,7 +584,7 @@ export async function resendInvitation(venueId: string, invitationId: string, in
       role: invitation.role,
       attemptCount: invitation.attemptCount + 1,
     })
-  } catch (emailError) {
+  } catch {
     logger.warn('Email service not available. Invitation updated but email not sent.', {
       invitationId: invitation.id,
       email: invitation.email,

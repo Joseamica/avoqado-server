@@ -1,12 +1,10 @@
 // services/dashboard/order.dashboard.service.ts
 
-import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
+import prisma from '../../utils/prismaClient'
 
-import { Order, OriginSystem } from '@prisma/client'
-
-// Este tipo debería estar en un archivo central de tipos
+import { Order } from '@prisma/client'
 
 export async function getOrders(venueId: string, page: number, pageSize: number): Promise<PaginatedOrdersResponse> {
   if (!venueId) {

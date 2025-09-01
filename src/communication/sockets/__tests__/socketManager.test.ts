@@ -42,7 +42,7 @@ describe('SocketManager Integration Tests', () => {
       rateLimit: { windowMs: 60000, maxConnections: 100, maxEventsPerWindow: 50 },
     })
 
-    const io = socketManager.initialize(httpServer)
+    socketManager.initialize(httpServer)
 
     // Start server
     await new Promise<void>(resolve => {

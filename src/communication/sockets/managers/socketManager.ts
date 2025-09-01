@@ -6,7 +6,7 @@ let createClient: any
 try {
   createAdapter = require('@socket.io/redis-adapter').createAdapter
   createClient = require('redis').createClient
-} catch (error) {
+} catch {
   // Redis modules not available - will use memory adapter
 }
 import { StaffRole } from '@prisma/client'

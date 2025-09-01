@@ -1,7 +1,8 @@
-import prisma from '../../utils/prismaClient'
-import { NotificationType, NotificationPriority, NotificationChannel, Notification, NotificationPreference } from '@prisma/client'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { Notification, NotificationChannel, NotificationPreference, NotificationPriority, NotificationType } from '@prisma/client'
 import socketManager from '../../communication/sockets'
+import { NotFoundError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
+import logger from '@/config/logger'
 
 // ===== TYPES =====
 
@@ -82,13 +83,13 @@ export async function createNotification(data: CreateNotificationDto): Promise<N
 
   // Skip if user has disabled this type
   if (!preferences.enabled) {
-    console.log(`Notification ${data.type} skipped for user ${data.recipientId} - disabled in preferences`)
+    logger.info(`Notification ${data.type} skipped for user ${data.recipientId} - disabled in preferences`)
     throw new Error('Notification disabled in preferences')
   }
 
   // Check quiet hours
   if (isInQuietHours(preferences.quietStart || undefined, preferences.quietEnd || undefined)) {
-    console.log(`Notification ${data.type} skipped for user ${data.recipientId} - quiet hours`)
+    logger.info(`Notification ${data.type} skipped for user ${data.recipientId} - quiet hours`)
     throw new Error('Notification skipped due to quiet hours')
   }
 

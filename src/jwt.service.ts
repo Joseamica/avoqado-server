@@ -93,21 +93,15 @@ export function generateRefreshToken(staffId: string, organizationId?: string): 
  * @throws JsonWebTokenError si el token es inválido o ha expirado.
  */
 export function verifyAccessToken(token: string): AccessTokenPayload {
-  try {
-    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!) as AccessTokenPayload
-    // Validaciones adicionales del payload si es necesario
-    if (!decoded.sub || !decoded.orgId || !decoded.venueId || !decoded.role) {
-      throw new jwt.JsonWebTokenError('Payload del token de acceso incompleto.')
-    }
-    if (!Object.values(StaffRole).includes(decoded.role as StaffRole)) {
-      throw new jwt.JsonWebTokenError('Rol en token de acceso no es un StaffRole válido.')
-    }
-    return decoded
-  } catch (error) {
-    // Re-lanzar el error para ser manejado por el llamador
-    // Esto podría ser TokenExpiredError, JsonWebTokenError, etc.
-    throw error
+  const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!) as AccessTokenPayload
+  // Validaciones adicionales del payload si es necesario
+  if (!decoded.sub || !decoded.orgId || !decoded.venueId || !decoded.role) {
+    throw new jwt.JsonWebTokenError('Payload del token de acceso incompleto.')
   }
+  if (!Object.values(StaffRole).includes(decoded.role as StaffRole)) {
+    throw new jwt.JsonWebTokenError('Rol en token de acceso no es un StaffRole válido.')
+  }
+  return decoded
 }
 
 /**
@@ -117,17 +111,12 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
  * @throws JsonWebTokenError si el token es inválido o ha expirado.
  */
 export function verifyRefreshToken(token: string): RefreshTokenPayload {
-  try {
-    const decoded = jwt.verify(token, REFRESH_TOKEN_SECRET!) as RefreshTokenPayload
-    // Validaciones adicionales del payload si es necesario
-    if (!decoded.sub || !decoded.tokenId) {
-      throw new jwt.JsonWebTokenError('Payload del token de refresco incompleto.')
-    }
-    return decoded
-  } catch (error) {
-    // Re-lanzar el error para ser manejado por el llamador
-    throw error
+  const decoded = jwt.verify(token, REFRESH_TOKEN_SECRET!) as RefreshTokenPayload
+  // Validaciones adicionales del payload si es necesario
+  if (!decoded.sub || !decoded.tokenId) {
+    throw new jwt.JsonWebTokenError('Payload del token de refresco incompleto.')
   }
+  return decoded
 }
 
 /**

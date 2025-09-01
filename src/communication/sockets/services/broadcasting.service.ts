@@ -1,18 +1,16 @@
-import { Server } from 'socket.io'
 import { StaffRole } from '@prisma/client'
+import { Server } from 'socket.io'
+import { v4 as uuidv4 } from 'uuid'
+import logger from '../../../config/logger'
 import {
-  SocketEventType,
   BroadcastOptions,
-  PaymentEventPayload,
-  OrderEventPayload,
-  SystemAlertPayload,
   NotificationEventPayload,
-  BaseEventPayload,
-  AuthenticatedSocket,
+  OrderEventPayload,
+  PaymentEventPayload,
+  SocketEventType,
+  SystemAlertPayload,
 } from '../types'
 import { RoomManagerService } from './roomManager.service'
-import logger from '../../../config/logger'
-import { v4 as uuidv4 } from 'uuid'
 
 /**
  * Broadcasting Service

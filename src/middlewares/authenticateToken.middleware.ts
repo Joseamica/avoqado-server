@@ -26,19 +26,6 @@ export const authenticateTokenMiddleware = (req: Request, res: Response, next: N
     // Verificar token
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!) as any
 
-    // Log para debugging del problema específico (solo en development)
-    if (process.env.NODE_ENV === 'development') {
-      console.log('🚨 JWT TOKEN DEBUG:', {
-        userId: decoded.sub,
-        orgId: decoded.orgId,
-        venueId: decoded.venueId,
-        venueIdType: typeof decoded.venueId,
-        role: decoded.role,
-        requestPath: req.path,
-        isAssistantQuery: req.path.includes('assistant'),
-      })
-    }
-
     // Crear contexto de autenticación
     const authContext: AuthContext = {
       userId: decoded.sub,

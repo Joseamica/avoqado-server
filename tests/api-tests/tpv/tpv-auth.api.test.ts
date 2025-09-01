@@ -56,7 +56,7 @@ describe('TPV GET routes - authentication and authorization', () => {
   ]
 
   const viewerToken = makeToken('VIEWER') // not allowed by authorizeRole
-  const cashierToken = makeToken('CASHIER') // allowed
+  // const cashierToken = makeToken('CASHIER') // allowed
 
   describe('401 Unauthorized when token is missing or invalid', () => {
     it.each(routes.map(p => [p]))('GET %s -> 401 without Authorization header', async path => {

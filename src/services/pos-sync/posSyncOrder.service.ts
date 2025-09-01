@@ -17,7 +17,7 @@ import { PaymentMethod } from '@prisma/client'
  * @param folio - Número de folio de la orden
  * @returns La orden existente o null si no existe
  */
-async function findExistingOrderWithSmartResolution(externalId: string, venueId: string, folio: string): Promise<Order | null> {
+async function findExistingOrderWithSmartResolution(externalId: string, venueId: string, _folio: string): Promise<Order | null> {
   // Paso 1: Buscar por el externalId exacto
   const exactMatch = await prisma.order.findUnique({
     where: {
@@ -94,7 +94,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
   const shiftId = await getOrCreatePosShift(shiftData, venue.id, staffId)
 
   // 2. Buscar orden existente con lógica de resolución inteligente
-  const existingOrder = await findExistingOrderWithSmartResolution(externalId, venue.id, orderData.orderNumber)
+  // const existingOrder = await findExistingOrderWithSmartResolution(externalId, venue.id, orderData.orderNumber)
 
   // 3. Ejecutar el upsert final de la Orden
   return prisma.$transaction(async tx => {

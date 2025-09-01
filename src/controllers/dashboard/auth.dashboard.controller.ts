@@ -1,18 +1,12 @@
 import { NextFunction, Request, Response } from 'express'
 import jwt from 'jsonwebtoken'
 import prisma from '../../utils/prismaClient' // Corrected import path
-import { AuthenticationError, InternalServerError } from '../../errors/AppError'
+import { AuthenticationError } from '../../errors/AppError'
 import { StaffRole } from '@prisma/client'
-import { LoginDto, UpdateAccountDto } from '../../schemas/dashboard/auth.schema'
+import { UpdateAccountDto } from '../../schemas/dashboard/auth.schema'
 import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
-
-// Define la estructura del payload que esperas en tu JWT
-interface JwtPayload {
-  id: string
-  // Puedes añadir otros campos que incluyas en el token, como 'version' o 'type'
-}
 
 /**
  * Endpoint para verificar el estado de autenticación de un usuario.
@@ -79,14 +73,6 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         authenticated: false,
         user: null,
       })
-    }
-
-    // Define venue type interface
-    interface SimpleVenue {
-      id: string
-      name: string
-      slug: string
-      logo: string | null
     }
 
     // Define venue type with features and role
@@ -306,7 +292,7 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     if (req.session) {
       req.session.destroy(err => {
         if (err) {
-          console.error('Error al destruir sesión:', err)
+          logger.error('Error al destruir sesión:', err)
         }
       })
     }
@@ -316,7 +302,7 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
       message: 'Logout exitoso',
     })
   } catch (error) {
-    console.error('Error en logout:', error)
+    logger.error('Error en logout:', error)
     throw new AuthenticationError('Error al cerrar sesión')
   }
 }
@@ -372,7 +358,7 @@ export async function updateAccountController(req: Request, res: Response, next:
     // Buscar el staff actual
     const currentStaff = await prisma.staff.findUnique({
       where: { id: staffId },
-      select: { password: true, email: true }
+      select: { password: true, email: true },
     })
 
     if (!currentStaff) {
@@ -389,12 +375,12 @@ export async function updateAccountController(req: Request, res: Response, next:
     if (updateData.email && updateData.email !== currentStaff.email) {
       // Verificar que el nuevo email no esté en uso
       const existingStaff = await prisma.staff.findUnique({
-        where: { email: updateData.email }
+        where: { email: updateData.email },
       })
       if (existingStaff && existingStaff.id !== staffId) {
         res.status(400).json({
           success: false,
-          message: 'El correo electrónico ya está en uso por otro usuario.'
+          message: 'El correo electrónico ya está en uso por otro usuario.',
         })
         return
       }
@@ -408,7 +394,7 @@ export async function updateAccountController(req: Request, res: Response, next:
       if (!isValidPassword) {
         res.status(400).json({
           success: false,
-          message: 'La contraseña actual es incorrecta.'
+          message: 'La contraseña actual es incorrecta.',
         })
         return
       }
@@ -432,21 +418,20 @@ export async function updateAccountController(req: Request, res: Response, next:
         emailVerified: true,
         photoUrl: true,
         createdAt: true,
-        updatedAt: true
-      }
+        updatedAt: true,
+      },
     })
 
     logger.info(`Staff profile updated successfully`, {
       staffId,
-      updatedFields: Object.keys(updateFields)
+      updatedFields: Object.keys(updateFields),
     })
 
     res.status(200).json({
       success: true,
       message: 'Perfil actualizado correctamente.',
-      user: updatedStaff
+      user: updatedStaff,
     })
-
   } catch (error) {
     logger.error('Error updating staff profile:', error)
     next(error)

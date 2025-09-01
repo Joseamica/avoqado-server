@@ -3,6 +3,7 @@ export { StaffRole } // Re-export StaffRole
 import jwt from 'jsonwebtoken'
 import { Request, Response, NextFunction } from 'express'
 import { IncomingHttpHeaders } from 'http'
+import logger from './config/logger'
 
 /**
  * Estructura esperada del payload de un token JWT de Avoqado.
@@ -325,6 +326,7 @@ export function verifyToken(token: string): AvoqadoJwtPayload | null {
 
     return decoded
   } catch (error) {
+    logger.error('Error verifying JWT token', { error: error instanceof Error ? error.message : 'Unknown error' })
     return null
   }
 }

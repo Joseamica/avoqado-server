@@ -1,7 +1,7 @@
 import { StaffRole } from '@prisma/client'
-import { AuthenticatedSocket, RoomType, RoomIdentifier, BroadcastOptions } from '../types'
 import logger from '../../../config/logger'
 import { NotFoundError } from '../../../errors/AppError'
+import { AuthenticatedSocket, BroadcastOptions } from '../types'
 
 /**
  * Room Manager Service

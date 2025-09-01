@@ -1,7 +1,6 @@
-import prisma from '../../utils/prismaClient'
-import { Shift } from '@prisma/client'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import { BadRequestError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 
 interface ShiftFilters {
   staffId?: string
