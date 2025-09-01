@@ -98,7 +98,7 @@ jobs:
           fi
 
           # Test CORS headers
-          CORS_HEADERS=$(curl -s -H "Origin: https://app.avoqado.io" -I $PRODUCTION_URL/health | grep -i "access-control" || echo "No CORS headers")
+          CORS_HEADERS=$(curl -s -H "Origin: https://dashboardv2.avoqado.io" -I $PRODUCTION_URL/health | grep -i "access-control" || echo "No CORS headers")
           echo "🌐 CORS headers: $CORS_HEADERS"
 
       - name: 📊 Production Performance Check

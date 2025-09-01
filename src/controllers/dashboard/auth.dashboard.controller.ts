@@ -3,9 +3,10 @@ import jwt from 'jsonwebtoken'
 import prisma from '../../utils/prismaClient' // Corrected import path
 import { AuthenticationError, InternalServerError } from '../../errors/AppError'
 import { StaffRole } from '@prisma/client'
-import { LoginDto } from '../../schemas/dashboard/auth.schema'
+import { LoginDto, UpdateAccountDto } from '../../schemas/dashboard/auth.schema'
 import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
+import bcrypt from 'bcrypt'
 
 // Define la estructura del payload que esperas en tu JWT
 interface JwtPayload {
@@ -355,6 +356,99 @@ export async function switchVenueController(req: Request, res: Response, next: N
 
     res.status(200).json({ success: true, message: 'Contexto de venue actualizado correctamente.' })
   } catch (error) {
+    next(error)
+  }
+}
+
+export async function updateAccountController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const updateData = req.body as UpdateAccountDto
+    const staffId = req.authContext?.userId
+
+    if (!staffId) {
+      throw new AuthenticationError('Usuario no autenticado.')
+    }
+
+    // Buscar el staff actual
+    const currentStaff = await prisma.staff.findUnique({
+      where: { id: staffId },
+      select: { password: true, email: true }
+    })
+
+    if (!currentStaff) {
+      throw new AuthenticationError('Usuario no encontrado.')
+    }
+
+    // Preparar datos de actualización
+    const updateFields: any = {}
+
+    // Actualizar campos básicos si se proporcionan
+    if (updateData.firstName) updateFields.firstName = updateData.firstName
+    if (updateData.lastName) updateFields.lastName = updateData.lastName
+    if (updateData.phone) updateFields.phone = updateData.phone
+    if (updateData.email && updateData.email !== currentStaff.email) {
+      // Verificar que el nuevo email no esté en uso
+      const existingStaff = await prisma.staff.findUnique({
+        where: { email: updateData.email }
+      })
+      if (existingStaff && existingStaff.id !== staffId) {
+        res.status(400).json({
+          success: false,
+          message: 'El correo electrónico ya está en uso por otro usuario.'
+        })
+        return
+      }
+      updateFields.email = updateData.email
+    }
+
+    // Manejar cambio de contraseña
+    if (updateData.password && updateData.old_password) {
+      // Verificar contraseña actual
+      const isValidPassword = await bcrypt.compare(updateData.old_password, currentStaff.password || '')
+      if (!isValidPassword) {
+        res.status(400).json({
+          success: false,
+          message: 'La contraseña actual es incorrecta.'
+        })
+        return
+      }
+
+      // Hashear nueva contraseña
+      const saltRounds = 10
+      const hashedPassword = await bcrypt.hash(updateData.password, saltRounds)
+      updateFields.password = hashedPassword
+    }
+
+    // Actualizar el staff
+    const updatedStaff = await prisma.staff.update({
+      where: { id: staffId },
+      data: updateFields,
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        emailVerified: true,
+        photoUrl: true,
+        createdAt: true,
+        updatedAt: true
+      }
+    })
+
+    logger.info(`Staff profile updated successfully`, {
+      staffId,
+      updatedFields: Object.keys(updateFields)
+    })
+
+    res.status(200).json({
+      success: true,
+      message: 'Perfil actualizado correctamente.',
+      user: updatedStaff
+    })
+
+  } catch (error) {
+    logger.error('Error updating staff profile:', error)
     next(error)
   }
 }

@@ -31,7 +31,7 @@ This document summarizes the comprehensive deployment optimization performed on 
 
 ### ✅ **3. ENVIRONMENT SEPARATION - IMPLEMENTED**
 **Proper Environment Strategy**:
-- **Production** (`main` branch) → `app.avoqado.io` & `avoqado-server.onrender.com`
+- **Production** (`main` branch) → `dashboardv2.avoqado.io` & `avoqado-server.onrender.com`
 - **Staging** (`develop` branch) → `develop.avoqado-web-dashboard.pages.dev` & `avoqado-server-staging.onrender.com`
 - **Preview** (PR branches) → Dynamic preview deployments with database branching
 
@@ -39,7 +39,7 @@ This document summarizes the comprehensive deployment optimization performed on 
 - ✅ `VITE_STAGING_API_URL` → `https://avoqado-server-staging-cm35.onrender.com`
 - ✅ `VITE_STAGING_FRONTEND_URL` → `https://develop.avoqado-web-dashboard.pages.dev`
 - ✅ `VITE_PRODUCTION_API_URL` → `https://avoqado-server.onrender.com`
-- ✅ `VITE_PRODUCTION_FRONTEND_URL` → `https://app.avoqado.io`
+- ✅ `VITE_PRODUCTION_FRONTEND_URL` → `https://dashboardv2.avoqado.io`
 
 ### ✅ **4. MONITORING & HEALTH CHECKS - ACTIVE**
 

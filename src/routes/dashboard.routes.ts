@@ -61,7 +61,7 @@ import {
   RemoveModifierGroupFromProductParamsSchema,
   ReorderProductsSchema,
 } from '../schemas/dashboard/menu.schema'
-import { loginSchema, switchVenueSchema } from '../schemas/dashboard/auth.schema'
+import { loginSchema, switchVenueSchema, updateAccountSchema } from '../schemas/dashboard/auth.schema'
 import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
 import {
   VenueIdParamsSchema as TeamVenueIdParamsSchema,
@@ -381,6 +381,84 @@ router.post(
   authenticateTokenMiddleware, // Requires a valid token to know who the user is
   validateRequest(switchVenueSchema), // Validate the request body (changed from validateRequestMiddleware)
   authDashboardController.switchVenueController,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/{venueId}/account:
+ *   patch:
+ *     tags: [Authentication]
+ *     summary: Update user account information
+ *     description: Update profile information for the authenticated user including name, email, phone, and password
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               firstName:
+ *                 type: string
+ *                 description: User's first name
+ *               lastName:
+ *                 type: string
+ *                 description: User's last name
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 description: User's email address
+ *               phone:
+ *                 type: string
+ *                 description: User's phone number
+ *               old_password:
+ *                 type: string
+ *                 description: Current password (required if changing password)
+ *               password:
+ *                 type: string
+ *                 description: New password
+ *     responses:
+ *       200:
+ *         description: Account updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     firstName:
+ *                       type: string
+ *                     lastName:
+ *                       type: string
+ *                     email:
+ *                       type: string
+ *                     phone:
+ *                       type: string
+ *       400:
+ *         description: Validation error or incorrect current password
+ *       401:
+ *         description: Unauthorized
+ */
+router.patch(
+  '/:venueId/account',
+  authenticateTokenMiddleware,
+  validateRequest(updateAccountSchema),
+  authDashboardController.updateAccountController,
 )
 
 // --- Google OAuth Routes ---

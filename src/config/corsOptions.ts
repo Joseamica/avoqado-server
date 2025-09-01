@@ -8,13 +8,13 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
   const dashboardOrigins = {
     development: ['http://localhost:3000', 'http://localhost:8080'],
     staging: ['https://develop.avoqado-web-dashboard.pages.dev'],
-    production: ['https://dashboard.avoqado.io', 'https://app.avoqado.io'],
+    production: ['https://dashboard.avoqado.io', 'https://dashboardv2.avoqado.io'],
   }
 
   // Mobile apps use capacitor/webview origins on dev
   const mobileOrigins = {
     development: ['capacitor://localhost', 'http://localhost'],
-    staging: ['https://staging-app.avoqado.io'],
+    staging: [''],
     production: [''],
   }
 
