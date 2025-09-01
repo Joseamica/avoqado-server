@@ -7,10 +7,17 @@ import * as authController from '../../../../src/controllers/dashboard/auth.dash
 import * as authService from '../../../../src/services/dashboard/auth.service' // Import for direct mock reference
 import { AuthenticationError } from '../../../../src/errors/AppError'
 import { StaffRole } from '@prisma/client'
+import logger from '../../../../src/config/logger'
 import '../../../../src/types/express.d.ts' // Import the type declarations
 
 // Mock dependencies
 jest.mock('jsonwebtoken')
+jest.mock('../../../../src/config/logger', () => ({
+  error: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  debug: jest.fn(),
+}))
 jest.mock('../../../../src/services/dashboard/auth.service', () => ({
   loginStaff: jest.fn(),
   switchVenueForStaff: jest.fn(), // Also mock other functions if they exist in the service
@@ -366,7 +373,7 @@ describe('Dashboard Auth Controller', () => {
       await authController.dashboardLogoutController(req as Request, res as Response)
 
       expect(mockSessionDestroy).toHaveBeenCalled()
-      expect(console.error).toHaveBeenCalledWith('Error al destruir sesión:', mockSessionError)
+      expect(logger.error).toHaveBeenCalledWith('Error al destruir sesión:', mockSessionError)
       expect(res.status).toHaveBeenCalledWith(200)
       expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
     })
@@ -395,7 +402,7 @@ describe('Dashboard Auth Controller', () => {
       await expect(authController.dashboardLogoutController(req as Request, res as Response)).rejects.toThrow(
         new AuthenticationError('Error al cerrar sesión'),
       )
-      expect(console.error).toHaveBeenCalledWith('Error en logout:', clearCookieError)
+      expect(logger.error).toHaveBeenCalledWith('Error en logout:', clearCookieError)
     })
   })
   describe('switchVenueController', () => {
