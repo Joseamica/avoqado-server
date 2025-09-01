@@ -39,4 +39,4 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: FRONTEND_URL
-        value: https://staging.dashboard.avoqado.io
+        value: https://develop.avoqado-web-dashboard.pages.dev

@@ -147,7 +147,7 @@ Each Render service needs these environment variables:
 ```bash
 NODE_ENV=staging
 DATABASE_URL=postgresql://neondb_owner:npg_rzaM3Pyt4Tgf@ep-cold-math-aforhbky.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require
-FRONTEND_URL=https://staging.dashboard.avoqado.io
+FRONTEND_URL=https://develop.avoqado-web-dashboard.pages.dev
 # ... other secrets from your .env file
 ```
 

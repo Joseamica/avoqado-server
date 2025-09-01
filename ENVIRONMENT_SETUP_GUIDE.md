@@ -53,7 +53,7 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
 ## 🌐 Frontend URLs
 
-### Staging: `https://staging.dashboard.avoqado.io`
+### Staging: `https://develop.avoqado-web-dashboard.pages.dev`
 - CORS configured for staging API
 - Connected to dev database branch
 - Safe for testing and development
@@ -101,5 +101,5 @@ gh secret set RENDER_STAGING_SERVICE_ID --body "srv-xxxxx" # Get from Render das
 
 | Environment | Branch    | Database Branch | Frontend URL                        | API URL                                   |
 |-------------|-----------|-----------------|-------------------------------------|-------------------------------------------|
-| Staging     | `develop` | `dev`          | https://staging.dashboard.avoqado.io | https://avoqado-server-staging.onrender.com |
+| Staging     | `develop` | `dev`          | https://develop.avoqado-web-dashboard.pages.dev | https://avoqado-server-staging.onrender.com |
 | Production  | `main`    | `main`         | https://dashboard.avoqado.io        | https://avoqado-server.onrender.com       |
