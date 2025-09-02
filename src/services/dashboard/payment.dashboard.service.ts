@@ -27,8 +27,13 @@ export async function getPaymentsData(venueId: string, page: number, pageSize: n
     prisma.payment.findMany({
       where: whereClause,
       include: {
-        processedBy: true, // El nuevo 'staff'
-        order: true, // Incluimos la orden para tener más contexto
+        processedBy: true, // El staff que procesó el pago
+        shift: true, // Información del turno
+        order: {
+          include: {
+            table: true, // Información de la mesa
+          },
+        },
       },
       orderBy: {
         createdAt: 'desc',
@@ -60,8 +65,13 @@ export async function getPaymentById(paymentId: string) {
   const payment = await prisma.payment.findUnique({
     where: { id: paymentId },
     include: {
-      processedBy: true, // Reemplaza a 'staff'
-      order: true,
+      processedBy: true, // Staff que procesó el pago
+      shift: true, // Información del turno
+      order: {
+        include: {
+          table: true, // AQUÍ INCLUIMOS LA INFORMACIÓN DE LA MESA
+        },
+      },
     },
   })
 
