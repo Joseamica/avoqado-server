@@ -468,18 +468,88 @@ async function main() {
       console.log(`      - Created VenueSettings and assigned Features.`)
 
       const terminals = await Promise.all(
-        Array.from({ length: 2 }).map((_, t) =>
-          prisma.terminal.create({
-            data: {
-              venueId: venue.id,
-              serialNumber: faker.string.uuid(),
-              name: `TPV ${t + 1}`,
-              type: TerminalType.TPV_ANDROID,
+        Array.from({ length: 3 }).map((_, t) => {
+          // Create varied TPV health scenarios for testing
+          const scenarios = [
+            {
               status: TerminalStatus.ACTIVE,
-              lastHeartbeat: new Date(),
+              lastHeartbeat: new Date(Date.now() - 30 * 1000), // 30 seconds ago - online
+              version: '2.1.4',
+              systemInfo: {
+                platform: 'Android 13',
+                memory: { total: 4096, free: 2048, used: 2048 },
+                uptime: 86400, // 24 hours in seconds
+                cpuUsage: 15.2,
+                diskSpace: { total: 64000, free: 32000, used: 32000 },
+                batteryLevel: 85,
+                wifiSignal: -42,
+                lastRestart: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+              },
+              ipAddress: faker.internet.ipv4(),
             },
-          }),
-        ),
+            {
+              status: TerminalStatus.MAINTENANCE,
+              lastHeartbeat: new Date(Date.now() - 10 * 60 * 1000), // 10 minutes ago - maintenance
+              version: '2.1.3',
+              systemInfo: {
+                platform: 'Android 12',
+                memory: { total: 2048, free: 512, used: 1536 },
+                uptime: 43200, // 12 hours in seconds
+                cpuUsage: 5.8,
+                diskSpace: { total: 32000, free: 8000, used: 24000 },
+                batteryLevel: 45,
+                wifiSignal: -58,
+                lastRestart: new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString(),
+              },
+              ipAddress: faker.internet.ipv4(),
+            },
+            {
+              status: TerminalStatus.INACTIVE,
+              lastHeartbeat: new Date(Date.now() - 5 * 60 * 1000), // 5 minutes ago - will be detected as offline
+              version: '2.0.8',
+              systemInfo: {
+                platform: 'Android 11',
+                memory: { total: 4096, free: 1024, used: 3072 },
+                uptime: 7200, // 2 hours in seconds
+                cpuUsage: 35.7,
+                diskSpace: { total: 64000, free: 16000, used: 48000 },
+                batteryLevel: 12,
+                wifiSignal: -75,
+                lastRestart: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+              },
+              ipAddress: faker.internet.ipv4(),
+            },
+          ]
+
+          const scenario = scenarios[t] || scenarios[0]
+
+          // Use actual device serial for the first terminal (development device)
+          const serialNumber =
+            t === 0 && venue.name.includes('Avoqado Centro')
+              ? '9701a1cbf798fb92' // Your actual Android device serial
+              : faker.string.uuid()
+
+          return prisma.terminal.create({
+            data: {
+              id:
+                t === 0 && venue.name.includes('Avoqado Centro')
+                  ? '9701a1cbf798fb92' // Use device serial as ID for development terminal
+                  : undefined, // Let Prisma generate UUID for others
+              venueId: venue.id,
+              serialNumber,
+              name:
+                t === 0 && venue.name.includes('Avoqado Centro')
+                  ? 'TPV Desarrollo (Android)' // Clear name for development device
+                  : `TPV ${t + 1}`,
+              type: TerminalType.TPV_ANDROID,
+              status: scenario.status,
+              lastHeartbeat: scenario.lastHeartbeat,
+              version: scenario.version,
+              systemInfo: scenario.systemInfo,
+              ipAddress: scenario.ipAddress,
+            },
+          })
+        }),
       )
       console.log(`      - Created ${terminals.length} terminals.`)
 
@@ -758,6 +828,7 @@ async function main() {
             NotificationType.LOW_INVENTORY,
             NotificationType.NEW_REVIEW,
             NotificationType.SHIFT_REMINDER,
+            NotificationType.POS_DISCONNECTED,
             NotificationType.ANNOUNCEMENT,
           ])
 
@@ -830,6 +901,35 @@ async function main() {
               actionLabel = 'Ver Horario'
               entityType = 'shift'
               entityId = faker.string.uuid()
+              break
+
+            case NotificationType.POS_DISCONNECTED:
+              const terminalName = getRandomItem(['TPV 1', 'TPV 2', 'TPV 3'])
+              const disconnectionTypes = [
+                {
+                  title: 'TPV Desconectado',
+                  message: `El terminal ${terminalName} se ha desconectado.`,
+                  actionLabel: 'Verificar Conexión',
+                },
+                {
+                  title: 'TPV En Mantenimiento',
+                  message: `El terminal ${terminalName} entró en modo mantenimiento.`,
+                  actionLabel: 'Ver Estado',
+                },
+                {
+                  title: 'TPV Batería Baja',
+                  message: `El terminal ${terminalName} tiene batería baja (${faker.number.int({ min: 5, max: 20 })}%).`,
+                  actionLabel: 'Verificar Terminal',
+                },
+              ]
+              const disconnectionScenario = getRandomItem(disconnectionTypes)
+              title = disconnectionScenario.title
+              message = disconnectionScenario.message
+              actionUrl = `/terminals/${terminalName.toLowerCase().replace(' ', '-')}`
+              actionLabel = disconnectionScenario.actionLabel
+              entityType = 'terminal'
+              entityId = faker.string.uuid()
+              metadata = { terminalName }
               break
 
             case NotificationType.ANNOUNCEMENT:

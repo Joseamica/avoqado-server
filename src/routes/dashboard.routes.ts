@@ -1342,6 +1342,220 @@ router.put(
 
 /**
  * @openapi
+ * /api/v1/tpv/heartbeat:
+ *   post:
+ *     tags: [TPV Health]
+ *     summary: Process heartbeat from TPV terminal
+ *     description: Endpoint for TPV terminals to send periodic heartbeat data
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               terminalId:
+ *                 type: string
+ *                 description: Unique terminal identifier
+ *               timestamp:
+ *                 type: string
+ *                 format: date-time
+ *                 description: Heartbeat timestamp
+ *               status:
+ *                 type: string
+ *                 enum: [ACTIVE, MAINTENANCE]
+ *                 description: Current terminal status
+ *               version:
+ *                 type: string
+ *                 description: AvoqadoPOS version
+ *               systemInfo:
+ *                 type: object
+ *                 description: System information (platform, memory, uptime, etc.)
+ *     responses:
+ *       200:
+ *         description: Heartbeat processed successfully
+ *       400:
+ *         description: Invalid heartbeat data
+ *       404:
+ *         description: Terminal not found
+ */
+router.post('/tpv/heartbeat', tpvController.processHeartbeat)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tpv/{terminalId}/command:
+ *   post:
+ *     tags: [TPV Commands]
+ *     summary: Send command to TPV terminal
+ *     description: Send remote commands to TPV terminals for maintenance, updates, or control
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: terminalId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The ID or serial number of the terminal
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               command:
+ *                 type: string
+ *                 enum: [SHUTDOWN, RESTART, MAINTENANCE_MODE, UPDATE_STATUS]
+ *                 description: Command to send to terminal
+ *               payload:
+ *                 type: object
+ *                 description: Optional command payload
+ *             required:
+ *               - command
+ *     responses:
+ *       200:
+ *         description: Command sent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 timestamp:
+ *                   type: string
+ *       400:
+ *         description: Invalid command data
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Insufficient permissions
+ *       404:
+ *         description: Terminal not found or offline
+ */
+router.post(
+  '/tpv/:terminalId/command',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  tpvController.sendTpvCommand,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/health:
+ *   get:
+ *     tags: [TPV Health]
+ *     summary: Get health summary for all terminals in venue
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The venue ID
+ *     responses:
+ *       200:
+ *         description: Health summary retrieved successfully
+ *       403:
+ *         description: Forbidden
+ */
+router.get(
+  '/venues/:venueId/tpvs/health',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  tpvController.getVenueTerminalHealth,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}/health:
+ *   get:
+ *     tags: [TPV Health]
+ *     summary: Get detailed health info for specific terminal
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The venue ID
+ *       - name: tpvId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The terminal ID
+ *     responses:
+ *       200:
+ *         description: Terminal health retrieved successfully
+ *       404:
+ *         description: Terminal not found
+ *       403:
+ *         description: Forbidden
+ */
+router.get(
+  '/venues/:venueId/tpv/:tpvId/health',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  tpvController.getTerminalHealth,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}/command:
+ *   post:
+ *     tags: [TPV Health]
+ *     summary: Send command to TPV terminal
+ *     description: Send control commands to TPV terminals (SUPERADMIN, ADMIN, OWNER only)
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The venue ID
+ *       - name: tpvId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The terminal ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               command:
+ *                 type: object
+ *                 properties:
+ *                   type:
+ *                     type: string
+ *                     enum: [SHUTDOWN, RESTART, MAINTENANCE_MODE, UPDATE_STATUS]
+ *                   payload:
+ *                     type: object
+ *                     description: Optional command payload
+ *     responses:
+ *       200:
+ *         description: Command sent successfully
+ *       403:
+ *         description: Forbidden - insufficient permissions
+ *       404:
+ *         description: Terminal not found or offline
+ */
+router.post(
+  '/venues/:venueId/tpv/:tpvId/command',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN]),
+  tpvController.sendTpvCommand,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/general-stats:
  *   get:
  *     tags: [Dashboard Analytics]

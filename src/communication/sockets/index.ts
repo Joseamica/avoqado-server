@@ -278,6 +278,110 @@ export function broadcastSystemAlert(venueId: string, alertData: any, options?: 
 }
 
 /**
+ * Broadcast TPV command
+ * Convenience function for sending commands to specific TPV terminals
+ */
+export function broadcastTpvCommand(
+  terminalId: string,
+  venueId: string,
+  command: {
+    type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS'
+    payload?: any
+    requestedBy: string
+  },
+  options?: BroadcastOptions,
+): void {
+  try {
+    if (socketManager.getServer()) {
+      // Broadcast to venue since we don't have room-specific functionality yet
+      socketManager.broadcastToVenue(
+        venueId,
+        'tpv_command' as any,
+        {
+          terminalId,
+          venueId,
+          command,
+          correlationId: require('uuid').v4(),
+          timestamp: new Date(),
+        },
+        options,
+      )
+
+      // Also broadcast command sent notification for admin visibility
+      socketManager.broadcastToVenue(
+        venueId,
+        'tpv_command_sent' as any,
+        {
+          terminalId,
+          command: command.type,
+          requestedBy: command.requestedBy,
+          timestamp: new Date(),
+        },
+        options,
+      )
+    } else {
+      logger.warn('Socket server not initialized for TPV command', {
+        terminalId,
+        venueId,
+        commandType: command.type,
+      })
+    }
+  } catch (error) {
+    logger.error('Error broadcasting TPV command', {
+      terminalId,
+      venueId,
+      commandType: command.type,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
+ * Broadcast TPV status update
+ * Function for broadcasting when a TPV terminal changes status
+ */
+export function broadcastTpvStatusUpdate(
+  terminalId: string,
+  venueId: string,
+  statusData: {
+    status: string
+    lastHeartbeat?: Date
+    version?: string
+    ipAddress?: string
+    systemInfo?: any
+  },
+  options?: BroadcastOptions,
+): void {
+  try {
+    if (socketManager.getServer()) {
+      socketManager.broadcastToVenue(
+        venueId,
+        'tpv_status_update' as any,
+        {
+          terminalId,
+          ...statusData,
+          correlationId: require('uuid').v4(),
+          timestamp: new Date(),
+        },
+        options,
+      )
+    } else {
+      logger.warn('Socket server not initialized for TPV status update', {
+        terminalId,
+        venueId,
+        status: statusData.status,
+      })
+    }
+  } catch (error) {
+    logger.error('Error broadcasting TPV status update', {
+      terminalId,
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Get connection statistics
  * Useful for monitoring and analytics
  */

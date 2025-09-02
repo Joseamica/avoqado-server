@@ -1099,6 +1099,11 @@ model Terminal {
   status        TerminalStatus @default(INACTIVE)
   lastHeartbeat DateTime?
 
+  // Health monitoring
+  version       String? // AvoqadoPOS version
+  systemInfo    Json?   // Platform, memory, uptime, etc.
+  ipAddress     String? // Last known IP address
+
   // Configuration
   config Json?
 

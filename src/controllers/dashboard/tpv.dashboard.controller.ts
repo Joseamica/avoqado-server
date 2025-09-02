@@ -1,6 +1,8 @@
-import { Request, Response, NextFunction } from 'express'
-import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
+import { NextFunction, Request, Response } from 'express'
 import { GetTerminalsQuery, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
+import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
+import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
+import { BadRequestError } from '../../errors/AppError'
 
 /**
  * Controlador para manejar la solicitud GET de terminales.
@@ -63,6 +65,104 @@ export async function updateTpv(
     const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData)
 
     res.status(200).json(updatedTpv)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Controlador para procesar heartbeat de TPV
+ */
+export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const heartbeatData = req.body
+    const clientIp = req.ip || req.connection.remoteAddress
+
+    await tpvHealthService.processHeartbeat(heartbeatData, clientIp)
+
+    res.status(200).json({
+      success: true,
+      message: 'Heartbeat processed successfully',
+      timestamp: new Date().toISOString(),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Controlador para enviar comando a TPV
+ */
+export async function sendTpvCommand(
+  req: Request<{ terminalId: string }, {}, { command: string; payload?: any }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { terminalId } = req.params
+    const { command, payload } = req.body
+    const requestedBy = (req as any).authContext?.userId || 'system'
+
+    // Validate command logic
+    if (command === 'EXIT_MAINTENANCE') {
+      // Check if terminal is actually in maintenance mode
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      if (terminalHealth.status !== 'MAINTENANCE') {
+        throw new BadRequestError(`Terminal ${terminalId} is not in maintenance mode (current status: ${terminalHealth.status})`)
+      }
+    } else if (command === 'MAINTENANCE_MODE') {
+      // Check if terminal is already in maintenance mode
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      if (terminalHealth.status === 'MAINTENANCE') {
+        throw new BadRequestError(`Terminal ${terminalId} is already in maintenance mode`)
+      }
+    }
+
+    await tpvHealthService.sendCommand(terminalId, {
+      type: command as any,
+      payload,
+      requestedBy,
+    })
+
+    res.status(200).json({
+      success: true,
+      message: `Command ${command} sent to terminal ${terminalId}`,
+      timestamp: new Date().toISOString(),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Controlador para obtener salud de terminales del venue
+ */
+export async function getVenueTerminalHealth(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+
+    const healthSummary = await tpvHealthService.getVenueTerminalHealth(venueId)
+
+    res.status(200).json(healthSummary)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Controlador para obtener información detallada de salud de un terminal
+ */
+export async function getTerminalHealth(
+  req: Request<{ venueId: string; tpvId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { tpvId } = req.params
+
+    const terminalHealth = await tpvHealthService.getTerminalHealth(tpvId)
+
+    res.status(200).json(terminalHealth)
   } catch (error) {
     next(error)
   }

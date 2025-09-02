@@ -15,6 +15,7 @@ import { CommandListener } from './communication/rabbitmq/commandListener'
 import { CommandRetryService } from './communication/rabbitmq/commandRetryService'
 import { startEventConsumer } from './communication/rabbitmq/consumer'
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
+import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 
@@ -36,6 +37,10 @@ const gracefulShutdown = async (signal: string) => {
       logger.info('Stopping command services...')
       await commandListener.stop()
       commandRetryService.stop()
+
+      // Stop TPV health monitor
+      logger.info('Stopping TPV health monitor...')
+      tpvHealthMonitorJob.stop()
 
       // Shutdown Socket.io server
       logger.info('Shutting down Socket.io server...')
@@ -101,7 +106,10 @@ const startApplication = async (retries = 3) => {
     // Start POS connection monitor
     startPosConnectionMonitor()
 
-    logger.info('✅ All communication services started successfully.')
+    // Start TPV health monitor
+    tpvHealthMonitorJob.start()
+
+    logger.info('✅ All communication and monitoring services started successfully.')
 
     // Start HTTP server
     if (require.main === module || NODE_ENV !== 'test') {
