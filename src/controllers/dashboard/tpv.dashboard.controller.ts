@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { GetTerminalsQuery, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
+import { BadRequestError } from '../../errors/AppError'
 
 /**
  * Controlador para manejar la solicitud GET de terminales.
@@ -101,6 +102,21 @@ export async function sendTpvCommand(
     const { terminalId } = req.params
     const { command, payload } = req.body
     const requestedBy = (req as any).authContext?.userId || 'system'
+
+    // Validate command logic
+    if (command === 'EXIT_MAINTENANCE') {
+      // Check if terminal is actually in maintenance mode
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      if (terminalHealth.status !== 'MAINTENANCE') {
+        throw new BadRequestError(`Terminal ${terminalId} is not in maintenance mode (current status: ${terminalHealth.status})`)
+      }
+    } else if (command === 'MAINTENANCE_MODE') {
+      // Check if terminal is already in maintenance mode
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      if (terminalHealth.status === 'MAINTENANCE') {
+        throw new BadRequestError(`Terminal ${terminalId} is already in maintenance mode`)
+      }
+    }
 
     await tpvHealthService.sendCommand(terminalId, {
       type: command as any,

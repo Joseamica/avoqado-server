@@ -285,7 +285,7 @@ export function broadcastTpvCommand(
   terminalId: string,
   venueId: string,
   command: {
-    type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'UPDATE_STATUS'
+    type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS'
     payload?: any
     requestedBy: string
   },

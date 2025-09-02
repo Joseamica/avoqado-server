@@ -20,7 +20,7 @@ export interface HeartbeatData {
 }
 
 export interface TpvCommand {
-  type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'UPDATE_STATUS'
+  type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS'
   payload?: any
   requestedBy: string
 }
@@ -61,10 +61,27 @@ export class TpvHealthService {
         heartbeatDate.setTime(Date.now())
       }
 
+      // Determine the status to set based on current terminal status and heartbeat
+      let newStatus: TerminalStatus
+      if (terminal.status === TerminalStatus.MAINTENANCE) {
+        // If terminal is in maintenance mode, only allow MAINTENANCE status from heartbeat
+        // ACTIVE heartbeats should not override maintenance mode set by admin commands
+        if (status === 'MAINTENANCE') {
+          newStatus = TerminalStatus.MAINTENANCE
+        } else {
+          // Keep maintenance mode, don't allow heartbeat to override it
+          newStatus = TerminalStatus.MAINTENANCE
+          logger.warn(`Terminal ${terminal.id} tried to send ACTIVE heartbeat while in maintenance mode - keeping maintenance status`)
+        }
+      } else {
+        // Normal status handling for non-maintenance terminals
+        newStatus = status === 'ACTIVE' ? TerminalStatus.ACTIVE : TerminalStatus.MAINTENANCE
+      }
+
       const updatedTerminal = await prisma.terminal.update({
         where: { id: terminal.id },
         data: {
-          status: status === 'ACTIVE' ? TerminalStatus.ACTIVE : TerminalStatus.MAINTENANCE,
+          status: newStatus,
           lastHeartbeat: heartbeatDate,
           version: version || terminal.version,
           systemInfo: (systemInfo as any) || terminal.systemInfo,
@@ -148,6 +165,14 @@ export class TpvHealthService {
           where: { id: terminalId },
           data: {
             status: TerminalStatus.MAINTENANCE,
+            updatedAt: new Date(),
+          },
+        })
+      } else if (command.type === 'EXIT_MAINTENANCE') {
+        await prisma.terminal.update({
+          where: { id: terminalId },
+          data: {
+            status: TerminalStatus.ACTIVE,
             updatedAt: new Date(),
           },
         })
