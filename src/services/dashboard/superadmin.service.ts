@@ -1103,3 +1103,99 @@ async function calculatePlatformRevenue(
     }
   }
 }
+
+/**
+ * Get list of all payment providers
+ */
+export async function getPaymentProvidersList() {
+  try {
+    logger.info('Getting payment providers list')
+
+    const providers = await prisma.paymentProvider.findMany({
+      where: { active: true },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        type: true,
+        countryCode: true,
+        active: true,
+      },
+      orderBy: { name: 'asc' },
+    })
+
+    return providers
+  } catch (error) {
+    logger.error('Error getting payment providers list:', error)
+    throw new Error('Failed to get payment providers list')
+  }
+}
+
+/**
+ * Get list of merchant accounts, optionally filtered by provider
+ */
+export async function getMerchantAccountsList(providerId?: string) {
+  try {
+    logger.info('Getting merchant accounts list', { providerId })
+
+    const whereClause: any = {}
+    if (providerId) {
+      whereClause.providerId = providerId
+    }
+
+    const merchantAccounts = await prisma.merchantAccount.findMany({
+      where: whereClause,
+      select: {
+        id: true,
+        externalMerchantId: true,
+        alias: true,
+        providerId: true,
+        provider: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+          },
+        },
+      },
+      orderBy: [{ provider: { name: 'asc' } }, { alias: 'asc' }],
+    })
+
+    return merchantAccounts.map(account => ({
+      id: account.id,
+      externalMerchantId: account.externalMerchantId,
+      alias: account.alias,
+      providerId: account.providerId,
+      providerName: account.provider.name,
+      active: true, // Assuming active if not specified
+    }))
+  } catch (error) {
+    logger.error('Error getting merchant accounts list:', error)
+    throw new Error('Failed to get merchant accounts list')
+  }
+}
+
+/**
+ * Get simplified venues list for dropdowns
+ */
+export async function getVenuesListSimple() {
+  try {
+    logger.info('Getting venues list (simple)')
+
+    const venues = await prisma.venue.findMany({
+      where: { active: true },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        active: true,
+      },
+      orderBy: { name: 'asc' },
+    })
+
+    return venues
+  } catch (error) {
+    logger.error('Error getting venues list:', error)
+    throw new Error('Failed to get venues list')
+  }
+}

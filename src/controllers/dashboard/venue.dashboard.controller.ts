@@ -3,6 +3,8 @@ import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 
 import { CreateVenueDto, ListVenuesQueryDto } from '../../schemas/dashboard/venue.schema' // Ajusta la ruta
+import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
+import logger from '../../config/logger'
 
 export async function listVenues(req: Request<{}, any, any, ListVenuesQueryDto>, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -96,6 +98,57 @@ export async function deleteVenue(req: Request<{ venueId: string }>, res: Respon
       message: 'Venue deleted successfully',
     })
   } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Enhanced venue creation with payment processing and pricing configuration
+ */
+export async function createEnhancedVenue(
+  req: Request<{}, any, EnhancedCreateVenueBody>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      logger.error('Organization context not found in enhanced venue creation')
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+
+    const userId = req.authContext?.userId
+    if (!userId) {
+      logger.error('User context not found in enhanced venue creation')
+      return next(new Error('Contexto de usuario no encontrado'))
+    }
+
+    const venueData: EnhancedCreateVenueBody = req.body
+
+    logger.info('Creating enhanced venue', {
+      orgId,
+      userId,
+      venueName: venueData.name,
+      enablePaymentProcessing: venueData.enablePaymentProcessing,
+      setupPricingStructure: venueData.setupPricingStructure,
+      pricingTier: venueData.pricingTier,
+    })
+
+    // Create the venue with enhanced features
+    const newVenue = await venueDashboardService.createEnhancedVenue(orgId, userId, venueData)
+
+    res.status(201).json({
+      success: true,
+      data: newVenue,
+      message: 'Enhanced venue created successfully',
+    })
+  } catch (error) {
+    logger.error('Error creating enhanced venue', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      userId: req.authContext?.userId,
+      venueName: req.body?.name,
+    })
     next(error)
   }
 }
