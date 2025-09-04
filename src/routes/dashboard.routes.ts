@@ -1044,7 +1044,7 @@ router.delete(
 router.get(
   '/venues/:venueId/payments',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   paymentController.getPaymentsData,
 )
 
@@ -1074,14 +1074,14 @@ router.get(
 router.get(
   '/venues/:venueId/orders', // Nueva ruta semántica
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   orderController.getOrdersData, // Apunta al nuevo controlador
 )
 
 router.get(
   '/venues/:venueId/orders/:orderId', // Nueva ruta semántica
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   orderController.getOrder, // Apunta al nuevo controlador
 )
 
@@ -1623,7 +1623,7 @@ router.post(
 router.get(
   '/venues/:venueId/general-stats',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getGeneralStats,
 )
@@ -1664,7 +1664,7 @@ router.get(
 router.get(
   '/venues/:venueId/basic-metrics',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getBasicMetrics,
 )
@@ -1707,7 +1707,7 @@ router.get(
 router.get(
   '/venues/:venueId/charts/:chartType',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getChartData,
 )
@@ -1750,7 +1750,7 @@ router.get(
 router.get(
   '/venues/:venueId/metrics/:metricType',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getExtendedMetrics,
 )
@@ -2866,7 +2866,7 @@ router.delete(
 router.get(
   '/venues/:venueId/shifts',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
   shiftController.getShifts,
 )
 
@@ -2890,7 +2890,7 @@ router.get(
 router.get(
   '/venues/:venueId/shifts/:shiftId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
   shiftController.getShift,
 )
 
@@ -2924,7 +2924,7 @@ router.get(
 router.get(
   '/venues/:venueId/shifts/summary',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
   shiftController.getShiftsSummary,
 )
 

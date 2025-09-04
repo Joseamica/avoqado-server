@@ -201,6 +201,79 @@ Comprehensive test suite organized by type:
 
 Test configuration includes coverage thresholds (70% global, 80% for critical services) and project-based Jest setup for parallel execution.
 
+## UI Design Guidelines
+
+### Color System (shadcn/ui)
+
+When working with the dashboard/web interface, always use **shadcn/ui semantic color tokens** instead of hardcoded colors. This ensures proper theming support and consistency across the application.
+
+#### Semantic Color Usage:
+
+**Backgrounds:**
+- `bg-background` - Main background color  
+- `bg-muted` - Subtle background for secondary elements
+- `bg-card` - Card/surface background
+- `bg-accent` - Accent background for hover states
+- `bg-primary` - Primary brand color background
+- `bg-secondary` - Secondary background
+- `bg-destructive` - Error/danger states
+
+**Text Colors:**
+- `text-foreground` - Primary text color
+- `text-muted-foreground` - Secondary/subtle text
+- `text-primary` - Primary brand color text
+- `text-secondary` - Secondary text color
+- `text-destructive` - Error/danger text
+
+**Borders:**
+- `border-border` - Default border color
+- `border-input` - Form input borders
+- `border-primary` - Primary brand color borders
+- `border-destructive` - Error state borders
+
+#### Status-Specific Colors:
+
+**Success/Online States:**
+- `bg-green-500/10 text-green-700 dark:text-green-400` for success backgrounds
+- `text-green-600` for success text
+
+**Warning/Maintenance States:**  
+- `bg-orange-500/10 text-orange-700 dark:text-orange-400` for warning backgrounds
+- `text-orange-600` for warning text
+- `bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400` for maintenance mode
+
+**Error/Offline States:**
+- `bg-destructive/10 text-destructive` for error backgrounds
+- Use `text-destructive` for error text
+
+#### Important Rules:
+1. **Never use hardcoded colors** like `bg-gray-50`, `text-blue-500`, etc.
+2. **Always use semantic tokens** that respect dark/light theme modes
+3. **Use opacity modifiers** (e.g., `/10`, `/20`) for subtle background effects
+4. **Provide dark mode alternatives** when using custom colors
+5. **Maintain consistency** across all UI components
+
+Reference: https://ui.shadcn.com/colors
+
+## Database Schema Documentation
+
+The complete database schema is documented in `/docs/DATABASE_SCHEMA.md`. This file contains:
+
+- **Comprehensive model explanations** with purpose and use cases
+- **Relationship documentation** showing how models connect
+- **Business logic examples** for each entity
+- **Schema evolution guidelines** for future changes
+
+### Schema Maintenance Rules:
+
+**CRITICAL**: When modifying `prisma/schema.prisma`, you MUST also update:
+1. `/docs/DATABASE_SCHEMA.md` - Add/update model documentation
+2. `CLAUDE.md` - Document the changes made
+3. Seed data in `prisma/seed.ts` if new models added
+4. Related API documentation
+
+The schema documentation serves as context for AI assistants and team members, so accuracy is essential.
+
 ## Development Notes
 
 - The server includes graceful shutdown handling for all services (HTTP, Socket.IO, RabbitMQ, database connections)
