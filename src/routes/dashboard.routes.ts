@@ -10,6 +10,7 @@ import { StaffRole } from '@prisma/client' // O '../security' si StaffRole está
 
 // Importa el SCHEMA de Zod, no el tipo DTO, para el middleware de validación
 import { createVenueSchema, listVenuesQuerySchema } from '../schemas/dashboard/venue.schema'
+import { enhancedCreateVenueSchema } from '../schemas/dashboard/cost-management.schema'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
@@ -905,6 +906,78 @@ router.post(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/enhanced:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Create a new venue with enhanced features (payment processing and pricing)
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - type
+ *               - logo
+ *               - address
+ *               - city
+ *               - state
+ *               - zipCode
+ *               - phone
+ *               - email
+ *             properties:
+ *               name: { type: string, description: "Venue name" }
+ *               type: { type: string, description: "Venue type" }
+ *               logo: { type: string, format: uri, description: "Logo URL" }
+ *               address: { type: string, description: "Street address" }
+ *               city: { type: string, description: "City" }
+ *               state: { type: string, description: "State/Province" }
+ *               country: { type: string, default: "MX", description: "Country code" }
+ *               zipCode: { type: string, description: "ZIP/Postal code" }
+ *               phone: { type: string, description: "Phone number" }
+ *               email: { type: string, format: email, description: "Email address" }
+ *               website: { type: string, format: uri, description: "Website URL" }
+ *               enablePaymentProcessing: { type: boolean, default: true, description: "Enable payment processing setup" }
+ *               primaryAccountId: { type: string, description: "Primary payment account ID" }
+ *               secondaryAccountId: { type: string, description: "Secondary payment account ID" }
+ *               tertiaryAccountId: { type: string, description: "Tertiary payment account ID" }
+ *               setupPricingStructure: { type: boolean, default: true, description: "Setup pricing structure" }
+ *               pricingTier: { type: string, enum: ["STANDARD", "PREMIUM", "ENTERPRISE", "CUSTOM"], default: "STANDARD", description: "Pricing tier" }
+ *               currency: { type: string, default: "MXN", description: "Currency code" }
+ *               timezone: { type: string, default: "America/Mexico_City", description: "Timezone" }
+ *     responses:
+ *       201:
+ *         description: Enhanced venue created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     venueId: { type: string }
+ *                     venue: { $ref: '#/components/schemas/Venue' }
+ *                     paymentProcessing: { type: boolean }
+ *                     pricingStructure: { type: boolean }
+ *                 message: { type: string }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/enhanced',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]), // Allow both OWNER and ADMIN
+  validateRequest(enhancedCreateVenueSchema),
+  venueController.createEnhancedVenue,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues:
  *   get:
  *     tags: [Venues]
@@ -1044,7 +1117,7 @@ router.delete(
 router.get(
   '/venues/:venueId/payments',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   paymentController.getPaymentsData,
 )
 
@@ -1074,14 +1147,14 @@ router.get(
 router.get(
   '/venues/:venueId/orders', // Nueva ruta semántica
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   orderController.getOrdersData, // Apunta al nuevo controlador
 )
 
 router.get(
   '/venues/:venueId/orders/:orderId', // Nueva ruta semántica
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   orderController.getOrder, // Apunta al nuevo controlador
 )
 
@@ -1623,7 +1696,7 @@ router.post(
 router.get(
   '/venues/:venueId/general-stats',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getGeneralStats,
 )
@@ -1664,7 +1737,7 @@ router.get(
 router.get(
   '/venues/:venueId/basic-metrics',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getBasicMetrics,
 )
@@ -1707,7 +1780,7 @@ router.get(
 router.get(
   '/venues/:venueId/charts/:chartType',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getChartData,
 )
@@ -1750,7 +1823,7 @@ router.get(
 router.get(
   '/venues/:venueId/metrics/:metricType',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getExtendedMetrics,
 )
@@ -2866,7 +2939,7 @@ router.delete(
 router.get(
   '/venues/:venueId/shifts',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
   shiftController.getShifts,
 )
 
@@ -2890,7 +2963,7 @@ router.get(
 router.get(
   '/venues/:venueId/shifts/:shiftId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
   shiftController.getShift,
 )
 
@@ -2924,7 +2997,7 @@ router.get(
 router.get(
   '/venues/:venueId/shifts/summary',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
   shiftController.getShiftsSummary,
 )
 

@@ -20,7 +20,7 @@ export interface HeartbeatData {
 }
 
 export interface TpvCommand {
-  type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS'
+  type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS' | 'REACTIVATE'
   payload?: any
   requestedBy: string
 }
@@ -64,14 +64,16 @@ export class TpvHealthService {
       // Determine the status to set based on current terminal status and heartbeat
       let newStatus: TerminalStatus
       if (terminal.status === TerminalStatus.MAINTENANCE) {
-        // If terminal is in maintenance mode, only allow MAINTENANCE status from heartbeat
-        // ACTIVE heartbeats should not override maintenance mode set by admin commands
+        // If terminal is in maintenance mode, check if this is a force exit attempt
         if (status === 'MAINTENANCE') {
           newStatus = TerminalStatus.MAINTENANCE
+        } else if (status === 'ACTIVE') {
+          // Allow ACTIVE heartbeats to override maintenance mode (for force exits)
+          // This enables force exit functionality from client apps
+          newStatus = TerminalStatus.ACTIVE
+          logger.info(`Terminal ${terminal.id} force exited maintenance mode via ACTIVE heartbeat`)
         } else {
-          // Keep maintenance mode, don't allow heartbeat to override it
           newStatus = TerminalStatus.MAINTENANCE
-          logger.warn(`Terminal ${terminal.id} tried to send ACTIVE heartbeat while in maintenance mode - keeping maintenance status`)
         }
       } else {
         // Normal status handling for non-maintenance terminals
@@ -133,23 +135,38 @@ export class TpvHealthService {
       }
 
       // Check if terminal is online (heartbeat within last 2 minutes)
+      // Exception: EXIT_MAINTENANCE and REACTIVATE can be executed even when terminal is offline
       const cutoff = new Date(Date.now() - 2 * 60 * 1000)
-      if (!terminal.lastHeartbeat || terminal.lastHeartbeat < cutoff) {
+      const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
+      const canExecuteOffline = command.type === 'EXIT_MAINTENANCE' || command.type === 'REACTIVATE'
+
+      if (!isOnline && !canExecuteOffline) {
         throw new Error(`Terminal ${terminalId} is offline and cannot receive commands`)
       }
 
-      // Send command via Socket.io to the terminal
-      const { broadcastTpvCommand } = require('../../communication/sockets')
+      // Send command via Socket.io to the terminal (only if online)
+      if (isOnline) {
+        const { broadcastTpvCommand } = require('../../communication/sockets')
 
-      // Use serial number for Android device compatibility
-      broadcastTpvCommand(terminal.serialNumber || terminal.id, terminal.venueId, command)
-      logger.info(`Command sent to terminal ${terminal.id}:`, {
-        terminalId: terminal.id,
-        serialNumber: terminal.serialNumber,
-        command: command.type,
-        requestedBy: command.requestedBy,
-        venueId: terminal.venueId,
-      })
+        // Use serial number for Android device compatibility
+        broadcastTpvCommand(terminal.serialNumber || terminal.id, terminal.venueId, command)
+        logger.info(`Command sent to terminal ${terminal.id}:`, {
+          terminalId: terminal.id,
+          serialNumber: terminal.serialNumber,
+          command: command.type,
+          requestedBy: command.requestedBy,
+          venueId: terminal.venueId,
+        })
+      } else {
+        logger.info(`Command executed offline for terminal ${terminal.id}:`, {
+          terminalId: terminal.id,
+          serialNumber: terminal.serialNumber,
+          command: command.type,
+          requestedBy: command.requestedBy,
+          venueId: terminal.venueId,
+          reason: 'Terminal offline - database status updated only',
+        })
+      }
 
       // Update status based on command
       if (command.type === 'SHUTDOWN') {
@@ -169,6 +186,14 @@ export class TpvHealthService {
           },
         })
       } else if (command.type === 'EXIT_MAINTENANCE') {
+        await prisma.terminal.update({
+          where: { id: terminalId },
+          data: {
+            status: TerminalStatus.ACTIVE,
+            updatedAt: new Date(),
+          },
+        })
+      } else if (command.type === 'REACTIVATE') {
         await prisma.terminal.update({
           where: { id: terminalId },
           data: {
@@ -198,7 +223,7 @@ export class TpvHealthService {
             lt: cutoff,
           },
           status: {
-            in: [TerminalStatus.ACTIVE, TerminalStatus.MAINTENANCE],
+            in: [TerminalStatus.ACTIVE], // Only mark ACTIVE terminals as offline, preserve MAINTENANCE state
           },
         },
         data: {

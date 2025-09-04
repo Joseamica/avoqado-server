@@ -1,9 +1,11 @@
 // src/services/dashboard/venue.dashboard.service.ts
 import prisma from '../../utils/prismaClient' // Tu instancia de Prisma Client
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema' // Ajusta la ruta
-import { Venue } from '@prisma/client'
+import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
+import { Venue, AccountType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError' // Tu error personalizado
 import { generateSlug } from '../../utils/slugify'
+import logger from '../../config/logger'
 
 // Función para generar slugs (podría estar en un utilitario)
 
@@ -48,9 +50,12 @@ export async function createVenueForOrganization(orgId: string, venueData: Creat
   return newVenue
 }
 
-export async function listVenuesForOrganization(_orgId: string, _queryOptions: any /* ListVenuesQueryDto */): Promise<Venue[]> {
+export async function listVenuesForOrganization(orgId: string, _queryOptions: any /* ListVenuesQueryDto */): Promise<Venue[]> {
   // Aquí implementarías la lógica para paginación, filtros, ordenación basados en queryOptions
   return prisma.venue.findMany({
+    where: {
+      organizationId: orgId,
+    },
     // orderBy: { [queryOptions.sortBy || 'createdAt']: queryOptions.sortOrder || 'desc' },
     // skip: (queryOptions.page - 1) * queryOptions.limit,
     // take: queryOptions.limit,
@@ -58,9 +63,10 @@ export async function listVenuesForOrganization(_orgId: string, _queryOptions: a
 }
 
 export async function getVenueById(orgId: string, venueId: string): Promise<Venue> {
-  const venue = await prisma.venue.findUnique({
+  const venue = await prisma.venue.findFirst({
     where: {
       id: venueId,
+      organizationId: orgId,
     },
     include: {
       menuCategories: true,
@@ -169,5 +175,200 @@ export async function deleteVenue(orgId: string, venueId: string): Promise<void>
   // Delete the venue (this will cascade to related records based on schema)
   await prisma.venue.delete({
     where: { id: venueId },
+  })
+}
+
+/**
+ * Enhanced venue creation with payment processing and pricing configuration
+ */
+export async function createEnhancedVenue(orgId: string, userId: string, venueData: EnhancedCreateVenueBody) {
+  logger.info('Creating enhanced venue', { orgId, userId, venueName: venueData.name })
+
+  // Start a transaction to ensure data consistency
+  return await prisma.$transaction(async tx => {
+    // 1. Generate slug if not provided
+    let slugToUse = generateSlug(venueData.name)
+
+    // 2. Check slug uniqueness within organization
+    const existingVenueWithSlug = await tx.venue.findFirst({
+      where: {
+        organizationId: orgId,
+        slug: slugToUse,
+      },
+    })
+
+    if (existingVenueWithSlug) {
+      slugToUse = `${slugToUse}-${Date.now()}` // Make it unique
+    }
+
+    // 3. Create the venue with enhanced data
+    const newVenue = await tx.venue.create({
+      data: {
+        name: venueData.name,
+        type: venueData.type as any, // Cast to enum
+        logo: venueData.logo,
+        slug: slugToUse,
+        organizationId: orgId,
+
+        // Location information
+        address: venueData.address,
+        city: venueData.city,
+        state: venueData.state,
+        zipCode: venueData.zipCode,
+
+        // Contact information
+        phone: venueData.phone,
+        email: venueData.email,
+        website: venueData.website || null,
+
+        // Business configuration
+        // pos: venueData.pos as any, // Cast to enum
+        currency: venueData.currency,
+        timezone: venueData.timezone,
+
+        // Set as active by default
+        active: true,
+      },
+    })
+
+    logger.info('Venue created', { venueId: newVenue.id, venueName: newVenue.name })
+
+    // 4. Setup payment processing if enabled
+    if (venueData.enablePaymentProcessing) {
+      await setupPaymentProcessing(tx, newVenue.id, venueData)
+    }
+
+    // 5. Setup pricing structure if enabled
+    if (venueData.setupPricingStructure) {
+      await setupPricingStructure(tx, newVenue.id, venueData)
+    }
+
+    // 6. Create default staff member (venue owner)
+    // await tx.staffVenue.create({
+    //   data: {
+    //     userId: userId,
+    //     venueId: newVenue.id,
+    //     role: 'OWNER', // Highest role
+    //     active: true,
+    //   },
+    // })
+
+    logger.info('Enhanced venue creation completed', {
+      venueId: newVenue.id,
+      paymentProcessing: venueData.enablePaymentProcessing,
+      pricingStructure: venueData.setupPricingStructure,
+    })
+
+    return {
+      venueId: newVenue.id,
+      venue: newVenue,
+      paymentProcessing: venueData.enablePaymentProcessing,
+      pricingStructure: venueData.setupPricingStructure,
+    }
+  })
+}
+
+/**
+ * Setup payment processing configuration for venue
+ */
+async function setupPaymentProcessing(tx: any, venueId: string, venueData: EnhancedCreateVenueBody) {
+  logger.info('Setting up payment processing', { venueId })
+
+  // Default routing rules if not provided
+  const defaultRoutingRules = {
+    factura: 'secondary',
+    amount_over: 5000,
+    peak_hours: {
+      start: '18:00',
+      end: '22:00',
+      account: 'secondary',
+    },
+  }
+
+  const routingRules = venueData.routingRules || defaultRoutingRules
+
+  // Create venue payment configuration
+  const paymentConfig = await tx.venuePaymentConfig.create({
+    data: {
+      venueId: venueId,
+      primaryAccountId: venueData.primaryAccountId || null,
+      secondaryAccountId: venueData.secondaryAccountId || null,
+      tertiaryAccountId: venueData.tertiaryAccountId || null,
+      routingRules: routingRules,
+      preferredProcessor: 'AUTO',
+    },
+  })
+
+  logger.info('Payment processing configured', { venueId, configId: paymentConfig.id })
+}
+
+/**
+ * Setup pricing structure for venue
+ */
+async function setupPricingStructure(tx: any, venueId: string, venueData: EnhancedCreateVenueBody) {
+  logger.info('Setting up pricing structure', { venueId, pricingTier: venueData.pricingTier })
+
+  // Define pricing tiers
+  const pricingTiers = {
+    STANDARD: {
+      debitRate: 0.02, // 2.0%
+      creditRate: 0.03, // 3.0%
+      amexRate: 0.04, // 4.0%
+      internationalRate: 0.045, // 4.5%
+      fixedFeePerTransaction: 0.75,
+      monthlyServiceFee: 799.0,
+    },
+    PREMIUM: {
+      debitRate: 0.018, // 1.8%
+      creditRate: 0.028, // 2.8%
+      amexRate: 0.038, // 3.8%
+      internationalRate: 0.043, // 4.3%
+      fixedFeePerTransaction: 0.7,
+      monthlyServiceFee: 1299.0,
+    },
+    ENTERPRISE: {
+      debitRate: 0.015, // 1.5%
+      creditRate: 0.025, // 2.5%
+      amexRate: 0.035, // 3.5%
+      internationalRate: 0.04, // 4.0%
+      fixedFeePerTransaction: 0.65,
+      monthlyServiceFee: 1999.0,
+    },
+    CUSTOM: {
+      debitRate: venueData.debitRate || 0.02,
+      creditRate: venueData.creditRate || 0.03,
+      amexRate: venueData.amexRate || 0.04,
+      internationalRate: venueData.internationalRate || 0.045,
+      fixedFeePerTransaction: venueData.fixedFeePerTransaction || 0.75,
+      monthlyServiceFee: venueData.monthlyServiceFee || 799.0,
+    },
+  }
+
+  const tier = pricingTiers[venueData.pricingTier || 'STANDARD']
+
+  // Create pricing structure for PRIMARY account type
+  const pricingStructure = await tx.venuePricingStructure.create({
+    data: {
+      venueId: venueId,
+      accountType: AccountType.PRIMARY,
+      debitRate: tier.debitRate,
+      creditRate: tier.creditRate,
+      amexRate: tier.amexRate,
+      internationalRate: tier.internationalRate,
+      fixedFeePerTransaction: tier.fixedFeePerTransaction,
+      monthlyServiceFee: tier.monthlyServiceFee,
+      minimumMonthlyVolume: venueData.minimumMonthlyVolume || null,
+      effectiveFrom: new Date(),
+      active: true,
+      contractReference: `VENUE-${venueId}-${venueData.pricingTier || 'STANDARD'}-${Date.now()}`,
+      notes: `Automatic pricing setup for ${venueData.pricingTier || 'STANDARD'} tier`,
+    },
+  })
+
+  logger.info('Pricing structure configured', {
+    venueId,
+    pricingId: pricingStructure.id,
+    tier: venueData.pricingTier,
+    monthlyFee: tier.monthlyServiceFee,
   })
 }

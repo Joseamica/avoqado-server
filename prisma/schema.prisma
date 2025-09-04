@@ -112,6 +112,13 @@ model Venue {
   // AI Training
   chatTrainingData ChatTrainingData[] @relation("VenueChatTraining")
 
+  // Payment Provider Integration
+  paymentConfig        VenuePaymentConfig?
+  webhookSubscriptions WebhookSubscription[]
+  providerEvents       ProviderEventLog[]
+  pricingStructures    VenuePricingStructure[]
+  monthlyProfits       MonthlyVenueProfit[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -844,9 +851,10 @@ model Payment {
   syncedAt     DateTime?
 
   // Relations
-  transaction VenueTransaction?
-  allocations PaymentAllocation[] // ✅ LÍNEA AGREGADA
-  review      Review? // ✅ LÍNEA AGREGADA (en singular porque es 1-a-1)
+  transaction     VenueTransaction?
+  allocations     PaymentAllocation[] // ✅ LÍNEA AGREGADA
+  review          Review? // ✅ LÍNEA AGREGADA (en singular porque es 1-a-1)
+  transactionCost TransactionCost?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1100,12 +1108,15 @@ model Terminal {
   lastHeartbeat DateTime?
 
   // Health monitoring
-  version       String? // AvoqadoPOS version
-  systemInfo    Json?   // Platform, memory, uptime, etc.
-  ipAddress     String? // Last known IP address
+  version    String? // AvoqadoPOS version
+  systemInfo Json? // Platform, memory, uptime, etc.
+  ipAddress  String? // Last known IP address
 
   // Configuration
   config Json?
+
+  // Preferred processor for this TPV (LEGACY/MENTA/AUTO)
+  preferredProcessor PaymentProcessor @default(AUTO)
 
   reviews Review[] // ✅ LÍNEA AGREGADA
 
@@ -1113,6 +1124,335 @@ model Terminal {
   updatedAt DateTime @updatedAt
 
   @@index([venueId])
+  @@index([status])
+}
+
+// ==========================================
+// NOTE: PAYMENT PROVIDER INTEGRATION
+// ==========================================
+
+// Generic payment provider model
+model PaymentProvider {
+  id          String       @id @default(cuid())
+  code        String       @unique // "MENTA", "CLIP", "BANORTE_DIRECT", etc.
+  name        String // "Menta", "Clip", "Banorte Direct"
+  type        ProviderType // PAYMENT_PROCESSOR, BANK_DIRECT, WALLET
+  countryCode String[] // ["MX", "AR"]
+  active      Boolean      @default(true)
+
+  // Provider-specific configuration schema
+  configSchema Json? // JSON schema for validation
+
+  // Relations
+  merchants      MerchantAccount[]
+  webhooks       WebhookSubscription[]
+  eventLogs      ProviderEventLog[]
+  costStructures ProviderCostStructure[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([code])
+  @@index([type])
+}
+
+// Generic merchant account (works for any provider)
+model MerchantAccount {
+  id String @id @default(cuid())
+
+  // Provider relationship
+  providerId String
+  provider   PaymentProvider @relation(fields: [providerId], references: [id])
+
+  // Generic merchant info
+  externalMerchantId String // Provider's merchant ID
+  alias              String?
+
+  // Encrypted credentials (provider-agnostic)
+  credentialsEncrypted Json // Different per provider
+
+  // Provider-specific config
+  providerConfig Json? // Flexible config per provider
+
+  // Relations
+  venueConfigsPrimary   VenuePaymentConfig[]    @relation("PrimaryAccount")
+  venueConfigsSecondary VenuePaymentConfig[]    @relation("SecondaryAccount")
+  venueConfigsTertiary  VenuePaymentConfig[]    @relation("TertiaryAccount")
+  costStructures        ProviderCostStructure[]
+  transactionCosts      TransactionCost[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([providerId, externalMerchantId])
+  @@index([providerId])
+}
+
+// Venue payment configuration (supports multiple providers)
+model VenuePaymentConfig {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Account hierarchy (flexible for any provider)
+  primaryAccountId String
+  primaryAccount   MerchantAccount @relation("PrimaryAccount", fields: [primaryAccountId], references: [id])
+
+  secondaryAccountId String?
+  secondaryAccount   MerchantAccount? @relation("SecondaryAccount", fields: [secondaryAccountId], references: [id])
+
+  tertiaryAccountId String?
+  tertiaryAccount   MerchantAccount? @relation("TertiaryAccount", fields: [tertiaryAccountId], references: [id])
+
+  // Routing rules (JSON for flexibility)
+  routingRules Json? // { "factura": "secondary", "amount_over": 1000, "bin_routing": {...} }
+
+  // Default processor preference
+  preferredProcessor PaymentProcessor @default(AUTO)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([primaryAccountId])
+  @@index([secondaryAccountId])
+  @@index([tertiaryAccountId])
+}
+
+// Generic webhook subscription (works for any provider)
+model WebhookSubscription {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Provider info
+  providerId String?
+  provider   PaymentProvider? @relation(fields: [providerId], references: [id])
+
+  url             String
+  secretEncrypted String?
+  active          Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([providerId])
+}
+
+// Generic provider event log
+model ProviderEventLog {
+  id       String       @id @default(cuid())
+  provider ProviderType @default(PAYMENT_PROCESSOR)
+  venueId  String?
+  venue    Venue?       @relation(fields: [venueId], references: [id], onDelete: SetNull)
+
+  // Provider info
+  providerId      String?
+  paymentProvider PaymentProvider? @relation(fields: [providerId], references: [id])
+
+  eventId String?
+  type    String?
+  payload Json
+  status  EventStatus @default(PENDING)
+
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+
+  @@index([provider])
+  @@index([venueId])
+  @@index([status])
+  @@index([providerId])
+}
+
+// ==========================================
+// NOTE: COST MANAGEMENT & PRICING
+// ==========================================
+
+// Provider costs (what Menta charges Avoqado)
+model ProviderCostStructure {
+  id String @id @default(cuid())
+
+  // Provider relationship
+  providerId String
+  provider   PaymentProvider @relation(fields: [providerId], references: [id])
+
+  // Merchant account (costs can vary by account type)
+  merchantAccountId String
+  merchantAccount   MerchantAccount @relation(fields: [merchantAccountId], references: [id])
+
+  // Cost breakdown by transaction type
+  debitRate         Decimal @db.Decimal(5, 4) // e.g., 0.0150 (1.5%)
+  creditRate        Decimal @db.Decimal(5, 4) // e.g., 0.0250 (2.5%)
+  amexRate          Decimal @db.Decimal(5, 4) // e.g., 0.0350 (3.5%)
+  internationalRate Decimal @db.Decimal(5, 4) // e.g., 0.0400 (4.0%)
+
+  // Fixed costs per transaction (if applicable)
+  fixedCostPerTransaction Decimal? @db.Decimal(8, 4) // e.g., 0.50 MXN
+
+  // Monthly/volume-based costs
+  monthlyFee     Decimal? @db.Decimal(10, 2)
+  minimumVolume  Decimal? @db.Decimal(12, 2)
+  volumeDiscount Decimal? @db.Decimal(5, 4)
+
+  // Period this cost structure is valid for
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  // Status
+  active Boolean @default(true)
+
+  // Metadata
+  proposalReference String? // Reference to Menta's proposal
+  notes             String?
+
+  // Relations
+  transactionCosts TransactionCost[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([merchantAccountId, effectiveFrom])
+  @@index([providerId])
+  @@index([merchantAccountId])
+  @@index([effectiveFrom])
+}
+
+// Venue pricing (what Avoqado charges venues)
+model VenuePricingStructure {
+  id String @id @default(cuid())
+
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Account type this pricing applies to
+  accountType AccountType // PRIMARY, SECONDARY, TERTIARY
+
+  // Pricing by transaction type (with Avoqado's margin included)
+  debitRate         Decimal @db.Decimal(5, 4) // e.g., 0.0200 (2.0% - includes margin)
+  creditRate        Decimal @db.Decimal(5, 4) // e.g., 0.0300 (3.0% - includes margin)
+  amexRate          Decimal @db.Decimal(5, 4) // e.g., 0.0400 (4.0% - includes margin)
+  internationalRate Decimal @db.Decimal(5, 4) // e.g., 0.0450 (4.5% - includes margin)
+
+  // Fixed fees (with margin)
+  fixedFeePerTransaction Decimal? @db.Decimal(8, 4) // e.g., 0.75 MXN
+  monthlyServiceFee      Decimal? @db.Decimal(10, 2) // e.g., 299.00 MXN
+
+  // Minimum transaction volumes or penalties
+  minimumMonthlyVolume Decimal? @db.Decimal(12, 2)
+  volumePenalty        Decimal? @db.Decimal(10, 2)
+
+  // Period this pricing is valid for
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  // Status
+  active Boolean @default(true)
+
+  // Contract/agreement reference
+  contractReference String?
+  notes             String?
+
+  // Relations
+  transactionCosts TransactionCost[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, accountType, effectiveFrom])
+  @@index([venueId])
+  @@index([accountType])
+  @@index([effectiveFrom])
+}
+
+// Transaction cost tracking (for profit calculation)
+model TransactionCost {
+  id String @id @default(cuid())
+
+  // Payment reference
+  paymentId String  @unique
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  // Account used for this transaction
+  merchantAccountId String
+  merchantAccount   MerchantAccount @relation(fields: [merchantAccountId], references: [id])
+
+  // Transaction details
+  transactionType TransactionCardType
+  amount          Decimal             @db.Decimal(12, 2)
+
+  // Costs (what we pay to provider)
+  providerRate       Decimal @db.Decimal(5, 4) // Rate charged by provider
+  providerCostAmount Decimal @db.Decimal(10, 4) // Actual cost amount
+  providerFixedFee   Decimal @default(0) @db.Decimal(8, 4)
+
+  // Revenue (what we charge venue)
+  venueRate         Decimal @db.Decimal(5, 4) // Rate we charge venue
+  venueChargeAmount Decimal @db.Decimal(10, 4) // What we charge venue
+  venueFixedFee     Decimal @default(0) @db.Decimal(8, 4)
+
+  // Profit calculation
+  grossProfit  Decimal @db.Decimal(10, 4) // venueCharge - providerCost
+  profitMargin Decimal @db.Decimal(5, 4) // grossProfit / venueCharge
+
+  // References to cost structures used
+  providerCostStructureId String?
+  providerCostStructure   ProviderCostStructure? @relation(fields: [providerCostStructureId], references: [id])
+
+  venuePricingStructureId String?
+  venuePricingStructure   VenuePricingStructure? @relation(fields: [venuePricingStructureId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([paymentId])
+  @@index([merchantAccountId])
+  @@index([transactionType])
+  @@index([createdAt])
+}
+
+// Monthly profit summary per venue
+model MonthlyVenueProfit {
+  id String @id @default(cuid())
+
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Period
+  year  Int
+  month Int
+
+  // Volume metrics
+  totalTransactions Int
+  totalVolume       Decimal @db.Decimal(15, 2)
+
+  // By transaction type
+  debitTransactions         Int     @default(0)
+  debitVolume               Decimal @default(0) @db.Decimal(15, 2)
+  creditTransactions        Int     @default(0)
+  creditVolume              Decimal @default(0) @db.Decimal(15, 2)
+  amexTransactions          Int     @default(0)
+  amexVolume                Decimal @default(0) @db.Decimal(15, 2)
+  internationalTransactions Int     @default(0)
+  internationalVolume       Decimal @default(0) @db.Decimal(15, 2)
+
+  // Financial summary
+  totalProviderCosts  Decimal @db.Decimal(12, 4) // What we paid to providers
+  totalVenueCharges   Decimal @db.Decimal(12, 4) // What we charged venue
+  totalGrossProfit    Decimal @db.Decimal(12, 4) // Our profit
+  averageProfitMargin Decimal @db.Decimal(5, 4) // Average margin %
+
+  // Monthly fees
+  monthlyProviderFees Decimal @default(0) @db.Decimal(10, 2)
+  monthlyServiceFees  Decimal @default(0) @db.Decimal(10, 2)
+
+  // Status
+  status ProfitStatus @default(CALCULATED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, year, month])
+  @@index([venueId])
+  @@index([year, month])
   @@index([status])
 }
 
@@ -1574,6 +1914,49 @@ enum PosConnectionState {
   ONLINE // Recibiendo heartbeats normalmente
   OFFLINE // No hemos recibido un heartbeat en mucho tiempo
   NEEDS_RECONCILIATION // Se detectó un cambio de InstanceId (¡Alerta máxima!)
+}
+
+enum PaymentProcessor {
+  LEGACY
+  MENTA
+  CLIP
+  BANK_DIRECT
+  AUTO
+}
+
+enum ProviderType {
+  PAYMENT_PROCESSOR // Menta, Stripe, etc.
+  BANK_DIRECT // Direct bank integration
+  WALLET // Clip, PayPal, etc.
+  GATEWAY // Payment gateway
+  OTHER
+}
+
+enum EventStatus {
+  PENDING
+  PROCESSED
+  ERROR
+}
+
+enum AccountType {
+  PRIMARY
+  SECONDARY
+  TERTIARY
+}
+
+enum TransactionCardType {
+  DEBIT
+  CREDIT
+  AMEX
+  INTERNATIONAL
+  OTHER
+}
+
+enum ProfitStatus {
+  CALCULATED
+  VERIFIED
+  DISPUTED
+  FINALIZED
 }
 
 enum SplitType {

@@ -1,5 +1,6 @@
 import { faker } from '@faker-js/faker'
 import {
+  AccountType,
   ChargeType,
   FeatureCategory,
   InvitationStatus,
@@ -18,12 +19,14 @@ import {
   PaymentStatus,
   PrismaClient,
   ProductType,
+  ProviderType,
   ReceiptStatus,
   ReviewSource,
   SettlementStatus,
   StaffRole,
   TerminalStatus,
   TerminalType,
+  TransactionCardType,
   TransactionStatus,
   TransactionType,
   VenueType,
@@ -101,6 +104,15 @@ async function main() {
   await prisma.notification.deleteMany()
   await prisma.notificationPreference.deleteMany()
   await prisma.notificationTemplate.deleteMany()
+
+  // Clean cost management models
+  await prisma.transactionCost.deleteMany()
+  await prisma.monthlyVenueProfit.deleteMany()
+  await prisma.venuePricingStructure.deleteMany()
+  await prisma.providerCostStructure.deleteMany()
+  await prisma.venuePaymentConfig.deleteMany()
+  await prisma.merchantAccount.deleteMany()
+  await prisma.paymentProvider.deleteMany()
 
   // ✅ CORRECTED ORDER: Delete Tables before Areas
   await prisma.table.deleteMany()
@@ -261,6 +273,179 @@ async function main() {
 
   await prisma.notificationTemplate.createMany({ data: notificationTemplates })
   console.log(`  Created ${notificationTemplates.length} notification templates.`)
+
+  // --- Payment Providers and Cost Management ---
+  console.log('Seeding payment providers and cost structures...')
+
+  // Create payment providers
+  const mentaProvider = await prisma.paymentProvider.create({
+    data: {
+      code: 'MENTA',
+      name: 'Menta Payment Solutions',
+      type: ProviderType.PAYMENT_PROCESSOR,
+      countryCode: ['MX', 'AR'],
+      active: true,
+      configSchema: {
+        required: ['apiKey', 'customerId', 'merchantId'],
+        properties: {
+          apiKey: { type: 'string', description: 'Encrypted API key' },
+          customerId: { type: 'string', description: 'Customer ID in Menta' },
+          merchantId: { type: 'string', description: 'Merchant ID in Menta' },
+          acquirerId: { type: 'string', description: 'Acquirer ID (BANORTE, GPS, etc.)' },
+        },
+      },
+    },
+  })
+
+  const clipProvider = await prisma.paymentProvider.create({
+    data: {
+      code: 'CLIP',
+      name: 'Clip Digital Wallet',
+      type: ProviderType.WALLET,
+      countryCode: ['MX'],
+      active: true,
+      configSchema: {
+        required: ['apiKey', 'merchantId'],
+        properties: {
+          apiKey: { type: 'string', description: 'Clip API key' },
+          merchantId: { type: 'string', description: 'Clip merchant ID' },
+        },
+      },
+    },
+  })
+
+  const banorteProvider = await prisma.paymentProvider.create({
+    data: {
+      code: 'BANORTE_DIRECT',
+      name: 'Banorte Direct Integration',
+      type: ProviderType.BANK_DIRECT,
+      countryCode: ['MX'],
+      active: true,
+      configSchema: {
+        required: ['clientId', 'clientSecret'],
+        properties: {
+          clientId: { type: 'string', description: 'Bank client ID' },
+          clientSecret: { type: 'string', description: 'Bank client secret' },
+          environment: { type: 'string', enum: ['sandbox', 'production'] },
+        },
+      },
+    },
+  })
+
+  console.log(`  Created 3 payment providers (Menta, Clip, Banorte).`)
+
+  // Create merchant accounts for different scenarios
+  const mentaMerchantPrimary = await prisma.merchantAccount.create({
+    data: {
+      providerId: mentaProvider.id,
+      externalMerchantId: '7acd6930-bef7-4306-91be-c18ccb537423',
+      alias: 'Menta Primary Account',
+      credentialsEncrypted: {
+        apiKey: 'encrypted_menta_api_key_primary',
+        customerId: 'bbee0460-d1f3-419f-898e-49bd0d63516d',
+        merchantId: '7acd6930-bef7-4306-91be-c18ccb537423',
+      },
+      providerConfig: {
+        acquirerId: 'BANORTE',
+        terminalId: '3780f095-2ed4-46d2-b6e1-44d0659afd69',
+        country: 'MX',
+        currency: 'MXN',
+      },
+    },
+  })
+
+  const mentaMerchantSecondary = await prisma.merchantAccount.create({
+    data: {
+      providerId: mentaProvider.id,
+      externalMerchantId: '8bcd6930-bef7-4306-91be-c18ccb537424',
+      alias: 'Menta Secondary Account (Factura)',
+      credentialsEncrypted: {
+        apiKey: 'encrypted_menta_api_key_secondary',
+        customerId: 'ccee0460-d1f3-419f-898e-49bd0d63516e',
+        merchantId: '8bcd6930-bef7-4306-91be-c18ccb537424',
+      },
+      providerConfig: {
+        acquirerId: 'BANORTE',
+        terminalId: '4780f095-2ed4-46d2-b6e1-44d0659afd70',
+        country: 'MX',
+        currency: 'MXN',
+        invoiceCapable: true,
+      },
+    },
+  })
+
+  const clipMerchant = await prisma.merchantAccount.create({
+    data: {
+      providerId: clipProvider.id,
+      externalMerchantId: 'clip_merchant_12345',
+      alias: 'Clip Digital Wallet',
+      credentialsEncrypted: {
+        apiKey: 'encrypted_clip_api_key',
+        merchantId: 'clip_merchant_12345',
+      },
+      providerConfig: {
+        webhookUrl: 'https://api.avoqado.com/webhooks/clip',
+        country: 'MX',
+        currency: 'MXN',
+      },
+    },
+  })
+
+  console.log(`  Created 3 merchant accounts.`)
+
+  // Create provider cost structures (what Menta/providers charge Avoqado)
+  const mentaPrimaryCosts = await prisma.providerCostStructure.create({
+    data: {
+      providerId: mentaProvider.id,
+      merchantAccountId: mentaMerchantPrimary.id,
+      debitRate: 0.015, // 1.5% for debit cards
+      creditRate: 0.025, // 2.5% for credit cards
+      amexRate: 0.035, // 3.5% for Amex (higher cost)
+      internationalRate: 0.04, // 4.0% for international cards
+      fixedCostPerTransaction: 0.5, // 0.50 MXN per transaction
+      monthlyFee: 500.0, // 500 MXN monthly fee
+      effectiveFrom: new Date('2024-01-01'),
+      active: true,
+      proposalReference: 'MENTA-2024-PRIMARY-001',
+      notes: 'Standard rates for primary Menta account',
+    },
+  })
+
+  const mentaSecondaryCosts = await prisma.providerCostStructure.create({
+    data: {
+      providerId: mentaProvider.id,
+      merchantAccountId: mentaMerchantSecondary.id,
+      debitRate: 0.016, // Slightly higher for secondary account
+      creditRate: 0.027,
+      amexRate: 0.037,
+      internationalRate: 0.042,
+      fixedCostPerTransaction: 0.6,
+      monthlyFee: 600.0, // Higher monthly fee for invoice-capable account
+      effectiveFrom: new Date('2024-01-01'),
+      active: true,
+      proposalReference: 'MENTA-2024-SECONDARY-001',
+      notes: 'Rates for secondary account with invoice capabilities',
+    },
+  })
+
+  const clipCosts = await prisma.providerCostStructure.create({
+    data: {
+      providerId: clipProvider.id,
+      merchantAccountId: clipMerchant.id,
+      debitRate: 0.028, // Clip rates (typically higher than traditional processors)
+      creditRate: 0.029,
+      amexRate: 0.035,
+      internationalRate: 0.04,
+      fixedCostPerTransaction: 0.0, // No fixed fee for Clip
+      monthlyFee: 0.0, // No monthly fee
+      effectiveFrom: new Date('2024-01-01'),
+      active: true,
+      proposalReference: 'CLIP-2024-001',
+      notes: 'Standard Clip wallet processing rates',
+    },
+  })
+
+  console.log(`  Created 3 provider cost structures.`)
 
   // --- 1. Organizaciones ---
   console.log('Seeding organizations...')
@@ -466,6 +651,93 @@ async function main() {
         }
       }
       console.log(`      - Created VenueSettings and assigned Features.`)
+
+      // --- Payment Configuration for this Venue ---
+      const paymentConfig = await prisma.venuePaymentConfig.create({
+        data: {
+          venueId: venue.id,
+          primaryAccountId: mentaMerchantPrimary.id,
+          secondaryAccountId: mentaMerchantSecondary.id,
+          tertiaryAccountId: i === 0 ? clipMerchant.id : null, // Only first venue gets Clip as tertiary
+          routingRules: {
+            factura: 'secondary', // Use secondary account when customer needs invoice
+            amount_over: 5000, // Use tertiary for amounts over $5000 MXN
+            customer_type: {
+              business: 'secondary', // Business customers use secondary
+            },
+            bin_routing: {
+              '4111': 'secondary', // Route specific BINs to secondary
+              '5555': 'tertiary',
+            },
+            time_based: {
+              peak_hours: {
+                start: '18:00',
+                end: '22:00',
+                account: 'tertiary', // Use tertiary during peak hours
+              },
+            },
+          },
+        },
+      })
+
+      // --- Venue Pricing Structures (what you charge venues) ---
+      // Primary account pricing (with margins over provider costs)
+      const primaryPricing = await prisma.venuePricingStructure.create({
+        data: {
+          venueId: venue.id,
+          accountType: AccountType.PRIMARY,
+          debitRate: 0.02, // 2.0% (0.5% margin over 1.5% cost)
+          creditRate: 0.03, // 3.0% (0.5% margin over 2.5% cost)
+          amexRate: 0.0425, // 4.25% (0.75% margin over 3.5% cost)
+          internationalRate: 0.045, // 4.5% (0.5% margin over 4.0% cost)
+          fixedFeePerTransaction: 0.75, // 0.75 MXN (0.25 margin over 0.50 cost)
+          monthlyServiceFee: 799.0, // 799 MXN (299 margin over 500 cost)
+          effectiveFrom: new Date('2024-01-01'),
+          active: true,
+          contractReference: `CONTRACT-${venue.slug.toUpperCase()}-PRIMARY`,
+          notes: `Standard pricing for ${venue.name} - Primary Account`,
+        },
+      })
+
+      // Secondary account pricing (higher margins due to invoice capability)
+      const secondaryPricing = await prisma.venuePricingStructure.create({
+        data: {
+          venueId: venue.id,
+          accountType: AccountType.SECONDARY,
+          debitRate: 0.022, // 2.2% (0.6% margin over 1.6% cost)
+          creditRate: 0.032, // 3.2% (0.5% margin over 2.7% cost)
+          amexRate: 0.045, // 4.5% (0.8% margin over 3.7% cost)
+          internationalRate: 0.048, // 4.8% (0.6% margin over 4.2% cost)
+          fixedFeePerTransaction: 0.9, // 0.90 MXN (0.30 margin over 0.60 cost)
+          monthlyServiceFee: 999.0, // 999 MXN (399 margin over 600 cost)
+          effectiveFrom: new Date('2024-01-01'),
+          active: true,
+          contractReference: `CONTRACT-${venue.slug.toUpperCase()}-SECONDARY`,
+          notes: `Premium pricing for ${venue.name} - Secondary Account with invoice capability`,
+        },
+      })
+
+      // Tertiary account pricing (if Clip is available)
+      if (i === 0) {
+        const tertiaryPricing = await prisma.venuePricingStructure.create({
+          data: {
+            venueId: venue.id,
+            accountType: AccountType.TERTIARY,
+            debitRate: 0.035, // 3.5% (0.7% margin over 2.8% Clip cost)
+            creditRate: 0.036, // 3.6% (0.7% margin over 2.9% cost)
+            amexRate: 0.0425, // 4.25% (0.75% margin over 3.5% cost)
+            internationalRate: 0.045, // 4.5% (0.5% margin over 4.0% cost)
+            fixedFeePerTransaction: 0.5, // 0.50 MXN (0.50 margin since Clip has no fixed fee)
+            monthlyServiceFee: 299.0, // 299 MXN (299 margin since Clip has no monthly fee)
+            effectiveFrom: new Date('2024-01-01'),
+            active: true,
+            contractReference: `CONTRACT-${venue.slug.toUpperCase()}-TERTIARY`,
+            notes: `Digital wallet pricing for ${venue.name} - Clip integration`,
+          },
+        })
+      }
+
+      console.log(`      - Created payment configuration and pricing structures.`)
 
       const terminals = await Promise.all(
         Array.from({ length: 3 }).map((_, t) => {
@@ -757,6 +1029,82 @@ async function main() {
               },
             })
 
+            // --- Add Transaction Cost Tracking (only for card payments) ---
+            if (paymentMethod !== PaymentMethod.CASH) {
+              // Simulate different card types based on payment method
+              const cardType =
+                paymentMethod === PaymentMethod.DEBIT_CARD
+                  ? TransactionCardType.DEBIT
+                  : getRandomItem([
+                      TransactionCardType.CREDIT,
+                      TransactionCardType.CREDIT,
+                      TransactionCardType.CREDIT, // Higher probability for credit
+                      TransactionCardType.AMEX,
+                      TransactionCardType.INTERNATIONAL,
+                    ])
+
+              // Determine which account was used (simulate routing logic)
+              const accountType = Math.random() > 0.7 ? AccountType.SECONDARY : AccountType.PRIMARY
+              const merchantAccountId = accountType === AccountType.SECONDARY ? mentaMerchantSecondary.id : mentaMerchantPrimary.id
+
+              // Get the cost structures
+              const providerCost = accountType === AccountType.SECONDARY ? mentaSecondaryCosts : mentaPrimaryCosts
+              const venuePricing = await prisma.venuePricingStructure.findFirst({
+                where: { venueId: venue.id, accountType, active: true },
+              })
+
+              if (venuePricing) {
+                // Calculate rates based on card type
+                const getRate = (structure: any, type: TransactionCardType) => {
+                  switch (type) {
+                    case TransactionCardType.DEBIT:
+                      return Number(structure.debitRate)
+                    case TransactionCardType.CREDIT:
+                      return Number(structure.creditRate)
+                    case TransactionCardType.AMEX:
+                      return Number(structure.amexRate)
+                    case TransactionCardType.INTERNATIONAL:
+                      return Number(structure.internationalRate)
+                    default:
+                      return Number(structure.creditRate)
+                  }
+                }
+
+                const providerRate = getRate(providerCost, cardType)
+                const venueRate = getRate(venuePricing, cardType)
+
+                const providerCostAmount = total * providerRate
+                const providerFixedFee = Number(providerCost.fixedCostPerTransaction || 0)
+                const venueChargeAmount = total * venueRate
+                const venueFixedFee = Number(venuePricing.fixedFeePerTransaction || 0)
+
+                const totalProviderCost = providerCostAmount + providerFixedFee
+                const totalVenueCharge = venueChargeAmount + venueFixedFee
+                const grossProfit = totalVenueCharge - totalProviderCost
+                const profitMargin = totalVenueCharge > 0 ? grossProfit / totalVenueCharge : 0
+
+                await prisma.transactionCost.create({
+                  data: {
+                    paymentId: payment.id,
+                    merchantAccountId,
+                    transactionType: cardType,
+                    amount: total,
+                    providerRate,
+                    providerCostAmount,
+                    providerFixedFee,
+                    venueRate,
+                    venueChargeAmount,
+                    venueFixedFee,
+                    grossProfit,
+                    profitMargin,
+                    providerCostStructureId: providerCost.id,
+                    venuePricingStructureId: venuePricing.id,
+                    createdAt: paymentCreatedAt,
+                  },
+                })
+              }
+            }
+
             await prisma.digitalReceipt.create({
               data: {
                 paymentId: payment.id,
@@ -808,6 +1156,107 @@ async function main() {
         }
       }
       console.log(`      - Finished creating orders and related data across multiple shifts.`)
+
+      // --- Generate Monthly Profit Summary ---
+      console.log(`      - Generating monthly profit summaries for ${venue.name}...`)
+
+      // Get all transaction costs for this venue
+      const transactionCosts = await prisma.transactionCost.findMany({
+        where: {
+          payment: { venueId: venue.id },
+        },
+        include: {
+          payment: true,
+        },
+      })
+
+      // Group by month and calculate totals
+      const monthlyData = new Map()
+
+      transactionCosts.forEach(cost => {
+        const date = new Date(cost.createdAt)
+        const year = date.getFullYear()
+        const month = date.getMonth() + 1
+        const key = `${year}-${month}`
+
+        if (!monthlyData.has(key)) {
+          monthlyData.set(key, {
+            year,
+            month,
+            totalTransactions: 0,
+            totalVolume: 0,
+            debitTransactions: 0,
+            debitVolume: 0,
+            creditTransactions: 0,
+            creditVolume: 0,
+            amexTransactions: 0,
+            amexVolume: 0,
+            internationalTransactions: 0,
+            internationalVolume: 0,
+            totalProviderCosts: 0,
+            totalVenueCharges: 0,
+            totalGrossProfit: 0,
+          })
+        }
+
+        const data = monthlyData.get(key)
+        data.totalTransactions++
+        data.totalVolume += Number(cost.amount)
+        data.totalProviderCosts += Number(cost.providerCostAmount) + Number(cost.providerFixedFee)
+        data.totalVenueCharges += Number(cost.venueChargeAmount) + Number(cost.venueFixedFee)
+        data.totalGrossProfit += Number(cost.grossProfit)
+
+        // Track by card type
+        switch (cost.transactionType) {
+          case TransactionCardType.DEBIT:
+            data.debitTransactions++
+            data.debitVolume += Number(cost.amount)
+            break
+          case TransactionCardType.CREDIT:
+            data.creditTransactions++
+            data.creditVolume += Number(cost.amount)
+            break
+          case TransactionCardType.AMEX:
+            data.amexTransactions++
+            data.amexVolume += Number(cost.amount)
+            break
+          case TransactionCardType.INTERNATIONAL:
+            data.internationalTransactions++
+            data.internationalVolume += Number(cost.amount)
+            break
+        }
+      })
+
+      // Create MonthlyVenueProfit records
+      for (const [key, data] of monthlyData) {
+        const averageProfitMargin = data.totalVenueCharges > 0 ? data.totalGrossProfit / data.totalVenueCharges : 0
+
+        await prisma.monthlyVenueProfit.create({
+          data: {
+            venueId: venue.id,
+            year: data.year,
+            month: data.month,
+            totalTransactions: data.totalTransactions,
+            totalVolume: data.totalVolume,
+            debitTransactions: data.debitTransactions,
+            debitVolume: data.debitVolume,
+            creditTransactions: data.creditTransactions,
+            creditVolume: data.creditVolume,
+            amexTransactions: data.amexTransactions,
+            amexVolume: data.amexVolume,
+            internationalTransactions: data.internationalTransactions,
+            internationalVolume: data.internationalVolume,
+            totalProviderCosts: data.totalProviderCosts,
+            totalVenueCharges: data.totalVenueCharges,
+            totalGrossProfit: data.totalGrossProfit,
+            averageProfitMargin,
+            monthlyProviderFees: 500.0, // Base monthly fee
+            monthlyServiceFees: 799.0, // What we charge venue
+          },
+        })
+      }
+
+      console.log(`      - Created ${monthlyData.size} monthly profit summaries.`)
 
       // Create sample notifications for this venue
       const venueStaff = await prisma.staffVenue.findMany({

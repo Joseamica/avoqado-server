@@ -116,6 +116,12 @@ export async function sendTpvCommand(
       if (terminalHealth.status === 'MAINTENANCE') {
         throw new BadRequestError(`Terminal ${terminalId} is already in maintenance mode`)
       }
+    } else if (command === 'REACTIVATE') {
+      // Check if terminal is actually inactive
+      const terminalHealth = await tpvHealthService.getTerminalHealth(terminalId)
+      if (terminalHealth.status !== 'INACTIVE') {
+        throw new BadRequestError(`Terminal ${terminalId} is not inactive (current status: ${terminalHealth.status})`)
+      }
     }
 
     await tpvHealthService.sendCommand(terminalId, {

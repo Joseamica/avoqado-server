@@ -275,3 +275,77 @@ export async function getRevenueBreakdown(req: Request, res: Response, next: Nex
     next(error)
   }
 }
+
+/**
+ * Get list of all payment providers
+ */
+export async function getProvidersList(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    logger.info('Getting providers list', { userId: req.authContext?.userId })
+
+    const providers = await superadminService.getPaymentProvidersList()
+
+    res.json({
+      success: true,
+      data: providers,
+      message: 'Payment providers retrieved successfully',
+    })
+  } catch (error) {
+    logger.error('Error getting providers list', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get list of merchant accounts
+ */
+export async function getMerchantAccountsList(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { providerId } = req.query
+
+    logger.info('Getting merchant accounts list', {
+      userId: req.authContext?.userId,
+      providerId,
+    })
+
+    const merchantAccounts = await superadminService.getMerchantAccountsList(providerId as string)
+
+    res.json({
+      success: true,
+      data: merchantAccounts,
+      message: 'Merchant accounts retrieved successfully',
+    })
+  } catch (error) {
+    logger.error('Error getting merchant accounts list', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get simplified venues list for dropdowns
+ */
+export async function getVenuesListSimple(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    logger.info('Getting venues list (simple)', { userId: req.authContext?.userId })
+
+    const venues = await superadminService.getVenuesListSimple()
+
+    res.json({
+      success: true,
+      data: venues,
+      message: 'Venues list retrieved successfully',
+    })
+  } catch (error) {
+    logger.error('Error getting venues list', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
