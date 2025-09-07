@@ -16,6 +16,14 @@ interface InvitationEmailData {
   inviteLink: string
 }
 
+interface ReceiptEmailData {
+  venueName: string
+  receiptUrl: string
+  orderNumber?: string
+  totalAmount?: string
+  venueLogoUrl?: string
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -72,6 +80,97 @@ class EmailService {
       logger.error('Failed to send email:', error)
       return false
     }
+  }
+
+  async sendReceiptEmail(email: string, data: ReceiptEmailData): Promise<boolean> {
+    const subject = `Tu recibo digital de ${data.venueName} - Avoqado`
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Recibo Digital - ${data.venueName}</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+              ${data.venueLogoUrl ? `<img src="${data.venueLogoUrl}" alt="${data.venueName}" style="max-height: 60px; margin-bottom: 20px; background: white; padding: 10px; border-radius: 8px;">` : ''}
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">¡Tu recibo digital está listo!</h1>
+              <p style="color: #e8f4f8; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
+            </div>
+            
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola,</p>
+              
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                Gracias por tu visita a <strong>${data.venueName}</strong>. Tu recibo digital está disponible y puedes acceder a él en cualquier momento.
+              </p>
+              
+              ${data.orderNumber ? `<p style="font-size: 14px; color: #666; margin-bottom: 20px;">Orden: <strong>#${data.orderNumber}</strong></p>` : ''}
+              ${data.totalAmount ? `<p style="font-size: 14px; color: #666; margin-bottom: 30px;">Total: <strong>${data.totalAmount}</strong></p>` : ''}
+              
+              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0; text-align: center;">
+                <p style="font-size: 16px; margin-bottom: 20px; color: #555;">Accede a tu recibo digital:</p>
+                <a href="${data.receiptUrl}" 
+                   style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                          color: white; 
+                          padding: 15px 35px; 
+                          text-decoration: none; 
+                          border-radius: 25px; 
+                          font-weight: bold; 
+                          font-size: 16px;
+                          display: inline-block;
+                          box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+                          transition: all 0.3s ease;">
+                  📱 Ver Recibo Digital
+                </a>
+              </div>
+              
+              <div style="background: #f9f9f9; border-left: 4px solid #667eea; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  💡 <strong>Tip:</strong> Guarda este enlace para acceder a tu recibo cuando lo necesites. También puedes imprimirlo o descargarlo como PDF desde la página del recibo.
+                </p>
+              </div>
+              
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+              
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                ¡Gracias por elegirnos! Esperamos verte pronto.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Hola,
+      
+      Gracias por tu visita a ${data.venueName}. Tu recibo digital está disponible en el siguiente enlace:
+      
+      ${data.receiptUrl}
+      
+      ${data.orderNumber ? `Orden: #${data.orderNumber}` : ''}
+      ${data.totalAmount ? `Total: ${data.totalAmount}` : ''}
+      
+      Puedes acceder a tu recibo, imprimirlo o descargarlo como PDF desde el enlace anterior.
+      
+      ¡Gracias por elegirnos!
+      
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
   }
 
   async sendTeamInvitation(email: string, data: InvitationEmailData): Promise<boolean> {

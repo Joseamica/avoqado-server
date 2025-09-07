@@ -6,9 +6,26 @@ import { BadRequestError, InternalServerError, NotFoundError } from '../../error
 // Define types for the receipt snapshot
 import { ReceiptDataSnapshot } from '../../schemas/dashboard/receipt.schema'
 import logger from '@/config/logger'
+import emailService from '../email.service'
 
 // Main function to generate and store a digital receipt
 export async function generateAndStoreReceipt(paymentId: string, recipientEmail?: string): Promise<DigitalReceipt> {
+  // Check if a digital receipt already exists for this payment
+  const existingReceipt = await prisma.digitalReceipt.findFirst({
+    where: { paymentId },
+  })
+
+  if (existingReceipt) {
+    // Update recipient email if provided and different
+    if (recipientEmail && existingReceipt.recipientEmail !== recipientEmail) {
+      return await prisma.digitalReceipt.update({
+        where: { id: existingReceipt.id },
+        data: { recipientEmail },
+      })
+    }
+    return existingReceipt
+  }
+
   // Get payment data first
   const payment = await prisma.payment.findUnique({
     where: { id: paymentId },
@@ -29,7 +46,10 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
       state: true,
       zipCode: true,
       phone: true,
-      logo: true, // Using logo instead of logoUrl based on schema
+      email: true, // Add email field
+      logo: true,
+      primaryColor: true, // Add primaryColor for theming
+      currency: true, // Add currency field
     },
   })
 
@@ -94,15 +114,18 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
   // These variables were already declared above, removing duplicate declarations
 
   // Create data snapshot with all information needed to render the receipt
+  const baseAmount = parseFloat(payment.amount.toString())
+  const tipAmount = parseFloat(payment.tipAmount.toString())
+
   const dataSnapshot: ReceiptDataSnapshot = {
     payment: {
       id: payment.id,
-      amount: payment.amount,
-      tipAmount: payment.tipAmount,
-      totalAmount: parseFloat(payment.amount.toString()) + parseFloat(payment.tipAmount.toString()),
+      amount: baseAmount,
+      tipAmount: tipAmount,
+      totalAmount: baseAmount + tipAmount, // Standardized calculation
       method: payment.method.toString(),
       status: payment.status.toString(),
-      createdAt: payment.createdAt,
+      createdAt: payment.createdAt.toISOString(), // Convert to string for consistency
     },
     venue: {
       id: venue.id,
@@ -112,7 +135,10 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
       state: venue.state || '',
       zipCode: venue.zipCode || '',
       phone: venue.phone || '',
-      logo: venue.logo, // This would be the venue logo URL
+      email: venue.email || '', // Add email field for consistency
+      logo: venue.logo || undefined, // Ensure proper optional handling
+      primaryColor: venue.primaryColor || undefined, // Add primaryColor for theming
+      currency: venue.currency || 'MXN', // Use venue currency or default
     },
     order: {
       id: order.id,
@@ -127,23 +153,23 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
           price: parseFloat(mod.modifier?.price?.toString() || '0'),
         })),
       })),
-      subtotal: order.subtotal,
-      tax: order.taxAmount || (order as any).tax || 0, // Flexible field name approach with type safety
-      total: order.total,
-      createdAt: order.createdAt,
+      subtotal: parseFloat(order.subtotal.toString()),
+      taxAmount: parseFloat((order.taxAmount || (order as any).tax || 0).toString()), // Standardized to taxAmount
+      total: parseFloat(order.total.toString()),
+      createdAt: order.createdAt.toISOString(), // Convert to string for consistency
     },
     processedBy: processedBy
       ? {
           name: `${processedBy.firstName || ''} ${processedBy.lastName || ''}`.trim() || 'Staff Member',
         }
-      : null,
+      : undefined,
     // Use customer data if available in a type-safe way
     customer: customer
       ? {
           name: (customer as any).name || `${(customer as any).firstName || ''} ${(customer as any).lastName || ''}`.trim() || 'Customer',
-          email: (customer as any).email || null,
+          email: (customer as any).email || undefined,
         }
-      : null,
+      : undefined,
   }
 
   // Create digital receipt
@@ -175,19 +201,31 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
   }
 
   try {
-    // In a real implementation, you would call your email service here
-    // For example:
-    // await emailService.sendTemplate('receipt', {
-    //   to: receipt.recipientEmail,
-    //   subject: 'Your receipt from Avoqado',
-    //   data: {
-    //     receiptUrl: `https://dashboard.avoqado.io/r/${receipt.accessKey}`,
-    //     venueName: receipt.dataSnapshot.venue.name
-    //   }
-    // });
+    // Extract venue info from dataSnapshot for email
+    const dataSnapshot = receipt.dataSnapshot as any
+    const venueName = dataSnapshot?.venue?.name || 'Establecimiento'
+    const venueLogoUrl = dataSnapshot?.venue?.logo || undefined
+    const orderNumber = dataSnapshot?.order?.number?.toString() || undefined
+    const totalAmount = dataSnapshot?.payment?.totalAmount ? `$${parseFloat(dataSnapshot.payment.totalAmount).toFixed(2)}` : undefined
 
-    // For now, we'll simulate a successful email send
-    logger.info(`Email would be sent to ${receipt.recipientEmail} with receipt link: /r/${receipt.accessKey}`)
+    // Send actual email using the email service
+    const emailSent = await emailService.sendReceiptEmail(receipt.recipientEmail, {
+      venueName,
+      receiptUrl: `${process.env.FRONTEND_URL}/receipts/public/${receipt.accessKey}`,
+      venueLogoUrl,
+      orderNumber,
+      totalAmount,
+    })
+
+    if (!emailSent) {
+      throw new Error('Email service failed to send receipt')
+    }
+
+    logger.info(`Receipt email sent successfully to ${receipt.recipientEmail}`, {
+      receiptId: receipt.id,
+      accessKey: receipt.accessKey,
+      venueName,
+    })
 
     // Update receipt status
     return prisma.digitalReceipt.update({

@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
-import { GetTerminalsQuery, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
+import { GetTerminalsQuery, UpdateTpvBody, CreateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
 import { BadRequestError } from '../../errors/AppError'
@@ -65,6 +65,20 @@ export async function updateTpv(
     const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData)
 
     res.status(200).json(updatedTpv)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Controlador para crear una nueva terminal.
+ */
+export async function createTpv(req: Request<{ venueId: string }, {}, CreateTpvBody>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const body = req.body
+    const created = await tpvDashboardService.createTpv(venueId, body)
+    res.status(201).json(created)
   } catch (error) {
     next(error)
   }

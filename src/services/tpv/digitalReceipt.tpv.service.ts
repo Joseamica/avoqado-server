@@ -288,5 +288,5 @@ export async function getDigitalReceiptByAccessKey(accessKey: string): Promise<D
  * @returns Full receipt URL
  */
 export function generateReceiptUrl(accessKey: string, baseUrl: string): string {
-  return `${baseUrl}/receipt/${accessKey}`
+  return `${baseUrl}/receipts/public/${accessKey}`
 }

@@ -168,27 +168,30 @@ export function generateReceiptHTML(data: ReceiptData): string {
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
             min-height: 100vh;
-            padding: 20px;
-            color: #2d3748;
+            padding: 15px;
+            color: #1a202c;
+            line-height: 1.5;
         }
         
         .receipt-container {
-            max-width: 600px;
+            max-width: 580px;
             margin: 0 auto;
             background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            border-radius: 20px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(255, 255, 255, 0.8);
             overflow: hidden;
+            position: relative;
         }
         
         .header {
             background: linear-gradient(135deg, ${primaryColor} 0%, ${primaryColor}dd 100%);
             color: white;
-            padding: 30px;
+            padding: 35px 30px;
             text-align: center;
             position: relative;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
         }
         
         .header::before {
@@ -665,38 +668,43 @@ export function generateReceiptHTML(data: ReceiptData): string {
                 }
             </div>
             
-            ${
-              data.items.length > 0
-                ? `
             <div class="order-items">
                 <h2 class="section-title">Productos</h2>
-                ${data.items
-                  .map(
-                    item => `
-                    <div class="item">
-                        <div class="item-details">
-                            <div class="item-name">${item.productName}</div>
-                            <div class="item-quantity">Cantidad: ${item.quantity}</div>
-                            ${
-                              item.modifiers && item.modifiers.length > 0
-                                ? `
-                                <div class="item-modifiers">
-                                    ${item.modifiers.map(mod => `+ ${mod.name} (${formatCurrency(mod.price, currency)})`).join('<br>')}
-                                </div>
-                            `
-                                : ''
-                            }
+                ${data.items && data.items.length > 0
+                  ? data.items
+                      .map(
+                        item => `
+                        <div class="item">
+                            <div class="item-details">
+                                <div class="item-name">${item.productName}</div>
+                                <div class="item-quantity">Cantidad: ${item.quantity}</div>
+                                ${
+                                  item.modifiers && item.modifiers.length > 0
+                                    ? `
+                                    <div class="item-modifiers">
+                                        ${item.modifiers.map(mod => `+ ${mod.name} (${formatCurrency(mod.price, currency)})`).join('<br>')}
+                                    </div>
+                                `
+                                    : ''
+                                }
+                            </div>
+                            <div class="item-price">
+                                ${formatCurrency(item.total, currency)}
+                            </div>
                         </div>
-                        <div class="item-price">
-                            ${formatCurrency(item.total, currency)}
+                    `,
+                      )
+                      .join('')
+                  : `
+                    <div class="no-items">
+                        <div style="text-align: center; padding: 30px; color: #6b7280; font-style: italic;">
+                            <div style="font-size: 24px; margin-bottom: 10px;">🛒</div>
+                            <p>No se registraron productos individuales para esta orden</p>
+                            <p style="font-size: 14px; margin-top: 8px;">Total de la orden: ${formatCurrency(data.order?.total || 0, currency)}</p>
                         </div>
                     </div>
-                `,
-                  )
-                  .join('')}
-            </div>`
-                : ''
-            }
+                `}
+            </div>
             
             <div class="totals">
                 <div class="total-row">
@@ -930,7 +938,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
         // Check if review can be submitted
         async function checkReviewStatus() {
             try {
-                const response = await fetch(baseUrl + '/api/public/receipt/' + accessKey + '/review/status');
+                const response = await fetch(baseUrl + '/api/v1/public/receipt/' + accessKey + '/review/status');
                 const data = await response.json();
                 
                 if (!data.data.canSubmit) {
@@ -967,7 +975,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
             };
             
             try {
-                const response = await fetch(baseUrl + '/api/public/receipt/' + accessKey + '/review', {
+                const response = await fetch(baseUrl + '/api/v1/public/receipt/' + accessKey + '/review', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
