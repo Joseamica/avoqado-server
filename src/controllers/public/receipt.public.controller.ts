@@ -23,7 +23,7 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
     // Check if client wants JSON response
     const acceptHeader = req.get('Accept')
     const wantsJson = acceptHeader && (acceptHeader.includes('application/json') || acceptHeader.includes('*/*'))
-    
+
     if (wantsJson && !acceptHeader.includes('text/html')) {
       // Return JSON data for API clients (like React frontend)
       res.json({
@@ -37,7 +37,7 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
           createdAt: receipt.createdAt,
           sentAt: receipt.sentAt,
           viewedAt: receipt.viewedAt,
-        }
+        },
       })
       return
     }

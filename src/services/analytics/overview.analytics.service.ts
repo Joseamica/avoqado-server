@@ -143,11 +143,13 @@ export const buildAnalyticsOverview = async (input: BuildOverviewInput) => {
             { label: L('Churn', 'Cancelación'), value: -35000 },
             { label: L('Ending ARR', 'ARR final'), value: 1245000 },
           ],
-      cohorts: { retention: [
-        [1, 0.82, 0.71, 0.65],
-        [1, 0.80, 0.69, 0.63],
-        [1, 0.84, 0.73, 0.67],
-      ] },
+      cohorts: {
+        retention: [
+          [1, 0.82, 0.71, 0.65],
+          [1, 0.8, 0.69, 0.63],
+          [1, 0.84, 0.73, 0.67],
+        ],
+      },
       funnels: {
         activation: [
           { stage: L('Signups', 'Registros'), value: growth.signups },
@@ -171,8 +173,14 @@ export const buildAnalyticsOverview = async (input: BuildOverviewInput) => {
       { severity: 'info', message: L('DAU/MAU stable at 14.5%', 'DAU/MAU estable en 14.5%'), code: 'stickiness_stable' },
     ],
     definitions: [
-      { metric: 'NRR', formula: L('(Ending ARR + Churn + Contraction) / Starting ARR', '(ARR final + Cancelación + Contracción) / ARR inicial') },
-      { metric: L('Net New ARR', 'ARR neta nueva'), formula: L('New + Expansion – Contraction – Churn', 'Nuevos + Expansión – Contracción – Cancelación') },
+      {
+        metric: 'NRR',
+        formula: L('(Ending ARR + Churn + Contraction) / Starting ARR', '(ARR final + Cancelación + Contracción) / ARR inicial'),
+      },
+      {
+        metric: L('Net New ARR', 'ARR neta nueva'),
+        formula: L('New + Expansion – Contraction – Churn', 'Nuevos + Expansión – Contracción – Cancelación'),
+      },
     ],
   }
 

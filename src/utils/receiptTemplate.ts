@@ -670,10 +670,11 @@ export function generateReceiptHTML(data: ReceiptData): string {
             
             <div class="order-items">
                 <h2 class="section-title">Productos</h2>
-                ${data.items && data.items.length > 0
-                  ? data.items
-                      .map(
-                        item => `
+                ${
+                  data.items && data.items.length > 0
+                    ? data.items
+                        .map(
+                          item => `
                         <div class="item">
                             <div class="item-details">
                                 <div class="item-name">${item.productName}</div>
@@ -693,9 +694,9 @@ export function generateReceiptHTML(data: ReceiptData): string {
                             </div>
                         </div>
                     `,
-                      )
-                      .join('')
-                  : `
+                        )
+                        .join('')
+                    : `
                     <div class="no-items">
                         <div style="text-align: center; padding: 30px; color: #6b7280; font-style: italic;">
                             <div style="font-size: 24px; margin-bottom: 10px;">🛒</div>
@@ -703,7 +704,8 @@ export function generateReceiptHTML(data: ReceiptData): string {
                             <p style="font-size: 14px; margin-top: 8px;">Total de la orden: ${formatCurrency(data.order?.total || 0, currency)}</p>
                         </div>
                     </div>
-                `}
+                `
+                }
             </div>
             
             <div class="totals">
