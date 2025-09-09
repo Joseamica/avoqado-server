@@ -334,16 +334,19 @@ async function main() {
 
   console.log(`  Created 3 payment providers (Menta, Clip, Banorte).`)
 
-  // Create merchant accounts for different scenarios
+  // Create merchant accounts for different scenarios with display names and ordering
   const mentaMerchantPrimary = await prisma.merchantAccount.create({
     data: {
       providerId: mentaProvider.id,
-      externalMerchantId: '7acd6930-bef7-4306-91be-c18ccb537423',
+      externalMerchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       alias: 'Menta Primary Account',
+      displayName: 'Cuenta Principal Menta',
+      displayOrder: 0,
+      active: true,
       credentialsEncrypted: {
-        apiKey: 'encrypted_menta_api_key_primary',
-        customerId: 'bbee0460-d1f3-419f-898e-49bd0d63516d',
-        merchantId: '7acd6930-bef7-4306-91be-c18ccb537423',
+        apiKey: 'menta_demo_key',
+        customerId: '4b944822-9c94-4058-b58f-b84c7d214ed4',
+        merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       },
       providerConfig: {
         acquirerId: 'BANORTE',
@@ -357,12 +360,15 @@ async function main() {
   const mentaMerchantSecondary = await prisma.merchantAccount.create({
     data: {
       providerId: mentaProvider.id,
-      externalMerchantId: '8bcd6930-bef7-4306-91be-c18ccb537424',
+      externalMerchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f-secondary',
       alias: 'Menta Secondary Account (Factura)',
+      displayName: 'Cuenta Secundaria Menta (Facturación)',
+      displayOrder: 1,
+      active: true,
       credentialsEncrypted: {
-        apiKey: 'encrypted_menta_api_key_secondary',
-        customerId: 'ccee0460-d1f3-419f-898e-49bd0d63516e',
-        merchantId: '8bcd6930-bef7-4306-91be-c18ccb537424',
+        apiKey: 'menta_demo_key',
+        customerId: '4b944822-9c94-4058-b58f-b84c7d214ed4',
+        merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       },
       providerConfig: {
         acquirerId: 'BANORTE',
@@ -379,6 +385,9 @@ async function main() {
       providerId: clipProvider.id,
       externalMerchantId: 'clip_merchant_12345',
       alias: 'Clip Digital Wallet',
+      displayName: 'Cuenta Principal Clip',
+      displayOrder: 10,
+      active: true,
       credentialsEncrypted: {
         apiKey: 'encrypted_clip_api_key',
         merchantId: 'clip_merchant_12345',
@@ -579,13 +588,17 @@ async function main() {
       // Asignar Staff a este Venue
       for (const staffWithRole of createdStaffList) {
         if ([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN].includes(staffWithRole.assignedRole) || Math.random() > 0.3) {
+          // Set PIN 0000 for superadmin at Avoqado Centro
+          const pin =
+            staffWithRole.assignedRole === StaffRole.SUPERADMIN && venue.name === 'Avoqado Centro' ? '0000' : faker.string.numeric(4)
+
           await prisma.staffVenue.create({
             data: {
               staffId: staffWithRole.id,
               venueId: venue.id,
               role: staffWithRole.assignedRole,
               active: true,
-              pin: faker.string.numeric(4), // Set venue-specific PIN
+              pin: pin, // Set venue-specific PIN
             },
           })
 

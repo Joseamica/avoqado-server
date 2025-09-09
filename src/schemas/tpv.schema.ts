@@ -126,3 +126,16 @@ export const recordPaymentBodySchema = z.object({
     equalPartsPayedFor: z.number().int().positive().optional(),
   }),
 })
+
+// Payment routing schemas  
+export const paymentRouteSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    amount: z.number().int().positive({ message: 'El monto debe ser un número entero positivo (en centavos).' }),
+    merchantAccountId: z.string().cuid({ message: 'El ID de la cuenta merchant debe ser un CUID válido.' }),
+    terminalSerial: z.string().min(1, { message: 'El número de serie del terminal es requerido.' }),
+    bin: z.string().optional(),
+  }),
+})

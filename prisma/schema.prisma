@@ -1167,6 +1167,11 @@ model MerchantAccount {
   // Generic merchant info
   externalMerchantId String // Provider's merchant ID
   alias              String?
+  
+  // Display and status fields for UI
+  displayName  String? // User-friendly name like "Cuenta Principal", "Facturación"
+  active       Boolean @default(true) // Enable/disable account
+  displayOrder Int     @default(0) // For consistent ordering in UI
 
   // Encrypted credentials (provider-agnostic)
   credentialsEncrypted Json // Different per provider
@@ -1186,6 +1191,8 @@ model MerchantAccount {
 
   @@unique([providerId, externalMerchantId])
   @@index([providerId])
+  @@index([active])
+  @@index([displayOrder])
 }
 
 // Venue payment configuration (supports multiple providers)

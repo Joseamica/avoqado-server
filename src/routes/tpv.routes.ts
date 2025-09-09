@@ -14,6 +14,7 @@ import {
   recordPaymentParamsSchema,
   recordFastPaymentParamsSchema,
   recordPaymentBodySchema,
+  paymentRouteSchema,
 } from '../schemas/tpv.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
@@ -521,6 +522,181 @@ router.get(
   authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
   validateRequest(paymentsQuerySchema),
   paymentController.getPayments,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/merchant-accounts:
+ *   get:
+ *     tags:
+ *       - TPV - Payments
+ *     summary: Get available merchant accounts for a venue
+ *     description: Retrieve active merchant accounts configured for the venue for payment processing
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The ID of the venue
+ *     responses:
+ *       200:
+ *         description: Merchant accounts retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                         format: cuid
+ *                         description: Merchant account ID
+ *                       accountType:
+ *                         type: string
+ *                         enum: [PRIMARY, SECONDARY, TERTIARY]
+ *                         description: Account type in the venue configuration
+ *                       displayName:
+ *                         type: string
+ *                         description: User-friendly name for the account
+ *                       providerName:
+ *                         type: string
+ *                         description: Payment provider name
+ *                       providerCode:
+ *                         type: string
+ *                         description: Payment provider code
+ *                       active:
+ *                         type: boolean
+ *                         description: Whether the account is active
+ *                       hasValidCredentials:
+ *                         type: boolean
+ *                         description: Whether the account has valid credentials
+ *                       displayOrder:
+ *                         type: integer
+ *                         description: Display order for UI
+ *                       externalMerchantId:
+ *                         type: string
+ *                         description: External merchant ID from provider
+ *                 message:
+ *                   type: string
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
+ *       404:
+ *         description: Venue not found or not accessible
+ *       500:
+ *         description: Internal server error
+ */
+router.get(
+  '/venues/:venueId/merchant-accounts',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(venueIdParamSchema),
+  paymentController.getMerchantAccounts,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/menta/route:
+ *   post:
+ *     tags:
+ *       - TPV - Payments
+ *     summary: Get Menta payment routing information
+ *     description: Get dynamic merchant credentials and routing information for Menta payment processing
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The ID of the venue
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amount
+ *               - merchantAccountId
+ *               - terminalSerial
+ *             properties:
+ *               amount:
+ *                 type: integer
+ *                 description: Payment amount in cents
+ *               factura:
+ *                 type: boolean
+ *                 description: Whether this payment should generate an invoice
+ *                 default: false
+ *               bin:
+ *                 type: string
+ *                 description: Card BIN (first 6 digits) for routing decisions
+ *                 nullable: true
+ *               merchantAccountId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Selected merchant account ID
+ *               terminalSerial:
+ *                 type: string
+ *                 description: Terminal serial number
+ *     responses:
+ *       200:
+ *         description: Menta routing information retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     route:
+ *                       type: string
+ *                       description: Routing decision (primary/secondary/tertiary)
+ *                     merchantId:
+ *                       type: string
+ *                       description: Merchant ID for this transaction
+ *                     apiKeyMerchant:
+ *                       type: string
+ *                       description: API key for merchant operations
+ *                     customerId:
+ *                       type: string
+ *                       description: Customer ID in Menta system
+ *                     acquirer:
+ *                       type: string
+ *                       description: Acquirer identifier (BANORTE, GPS, etc.)
+ *                 message:
+ *                   type: string
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
+ *       404:
+ *         description: Venue or merchant account not found
+ *       500:
+ *         description: Internal server error
+ */
+router.post(
+  '/venues/:venueId/menta/route',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  validateRequest(paymentRouteSchema),
+  paymentController.getMentaRoute,
 )
 
 /**
