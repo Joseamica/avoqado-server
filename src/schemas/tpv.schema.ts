@@ -127,7 +127,7 @@ export const recordPaymentBodySchema = z.object({
   }),
 })
 
-// Payment routing schemas  
+// Payment routing schemas
 export const paymentRouteSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
