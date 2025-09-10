@@ -281,3 +281,7 @@ The schema documentation serves as context for AI assistants and team members, s
 - Swagger documentation available at `/api-docs`
 - Winston logging with correlation IDs for request tracing
 - Multi-environment configuration via environment variables
+
+## Known Limitations
+
+- **Organization ID (orgId) authorization**: Currently not fully implemented in service methods. Most TPV service methods accept `orgId` parameter but don't enforce organization-level access control. Future implementation needed for proper multi-tenant isolation.

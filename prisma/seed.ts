@@ -334,16 +334,19 @@ async function main() {
 
   console.log(`  Created 3 payment providers (Menta, Clip, Banorte).`)
 
-  // Create merchant accounts for different scenarios
+  // Create merchant accounts for different scenarios with display names and ordering
   const mentaMerchantPrimary = await prisma.merchantAccount.create({
     data: {
       providerId: mentaProvider.id,
-      externalMerchantId: '7acd6930-bef7-4306-91be-c18ccb537423',
+      externalMerchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       alias: 'Menta Primary Account',
+      displayName: 'Cuenta Principal Menta',
+      displayOrder: 0,
+      active: true,
       credentialsEncrypted: {
-        apiKey: 'encrypted_menta_api_key_primary',
-        customerId: 'bbee0460-d1f3-419f-898e-49bd0d63516d',
-        merchantId: '7acd6930-bef7-4306-91be-c18ccb537423',
+        apiKey: 'menta_demo_key',
+        customerId: '4b944822-9c94-4058-b58f-b84c7d214ed4',
+        merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       },
       providerConfig: {
         acquirerId: 'BANORTE',
@@ -357,12 +360,15 @@ async function main() {
   const mentaMerchantSecondary = await prisma.merchantAccount.create({
     data: {
       providerId: mentaProvider.id,
-      externalMerchantId: '8bcd6930-bef7-4306-91be-c18ccb537424',
+      externalMerchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f-secondary',
       alias: 'Menta Secondary Account (Factura)',
+      displayName: 'Cuenta Secundaria Menta (Facturación)',
+      displayOrder: 1,
+      active: true,
       credentialsEncrypted: {
-        apiKey: 'encrypted_menta_api_key_secondary',
-        customerId: 'ccee0460-d1f3-419f-898e-49bd0d63516e',
-        merchantId: '8bcd6930-bef7-4306-91be-c18ccb537424',
+        apiKey: 'menta_demo_key',
+        customerId: '4b944822-9c94-4058-b58f-b84c7d214ed4',
+        merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       },
       providerConfig: {
         acquirerId: 'BANORTE',
@@ -379,6 +385,9 @@ async function main() {
       providerId: clipProvider.id,
       externalMerchantId: 'clip_merchant_12345',
       alias: 'Clip Digital Wallet',
+      displayName: 'Cuenta Principal Clip',
+      displayOrder: 10,
+      active: true,
       credentialsEncrypted: {
         apiKey: 'encrypted_clip_api_key',
         merchantId: 'clip_merchant_12345',
@@ -537,9 +546,10 @@ async function main() {
     })
     console.log(`  Created a sample invitation.`)
 
-    // --- Bucle de Venues (2 por Organización) ---
-    for (let i = 0; i < 2; i++) {
-      const venueName = orgIndex === 0 ? `Avoqado ${i === 0 ? 'Centro' : 'Sur'}` : `${faker.company.name()} Branch`
+    // --- Bucle de Venues (3 para Avoqado, 2 para otras organizaciones) ---
+    const venueCount = orgIndex === 0 ? 3 : 2
+    for (let i = 0; i < venueCount; i++) {
+      const venueName = orgIndex === 0 ? `Avoqado ${i === 0 ? 'Centro' : i === 1 ? 'Sur' : 'Norte'}` : `${faker.company.name()} Branch`
       const venueSlug = generateSlug(venueName)
       const venue = await prisma.venue.create({
         data: {
@@ -578,13 +588,17 @@ async function main() {
       // Asignar Staff a este Venue
       for (const staffWithRole of createdStaffList) {
         if ([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN].includes(staffWithRole.assignedRole) || Math.random() > 0.3) {
+          // Set PIN 0000 for superadmin at Avoqado Centro
+          const pin =
+            staffWithRole.assignedRole === StaffRole.SUPERADMIN && venue.name === 'Avoqado Centro' ? '0000' : faker.string.numeric(4)
+
           await prisma.staffVenue.create({
             data: {
               staffId: staffWithRole.id,
               venueId: venue.id,
               role: staffWithRole.assignedRole,
               active: true,
-              pin: faker.string.numeric(4), // Set venue-specific PIN
+              pin: pin, // Set venue-specific PIN
             },
           })
 
@@ -920,7 +934,12 @@ async function main() {
       const activeWaiter = getRandomItem(venueWaiters)
 
       console.log('      - Creating shifts, orders, payments over the last 60 days...')
-      const shiftsToCreate = faker.number.int({ min: 8, max: 16 })
+      // Prioritize Avoqado venues with significantly more data
+      const isAvoqadoVenue = orgIndex === 0
+      const shiftsToCreate = isAvoqadoVenue
+        ? faker.number.int({ min: 25, max: 40 }) // Much more shifts for Avoqado venues
+        : faker.number.int({ min: 3, max: 6 }) // Minimal shifts for other venues
+      console.log(`        📊 ${isAvoqadoVenue ? 'PRIORITY' : 'minimal'} data for ${venue.name}: ${shiftsToCreate} shifts planned`)
       for (let s = 0; s < shiftsToCreate; s++) {
         const startTime = randomDateBetween(daysAgo(60), new Date())
         const shiftDurationHours = faker.number.int({ min: 5, max: 9 })
@@ -931,9 +950,32 @@ async function main() {
           data: { venueId: venue.id, staffId: activeWaiter.staffId, startTime, endTime },
         })
 
-        const ordersInShift = faker.number.int({ min: 6, max: 14 })
+        // More orders per shift for Avoqado venues
+        const ordersInShift = isAvoqadoVenue
+          ? faker.number.int({ min: 10, max: 18 }) // More orders for Avoqado venues
+          : faker.number.int({ min: 3, max: 8 }) // Fewer orders for other venues
         for (let k = 0; k < ordersInShift; k++) {
-          const orderStatus = getRandomItem([OrderStatus.COMPLETED, OrderStatus.COMPLETED, OrderStatus.PENDING, OrderStatus.CANCELLED])
+          // Higher completion rate for Avoqado venues (90% vs 60%)
+          const orderStatus = isAvoqadoVenue
+            ? getRandomItem([
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.PENDING,
+              ]) // 90% completed
+            : getRandomItem([
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.COMPLETED,
+                OrderStatus.PENDING,
+                OrderStatus.CANCELLED,
+              ]) // 60% completed
 
           const orderCreatedAt = randomDateBetween(startTime, endTime)
           const orderCompletedAt =
@@ -963,7 +1005,11 @@ async function main() {
           })
 
           let subtotal = 0
-          const numItems = faker.number.int({ min: 1, max: 4 })
+          const createdOrderItems: any[] = []
+          // More items per order for Avoqado venues
+          const numItems = isAvoqadoVenue
+            ? faker.number.int({ min: 2, max: 6 }) // More items per order for Avoqado
+            : faker.number.int({ min: 1, max: 3 }) // Fewer items for other venues
           for (let j = 0; j < numItems; j++) {
             if (sellableProducts.length === 0) continue // Evitar error si no hay productos vendibles
             const product = getRandomItem(sellableProducts)
@@ -982,17 +1028,39 @@ async function main() {
                 createdAt: orderCreatedAt,
               },
             })
-            if (Math.random() < 0.2) {
+
+            const itemModifiers: any[] = []
+            // Higher modifier probability for Avoqado venues
+            const modifierProbability = isAvoqadoVenue ? 0.35 : 0.15
+            if (Math.random() < modifierProbability) {
               const modifier = getRandomItem(modifiers)
               await prisma.orderItemModifier.create({
                 data: { orderItemId: orderItem.id, modifierId: modifier.id, quantity: 1, price: modifier.price },
               })
               subtotal += parseFloat(modifier.price.toString())
+              itemModifiers.push({
+                name: modifier.name,
+                price: parseFloat(modifier.price.toString()),
+              })
             }
+
+            createdOrderItems.push({
+              name: product.name,
+              quantity,
+              price: parseFloat(product.price.toString()),
+              totalPrice: itemTotal + itemModifiers.reduce((sum, mod) => sum + mod.price, 0),
+              modifiers: itemModifiers,
+            })
           }
 
           const taxAmount = subtotal * 0.16
-          const tipAmount = order.status === OrderStatus.COMPLETED ? subtotal * getRandomItem([0.1, 0.15, 0.2]) : 0
+          // Higher tips for Avoqado venues (better service quality)
+          const tipAmount =
+            order.status === OrderStatus.COMPLETED
+              ? isAvoqadoVenue
+                ? subtotal * getRandomItem([0.15, 0.18, 0.2, 0.22, 0.25]) // Higher tips for Avoqado venues
+                : subtotal * getRandomItem([0.08, 0.1, 0.12, 0.15]) // Lower tips for other venues
+              : 0
           const total = subtotal + taxAmount + tipAmount
 
           await prisma.order.update({ where: { id: order.id }, data: { subtotal, taxAmount, tipAmount, total } })
@@ -1105,10 +1173,57 @@ async function main() {
               }
             }
 
+            // Create proper dataSnapshot structure for the digital receipt
+            const dataSnapshot = {
+              payment: {
+                id: payment.id,
+                amount: parseFloat(payment.amount.toString()),
+                tipAmount: parseFloat(payment.tipAmount.toString()),
+                totalAmount: parseFloat(payment.amount.toString()) + parseFloat(payment.tipAmount.toString()),
+                method: payment.method.toString(),
+                status: payment.status.toString(),
+                createdAt: payment.createdAt.toISOString(),
+                splitType: payment.splitType?.toString(),
+              },
+              venue: {
+                id: venue.id,
+                name: venue.name,
+                address: venue.address || '',
+                city: venue.city || '',
+                state: venue.state || '',
+                zipCode: venue.zipCode || '',
+                phone: venue.phone || '',
+                email: venue.email || '',
+                logo: venue.logo || undefined,
+                primaryColor: venue.primaryColor || undefined,
+                currency: 'MXN',
+              },
+              order: {
+                id: order.id,
+                number: order.orderNumber,
+                items: createdOrderItems,
+                subtotal: subtotal,
+                taxAmount: taxAmount,
+                total: total,
+                createdAt: order.createdAt.toISOString(),
+                type: order.type?.toString(),
+                source: order.source?.toString(),
+                table: order.tableId
+                  ? {
+                      number: tables.find(t => t.id === order.tableId)?.number || 'N/A',
+                      area: createdAreas.find(a => a.id === tables.find(t => t.id === order.tableId)?.areaId)?.name || 'N/A',
+                    }
+                  : undefined,
+              },
+              processedBy: {
+                name: `${activeWaiter.staff.firstName} ${activeWaiter.staff.lastName}`,
+              },
+            }
+
             await prisma.digitalReceipt.create({
               data: {
                 paymentId: payment.id,
-                dataSnapshot: { venueName: venue.name, orderNumber: order.orderNumber, total, paymentMethod },
+                dataSnapshot,
                 status: ReceiptStatus.SENT,
                 recipientEmail: faker.internet.email(),
                 sentAt: paymentCreatedAt,

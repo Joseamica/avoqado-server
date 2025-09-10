@@ -1288,6 +1288,14 @@ router.get(
   tpvController.getTerminals,
 )
 
+// Create TPV (terminal)
+router.post(
+  '/venues/:venueId/tpvs',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  tpvController.createTpv,
+)
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}:

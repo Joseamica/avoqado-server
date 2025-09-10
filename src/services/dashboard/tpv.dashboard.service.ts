@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
-import { PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
+import { PaginatedTerminalsResponse, UpdateTpvBody, CreateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import logger from '@/config/logger'
 
@@ -144,4 +144,34 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
   })
 
   return updatedTerminal
+}
+
+/**
+ * Crea una nueva terminal (TPV) para un venue.
+ */
+export async function createTpv(venueId: string, payload: CreateTpvBody): Promise<Terminal> {
+  if (!venueId) throw new NotFoundError('El ID del Venue es requerido.')
+  const { name, serialNumber } = payload
+  if (!name || !serialNumber) {
+    throw new NotFoundError('Nombre y número de serie son requeridos')
+  }
+
+  // Ensure serial number is unique
+  const existing = await prisma.terminal.findUnique({ where: { serialNumber } })
+  if (existing) {
+    throw new NotFoundError(`Ya existe un terminal con número de serie ${serialNumber}`)
+  }
+
+  const created = await prisma.terminal.create({
+    data: {
+      venueId,
+      name,
+      serialNumber,
+      type: (payload.type as any) || TerminalType.TPV_ANDROID,
+      status: TerminalStatus.INACTIVE,
+      config: payload.config as any,
+    },
+  })
+
+  return created
 }

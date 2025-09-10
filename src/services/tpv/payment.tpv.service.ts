@@ -662,3 +662,227 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       : null,
   }
 }
+
+/**
+ * Get available merchant accounts for a venue
+ * Returns active merchant accounts configured for the venue with display information
+ * @param venueId Venue ID to get merchant accounts for
+ * @param orgId Organization ID for authorization
+ * @returns Array of available merchant accounts with display info
+ */
+export async function getVenueMerchantAccounts(venueId: string, _orgId?: string): Promise<any[]> {
+  // First validate that the venue exists and belongs to the organization
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+    },
+    include: {
+      paymentConfig: {
+        include: {
+          primaryAccount: {
+            include: {
+              provider: true,
+            },
+          },
+          secondaryAccount: {
+            include: {
+              provider: true,
+            },
+          },
+          tertiaryAccount: {
+            include: {
+              provider: true,
+            },
+          },
+        },
+      },
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError('Venue not found or not accessible')
+  }
+
+  if (!venue.paymentConfig) {
+    logger.warn('No payment configuration found for venue', { venueId })
+    return []
+  }
+
+  const accounts = []
+  const { paymentConfig } = venue
+
+  // Helper function to create account response object
+  const createAccountResponse = (account: any, accountType: string) => {
+    if (!account || !account.active) return null
+
+    // Check if account has required credentials
+    const credentials = account.credentialsEncrypted
+    const hasValidCredentials = credentials && credentials.merchantId && credentials.apiKey
+
+    return {
+      id: account.id,
+      accountType,
+      displayName: account.displayName || `${account.provider.name} ${accountType}`,
+      providerName: account.provider.name,
+      providerCode: account.provider.code,
+      active: account.active,
+      hasValidCredentials,
+      displayOrder: account.displayOrder,
+      externalMerchantId: account.externalMerchantId,
+    }
+  }
+
+  // Add primary account if exists and active
+  if (paymentConfig.primaryAccount) {
+    const primaryAccount = createAccountResponse(paymentConfig.primaryAccount, 'PRIMARY')
+    if (primaryAccount) accounts.push(primaryAccount)
+  }
+
+  // Add secondary account if exists and active
+  if (paymentConfig.secondaryAccount) {
+    const secondaryAccount = createAccountResponse(paymentConfig.secondaryAccount, 'SECONDARY')
+    if (secondaryAccount) accounts.push(secondaryAccount)
+  }
+
+  // Add tertiary account if exists and active
+  if (paymentConfig.tertiaryAccount) {
+    const tertiaryAccount = createAccountResponse(paymentConfig.tertiaryAccount, 'TERTIARY')
+    if (tertiaryAccount) accounts.push(tertiaryAccount)
+  }
+
+  // Filter only accounts with valid credentials and sort by display order
+  const validAccounts = accounts.filter(account => account.hasValidCredentials).sort((a, b) => a.displayOrder - b.displayOrder)
+
+  logger.info('Retrieved merchant accounts for venue', {
+    venueId,
+    totalAccounts: accounts.length,
+    validAccounts: validAccounts.length,
+  })
+
+  return validAccounts
+}
+
+/**
+ * Interface for payment routing request data
+ */
+interface PaymentRoutingData {
+  amount: number // Amount in cents
+  merchantAccountId: string // Selected merchant account ID (user has already chosen primary/secondary/tertiary)
+  terminalSerial: string // Terminal identifier
+  bin?: string // Optional BIN for card routing
+}
+
+/**
+ * Get payment routing configuration for the selected merchant account
+ * This method retrieves the credentials and routing info for the merchant account selected by the user in TPV
+ * @param venueId Venue ID
+ * @param routingData Routing parameters from the request (includes user-selected merchant account)
+ * @param orgId Organization ID for authorization
+ * @returns Payment routing configuration with credentials and routing info for the selected account
+ */
+export async function getPaymentRouting(venueId: string, routingData: PaymentRoutingData, _orgId?: string): Promise<any> {
+  logger.info('Getting payment routing configuration for user-selected merchant account', {
+    venueId,
+    merchantAccountId: routingData.merchantAccountId,
+    amount: routingData.amount,
+  })
+
+  // First validate that the venue exists and get its payment configuration
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+    },
+    include: {
+      paymentConfig: {
+        include: {
+          primaryAccount: {
+            include: {
+              provider: true,
+            },
+          },
+          secondaryAccount: {
+            include: {
+              provider: true,
+            },
+          },
+          tertiaryAccount: {
+            include: {
+              provider: true,
+            },
+          },
+        },
+      },
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError('Venue not found or not accessible')
+  }
+
+  if (!venue.paymentConfig) {
+    throw new BadRequestError('Venue payment configuration not found')
+  }
+
+  // Find the specific merchant account by ID from the venue's configured accounts
+  // The user has already selected which account they want to use (primary/secondary/tertiary)
+  let selectedAccount: any = null
+  let accountType: string = 'UNKNOWN'
+
+  const { paymentConfig } = venue
+
+  if (paymentConfig.primaryAccount?.id === routingData.merchantAccountId) {
+    selectedAccount = paymentConfig.primaryAccount
+    accountType = 'PRIMARY'
+  } else if (paymentConfig.secondaryAccount?.id === routingData.merchantAccountId) {
+    selectedAccount = paymentConfig.secondaryAccount
+    accountType = 'SECONDARY'
+  } else if (paymentConfig.tertiaryAccount?.id === routingData.merchantAccountId) {
+    selectedAccount = paymentConfig.tertiaryAccount
+    accountType = 'TERTIARY'
+  }
+
+  if (!selectedAccount || !selectedAccount.active) {
+    throw new NotFoundError('Selected merchant account not found or not active for this venue')
+  }
+
+  // Check if account has valid credentials
+  const credentials = selectedAccount.credentialsEncrypted as any
+  if (!credentials || !credentials.merchantId || !credentials.apiKey || !credentials.customerId) {
+    throw new BadRequestError('Selected merchant account does not have valid payment processor credentials')
+  }
+
+  // Simple routing based on account type - the user has already made the routing decision by selecting the account
+  const route = accountType.toLowerCase() // 'primary', 'secondary', or 'tertiary'
+  const acquirer = selectedAccount.provider.code.toUpperCase() // 'MENTA', etc.
+
+  // The routing response contains the credentials for the user-selected merchant account
+  const routingResponse = {
+    route,
+    acquirer,
+    merchantId: credentials.merchantId,
+    apiKeyMerchant: credentials.apiKey,
+    customerId: credentials.customerId,
+    terminalSerial: routingData.terminalSerial,
+    amount: routingData.amount,
+    // Additional routing metadata
+    routingMetadata: {
+      accountType,
+      providerCode: selectedAccount.provider.code,
+      externalMerchantId: selectedAccount.externalMerchantId,
+      userSelected: true, // This routing was based on user selection, not automatic rules
+      timestamp: new Date().toISOString(),
+    },
+  }
+
+  logger.info('Payment routing configuration generated for user-selected account', {
+    venueId,
+    merchantAccountId: routingData.merchantAccountId,
+    accountType,
+    route,
+    acquirer,
+    userSelected: true,
+    merchantId: credentials.merchantId.substring(0, 8) + '...',
+  })
+
+  return routingResponse
+}

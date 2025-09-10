@@ -12,10 +12,9 @@ name: 📊 Service Monitoring & Health Checks
 # 3. Make alerts more strict
 
 on:
-  schedule:
-    # Run health checks every hour (free tier friendly)
-    # TODO: When you upgrade to PAID tier, change to: '*/15 * * * *' (every 15 minutes)
-    - cron: '0 * * * *'
+  # Temporarily disable scheduled health checks to stop hourly emails
+  # schedule:
+  #   - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       check_type:

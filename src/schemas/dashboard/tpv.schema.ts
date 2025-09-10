@@ -28,3 +28,11 @@ export type UpdateTpvBody = {
   lastHeartbeat?: Date
   config?: any // JSON field in Prisma
 }
+
+// Create TPV body payload
+export type CreateTpvBody = {
+  name: string
+  serialNumber: string
+  type?: TerminalType
+  config?: any
+}

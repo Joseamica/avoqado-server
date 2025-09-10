@@ -97,3 +97,56 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
     next(error)
   }
 }
+
+/**
+ * Get available merchant accounts for a venue
+ * @param req Request with venueId parameter
+ * @param res Response
+ * @param next Next function for error handling
+ */
+export async function getMerchantAccounts(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const venueId: string = req.params.venueId
+
+    // Call service to get merchant accounts
+    const result = await paymentTpvService.getVenueMerchantAccounts(venueId, orgId)
+
+    // Send success response
+    res.status(200).json({
+      success: true,
+      data: result,
+      message: 'Merchant accounts retrieved successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Get payment routing configuration for dynamic payment processing
+ * @param req Request with venueId parameter and routing data in body
+ * @param res Response
+ * @param next Next function for error handling
+ */
+export async function getMentaRoute(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const venueId: string = req.params.venueId
+
+    // Extract routing parameters from request body (already validated by schema)
+    const routingData = req.body
+
+    // Call service to get payment routing configuration
+    const result = await paymentTpvService.getPaymentRouting(venueId, routingData, orgId)
+
+    // Send success response
+    res.status(200).json({
+      success: true,
+      data: result,
+      message: 'Payment routing retrieved successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
