@@ -37,6 +37,54 @@ const prisma = new PrismaClient()
 
 const HASH_ROUNDS = 10
 
+// ==========================================
+// SEED CONFIGURATION FROM ENVIRONMENT
+// ==========================================
+const SEED_CONFIG = {
+  // Time series configuration
+  DAYS: parseInt(process.env.SEED_DAYS || '30'), // Reduced from 90 to 30 days
+  TIMEZONE: process.env.SEED_TIMEZONE || 'America/Mexico_City',
+
+  // Volume configuration
+  STORES: parseInt(process.env.SEED_STORES || '3'),
+  CUSTOMERS: parseInt(process.env.SEED_CUSTOMERS || '300'), // Reduced from 2000 to 300
+  PRODUCTS: parseInt(process.env.SEED_PRODUCTS || '40'), // Reduced from 200 to 40
+
+  // Order patterns (significantly reduced)
+  ORDERS_PER_DAY_MIN: parseInt(process.env.SEED_ORDERS_PER_DAY_MIN || '3'), // Reduced from 15 to 3
+  ORDERS_PER_DAY_MAX: parseInt(process.env.SEED_ORDERS_PER_DAY_MAX || '8'), // Reduced from 45 to 8
+
+  // Business hours
+  OPEN_HOURS: process.env.SEED_OPEN_HOURS || '08:00-22:00',
+  PEAK_HOURS: process.env.SEED_PEAK_HOURS || '12:00-14:00,19:00-21:00',
+
+  // Order characteristics
+  ITEMS_PER_ORDER_MIN: parseInt(process.env.SEED_ITEMS_PER_ORDER_MIN || '1'),
+  ITEMS_PER_ORDER_MAX: parseInt(process.env.SEED_ITEMS_PER_ORDER_MAX || '3'), // Reduced from 6 to 3
+  AOV_MIN: parseFloat(process.env.SEED_AOV_MIN || '120'),
+  AOV_MAX: parseFloat(process.env.SEED_AOV_MAX || '850'),
+
+  // Customer behavior
+  TIP_MIN_PERCENT: parseFloat(process.env.SEED_TIP_MIN_PERCENT || '0.08'),
+  TIP_MAX_PERCENT: parseFloat(process.env.SEED_TIP_MAX_PERCENT || '0.25'),
+  REVIEW_PROBABILITY: parseFloat(process.env.SEED_REVIEW_PROB || '0.2'), // Reduced from 0.4 to 0.2
+  GOOD_REVIEW_RATE: parseFloat(process.env.SEED_GOOD_REVIEW_RATE || '0.8'),
+
+  // Payment patterns
+  CASH_RATIO: parseFloat(process.env.SEED_CASH_RATIO || '0.25'),
+  CARD_RATIO: parseFloat(process.env.SEED_CARD_RATIO || '0.75'),
+
+  // Anomalies & variations
+  WEEKEND_MULTIPLIER: parseFloat(process.env.SEED_WEEKEND_MULTIPLIER || '1.2'), // Reduced from 1.4 to 1.2
+  REFUND_RATE: parseFloat(process.env.SEED_REFUND_RATE || '0.03'),
+
+  // Reproducibility
+  SEED: process.env.SEED_SEED ? parseInt(process.env.SEED_SEED) : undefined,
+
+  // Promotion windows (JSON format)
+  PROMO_WINDOWS: process.env.SEED_PROMO_WINDOWS || '[{"start":"2024-12-15","end":"2024-12-25","discount":0.2,"name":"Holiday Promo"}]',
+}
+
 export function generateSlug(text: string): string {
   if (!text) return ''
   return text
@@ -61,7 +109,29 @@ function getRandomSample<T>(arr: T[], count: number): T[] {
   return shuffled.slice(0, count)
 }
 
-// --- Date helpers for realistic time distribution ---
+// ==========================================
+// ADVANCED TIME-SERIES GENERATION
+// ==========================================
+
+// Set deterministic seed if provided
+if (SEED_CONFIG.SEED) {
+  faker.seed(SEED_CONFIG.SEED)
+  console.log(`🎲 Using deterministic seed: ${SEED_CONFIG.SEED}`)
+}
+
+// Parse business hours
+function parseTimeRange(range: string) {
+  const [start, end] = range.split('-')
+  const startHour = parseInt(start.split(':')[0])
+  const endHour = parseInt(end.split(':')[0])
+  return { start: startHour, end: endHour }
+}
+
+const businessHours = parseTimeRange(SEED_CONFIG.OPEN_HOURS)
+const peakHours = SEED_CONFIG.PEAK_HOURS.split(',').map(parseTimeRange)
+const promoWindows = JSON.parse(SEED_CONFIG.PROMO_WINDOWS)
+
+// Advanced date helpers for realistic time distribution
 function daysAgo(n: number): Date {
   const d = new Date()
   d.setDate(d.getDate() - n)
@@ -72,70 +142,215 @@ function randomDateBetween(from: Date, to: Date): Date {
   return faker.date.between({ from, to })
 }
 
+// Generate realistic business hours with peak patterns
+function generateBusinessHourTimestamp(baseDate: Date): Date {
+  const result = new Date(baseDate)
+
+  // Determine if it's a peak hour
+  const isPeakTime = Math.random() < 0.4 // 40% chance of peak time
+
+  let hour: number
+  if (isPeakTime && peakHours.length > 0) {
+    // Select a random peak period
+    const peakPeriod = getRandomItem(peakHours)
+    hour = faker.number.int({ min: peakPeriod.start, max: peakPeriod.end - 1 })
+  } else {
+    // Regular business hours
+    hour = faker.number.int({ min: businessHours.start, max: businessHours.end - 1 })
+  }
+
+  const minute = faker.number.int({ min: 0, max: 59 })
+  const second = faker.number.int({ min: 0, max: 59 })
+
+  result.setHours(hour, minute, second, 0)
+  return result
+}
+
+// Calculate day-of-week multiplier for realistic weekly patterns
+function getDayOfWeekMultiplier(date: Date): number {
+  const dayOfWeek = date.getDay() // 0 = Sunday, 6 = Saturday
+
+  // Weekend boost
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
+    return SEED_CONFIG.WEEKEND_MULTIPLIER
+  }
+
+  // Weekday patterns (Tuesday-Thursday slightly higher)
+  if (dayOfWeek >= 2 && dayOfWeek <= 4) {
+    return 1.1
+  }
+
+  // Monday and Friday slightly lower
+  return 0.9
+}
+
+// Check if date is within a promotion window
+function isPromotionDay(date: Date): { active: boolean; discount: number; name?: string } {
+  const dateStr = date.toISOString().split('T')[0]
+
+  for (const promo of promoWindows) {
+    if (dateStr >= promo.start && dateStr <= promo.end) {
+      return { active: true, discount: promo.discount, name: promo.name }
+    }
+  }
+
+  return { active: false, discount: 0 }
+}
+
+// Generate realistic order volume for a given day
+function getOrderVolumeForDay(date: Date): number {
+  const baseVolume = faker.number.int({
+    min: SEED_CONFIG.ORDERS_PER_DAY_MIN,
+    max: SEED_CONFIG.ORDERS_PER_DAY_MAX,
+  })
+
+  // Apply day-of-week multiplier
+  const dayMultiplier = getDayOfWeekMultiplier(date)
+
+  // Apply promotion multiplier
+  const promo = isPromotionDay(date)
+  const promoMultiplier = promo.active ? 1 + promo.discount * 0.5 : 1 // Promos increase volume
+
+  // Add some random variance (±20%)
+  const varianceMultiplier = faker.number.float({ min: 0.8, max: 1.2 })
+
+  // Occasionally have very slow days (2% chance)
+  const isSlowDay = Math.random() < 0.02
+  const slowDayMultiplier = isSlowDay ? 0.3 : 1
+
+  const finalVolume = Math.round(baseVolume * dayMultiplier * promoMultiplier * varianceMultiplier * slowDayMultiplier)
+
+  return Math.max(1, finalVolume) // At least 1 order
+}
+
+// Generate realistic AOV with promotions and variance
+function generateRealisticAOV(date: Date, baseAov?: number): number {
+  const targetAov = baseAov || faker.number.float({ min: SEED_CONFIG.AOV_MIN, max: SEED_CONFIG.AOV_MAX })
+
+  // Apply promotion discount
+  const promo = isPromotionDay(date)
+  const promoMultiplier = promo.active ? 1 - promo.discount : 1
+
+  // Weekend AOV tends to be higher
+  const dayMultiplier = date.getDay() === 0 || date.getDay() === 6 ? 1.15 : 1
+
+  // Evening orders tend to be higher
+  const hour = date.getHours()
+  const timeMultiplier = hour >= 18 && hour <= 21 ? 1.2 : 1
+
+  return targetAov * promoMultiplier * dayMultiplier * timeMultiplier
+}
+
+// Generate customer cohorts with realistic retention patterns
+function generateCustomerCohort(customerIndex: number, totalCustomers: number) {
+  // 20% are new customers (recent signups)
+  // 60% are regular customers
+  // 20% are VIP/frequent customers
+
+  const cohortType = customerIndex < totalCustomers * 0.2 ? 'new' : customerIndex < totalCustomers * 0.8 ? 'regular' : 'vip'
+
+  return {
+    type: cohortType,
+    orderFrequency: cohortType === 'new' ? 0.1 : cohortType === 'regular' ? 0.3 : 0.7,
+    tipMultiplier: cohortType === 'new' ? 0.8 : cohortType === 'regular' ? 1.0 : 1.3,
+    avgOrderValue: cohortType === 'new' ? 0.9 : cohortType === 'regular' ? 1.0 : 1.4,
+  }
+}
+
+// ==========================================
+// IDEMPOTENT RESET FUNCTIONALITY
+// ==========================================
+async function resetDatabase() {
+  console.log('🧹 Performing idempotent database reset...')
+
+  // Helper to safely delete with logging
+  const safeDelete = async (modelName: string, deleteOperation: () => Promise<any>) => {
+    try {
+      const result = await deleteOperation()
+      if (result.count > 0) {
+        console.log(`  ✅ Deleted ${result.count} ${modelName} records`)
+      }
+    } catch (error: any) {
+      // Ignore FK constraint errors during cleanup
+      if (!error.message.includes('foreign key constraint')) {
+        console.warn(`  ⚠️  Warning deleting ${modelName}: ${error.message}`)
+      }
+    }
+  }
+
+  // Delete in proper FK dependency order
+  const deleteOrder = [
+    ['OrderItemModifiers', () => prisma.orderItemModifier.deleteMany()],
+    ['ActivityLogs', () => prisma.activityLog.deleteMany()],
+    ['DigitalReceipts', () => prisma.digitalReceipt.deleteMany()],
+    ['InvoiceItems', () => prisma.invoiceItem.deleteMany()],
+    ['PaymentAllocations', () => prisma.paymentAllocation.deleteMany()],
+    ['Reviews', () => prisma.review.deleteMany()],
+    ['ProductModifierGroups', () => prisma.productModifierGroup.deleteMany()],
+    ['InventoryMovements', () => prisma.inventoryMovement.deleteMany()],
+    ['MenuCategoryAssignments', () => prisma.menuCategoryAssignment.deleteMany()],
+    ['VenueFeatures', () => prisma.venueFeature.deleteMany()],
+    ['FeeTiers', () => prisma.feeTier.deleteMany()],
+    ['OrderItems', () => prisma.orderItem.deleteMany()],
+    ['VenueTransactions', () => prisma.venueTransaction.deleteMany()],
+    ['Payments', () => prisma.payment.deleteMany()],
+    ['Orders', () => prisma.order.deleteMany()],
+    ['Shifts', () => prisma.shift.deleteMany()],
+    ['Inventories', () => prisma.inventory.deleteMany()],
+    ['Modifiers', () => prisma.modifier.deleteMany()],
+    ['StaffVenues', () => prisma.staffVenue.deleteMany()],
+    ['VenueSettings', () => prisma.venueSettings.deleteMany()],
+    ['PosCommands', () => prisma.posCommand.deleteMany()],
+    ['PosConnectionStatuses', () => prisma.posConnectionStatus.deleteMany()],
+    ['Notifications', () => prisma.notification.deleteMany()],
+    ['NotificationPreferences', () => prisma.notificationPreference.deleteMany()],
+    ['NotificationTemplates', () => prisma.notificationTemplate.deleteMany()],
+    ['TransactionCosts', () => prisma.transactionCost.deleteMany()],
+    ['MonthlyVenueProfits', () => prisma.monthlyVenueProfit.deleteMany()],
+    ['VenuePricingStructures', () => prisma.venuePricingStructure.deleteMany()],
+    ['ProviderCostStructures', () => prisma.providerCostStructure.deleteMany()],
+    ['VenuePaymentConfigs', () => prisma.venuePaymentConfig.deleteMany()],
+    ['MerchantAccounts', () => prisma.merchantAccount.deleteMany()],
+    ['PaymentProviders', () => prisma.paymentProvider.deleteMany()],
+    ['Tables', () => prisma.table.deleteMany()],
+    ['Areas', () => prisma.area.deleteMany()],
+    ['Terminals', () => prisma.terminal.deleteMany()],
+    ['Invitations', () => prisma.invitation.deleteMany()],
+    ['Invoices', () => prisma.invoice.deleteMany()],
+    ['Menus', () => prisma.menu.deleteMany()],
+    ['ModifierGroups', () => prisma.modifierGroup.deleteMany()],
+    ['Products', () => prisma.product.deleteMany()],
+    ['MenuCategories', () => prisma.menuCategory.deleteMany()],
+    ['FeeSchedules', () => prisma.feeSchedule.deleteMany()],
+    ['Staff', () => prisma.staff.deleteMany()],
+    ['Venues', () => prisma.venue.deleteMany()],
+    ['Organizations', () => prisma.organization.deleteMany()],
+    ['Features', () => prisma.feature.deleteMany()],
+    ['Customers', () => prisma.customer.deleteMany()],
+  ]
+
+  for (const [modelName, deleteOperation] of deleteOrder) {
+    await safeDelete(modelName as string, deleteOperation as () => Promise<any>)
+  }
+
+  console.log('🧹 Database reset completed successfully.')
+}
+
 async function main() {
-  console.log(`Start seeding ...`)
+  console.log(`🚀 Starting intelligent Prisma seed generation...`)
+  console.log(`📊 Configuration:`)
+  console.log(`   - Days: ${SEED_CONFIG.DAYS}`)
+  console.log(`   - Business Hours: ${SEED_CONFIG.OPEN_HOURS}`)
+  console.log(`   - Peak Hours: ${SEED_CONFIG.PEAK_HOURS}`)
+  console.log(`   - Orders/day: ${SEED_CONFIG.ORDERS_PER_DAY_MIN}-${SEED_CONFIG.ORDERS_PER_DAY_MAX}`)
+  console.log(`   - AOV Range: $${SEED_CONFIG.AOV_MIN}-${SEED_CONFIG.AOV_MAX}`)
+  console.log(`   - Tip Range: ${(SEED_CONFIG.TIP_MIN_PERCENT * 100).toFixed(1)}%-${(SEED_CONFIG.TIP_MAX_PERCENT * 100).toFixed(1)}%`)
+  if (promoWindows.length > 0) {
+    console.log(`   - Promotions: ${promoWindows.length} promotion windows configured`)
+  }
+  console.log('')
 
-  console.log('Cleaning up existing data...')
-  // All records that depend on other tables must be deleted first.
-  await prisma.orderItemModifier.deleteMany()
-  await prisma.activityLog.deleteMany()
-  await prisma.digitalReceipt.deleteMany()
-  await prisma.invoiceItem.deleteMany()
-  await prisma.paymentAllocation.deleteMany()
-  await prisma.review.deleteMany()
-  await prisma.productModifierGroup.deleteMany()
-  await prisma.inventoryMovement.deleteMany()
-  await prisma.menuCategoryAssignment.deleteMany()
-  await prisma.venueFeature.deleteMany()
-  await prisma.feeTier.deleteMany()
-  await prisma.orderItem.deleteMany()
-  await prisma.venueTransaction.deleteMany()
-  await prisma.payment.deleteMany()
-  await prisma.order.deleteMany()
-  await prisma.shift.deleteMany()
-  await prisma.inventory.deleteMany()
-  await prisma.modifier.deleteMany()
-  await prisma.staffVenue.deleteMany()
-  await prisma.venueSettings.deleteMany()
-  await prisma.posCommand.deleteMany()
-  await prisma.posConnectionStatus.deleteMany()
-
-  // Clean notification system
-  await prisma.notification.deleteMany()
-  await prisma.notificationPreference.deleteMany()
-  await prisma.notificationTemplate.deleteMany()
-
-  // Clean cost management models
-  await prisma.transactionCost.deleteMany()
-  await prisma.monthlyVenueProfit.deleteMany()
-  await prisma.venuePricingStructure.deleteMany()
-  await prisma.providerCostStructure.deleteMany()
-  await prisma.venuePaymentConfig.deleteMany()
-  await prisma.merchantAccount.deleteMany()
-  await prisma.paymentProvider.deleteMany()
-
-  // ✅ CORRECTED ORDER: Delete Tables before Areas
-  await prisma.table.deleteMany()
-  await prisma.area.deleteMany()
-
-  await prisma.terminal.deleteMany()
-  await prisma.invitation.deleteMany()
-  await prisma.invoice.deleteMany()
-  await prisma.menu.deleteMany()
-  await prisma.modifierGroup.deleteMany()
-  await prisma.product.deleteMany()
-  await prisma.menuCategory.deleteMany()
-  await prisma.feeSchedule.deleteMany()
-  await prisma.staff.deleteMany()
-
-  // Now it's safe to delete Venues and Organizations
-  await prisma.venue.deleteMany()
-  await prisma.organization.deleteMany()
-
-  // Independent models
-  await prisma.feature.deleteMany()
-  await prisma.customer.deleteMany()
-  console.log('Cleaned up existing data successfully.')
+  await resetDatabase()
 
   // --- Seed de Datos Globales/Independientes ---
   console.log('Seeding global data...')
@@ -195,13 +410,33 @@ async function main() {
   })
   console.log(`  Created 1 FeeSchedule with tiers.`)
 
-  await prisma.customer.createMany({
-    data: [
-      { email: faker.internet.email(), phone: faker.phone.number(), firstName: 'John', lastName: 'Doe', marketingConsent: true },
-      { email: faker.internet.email(), phone: faker.phone.number(), firstName: 'Jane', lastName: 'Smith', marketingConsent: false },
-    ],
-  })
-  console.log(`  Created 2 sample customers.`)
+  // Create realistic customer cohorts
+  console.log(`  Creating ${SEED_CONFIG.CUSTOMERS} customers with cohort distribution...`)
+  const customersData = []
+  const customerCohortMap = new Map<string, { type: string; joinedAt: Date }>() // Track cohort info separately
+
+  for (let i = 0; i < SEED_CONFIG.CUSTOMERS; i++) {
+    const cohort = generateCustomerCohort(i, SEED_CONFIG.CUSTOMERS)
+    const email = faker.internet.email()
+
+    customersData.push({
+      email,
+      phone: faker.phone.number(),
+      firstName: faker.person.firstName(),
+      lastName: faker.person.lastName(),
+      marketingConsent: Math.random() < 0.7, // 70% consent rate
+    })
+
+    // Store cohort info separately
+    customerCohortMap.set(email, {
+      type: cohort.type,
+      joinedAt: faker.date.past({ years: cohort.type === 'new' ? 0.25 : cohort.type === 'regular' ? 1 : 2 }),
+    })
+  }
+
+  await prisma.customer.createMany({ data: customersData })
+  const customers = await prisma.customer.findMany()
+  console.log(`  Created ${customers.length} customers across cohorts.`)
 
   // --- Notification Templates ---
   const notificationTemplates = [
@@ -314,7 +549,7 @@ async function main() {
     },
   })
 
-  const banorteProvider = await prisma.paymentProvider.create({
+  await prisma.paymentProvider.create({
     data: {
       code: 'BANORTE_DIRECT',
       name: 'Banorte Direct Integration',
@@ -437,7 +672,7 @@ async function main() {
     },
   })
 
-  const clipCosts = await prisma.providerCostStructure.create({
+  await prisma.providerCostStructure.create({
     data: {
       providerId: clipProvider.id,
       merchantAccountId: clipMerchant.id,
@@ -667,7 +902,7 @@ async function main() {
       console.log(`      - Created VenueSettings and assigned Features.`)
 
       // --- Payment Configuration for this Venue ---
-      const paymentConfig = await prisma.venuePaymentConfig.create({
+      await prisma.venuePaymentConfig.create({
         data: {
           venueId: venue.id,
           primaryAccountId: mentaMerchantPrimary.id,
@@ -696,7 +931,7 @@ async function main() {
 
       // --- Venue Pricing Structures (what you charge venues) ---
       // Primary account pricing (with margins over provider costs)
-      const primaryPricing = await prisma.venuePricingStructure.create({
+      await prisma.venuePricingStructure.create({
         data: {
           venueId: venue.id,
           accountType: AccountType.PRIMARY,
@@ -714,7 +949,7 @@ async function main() {
       })
 
       // Secondary account pricing (higher margins due to invoice capability)
-      const secondaryPricing = await prisma.venuePricingStructure.create({
+      await prisma.venuePricingStructure.create({
         data: {
           venueId: venue.id,
           accountType: AccountType.SECONDARY,
@@ -733,7 +968,7 @@ async function main() {
 
       // Tertiary account pricing (if Clip is available)
       if (i === 0) {
-        const tertiaryPricing = await prisma.venuePricingStructure.create({
+        await prisma.venuePricingStructure.create({
           data: {
             venueId: venue.id,
             accountType: AccountType.TERTIARY,
@@ -812,14 +1047,14 @@ async function main() {
           // Use actual device serial for the first terminal (development device)
           const serialNumber =
             t === 0 && venue.name.includes('Avoqado Centro')
-              ? '9701a1cbf798fb92' // Your actual Android device serial
+              ? '98282447347751' // Your actual Android device serial
               : faker.string.uuid()
 
           return prisma.terminal.create({
             data: {
               id:
                 t === 0 && venue.name.includes('Avoqado Centro')
-                  ? '9701a1cbf798fb92' // Use device serial as ID for development terminal
+                  ? '98282447347751' // Use device serial as ID for development terminal
                   : undefined, // Let Prisma generate UUID for others
               venueId: venue.id,
               serialNumber,
@@ -933,64 +1168,79 @@ async function main() {
 
       const activeWaiter = getRandomItem(venueWaiters)
 
-      console.log('      - Creating shifts, orders, payments over the last 60 days...')
-      // Prioritize Avoqado venues with significantly more data
+      // ==========================================
+      // INTELLIGENT TIME-SERIES ORDER GENERATION
+      // ==========================================
+      console.log(`      - Generating ${SEED_CONFIG.DAYS} days of realistic time-series data...`)
       const isAvoqadoVenue = orgIndex === 0
-      const shiftsToCreate = isAvoqadoVenue
-        ? faker.number.int({ min: 25, max: 40 }) // Much more shifts for Avoqado venues
-        : faker.number.int({ min: 3, max: 6 }) // Minimal shifts for other venues
-      console.log(`        📊 ${isAvoqadoVenue ? 'PRIORITY' : 'minimal'} data for ${venue.name}: ${shiftsToCreate} shifts planned`)
-      for (let s = 0; s < shiftsToCreate; s++) {
-        const startTime = randomDateBetween(daysAgo(60), new Date())
-        const shiftDurationHours = faker.number.int({ min: 5, max: 9 })
-        const rawEndTime = new Date(startTime.getTime() + shiftDurationHours * 60 * 60 * 1000)
-        const endTime = new Date(Math.min(rawEndTime.getTime(), Date.now()))
 
-        const shift = await prisma.shift.create({
-          data: { venueId: venue.id, staffId: activeWaiter.staffId, startTime, endTime },
-        })
+      // Generate orders day by day with realistic patterns
+      let totalOrdersGenerated = 0
+      const startDate = daysAgo(SEED_CONFIG.DAYS)
 
-        // More orders per shift for Avoqado venues
-        const ordersInShift = isAvoqadoVenue
-          ? faker.number.int({ min: 10, max: 18 }) // More orders for Avoqado venues
-          : faker.number.int({ min: 3, max: 8 }) // Fewer orders for other venues
-        for (let k = 0; k < ordersInShift; k++) {
-          // Higher completion rate for Avoqado venues (90% vs 60%)
-          const orderStatus = isAvoqadoVenue
-            ? getRandomItem([
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.PENDING,
-              ]) // 90% completed
-            : getRandomItem([
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.COMPLETED,
-                OrderStatus.PENDING,
-                OrderStatus.CANCELLED,
-              ]) // 60% completed
+      for (let dayOffset = 0; dayOffset < SEED_CONFIG.DAYS; dayOffset++) {
+        const currentDate = new Date(startDate)
+        currentDate.setDate(currentDate.getDate() + dayOffset)
 
-          const orderCreatedAt = randomDateBetween(startTime, endTime)
+        // Skip future dates
+        if (currentDate > new Date()) continue
+
+        const dayVolume = getOrderVolumeForDay(currentDate)
+        const dayMultiplier = isAvoqadoVenue ? 1 : 0.3 // Avoqado venues get full data
+        const actualVolume = Math.round(dayVolume * dayMultiplier)
+
+        if (actualVolume === 0) continue
+
+        // Create a shift for this day (simplified - one shift per day)
+        const shiftStart = new Date(currentDate)
+        shiftStart.setHours(businessHours.start, 0, 0, 0)
+        const shiftEnd = new Date(currentDate)
+        shiftEnd.setHours(businessHours.end, 0, 0, 0)
+
+        let shift: any = null
+        if (actualVolume > 5) {
+          // Only create shift if significant volume
+          shift = await prisma.shift.create({
+            data: {
+              venueId: venue.id,
+              staffId: activeWaiter.staffId,
+              startTime: shiftStart,
+              endTime: shiftEnd,
+            },
+          })
+        }
+
+        // Generate orders for this day
+        for (let orderIndex = 0; orderIndex < actualVolume; orderIndex++) {
+          // Generate realistic order timing within business hours
+          const orderCreatedAt = generateBusinessHourTimestamp(currentDate)
+
+          // Higher completion rate for Avoqado venues (95% vs 70%)
+          const completionRate = isAvoqadoVenue ? 0.95 : 0.7
+          const orderStatus =
+            Math.random() < completionRate ? OrderStatus.COMPLETED : Math.random() < 0.8 ? OrderStatus.PENDING : OrderStatus.CANCELLED
+
           const orderCompletedAt =
             orderStatus === OrderStatus.COMPLETED
-              ? randomDateBetween(orderCreatedAt, new Date(Math.min(endTime.getTime() + 60 * 60 * 1000, Date.now())))
+              ? new Date(orderCreatedAt.getTime() + faker.number.int({ min: 15, max: 45 }) * 60 * 1000)
               : undefined
+
+          // Select customer with cohort-based probability
+          const customer = getRandomItem(customers)
+          const cohortInfo = customer.email ? customerCohortMap.get(customer.email) : null
+          const shouldAddCustomer = Math.random() < (cohortInfo?.type === 'vip' ? 0.8 : cohortInfo?.type === 'regular' ? 0.4 : 0.2)
 
           const order = await prisma.order.create({
             data: {
               venueId: venue.id,
-              shiftId: shift.id,
+              shiftId: shift?.id,
               orderNumber: `ORD-${faker.string.alphanumeric(8).toUpperCase()}`,
               type: getRandomItem([OrderType.DINE_IN, OrderType.TAKEOUT]),
               source: getRandomItem([OrderSource.TPV, OrderSource.QR]),
               tableId: getRandomItem(tables).id,
+              customerEmail: shouldAddCustomer ? customer.email : null,
+              customerName: shouldAddCustomer ? `${customer.firstName || ''} ${customer.lastName || ''}`.trim() : null,
+              customerPhone: shouldAddCustomer ? customer.phone : null,
               createdById: activeWaiter.staffId,
               servedById: activeWaiter.staffId,
               subtotal: 0,
@@ -1004,12 +1254,18 @@ async function main() {
             },
           })
 
+          // Generate realistic items per order based on configuration
+          const numItems = faker.number.int({
+            min: SEED_CONFIG.ITEMS_PER_ORDER_MIN,
+            max: SEED_CONFIG.ITEMS_PER_ORDER_MAX,
+          })
+
           let subtotal = 0
           const createdOrderItems: any[] = []
-          // More items per order for Avoqado venues
-          const numItems = isAvoqadoVenue
-            ? faker.number.int({ min: 2, max: 6 }) // More items per order for Avoqado
-            : faker.number.int({ min: 1, max: 3 }) // Fewer items for other venues
+
+          // Target AOV for this order based on customer cohort and timing
+          generateRealisticAOV(currentDate) // Generate realistic AOV patterns
+
           for (let j = 0; j < numItems; j++) {
             if (sellableProducts.length === 0) continue // Evitar error si no hay productos vendibles
             const product = getRandomItem(sellableProducts)
@@ -1054,41 +1310,64 @@ async function main() {
           }
 
           const taxAmount = subtotal * 0.16
-          // Higher tips for Avoqado venues (better service quality)
-          const tipAmount =
-            order.status === OrderStatus.COMPLETED
-              ? isAvoqadoVenue
-                ? subtotal * getRandomItem([0.15, 0.18, 0.2, 0.22, 0.25]) // Higher tips for Avoqado venues
-                : subtotal * getRandomItem([0.08, 0.1, 0.12, 0.15]) // Lower tips for other venues
-              : 0
+
+          // Generate realistic tip based on customer cohort and service quality
+          let tipAmount = 0
+          if (order.status === OrderStatus.COMPLETED) {
+            const baseTipPercent = faker.number.float({
+              min: SEED_CONFIG.TIP_MIN_PERCENT,
+              max: SEED_CONFIG.TIP_MAX_PERCENT,
+            })
+
+            // Apply cohort multiplier for tips
+            const cohortTipMultiplier = cohortInfo?.type === 'vip' ? 1.3 : cohortInfo?.type === 'regular' ? 1.0 : 0.8
+
+            // Better venues get better tips
+            const venueQualityMultiplier = isAvoqadoVenue ? 1.2 : 1.0
+
+            // Weekend tips tend to be higher
+            const weekendMultiplier = currentDate.getDay() === 0 || currentDate.getDay() === 6 ? 1.15 : 1.0
+
+            const finalTipPercent = baseTipPercent * cohortTipMultiplier * venueQualityMultiplier * weekendMultiplier
+            tipAmount = subtotal * Math.min(finalTipPercent, 0.3) // Cap at 30%
+          }
+
           const total = subtotal + taxAmount + tipAmount
 
-          await prisma.order.update({ where: { id: order.id }, data: { subtotal, taxAmount, tipAmount, total } })
+          await prisma.order.update({
+            where: { id: order.id },
+            data: { subtotal, taxAmount, tipAmount, total },
+          })
+
+          totalOrdersGenerated++
 
           if (order.status === OrderStatus.COMPLETED) {
-            const paymentMethod = getRandomItem([PaymentMethod.CASH, PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD])
+            // Realistic payment method distribution
+            const paymentMethod =
+              Math.random() < SEED_CONFIG.CASH_RATIO
+                ? PaymentMethod.CASH
+                : getRandomItem([PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD])
+
             const feePercentage = parseFloat(venue.feeValue.toString())
             const feeAmount = total * feePercentage
             const netAmount = total - feeAmount
 
-            const paymentCreatedAt = randomDateBetween(
-              orderCompletedAt ?? orderCreatedAt,
-              new Date(Math.min((orderCompletedAt ?? orderCreatedAt).getTime() + 30 * 60 * 1000, Date.now())),
-            )
+            const paymentCreatedAt =
+              orderCompletedAt || new Date(orderCreatedAt.getTime() + faker.number.int({ min: 5, max: 30 }) * 60 * 1000)
 
             const payment = await prisma.payment.create({
               data: {
                 venueId: venue.id,
                 orderId: order.id,
-                shiftId: shift.id,
+                shiftId: shift?.id,
                 processedById: activeWaiter.staffId,
                 amount: total,
                 tipAmount,
                 method: paymentMethod,
                 status: TransactionStatus.COMPLETED,
-                splitType: 'FULLPAYMENT', // Add required splitType field
-                processor: paymentMethod !== 'CASH' ? 'stripe' : null,
-                processorId: paymentMethod !== 'CASH' ? `pi_${faker.string.alphanumeric(24)}` : null,
+                splitType: 'FULLPAYMENT',
+                processor: paymentMethod !== PaymentMethod.CASH ? 'stripe' : null,
+                processorId: paymentMethod !== PaymentMethod.CASH ? `pi_${faker.string.alphanumeric(24)}` : null,
                 feePercentage,
                 feeAmount,
                 netAmount,
@@ -1249,19 +1528,46 @@ async function main() {
               },
             })
 
-            if (Math.random() > 0.5) {
-              const reviewCreatedAt = randomDateBetween(
-                paymentCreatedAt,
-                new Date(Math.min(paymentCreatedAt.getTime() + 3 * 60 * 60 * 1000, Date.now())),
-              )
+            // Generate reviews with realistic patterns
+            if (Math.random() < SEED_CONFIG.REVIEW_PROBABILITY) {
+              const reviewCreatedAt = new Date(paymentCreatedAt.getTime() + faker.number.int({ min: 30, max: 180 }) * 60 * 1000)
+
+              // Good venues get better ratings, customer cohort affects rating too
+              const baseRating = isAvoqadoVenue ? 4.5 : 3.8
+              const cohortBonus = cohortInfo?.type === 'vip' ? 0.3 : cohortInfo?.type === 'regular' ? 0.1 : 0
+              const ratingFloat = Math.min(5, baseRating + cohortBonus + faker.number.float({ min: -0.5, max: 0.5 }))
+              const finalRating = Math.round(ratingFloat)
+
+              // Generate realistic comments based on rating
+              const comments: Record<number, string[]> = {
+                5: [
+                  'Excellent service and food!',
+                  'Outstanding experience, highly recommend!',
+                  'Perfect in every way!',
+                  'Amazing food and great staff!',
+                ],
+                4: [
+                  'Very good, will come back!',
+                  'Great service, food was delicious!',
+                  'Good experience overall!',
+                  'Nice place, good food!',
+                ],
+                3: ['Decent food, average service', 'It was okay, nothing special', 'Average experience', 'Food was fine'],
+                2: ['Service could be better', 'Food was cold when served', 'Long wait time', 'Not impressed'],
+                1: ['Terrible experience', 'Would not recommend', 'Very disappointed', 'Poor service and food'],
+              }
+
+              const commentOptions = comments[finalRating] || comments[3]
+              const selectedComment = getRandomItem(commentOptions) as string
+
               await prisma.review.create({
                 data: {
                   venueId: venue.id,
                   paymentId: payment.id,
                   terminalId: getRandomItem(terminals).id,
                   servedById: activeWaiter.staffId,
-                  overallRating: faker.number.int({ min: 3, max: 5 }),
-                  comment: faker.lorem.sentence(),
+                  overallRating: finalRating,
+                  comment: selectedComment,
                   source: ReviewSource.AVOQADO,
                   createdAt: reviewCreatedAt,
                 },
@@ -1270,7 +1576,7 @@ async function main() {
           }
         }
       }
-      console.log(`      - Finished creating orders and related data across multiple shifts.`)
+      console.log(`      - Generated ${totalOrdersGenerated} orders with realistic time-series patterns for ${venue.name}.`)
 
       // --- Generate Monthly Profit Summary ---
       console.log(`      - Generating monthly profit summaries for ${venue.name}...`)
@@ -1343,7 +1649,7 @@ async function main() {
       })
 
       // Create MonthlyVenueProfit records
-      for (const [key, data] of monthlyData) {
+      for (const [, data] of monthlyData) {
         const averageProfitMargin = data.totalVenueCharges > 0 ? data.totalGrossProfit / data.totalVenueCharges : 0
 
         await prisma.monthlyVenueProfit.create({
@@ -1593,7 +1899,42 @@ async function main() {
     }
   }
 
-  console.log(`\nSeeding finished successfully.`)
+  // ==========================================
+  // SEED SUMMARY REPORT
+  // ==========================================
+  console.log(`\n🎉 Intelligent Prisma seed completed successfully!`)
+  console.log(`\n📊 Generated Data Summary:`)
+  console.log(`   - Time Period: ${SEED_CONFIG.DAYS} days`)
+  console.log(`   - Organizations: ${organizations.length}`)
+
+  // Get final counts
+  const finalCounts = {
+    venues: await prisma.venue.count(),
+    orders: await prisma.order.count(),
+    payments: await prisma.payment.count(),
+    reviews: await prisma.review.count(),
+    customers: await prisma.customer.count(),
+    products: await prisma.product.count(),
+  }
+
+  console.log(`   - Venues: ${finalCounts.venues}`)
+  console.log(`   - Customers: ${finalCounts.customers}`)
+  console.log(`   - Products: ${finalCounts.products}`)
+  console.log(`   - Orders: ${finalCounts.orders}`)
+  console.log(`   - Payments: ${finalCounts.payments}`)
+  console.log(`   - Reviews: ${finalCounts.reviews}`)
+
+  console.log(`\n🚀 Ready for analytics! Run the validation script to verify metrics:`)
+  console.log(`   pnpm ts-node scripts/check-analytics.ts`)
+  console.log(``)
+
+  if (SEED_CONFIG.SEED) {
+    console.log(`🎲 Deterministic seed used: ${SEED_CONFIG.SEED}`)
+    console.log(`   To reproduce this data: SEED_SEED=${SEED_CONFIG.SEED} pnpm prisma db seed`)
+  } else {
+    console.log(`🎲 Random seed generated. To reproduce, use: SEED_SEED=<number> pnpm prisma db seed`)
+  }
+  console.log(``)
 }
 
 main()

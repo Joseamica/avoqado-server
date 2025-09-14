@@ -717,7 +717,7 @@ export async function getVenueMerchantAccounts(venueId: string, _orgId?: string)
 
     // Check if account has required credentials
     const credentials = account.credentialsEncrypted
-    const hasValidCredentials = credentials && credentials.merchantId && credentials.apiKey
+    const hasValidCredentials = !!(credentials && credentials.merchantId && credentials.apiKey)
 
     return {
       id: account.id,

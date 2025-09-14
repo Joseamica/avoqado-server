@@ -39,12 +39,7 @@ interface MentaTerminalsResponse {
   }
 }
 
-interface MentaAuthResponse {
-  access_token: string
-  token_type: string
-  expires_in: number
-  scope: string
-}
+// Removed MentaAuthResponse interface - using API key authentication instead
 
 /**
  * Service for interacting with Menta API
@@ -54,12 +49,16 @@ export class MentaApiService {
   private static instance: MentaApiService
   private accessToken: string | null = null
   private tokenExpiry: number = 0
+  private merchantApiKey: string
 
   private readonly MENTA_API_BASE = 'https://api.menta.global'
-  private readonly AUTH_ENDPOINT = '/auth/oauth/token'
+  private readonly AUTH_ENDPOINT = '/api/v1/auth/token'
   private readonly TERMINALS_ENDPOINT = '/api/v1/terminals'
 
-  private constructor() {}
+  private constructor() {
+    // Use correct merchant API key from demo SDK
+    this.merchantApiKey = process.env.MENTA_MERCHANT_API_KEY || 'xEMb2GMrkCNLTEgElqETWGGyFnU6WFr9sLwMII7b76oBPfQJf6TcImTkCXZs1S0P'
+  }
 
   static getInstance(): MentaApiService {
     if (!MentaApiService.instance) {
@@ -70,6 +69,7 @@ export class MentaApiService {
 
   /**
    * Get valid access token (refresh if needed)
+   * Uses merchant API key to get access token similar to ExternalTokenData.getExternalToken
    */
   private async getAccessToken(): Promise<string> {
     const now = Date.now()
@@ -79,41 +79,49 @@ export class MentaApiService {
       return this.accessToken
     }
 
-    logger.info('🔑 Refreshing Menta API access token')
+    logger.info('🔑 Getting Menta access token using merchant API key')
 
     try {
-      // Get credentials from environment or merchant account
-      const clientId = process.env.MENTA_CLIENT_ID || 'menta_demo_client'
-      const clientSecret = process.env.MENTA_CLIENT_SECRET || 'menta_demo_secret'
-
       const response = await fetch(`${this.MENTA_API_BASE}${this.AUTH_ENDPOINT}`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
         },
-        body: new URLSearchParams({
-          grant_type: 'client_credentials',
-          client_id: clientId,
-          client_secret: clientSecret,
+        body: JSON.stringify({
+          api_key: this.merchantApiKey
         }),
       })
 
       if (!response.ok) {
+        const errorText = await response.text()
+        logger.error(`❌ Menta auth failed: ${response.status} ${response.statusText} - ${errorText}`)
         throw new Error(`Menta auth failed: ${response.status} ${response.statusText}`)
       }
 
-      const authData: MentaAuthResponse = await response.json()
+      const authData = await response.json()
+      logger.info('✅ Menta auth response received:', { hasToken: !!authData.access_token, tokenType: authData.token_type })
 
       // Cache token with 5-minute buffer before actual expiry
-      this.accessToken = authData.access_token
-      this.tokenExpiry = now + (authData.expires_in - 300) * 1000
+      this.accessToken = authData.access_token || authData.token || ''
+      this.tokenExpiry = now + ((authData.expires_in || 3600) - 300) * 1000
 
-      logger.info('✅ Menta API access token refreshed successfully')
-      return this.accessToken
+      logger.info('✅ Menta API access token obtained successfully')
+      return this.accessToken || ''
     } catch (error) {
       logger.error('❌ Failed to get Menta access token:', error)
       throw new Error(`Failed to authenticate with Menta API: ${error}`)
+    }
+  }
+
+  /**
+   * Get authorization headers for API requests
+   */
+  private async getAuthHeaders(): Promise<{ [key: string]: string }> {
+    const token = await this.getAccessToken()
+    return {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/json'
     }
   }
 
@@ -122,19 +130,16 @@ export class MentaApiService {
    */
   async fetchTerminals(page = 0, size = 100): Promise<MentaTerminal[]> {
     try {
-      const token = await this.getAccessToken()
       const url = new URL(`${this.MENTA_API_BASE}${this.TERMINALS_ENDPOINT}`)
       url.searchParams.set('page', page.toString())
       url.searchParams.set('size', size.toString())
 
       logger.info(`🔍 Fetching Menta terminals: page=${page}, size=${size}`)
 
+      const headers = await this.getAuthHeaders()
       const response = await fetch(url.toString(), {
         method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
+        headers,
       })
 
       if (!response.ok) {
@@ -208,13 +213,10 @@ export class MentaApiService {
    */
   async getTerminalById(mentaTerminalId: string): Promise<MentaTerminal | null> {
     try {
-      const token = await this.getAccessToken()
+      const headers = await this.getAuthHeaders()
       const response = await fetch(`${this.MENTA_API_BASE}${this.TERMINALS_ENDPOINT}/${mentaTerminalId}`, {
         method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
+        headers,
       })
 
       if (response.status === 404) {

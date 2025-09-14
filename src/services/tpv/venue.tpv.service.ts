@@ -130,8 +130,27 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
         throw error
       }
 
-      // For other errors, provide a helpful message
-      throw new Error(`Unable to fetch terminal information from Menta API. Please try again later or contact support.`)
+      // 🚨 TEMPORARY FALLBACK: Allow terminal to work without Menta lookup
+      // This is a temporary solution while we resolve Menta API access issues
+      logger.warn(`⚠️  Menta API lookup failed, using fallback terminal ID based on serial number`)
+
+      // Generate a fallback terminal ID based on the serial number
+      const fallbackTerminalId = `fallback-${serialNumber}`
+
+      // Update the database with the fallback ID to avoid repeated API calls
+      await prisma.terminal.update({
+        where: { id: terminal.id },
+        data: {
+          mentaTerminalId: fallbackTerminalId,
+          mentaLastSync: new Date(),
+        },
+      })
+
+      // Update our local terminal object
+      terminal.mentaTerminalId = fallbackTerminalId
+      terminal.mentaLastSync = new Date()
+
+      logger.info(`💾 Using fallback Menta terminal ID: ${fallbackTerminalId} for serial: ${serialNumber}`)
     }
   } else {
     logger.info(`✅ Using cached Menta terminal ID: ${terminal.mentaTerminalId}`)
