@@ -86,10 +86,10 @@ export class MentaApiService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Accept': 'application/json',
+          Accept: 'application/json',
         },
         body: JSON.stringify({
-          api_key: this.merchantApiKey
+          api_key: this.merchantApiKey,
         }),
       })
 
@@ -120,8 +120,8 @@ export class MentaApiService {
   private async getAuthHeaders(): Promise<{ [key: string]: string }> {
     const token = await this.getAccessToken()
     return {
-      'Authorization': `Bearer ${token}`,
-      'Accept': 'application/json'
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
     }
   }
 

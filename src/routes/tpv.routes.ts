@@ -171,11 +171,11 @@ router.get(
  *     summary: Get terminal information from serial number (Smart Caching)
  *     description: |
  *       Retrieve complete terminal information including venue ID and Menta terminal UUID for payment processing.
- *       
+ *
  *       **Smart Caching Behavior:**
  *       - First request: Fetches terminal ID from Menta API and caches it in database
  *       - Subsequent requests: Returns cached terminal ID (no API call to Menta)
- *       
+ *
  *       This ensures optimal performance while maintaining accurate terminal information.
  *     parameters:
  *       - in: path
