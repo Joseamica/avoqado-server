@@ -280,8 +280,8 @@ async function main() {
   // Create payment providers
   const mentaProvider = await prisma.paymentProvider.create({
     data: {
-      code: 'MENTA',
-      name: 'Menta Payment Solutions',
+      code: 'BANORTE',
+      name: 'Menta Payment Solutions - Banorte',
       type: ProviderType.PAYMENT_PROCESSOR,
       countryCode: ['MX', 'AR'],
       active: true,
@@ -344,8 +344,8 @@ async function main() {
       displayOrder: 0,
       active: true,
       credentialsEncrypted: {
-        apiKey: 'menta_demo_key',
-        customerId: '4b944822-9c94-4058-b58f-b84c7d214ed4',
+        apiKey: 'mentaMerchantApiKey',
+        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
         merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       },
       providerConfig: {
@@ -366,8 +366,8 @@ async function main() {
       displayOrder: 1,
       active: true,
       credentialsEncrypted: {
-        apiKey: 'menta_demo_key',
-        customerId: '4b944822-9c94-4058-b58f-b84c7d214ed4',
+        apiKey: 'xEMb2GMrkCNLTEgElqETWGGyFnU6WFr9sLwMII7b76oBPfQJf6TcImTkCXZs1S0P',
+        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
         merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
       },
       providerConfig: {
