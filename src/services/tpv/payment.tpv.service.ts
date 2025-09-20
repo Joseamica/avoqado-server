@@ -731,11 +731,13 @@ export async function getVenueMerchantAccounts(venueId: string, _orgId?: string)
       externalMerchantId: account.externalMerchantId,
       // 🚀 OPTIMIZATION: Include decrypted credentials for POS terminals
       // This eliminates the need for getMentaRoute API calls during payment
-      credentials: hasValidCredentials ? {
-        apiKey: credentials.apiKey,
-        merchantId: credentials.merchantId,
-        customerId: credentials.customerId || null,
-      } : null,
+      credentials: hasValidCredentials
+        ? {
+            apiKey: credentials.apiKey,
+            merchantId: credentials.merchantId,
+            customerId: credentials.customerId || null,
+          }
+        : null,
     }
   }
 
