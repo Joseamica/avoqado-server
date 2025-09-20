@@ -25,6 +25,7 @@ export interface AuthenticatedSocket extends Socket {
 export enum RoomType {
   VENUE = 'venue',
   TABLE = 'table',
+  ORDER = 'order',
   ROLE = 'role',
   USER = 'user',
   GLOBAL = 'global',
@@ -34,6 +35,7 @@ export interface RoomIdentifier {
   type: RoomType
   venueId: string
   tableId?: string
+  orderId?: string
   userId?: string
   role?: StaffRole
 }
@@ -103,6 +105,7 @@ export interface RoomJoinPayload {
   roomType: RoomType
   venueId: string
   tableId?: string
+  orderId?: string
   metadata?: Record<string, any>
 }
 

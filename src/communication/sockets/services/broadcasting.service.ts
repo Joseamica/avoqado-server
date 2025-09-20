@@ -100,6 +100,43 @@ export class BroadcastingService {
   }
 
   /**
+   * Broadcast to order room participants
+   */
+  public broadcastToOrder(venueId: string, orderId: string, event: SocketEventType, payload: any, options: BroadcastOptions = {}): void {
+    const correlationId = uuidv4()
+
+    try {
+      const sockets = this.roomManager.getOrderSockets(venueId, orderId)
+      const filteredSockets = this.roomManager.filterSocketsByOptions(sockets, options)
+
+      const enrichedPayload = this.enrichPayload(payload, correlationId, venueId)
+
+      filteredSockets.forEach(socket => {
+        socket.emit(event, enrichedPayload)
+      })
+
+      logger.info('Broadcast to order completed', {
+        correlationId,
+        venueId,
+        orderId,
+        event,
+        totalSockets: sockets.length,
+        filteredSockets: filteredSockets.length,
+        options: this.sanitizeOptions(options),
+      })
+    } catch (error) {
+      logger.error('Error broadcasting to order', {
+        correlationId,
+        venueId,
+        orderId,
+        event,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+      })
+    }
+  }
+
+  /**
    * Broadcast to users with specific role
    */
   public broadcastToRole(role: StaffRole, event: SocketEventType, payload: any, venueId?: string, options: BroadcastOptions = {}): void {

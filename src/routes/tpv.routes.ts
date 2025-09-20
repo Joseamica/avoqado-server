@@ -21,6 +21,7 @@ import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
 import * as shiftController from '../controllers/tpv/shift.tpv.controller'
 import * as authController from '../controllers/tpv/auth.tpv.controller'
+import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
 
 const router = express.Router()
 
@@ -211,6 +212,61 @@ router.get(
  *         description: Internal server error or Menta API unavailable
  */
 router.get('/serial-number/:serialNumber', validateRequest(serialNumberParamSchema), venueController.getVenueIdFromSerialNumber)
+
+/**
+ * @openapi
+ * /tpv/status-sync/{serialNumber}:
+ *   get:
+ *     tags:
+ *       - TPV - Terminal Status
+ *     summary: Get terminal status for synchronization
+ *     description: Retrieve current terminal status from server for synchronization purposes
+ *     parameters:
+ *       - in: path
+ *         name: serialNumber
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The serial number of the terminal
+ *     responses:
+ *       200:
+ *         description: Terminal status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 status:
+ *                   type: string
+ *                   description: Current terminal status
+ *                 message:
+ *                   type: string
+ *                 lastSeen:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Last time terminal was seen
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Current server timestamp
+ *       404:
+ *         description: Terminal not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 error:
+ *                   type: string
+ *                   example: "Terminal not found"
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/status-sync/:serialNumber', validateRequest(serialNumberParamSchema), heartbeatController.getTerminalStatus)
 
 /**
  * @openapi
