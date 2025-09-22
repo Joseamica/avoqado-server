@@ -1,9 +1,10 @@
-import { Payment, PaymentMethod, SplitType } from '@prisma/client'
+import { Payment, PaymentMethod, SplitType, OrderSource } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
+import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -18,6 +19,70 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
   }
 
   return ratingMap[tpvRating.toUpperCase()] || null
+}
+
+/**
+ * Update order totals directly in backend for standalone mode
+ * @param orderId Order ID to update
+ * @param paymentAmount Total payment amount (including tip)
+ */
+async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmount: number): Promise<void> {
+  // Get current order with payment information
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      payments: {
+        where: { status: 'COMPLETED' },
+        select: { amount: true, tipAmount: true },
+      },
+    },
+  })
+
+  if (!order) {
+    throw new Error(`Order ${orderId} not found for total update`)
+  }
+
+  // Calculate total payments made (including this new one)
+  const previousPayments = order.payments.reduce(
+    (sum, payment) => sum + parseFloat(payment.amount.toString()) + parseFloat(payment.tipAmount.toString()),
+    0,
+  )
+  const totalPaid = previousPayments + paymentAmount
+  const originalTotal = parseFloat(order.total.toString())
+
+  // Calculate remaining amount
+  const remainingAmount = Math.max(0, originalTotal - totalPaid)
+  const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+
+  // Determine new payment status
+  let newPaymentStatus = order.paymentStatus
+  if (isFullyPaid) {
+    newPaymentStatus = 'PAID'
+  } else if (totalPaid > 0) {
+    newPaymentStatus = 'PARTIAL'
+  }
+
+  // Update order totals and status
+  await prisma.order.update({
+    where: { id: orderId },
+    data: {
+      paymentStatus: newPaymentStatus,
+      ...(isFullyPaid && {
+        status: 'COMPLETED',
+        completedAt: new Date(),
+      }),
+    },
+  })
+
+  logger.info('Order totals updated for standalone payment', {
+    orderId,
+    originalTotal,
+    paymentAmount,
+    totalPaid,
+    remainingAmount,
+    isFullyPaid,
+    newPaymentStatus,
+  })
 }
 
 interface PaymentFilters {
@@ -534,37 +599,72 @@ export async function recordOrderPayment(
   // TODO: Emit socket event for real-time updates
   // SocketManager.emitPaymentUpdate(venueId, tableNumber, payment)
 
-  // ✅ NUEVO: Enviar comando de pago a POS via RabbitMQ
-  try {
-    // Determinar si es pago parcial comparando con el total de la orden
-    const isPartialPayment = totalAmount + tipAmount < parseFloat(activeOrder.total.toString())
+  // ✅ NUEVO: Detectar modo de operación y manejar pago según el contexto
+  const isIntegratedMode = activeOrder.source === OrderSource.POS && activeOrder.externalId && activeOrder.externalId.trim() !== ''
 
-    await publishCommand(`command.softrestaurant.${venueId}`, {
-      entity: 'Payment',
-      action: 'APPLY',
-      payload: {
-        orderExternalId: activeOrder.externalId,
-        paymentData: {
-          amount: totalAmount,
-          tip: tipAmount,
-          posPaymentMethodId: mapPaymentMethodToPOS(paymentData.method),
-          reference: paymentData.mentaOperationId || paymentData.authorizationNumber || '',
-          isPartial: isPartialPayment,
+  logger.info('Payment processing mode detected', {
+    paymentId: payment.id,
+    orderId: activeOrder.id,
+    isIntegratedMode,
+    orderSource: activeOrder.source,
+    hasExternalId: !!activeOrder.externalId,
+  })
+
+  if (isIntegratedMode) {
+    // MODO INTEGRADO: Enviar comando a POS, POS maneja los totales
+    try {
+      const isPartialPayment = totalAmount + tipAmount < parseFloat(activeOrder.total.toString())
+
+      await publishCommand(`command.softrestaurant.${venueId}`, {
+        entity: 'Payment',
+        action: 'APPLY',
+        payload: {
+          orderExternalId: activeOrder.externalId,
+          paymentData: {
+            amount: totalAmount,
+            tip: tipAmount,
+            posPaymentMethodId: mapPaymentMethodToPOS(paymentData.method),
+            reference: paymentData.mentaOperationId || paymentData.authorizationNumber || '',
+            isPartial: isPartialPayment,
+          },
         },
-      },
-    })
+      })
 
-    logger.info('Payment command sent to POS', {
-      paymentId: payment.id,
-      orderExternalId: activeOrder.externalId,
-      isPartial: isPartialPayment,
-    })
-  } catch (rabbitMQError) {
-    logger.error('Failed to send payment command to POS', {
-      paymentId: payment.id,
-      error: rabbitMQError,
-    })
-    // No fallar el pago si RabbitMQ falla
+      // Track this payment command to prevent double deduction when POS sends back order.updated
+      if (activeOrder.externalId) {
+        trackRecentPaymentCommand(activeOrder.externalId, totalAmount + tipAmount)
+      }
+
+      logger.info('Payment command sent to POS (Integrated Mode)', {
+        paymentId: payment.id,
+        orderExternalId: activeOrder.externalId,
+        isPartial: isPartialPayment,
+      })
+    } catch (rabbitMQError) {
+      logger.error('Failed to send payment command to POS', {
+        paymentId: payment.id,
+        error: rabbitMQError,
+      })
+      // No fallar el pago si RabbitMQ falla
+    }
+  } else {
+    // MODO AUTÓNOMO: Backend maneja los totales directamente
+    try {
+      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount)
+
+      logger.info('Order totals updated directly in backend (Standalone Mode)', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        paymentAmount: totalAmount + tipAmount,
+      })
+    } catch (updateError) {
+      logger.error('Failed to update order totals in standalone mode', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        error: updateError,
+      })
+      // Continue execution - payment is still recorded even if total update fails
+    }
   }
 
   logger.info('Payment recorded successfully', { paymentId: payment.id, amount: totalAmount })

@@ -8,6 +8,54 @@ import { getOrCreatePosShift } from './posSyncShift.service'
 import { RichPosPayload, PosPaymentMethod } from '@/types/pos.types'
 import { PaymentMethod } from '@prisma/client'
 
+// Cache to track recent payment commands to prevent double deduction
+interface RecentPayment {
+  orderId: string
+  timestamp: number
+  amount: number
+}
+
+const recentPayments = new Map<string, RecentPayment>()
+const PAYMENT_CACHE_TTL = 30000 // 30 seconds
+
+// Clean up expired entries
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, payment] of recentPayments.entries()) {
+    if (now - payment.timestamp > PAYMENT_CACHE_TTL) {
+      recentPayments.delete(key)
+    }
+  }
+}, 60000) // Clean every minute
+
+/**
+ * Track a payment command that was sent to POS to prevent double deduction
+ */
+export function trackRecentPaymentCommand(orderExternalId: string, amount: number): void {
+  recentPayments.set(orderExternalId, {
+    orderId: orderExternalId,
+    timestamp: Date.now(),
+    amount,
+  })
+  logger.info(`[💳 PaymentTracker] Tracked payment command for order ${orderExternalId}, amount: ${amount}`)
+}
+
+/**
+ * Check if an order has a recent payment command that should prevent total updates
+ */
+function shouldIgnoreTotalUpdates(orderExternalId: string): boolean {
+  const recentPayment = recentPayments.get(orderExternalId)
+  if (!recentPayment) return false
+
+  const isRecent = Date.now() - recentPayment.timestamp < PAYMENT_CACHE_TTL
+  if (isRecent) {
+    logger.info(`[💳 PaymentTracker] Ignoring total updates for order ${orderExternalId} due to recent payment command`)
+    return true
+  }
+
+  return false
+}
+
 /**
  * Encuentra una orden existente usando lógica de resolución inteligente.
  * Maneja el caso donde SoftRestaurant crea órdenes con idturno=0 inicialmente,
@@ -101,23 +149,34 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
     // Si encontramos una orden existente con resolución inteligente, actualizarla
     if (existingOrder && existingOrder.externalId !== externalId) {
       // La orden existe pero con un externalId diferente (caso idturno=0 → idturno real)
+      const ignoreFinancialUpdates = shouldIgnoreTotalUpdates(externalId)
+
+      // Prepare update data conditionally
+      const updateData: any = {
+        externalId: externalId, // Actualizar al nuevo externalId
+        status: orderData.status,
+        paymentStatus: orderData.paymentStatus,
+        completedAt: orderData.completedAt ? new Date(orderData.completedAt) : null,
+        posRawData: orderData.posRawData as Prisma.InputJsonValue,
+        syncedAt: new Date(),
+        syncStatus: SyncStatus.SYNCED,
+        ...(shiftId && { shift: { connect: { id: shiftId } } }),
+      }
+
+      // Only update financial fields if not from recent payment command
+      if (!ignoreFinancialUpdates) {
+        updateData.subtotal = orderData.subtotal
+        updateData.taxAmount = orderData.taxAmount
+        updateData.discountAmount = orderData.discountAmount
+        updateData.tipAmount = orderData.tipAmount
+        updateData.total = orderData.total
+      } else {
+        logger.info(`[💳 PaymentTracker] Skipping financial field updates for existing order ${externalId}`)
+      }
+
       const order = await tx.order.update({
         where: { id: existingOrder.id },
-        data: {
-          externalId: externalId, // Actualizar al nuevo externalId
-          status: orderData.status,
-          paymentStatus: orderData.paymentStatus,
-          subtotal: orderData.subtotal,
-          taxAmount: orderData.taxAmount,
-          discountAmount: orderData.discountAmount,
-          tipAmount: orderData.tipAmount,
-          total: orderData.total,
-          completedAt: orderData.completedAt ? new Date(orderData.completedAt) : null,
-          posRawData: orderData.posRawData as Prisma.InputJsonValue,
-          syncedAt: new Date(),
-          syncStatus: SyncStatus.SYNCED,
-          ...(shiftId && { shift: { connect: { id: shiftId } } }),
-        },
+        data: updateData,
       })
 
       logger.info(
@@ -133,6 +192,29 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
     }
 
     // Si no hay orden existente o el externalId coincide, hacer upsert normal
+    const ignoreFinancialUpdates = shouldIgnoreTotalUpdates(externalId)
+
+    // Prepare update data conditionally
+    const updateData: any = {
+      status: orderData.status,
+      paymentStatus: orderData.paymentStatus,
+      completedAt: orderData.completedAt ? new Date(orderData.completedAt) : null,
+      posRawData: orderData.posRawData as Prisma.InputJsonValue,
+      syncedAt: new Date(),
+      syncStatus: SyncStatus.SYNCED,
+    }
+
+    // Only update financial fields if not from recent payment command
+    if (!ignoreFinancialUpdates) {
+      updateData.subtotal = orderData.subtotal
+      updateData.taxAmount = orderData.taxAmount
+      updateData.discountAmount = orderData.discountAmount
+      updateData.tipAmount = orderData.tipAmount
+      updateData.total = orderData.total
+    } else {
+      logger.info(`[💳 PaymentTracker] Skipping financial field updates for order ${externalId}`)
+    }
+
     const order = await tx.order.upsert({
       where: {
         venueId_externalId: {
@@ -140,19 +222,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
           externalId: externalId,
         },
       },
-      update: {
-        status: orderData.status,
-        paymentStatus: orderData.paymentStatus,
-        subtotal: orderData.subtotal,
-        taxAmount: orderData.taxAmount,
-        discountAmount: orderData.discountAmount,
-        tipAmount: orderData.tipAmount,
-        total: orderData.total,
-        completedAt: orderData.completedAt ? new Date(orderData.completedAt) : null,
-        posRawData: orderData.posRawData as Prisma.InputJsonValue,
-        syncedAt: new Date(),
-        syncStatus: SyncStatus.SYNCED,
-      },
+      update: updateData,
       create: {
         externalId: externalId,
         orderNumber: orderData.orderNumber,
