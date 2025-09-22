@@ -95,7 +95,17 @@ export const recordPaymentBodySchema = z.object({
     source: z.string().default('TPV'),
     splitType: z.enum(['PERPRODUCT', 'EQUALPARTS', 'CUSTOMAMOUNT', 'FULLPAYMENT'], { message: 'Tipo de división inválido.' }),
     // tpvId: z.string().cuid({ message: 'El ID del TPV debe ser un CUID válido.' }),
-    staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+    // TEMPORARY FIX: Allow both CUID and numeric string for Android compatibility
+    staffId: z.string().refine(
+      val => {
+        // Allow CUID format
+        if (/^c[0-9a-z]{24}$/.test(val)) return true
+        // TEMPORARY: Allow numeric strings for Android app compatibility
+        if (/^\d+$/.test(val)) return true
+        return false
+      },
+      { message: 'El ID del staff debe ser un CUID válido o un ID numérico temporal.' },
+    ),
     paidProductsId: z.array(z.string()).default([]),
 
     // Card payment fields (optional)

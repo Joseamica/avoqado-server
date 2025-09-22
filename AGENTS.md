@@ -1,91 +1,402 @@
-# Repository Guidelines
+# CLAUDE.md
 
-## Project Structure & Module Organization
-- `src/`: Express + TypeScript application.
-  - `controllers/`, `services/`, `routes/`, `middlewares/`, `schemas/` (Zod), `communication/` (Socket.IO/RabbitMQ), `utils/`, `config/`.
-  - `app.ts`: app wiring; `server.ts`: HTTP entrypoint.
-- `prisma/`: `schema.prisma`, `migrations/`, `seed.ts`.
-- `tests/`: `unit/`, `api-tests`, `workflows`, `__helpers__`, `__fixtures__`.
-- `dist/`: compiled JS (output of `npm run build`).
-- `scripts/`: one‑off helpers; `logs/` for runtime logs.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Build, Test, and Development Commands
-- `npm run dev`: start TS server with nodemon + ts-node.
-- `npm run build`: compile TypeScript (`tsc` + `tsc-alias`).
-- `npm start`: run built app from `dist/`.
-- `npm test`: all tests; also `test:unit`, `test:api`, `test:workflows`, `test:watch`, `test:coverage`, `test:ci`.
-- Module suites: `test:dashboard`, `test:pos-sync`, `test:tpv`, `test:orders`, `test:auth`, `test:communication`.
-- `npm run lint` / `lint:fix`: ESLint checks and autofix.
-- `npm run format`: Prettier write.
-- `npm run migrate`: Prisma migrate dev; `npm run studio`: Prisma Studio.
-- Deploy/CI: `predeploy:backend` runs `prisma generate` + `migrate deploy`.
+## Development Commands
 
-## Database Operations
-- Local dev: `npm run migrate` (creates/updates schema with history).
-- Generate client: `npx prisma generate` (runs automatically on deploy script).
-- In containers: `docker exec avoqado-server-dev npx prisma migrate deploy`.
+### Build and Development
 
-## Coding Style & Naming Conventions
-- Language: TypeScript. Indent 2 spaces.
-- Prettier: single quotes, no semicolons, trailing commas, width 140.
-- ESLint: `@typescript-eslint` + Prettier; avoid unused vars; `no-console` warned (allowed in tests).
-- Paths: use `@/…` alias (tsconfig-paths).
-- Naming: files kebab-case; `*.controller.ts`, `*.service.ts`; classes PascalCase; functions/vars camelCase; tests mirror paths.
+- `npm run build` - Compile TypeScript to `dist/` directory using tsc and tsc-alias
+- `npm run dev` - Start development server with hot reload using nodemon and pino-pretty logging
+- `npm start` - Start production server from compiled JavaScript in dist/
 
-## Testing Guidelines
-- Framework: Jest + ts-jest (+ Supertest for API).
-- Locations: `tests/unit`, `tests/api-tests`, `tests/workflows`.
-- Naming: `*.test.ts`, `*.api.test.ts`, `*.workflow.test.ts`.
-- Setup: `tests/__helpers__/setup.ts` auto-loaded.
-- Coverage: global ≥70%; `src/services/{dashboard,pos-sync}` ≥80% (see `jest.config.js`).
-- Example: `npm run test:coverage` to verify thresholds.
+### Database Operations
 
-## Commit & Pull Request Guidelines
-- Conventional Commits: `feat`, `fix`, `chore`, `refactor`, `docs` with optional scope.
-  - Example: `feat(notifications): emit notification_new event`
-- PRs: clear description, scope, linked issues, test plan (commands), and any DB/ENV changes.
-- Before opening: `npm run lint && npm test`. Update `README.md`/Swagger if endpoints change and `.env.example` if adding env vars.
+- `npm run migrate` - Run Prisma database migrations (`prisma migrate dev`)
+- `npm run studio` - Launch Prisma Studio for database exploration
 
-## Security & Configuration Tips
-- Never commit secrets; use `.env` (copy from `.env.example`).
-- Database: update Prisma schema → `npx prisma generate` and add a migration.
-- Required envs: `DATABASE_URL`, `JWT_SECRET`, `SESSION_SECRET`, Redis/RabbitMQ URLs as applicable.
+### Testing
+
+- `npm test` - Run all tests with Jest
+- `npm run test:unit` - Run only unit tests (`tests/unit`)
+- `npm run test:api` - Run only API integration tests (`tests/api-tests`)
+- `npm run test:workflows` - Run workflow tests (`tests/workflows`)
+- `npm run test:watch` - Run tests in watch mode
+- `npm run test:coverage` - Run tests with coverage reports
+- `npm run test:ci` - Run tests in CI mode (no watch, with coverage)
+
+### Module-Specific Testing
+
+- `npm run test:dashboard` - Test dashboard functionality
+- `npm run test:pos-sync` - Test POS synchronization features
+- `npm run test:tpv` - Test TPV (Terminal Portátil de Ventas) functionality
+- `npm run test:orders` - Test order management
+- `npm run test:auth` - Test authentication workflows
+- `npm run test:communication` - Test socket and RabbitMQ communication
+
+### Code Quality
+
+- `npm run lint` - Run ESLint on TypeScript files
+- `npm run lint:fix` - Run ESLint with auto-fix
+- `npm run format` - Format code with Prettier
 
 ## Architecture Overview
-- Domains: Organizations, Venues, Staff (RBAC), Menu/Product, Orders, POS Integration, Payments.
-- Technical stack: Express + TypeScript; PostgreSQL + Prisma; Socket.IO (real-time); RabbitMQ (queue); Redis sessions; JWT auth; Zod validation; Jest tests.
-- Layered flow: Routes → Middleware → Controllers → Services → Prisma (DB). Controllers stay thin; services hold business logic.
-- Key service areas: `src/services/{dashboard,tpv,pos-sync,realtime,storage,auth}` and `src/communication/{sockets,rabbitmq}`.
-- Database model: Multi-tenant (Organization → Venue), staff with venue roles, catalog, orders, payments, POS sync tracking.
-- Real-time: Socket.IO rooms per venue/user; broadcast business events (orders, payments, notifications).
-- Messaging: RabbitMQ for POS command queuing, consumers, retries for failed processing.
 
-## Role Hierarchy (RBAC)
-- SUPERADMIN: full-system access across all orgs/venues; cannot be invited.
-- OWNER: org-wide access to all venues; manages staff (except SUPERADMIN).
-- ADMIN: full access within assigned venues; management and configuration.
-- MANAGER: operations within assigned venues (shifts, inventory, reports).
-- WAITER: service-level (orders, table service).
-- CASHIER: payments and POS operations.
-- KITCHEN: kitchen display and prep tracking.
-- HOST: reservations and seating.
-- VIEWER: read-only access.
-- Inheritance: higher roles include lower; middleware enforces role checks and cross-venue access rules.
+This is a restaurant management platform backend with multi-tenant architecture supporting:
+
+### Core Business Domains
+
+- **Organizations** - Multi-tenant root entities
+- **Venues** - Individual restaurant locations
+- **Staff Management** - Role-based access control with hierarchical permission system
+- **Menu & Product Management** - Menu categories, products, and pricing
+- **Order Processing** - Order lifecycle management
+- **POS Integration** - Real-time synchronization with Point-of-Sale systems
+- **Payment Processing** - Transaction and payment management
+
+### User Role Hierarchy
+
+The system implements a hierarchical role-based access control (RBAC) system with the following roles in descending order of permissions:
+
+#### 1. **SUPERADMIN** (Highest Level)
+
+- **Scope**: Full system access across all organizations and venues
+- **Permissions**: Complete administrative control, can access any venue/organization
+- **Use Case**: System administrators, platform maintainers
+- **Restrictions**: Cannot be invited through normal team invitation flow
+- **Special Access**: Maintains SUPERADMIN privileges when switching between venues
+
+#### 2. **OWNER**
+
+- **Scope**: Full access to all venues within their organization
+- **Permissions**: Organization-wide management, can create/manage venues, full staff management
+- **Use Case**: Restaurant chain owners, franchise owners
+- **Special Access**: Can access any venue within their organization, maintains OWNER privileges across venues
+- **Hierarchy**: Can manage all roles except SUPERADMIN
+
+#### 3. **ADMIN**
+
+- **Scope**: Full venue access within assigned venues
+- **Permissions**: Complete venue management, staff management, financial reports, system configuration
+- **Use Case**: General managers, venue administrators
+- **Limitations**: Limited to assigned venues only
+
+#### 4. **MANAGER**
+
+- **Scope**: Operations access within assigned venues
+- **Permissions**: Shift management, staff scheduling, operations reports, inventory management
+- **Use Case**: Shift managers, assistant managers
+- **Focus**: Day-to-day operations and staff coordination
+
+#### 5. **WAITER**
+
+- **Scope**: Service access within assigned venues
+- **Permissions**: Order management, table service, basic customer interaction
+- **Use Case**: Waitstaff, servers
+- **Focus**: Customer service and order processing
+
+#### 6. **CASHIER**
+
+- **Scope**: Payment access within assigned venues
+- **Permissions**: Payment processing, basic order management, POS operations
+- **Use Case**: Cashiers, front desk staff
+- **Focus**: Payment processing and customer checkout
+
+#### 7. **KITCHEN**
+
+- **Scope**: Kitchen display access within assigned venues
+- **Permissions**: Kitchen display system, order preparation tracking
+- **Use Case**: Kitchen staff, cooks
+- **Focus**: Food preparation and kitchen operations
+
+#### 8. **HOST**
+
+- **Scope**: Reservations and seating access within assigned venues
+- **Permissions**: Reservation management, seating arrangements, customer greeting
+- **Use Case**: Host/hostess, reception staff
+- **Focus**: Customer reception and table management
+
+#### 9. **VIEWER** (Lowest Level)
+
+- **Scope**: Read-only access within assigned venues
+- **Permissions**: View-only access to reports and data
+- **Use Case**: Observers, trainees, external auditors
+- **Limitations**: Cannot modify any data or perform operations
+
+#### Permission Inheritance
+
+- **Higher roles inherit permissions from lower roles**
+- **SUPERADMIN** has unrestricted access across the entire platform
+- **OWNER** has organization-wide access but cannot manage SUPERADMINs
+- **Role-based middleware** automatically enforces permissions at the API level
+- **Special handling** for cross-venue access based on role hierarchy
+
+### Technical Stack
+
+- **Framework**: Express.js with TypeScript
+- **Database**: PostgreSQL with Prisma ORM
+- **Real-time Communication**: Socket.IO for live updates
+- **Message Queue**: RabbitMQ for POS command processing
+- **Session Management**: Redis-backed sessions
+- **Authentication**: JWT with refresh tokens
+- **Validation**: Zod schemas
+- **Testing**: Jest with comprehensive unit, API, and workflow tests
+
+### Layered Architecture
+
+The codebase follows a clean layered architecture:
+
+```
+Routes → Middleware → Controllers → Services → Prisma (Database)
+```
+
+- **Routes** (`/src/routes/`) - HTTP endpoint definitions with middleware chains
+- **Controllers** (`/src/controllers/`) - HTTP request orchestration (thin layer)
+- **Services** (`/src/services/`) - Business logic implementation (core layer)
+- **Middlewares** (`/src/middlewares/`) - Cross-cutting concerns (auth, validation, logging)
+- **Schemas** (`/src/schemas/`) - Zod validation schemas and TypeScript types
+
+### Key Service Areas
+
+- **Dashboard Services** (`/src/services/dashboard/`) - Admin interface logic
+- **TPV Services** (`/src/services/tpv/`) - Point-of-sale terminal operations
+- **POS Sync Services** (`/src/services/pos-sync/`) - External POS system integration
+- **Communication** (`/src/communication/`) - Socket.IO and RabbitMQ handlers
+
+### Database Schema
+
+Multi-tenant PostgreSQL schema managed by Prisma:
+
+- Organization → Venue hierarchy
+- Staff with venue-specific roles
+- Product catalog with categories
+- Order management with items and payments
+- POS synchronization tracking
+
+### Real-time Features
+
+- Socket.IO server for live updates (`/src/communication/sockets/`)
+- Room-based broadcasting for venue-specific events
+- Business event controllers for order/payment notifications
+
+### Message Processing
+
+- RabbitMQ integration for POS command queuing
+- Command listener for database-triggered events
+- Retry service for failed command processing
+- Event consumer for external POS system events
 
 ## Docker Environment
-- Development: `docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d`.
-- Production: `docker-compose up -d`.
-- Migrations in container: `docker exec avoqado-server-dev npx prisma migrate deploy`.
-- Services: app (3000), Postgres (5434), Redis (6379), RabbitMQ (5672/15672).
+
+The project includes comprehensive Docker setup:
+
+- Development: `docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d`
+- Production: `docker-compose up -d`
+- Database migrations in container: `docker exec avoqado-server-dev npx prisma migrate deploy`
+
+Services:
+
+- **avoqado-server-dev** (port 12344) - Main application
+- **avoqado-postgres** (port 5434) - PostgreSQL database
+- **avoqado-redis** (port 6379) - Session storage
+- **avoqado-rabbitmq** (ports 5672, 15672) - Message broker
 
 ## Testing Strategy
-- Unit (`tests/unit`), API (`tests/api-tests`), Workflow (`tests/workflows`).
-- Jest project-based config enables parallel suites; coverage: 70% global, 80% for critical services.
+
+Comprehensive test suite organized by type:
+
+- **Unit Tests** (`tests/unit/`) - Service and utility function testing
+- **API Tests** (`tests/api-tests/`) - HTTP endpoint integration testing
+- **Workflow Tests** (`tests/workflows/`) - End-to-end business process testing
+
+Test configuration includes coverage thresholds (70% global, 80% for critical services) and project-based Jest setup for parallel execution.
+
+## UI Design Guidelines
+
+### Color System (shadcn/ui)
+
+When working with the dashboard/web interface, always use **shadcn/ui semantic color tokens** instead of hardcoded colors. This ensures
+proper theming support and consistency across the application.
+
+#### Semantic Color Usage:
+
+**Backgrounds:**
+
+- `bg-background` - Main background color
+- `bg-muted` - Subtle background for secondary elements
+- `bg-card` - Card/surface background
+- `bg-accent` - Accent background for hover states
+- `bg-primary` - Primary brand color background
+- `bg-secondary` - Secondary background
+- `bg-destructive` - Error/danger states
+
+**Text Colors:**
+
+- `text-foreground` - Primary text color
+- `text-muted-foreground` - Secondary/subtle text
+- `text-primary` - Primary brand color text
+- `text-secondary` - Secondary text color
+- `text-destructive` - Error/danger text
+
+**Borders:**
+
+- `border-border` - Default border color
+- `border-input` - Form input borders
+- `border-primary` - Primary brand color borders
+- `border-destructive` - Error state borders
+
+#### Status-Specific Colors:
+
+**Success/Online States:**
+
+- `bg-green-500/10 text-green-700 dark:text-green-400` for success backgrounds
+- `text-green-600` for success text
+
+**Warning/Maintenance States:**
+
+- `bg-orange-500/10 text-orange-700 dark:text-orange-400` for warning backgrounds
+- `text-orange-600` for warning text
+- `bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400` for maintenance mode
+
+**Error/Offline States:**
+
+- `bg-destructive/10 text-destructive` for error backgrounds
+- Use `text-destructive` for error text
+
+#### Important Rules:
+
+1. **Never use hardcoded colors** like `bg-gray-50`, `text-blue-500`, etc.
+2. **Always use semantic tokens** that respect dark/light theme modes
+3. **Use opacity modifiers** (e.g., `/10`, `/20`) for subtle background effects
+4. **Provide dark mode alternatives** when using custom colors
+5. **Maintain consistency** across all UI components
+
+Reference: https://ui.shadcn.com/colors
+
+## Database Schema Documentation
+
+The complete database schema is documented in `/docs/DATABASE_SCHEMA.md`. This file contains:
+
+- **Comprehensive model explanations** with purpose and use cases
+- **Relationship documentation** showing how models connect
+- **Business logic examples** for each entity
+- **Schema evolution guidelines** for future changes
+
+### Schema Maintenance Rules:
+
+**CRITICAL**: When modifying `prisma/schema.prisma`, you MUST also update:
+
+1. `/docs/DATABASE_SCHEMA.md` - Add/update model documentation
+2. `CLAUDE.md` - Document the changes made
+3. Seed data in `prisma/seed.ts` if new models added
+4. Related API documentation
+
+The schema documentation serves as context for AI assistants and team members, so accuracy is essential.
 
 ## Development Notes
-- Graceful shutdown for HTTP, Socket.IO, RabbitMQ, and DB connections.
-- Dev helper: `POST /api/dev/generate-token` issues JWT for testing.
-- API docs: Swagger at `/api-docs`.
-- Logging: Winston with correlation IDs for request tracing.
-- Config: multi-environment via env vars; prefer `.env` for local.
 
+- The server includes graceful shutdown handling for all services (HTTP, Socket.IO, RabbitMQ, database connections)
+- Development mode provides JWT token generation endpoint: `POST /api/dev/generate-token`
+- Swagger documentation available at `/api-docs`
+- Winston logging with correlation IDs for request tracing
+- Multi-environment configuration via environment variables
+
+### Testing and Debugging Best Practices
+
+**CRITICAL DEVELOPMENT WORKFLOW**: When implementing or debugging features, follow this iterative approach:
+
+#### 1. **Add Temporary Debug Logs**
+
+Always add comprehensive logging when working on complex features:
+
+```typescript
+// ✅ GOOD: Temporary debug logs for development
+logger.info(`🔧 [DEBUG] Starting payment process for amount: ${amount}`)
+logger.info(`🔧 [DEBUG] Terminal ID: ${terminalId}, Merchant: ${merchantId}`)
+logger.info(`🔧 [DEBUG] Payment request payload:`, { amount, currency, terminalId })
+
+try {
+  const result = await processPayment(paymentData)
+  logger.info(`🔧 [DEBUG] Payment result:`, result)
+} catch (error) {
+  logger.error(`🔧 [DEBUG] Payment failed:`, { error: error.message, stack: error.stack })
+}
+```
+
+#### 2. **Provide Testing Steps**
+
+After implementing changes, always provide clear testing instructions:
+
+```bash
+# Test the new feature
+curl -X POST "http://localhost:12344/api/v1/payments" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 100, "terminalId": "abc123"}'
+
+# Expected response: 200 OK with payment confirmation
+```
+
+#### 3. **Monitor Logs During Testing**
+
+Use these commands to monitor logs in real-time:
+
+```bash
+# Monitor all logs
+tail -f /path/to/logs/app.log
+
+# Filter specific debug logs
+tail -f /path/to/logs/app.log | grep "🔧 \[DEBUG\]"
+
+# Monitor server logs in development
+npm run dev | grep -E "(error|🔧|payment|terminal)"
+```
+
+#### 4. **Share Logs When Issues Occur**
+
+If testing reveals issues, share relevant logs using:
+
+```bash
+# Get recent logs with context
+tail -50 /path/to/logs/app.log
+
+# Get specific error logs
+grep -A5 -B5 "error\|ERROR\|failed" /path/to/logs/app.log | tail -20
+```
+
+#### 5. **Clean Up Debug Logs**
+
+**IMPORTANT**: Once feature is working, remove all temporary debug logs:
+
+```typescript
+// ❌ REMOVE: Clean up all debug logs before committing
+// logger.info(`🔧 [DEBUG] Starting payment process...`)
+// logger.info(`🔧 [DEBUG] Payment request payload:`, paymentData)
+
+// ✅ KEEP: Only essential production logs
+logger.info(`Payment processed successfully for terminal: ${terminalId}`)
+```
+
+#### Debug Log Conventions:
+
+- Use `🔧 [DEBUG]` prefix for temporary debugging logs
+- Include context: function name, key variables, request/response data
+- Add timestamps and correlation IDs for tracing
+- Use structured logging with objects for complex data
+- Always add both success and error logging paths
+
+#### Testing Feedback Loop:
+
+1. **Implement** → Add debug logs
+2. **Test** → Provide testing steps to user
+3. **Debug** → Share logs if issues occur
+4. **Iterate** → Fix based on log analysis
+5. **Clean** → Remove debug logs once working
+6. **Commit** → Only production-ready code
+
+## Known Limitations
+
+- **Organization ID (orgId) authorization**: Currently not fully implemented in service methods. Most TPV service methods accept `orgId`
+  parameter but don't enforce organization-level access control. Future implementation needed for proper multi-tenant isolation.
+
+- You can query directly postgres using psql with this env variables:
+  DATABASE_URL="postgresql://postgres:exitosoy777@localhost:5432/av-db-25"

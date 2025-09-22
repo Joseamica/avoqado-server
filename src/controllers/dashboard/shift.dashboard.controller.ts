@@ -66,3 +66,23 @@ export async function getShiftsSummary(req: Request, res: Response, next: NextFu
     next(error)
   }
 }
+
+export async function deleteShift(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const shiftId: string = req.params.shiftId
+
+    const deleted = await shiftDashboardService.deleteShift(venueId, shiftId)
+
+    if (!deleted) {
+      res.status(404).json({
+        error: 'Shift not found',
+      })
+      return
+    }
+
+    res.status(204).send() // 204 No Content for successful deletion
+  } catch (error) {
+    next(error)
+  }
+}

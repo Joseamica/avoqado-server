@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
+import { publishCommand } from '../../communication/rabbitmq/publisher'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -51,10 +52,55 @@ export async function validateStaffVenue(staffId: string | undefined, venueId: s
     return userId
   }
 
+  let actualStaffId = staffId
+
+  // 🔧 [TEMP FIX] Handle numeric staffId from Android app (e.g., "1", "2", "3")
+  // Android app sends numeric indices instead of proper CUIDs - map to actual staffIds
+  if (/^\d+$/.test(staffId)) {
+    logger.warn('🔧 [TEMP FIX] Received numeric staffId from Android app', { staffId, venueId })
+
+    try {
+      // Get all staff assigned to this venue, ordered by creation date
+      const staffVenues = await prisma.staffVenue.findMany({
+        where: {
+          venueId,
+          active: true,
+        },
+        include: {
+          staff: true,
+        },
+        orderBy: {
+          startDate: 'asc',
+        },
+      })
+
+      if (staffVenues.length === 0) {
+        throw new BadRequestError(`No active staff found for venue ${venueId}`)
+      }
+
+      // Map numeric index to actual staffId (1-based index from Android)
+      const staffIndex = parseInt(staffId) - 1
+      if (staffIndex < 0 || staffIndex >= staffVenues.length) {
+        logger.error('🔧 [TEMP FIX] Invalid staff index', { staffId, staffIndex, availableStaff: staffVenues.length })
+        throw new BadRequestError(`Invalid staff index ${staffId}. Available staff: 1-${staffVenues.length}`)
+      }
+
+      actualStaffId = staffVenues[staffIndex].staffId
+      logger.info('🔧 [TEMP FIX] Mapped numeric staffId to actual CUID', {
+        originalStaffId: staffId,
+        mappedStaffId: actualStaffId,
+        staffName: `${staffVenues[staffIndex].staff?.firstName || 'Unknown'} ${staffVenues[staffIndex].staff?.lastName || 'Staff'}`,
+      })
+    } catch (error) {
+      logger.error('🔧 [TEMP FIX] Failed to map numeric staffId', { staffId, venueId, error })
+      throw new BadRequestError(`Failed to resolve staff ID ${staffId} for venue ${venueId}`)
+    }
+  }
+
   // Validate that staff exists and is assigned to this venue
   const staffVenue = await prisma.staffVenue.findFirst({
     where: {
-      staffId,
+      staffId: actualStaffId,
       venueId,
       active: true,
     },
@@ -64,7 +110,7 @@ export async function validateStaffVenue(staffId: string | undefined, venueId: s
   })
 
   if (!staffVenue) {
-    throw new BadRequestError(`Staff ${staffId} is not assigned to venue ${venueId} or is inactive`)
+    throw new BadRequestError(`Staff ${actualStaffId} is not assigned to venue ${venueId} or is inactive`)
   }
 
   return staffVenue.staffId
@@ -488,6 +534,39 @@ export async function recordOrderPayment(
   // TODO: Emit socket event for real-time updates
   // SocketManager.emitPaymentUpdate(venueId, tableNumber, payment)
 
+  // ✅ NUEVO: Enviar comando de pago a POS via RabbitMQ
+  try {
+    // Determinar si es pago parcial comparando con el total de la orden
+    const isPartialPayment = totalAmount + tipAmount < parseFloat(activeOrder.total.toString())
+
+    await publishCommand(`command.softrestaurant.${venueId}`, {
+      entity: 'Payment',
+      action: 'APPLY',
+      payload: {
+        orderExternalId: activeOrder.externalId,
+        paymentData: {
+          amount: totalAmount,
+          tip: tipAmount,
+          posPaymentMethodId: mapPaymentMethodToPOS(paymentData.method),
+          reference: paymentData.mentaOperationId || paymentData.authorizationNumber || '',
+          isPartial: isPartialPayment,
+        },
+      },
+    })
+
+    logger.info('Payment command sent to POS', {
+      paymentId: payment.id,
+      orderExternalId: activeOrder.externalId,
+      isPartial: isPartialPayment,
+    })
+  } catch (rabbitMQError) {
+    logger.error('Failed to send payment command to POS', {
+      paymentId: payment.id,
+      error: rabbitMQError,
+    })
+    // No fallar el pago si RabbitMQ falla
+  }
+
   logger.info('Payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
   // Add digital receipt info to payment response
@@ -894,4 +973,21 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
   })
 
   return routingResponse
+}
+
+/**
+ * ✅ NUEVO: Mapea métodos de pago del backend a códigos de POS
+ * Convierte los métodos de pago de Avoqado a los códigos que entiende SoftRestaurant
+ */
+function mapPaymentMethodToPOS(method: PaymentMethod): string {
+  const paymentMethodMap: Record<PaymentMethod, string> = {
+    CASH: 'AEF', // EFECTIVO
+    CREDIT_CARD: 'CRE', // TAR. CREDITO
+    DEBIT_CARD: 'DEB', // TAR. DEBITO
+    DIGITAL_WALLET: 'MPY', // MARC PAYMENTS (como genérico para wallets)
+    BANK_TRANSFER: 'AEF', // Se trata como efectivo
+    OTHER: 'AEF', // Por defecto efectivo
+  }
+
+  return paymentMethodMap[method] || 'AEF'
 }

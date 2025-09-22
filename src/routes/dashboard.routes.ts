@@ -3009,6 +3009,32 @@ router.get(
   shiftController.getShiftsSummary,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/shifts/{shiftId}:
+ *   delete:
+ *     tags: [Shifts]
+ *     summary: Delete a shift
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: shiftId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       204:
+ *         description: Shift deleted successfully
+ *       400:
+ *         description: Cannot delete open shift
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/shifts/:shiftId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  shiftController.deleteShift,
+)
+
 // ==========================================
 // NOTIFICATIONS ROUTES
 // ==========================================
