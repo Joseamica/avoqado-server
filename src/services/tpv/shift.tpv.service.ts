@@ -1,7 +1,9 @@
-import { Shift } from '@prisma/client'
+import { Shift, ShiftStatus } from '@prisma/client'
+import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { publishCommand } from '../../communication/rabbitmq/publisher'
 
 interface ShiftFilters {
   staffId?: string
@@ -434,4 +436,293 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     },
     waiterTips: waiterTips,
   }
+}
+
+/**
+ * Interface for shift closing data
+ */
+interface ShiftCloseData {
+  cashDeclared: number
+  cardDeclared: number
+  vouchersDeclared: number
+  otherDeclared: number
+  notes?: string
+}
+
+/**
+ * Open a new shift for a venue
+ * Works with both integrated POS (SOFTRESTAURANT) and standalone (NONE) mode
+ * @param venueId Venue ID
+ * @param staffId Staff ID who is opening the shift
+ * @param startingCash Starting cash amount
+ * @param stationId POS station ID (optional)
+ * @param orgId Organization ID for authorization
+ * @returns Created shift object
+ */
+export async function openShiftForVenue(
+  venueId: string,
+  staffId: string,
+  startingCash: number,
+  stationId?: string,
+  _orgId?: string,
+): Promise<Shift> {
+  logger.info('Opening new shift for venue', {
+    venueId,
+    staffId,
+    startingCash,
+    stationId,
+  })
+
+  // Verify venue exists and get its POS configuration
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: {
+      id: true,
+      name: true,
+      posType: true,
+      posStatus: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError('Venue not found')
+  }
+
+  // Check if there's already an open shift for this venue
+  const existingOpenShift = await prisma.shift.findFirst({
+    where: {
+      venueId: venueId,
+      endTime: null, // Open shift
+    },
+  })
+
+  if (existingOpenShift) {
+    throw new BadRequestError('There is already an open shift for this venue. Please close it before opening a new one.')
+  }
+
+  // Verify staff member exists and belongs to venue
+  // Find staff and their venue association
+  const staffWithVenue = await prisma.staffVenue.findFirst({
+    where: {
+      staffId: staffId,
+      venueId: venueId,
+    },
+    include: {
+      staff: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+        },
+      },
+    },
+  })
+
+  if (!staffWithVenue) {
+    throw new NotFoundError('Staff member not found or not associated with this venue')
+  }
+
+  const staffName = `${staffWithVenue.staff.firstName} ${staffWithVenue.staff.lastName}`
+  const posStaffId = staffWithVenue.posStaffId || staffId
+
+  // Determine if we should send command to POS
+  const isIntegratedPOS = venue.posType === 'SOFTRESTAURANT' && venue.posStatus === 'CONNECTED'
+
+  let shiftExternalId: string | null = null
+
+  if (isIntegratedPOS) {
+    // INTEGRATED MODE: Send command to Windows service to open shift in POS
+    try {
+      // Generate a temporary shift ID for tracking
+      const tempShiftId = `SHIFT_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+
+      logger.info('Sending shift open command to POS', {
+        venueId,
+        tempShiftId,
+        staffPosId: posStaffId,
+      })
+
+      await publishCommand(`command.softrestaurant.${venueId}`, {
+        entity: 'Shift',
+        action: 'OPEN',
+        payload: {
+          tempShiftId,
+          posStaffId: posStaffId,
+          startingCash: startingCash || 0,
+          stationId: stationId || 'AVOQADO',
+        },
+      })
+
+      // The Windows service will process this command and create the shift in POS
+      // The shift will be synced back via the posSyncShift service
+      // For now, we'll create the shift record with a marker that it's pending POS confirmation
+      shiftExternalId = tempShiftId
+    } catch (error) {
+      logger.error('Failed to send shift open command to POS', error)
+      throw new BadRequestError('Failed to open shift in POS system. Please try again.')
+    }
+  }
+
+  // Create shift record in database
+  const shift = await prisma.shift.create({
+    data: {
+      venueId: venueId,
+      staffId: staffId,
+      startTime: new Date(),
+      endTime: null,
+      status: 'OPEN' as ShiftStatus,
+      startingCash: startingCash || 0,
+      endingCash: null,
+      cashDeclared: null,
+      cardDeclared: null,
+      vouchersDeclared: null,
+      otherDeclared: null,
+      totalSales: 0,
+      totalTips: 0,
+      notes: null,
+      externalId: shiftExternalId,
+      posRawData: stationId ? { stationId } : undefined,
+    },
+  })
+
+  logger.info('Shift opened successfully', {
+    shiftId: shift.id,
+    venueId,
+    staffId,
+    isIntegratedPOS,
+  })
+
+  return shift
+}
+
+/**
+ * Close an existing shift for a venue
+ * Works with both integrated POS (SOFTRESTAURANT) and standalone (NONE) mode
+ * @param venueId Venue ID
+ * @param shiftId Shift ID to close
+ * @param closeData Cash reconciliation and closing data
+ * @param orgId Organization ID for authorization
+ * @returns Updated shift object
+ */
+export async function closeShiftForVenue(venueId: string, shiftId: string, closeData: ShiftCloseData, _orgId?: string): Promise<Shift> {
+  logger.info('Closing shift for venue', {
+    venueId,
+    shiftId,
+    closeData,
+  })
+
+  // Verify shift exists and belongs to the venue
+  const shift = await prisma.shift.findFirst({
+    where: {
+      id: shiftId,
+      venueId: venueId,
+    },
+    include: {
+      venue: {
+        select: {
+          posType: true,
+          posStatus: true,
+        },
+      },
+    },
+  })
+
+  if (!shift) {
+    throw new NotFoundError('Shift not found or does not belong to this venue')
+  }
+
+  if (shift.endTime !== null) {
+    throw new BadRequestError('Shift is already closed')
+  }
+
+  // Calculate shift totals from orders
+  const shiftOrders = await prisma.order.findMany({
+    where: {
+      shiftId: shiftId,
+      status: {
+        in: ['COMPLETED'],
+      },
+    },
+  })
+
+  // Also get payments for shift totals
+  const shiftPayments = await prisma.payment.findMany({
+    where: {
+      shiftId: shiftId,
+      status: 'COMPLETED',
+    },
+  })
+
+  let totalSales = new Decimal(0)
+  let totalTips = new Decimal(0)
+
+  shiftOrders.forEach(order => {
+    totalSales = totalSales.add(order.total)
+  })
+
+  shiftPayments.forEach(payment => {
+    if (payment.tipAmount) {
+      totalTips = totalTips.add(payment.tipAmount)
+    }
+  })
+
+  // Determine if we should send command to POS
+  const isIntegratedPOS = shift.venue.posType === 'SOFTRESTAURANT' && shift.venue.posStatus === 'CONNECTED'
+
+  if (isIntegratedPOS && shift.externalId) {
+    // INTEGRATED MODE: Send command to Windows service to close shift in POS
+    try {
+      logger.info('Sending shift close command to POS', {
+        venueId,
+        shiftId,
+        externalShiftId: shift.externalId,
+      })
+
+      await publishCommand(`command.softrestaurant.${venueId}`, {
+        entity: 'Shift',
+        action: 'CLOSE',
+        payload: {
+          shiftId: shift.externalId,
+          cashDeclared: closeData.cashDeclared,
+          cardDeclared: closeData.cardDeclared,
+          vouchersDeclared: closeData.vouchersDeclared,
+          otherDeclared: closeData.otherDeclared,
+        },
+      })
+
+      // The Windows service will process this command and close the shift in POS
+      // Archival operations will happen in the POS database
+    } catch (error) {
+      logger.error('Failed to send shift close command to POS', error)
+      // Continue with local shift close even if POS command fails
+      // The shift can be manually closed in POS if needed
+    }
+  }
+
+  // Update shift record in database
+  const updatedShift = await prisma.shift.update({
+    where: { id: shiftId },
+    data: {
+      endTime: new Date(),
+      status: 'CLOSED' as ShiftStatus,
+      endingCash: new Decimal(shift.startingCash || 0).add(new Decimal(closeData.cashDeclared || 0)),
+      cashDeclared: closeData.cashDeclared,
+      cardDeclared: closeData.cardDeclared,
+      vouchersDeclared: closeData.vouchersDeclared,
+      otherDeclared: closeData.otherDeclared,
+      totalSales: totalSales,
+      totalTips: totalTips,
+      notes: closeData.notes,
+    },
+  })
+
+  logger.info('Shift closed successfully', {
+    shiftId,
+    venueId,
+    totalSales,
+    totalTips,
+    isIntegratedPOS,
+  })
+
+  return updatedShift
 }

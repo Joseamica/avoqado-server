@@ -592,6 +592,12 @@ model Shift {
   endingCash     Decimal? @db.Decimal(10, 2)
   cashDifference Decimal? @db.Decimal(10, 2)
 
+  // Cash reconciliation (for shift closing)
+  cashDeclared     Decimal? @db.Decimal(10, 2)
+  cardDeclared     Decimal? @db.Decimal(10, 2)
+  vouchersDeclared Decimal? @db.Decimal(10, 2)
+  otherDeclared    Decimal? @db.Decimal(10, 2)
+
   // Summary
   totalSales  Decimal @default(0) @db.Decimal(12, 2)
   totalTips   Decimal @default(0) @db.Decimal(10, 2)
@@ -1117,9 +1123,9 @@ model Terminal {
 
   // Preferred processor for this TPV (LEGACY/MENTA/AUTO)
   preferredProcessor PaymentProcessor @default(AUTO)
-  
+
   // Menta API Integration - Smart Caching
-  mentaTerminalId String?   // Menta's UUID for payments (cached on first use)
+  mentaTerminalId String? // Menta's UUID for payments (cached on first use)
   mentaLastSync   DateTime? // When we last synced with Menta API
 
   reviews Review[] // ✅ LÍNEA AGREGADA
@@ -1171,7 +1177,7 @@ model MerchantAccount {
   // Generic merchant info
   externalMerchantId String // Provider's merchant ID
   alias              String?
-  
+
   // Display and status fields for UI
   displayName  String? // User-friendly name like "Cuenta Principal", "Facturación"
   active       Boolean @default(true) // Enable/disable account
