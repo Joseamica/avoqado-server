@@ -26,7 +26,7 @@ export interface TpvCommand {
 }
 
 /**
- * Service to handle TPV health monitoring and remote commands
+ * Service to handle TPV health monitoring and remote commandss
  */
 export class TpvHealthService {
   /**
