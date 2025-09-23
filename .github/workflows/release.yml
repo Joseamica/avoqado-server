@@ -12,13 +12,13 @@ jobs:
     outputs:
       version-changed: ${{ steps.check.outputs.changed }}
       new-version: ${{ steps.get-version.outputs.version }}
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-          
+
       - name: Check if version changed
         id: check
         run: |
@@ -31,7 +31,7 @@ jobs:
           else
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
-          
+
       - name: Get new version
         id: get-version
         if: steps.check.outputs.changed == 'true'
@@ -44,23 +44,23 @@ jobs:
     runs-on: ubuntu-latest
     needs: check-version-bump
     if: needs.check-version-bump.outputs.version-changed == 'true'
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          
+
       - name: Create Git tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "v${{ needs.check-version-bump.outputs.new-version }}" -m "Release v${{ needs.check-version-bump.outputs.new-version }}"
           git push origin "v${{ needs.check-version-bump.outputs.new-version }}"
-        
+
       - name: Generate changelog
         id: changelog
         run: |
@@ -71,25 +71,25 @@ jobs:
           else
             COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s" --reverse)
           fi
-          
+
           # Generate database migration info
           MIGRATION_FILES=$(find prisma/migrations -name "*.sql" -newer $(git log -1 --format="%ci" ${LAST_TAG} 2>/dev/null | head -1) 2>/dev/null | wc -l || echo "0")
-          
+
           # Create changelog
           cat > CHANGELOG.md << EOF
           ## 🚀 What's New
-          
+
           $COMMITS
-          
+
           ## 📊 Database Changes
           - $MIGRATION_FILES new migration(s) included
           - Run \`npx prisma migrate deploy\` to apply changes
-          
+
           ## 🛠️ Technical Details
           - **Node.js Version**: 20.x
           - **Prisma Version**: $(node -p "require('./package.json').dependencies['@prisma/client']")
           - **TypeScript**: $(node -p "require('./package.json').devDependencies['typescript']")
-          
+
           ## 📦 Installation
           \`\`\`bash
           npm install
@@ -97,10 +97,10 @@ jobs:
           npm run build
           npm start
           \`\`\`
-          
+
           **Full Changelog**: https://github.com/${{ github.repository }}/compare/${LAST_TAG}...v${{ needs.check-version-bump.outputs.new-version }}
           EOF
-          
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

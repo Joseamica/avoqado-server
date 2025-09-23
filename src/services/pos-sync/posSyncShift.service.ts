@@ -50,7 +50,7 @@ export async function processPosShiftEvent(
   event: 'created' | 'updated' | 'closed',
 ): Promise<Shift> {
   const { venueId, shiftData } = payload
-  logger.info(`[PosSyncService] Procesando evento '${event}' para Turno con externalId: ${shiftData.WorkspaceId}`)
+  logger.info(`[PosSyncService] Procesando evento '${event}' para Turno con externalId: ${shiftData.externalId}`)
   logger.info(JSON.stringify(shiftData))
   logger.info(`[PosSyncService] Evento: ${event} 🕒`)
 
@@ -71,13 +71,16 @@ export async function processPosShiftEvent(
     totalOrders: 0,
   }
 
+  // Get the externalId from the correct location in the payload (declare outside if block)
+  const shiftExternalId = shiftData.externalId || shiftData.WorkspaceId || shiftData.EntityId
+
   if (event === 'closed') {
-    logger.info(`[PosSyncService] El turno ${shiftData.WorkspaceId} se ha cerrado. Calculando totales...`)
+    logger.info(`[PosSyncService] El turno ${shiftExternalId} se ha cerrado. Calculando totales...`)
 
     // First find the current shift to get its actual ID
     const currentShift = await prisma.shift.findUnique({
       where: {
-        venueId_externalId: { venueId, externalId: shiftData.WorkspaceId },
+        venueId_externalId: { venueId, externalId: shiftExternalId },
       },
       select: { id: true },
     })
@@ -101,7 +104,7 @@ export async function processPosShiftEvent(
 
   // --- Mapear datos desde la estructura correcta ---
   const rawData = shiftData.posRawData || shiftData
-  const externalId = shiftData.EntityId || shiftData.externalId
+  const externalId = shiftExternalId // Use the already extracted externalId
   const startTime = rawData.apertura || shiftData.startTime
   const endTime = rawData.cierre || shiftData.endTime
   const startingCash = rawData.fondo !== undefined ? rawData.fondo : shiftData.startingCash

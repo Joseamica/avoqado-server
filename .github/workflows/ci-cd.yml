@@ -31,50 +31,50 @@ jobs:
     outputs:
       version: ${{ steps.package-version.outputs.version }}
       build-time: ${{ steps.build-info.outputs.build-time }}
-    
+
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
-        
+
       - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          
+
       - name: 📦 Install dependencies
         run: npm ci
-        
+
       - name: 📏 Run ESLint
         run: npm run lint
-        
+
       - name: 🔍 TypeScript compilation check
         run: npx tsc --noEmit
-        
+
       - name: 🗄️ Generate Prisma Client
         run: npx prisma generate
-        
+
       - name: 🏗️ Build application
         run: npm run build
-        
+
       - name: 🧪 Run unit tests
         run: npm run test:unit
-        
+
       - name: 📋 Get package version
         id: package-version
         run: echo "version=$(node -p 'require("./package.json").version')" >> $GITHUB_OUTPUT
-        
+
       - name: ⏰ Build info
         id: build-info
         run: echo "build-time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-        
+
       - name: 📤 Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-files-${{ github.sha }}
           path: dist/
           retention-days: 7
-          
+
       - name: 📤 Upload Prisma schema
         uses: actions/upload-artifact@v4
         with:
@@ -90,26 +90,26 @@ jobs:
     if: |
       (github.ref == 'refs/heads/develop' && github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
-    environment: 
+    environment:
       name: staging
       url: ${{ vars.STAGING_API_URL }}
-    
+
     steps:
       - name: 🚀 Deploy to Render (Staging)
         uses: johnbeynon/render-deploy-action@v0.0.8
         with:
           service-id: ${{ secrets.RENDER_STAGING_SERVICE_ID }}
           api-key: ${{ secrets.RENDER_API_KEY }}
-          
+
       - name: ⏳ Wait for deployment to stabilize
         run: |
           echo "⏳ Waiting for deployment to complete..."
           sleep 90
-          
+
       - name: 🏥 Comprehensive health check
         run: |
           echo "🏥 Performing health checks..."
-          
+
           # Basic health check
           for i in {1..10}; do
             if curl -f -s ${{ vars.STAGING_API_URL }}/health; then
@@ -119,13 +119,13 @@ jobs:
             echo "⏳ Health check attempt $i failed, retrying in 10 seconds..."
             sleep 10
           done
-          
+
           # Extended API tests
           echo "🔍 Testing API endpoints..."
           curl -f -s ${{ vars.STAGING_API_URL }}/health | jq '.' || echo "❌ JSON response invalid"
-          
+
           echo "✅ Staging deployment successful!"
-          
+
       - name: 📢 Notify staging deployment
         if: always()
         run: |
@@ -148,7 +148,7 @@ jobs:
     if: |
       (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
-    environment: 
+    environment:
       name: production
       url: ${{ vars.PRODUCTION_API_URL }}
 
@@ -158,16 +158,16 @@ jobs:
         with:
           service-id: ${{ secrets.RENDER_PRODUCTION_SERVICE_ID }}
           api-key: ${{ secrets.RENDER_API_KEY }}
-          
+
       - name: ⏳ Wait for deployment to stabilize
         run: |
           echo "⏳ Waiting for production deployment to complete..."
           sleep 120
-          
+
       - name: 🏥 Production health verification
         run: |
           echo "🏥 Performing comprehensive production health checks..."
-          
+
           # Extended health checks for production
           for i in {1..15}; do
             if curl -f -s ${{ vars.PRODUCTION_API_URL }}/health; then
@@ -187,9 +187,9 @@ jobs:
             echo "⏳ Production health check attempt $i failed, retrying in 15 seconds..."
             sleep 15
           done
-          
+
           echo "🎉 Production deployment successful!"
-          
+
       - name: 📢 Notify production deployment
         if: always()
         run: |
@@ -211,7 +211,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     needs: test-and-build
-    
+
     steps:
       - name: 💬 Enhanced PR Comment
         uses: actions/github-script@v7
@@ -222,41 +222,41 @@ jobs:
               repo: context.repo.repo,
               pull_number: context.issue.number
             });
-            
+
             const buildTime = '${{ needs.test-and-build.outputs.build-time }}';
             const version = '${{ needs.test-and-build.outputs.version }}';
-            
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
               body: `## 🚀 Build Successful! Ready for Review
-            
+
             ### 📋 Build Summary
             - **Branch**: \`${pr.head.ref}\`
             - **Commit**: \`${context.sha.substring(0, 7)}\`
             - **Version**: \`${version}\`
             - **Built at**: \`${buildTime}\`
-            
+
             ### 🔍 Quality Checks
             - ✅ **ESLint**: No issues found
             - ✅ **TypeScript**: Compilation successful
             - ✅ **Unit Tests**: All passing
             - ✅ **Build**: Successful
-            
+
             ### 🗄️ Database
             - **Neon Branch**: \`pr-${context.issue.number}\` will be created when merged
             - **Migrations**: Will be applied automatically
-            
+
             ### 📦 Artifacts
             - **Build files**: Available for 7 days
             - **Prisma schema**: Included for migration review
-            
+
             ---
-            
+
             🎯 **Ready for code review!** All automated checks have passed.`
             });
-            
+
       - name: 📊 Build metrics
         run: |
           echo "📊 Build Metrics Summary:"
