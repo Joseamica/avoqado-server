@@ -1,8 +1,10 @@
-import { Payment, PaymentMethod, SplitType } from '@prisma/client'
+import { Payment, PaymentMethod, SplitType, OrderSource } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
+import { publishCommand } from '../../communication/rabbitmq/publisher'
+import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -17,6 +19,70 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
   }
 
   return ratingMap[tpvRating.toUpperCase()] || null
+}
+
+/**
+ * Update order totals directly in backend for standalone mode
+ * @param orderId Order ID to update
+ * @param paymentAmount Total payment amount (including tip)
+ */
+async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmount: number): Promise<void> {
+  // Get current order with payment information
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      payments: {
+        where: { status: 'COMPLETED' },
+        select: { amount: true, tipAmount: true },
+      },
+    },
+  })
+
+  if (!order) {
+    throw new Error(`Order ${orderId} not found for total update`)
+  }
+
+  // Calculate total payments made (including this new one)
+  const previousPayments = order.payments.reduce(
+    (sum, payment) => sum + parseFloat(payment.amount.toString()) + parseFloat(payment.tipAmount.toString()),
+    0,
+  )
+  const totalPaid = previousPayments + paymentAmount
+  const originalTotal = parseFloat(order.total.toString())
+
+  // Calculate remaining amount
+  const remainingAmount = Math.max(0, originalTotal - totalPaid)
+  const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+
+  // Determine new payment status
+  let newPaymentStatus = order.paymentStatus
+  if (isFullyPaid) {
+    newPaymentStatus = 'PAID'
+  } else if (totalPaid > 0) {
+    newPaymentStatus = 'PARTIAL'
+  }
+
+  // Update order totals and status
+  await prisma.order.update({
+    where: { id: orderId },
+    data: {
+      paymentStatus: newPaymentStatus,
+      ...(isFullyPaid && {
+        status: 'COMPLETED',
+        completedAt: new Date(),
+      }),
+    },
+  })
+
+  logger.info('Order totals updated for standalone payment', {
+    orderId,
+    originalTotal,
+    paymentAmount,
+    totalPaid,
+    remainingAmount,
+    isFullyPaid,
+    newPaymentStatus,
+  })
 }
 
 interface PaymentFilters {
@@ -51,10 +117,55 @@ export async function validateStaffVenue(staffId: string | undefined, venueId: s
     return userId
   }
 
+  let actualStaffId = staffId
+
+  // 🔧 [TEMP FIX] Handle numeric staffId from Android app (e.g., "1", "2", "3")
+  // Android app sends numeric indices instead of proper CUIDs - map to actual staffIds
+  if (/^\d+$/.test(staffId)) {
+    logger.warn('🔧 [TEMP FIX] Received numeric staffId from Android app', { staffId, venueId })
+
+    try {
+      // Get all staff assigned to this venue, ordered by creation date
+      const staffVenues = await prisma.staffVenue.findMany({
+        where: {
+          venueId,
+          active: true,
+        },
+        include: {
+          staff: true,
+        },
+        orderBy: {
+          startDate: 'asc',
+        },
+      })
+
+      if (staffVenues.length === 0) {
+        throw new BadRequestError(`No active staff found for venue ${venueId}`)
+      }
+
+      // Map numeric index to actual staffId (1-based index from Android)
+      const staffIndex = parseInt(staffId) - 1
+      if (staffIndex < 0 || staffIndex >= staffVenues.length) {
+        logger.error('🔧 [TEMP FIX] Invalid staff index', { staffId, staffIndex, availableStaff: staffVenues.length })
+        throw new BadRequestError(`Invalid staff index ${staffId}. Available staff: 1-${staffVenues.length}`)
+      }
+
+      actualStaffId = staffVenues[staffIndex].staffId
+      logger.info('🔧 [TEMP FIX] Mapped numeric staffId to actual CUID', {
+        originalStaffId: staffId,
+        mappedStaffId: actualStaffId,
+        staffName: `${staffVenues[staffIndex].staff?.firstName || 'Unknown'} ${staffVenues[staffIndex].staff?.lastName || 'Staff'}`,
+      })
+    } catch (error) {
+      logger.error('🔧 [TEMP FIX] Failed to map numeric staffId', { staffId, venueId, error })
+      throw new BadRequestError(`Failed to resolve staff ID ${staffId} for venue ${venueId}`)
+    }
+  }
+
   // Validate that staff exists and is assigned to this venue
   const staffVenue = await prisma.staffVenue.findFirst({
     where: {
-      staffId,
+      staffId: actualStaffId,
       venueId,
       active: true,
     },
@@ -64,7 +175,7 @@ export async function validateStaffVenue(staffId: string | undefined, venueId: s
   })
 
   if (!staffVenue) {
-    throw new BadRequestError(`Staff ${staffId} is not assigned to venue ${venueId} or is inactive`)
+    throw new BadRequestError(`Staff ${actualStaffId} is not assigned to venue ${venueId} or is inactive`)
   }
 
   return staffVenue.staffId
@@ -488,6 +599,74 @@ export async function recordOrderPayment(
   // TODO: Emit socket event for real-time updates
   // SocketManager.emitPaymentUpdate(venueId, tableNumber, payment)
 
+  // ✅ NUEVO: Detectar modo de operación y manejar pago según el contexto
+  const isIntegratedMode = activeOrder.source === OrderSource.POS && activeOrder.externalId && activeOrder.externalId.trim() !== ''
+
+  logger.info('Payment processing mode detected', {
+    paymentId: payment.id,
+    orderId: activeOrder.id,
+    isIntegratedMode,
+    orderSource: activeOrder.source,
+    hasExternalId: !!activeOrder.externalId,
+  })
+
+  if (isIntegratedMode) {
+    // MODO INTEGRADO: Enviar comando a POS, POS maneja los totales
+    try {
+      const isPartialPayment = totalAmount + tipAmount < parseFloat(activeOrder.total.toString())
+
+      await publishCommand(`command.softrestaurant.${venueId}`, {
+        entity: 'Payment',
+        action: 'APPLY',
+        payload: {
+          orderExternalId: activeOrder.externalId,
+          paymentData: {
+            amount: totalAmount,
+            tip: tipAmount,
+            posPaymentMethodId: mapPaymentMethodToPOS(paymentData.method),
+            reference: paymentData.mentaOperationId || paymentData.authorizationNumber || '',
+            isPartial: isPartialPayment,
+          },
+        },
+      })
+
+      // Track this payment command to prevent double deduction when POS sends back order.updated
+      if (activeOrder.externalId) {
+        trackRecentPaymentCommand(activeOrder.externalId, totalAmount + tipAmount)
+      }
+
+      logger.info('Payment command sent to POS (Integrated Mode)', {
+        paymentId: payment.id,
+        orderExternalId: activeOrder.externalId,
+        isPartial: isPartialPayment,
+      })
+    } catch (rabbitMQError) {
+      logger.error('Failed to send payment command to POS', {
+        paymentId: payment.id,
+        error: rabbitMQError,
+      })
+      // No fallar el pago si RabbitMQ falla
+    }
+  } else {
+    // MODO AUTÓNOMO: Backend maneja los totales directamente
+    try {
+      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount)
+
+      logger.info('Order totals updated directly in backend (Standalone Mode)', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        paymentAmount: totalAmount + tipAmount,
+      })
+    } catch (updateError) {
+      logger.error('Failed to update order totals in standalone mode', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        error: updateError,
+      })
+      // Continue execution - payment is still recorded even if total update fails
+    }
+  }
+
   logger.info('Payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
   // Add digital receipt info to payment response
@@ -717,7 +896,7 @@ export async function getVenueMerchantAccounts(venueId: string, _orgId?: string)
 
     // Check if account has required credentials
     const credentials = account.credentialsEncrypted
-    const hasValidCredentials = credentials && credentials.merchantId && credentials.apiKey
+    const hasValidCredentials = !!(credentials && credentials.merchantId && credentials.apiKey)
 
     return {
       id: account.id,
@@ -729,6 +908,15 @@ export async function getVenueMerchantAccounts(venueId: string, _orgId?: string)
       hasValidCredentials,
       displayOrder: account.displayOrder,
       externalMerchantId: account.externalMerchantId,
+      // 🚀 OPTIMIZATION: Include decrypted credentials for POS terminals
+      // This eliminates the need for getMentaRoute API calls during payment
+      credentials: hasValidCredentials
+        ? {
+            apiKey: credentials.apiKey,
+            merchantId: credentials.merchantId,
+            customerId: credentials.customerId || null,
+          }
+        : null,
     }
   }
 
@@ -885,4 +1073,21 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
   })
 
   return routingResponse
+}
+
+/**
+ * ✅ NUEVO: Mapea métodos de pago del backend a códigos de POS
+ * Convierte los métodos de pago de Avoqado a los códigos que entiende SoftRestaurant
+ */
+function mapPaymentMethodToPOS(method: PaymentMethod): string {
+  const paymentMethodMap: Record<PaymentMethod, string> = {
+    CASH: 'AEF', // EFECTIVO
+    CREDIT_CARD: 'CRE', // TAR. CREDITO
+    DEBIT_CARD: 'DEB', // TAR. DEBITO
+    DIGITAL_WALLET: 'MPY', // MARC PAYMENTS (como genérico para wallets)
+    BANK_TRANSFER: 'AEF', // Se trata como efectivo
+    OTHER: 'AEF', // Por defecto efectivo
+  }
+
+  return paymentMethodMap[method] || 'AEF'
 }

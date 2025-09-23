@@ -21,6 +21,7 @@ import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
 import * as shiftController from '../controllers/tpv/shift.tpv.controller'
 import * as authController from '../controllers/tpv/auth.tpv.controller'
+import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
 
 const router = express.Router()
 
@@ -37,6 +38,40 @@ const router = express.Router()
  *           description: The ID of the venue
  *       required:
  *         - venueId
+ *     TerminalMerchantResponse:
+ *       type: object
+ *       properties:
+ *         venueId:
+ *           type: string
+ *           format: cuid
+ *           description: The ID of the venue
+ *         terminalId:
+ *           type: string
+ *           format: uuid
+ *           description: Menta's terminal UUID (required for payment processing - automatically fetched and cached)
+ *         serialCode:
+ *           type: string
+ *           description: The serial number of the terminal
+ *         status:
+ *           type: string
+ *           enum: [ACTIVE, INACTIVE, MAINTENANCE]
+ *           description: Current status of the terminal
+ *         model:
+ *           type: string
+ *           description: Terminal model/type
+ *         hardwareVersion:
+ *           type: string
+ *           description: Hardware version
+ *         features:
+ *           type: array
+ *           items:
+ *             type: string
+ *           description: Terminal capabilities/features
+ *       required:
+ *         - venueId
+ *         - terminalId
+ *         - serialCode
+ *         - status
  *
  *     VenueTPVResponse:
  *       type: object
@@ -134,24 +169,31 @@ router.get(
  *   get:
  *     tags:
  *       - TPV - Venues
- *     summary: Get venue ID from terminal serial number
- *     description: Retrieve the venue ID associated with a terminal serial number
+ *     summary: Get terminal information from serial number (Smart Caching)
+ *     description: |
+ *       Retrieve complete terminal information including venue ID and Menta terminal UUID for payment processing.
+ *
+ *       **Smart Caching Behavior:**
+ *       - First request: Fetches terminal ID from Menta API and caches it in database
+ *       - Subsequent requests: Returns cached terminal ID (no API call to Menta)
+ *
+ *       This ensures optimal performance while maintaining accurate terminal information.
  *     parameters:
  *       - in: path
  *         name: serialNumber
  *         required: true
  *         schema:
  *           type: string
- *         description: The serial number of the terminal
+ *         description: The serial number of the terminal (printed on hardware)
  *     responses:
  *       200:
- *         description: Venue ID retrieved successfully
+ *         description: Terminal information retrieved successfully
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/VenueIdResponse'
+ *               $ref: '#/components/schemas/TerminalMerchantResponse'
  *       404:
- *         description: Terminal not found or no venue associated
+ *         description: Terminal not found or not registered in Menta
  *         content:
  *           application/json:
  *             schema:
@@ -164,10 +206,67 @@ router.get(
  *                       value: "Terminal not found"
  *                     venue_not_found:
  *                       value: "VenueId not found"
+ *                     menta_not_found:
+ *                       value: "Terminal {serialNumber} not found in Menta system. Please register the terminal in Menta dashboard first."
+ *       500:
+ *         description: Internal server error or Menta API unavailable
+ */
+router.get('/serial-number/:serialNumber', validateRequest(serialNumberParamSchema), venueController.getVenueIdFromSerialNumber)
+
+/**
+ * @openapi
+ * /tpv/status-sync/{serialNumber}:
+ *   get:
+ *     tags:
+ *       - TPV - Terminal Status
+ *     summary: Get terminal status for synchronization
+ *     description: Retrieve current terminal status from server for synchronization purposes
+ *     parameters:
+ *       - in: path
+ *         name: serialNumber
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The serial number of the terminal
+ *     responses:
+ *       200:
+ *         description: Terminal status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 status:
+ *                   type: string
+ *                   description: Current terminal status
+ *                 message:
+ *                   type: string
+ *                 lastSeen:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Last time terminal was seen
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Current server timestamp
+ *       404:
+ *         description: Terminal not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 error:
+ *                   type: string
+ *                   example: "Terminal not found"
  *       500:
  *         description: Internal server error
  */
-router.get('/serial-number/:serialNumber', validateRequest(serialNumberParamSchema), venueController.getVenueIdFromSerialNumber)
+router.get('/status-sync/:serialNumber', validateRequest(serialNumberParamSchema), heartbeatController.getTerminalStatus)
 
 /**
  * @openapi

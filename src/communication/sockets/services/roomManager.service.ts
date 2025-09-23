@@ -12,6 +12,7 @@ export class RoomManagerService {
   private connectedSockets: Map<string, AuthenticatedSocket> = new Map()
   private socketsByVenue: Map<string, Set<string>> = new Map()
   private socketsByTable: Map<string, Set<string>> = new Map()
+  private socketsByOrder: Map<string, Set<string>> = new Map()
   private socketsByRole: Map<StaffRole, Set<string>> = new Map()
   private socketsByUser: Map<string, Set<string>> = new Map()
 
@@ -73,6 +74,9 @@ export class RoomManagerService {
 
     // Remove from all table rooms
     this.removeFromAllTableRooms(socketId)
+
+    // Remove from all order rooms
+    this.removeFromAllOrderRooms(socketId)
 
     logger.info('Socket unregistered successfully', {
       socketId,
@@ -137,6 +141,58 @@ export class RoomManagerService {
   }
 
   /**
+   * Join an order room
+   */
+  public joinOrderRoom(socket: AuthenticatedSocket, orderId: string): void {
+    if (!socket.authContext) {
+      throw new NotFoundError('Authentication context required to join order room')
+    }
+
+    const { socketId, venueId } = socket.authContext
+    const roomKey = `${venueId}:${orderId}`
+
+    // Join Socket.io room
+    socket.join(this.getOrderRoomName(venueId, orderId))
+
+    // Track in our collections
+    this.addToOrderRoom(roomKey, socketId)
+
+    logger.info('Socket joined order room', {
+      socketId,
+      venueId,
+      orderId,
+      roomName: this.getOrderRoomName(venueId, orderId),
+      correlationId: socket.correlationId,
+    })
+  }
+
+  /**
+   * Leave an order room
+   */
+  public leaveOrderRoom(socket: AuthenticatedSocket, orderId: string): void {
+    if (!socket.authContext) {
+      return
+    }
+
+    const { socketId, venueId } = socket.authContext
+    const roomKey = `${venueId}:${orderId}`
+
+    // Leave Socket.io room
+    socket.leave(this.getOrderRoomName(venueId, orderId))
+
+    // Remove from our collections
+    this.removeFromOrderRoom(roomKey, socketId)
+
+    logger.info('Socket left order room', {
+      socketId,
+      venueId,
+      orderId,
+      roomName: this.getOrderRoomName(venueId, orderId),
+      correlationId: socket.correlationId,
+    })
+  }
+
+  /**
    * Get all sockets in a venue
    */
   public getVenueSockets(venueId: string): AuthenticatedSocket[] {
@@ -152,6 +208,17 @@ export class RoomManagerService {
   public getTableSockets(venueId: string, tableId: string): AuthenticatedSocket[] {
     const roomKey = `${venueId}:${tableId}`
     const socketIds = this.socketsByTable.get(roomKey) || new Set()
+    return Array.from(socketIds)
+      .map(id => this.connectedSockets.get(id))
+      .filter((socket): socket is AuthenticatedSocket => socket !== undefined)
+  }
+
+  /**
+   * Get all sockets in an order room
+   */
+  public getOrderSockets(venueId: string, orderId: string): AuthenticatedSocket[] {
+    const roomKey = `${venueId}:${orderId}`
+    const socketIds = this.socketsByOrder.get(roomKey) || new Set()
     return Array.from(socketIds)
       .map(id => this.connectedSockets.get(id))
       .filter((socket): socket is AuthenticatedSocket => socket !== undefined)
@@ -281,6 +348,34 @@ export class RoomManagerService {
     }
   }
 
+  private addToOrderRoom(roomKey: string, socketId: string): void {
+    if (!this.socketsByOrder.has(roomKey)) {
+      this.socketsByOrder.set(roomKey, new Set())
+    }
+    this.socketsByOrder.get(roomKey)!.add(socketId)
+  }
+
+  private removeFromOrderRoom(roomKey: string, socketId: string): void {
+    const orderSet = this.socketsByOrder.get(roomKey)
+    if (orderSet) {
+      orderSet.delete(socketId)
+      if (orderSet.size === 0) {
+        this.socketsByOrder.delete(roomKey)
+      }
+    }
+  }
+
+  private removeFromAllOrderRooms(socketId: string): void {
+    for (const [roomKey, socketSet] of this.socketsByOrder.entries()) {
+      if (socketSet.has(socketId)) {
+        socketSet.delete(socketId)
+        if (socketSet.size === 0) {
+          this.socketsByOrder.delete(roomKey)
+        }
+      }
+    }
+  }
+
   private addToRoleRoom(role: StaffRole, socketId: string): void {
     if (!this.socketsByRole.has(role)) {
       this.socketsByRole.set(role, new Set())
@@ -317,5 +412,9 @@ export class RoomManagerService {
 
   private getTableRoomName(venueId: string, tableId: string): string {
     return `venue_${venueId}_table_${tableId}`
+  }
+
+  private getOrderRoomName(venueId: string, orderId: string): string {
+    return `venue_${venueId}_order_${orderId}`
   }
 }

@@ -115,6 +115,10 @@ export async function getShifts(
   ])
 
   const shiftsWithCalculations = shifts.map(shift => {
+    // Determine effective status based on time logic
+    const now = new Date()
+    const effectiveStatus = shift.endTime && shift.endTime < now ? 'CLOSED' : shift.status
+
     return {
       id: shift.id,
       venueId: shift.venueId,
@@ -127,7 +131,7 @@ export async function getShifts(
       totalSales: Number(shift.totalSales),
       totalTips: Number(shift.totalTips),
       totalOrders: shift.totalOrders,
-      status: shift.status,
+      status: effectiveStatus,
       staff: shift.staff,
       venue: shift.venue,
     }
@@ -176,6 +180,10 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
     return null
   }
 
+  // Determine effective status based on time logic
+  const now = new Date()
+  const effectiveStatus = shift.endTime && shift.endTime < now ? 'CLOSED' : shift.status
+
   return {
     id: shift.id,
     venueId: shift.venueId,
@@ -188,7 +196,7 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
     totalSales: Number(shift.totalSales),
     totalTips: Number(shift.totalTips),
     totalOrders: shift.totalOrders,
-    status: shift.status,
+    status: effectiveStatus,
     staff: shift.staff,
     venue: shift.venue,
   }
@@ -322,5 +330,52 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       ratingsCount: totalRatings,
     },
     waiterTips: waiterTips,
+  }
+}
+
+/**
+ * Delete a shift by ID
+ * @param venueId Venue ID
+ * @param shiftId Shift ID to delete
+ * @returns boolean indicating if shift was deleted
+ */
+export async function deleteShift(venueId: string, shiftId: string): Promise<boolean> {
+  try {
+    logger.info('Deleting shift', { venueId, shiftId })
+
+    // First check if shift exists and belongs to the venue
+    const existingShift = await prisma.shift.findFirst({
+      where: {
+        id: shiftId,
+        venueId: venueId,
+      },
+    })
+
+    if (!existingShift) {
+      logger.warn('Shift not found for deletion', { venueId, shiftId })
+      return false
+    }
+
+    // Check if shift is still open using time-based logic
+    const now = new Date()
+    const effectiveStatus = existingShift.endTime && existingShift.endTime < now ? 'CLOSED' : existingShift.status
+
+    if (effectiveStatus === 'OPEN') {
+      logger.warn('Cannot delete open shift', { venueId, shiftId, status: existingShift.status, effectiveStatus })
+      throw new BadRequestError('Cannot delete an open shift. Please close the shift first.')
+    }
+
+    // Delete the shift
+    await prisma.shift.delete({
+      where: {
+        id: shiftId,
+      },
+    })
+
+    logger.info('Shift deleted successfully', { venueId, shiftId })
+    return true
+  } catch (error) {
+    logger.error('Error deleting shift', { venueId, shiftId, error })
+    throw error
   }
 }

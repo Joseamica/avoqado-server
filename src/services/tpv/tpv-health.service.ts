@@ -26,7 +26,7 @@ export interface TpvCommand {
 }
 
 /**
- * Service to handle TPV health monitoring and remote commands
+ * Service to handle TPV health monitoring and remote commandss
  */
 export class TpvHealthService {
   /**
@@ -34,22 +34,29 @@ export class TpvHealthService {
    */
   async processHeartbeat(heartbeatData: HeartbeatData, clientIp?: string): Promise<void> {
     const { terminalId, timestamp, status, version, systemInfo } = heartbeatData
-
     try {
-      // Try to find terminal by ID first, then by serialNumber (for Android devices using device serial)
+      // Try to find terminal by multiple identifiers for compatibility
+      // 1. Try internal database ID first
       let terminal = await prisma.terminal.findUnique({
         where: { id: terminalId },
       })
 
-      // If not found by ID, try to find by serialNumber (Android device compatibility)
+      // 2. If not found by internal ID, try serialNumber (hardware serial)
       if (!terminal) {
         terminal = await prisma.terminal.findUnique({
           where: { serialNumber: terminalId },
         })
       }
 
+      // 3. If not found by serial, try Menta terminal ID (cached from Menta API)
       if (!terminal) {
-        throw new NotFoundError(`Terminal with ID or serial number ${terminalId} not found`)
+        terminal = await prisma.terminal.findFirst({
+          where: { mentaTerminalId: terminalId },
+        })
+      }
+
+      if (!terminal) {
+        throw new NotFoundError(`Terminal with ID, serial number, or Menta terminal ID ${terminalId} not found`)
       }
 
       // Update terminal status and health data

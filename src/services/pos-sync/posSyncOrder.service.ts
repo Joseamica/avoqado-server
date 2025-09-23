@@ -8,6 +8,54 @@ import { getOrCreatePosShift } from './posSyncShift.service'
 import { RichPosPayload, PosPaymentMethod } from '@/types/pos.types'
 import { PaymentMethod } from '@prisma/client'
 
+// Cache to track recent payment commands to prevent double deduction
+interface RecentPayment {
+  orderId: string
+  timestamp: number
+  amount: number
+}
+
+const recentPayments = new Map<string, RecentPayment>()
+const PAYMENT_CACHE_TTL = 30000 // 30 seconds
+
+// Clean up expired entries
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, payment] of recentPayments.entries()) {
+    if (now - payment.timestamp > PAYMENT_CACHE_TTL) {
+      recentPayments.delete(key)
+    }
+  }
+}, 60000) // Clean every minute
+
+/**
+ * Track a payment command that was sent to POS to prevent double deduction
+ */
+export function trackRecentPaymentCommand(orderExternalId: string, amount: number): void {
+  recentPayments.set(orderExternalId, {
+    orderId: orderExternalId,
+    timestamp: Date.now(),
+    amount,
+  })
+  logger.info(`[💳 PaymentTracker] Tracked payment command for order ${orderExternalId}, amount: ${amount}`)
+}
+
+/**
+ * Check if an order has a recent payment command that should prevent total updates
+ */
+function shouldIgnoreTotalUpdates(orderExternalId: string): boolean {
+  const recentPayment = recentPayments.get(orderExternalId)
+  if (!recentPayment) return false
+
+  const isRecent = Date.now() - recentPayment.timestamp < PAYMENT_CACHE_TTL
+  if (isRecent) {
+    logger.info(`[💳 PaymentTracker] Ignoring total updates for order ${orderExternalId} due to recent payment command`)
+    return true
+  }
+
+  return false
+}
+
 /**
  * Encuentra una orden existente usando lógica de resolución inteligente.
  * Maneja el caso donde SoftRestaurant crea órdenes con idturno=0 inicialmente,
@@ -94,31 +142,87 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
   const shiftId = await getOrCreatePosShift(shiftData, venue.id, staffId)
 
   // 2. Buscar orden existente con lógica de resolución inteligente
-  // const existingOrder = await findExistingOrderWithSmartResolution(externalId, venue.id, orderData.orderNumber)
+  const existingOrder = await findExistingOrderWithSmartResolution(externalId, venue.id, orderData.orderNumber)
 
   // 3. Ejecutar el upsert final de la Orden
   return prisma.$transaction(async tx => {
+    // Si encontramos una orden existente con resolución inteligente, actualizarla
+    if (existingOrder && existingOrder.externalId !== externalId) {
+      // La orden existe pero con un externalId diferente (caso idturno=0 → idturno real)
+      const ignoreFinancialUpdates = shouldIgnoreTotalUpdates(externalId)
+
+      // Prepare update data conditionally
+      const updateData: any = {
+        externalId: externalId, // Actualizar al nuevo externalId
+        status: orderData.status,
+        paymentStatus: orderData.paymentStatus,
+        completedAt: orderData.completedAt ? new Date(orderData.completedAt) : null,
+        posRawData: orderData.posRawData as Prisma.InputJsonValue,
+        syncedAt: new Date(),
+        syncStatus: SyncStatus.SYNCED,
+        ...(shiftId && { shift: { connect: { id: shiftId } } }),
+      }
+
+      // Only update financial fields if not from recent payment command
+      if (!ignoreFinancialUpdates) {
+        updateData.subtotal = orderData.subtotal
+        updateData.taxAmount = orderData.taxAmount
+        updateData.discountAmount = orderData.discountAmount
+        updateData.tipAmount = orderData.tipAmount
+        updateData.total = orderData.total
+      } else {
+        logger.info(`[💳 PaymentTracker] Skipping financial field updates for existing order ${externalId}`)
+      }
+
+      const order = await tx.order.update({
+        where: { id: existingOrder.id },
+        data: updateData,
+      })
+
+      logger.info(
+        `[🥾 PosSyncOrder] Orden ${order.id} actualizada con nuevo externalId: ${externalId} (antes: ${existingOrder.externalId})`,
+      )
+
+      // Procesar pagos si la orden está pagada
+      if (order.paymentStatus === 'PAID' && payments && payments.length > 0) {
+        await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftId, staffId)
+      }
+
+      return order
+    }
+
+    // Si no hay orden existente o el externalId coincide, hacer upsert normal
+    const ignoreFinancialUpdates = shouldIgnoreTotalUpdates(externalId)
+
+    // Prepare update data conditionally
+    const updateData: any = {
+      status: orderData.status,
+      paymentStatus: orderData.paymentStatus,
+      completedAt: orderData.completedAt ? new Date(orderData.completedAt) : null,
+      posRawData: orderData.posRawData as Prisma.InputJsonValue,
+      syncedAt: new Date(),
+      syncStatus: SyncStatus.SYNCED,
+    }
+
+    // Only update financial fields if not from recent payment command
+    if (!ignoreFinancialUpdates) {
+      updateData.subtotal = orderData.subtotal
+      updateData.taxAmount = orderData.taxAmount
+      updateData.discountAmount = orderData.discountAmount
+      updateData.tipAmount = orderData.tipAmount
+      updateData.total = orderData.total
+    } else {
+      logger.info(`[💳 PaymentTracker] Skipping financial field updates for order ${externalId}`)
+    }
+
     const order = await tx.order.upsert({
       where: {
         venueId_externalId: {
           venueId: venue.id,
           externalId: externalId,
         },
-        status: { not: OrderStatus.DELETED },
       },
-      update: {
-        status: orderData.status,
-        paymentStatus: orderData.paymentStatus,
-        subtotal: orderData.subtotal,
-        taxAmount: orderData.taxAmount,
-        discountAmount: orderData.discountAmount,
-        tipAmount: orderData.tipAmount,
-        total: orderData.total,
-        completedAt: orderData.completedAt ? new Date(orderData.completedAt) : null,
-        posRawData: orderData.posRawData as Prisma.InputJsonValue,
-        syncedAt: new Date(),
-        syncStatus: SyncStatus.SYNCED,
-      },
+      update: updateData,
       create: {
         externalId: externalId,
         orderNumber: orderData.orderNumber,
@@ -148,64 +252,77 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
     // 2b. LÓGICA DE PAGOS MEJORADA
     if (order.paymentStatus === 'PAID' && payments && payments.length > 0) {
-      logger.info(`[🥾 PosSyncOrder] La orden ${order.id} está pagada. Procesando ${payments.length} pago(s)...`)
-
-      // Verificación de idempotencia (sin cambios)
-      const existingPayments = await tx.payment.count({ where: { orderId: order.id } })
-      if (existingPayments > 0) {
-        logger.warn(`[🥾 PosSyncOrder] Ya existen ${existingPayments} pagos para la orden ${order.id}. Saltando creación.`)
-        return order
-      }
-
-      // Asegurarnos de que el catálogo de pagos vino en el payload
-      if (!paymentMethodsCatalog || paymentMethodsCatalog.length === 0) {
-        throw new Error('No se proporcionó el catálogo de métodos de pago para procesar los pagos.')
-      }
-
-      for (const posPayment of payments) {
-        // ... (cálculo de comisiones sin cambios) ...
-        const feePercentage = venue.feeValue
-        const feeAmount = posPayment.amount * parseFloat(feePercentage.toString())
-        const netAmount = posPayment.amount - feeAmount
-
-        // Crear el registro de Pago (Payment)
-        const newPayment = await tx.payment.create({
-          data: {
-            amount: posPayment.amount,
-            tipAmount: posPayment.tipAmount,
-            // ✅ LLAMADA A LA NUEVA FUNCIÓN DINÁMICA
-            method: mapPaymentMethodFromCatalog(posPayment.methodExternalId, paymentMethodsCatalog),
-            splitType: SplitType.FULLPAYMENT,
-            status: TransactionStatus.COMPLETED,
-            feePercentage,
-            feeAmount,
-            netAmount,
-            originSystem: OriginSystem.POS_SOFTRESTAURANT,
-            posRawData: posPayment.posRawData as Prisma.InputJsonValue,
-            externalId: `${order.externalId}-${posPayment.methodExternalId}`,
-            venue: { connect: { id: venue.id } },
-            order: { connect: { id: order.id } },
-            ...(shiftId && { shift: { connect: { id: shiftId } } }),
-            ...(staffId && { processedBy: { connect: { id: staffId } } }),
-          },
-        })
-
-        logger.info(`[🥾 PosSyncOrder] Pago ${newPayment.id} creado para la orden ${order.id}.`)
-
-        // Crear la asignación del pago (sin cambios)
-        await tx.paymentAllocation.create({
-          data: {
-            amount: newPayment.amount,
-            payment: { connect: { id: newPayment.id } },
-            order: { connect: { id: order.id } },
-          },
-        })
-        logger.info(`[🥾 PosSyncOrder] Asignación de pago creada para el pago ${newPayment.id}.`)
-      }
+      await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftId, staffId)
     }
 
     return order
   })
+}
+
+/**
+ * Procesa los pagos para una orden
+ */
+async function processPaymentsForOrder(
+  tx: any,
+  order: Order,
+  payments: any[],
+  paymentMethodsCatalog: PosPaymentMethod[],
+  venue: any,
+  shiftId: string | null,
+  staffId: string | null,
+) {
+  logger.info(`[🥾 PosSyncOrder] La orden ${order.id} está pagada. Procesando ${payments.length} pago(s)...`)
+
+  // Verificación de idempotencia
+  const existingPayments = await tx.payment.count({ where: { orderId: order.id } })
+  if (existingPayments > 0) {
+    logger.warn(`[🥾 PosSyncOrder] Ya existen ${existingPayments} pagos para la orden ${order.id}. Saltando creación.`)
+    return
+  }
+
+  // Asegurarnos de que el catálogo de pagos vino en el payload
+  if (!paymentMethodsCatalog || paymentMethodsCatalog.length === 0) {
+    throw new Error('No se proporcionó el catálogo de métodos de pago para procesar los pagos.')
+  }
+
+  for (const posPayment of payments) {
+    const feePercentage = venue.feeValue
+    const feeAmount = posPayment.amount * parseFloat(feePercentage.toString())
+    const netAmount = posPayment.amount - feeAmount
+
+    // Crear el registro de Pago (Payment)
+    const newPayment = await tx.payment.create({
+      data: {
+        amount: posPayment.amount,
+        tipAmount: posPayment.tipAmount,
+        method: mapPaymentMethodFromCatalog(posPayment.methodExternalId, paymentMethodsCatalog),
+        splitType: SplitType.FULLPAYMENT,
+        status: TransactionStatus.COMPLETED,
+        feePercentage,
+        feeAmount,
+        netAmount,
+        originSystem: OriginSystem.POS_SOFTRESTAURANT,
+        posRawData: posPayment.posRawData as Prisma.InputJsonValue,
+        externalId: `${order.externalId}-${posPayment.methodExternalId}`,
+        venue: { connect: { id: venue.id } },
+        order: { connect: { id: order.id } },
+        ...(shiftId && { shift: { connect: { id: shiftId } } }),
+        ...(staffId && { processedBy: { connect: { id: staffId } } }),
+      },
+    })
+
+    logger.info(`[🥾 PosSyncOrder] Pago ${newPayment.id} creado para la orden ${order.id}.`)
+
+    // Crear la asignación del pago
+    await tx.paymentAllocation.create({
+      data: {
+        amount: newPayment.amount,
+        payment: { connect: { id: newPayment.id } },
+        order: { connect: { id: order.id } },
+      },
+    })
+    logger.info(`[🥾 PosSyncOrder] Asignación de pago creada para el pago ${newPayment.id}.`)
+  }
 }
 
 /**

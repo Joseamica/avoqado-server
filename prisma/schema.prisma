@@ -1117,6 +1117,10 @@ model Terminal {
 
   // Preferred processor for this TPV (LEGACY/MENTA/AUTO)
   preferredProcessor PaymentProcessor @default(AUTO)
+  
+  // Menta API Integration - Smart Caching
+  mentaTerminalId String?   // Menta's UUID for payments (cached on first use)
+  mentaLastSync   DateTime? // When we last synced with Menta API
 
   reviews Review[] // ✅ LÍNEA AGREGADA
 

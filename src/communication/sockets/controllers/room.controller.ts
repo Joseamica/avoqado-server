@@ -59,6 +59,10 @@ export class RoomController {
           this.handleJoinTableRoom(socket, tableId!, correlationId, callback)
           break
 
+        case RoomType.ORDER:
+          this.handleJoinOrderRoom(socket, payload.orderId!, correlationId, callback)
+          break
+
         case RoomType.VENUE:
           this.handleJoinVenueRoom(socket, correlationId, callback)
           break
@@ -128,6 +132,10 @@ export class RoomController {
       switch (roomType) {
         case RoomType.TABLE:
           this.handleLeaveTableRoom(socket, tableId!, correlationId, callback)
+          break
+
+        case RoomType.ORDER:
+          this.handleLeaveOrderRoom(socket, payload.orderId!, correlationId, callback)
           break
 
         default:
@@ -254,6 +262,92 @@ export class RoomController {
     }
   }
 
+  private handleJoinOrderRoom(
+    socket: AuthenticatedSocket,
+    orderId: string,
+    correlationId: string,
+    callback?: (response: any) => void,
+  ): void {
+    if (!orderId) {
+      throw new BadRequestError('Order ID required for order room')
+    }
+
+    // Join the order room
+    this.roomManager.joinOrderRoom(socket, orderId)
+
+    const response = {
+      correlationId,
+      success: true,
+      message: `Joined order room: ${orderId}`,
+      roomType: RoomType.ORDER,
+      venueId: socket.authContext!.venueId,
+      orderId,
+    }
+
+    if (callback) callback(response)
+    socket.emit(SocketEventType.ROOM_JOINED, response)
+
+    // Notify other order participants
+    if (this.broadcastingService) {
+      this.broadcastingService.broadcastToOrder(
+        socket.authContext!.venueId,
+        orderId,
+        SocketEventType.ORDER_STATUS_CHANGED,
+        {
+          type: 'user_joined_order',
+          userId: socket.authContext!.userId,
+          role: socket.authContext!.role,
+          orderId,
+          timestamp: new Date(),
+        },
+        { excludeSocket: socket.id },
+      )
+    }
+  }
+
+  private handleLeaveOrderRoom(
+    socket: AuthenticatedSocket,
+    orderId: string,
+    correlationId: string,
+    callback?: (response: any) => void,
+  ): void {
+    if (!orderId) {
+      throw new BadRequestError('Order ID required for order room')
+    }
+
+    // Leave the order room
+    this.roomManager.leaveOrderRoom(socket, orderId)
+
+    const response = {
+      correlationId,
+      success: true,
+      message: `Left order room: ${orderId}`,
+      roomType: RoomType.ORDER,
+      venueId: socket.authContext!.venueId,
+      orderId,
+    }
+
+    if (callback) callback(response)
+    socket.emit(SocketEventType.ROOM_LEFT, response)
+
+    // Notify other order participants
+    if (this.broadcastingService) {
+      this.broadcastingService.broadcastToOrder(
+        socket.authContext!.venueId,
+        orderId,
+        SocketEventType.ORDER_STATUS_CHANGED,
+        {
+          type: 'user_left_order',
+          userId: socket.authContext!.userId,
+          role: socket.authContext!.role,
+          orderId,
+          timestamp: new Date(),
+        },
+        { excludeSocket: socket.id },
+      )
+    }
+  }
+
   private handleJoinVenueRoom(socket: AuthenticatedSocket, correlationId: string, callback?: (response: any) => void): void {
     // Users are automatically in venue rooms
     const response = {
@@ -315,6 +409,10 @@ export class RoomController {
 
     if (payload.roomType === RoomType.TABLE && !payload.tableId) {
       throw new BadRequestError('Table ID is required for table rooms')
+    }
+
+    if (payload.roomType === RoomType.ORDER && !payload.orderId) {
+      throw new BadRequestError('Order ID is required for order rooms')
     }
 
     // Validate room type
