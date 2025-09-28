@@ -50,7 +50,7 @@ export const dispatchPosEvent = async (routingKey: string, payload: any) => {
       break
 
     case 'shift':
-      if (event === 'created' || event === 'closed') {
+      if (event === 'created' || event === 'updated' || event === 'closed') {
         await posSyncService.processPosShiftEvent(payload, event)
       } else {
         logger.warn(`[Dispatcher] Evento de shift no soportado: ${event}`)

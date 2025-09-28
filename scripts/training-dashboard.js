@@ -2,7 +2,7 @@
 
 /**
  * 📊 AI TRAINING DASHBOARD
- * 
+ *
  * Real-time dashboard showing how the AI is learning and improving
  */
 
@@ -38,7 +38,7 @@ class TrainingDashboard {
 
   async showTrainingStats() {
     console.log('📊 CURRENT TRAINING STATUS'.green.bold)
-    console.log('='*50)
+    console.log('=' * 50)
     console.log()
 
     // Simulated stats - in real system these would come from database
@@ -54,12 +54,12 @@ class TrainingDashboard {
         inventory: { interactions: 32, accuracy: 0.91 },
         financial: { interactions: 41, accuracy: 0.85 },
         temporal: { interactions: 28, accuracy: 0.92 },
-        analytics: { interactions: 12, accuracy: 0.83 }
-      }
+        analytics: { interactions: 12, accuracy: 0.83 },
+      },
     }
 
     // Overall metrics
-    const accuracyRate = (stats.correctResponses / stats.totalInteractions * 100).toFixed(1)
+    const accuracyRate = ((stats.correctResponses / stats.totalInteractions) * 100).toFixed(1)
     const confidenceRate = (stats.averageConfidence * 100).toFixed(1)
 
     console.log(`📈 Overall Performance:`.yellow.bold)
@@ -74,14 +74,17 @@ class TrainingDashboard {
     Object.entries(stats.categories).forEach(([category, data]) => {
       const accuracy = (data.accuracy * 100).toFixed(1)
       const color = data.accuracy >= 0.9 ? 'green' : data.accuracy >= 0.8 ? 'yellow' : 'red'
-      console.log(`   • ${category.charAt(0).toUpperCase() + category.slice(1).padEnd(10)}: ${accuracy}%`[color] + ` (${data.interactions} questions)`)
+      console.log(
+        `   • ${category.charAt(0).toUpperCase() + category.slice(1).padEnd(10)}: ${accuracy}%`[color] +
+          ` (${data.interactions} questions)`,
+      )
     })
     console.log()
   }
 
   showLearningExplanation() {
     console.log('🧠 HOW THE AI IS LEARNING'.blue.bold)
-    console.log('='*50)
+    console.log('=' * 50)
     console.log()
 
     const learningSteps = [
@@ -89,32 +92,32 @@ class TrainingDashboard {
         step: '1. Data Collection',
         description: 'Every chat interaction is stored in ChatTrainingData table',
         status: '✅ Active',
-        details: 'Questions, responses, SQL queries, confidence scores, execution times'
+        details: 'Questions, responses, SQL queries, confidence scores, execution times',
       },
       {
-        step: '2. Pattern Recognition', 
+        step: '2. Pattern Recognition',
         description: 'AI identifies successful response patterns and stores them',
         status: '✅ Active',
-        details: 'Common keywords, SQL templates, category-specific approaches'
+        details: 'Common keywords, SQL templates, category-specific approaches',
       },
       {
         step: '3. Feedback Integration',
         description: 'User corrections are stored and applied to improve future responses',
         status: '⚡ Ready',
-        details: 'Thumb up/down feedback, admin corrections, response improvements'
+        details: 'Thumb up/down feedback, admin corrections, response improvements',
       },
       {
         step: '4. Confidence Calibration',
         description: 'AI adjusts confidence based on historical accuracy',
-        status: '✅ Active', 
-        details: 'Learned patterns boost confidence for similar future questions'
+        status: '✅ Active',
+        details: 'Learned patterns boost confidence for similar future questions',
       },
       {
         step: '5. Continuous Improvement',
         description: 'System automatically learns from new interactions',
         status: '🔄 Running',
-        details: 'Pattern updates, template optimization, accuracy improvements'
-      }
+        details: 'Pattern updates, template optimization, accuracy improvements',
+      },
     ]
 
     learningSteps.forEach(step => {
@@ -127,14 +130,14 @@ class TrainingDashboard {
 
   showNextSteps() {
     console.log('🚀 TRAINING IMPLEMENTATION GUIDE'.magenta.bold)
-    console.log('='*50)
+    console.log('=' * 50)
     console.log()
 
     console.log('📋 TO ACTIVATE TRAINING:'.green.bold)
     console.log('1. Run database migration:'.yellow)
     console.log('   npx prisma migrate dev --name add-ai-training-tables'.gray)
     console.log()
-    
+
     console.log('2. Generate Prisma client:'.yellow)
     console.log('   npx prisma generate'.gray)
     console.log()
@@ -145,7 +148,7 @@ class TrainingDashboard {
 
     console.log('💾 WHERE TRAINING DATA IS SAVED:'.green.bold)
     console.log('• ChatTrainingData: Every question/answer pair with metadata'.cyan)
-    console.log('• LearnedPatterns: Successful response templates and SQL patterns'.cyan)  
+    console.log('• LearnedPatterns: Successful response templates and SQL patterns'.cyan)
     console.log('• ChatFeedback: User corrections and improvements'.cyan)
     console.log()
 
@@ -178,7 +181,7 @@ class TrainingDashboard {
    */
   async start() {
     await this.showDashboard()
-    
+
     // Update dashboard every 30 seconds
     setInterval(async () => {
       await this.showDashboard()

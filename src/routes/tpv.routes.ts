@@ -866,6 +866,197 @@ router.get(
 
 /**
  * @openapi
+ * /tpv/venues/{venueId}/shifts/open:
+ *   post:
+ *     tags:
+ *       - TPV - Shifts
+ *     summary: Open a new shift
+ *     description: Open a new shift for the venue (works with both integrated POS and standalone mode)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The ID of the venue
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - staffId
+ *             properties:
+ *               staffId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Staff member opening the shift
+ *               startingCash:
+ *                 type: number
+ *                 description: Starting cash amount
+ *                 default: 0
+ *               stationId:
+ *                 type: string
+ *                 description: POS station ID (optional)
+ *     responses:
+ *       201:
+ *         description: Shift opened successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     venueId:
+ *                       type: string
+ *                     staffId:
+ *                       type: string
+ *                     startTime:
+ *                       type: string
+ *                       format: date-time
+ *                     status:
+ *                       type: string
+ *                       enum: [OPEN]
+ *                     startingCash:
+ *                       type: number
+ *                     externalId:
+ *                       type: string
+ *                       nullable: true
+ *       400:
+ *         description: Bad request - Missing required fields or shift already open
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
+ *       404:
+ *         description: Venue or staff not found
+ *       500:
+ *         description: Internal server error
+ */
+router.post(
+  '/venues/:venueId/shifts/open',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  shiftController.openShift,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/shifts/{shiftId}/close:
+ *   post:
+ *     tags:
+ *       - TPV - Shifts
+ *     summary: Close an existing shift
+ *     description: Close an existing shift with cash reconciliation (works with both integrated POS and standalone mode)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The ID of the venue
+ *       - in: path
+ *         name: shiftId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The ID of the shift to close
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               cashDeclared:
+ *                 type: number
+ *                 description: Cash amount declared at closing
+ *                 default: 0
+ *               cardDeclared:
+ *                 type: number
+ *                 description: Card payment amount declared
+ *                 default: 0
+ *               vouchersDeclared:
+ *                 type: number
+ *                 description: Vouchers amount declared
+ *                 default: 0
+ *               otherDeclared:
+ *                 type: number
+ *                 description: Other payment methods amount declared
+ *                 default: 0
+ *               notes:
+ *                 type: string
+ *                 description: Optional closing notes
+ *     responses:
+ *       200:
+ *         description: Shift closed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     venueId:
+ *                       type: string
+ *                     staffId:
+ *                       type: string
+ *                     startTime:
+ *                       type: string
+ *                       format: date-time
+ *                     endTime:
+ *                       type: string
+ *                       format: date-time
+ *                     status:
+ *                       type: string
+ *                       enum: [CLOSED]
+ *                     totalSales:
+ *                       type: number
+ *                     totalTips:
+ *                       type: number
+ *                     cashDeclared:
+ *                       type: number
+ *                     cardDeclared:
+ *                       type: number
+ *       400:
+ *         description: Bad request - Shift already closed
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient role permissions
+ *       404:
+ *         description: Shift not found
+ *       500:
+ *         description: Internal server error
+ */
+router.post(
+  '/venues/:venueId}/shifts/:shiftId/close',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  shiftController.closeShift,
+)
+
+/**
+ * @openapi
  * /tpv/venues/{venueId}/shifts:
  *   get:
  *     tags:

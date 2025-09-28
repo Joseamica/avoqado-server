@@ -2,7 +2,7 @@
 
 /**
  * 🎯 TRAINING SYSTEM FOR 100% BULLETPROOF CHAT
- * 
+ *
  * This script helps train and improve the Text-to-SQL system
  * by collecting real usage data and validating responses.
  */
@@ -17,7 +17,7 @@ class ChatTrainingSystem {
       correctResponses: 0,
       incorrectResponses: 0,
       lowConfidenceQueries: 0,
-      criticalQueries: 0
+      criticalQueries: 0,
     }
   }
 
@@ -34,27 +34,27 @@ class ChatTrainingSystem {
       { category: 'sales', question: 'cuanto vendimos esta semana', expectedType: 'weekly_sales' },
       { category: 'sales', question: 'ventas del mes pasado vs este mes', expectedType: 'monthly_comparison' },
       { category: 'sales', question: 'producto que mas se vende', expectedType: 'top_product' },
-      
-      // STAFF QUESTIONS  
+
+      // STAFF QUESTIONS
       { category: 'staff', question: 'cual mesero tiene mas ventas', expectedType: 'top_waiter' },
       { category: 'staff', question: 'promedio de propinas por mesero', expectedType: 'tip_analysis' },
       { category: 'staff', question: 'quien trabaja hoy', expectedType: 'staff_schedule' },
-      
+
       // INVENTORY QUESTIONS
       { category: 'inventory', question: 'productos con poco inventario', expectedType: 'low_stock' },
       { category: 'inventory', question: 'cual categoria vende mas', expectedType: 'category_sales' },
-      
+
       // FINANCIAL QUESTIONS
       { category: 'financial', question: 'total de propinas este mes', expectedType: 'monthly_tips' },
       { category: 'financial', question: 'metodo de pago mas usado', expectedType: 'payment_method_analysis' },
-      
+
       // TEMPORAL QUESTIONS
       { category: 'temporal', question: 'ventas de ayer vs hoy', expectedType: 'daily_comparison' },
       { category: 'temporal', question: 'hora pico del restaurante', expectedType: 'peak_hour' },
-      
+
       // COMPLEX QUESTIONS
       { category: 'complex', question: 'eficiencia por mesero (ventas/horas)', expectedType: 'staff_efficiency' },
-      { category: 'complex', question: 'tendencia de ventas ultimos 30 dias', expectedType: 'sales_trend' }
+      { category: 'complex', question: 'tendencia de ventas ultimos 30 dias', expectedType: 'sales_trend' },
     ]
 
     console.log('📋 TRAINING QUESTION CATEGORIES:'.green.bold)
@@ -64,7 +64,7 @@ class ChatTrainingSystem {
     console.log(`• Financial Analysis: ${trainingQuestions.filter(q => q.category === 'financial').length} questions`)
     console.log(`• Temporal Analysis: ${trainingQuestions.filter(q => q.category === 'temporal').length} questions`)
     console.log(`• Complex Analytics: ${trainingQuestions.filter(q => q.category === 'complex').length} questions`)
-    
+
     return trainingQuestions
   }
 
@@ -77,13 +77,13 @@ class ChatTrainingSystem {
 
     const validationChecks = [
       '✅ SQL Injection Prevention',
-      '✅ Read-only Query Verification', 
+      '✅ Read-only Query Verification',
       '✅ Venue-specific Data Access',
       '✅ Result Authenticity Validation',
       '✅ Confidence Score Accuracy',
       '✅ Fallback Mechanism Testing',
       '✅ Performance Under Load',
-      '✅ Edge Case Handling'
+      '✅ Edge Case Handling',
     ]
 
     validationChecks.forEach(check => {
@@ -102,9 +102,9 @@ class ChatTrainingSystem {
 
     const calibrationStrategy = {
       'High Confidence (90-100%)': 'Simple, direct queries with clear answers',
-      'Medium Confidence (70-89%)': 'Complex queries requiring joins/calculations', 
+      'Medium Confidence (70-89%)': 'Complex queries requiring joins/calculations',
       'Low Confidence (50-69%)': 'Ambiguous queries or missing context',
-      'Very Low Confidence (<50%)': 'Trigger fallback and ask for clarification'
+      'Very Low Confidence (<50%)': 'Trigger fallback and ask for clarification',
     }
 
     Object.entries(calibrationStrategy).forEach(([level, description]) => {
@@ -123,13 +123,13 @@ class ChatTrainingSystem {
 
     const learningFeatures = [
       '📈 User Feedback Collection',
-      '🎯 Response Accuracy Tracking', 
+      '🎯 Response Accuracy Tracking',
       '🔄 Query Pattern Recognition',
       '⚡ Performance Optimization',
       '🛡️ Enhanced Security Validation',
       '📊 Real-time Metrics Dashboard',
       '🎨 Natural Language Understanding Improvement',
-      '🔍 Context Awareness Enhancement'
+      '🔍 Context Awareness Enhancement',
     ]
 
     learningFeatures.forEach(feature => {
@@ -148,7 +148,7 @@ class ChatTrainingSystem {
 
     console.log('🎯 GOAL: 100% Bulletproof Chat Assistant'.green.bold)
     console.log('• Zero false data generation')
-    console.log('• 100% venue-specific accuracy') 
+    console.log('• 100% venue-specific accuracy')
     console.log('• Intelligent fallback mechanisms')
     console.log('• Real-time learning and adaptation\n')
 

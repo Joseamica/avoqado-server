@@ -12,12 +12,23 @@ import { posSyncStaffService } from './posSyncStaff.service' // Import for staff
 export async function getOrCreatePosShift(shiftPayload: PosShiftPayload, venueId: string, staffId: string | null): Promise<string | null> {
   if (!shiftPayload || !shiftPayload.externalId || !staffId) return null
 
-  const shift = await prisma.shift.upsert({
+  // First, try to find an existing OPEN shift with the same externalId
+  // This prevents returning closed shifts when SoftRestaurant reuses WorkspaceId values
+  const existingShift = await prisma.shift.findFirst({
     where: {
-      venueId_externalId: { venueId, externalId: shiftPayload.externalId },
+      venueId,
+      externalId: shiftPayload.externalId,
+      status: ShiftStatus.OPEN,
     },
-    update: {},
-    create: {
+  })
+
+  if (existingShift) {
+    return existingShift.id
+  }
+
+  // No open shift found, create a new one
+  const newShift = await prisma.shift.create({
+    data: {
       venueId,
       externalId: shiftPayload.externalId,
       staffId: staffId,
@@ -25,7 +36,8 @@ export async function getOrCreatePosShift(shiftPayload: PosShiftPayload, venueId
       originSystem: OriginSystem.POS_SOFTRESTAURANT,
     },
   })
-  return shift.id
+
+  return newShift.id
 }
 
 /**
@@ -38,7 +50,7 @@ export async function processPosShiftEvent(
   event: 'created' | 'updated' | 'closed',
 ): Promise<Shift> {
   const { venueId, shiftData } = payload
-  logger.info(`[PosSyncService] Procesando evento '${event}' para Turno con externalId: ${shiftData.WorkspaceId}`)
+  logger.info(`[PosSyncService] Procesando evento '${event}' para Turno con externalId: ${shiftData.externalId}`)
   logger.info(JSON.stringify(shiftData))
   logger.info(`[PosSyncService] Evento: ${event} 🕒`)
 
@@ -59,21 +71,40 @@ export async function processPosShiftEvent(
     totalOrders: 0,
   }
 
+  // Get the externalId from the correct location in the payload (declare outside if block)
+  const shiftExternalId = shiftData.externalId || shiftData.WorkspaceId || shiftData.EntityId
+
   if (event === 'closed') {
-    logger.info(`[PosSyncService] El turno ${shiftData.WorkspaceId} se ha cerrado. Calculando totales...`)
-    const summary = await prisma.order.aggregate({
-      where: { shift: { venueId: venueId, externalId: shiftData.WorkspaceId } },
-      _sum: { total: true, tipAmount: true },
-      _count: { id: true },
+    logger.info(`[PosSyncService] El turno ${shiftExternalId} se ha cerrado. Calculando totales...`)
+
+    // First find the current shift to get its actual ID
+    const currentShift = await prisma.shift.findUnique({
+      where: {
+        venueId_externalId: { venueId, externalId: shiftExternalId },
+      },
+      select: { id: true },
     })
-    summaryData.totalSales = summary._sum.total || new Prisma.Decimal(0)
-    summaryData.totalTips = summary._sum.tipAmount || new Prisma.Decimal(0)
-    summaryData.totalOrders = summary._count.id || 0
+
+    if (currentShift) {
+      // Only aggregate orders from THIS specific shift, not all shifts with same externalId
+      const summary = await prisma.order.aggregate({
+        where: { shiftId: currentShift.id },
+        _sum: { total: true, tipAmount: true },
+        _count: { id: true },
+      })
+      summaryData.totalSales = summary._sum.total || new Prisma.Decimal(0)
+      summaryData.totalTips = summary._sum.tipAmount || new Prisma.Decimal(0)
+      summaryData.totalOrders = summary._count.id || 0
+
+      logger.info(
+        `[PosSyncService] Totales calculados para shift ${currentShift.id}: ${summaryData.totalOrders} órdenes, ventas: ${summaryData.totalSales}`,
+      )
+    }
   }
 
   // --- Mapear datos desde la estructura correcta ---
   const rawData = shiftData.posRawData || shiftData
-  const externalId = shiftData.EntityId || shiftData.externalId
+  const externalId = shiftExternalId // Use the already extracted externalId
   const startTime = rawData.apertura || shiftData.startTime
   const endTime = rawData.cierre || shiftData.endTime
   const startingCash = rawData.fondo !== undefined ? rawData.fondo : shiftData.startingCash
@@ -91,9 +122,12 @@ export async function processPosShiftEvent(
       startingCash: startingCash || 0,
       endingCash: endingCash,
       status: event === 'closed' ? ShiftStatus.CLOSED : ShiftStatus.OPEN,
-      totalSales: summaryData.totalSales,
-      totalTips: summaryData.totalTips,
-      totalOrders: summaryData.totalOrders,
+      // Only update totals when shift is being closed
+      ...(event === 'closed' && {
+        totalSales: summaryData.totalSales,
+        totalTips: summaryData.totalTips,
+        totalOrders: summaryData.totalOrders,
+      }),
       posRawData: shiftData as Prisma.InputJsonValue,
       updatedAt: new Date(),
     },
@@ -105,9 +139,10 @@ export async function processPosShiftEvent(
       startingCash: startingCash || 0,
       endingCash: endingCash,
       status: event === 'closed' ? ShiftStatus.CLOSED : ShiftStatus.OPEN,
-      totalSales: summaryData.totalSales,
-      totalTips: summaryData.totalTips,
-      totalOrders: summaryData.totalOrders,
+      // Only set calculated totals for closed shifts, use zeros for new shifts
+      totalSales: event === 'closed' ? summaryData.totalSales : new Prisma.Decimal(0),
+      totalTips: event === 'closed' ? summaryData.totalTips : new Prisma.Decimal(0),
+      totalOrders: event === 'closed' ? summaryData.totalOrders : 0,
       posRawData: shiftData as Prisma.InputJsonValue,
       originSystem: OriginSystem.POS_SOFTRESTAURANT,
       // Conexiones de relaciones

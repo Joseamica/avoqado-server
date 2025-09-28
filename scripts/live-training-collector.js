@@ -2,7 +2,7 @@
 
 /**
  * 🔄 LIVE TRAINING DATA COLLECTOR
- * 
+ *
  * This script continuously monitors chat interactions
  * and collects training data for system improvement.
  */
@@ -20,7 +20,7 @@ class LiveTrainingCollector {
       successfulResponses: 0,
       failedResponses: 0,
       lowConfidenceResponses: 0,
-      averageConfidence: 0
+      averageConfidence: 0,
     }
   }
 
@@ -47,7 +47,7 @@ class LiveTrainingCollector {
       'ingresos totales del mes',
       'tendencias de ventas',
       'analisis de temporadas altas',
-      'rendimiento por categoria'
+      'rendimiento por categoria',
     ]
 
     console.log('📊 COLLECTING TRAINING DATA FROM REAL SCENARIOS...'.cyan)
@@ -56,29 +56,28 @@ class LiveTrainingCollector {
     for (let i = 0; i < realUserQuestions.length; i++) {
       const question = realUserQuestions[i]
       console.log(`${i + 1}. Testing: "${question}"`.yellow)
-      
+
       try {
         const response = await this.testQuestion(question)
-        
+
         this.processTrainingData(question, response)
-        
-        // Show real-time results  
+
+        // Show real-time results
         const confidence = (response.data?.confidence || response.confidence || 0) * 100
         const confidenceColor = confidence >= 80 ? 'green' : confidence >= 60 ? 'yellow' : 'red'
         console.log(`   ✅ Confidence: ${confidence.toFixed(1)}%`[confidenceColor])
-        
+
         if (response.sqlQuery || response.data?.sqlQuery) {
           const sqlQuery = response.sqlQuery || response.data?.sqlQuery
           console.log(`   📋 SQL Generated: ${sqlQuery.substring(0, 50)}...`.gray)
         }
-        
+
         await this.sleep(1000) // Realistic delay between questions
-        
       } catch (error) {
         console.log(`   ❌ Error: ${error.message}`.red)
         this.trainingMetrics.failedResponses++
       }
-      
+
       this.trainingMetrics.totalInteractions++
     }
 
@@ -93,15 +92,15 @@ class LiveTrainingCollector {
 
     const tokenPayload = {
       sub: 'test-user-123',
-      orgId: 'test-org-456', 
+      orgId: 'test-org-456',
       venueId: 'cmeniwgjm01qo9k32da7wcmhu',
       role: 'ADMIN',
-      expiresIn: '1h'
+      expiresIn: '1h',
     }
 
     const response = await axios.post(`${this.baseURL}/dev/generate-token`, tokenPayload, {
       headers: { 'Content-Type': 'application/json' },
-      timeout: 10000
+      timeout: 10000,
     })
 
     this.token = response.data.token
@@ -113,19 +112,19 @@ class LiveTrainingCollector {
    */
   async testQuestion(question) {
     const token = await this.generateToken()
-    
+
     const payload = {
       message: question,
       venueId: 'cmeniwgjm01qo9k32da7wcmhu', // Your test venue
-      conversationHistory: []
+      conversationHistory: [],
     }
 
     const response = await axios.post(`${this.baseURL}/v1/dashboard/assistant/text-to-sql`, payload, {
-      headers: { 
+      headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
+        Authorization: `Bearer ${token}`,
       },
-      timeout: 30000
+      timeout: 30000,
     })
 
     return response.data
@@ -144,7 +143,7 @@ class LiveTrainingCollector {
       executionTime: data.metadata?.executionTime || 0,
       rowsReturned: data.metadata?.rowsReturned || 0,
       timestamp: new Date(),
-      category: this.categorizeQuestion(question)
+      category: this.categorizeQuestion(question),
     }
 
     this.collectedData.push(trainingPoint)
@@ -157,9 +156,8 @@ class LiveTrainingCollector {
       this.trainingMetrics.lowConfidenceResponses++
     }
 
-    this.trainingMetrics.averageConfidence = 
-      (this.trainingMetrics.averageConfidence * (this.collectedData.length - 1) + confidence) / 
-      this.collectedData.length
+    this.trainingMetrics.averageConfidence =
+      (this.trainingMetrics.averageConfidence * (this.collectedData.length - 1) + confidence) / this.collectedData.length
   }
 
   /**
@@ -172,7 +170,7 @@ class LiveTrainingCollector {
       products: ['producto', 'plato', 'menu', 'categoria'],
       financial: ['propinas', 'pagos', 'dinero', 'total'],
       temporal: ['hoy', 'ayer', 'semana', 'mes', 'dia'],
-      analytics: ['mejor', 'promedio', 'analisis', 'tendencia', 'comparar']
+      analytics: ['mejor', 'promedio', 'analisis', 'tendencia', 'comparar'],
     }
 
     for (const [category, keywords] of Object.entries(categories)) {
@@ -204,9 +202,8 @@ class LiveTrainingCollector {
         stats[point.category] = { count: 0, avgConfidence: 0 }
       }
       stats[point.category].count++
-      stats[point.category].avgConfidence = 
-        (stats[point.category].avgConfidence * (stats[point.category].count - 1) + point.confidence) / 
-        stats[point.category].count
+      stats[point.category].avgConfidence =
+        (stats[point.category].avgConfidence * (stats[point.category].count - 1) + point.confidence) / stats[point.category].count
       return stats
     }, {})
 
@@ -217,7 +214,7 @@ class LiveTrainingCollector {
     })
 
     console.log('\n🎯 TRAINING RECOMMENDATIONS:'.yellow.bold)
-    
+
     // Find areas needing improvement
     const lowPerformance = Object.entries(categoryStats)
       .filter(([_, stats]) => stats.avgConfidence < 0.7)
@@ -238,7 +235,7 @@ class LiveTrainingCollector {
     console.log('2. Set up automatic retraining pipeline')
     console.log('3. Add real-time confidence monitoring')
     console.log('4. Create category-specific improvements')
-    
+
     console.log(`\n✅ Training data collected: ${this.collectedData.length} interactions`.green.bold)
   }
 
