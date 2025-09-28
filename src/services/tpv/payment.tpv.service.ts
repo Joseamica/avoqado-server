@@ -1043,6 +1043,23 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
   const route = accountType.toLowerCase() // 'primary', 'secondary', or 'tertiary'
   const acquirer = selectedAccount.provider.code.toUpperCase() // 'MENTA', etc.
 
+  // 🚨 CRITICAL FIX: Get proper terminal UUID instead of hardware serial
+  // Fetch terminal record by serial number to get the proper UUID
+  const terminal = await prisma.terminal.findFirst({
+    where: {
+      serialNumber: routingData.terminalSerial,
+      venueId: venueId,
+    },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal with serial ${routingData.terminalSerial} not found for venue ${venueId}`)
+  }
+
+  // Use Menta terminal UUID if available, otherwise use terminal's own UUID
+  const terminalUuid = terminal.mentaTerminalId
+  logger.info(`🎯 Using terminal UUID for payments: ${terminalUuid} (serial: ${routingData.terminalSerial})`)
+
   // The routing response contains the credentials for the user-selected merchant account
   const routingResponse = {
     route,
@@ -1050,7 +1067,7 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
     merchantId: credentials.merchantId,
     apiKeyMerchant: credentials.apiKey,
     customerId: credentials.customerId,
-    terminalSerial: routingData.terminalSerial,
+    terminalSerial: terminalUuid, // 🎯 CRITICAL: Return UUID instead of serial number
     amount: routingData.amount,
     // Additional routing metadata
     routingMetadata: {

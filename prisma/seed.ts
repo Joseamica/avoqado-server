@@ -512,6 +512,15 @@ async function main() {
   // --- Payment Providers and Cost Management ---
   console.log('Seeding payment providers and cost structures...')
 
+  // ============================
+  // PAYMENT PROVIDER TEMPLATES
+  // ============================
+  // These records are the source of truth for each upstream vendor.
+  // Keep `configSchema` aligned with the shape you expect inside
+  // `MerchantAccount.providerConfig` so the intent stays obvious for
+  // developers (and any validation layer you wire up later).
+  // Secrets (API keys, tokens, etc.) are *not* described here—they live in
+  // `credentialsEncrypted` in the accounts seeded below.
   // Create payment providers
   const mentaProvider = await prisma.paymentProvider.create({
     data: {
@@ -521,12 +530,24 @@ async function main() {
       countryCode: ['MX', 'AR'],
       active: true,
       configSchema: {
-        required: ['apiKey', 'customerId', 'merchantId'],
+        required: ['acquirerId', 'countryCode', 'currencyCode'],
         properties: {
-          apiKey: { type: 'string', description: 'Encrypted API key' },
-          customerId: { type: 'string', description: 'Customer ID in Menta' },
-          merchantId: { type: 'string', description: 'Merchant ID in Menta' },
-          acquirerId: { type: 'string', description: 'Acquirer ID (BANORTE, GPS, etc.)' },
+          acquirerId: { type: 'string', description: 'Acquirer identifier (BANORTE, GPS, etc.)' },
+          countryCode: {
+            type: 'string',
+            enum: ['484', '032'],
+            description: 'ISO numeric country code as string (484 = MX, 032 = AR)'
+          },
+          currencyCode: {
+            type: 'string',
+            enum: ['MX'],
+            description: 'Processor-specific currency code (Menta expects MX)'
+          },
+          terminalId: {
+            type: 'string',
+            description: 'Preferred terminal UUID used for this account (non-sensitive)'
+          },
+          invoiceCapable: { type: 'boolean', description: 'Marks accounts that support electronic invoicing flows' },
         },
       },
     },
@@ -540,10 +561,11 @@ async function main() {
       countryCode: ['MX'],
       active: true,
       configSchema: {
-        required: ['apiKey', 'merchantId'],
+        required: ['countryCode', 'currencyCode'],
         properties: {
-          apiKey: { type: 'string', description: 'Clip API key' },
-          merchantId: { type: 'string', description: 'Clip merchant ID' },
+          countryCode: { type: 'string', enum: ['484'], description: 'ISO numeric country code (484 = MX)' },
+          currencyCode: { type: 'string', enum: ['MX'], description: 'Settlement currency code used by Clip' },
+          webhookUrl: { type: 'string', description: 'URL where Clip will send webhook events' },
         },
       },
     },
@@ -579,15 +601,18 @@ async function main() {
       displayOrder: 0,
       active: true,
       credentialsEncrypted: {
+        // Demo-only plaintext for readability. Replace with encrypted payloads in production.
         apiKey: 'mentaMerchantApiKey',
-        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
         merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
+        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
+        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
       },
       providerConfig: {
         acquirerId: 'BANORTE',
-        terminalId: '3780f095-2ed4-46d2-b6e1-44d0659afd69',
-        country: 'MX',
-        currency: 'MXN',
+        countryCode: '484',
+        currencyCode: 'MX',
+        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
+        invoiceCapable: false,
       },
     },
   })
@@ -595,26 +620,28 @@ async function main() {
   const mentaMerchantSecondary = await prisma.merchantAccount.create({
     data: {
       providerId: mentaProvider.id,
-      externalMerchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f-secondary',
+      externalMerchantId: '', // Unique ID for secondary account
       alias: 'Menta Secondary Account (Factura)',
       displayName: 'Cuenta Secundaria Menta (Facturación)',
       displayOrder: 1,
       active: true,
       credentialsEncrypted: {
-        apiKey: 'xEMb2GMrkCNLTEgElqETWGGyFnU6WFr9sLwMII7b76oBPfQJf6TcImTkCXZs1S0P',
-        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
+        apiKey: 'mentasecondarymerchantid',
         merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
+        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
+        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
       },
       providerConfig: {
         acquirerId: 'BANORTE',
-        terminalId: '4780f095-2ed4-46d2-b6e1-44d0659afd70',
-        country: 'MX',
-        currency: 'MXN',
+        countryCode: '484',
+        currencyCode: 'MX',
+        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
         invoiceCapable: true,
       },
     },
   })
 
+  // NOTE: Clip account is disabled by default unless you have real Clip/Menta credentials
   const clipMerchant = await prisma.merchantAccount.create({
     data: {
       providerId: clipProvider.id,
@@ -622,15 +649,15 @@ async function main() {
       alias: 'Clip Digital Wallet',
       displayName: 'Cuenta Principal Clip',
       displayOrder: 10,
-      active: true,
+      active: true, // Enabled with valid Menta credentials
       credentialsEncrypted: {
-        apiKey: 'encrypted_clip_api_key',
+        apiKey: 'clipmerchantapikey',
         merchantId: 'clip_merchant_12345',
       },
       providerConfig: {
+        countryCode: '484',
+        currencyCode: 'MX',
         webhookUrl: 'https://api.avoqado.com/webhooks/clip',
-        country: 'MX',
-        currency: 'MXN',
       },
     },
   })
@@ -1054,7 +1081,7 @@ async function main() {
             data: {
               id:
                 t === 0 && venue.name.includes('Avoqado Centro')
-                  ? '98282447347751' // Use device serial as ID for development terminal
+                  ? '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122' // Menta terminal UUID (must match MerchantAccount.credentialsEncrypted.terminalId)
                   : undefined, // Let Prisma generate UUID for others
               venueId: venue.id,
               serialNumber,

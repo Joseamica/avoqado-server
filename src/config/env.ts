@@ -39,4 +39,9 @@ export const SESSION_MAX_AGE_MS = process.env.SESSION_MAX_AGE_MS ? parseInt(proc
 export const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'avoqado.sid'
 export const RABBITMQ_URL = process.env.RABBITMQ_URL!
 
+// Menta API credentials (optional with fallbacks)
+export const MENTA_USERNAME = process.env.MENTA_USERNAME
+export const MENTA_PASSWORD = process.env.MENTA_PASSWORD
+export const MENTA_MERCHANT_API_KEY = process.env.MENTA_MERCHANT_API_KEY
+
 logger.info('Environment variables loaded and checked.')

@@ -83,37 +83,67 @@ export async function getShifts(
 ): Promise<PaginationResponse<any>> {
   const { staffId, startTime, endTime } = filters
 
+  // Parse date filters once for reuse
+  let parsedStartTime: Date | undefined
+  let parsedEndTime: Date | undefined
+
+  if (startTime) {
+    parsedStartTime = new Date(startTime)
+    if (isNaN(parsedStartTime.getTime())) {
+      throw new BadRequestError(`Invalid startTime: ${startTime}`)
+    }
+  }
+
+  if (endTime) {
+    parsedEndTime = new Date(endTime)
+    if (isNaN(parsedEndTime.getTime())) {
+      throw new BadRequestError(`Invalid endTime: ${endTime}`)
+    }
+  }
+
+  // Build payment filter for date range
+  const paymentDateFilter: any = {}
+  if (parsedStartTime || parsedEndTime) {
+    paymentDateFilter.createdAt = {}
+    if (parsedStartTime) {
+      paymentDateFilter.createdAt.gte = parsedStartTime
+    }
+    if (parsedEndTime) {
+      paymentDateFilter.createdAt.lte = parsedEndTime
+    }
+  }
+
   // Build the base query filters for shifts
   const whereClause: any = {
     venueId: venueId,
   }
 
-  // Add date range filters if provided
-  if (startTime || endTime) {
-    whereClause.createdAt = {}
-
-    if (startTime) {
-      const parsedStartTime = new Date(startTime)
-      if (!isNaN(parsedStartTime.getTime())) {
-        whereClause.createdAt.gte = parsedStartTime
-      } else {
-        throw new BadRequestError(`Invalid startTime: ${startTime}`)
-      }
-    }
-
-    if (endTime) {
-      const parsedEndTime = new Date(endTime)
-      if (!isNaN(parsedEndTime.getTime())) {
-        whereClause.createdAt.lte = parsedEndTime
-      } else {
-        throw new BadRequestError(`Invalid endTime: ${endTime}`)
-      }
-    }
-
-    // If there are no valid date conditions, remove the empty createdAt object
-    if (Object.keys(whereClause.createdAt).length === 0) {
-      delete whereClause.createdAt
-    }
+  // If date filters are provided, include shifts that:
+  // 1. Were active during the period
+  // 2. Have payments in the period
+  if (parsedStartTime || parsedEndTime) {
+    whereClause.OR = [
+      // Include open shifts (they might have today's payments)
+      { endTime: null },
+      // Include closed shifts that overlap with the date range
+      {
+        // Shift was active during this period
+        AND: [
+          parsedStartTime ? { startTime: { lte: parsedEndTime || parsedStartTime } } : {},
+          parsedEndTime
+            ? {
+                OR: [{ endTime: null }, { endTime: { gte: parsedStartTime || parsedEndTime } }],
+              }
+            : {},
+        ].filter(obj => Object.keys(obj).length > 0),
+      },
+      // Or shift has payments in this period
+      {
+        payments: {
+          some: paymentDateFilter,
+        },
+      },
+    ]
   }
 
   // Calculate pagination values
@@ -127,15 +157,47 @@ export async function getShifts(
         orders: {
           include: {
             payments: {
-              where: staffId ? { processedById: staffId } : undefined,
+              where: {
+                ...(staffId ? { processedById: staffId } : {}),
+                // Filter payments by date range if provided
+                ...(parsedStartTime || parsedEndTime
+                  ? {
+                      createdAt: {
+                        ...(parsedStartTime ? { gte: parsedStartTime } : {}),
+                        ...(parsedEndTime ? { lte: parsedEndTime } : {}),
+                      },
+                    }
+                  : {}),
+              },
               include: {
                 allocations: true,
               },
             },
           },
+          // Filter orders by date if date range is provided
+          where:
+            parsedStartTime || parsedEndTime
+              ? {
+                  createdAt: {
+                    ...(parsedStartTime ? { gte: parsedStartTime } : {}),
+                    ...(parsedEndTime ? { lte: parsedEndTime } : {}),
+                  },
+                }
+              : undefined,
         },
         payments: {
-          where: staffId ? { processedById: staffId } : undefined,
+          where: {
+            ...(staffId ? { processedById: staffId } : {}),
+            // Filter payments by date range if provided
+            ...(parsedStartTime || parsedEndTime
+              ? {
+                  createdAt: {
+                    ...(parsedStartTime ? { gte: parsedStartTime } : {}),
+                    ...(parsedEndTime ? { lte: parsedEndTime } : {}),
+                  },
+                }
+              : {}),
+          },
         },
         staff: true,
       },
@@ -273,37 +335,66 @@ export async function getShifts(
 export async function getShiftsSummary(venueId: string, filters: ShiftFilters = {}, _orgId?: string): Promise<ShiftSummaryResponse> {
   const { staffId, startTime, endTime } = filters
 
+  // Parse date filters once for reuse
+  let parsedStartTime: Date | undefined
+  let parsedEndTime: Date | undefined
+
+  if (startTime) {
+    parsedStartTime = new Date(startTime)
+    if (isNaN(parsedStartTime.getTime())) {
+      throw new BadRequestError(`Invalid startTime: ${startTime}`)
+    }
+  }
+
+  if (endTime) {
+    parsedEndTime = new Date(endTime)
+    if (isNaN(parsedEndTime.getTime())) {
+      throw new BadRequestError(`Invalid endTime: ${endTime}`)
+    }
+  }
+
+  // Build payment filter for date range
+  const paymentDateFilter: any = {}
+  if (parsedStartTime || parsedEndTime) {
+    paymentDateFilter.createdAt = {}
+    if (parsedStartTime) {
+      paymentDateFilter.createdAt.gte = parsedStartTime
+    }
+    if (parsedEndTime) {
+      paymentDateFilter.createdAt.lte = parsedEndTime
+    }
+  }
+
   // Build the base query filters for shifts
   const whereClause: any = {
     venueId: venueId,
-  }
-
-  // Add date range filters if provided
-  if (startTime || endTime) {
-    whereClause.createdAt = {}
-
-    if (startTime) {
-      const parsedStartTime = new Date(startTime)
-      if (!isNaN(parsedStartTime.getTime())) {
-        whereClause.createdAt.gte = parsedStartTime
-      } else {
-        throw new BadRequestError(`Invalid startTime: ${startTime}`)
-      }
-    }
-
-    if (endTime) {
-      const parsedEndTime = new Date(endTime)
-      if (!isNaN(parsedEndTime.getTime())) {
-        whereClause.createdAt.lte = parsedEndTime
-      } else {
-        throw new BadRequestError(`Invalid endTime: ${endTime}`)
-      }
-    }
-
-    // If there are no valid date conditions, remove the empty createdAt object
-    if (Object.keys(whereClause.createdAt).length === 0) {
-      delete whereClause.createdAt
-    }
+    // Include all shifts that are open OR have payments in the date range
+    OR: [
+      // Include open shifts (they might have today's payments)
+      { endTime: null },
+      // Include closed shifts that overlap with the date range
+      ...(parsedStartTime || parsedEndTime
+        ? [
+            {
+              // Shift was active during this period
+              AND: [
+                parsedStartTime ? { startTime: { lte: parsedEndTime || parsedStartTime } } : {},
+                parsedEndTime
+                  ? {
+                      OR: [{ endTime: null }, { endTime: { gte: parsedStartTime || parsedEndTime } }],
+                    }
+                  : {},
+              ].filter(obj => Object.keys(obj).length > 0),
+            },
+            // Or shift has payments in this period
+            {
+              payments: {
+                some: paymentDateFilter,
+              },
+            },
+          ]
+        : []),
+    ],
   }
 
   // Get shifts with related data
@@ -315,6 +406,16 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           id: true,
           total: true,
         },
+        // Filter orders by date if date range is provided
+        where:
+          parsedStartTime || parsedEndTime
+            ? {
+                createdAt: {
+                  ...(parsedStartTime ? { gte: parsedStartTime } : {}),
+                  ...(parsedEndTime ? { lte: parsedEndTime } : {}),
+                },
+              }
+            : undefined,
       },
       payments: {
         select: {
@@ -322,6 +423,7 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           amount: true,
           tipAmount: true,
           processedById: true,
+          createdAt: true,
           processedBy: {
             select: {
               id: true,
@@ -330,7 +432,18 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
             },
           },
         },
-        ...(staffId ? { where: { processedById: staffId } } : {}),
+        where: {
+          ...(staffId ? { processedById: staffId } : {}),
+          // Filter payments by date range if provided
+          ...(parsedStartTime || parsedEndTime
+            ? {
+                createdAt: {
+                  ...(parsedStartTime ? { gte: parsedStartTime } : {}),
+                  ...(parsedEndTime ? { lte: parsedEndTime } : {}),
+                },
+              }
+            : {}),
+        },
       },
     },
   })

@@ -49,7 +49,7 @@ export class MentaApiService {
   private static instance: MentaApiService
   private accessToken: string | null = null
   private tokenExpiry: number = 0
-  private merchantApiKey: string
+  private merchantApiKey: string = ''
 
   private readonly MENTA_API_BASE = 'https://api.menta.global'
   private readonly AUTH_ENDPOINT = '/api/v1/auth/token'
