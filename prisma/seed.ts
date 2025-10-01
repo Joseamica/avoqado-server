@@ -536,16 +536,16 @@ async function main() {
           countryCode: {
             type: 'string',
             enum: ['484', '032'],
-            description: 'ISO numeric country code as string (484 = MX, 032 = AR)'
+            description: 'ISO numeric country code as string (484 = MX, 032 = AR)',
           },
           currencyCode: {
             type: 'string',
             enum: ['MX'],
-            description: 'Processor-specific currency code (Menta expects MX)'
+            description: 'Processor-specific currency code (Menta expects MX)',
           },
           terminalId: {
             type: 'string',
-            description: 'Preferred terminal UUID used for this account (non-sensitive)'
+            description: 'Preferred terminal UUID used for this account (non-sensitive)',
           },
           invoiceCapable: { type: 'boolean', description: 'Marks accounts that support electronic invoicing flows' },
         },
