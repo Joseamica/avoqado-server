@@ -113,7 +113,7 @@ export async function staffSignIn(venueId: string, pin: string) {
     // JWT tokens for socket and API authentication
     accessToken,
     refreshToken,
-    expiresIn: 3600, // 1 hour in seconds
+    expiresIn: 86400, // 24 hours (1 day) in seconds
     tokenType: 'Bearer',
 
     // Metadata
