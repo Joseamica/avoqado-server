@@ -82,11 +82,8 @@ export async function getCurrentShift(req: Request, res: Response, next: NextFun
     const shift = await shiftTpvService.getCurrentShift(venueId, orgId, posName)
 
     // 6. Send HTTP response (Controller)
-    if (!shift) {
-      res.status(200).json({ shift: null })
-    } else {
-      res.status(200).json(shift)
-    }
+    // Always wrap in {shift: ...} for consistency
+    res.status(200).json({ shift: shift })
   } catch (error) {
     next(error) // 7. HTTP error handling (Controller)
   }
