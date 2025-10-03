@@ -946,7 +946,7 @@ router.get(
 router.post(
   '/venues/:venueId/shifts/open',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
   shiftController.openShift,
 )
 
@@ -1049,9 +1049,9 @@ router.post(
  *         description: Internal server error
  */
 router.post(
-  '/venues/:venueId}/shifts/:shiftId/close',
+  '/venues/:venueId/shifts/:shiftId/close',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
   shiftController.closeShift,
 )
 

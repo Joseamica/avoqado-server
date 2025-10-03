@@ -50,6 +50,8 @@ export async function staffSignIn(venueId: string, pin: string) {
         select: {
           id: true,
           name: true,
+          posType: true,
+          posStatus: true,
         },
       },
     },
