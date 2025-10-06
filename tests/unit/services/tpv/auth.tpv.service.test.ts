@@ -58,6 +58,8 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
     venue: {
       id: 'venue-1',
       name: 'Test Restaurant',
+      posType: null,
+      posStatus: null,
     },
   }
 
@@ -103,7 +105,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         // JWT tokens
         accessToken: 'mock-access-token',
         refreshToken: 'mock-refresh-token',
-        expiresIn: 3600,
+        expiresIn: 86400,
         tokenType: 'Bearer',
 
         // Metadata
@@ -198,6 +200,8 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
             select: {
               id: true,
               name: true,
+              posType: true,
+              posStatus: true,
             },
           },
         },
