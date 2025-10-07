@@ -42,6 +42,15 @@ interface ShiftSummaryResponse {
     amount: number
     count: number
   }>
+  paymentMethods: Array<{
+    method: string
+    total: number
+    percentage: number
+  }>
+  salesTrend: Array<{
+    label: string
+    value: number
+  }>
 }
 
 /**
@@ -426,6 +435,7 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           tipAmount: true,
           processedById: true,
           createdAt: true,
+          method: true,
           processedBy: {
             select: {
               id: true,
@@ -459,6 +469,10 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   // Create a map to track tips per staff member
   const staffTipsMap: Map<string, { name: string; amount: number; count: number }> = new Map()
 
+  // Create maps for payment methods and time-series data
+  const paymentMethodMap: Map<string, number> = new Map()
+  const allPayments: Array<{ createdAt: Date; amount: number }> = []
+
   // Process all shifts
   for (const shift of shifts) {
     // Count orders
@@ -472,6 +486,16 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
 
       if (!isNaN(paymentAmount)) {
         totalSales += paymentAmount
+
+        // Track payment method
+        const method = payment.method || 'OTHER'
+        paymentMethodMap.set(method, (paymentMethodMap.get(method) || 0) + paymentAmount)
+
+        // Store for time-series data
+        allPayments.push({
+          createdAt: payment.createdAt,
+          amount: paymentAmount,
+        })
       }
 
       if (!isNaN(tipAmount)) {
@@ -535,6 +559,16 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     }))
     .sort((a, b) => b.amount - a.amount) // Sort by highest amount first
 
+  // Convert payment method map to array
+  const paymentMethodBreakdown = Array.from(paymentMethodMap.entries()).map(([method, total]) => ({
+    method: method,
+    total: Number(total.toFixed(2)),
+    percentage: totalSales > 0 ? Number(((total / totalSales) * 100).toFixed(2)) : 0,
+  }))
+
+  // Generate time-series sales data based on date range
+  const salesTrend = generateSalesTrend(allPayments, parsedStartTime, parsedEndTime)
+
   return {
     dateRange: {
       startTime: startTime ? new Date(startTime) : null,
@@ -548,7 +582,102 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       ratingsCount: totalRatings,
     },
     waiterTips: waiterTips,
+    paymentMethods: paymentMethodBreakdown,
+    salesTrend: salesTrend,
   }
+}
+
+/**
+ * Generate time-series sales data based on payment timestamps
+ */
+function generateSalesTrend(
+  payments: Array<{ createdAt: Date; amount: number }>,
+  startTime?: Date,
+  endTime?: Date,
+): Array<{ label: string; value: number }> {
+  if (payments.length === 0) {
+    return []
+  }
+
+  const now = new Date()
+  const start = startTime || new Date(Math.min(...payments.map(p => p.createdAt.getTime())))
+  const end = endTime || now
+
+  const diffMs = end.getTime() - start.getTime()
+  const diffDays = diffMs / (1000 * 60 * 60 * 24)
+
+  // Determine granularity based on date range
+  if (diffDays <= 1) {
+    // Hourly for single day
+    return generateHourlySalesTrend(payments)
+  } else if (diffDays <= 7) {
+    // Daily for week
+    return generateDailySalesTrend(payments)
+  } else if (diffDays <= 31) {
+    // Weekly for month
+    return generateWeeklySalesTrend(payments)
+  } else {
+    // Monthly for longer periods
+    return generateMonthlySalesTrend(payments)
+  }
+}
+
+function generateHourlySalesTrend(payments: Array<{ createdAt: Date; amount: number }>): Array<{ label: string; value: number }> {
+  const hourlyMap: Map<string, number> = new Map()
+
+  payments.forEach(payment => {
+    const hour = payment.createdAt.getHours()
+    const label = `${hour.toString().padStart(2, '0')}:00`
+    hourlyMap.set(label, (hourlyMap.get(label) || 0) + payment.amount)
+  })
+
+  return Array.from(hourlyMap.entries())
+    .map(([label, value]) => ({ label, value: Number(value.toFixed(2)) }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+}
+
+function generateDailySalesTrend(payments: Array<{ createdAt: Date; amount: number }>): Array<{ label: string; value: number }> {
+  const dailyMap: Map<string, number> = new Map()
+  const days = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
+
+  payments.forEach(payment => {
+    const dayOfWeek = payment.createdAt.getDay()
+    const label = days[dayOfWeek]
+    dailyMap.set(label, (dailyMap.get(label) || 0) + payment.amount)
+  })
+
+  return Array.from(dailyMap.entries()).map(([label, value]) => ({ label, value: Number(value.toFixed(2)) }))
+}
+
+function generateWeeklySalesTrend(payments: Array<{ createdAt: Date; amount: number }>): Array<{ label: string; value: number }> {
+  const weeklyMap: Map<string, number> = new Map()
+
+  payments.forEach(payment => {
+    const weekNumber = Math.floor((payment.createdAt.getDate() - 1) / 7) + 1
+    const label = `Sem ${weekNumber}`
+    weeklyMap.set(label, (weeklyMap.get(label) || 0) + payment.amount)
+  })
+
+  return Array.from(weeklyMap.entries())
+    .map(([label, value]) => ({ label, value: Number(value.toFixed(2)) }))
+    .sort((a, b) => {
+      const weekA = parseInt(a.label.split(' ')[1])
+      const weekB = parseInt(b.label.split(' ')[1])
+      return weekA - weekB
+    })
+}
+
+function generateMonthlySalesTrend(payments: Array<{ createdAt: Date; amount: number }>): Array<{ label: string; value: number }> {
+  const monthlyMap: Map<string, number> = new Map()
+  const months = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+
+  payments.forEach(payment => {
+    const monthIndex = payment.createdAt.getMonth()
+    const label = months[monthIndex]
+    monthlyMap.set(label, (monthlyMap.get(label) || 0) + payment.amount)
+  })
+
+  return Array.from(monthlyMap.entries()).map(([label, value]) => ({ label, value: Number(value.toFixed(2)) }))
 }
 
 /**
@@ -635,7 +764,6 @@ export async function openShiftForVenue(
     throw new NotFoundError('Staff member not found or not associated with this venue')
   }
 
-  const staffName = `${staffWithVenue.staff.firstName} ${staffWithVenue.staff.lastName}`
   const posStaffId = staffWithVenue.posStaffId || staffId
 
   // Determine if we should send command to POS
@@ -647,7 +775,7 @@ export async function openShiftForVenue(
     // INTEGRATED MODE: Send command to Windows service to open shift in POS
     try {
       // Generate a temporary shift ID for tracking
-      const tempShiftId = `SHIFT_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      const tempShiftId = `SHIFT_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
 
       logger.info('Sending shift open command to POS', {
         venueId,

@@ -99,6 +99,7 @@ model Venue {
   tables              Table[]
   areas               Area[]
   shifts              Shift[]
+  timeEntries         TimeEntry[]
   orders              Order[]
   payments            Payment[]
   transactions        VenueTransaction[]
@@ -219,6 +220,9 @@ model Staff {
 
   // AI Training
   chatTrainingData ChatTrainingData[] @relation("UserChatTraining")
+
+  // Time tracking
+  timeEntries TimeEntry[]
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -622,6 +626,62 @@ model Shift {
   @@index([staffId])
   @@index([status])
   @@index([startTime])
+}
+
+// ==========================================
+// NOTE: TIME TRACKING
+// ==========================================
+
+model TimeEntry {
+  id      String @id @default(cuid())
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Clock times
+  clockInTime  DateTime
+  clockOutTime DateTime?
+
+  // Break tracking
+  breaks TimeEntryBreak[]
+
+  // Job role during this time entry
+  jobRole String? // e.g., "Waiter", "Bartender", "Manager"
+
+  // Calculated fields
+  totalHours   Decimal? @db.Decimal(5, 2)
+  breakMinutes Int?     @default(0)
+
+  // Status
+  status TimeEntryStatus @default(CLOCKED_IN)
+
+  // Notes/metadata
+  notes    String?
+  editedBy String? // Admin who modified if applicable
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([staffId, venueId])
+  @@index([venueId, clockInTime])
+  @@index([status])
+  @@map("time_entries")
+}
+
+model TimeEntryBreak {
+  id          String    @id @default(cuid())
+  timeEntryId String
+  timeEntry   TimeEntry @relation(fields: [timeEntryId], references: [id], onDelete: Cascade)
+
+  startTime DateTime
+  endTime   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([timeEntryId])
+  @@map("time_entry_breaks")
 }
 
 model Order {
@@ -2167,4 +2227,11 @@ enum ChatProcessingStatus {
   PENDING
   PROCESSED
   APPLIED
+}
+
+enum TimeEntryStatus {
+  CLOCKED_IN // Currently working
+  ON_BREAK // Currently on break
+  CLOCKED_OUT // Finished shift
+  ADMIN_EDITED // Modified by admin
 }

@@ -22,6 +22,7 @@ import * as paymentController from '../controllers/tpv/payment.tpv.controller'
 import * as shiftController from '../controllers/tpv/shift.tpv.controller'
 import * as authController from '../controllers/tpv/auth.tpv.controller'
 import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
+import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
 
 const router = express.Router()
 
@@ -1602,6 +1603,55 @@ router.post(
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentController.recordFastPayment,
+)
+
+// ==========================================
+// TIME ENTRY ROUTES
+// ==========================================
+
+/**
+ * Clock in
+ */
+router.post('/venues/:venueId/time-entries/clock-in', authenticateTokenMiddleware, timeEntryController.clockIn)
+
+/**
+ * Clock out
+ */
+router.post('/venues/:venueId/time-entries/clock-out', authenticateTokenMiddleware, timeEntryController.clockOut)
+
+/**
+ * Start break
+ */
+router.post('/time-entries/:timeEntryId/break/start', authenticateTokenMiddleware, timeEntryController.startBreak)
+
+/**
+ * End break
+ */
+router.post('/time-entries/:timeEntryId/break/end', authenticateTokenMiddleware, timeEntryController.endBreak)
+
+/**
+ * Get time entries for a venue
+ */
+router.get(
+  '/venues/:venueId/time-entries',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
+  timeEntryController.getTimeEntries,
+)
+
+/**
+ * Get staff time summary
+ */
+router.get('/staff/:staffId/time-summary', authenticateTokenMiddleware, timeEntryController.getStaffTimeSummary)
+
+/**
+ * Get currently clocked in staff
+ */
+router.get(
+  '/venues/:venueId/time-entries/active',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
+  timeEntryController.getCurrentlyClockedInStaff,
 )
 
 export default router
