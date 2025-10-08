@@ -5,6 +5,7 @@
 import './config/env'
 
 import http from 'http'
+import detect from 'detect-port'
 import app from './app' // The configured Express application
 import logger from './config/logger'
 import { PORT, NODE_ENV, DATABASE_URL } from './config/env'
@@ -113,9 +114,15 @@ const startApplication = async (retries = 3) => {
 
     // Start HTTP server
     if (require.main === module || NODE_ENV !== 'test') {
-      httpServer.listen(PORT, () => {
-        logger.info(`🚀 Server running at http://localhost:${PORT} in ${NODE_ENV} mode`)
-        logger.info(`📚 API documentation available at http://localhost:${PORT}/api-docs`)
+      const availablePort = await detect(Number(PORT))
+
+      if (availablePort !== Number(PORT)) {
+        logger.warn(`⚠️  Port ${PORT} is already in use, using port ${availablePort} instead`)
+      }
+
+      httpServer.listen(availablePort, () => {
+        logger.info(`🚀 Server running at http://localhost:${availablePort} in ${NODE_ENV} mode`)
+        logger.info(`📚 API documentation available at http://localhost:${availablePort}/api-docs`)
         if (NODE_ENV === 'development') {
           logger.warn('⚠️  Application is running in Development mode.')
         }

@@ -305,7 +305,7 @@ export class TpvHealthService {
   async getTerminalHealth(terminalId: string): Promise<any> {
     try {
       const terminal = await prisma.terminal.findUnique({
-        where: { id: terminalId },
+        where: { serialNumber: terminalId },
         select: {
           id: true,
           name: true,
@@ -320,7 +320,7 @@ export class TpvHealthService {
       })
 
       if (!terminal) {
-        throw new NotFoundError(`Terminal with ID ${terminalId} not found`)
+        throw new NotFoundError(`Terminal with serial number ${terminalId} not found`)
       }
 
       const cutoff = new Date(Date.now() - 2 * 60 * 1000)
