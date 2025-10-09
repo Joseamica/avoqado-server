@@ -12,3 +12,4 @@ CLAUDE.md
 # Log files
 logs/
 dist/
+.claude/settings.local.json

@@ -2,6 +2,75 @@ import { NextFunction, Request, Response } from 'express'
 
 import * as shiftTpvService from '../../services/tpv/shift.tpv.service'
 
+/**
+ * Open a new shift for a venue
+ * Can work with both integrated POS and standalone mode
+ */
+export async function openShift(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const venueId: string = req.params.venueId
+
+    // Extract data from request body
+    const { staffId, startingCash, stationId } = req.body
+
+    // Validate required fields
+    if (!staffId) {
+      res.status(400).json({
+        success: false,
+        message: 'staffId is required',
+      })
+      return
+    }
+
+    // Call service to handle the shift opening
+    const shift = await shiftTpvService.openShiftForVenue(venueId, staffId, startingCash || 0, stationId, orgId)
+
+    res.status(201).json({
+      success: true,
+      data: shift,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Close an existing shift for a venue
+ * Can work with both integrated POS and standalone mode
+ */
+export async function closeShift(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const venueId: string = req.params.venueId
+    const shiftId: string = req.params.shiftId
+
+    // Extract closing data from request body
+    const { cashDeclared, cardDeclared, vouchersDeclared, otherDeclared, notes } = req.body
+
+    // Call service to handle the shift closing
+    const shift = await shiftTpvService.closeShiftForVenue(
+      venueId,
+      shiftId,
+      {
+        cashDeclared: cashDeclared || 0,
+        cardDeclared: cardDeclared || 0,
+        vouchersDeclared: vouchersDeclared || 0,
+        otherDeclared: otherDeclared || 0,
+        notes,
+      },
+      orgId,
+    )
+
+    res.status(200).json({
+      success: true,
+      data: shift,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function getCurrentShift(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const orgId = req.authContext?.orgId // 1. Extract from req (Controller)
@@ -13,11 +82,8 @@ export async function getCurrentShift(req: Request, res: Response, next: NextFun
     const shift = await shiftTpvService.getCurrentShift(venueId, orgId, posName)
 
     // 6. Send HTTP response (Controller)
-    if (!shift) {
-      res.status(200).json({ shift: null })
-    } else {
-      res.status(200).json(shift)
-    }
+    // Always wrap in {shift: ...} for consistency
+    res.status(200).json({ shift: shift })
   } catch (error) {
     next(error) // 7. HTTP error handling (Controller)
   }

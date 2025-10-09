@@ -7,6 +7,8 @@ import { getOrCreatePosTable } from './posSyncTable.service'
 import { getOrCreatePosShift } from './posSyncShift.service'
 import { RichPosPayload, PosPaymentMethod } from '@/types/pos.types'
 import { PaymentMethod } from '@prisma/client'
+import { socketManager } from '../../communication/sockets/managers/socketManager'
+import { SocketEventType } from '../../communication/sockets/types'
 
 // Cache to track recent payment commands to prevent double deduction
 interface RecentPayment {
@@ -144,8 +146,11 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
   // 2. Buscar orden existente con lógica de resolución inteligente
   const existingOrder = await findExistingOrderWithSmartResolution(externalId, venue.id, orderData.orderNumber)
 
+  // Track if this is a create or update for socket events
+  const isNewOrder = !existingOrder
+
   // 3. Ejecutar el upsert final de la Orden
-  return prisma.$transaction(async tx => {
+  const order = await prisma.$transaction(async tx => {
     // Si encontramos una orden existente con resolución inteligente, actualizarla
     if (existingOrder && existingOrder.externalId !== externalId) {
       // La orden existe pero con un externalId diferente (caso idturno=0 → idturno real)
@@ -257,6 +262,35 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
     return order
   })
+
+  // Emit socket event for real-time updates to POS devices (AFTER transaction commits)
+  try {
+    const socketEvent = isNewOrder ? SocketEventType.ORDER_CREATED : SocketEventType.ORDER_UPDATED
+    const eventType = isNewOrder ? 'created' : 'updated'
+
+    socketManager.broadcastToVenue(venue.id, socketEvent, {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      venueId: venue.id,
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      source: order.source,
+      externalId: order.externalId,
+      eventType: eventType, // For Android compatibility
+      timestamp: new Date().toISOString(),
+    })
+
+    logger.info(`[🔔 PosSyncOrder] Socket event ${isNewOrder ? 'ORDER_CREATED' : 'ORDER_UPDATED'} emitted`, {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      venueId: venue.id,
+    })
+  } catch (error) {
+    logger.error('[❌ PosSyncOrder] Failed to emit socket event', { orderId: order.id, error })
+    // Don't fail the order sync if socket emission fails
+  }
+
+  return order
 }
 
 /**
@@ -360,6 +394,28 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
       syncStatus: SyncStatus.SYNCED,
     },
   })
+
+  // Emit socket event for real-time updates to POS devices
+  try {
+    socketManager.broadcastToVenue(venueId, SocketEventType.ORDER_DELETED, {
+      orderId: updatedOrder.id,
+      orderNumber: updatedOrder.orderNumber,
+      venueId: venueId,
+      status: updatedOrder.status,
+      externalId: updatedOrder.externalId,
+      eventType: 'deleted', // For Android compatibility
+      timestamp: new Date().toISOString(),
+    })
+
+    logger.info('[🔔 PosSyncOrder] Socket event ORDER_DELETED emitted', {
+      orderId: updatedOrder.id,
+      orderNumber: updatedOrder.orderNumber,
+      venueId: venueId,
+    })
+  } catch (error) {
+    logger.error('[❌ PosSyncOrder] Failed to emit socket event for deletion', { orderId: updatedOrder.id, error })
+    // Don't fail the order sync if socket emission fails
+  }
 
   logger.info(
     `[🥾 PosSyncOrder] Order ${updatedOrder.id} (externalId: ${updatedOrder.externalId}) marked as DELETED. Original request was for: ${externalId}`,

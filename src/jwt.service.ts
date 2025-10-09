@@ -57,7 +57,7 @@ export function generateAccessToken(staffId: string, organizationId: string, ven
   // Explicitly type the secret and options
   const secret: Secret = ACCESS_TOKEN_SECRET!
   const options: SignOptions = {
-    expiresIn: 14400, // 4 hours in seconds (was 15 minutes)
+    expiresIn: 86400, // 24 hours (1 day) in seconds
   }
   return jwt.sign(payload, secret, options)
 }

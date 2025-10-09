@@ -5,6 +5,8 @@ import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
+import { socketManager } from '../../communication/sockets/managers/socketManager'
+import { SocketEventType } from '../../communication/sockets/types'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -596,8 +598,46 @@ export async function recordOrderPayment(
     // Don't fail the payment if receipt generation fails
   }
 
-  // TODO: Emit socket event for real-time updates
-  // SocketManager.emitPaymentUpdate(venueId, tableNumber, payment)
+  // Emit socket events for real-time updates
+  try {
+    // Emit payment completed event to venue room
+    socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_COMPLETED, {
+      paymentId: payment.id,
+      orderId: activeOrder.id,
+      orderNumber: activeOrder.orderNumber,
+      venueId: activeOrder.venueId,
+      amount: payment.amount,
+      tipAmount: payment.tipAmount,
+      method: payment.method,
+      status: payment.status.toLowerCase(), // Convert to lowercase for Android compatibility
+      timestamp: new Date().toISOString(),
+    })
+
+    // Emit order updated event to venue room
+    socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.ORDER_UPDATED, {
+      orderId: activeOrder.id,
+      orderNumber: activeOrder.orderNumber,
+      venueId: activeOrder.venueId,
+      status: activeOrder.status,
+      paymentStatus: activeOrder.paymentStatus,
+      timestamp: new Date().toISOString(),
+    })
+
+    logger.info('Socket events emitted successfully', {
+      paymentId: payment.id,
+      orderId: activeOrder.id,
+      orderNumber: activeOrder.orderNumber,
+      venueId: activeOrder.venueId,
+      events: ['PAYMENT_COMPLETED', 'ORDER_UPDATED'],
+    })
+  } catch (error) {
+    logger.error('Failed to emit socket events', {
+      paymentId: payment.id,
+      orderId: activeOrder.id,
+      error,
+    })
+    // Don't fail the payment if socket emission fails
+  }
 
   // ✅ NUEVO: Detectar modo de operación y manejar pago según el contexto
   const isIntegratedMode = activeOrder.source === OrderSource.POS && activeOrder.externalId && activeOrder.externalId.trim() !== ''
@@ -824,8 +864,48 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // Don't fail the payment if receipt generation fails
   }
 
-  // TODO: Emit socket event for real-time updates
-  // SocketManager.emitPaymentUpdate(venueId, 'FAST_PAYMENT', payment)
+  // Emit socket events for real-time updates
+  try {
+    // Emit payment completed event to venue room
+    socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_COMPLETED, {
+      paymentId: payment.id,
+      orderId: fastOrder.id,
+      orderNumber: fastOrder.orderNumber,
+      venueId: venueId,
+      amount: payment.amount,
+      tipAmount: payment.tipAmount,
+      method: payment.method,
+      status: payment.status.toLowerCase(), // Convert to lowercase for Android compatibility
+      type: 'FAST',
+      timestamp: new Date().toISOString(),
+    })
+
+    // Emit order updated event to venue room for the fast order
+    socketManager.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
+      orderId: fastOrder.id,
+      orderNumber: fastOrder.orderNumber,
+      venueId: venueId,
+      status: fastOrder.status,
+      paymentStatus: fastOrder.paymentStatus,
+      type: 'FAST',
+      timestamp: new Date().toISOString(),
+    })
+
+    logger.info('Socket events emitted successfully for fast payment', {
+      paymentId: payment.id,
+      orderId: fastOrder.id,
+      orderNumber: fastOrder.orderNumber,
+      venueId: venueId,
+      events: ['PAYMENT_COMPLETED', 'ORDER_UPDATED'],
+    })
+  } catch (error) {
+    logger.error('Failed to emit socket events for fast payment', {
+      paymentId: payment.id,
+      orderId: fastOrder.id,
+      error,
+    })
+    // Don't fail the payment if socket emission fails
+  }
 
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
@@ -1043,6 +1123,23 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
   const route = accountType.toLowerCase() // 'primary', 'secondary', or 'tertiary'
   const acquirer = selectedAccount.provider.code.toUpperCase() // 'MENTA', etc.
 
+  // 🚨 CRITICAL FIX: Get proper terminal UUID instead of hardware serial
+  // Fetch terminal record by serial number to get the proper UUID
+  const terminal = await prisma.terminal.findFirst({
+    where: {
+      serialNumber: routingData.terminalSerial,
+      venueId: venueId,
+    },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal with serial ${routingData.terminalSerial} not found for venue ${venueId}`)
+  }
+
+  // Use Menta terminal UUID if available, otherwise use terminal's own UUID
+  const terminalUuid = terminal.mentaTerminalId
+  logger.info(`🎯 Using terminal UUID for payments: ${terminalUuid} (serial: ${routingData.terminalSerial})`)
+
   // The routing response contains the credentials for the user-selected merchant account
   const routingResponse = {
     route,
@@ -1050,7 +1147,7 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
     merchantId: credentials.merchantId,
     apiKeyMerchant: credentials.apiKey,
     customerId: credentials.customerId,
-    terminalSerial: routingData.terminalSerial,
+    terminalSerial: terminalUuid, // 🎯 CRITICAL: Return UUID instead of serial number
     amount: routingData.amount,
     // Additional routing metadata
     routingMetadata: {
@@ -1080,14 +1177,16 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
  * Convierte los métodos de pago de Avoqado a los códigos que entiende SoftRestaurant
  */
 function mapPaymentMethodToPOS(method: PaymentMethod): string {
+  logger.info('Mapping payment method to POS', { method })
+  logger.info('Pene')
   const paymentMethodMap: Record<PaymentMethod, string> = {
-    CASH: 'AEF', // EFECTIVO
+    CASH: 'ACARD', // ✅ CHANGED: Use DEB instead of AEF (tipo=2 CARD) to prevent $0.00 archiving issue
     CREDIT_CARD: 'CRE', // TAR. CREDITO
     DEBIT_CARD: 'DEB', // TAR. DEBITO
     DIGITAL_WALLET: 'MPY', // MARC PAYMENTS (como genérico para wallets)
-    BANK_TRANSFER: 'AEF', // Se trata como efectivo
-    OTHER: 'AEF', // Por defecto efectivo
+    BANK_TRANSFER: 'DEB', // ✅ CHANGED: Use DEB instead of AEF to prevent $0.00 archiving
+    OTHER: 'ACARD', // ✅ CHANGED: Default to DEB instead of AEF
   }
 
-  return paymentMethodMap[method] || 'AEF'
+  return paymentMethodMap[method] || 'ACARD' // ✅ CHANGED: Default fallback to DEB
 }

@@ -99,6 +99,7 @@ model Venue {
   tables              Table[]
   areas               Area[]
   shifts              Shift[]
+  timeEntries         TimeEntry[]
   orders              Order[]
   payments            Payment[]
   transactions        VenueTransaction[]
@@ -219,6 +220,9 @@ model Staff {
 
   // AI Training
   chatTrainingData ChatTrainingData[] @relation("UserChatTraining")
+
+  // Time tracking
+  timeEntries TimeEntry[]
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -592,6 +596,12 @@ model Shift {
   endingCash     Decimal? @db.Decimal(10, 2)
   cashDifference Decimal? @db.Decimal(10, 2)
 
+  // Cash reconciliation (for shift closing)
+  cashDeclared     Decimal? @db.Decimal(10, 2)
+  cardDeclared     Decimal? @db.Decimal(10, 2)
+  vouchersDeclared Decimal? @db.Decimal(10, 2)
+  otherDeclared    Decimal? @db.Decimal(10, 2)
+
   // Summary
   totalSales  Decimal @default(0) @db.Decimal(12, 2)
   totalTips   Decimal @default(0) @db.Decimal(10, 2)
@@ -616,6 +626,62 @@ model Shift {
   @@index([staffId])
   @@index([status])
   @@index([startTime])
+}
+
+// ==========================================
+// NOTE: TIME TRACKING
+// ==========================================
+
+model TimeEntry {
+  id      String @id @default(cuid())
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Clock times
+  clockInTime  DateTime
+  clockOutTime DateTime?
+
+  // Break tracking
+  breaks TimeEntryBreak[]
+
+  // Job role during this time entry
+  jobRole String? // e.g., "Waiter", "Bartender", "Manager"
+
+  // Calculated fields
+  totalHours   Decimal? @db.Decimal(5, 2)
+  breakMinutes Int?     @default(0)
+
+  // Status
+  status TimeEntryStatus @default(CLOCKED_IN)
+
+  // Notes/metadata
+  notes    String?
+  editedBy String? // Admin who modified if applicable
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([staffId, venueId])
+  @@index([venueId, clockInTime])
+  @@index([status])
+  @@map("time_entries")
+}
+
+model TimeEntryBreak {
+  id          String    @id @default(cuid())
+  timeEntryId String
+  timeEntry   TimeEntry @relation(fields: [timeEntryId], references: [id], onDelete: Cascade)
+
+  startTime DateTime
+  endTime   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([timeEntryId])
+  @@map("time_entry_breaks")
 }
 
 model Order {
@@ -1117,9 +1183,9 @@ model Terminal {
 
   // Preferred processor for this TPV (LEGACY/MENTA/AUTO)
   preferredProcessor PaymentProcessor @default(AUTO)
-  
+
   // Menta API Integration - Smart Caching
-  mentaTerminalId String?   // Menta's UUID for payments (cached on first use)
+  mentaTerminalId String? // Menta's UUID for payments (cached on first use)
   mentaLastSync   DateTime? // When we last synced with Menta API
 
   reviews Review[] // ✅ LÍNEA AGREGADA
@@ -1136,6 +1202,9 @@ model Terminal {
 // ==========================================
 
 // Generic payment provider model
+/// Catalog of upstream payment vendors that Avoqado integrates with.
+/// Acts as the template/metadata layer; `configSchema` describes
+/// how merchant-level `providerConfig` JSON should be shaped.
 model PaymentProvider {
   id          String       @id @default(cuid())
   code        String       @unique // "MENTA", "CLIP", "BANORTE_DIRECT", etc.
@@ -1145,6 +1214,8 @@ model PaymentProvider {
   active      Boolean      @default(true)
 
   // Provider-specific configuration schema
+  /// Optional JSON schema describing the structure required in
+  /// `MerchantAccount.providerConfig` for this provider.
   configSchema Json? // JSON schema for validation
 
   // Relations
@@ -1160,7 +1231,9 @@ model PaymentProvider {
   @@index([type])
 }
 
-// Generic merchant account (works for any provider)
+/// Concrete merchant account issued by a provider for one of our venues.
+/// Holds the secure credentials and per-account configuration while keeping
+/// a reference to the reusable provider template above.
 model MerchantAccount {
   id String @id @default(cuid())
 
@@ -1171,7 +1244,7 @@ model MerchantAccount {
   // Generic merchant info
   externalMerchantId String // Provider's merchant ID
   alias              String?
-  
+
   // Display and status fields for UI
   displayName  String? // User-friendly name like "Cuenta Principal", "Facturación"
   active       Boolean @default(true) // Enable/disable account
@@ -1181,6 +1254,8 @@ model MerchantAccount {
   credentialsEncrypted Json // Different per provider
 
   // Provider-specific config
+  /// Per-account configuration values that comply with the provider's
+  /// `configSchema`. Non-sensitive knobs live here; secrets stay encrypted.
   providerConfig Json? // Flexible config per provider
 
   // Relations
@@ -1199,7 +1274,9 @@ model MerchantAccount {
   @@index([displayOrder])
 }
 
-// Venue payment configuration (supports multiple providers)
+/// Mapping between a venue and the merchant accounts it should use.
+/// Supports primary/secondary/tertiary routing plus extra rules so the
+/// same venue can failover or route by business logic.
 model VenuePaymentConfig {
   id      String @id @default(cuid())
   venueId String @unique
@@ -1216,6 +1293,8 @@ model VenuePaymentConfig {
   tertiaryAccount   MerchantAccount? @relation("TertiaryAccount", fields: [tertiaryAccountId], references: [id])
 
   // Routing rules (JSON for flexibility)
+  /// Optional dynamic rules (e.g. BIN routing, amount thresholds) that decide
+  /// which merchant account handles a given payment.
   routingRules Json? // { "factura": "secondary", "amount_over": 1000, "bin_routing": {...} }
 
   // Default processor preference
@@ -1279,7 +1358,8 @@ model ProviderEventLog {
 // NOTE: COST MANAGEMENT & PRICING
 // ==========================================
 
-// Provider costs (what Menta charges Avoqado)
+/// Defines what the upstream provider charges Avoqado for a given
+/// merchant account during a time window (the supply-side economics).
 model ProviderCostStructure {
   id String @id @default(cuid())
 
@@ -1328,7 +1408,8 @@ model ProviderCostStructure {
   @@index([effectiveFrom])
 }
 
-// Venue pricing (what Avoqado charges venues)
+/// Pricing agreement we offer to a venue for processing via a particular
+/// account tier. Mirrors provider cost fields but includes our margin.
 model VenuePricingStructure {
   id String @id @default(cuid())
 
@@ -1375,7 +1456,9 @@ model VenuePricingStructure {
   @@index([effectiveFrom])
 }
 
-// Transaction cost tracking (for profit calculation)
+/// Snapshot of the economics for a single payment. Links the payment to the
+/// merchant account used and records both provider cost and venue charge so
+/// we can compute margin and later aggregate into reports.
 model TransactionCost {
   id String @id @default(cuid())
 
@@ -2144,4 +2227,11 @@ enum ChatProcessingStatus {
   PENDING
   PROCESSED
   APPLIED
+}
+
+enum TimeEntryStatus {
+  CLOCKED_IN // Currently working
+  ON_BREAK // Currently on break
+  CLOCKED_OUT // Finished shift
+  ADMIN_EDITED // Modified by admin
 }
