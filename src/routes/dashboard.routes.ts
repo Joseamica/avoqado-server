@@ -26,6 +26,7 @@ import * as teamController from '../controllers/dashboard/team.dashboard.control
 import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
 import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
+import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import superadminRoutes from './dashboard/superadmin.routes'
 import {
   CreateMenuCategorySchema,
@@ -71,6 +72,7 @@ import {
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
+import { createTestPaymentSchema, getTestPaymentsSchema } from '../schemas/dashboard/testing.schema'
 
 const router = express.Router()
 
@@ -3588,6 +3590,181 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(feedbackSubmissionSchema),
   assistantController.submitFeedback,
+)
+
+// ========================================
+// TESTING ROUTES (SUPERADMIN ONLY)
+// ========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/testing/payment/fast:
+ *   post:
+ *     tags: [Testing]
+ *     summary: Create a test payment (SUPERADMIN only)
+ *     description: Creates a fast payment for testing purposes. This endpoint is only available for SUPERADMIN users.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - venueId
+ *               - amount
+ *               - method
+ *             properties:
+ *               venueId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Venue ID where the test payment will be created
+ *               amount:
+ *                 type: integer
+ *                 minimum: 1
+ *                 description: Payment amount in cents (e.g., 50000 = $500.00)
+ *               tipAmount:
+ *                 type: integer
+ *                 minimum: 0
+ *                 default: 0
+ *                 description: Tip amount in cents (e.g., 5000 = $50.00)
+ *               method:
+ *                 type: string
+ *                 enum: [CASH, CREDIT_CARD, DEBIT_CARD, DIGITAL_WALLET, BANK_TRANSFER, OTHER]
+ *                 description: Payment method
+ *     responses:
+ *       201:
+ *         description: Test payment created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     payment:
+ *                       $ref: '#/components/schemas/Payment'
+ *                     receiptUrl:
+ *                       type: string
+ *                       description: URL to the digital receipt
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       500: { $ref: '#/components/responses/InternalServerError' }
+ */
+router.post(
+  '/testing/payment/fast',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  validateRequest(createTestPaymentSchema),
+  testingController.createTestPayment,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/testing/payments:
+ *   get:
+ *     tags: [Testing]
+ *     summary: Get recent test payments (SUPERADMIN only)
+ *     description: Retrieves the most recent test payments, optionally filtered by venue
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: venueId
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: Optional venue ID to filter test payments
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 10
+ *         description: Maximum number of payments to return
+ *     responses:
+ *       200:
+ *         description: Test payments retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Payment'
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     count:
+ *                       type: integer
+ *                     limit:
+ *                       type: integer
+ *                     venueId:
+ *                       type: string
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       500: { $ref: '#/components/responses/InternalServerError' }
+ */
+router.get(
+  '/testing/payments',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  validateRequest(getTestPaymentsSchema),
+  testingController.getTestPayments,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/testing/payment/{paymentId}:
+ *   delete:
+ *     tags: [Testing]
+ *     summary: Delete a test payment (SUPERADMIN only)
+ *     description: Removes a test payment and its associated order. Only allows deletion of payments marked as test payments.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: paymentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: Payment ID to delete
+ *     responses:
+ *       200:
+ *         description: Test payment deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       500: { $ref: '#/components/responses/InternalServerError' }
+ */
+router.delete(
+  '/testing/payment/:paymentId',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  testingController.deleteTestPayment,
 )
 
 export default router

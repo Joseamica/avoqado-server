@@ -884,6 +884,7 @@ model Payment {
 
   // Payment info
   method    PaymentMethod
+  source    PaymentSource     @default(OTHER)
   status    TransactionStatus @default(PENDING)
   splitType SplitType         @default(FULLPAYMENT) // How this payment was split (audit trail)
   type      PaymentType?      @default(REGULAR) // How this payment was split (audit trail)
@@ -925,6 +926,7 @@ model Payment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([source])
   @@index([authorizationNumber]) // ✅ NUEVO ÍNDICE
   @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
   @@index([cardBrand]) // ✅ NUEVO ÍNDICE
@@ -1734,6 +1736,17 @@ model PosCommand {
 // NOTE: ENUMS
 // ==========================================
 
+enum PaymentSource {
+  TPV // Terminal
+  DASHBOARD_TEST // Test payments from superadmin dashboard
+  QR // Customer QR
+  WEB // Website
+  APP // Mobile app
+  PHONE // Phone order
+  POS // Direct from POS
+  OTHER
+}
+
 enum BusinessType {
   RESTAURANT
   RETAIL
@@ -2088,6 +2101,7 @@ enum CardEntryMode {
 enum PaymentType {
   REGULAR // Normal order-based payment
   FAST // Quick payment without order items
+  TEST // Test payments from superadmin dashboard
   REFUND // Future: refund payments
   ADJUSTMENT // Future: manual adjustments
 }

@@ -1,4 +1,4 @@
-import { Payment, PaymentMethod, SplitType, OrderSource } from '@prisma/client'
+import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -7,6 +7,7 @@ import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
+import { createTransactionCost } from '../payments/transactionCost.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -482,7 +483,8 @@ export async function recordOrderPayment(
       method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
       status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
       splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
-      processor: 'BANKAOOL',
+      source: (paymentData.source || 'OTHER') as PaymentSource, // ✅ NEW: Dedicated source field with PaymentSource enum
+      processor: 'TBD',
       processorId: paymentData.mentaOperationId,
       processorData: {
         cardBrand: paymentData.cardBrand,
@@ -508,7 +510,7 @@ export async function recordOrderPayment(
       posRawData: {
         splitType: paymentData.splitType,
         staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
-        source: paymentData.source || 'AVOQADO_TPV',
+        source: paymentData.source || 'TPV', // ✅ UPDATED: Use TPV instead of AVOQADO_TPV
         paidProductsId: paymentData.paidProductsId || [],
         ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
         ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
@@ -525,6 +527,37 @@ export async function recordOrderPayment(
       processedBy: true,
     },
   })
+
+  // Create VenueTransaction for financial tracking and settlement
+  await prisma.venueTransaction.create({
+    data: {
+      venueId,
+      paymentId: payment.id,
+      type: 'PAYMENT',
+      grossAmount: totalAmount + tipAmount,
+      feeAmount: payment.feeAmount,
+      netAmount: payment.netAmount,
+      status: 'PENDING', // Will be updated to SETTLED by settlement process
+    },
+  })
+
+  logger.info('VenueTransaction created for payment', {
+    paymentId: payment.id,
+    grossAmount: totalAmount + tipAmount,
+    feeAmount: payment.feeAmount,
+    netAmount: payment.netAmount,
+  })
+
+  // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
+  try {
+    await createTransactionCost(payment.id)
+  } catch (transactionCostError) {
+    logger.error('Failed to create TransactionCost', {
+      paymentId: payment.id,
+      error: transactionCostError,
+    })
+    // Don't fail the payment if TransactionCost creation fails
+  }
 
   // Update Order.splitType if this is the first payment
   if (!activeOrder.splitType) {
@@ -776,7 +809,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
       status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
       splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
-      processor: 'BANKAOOL',
+      source: (paymentData.source || 'OTHER') as PaymentSource, // ✅ NEW: Dedicated source field with PaymentSource enum
+      processor: 'TBD',
       type: 'FAST',
       processorId: paymentData.mentaOperationId,
       processorData: {
@@ -803,7 +837,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       posRawData: {
         splitType: 'FULLPAYMENT',
         staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
-        source: paymentData.source || 'AVOQADO_TPV',
+        source: paymentData.source || 'TPV', // ✅ UPDATED: Use TPV instead of AVOQADO_TPV
         paymentType: 'FAST',
         ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
       },
@@ -812,6 +846,37 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       processedBy: true,
     },
   })
+
+  // Create VenueTransaction for financial tracking and settlement
+  await prisma.venueTransaction.create({
+    data: {
+      venueId,
+      paymentId: payment.id,
+      type: 'PAYMENT',
+      grossAmount: totalAmount + tipAmount,
+      feeAmount: payment.feeAmount,
+      netAmount: payment.netAmount,
+      status: 'PENDING', // Will be updated to SETTLED by settlement process
+    },
+  })
+
+  logger.info('VenueTransaction created for fast payment', {
+    paymentId: payment.id,
+    grossAmount: totalAmount + tipAmount,
+    feeAmount: payment.feeAmount,
+    netAmount: payment.netAmount,
+  })
+
+  // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
+  try {
+    await createTransactionCost(payment.id)
+  } catch (transactionCostError) {
+    logger.error('Failed to create TransactionCost for fast payment', {
+      paymentId: payment.id,
+      error: transactionCostError,
+    })
+    // Don't fail the payment if TransactionCost creation fails
+  }
 
   // Create a general allocation for the fast payment (no specific order)
   await prisma.paymentAllocation.create({
