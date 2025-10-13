@@ -49,17 +49,17 @@ model Venue {
   currency String    @default("MXN")
 
   // Location
-  address   String
-  city      String
-  state     String
-  country   String   @default("MX")
-  zipCode   String
+  address   String?
+  city      String?
+  state     String?
+  country   String?  @default("MX")
+  zipCode   String?
   latitude  Decimal? @db.Decimal(10, 8)
   longitude Decimal? @db.Decimal(11, 8)
 
   // Contact
-  phone   String
-  email   String
+  phone   String?
+  email   String?
   website String?
 
   // Branding

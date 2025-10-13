@@ -28,6 +28,7 @@ import * as assistantController from '../controllers/dashboard/assistant.dashboa
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import superadminRoutes from './dashboard/superadmin.routes'
+import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import {
   CreateMenuCategorySchema,
   UpdateMenuCategorySchema,
@@ -1242,6 +1243,14 @@ router.get(
   authenticateTokenMiddleware,
   authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
   paymentController.getReceiptById,
+)
+
+// Venue Payment Configuration routes (SUPERADMIN only)
+router.use(
+  '/venues/:venueId/payment-config',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  venuePaymentConfigRoutes,
 )
 
 /**

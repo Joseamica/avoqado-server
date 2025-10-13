@@ -25,11 +25,11 @@ interface ReceiptDataSnapshot {
   venue: {
     id: string
     name: string
-    address: string
-    city: string
-    state: string
-    phone: string
-    email: string
+    address?: string
+    city?: string
+    state?: string
+    phone?: string
+    email?: string
     logo?: string
     primaryColor?: string
   }
@@ -165,11 +165,11 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
       venue: {
         id: paymentData.venue.id,
         name: paymentData.venue.name,
-        address: paymentData.venue.address,
-        city: paymentData.venue.city,
-        state: paymentData.venue.state,
-        phone: paymentData.venue.phone,
-        email: paymentData.venue.email,
+        address: paymentData.venue.address || undefined,
+        city: paymentData.venue.city || undefined,
+        state: paymentData.venue.state || undefined,
+        phone: paymentData.venue.phone || undefined,
+        email: paymentData.venue.email || undefined,
         logo: paymentData.venue.logo || undefined,
         primaryColor: paymentData.venue.primaryColor || undefined,
       },

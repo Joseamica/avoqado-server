@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 
 import * as posSyncTestService from '../../services/pos-sync/posSyncTest.service'
-import { PosOrderPayload } from '@/types/pos.types'
+import { PosOrderPayload } from '../../../../src/types/pos.types'
 
 export const handlePosOrderTest = async (req: Request, res: Response, next: NextFunction) => {
   try {
