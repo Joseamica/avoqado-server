@@ -393,6 +393,115 @@ logger.info(`Payment processed successfully for terminal: ${terminalId}`)
 5. **Clean** → Remove debug logs once working
 6. **Commit** → Only production-ready code
 
+## 🍔 Order → Payment → Inventory Flow (Critical Business Logic)
+
+### Overview
+
+When a customer completes a payment, the system automatically deducts inventory using **FIFO (First-In-First-Out) batch tracking**. This is one of the most critical business flows in the platform.
+
+### Flow Diagram
+
+```
+1. Waiter creates Order → Order status: PENDING
+2. Payment received → Order status: PAID
+3. ✅ Payment fully covers total → Trigger automatic inventory deduction
+4. For each OrderItem → Find Recipe → Deduct ingredients using FIFO
+5. Create VenueTransaction + TransactionCosts → Track profit
+```
+
+### Key Files
+
+- **Payment trigger**: `src/services/tpv/payment.tpv.service.ts:98-147`
+- **FIFO deduction**: `src/services/dashboard/rawMaterial.service.ts:468-537`
+- **Batch tracking**: `src/services/dashboard/rawMaterial.service.ts:395-466` (`deductStockFIFO`)
+
+### Critical Business Rules
+
+1. **Stock deduction ONLY happens when order is fully paid** (`totalPaid >= order.total`)
+2. **FIFO batch consumption**: Oldest batches (`receivedDate` ASC) are consumed first
+3. **Recipe-based deduction**: Each product links to a recipe with multiple ingredients
+4. **Non-blocking failures**: Payment succeeds even if stock deduction fails (logged as warning)
+5. **Low stock alerts**: Auto-generated when `currentStock <= reorderPoint`
+6. **Optional ingredients**: Skipped if unavailable (marked `isOptional: true` in recipe)
+7. **Profit tracking**: Revenue + costs recorded in `VenueTransaction` + `TransactionCost`
+
+### Real-World Example
+
+**Product**: Hamburger (sells for $5.00)
+**Recipe**:
+- 150g ground beef ($0.80/100g) = $1.20
+- 1 bun ($0.30 each) = $0.30
+- 20g cheese ($0.50/100g) = $0.10
+**Total Cost**: $1.60 per burger
+
+**Order**: 3 hamburgers
+1. Revenue: 3 × $5.00 = $15.00
+2. Cost: 3 × $1.60 = $4.80
+3. Profit: $15.00 - $4.80 = $10.20
+
+**Inventory Deduction** (FIFO):
+- Batch #1 (2024-01-01, 300g beef) → Deduct 450g → Consumes all 300g, needs 150g more
+- Batch #2 (2024-01-05, 500g beef) → Deduct 150g → 350g remaining
+- Buns (oldest batch first) → Deduct 3 units
+- Cheese (oldest batch first) → Deduct 60g
+
+### Testing the Flow
+
+```bash
+# 1. Create test data
+npm run migrate
+npm run seed  # Creates test venue, products, recipes, stock batches
+
+# 2. Create order
+curl -X POST "http://localhost:12344/api/v1/tpv/venues/{venueId}/orders" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "items": [{"productId": "hamburger-id", "quantity": 3}],
+    "tableId": "table-1"
+  }'
+
+# 3. Add payment (triggers inventory deduction)
+curl -X POST "http://localhost:12344/api/v1/tpv/venues/{venueId}/orders/{orderId}/payments" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "amount": 15.00,
+    "method": "CASH"
+  }'
+
+# 4. Verify stock deduction
+npm run studio  # Check RawMaterial.currentStock and RawMaterialMovement records
+
+# 5. Check logs for FIFO deduction
+tail -f logs/app.log | grep "🎯\|✅\|⚠️"
+```
+
+### Debugging Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| Stock not deducted | Order not fully paid | Check `totalPaid >= order.total` |
+| FIFO order wrong | Invalid `receivedDate` | Verify batch `receivedDate` timestamps |
+| Insufficient stock warning | Low inventory | Check `currentStock` vs recipe requirements |
+| Missing recipe | Product has no recipe | Create recipe or skip inventory tracking |
+| Optional ingredient skipped | `isOptional: true` | Expected behavior, check logs |
+
+### Agent Guidelines for Inventory Features
+
+When working on inventory-related features:
+
+1. **Always test payment → deduction flow** using the steps above
+2. **Verify FIFO ordering** by checking `RawMaterialMovement.createdAt` timestamps
+3. **Monitor logs** for `🎯 Starting inventory deduction` and `✅ Stock deducted successfully`
+4. **Check edge cases**: insufficient stock, missing recipes, optional ingredients
+5. **Update tests** in `tests/workflows/` when modifying deduction logic
+6. **Document changes** in both `AGENTS.md` and `CLAUDE.md`
+
+### Related Documentation
+
+- Full implementation details: `CLAUDE.md` (root) → "Order → Payment → Inventory Flow"
+- Database schema: `docs/DATABASE_SCHEMA.md` → RawMaterial, StockBatch, Recipe models
+- Frontend UI: `avoqado-web-dashboard/CLAUDE.md` → "Inventory Management System"
+
 ## Known Limitations
 
 - **Organization ID (orgId) authorization**: Currently not fully implemented in service methods. Most TPV service methods accept `orgId`
