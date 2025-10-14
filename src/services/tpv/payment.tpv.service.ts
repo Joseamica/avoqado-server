@@ -8,6 +8,7 @@ import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
+import { deductStockForRecipe } from '../dashboard/rawMaterial.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -66,7 +67,7 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
   }
 
   // Update order totals and status
-  await prisma.order.update({
+  const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       paymentStatus: newPaymentStatus,
@@ -74,6 +75,13 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
         status: 'COMPLETED',
         completedAt: new Date(),
       }),
+    },
+    include: {
+      items: {
+        include: {
+          product: true,
+        },
+      },
     },
   })
 
@@ -86,6 +94,57 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
     isFullyPaid,
     newPaymentStatus,
   })
+
+  // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
+  if (isFullyPaid) {
+    try {
+      logger.info('🎯 Starting inventory deduction for completed order', {
+        orderId,
+        venueId: updatedOrder.venueId,
+        itemCount: updatedOrder.items.length,
+      })
+
+      // Deduct stock for each product in the order
+      for (const item of updatedOrder.items) {
+        try {
+          await deductStockForRecipe(updatedOrder.venueId, item.productId, item.quantity, orderId)
+
+          logger.info('✅ Stock deducted successfully for product', {
+            orderId,
+            productId: item.productId,
+            productName: item.product.name,
+            quantity: item.quantity,
+          })
+        } catch (deductionError: any) {
+          // Log individual product deduction errors but continue with other products
+          logger.warn('⚠️ Failed to deduct stock for product - continuing with order', {
+            orderId,
+            productId: item.productId,
+            productName: item.product.name,
+            quantity: item.quantity,
+            error: deductionError.message,
+            reason: deductionError.message.includes('does not have a recipe')
+              ? 'NO_RECIPE'
+              : deductionError.message.includes('Insufficient stock')
+                ? 'INSUFFICIENT_STOCK'
+                : 'UNKNOWN',
+          })
+        }
+      }
+
+      logger.info('🎯 Inventory deduction completed for order', {
+        orderId,
+        totalItems: updatedOrder.items.length,
+      })
+    } catch (inventoryError) {
+      // Log overall inventory deduction errors but don't fail the payment
+      logger.error('❌ Failed to complete inventory deduction for order', {
+        orderId,
+        error: inventoryError,
+      })
+      // Payment is still successful - inventory deduction failure is logged but not critical
+    }
+  }
 }
 
 interface PaymentFilters {
