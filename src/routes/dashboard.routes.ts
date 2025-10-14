@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { authorizeRole } from '../middlewares/authorizeRole.middleware' // Verifica esta ruta
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
+import { checkPermission } from '../middlewares/checkPermission.middleware'
 
 // Importa StaffRole desde @prisma/client si ahí es donde está definido tu enum de Prisma
 // o desde donde lo hayas exportado como enum de TS (si es una copia manual)
@@ -1291,20 +1292,10 @@ router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryR
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
-router.get(
-  '/venues/:venueId/tpvs',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  tpvController.getTerminals,
-)
+router.get('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminals)
 
 // Create TPV (terminal)
-router.post(
-  '/venues/:venueId/tpvs',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  tpvController.createTpv,
-)
+router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:create'), tpvController.createTpv)
 
 /**
  * @openapi
@@ -1341,12 +1332,7 @@ router.post(
  *       403:
  *         description: Forbidden
  */
-router.get(
-  '/venues/:venueId/tpv/:tpvId',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  tpvController.getTpvById,
-)
+router.get('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTpvById)
 
 /**
  * @openapi
@@ -1424,12 +1410,7 @@ router.get(
  *       403:
  *         description: Forbidden
  */
-router.put(
-  '/venues/:venueId/tpv/:tpvId',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  tpvController.updateTpv,
-)
+router.put('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:update'), tpvController.updateTpv)
 
 /**
  * @openapi
@@ -1527,12 +1508,7 @@ router.post('/tpv/heartbeat', tpvController.processHeartbeat)
  *       404:
  *         description: Terminal not found or offline
  */
-router.post(
-  '/tpv/:terminalId/command',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  tpvController.sendTpvCommand,
-)
+router.post('/tpv/:terminalId/command', authenticateTokenMiddleware, checkPermission('tpv:command'), tpvController.sendTpvCommand)
 
 /**
  * @openapi
@@ -1553,12 +1529,7 @@ router.post(
  *       403:
  *         description: Forbidden
  */
-router.get(
-  '/venues/:venueId/tpvs/health',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  tpvController.getVenueTerminalHealth,
-)
+router.get('/venues/:venueId/tpvs/health', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getVenueTerminalHealth)
 
 /**
  * @openapi
@@ -1587,12 +1558,7 @@ router.get(
  *       403:
  *         description: Forbidden
  */
-router.get(
-  '/venues/:venueId/tpv/:tpvId/health',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  tpvController.getTerminalHealth,
-)
+router.get('/venues/:venueId/tpv/:tpvId/health', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminalHealth)
 
 /**
  * @openapi
@@ -1641,7 +1607,7 @@ router.get(
 router.post(
   '/venues/:venueId/tpv/:tpvId/command',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN]),
+  checkPermission('tpv:command'),
   tpvController.sendTpvCommand,
 )
 
@@ -2954,12 +2920,7 @@ router.delete(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
-router.get(
-  '/venues/:venueId/shifts',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
-  shiftController.getShifts,
-)
+router.get('/venues/:venueId/shifts', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShifts)
 
 /**
  * @openapi
@@ -2978,12 +2939,7 @@ router.get(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
-router.get(
-  '/venues/:venueId/shifts/:shiftId',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
-  shiftController.getShift,
-)
+router.get('/venues/:venueId/shifts/:shiftId', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShift)
 
 /**
  * @openapi
@@ -3012,12 +2968,7 @@ router.get(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
-router.get(
-  '/venues/:venueId/shifts/summary',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.WAITER, StaffRole.CASHIER]),
-  shiftController.getShiftsSummary,
-)
+router.get('/venues/:venueId/shifts/summary', authenticateTokenMiddleware, checkPermission('shifts:read'), shiftController.getShiftsSummary)
 
 /**
  * @openapi
@@ -3041,7 +2992,7 @@ router.get(
 router.delete(
   '/venues/:venueId/shifts/:shiftId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN, StaffRole.OWNER]),
+  checkPermission('shifts:delete'),
   shiftController.deleteShift,
 )
 

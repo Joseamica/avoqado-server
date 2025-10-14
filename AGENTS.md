@@ -131,6 +131,270 @@ The system implements a hierarchical role-based access control (RBAC) system wit
 - **Role-based middleware** automatically enforces permissions at the API level
 - **Special handling** for cross-venue access based on role hierarchy
 
+### Granular Permission System
+
+Beyond role-based access, the platform implements a **granular permission system** that controls what users can do at the **action level**. This enables fine-tuned control over feature access.
+
+#### Permission Format
+
+Permissions follow the format: `"resource:action"`
+
+**Examples:**
+- `"tpv:create"` - Create TPV terminals
+- `"menu:update"` - Update menu items
+- `"analytics:export"` - Export analytics data
+- `"shifts:delete"` - Delete shifts
+- `"orders:refund"` - Process refunds
+
+#### Wildcard Permissions
+
+- `"*:*"` - All permissions (ADMIN, OWNER, SUPERADMIN)
+- `"tpv:*"` - All TPV actions (create, read, update, delete, command)
+- `"*:read"` - Read access to all resources
+
+#### Default Permissions by Role
+
+From `src/lib/permissions.ts`:
+
+```typescript
+// VIEWER - Read-only
+'home:read', 'analytics:read', 'menu:read', 'orders:read', 'payments:read',
+'shifts:read', 'reviews:read', 'teams:read', 'tpv:read'
+
+// WAITER - Order and table management
+'menu:read', 'menu:create', 'menu:update', 'orders:*', 'payments:read',
+'payments:create', 'tables:*', 'tpv:read'
+
+// CASHIER - Payment operations
+'menu:read', 'orders:read', 'payments:*', 'shifts:read', 'tpv:read'
+
+// MANAGER - Operations
+'analytics:read', 'analytics:export', 'menu:*', 'orders:*', 'payments:refund',
+'shifts:*', 'tpv:read', 'tpv:create', 'tpv:update', 'tpv:command'
+
+// ADMIN, OWNER, SUPERADMIN - Full access
+'*:*'
+```
+
+#### Middleware Usage
+
+**File:** `src/middlewares/checkPermission.middleware.ts`
+
+**Available middleware functions:**
+- `checkPermission(permission: string)` - Require single permission
+- `checkAnyPermission(permissions: string[])` - Require at least one permission
+- `checkAllPermissions(permissions: string[])` - Require all permissions
+
+**Route Protection Examples:**
+
+```typescript
+// Single permission
+router.post('/venues/:venueId/tpvs',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:create'),
+  tpvController.createTpv
+)
+
+// Any permission (OR logic)
+router.put('/venues/:venueId/menu',
+  authenticateTokenMiddleware,
+  checkAnyPermission(['menu:update', 'admin:write']),
+  menuController.updateMenu
+)
+
+// All permissions (AND logic)
+router.delete('/venues/:venueId/shifts/:shiftId',
+  authenticateTokenMiddleware,
+  checkAllPermissions(['shifts:delete', 'admin:delete']),
+  shiftController.deleteShift
+)
+```
+
+#### Custom Permissions
+
+Beyond default role-based permissions, venues can assign **custom permissions** to individual staff members via the `StaffVenue.permissions` JSON field.
+
+**How it works:**
+1. Staff member has default permissions from their role
+2. Custom permissions are added from `StaffVenue.permissions` array
+3. Final permissions = Default + Custom
+
+**Example:**
+
+```typescript
+// WAITER role has default permissions:
+['menu:read', 'orders:create', 'tpv:read', ...]
+
+// WAITER with custom permissions:
+{
+  role: 'WAITER',
+  permissions: ['inventory:read', 'analytics:export']  // Extra permissions
+}
+
+// Final permissions = Default + Custom:
+['menu:read', 'orders:create', 'tpv:read', ..., 'inventory:read', 'analytics:export']
+```
+
+#### Adding Permissions to New Routes
+
+**Step-by-step guide:**
+
+1. **Define permission constant** in `src/lib/permissions.ts`:
+```typescript
+[StaffRole.MANAGER]: [
+  // ... existing permissions
+  'reports:create',
+  'reports:export',
+]
+```
+
+2. **Protect route** in `src/routes/dashboard.routes.ts`:
+```typescript
+router.post('/venues/:venueId/reports',
+  authenticateTokenMiddleware,
+  checkPermission('reports:create'),
+  reportController.create
+)
+```
+
+3. **Update frontend permissions** in `avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts` (MUST MATCH backend exactly!)
+
+4. **Use in frontend component**:
+```typescript
+import { usePermissions } from '@/hooks/usePermissions'
+
+function ReportsPage() {
+  const { can } = usePermissions()
+
+  return (
+    <>
+      {can('reports:create') && <Button>Create Report</Button>}
+      {can('reports:export') && <Button>Export</Button>}
+    </>
+  )
+}
+```
+
+#### Permission Validation Flow
+
+**Full stack permission check:**
+
+```
+1. User requests protected endpoint
+   └─ Frontend: PermissionGate checks permission (UX only)
+
+2. HTTP request sent to backend
+   └─ Middleware: checkPermission() validates permission
+       ├─ Extract user role from authContext
+       ├─ Get default permissions for role
+       ├─ Merge with custom permissions from StaffVenue
+       ├─ Check if user has required permission
+       ├─ Has permission? → next()
+       └─ No permission? → 403 Forbidden
+
+3. Response returned to frontend
+   └─ Success: Process data
+   └─ Error: Show permission error message
+```
+
+#### Common Permission Patterns
+
+**Resource-based permissions:**
+- `menu:create`, `menu:read`, `menu:update`, `menu:delete`
+- `tpv:create`, `tpv:read`, `tpv:update`, `tpv:delete`, `tpv:command`
+- `orders:create`, `orders:read`, `orders:update`, `orders:cancel`, `orders:refund`
+
+**Action-based permissions:**
+- `analytics:export` - Export analytics data
+- `shifts:close` - Close active shift
+- `payments:refund` - Process payment refunds
+- `admin:write` - Admin write operations
+- `admin:delete` - Admin delete operations
+
+#### CRITICAL: Frontend-Backend Sync
+
+**⚠️ MANDATORY**: Frontend and backend DEFAULT_PERMISSIONS must match EXACTLY!
+
+**Backend:** `avoqado-server/src/lib/permissions.ts`
+**Frontend:** `avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts`
+
+**Why?**
+- Frontend permissions control UX (show/hide buttons)
+- Backend permissions control security (API access)
+- Mismatch causes confusing UX or security vulnerabilities
+
+**Sync checklist when adding permissions:**
+- [ ] Add to backend `DEFAULT_PERMISSIONS`
+- [ ] Add to frontend `defaultPermissions`
+- [ ] Verify both have identical permission strings
+- [ ] Test in frontend with different roles
+- [ ] Test in backend with API calls
+
+#### Permission Testing
+
+**Manual testing:**
+
+```bash
+# 1. Get JWT token for test user
+curl -X POST "http://localhost:12344/api/v1/auth/login" \
+  -d '{"email": "waiter@test.com", "password": "test123"}'
+
+# 2. Try protected endpoint (should succeed)
+curl -X GET "http://localhost:12344/api/v1/dashboard/venues/{venueId}/menu" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. Try forbidden endpoint (should fail with 403)
+curl -X POST "http://localhost:12344/api/v1/dashboard/venues/{venueId}/tpvs" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Automated testing:**
+
+```typescript
+// tests/api-tests/permissions.test.ts
+describe('Permission Middleware', () => {
+  it('should allow MANAGER to create TPV', async () => {
+    const token = await getTokenForRole('MANAGER')
+    const response = await request(app)
+      .post(`/api/v1/dashboard/venues/${venueId}/tpvs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(tpvData)
+
+    expect(response.status).toBe(201)
+  })
+
+  it('should deny WAITER from creating TPV', async () => {
+    const token = await getTokenForRole('WAITER')
+    const response = await request(app)
+      .post(`/api/v1/dashboard/venues/${venueId}/tpvs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(tpvData)
+
+    expect(response.status).toBe(403)
+    expect(response.body.message).toContain("Permission 'tpv:create' required")
+  })
+})
+```
+
+#### Best Practices
+
+1. **Use specific permissions** - `"menu:update"` not `"*:*"` for non-admin routes
+2. **Name consistently** - Resource first, action second (`resource:action`)
+3. **Document new permissions** - Update CLAUDE.md and AGENTS.md
+4. **Keep frontend/backend synced** - Same permissions in both codebases
+5. **Test with multiple roles** - Verify WAITER can't access MANAGER features
+6. **Never skip backend validation** - Frontend permissions are UX only
+7. **Use wildcard sparingly** - Only for ADMIN/OWNER/SUPERADMIN roles
+
+#### Related Files
+
+- **Backend permissions:** `src/lib/permissions.ts`
+- **Backend middleware:** `src/middlewares/checkPermission.middleware.ts`
+- **Backend routes:** `src/routes/dashboard.routes.ts`
+- **Frontend permissions:** `avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts`
+- **Frontend hook:** `avoqado-web-dashboard/src/hooks/usePermissions.ts`
+- **Frontend component:** `avoqado-web-dashboard/src/components/PermissionGate.tsx`
+
 ### Technical Stack
 
 - **Framework**: Express.js with TypeScript
