@@ -29,6 +29,7 @@ import * as textToSqlAssistantController from '../controllers/dashboard/text-to-
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
+import inventoryRoutes from './dashboard/inventory.routes'
 import {
   CreateMenuCategorySchema,
   UpdateMenuCategorySchema,
@@ -1246,12 +1247,10 @@ router.get(
 )
 
 // Venue Payment Configuration routes (SUPERADMIN only)
-router.use(
-  '/venues/:venueId/payment-config',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.SUPERADMIN]),
-  venuePaymentConfigRoutes,
-)
+router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, authorizeRole([StaffRole.SUPERADMIN]), venuePaymentConfigRoutes)
+
+// Inventory Management routes (ADMIN and MANAGER)
+router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
 
 /**
  * @openapi
