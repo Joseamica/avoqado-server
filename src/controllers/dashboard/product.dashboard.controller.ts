@@ -9,11 +9,19 @@ import logger from '../../config/logger'
 export const getProductsHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { venueId } = req.params
+    const { includeRecipe, categoryId } = req.query
     const correlationId = (req as any).correlationId
 
-    logger.info(`Fetching products for venue ${venueId}`, { correlationId })
+    logger.info(`Fetching products for venue ${venueId}`, {
+      correlationId,
+      includeRecipe: includeRecipe === 'true',
+      categoryId: categoryId || undefined,
+    })
 
-    const products = await productService.getProducts(venueId)
+    const products = await productService.getProducts(venueId, {
+      includeRecipe: includeRecipe === 'true',
+      categoryId: categoryId as string | undefined,
+    })
 
     res.status(200).json({
       message: `Products for venue ${venueId}`,
@@ -111,13 +119,18 @@ export const deleteProductHandler = async (req: Request, res: Response, next: Ne
   try {
     const { venueId, productId } = req.params
     const correlationId = (req as any).correlationId
+    const userId = req.authContext?.userId
+
+    if (!userId) {
+      throw new AppError('User ID not found in authentication context', 401)
+    }
 
     logger.info(`Deleting product ${productId} in venue ${venueId}`, {
       correlationId,
       authContext: req.authContext,
     })
 
-    await productService.deleteProduct(venueId, productId)
+    await productService.deleteProduct(venueId, productId, userId)
 
     res.status(200).json({
       message: `Product deleted successfully`,
