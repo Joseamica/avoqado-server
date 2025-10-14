@@ -11,10 +11,11 @@
 ALTER TYPE "public"."PaymentSource" ADD VALUE IF NOT EXISTS 'TPV';
 ALTER TYPE "public"."PaymentSource" ADD VALUE IF NOT EXISTS 'OTHER';
 
--- Note: PostgreSQL requires a separate transaction after adding enum values
--- The migration will pause here and continue in the next statements
+-- Force commit to make enum values usable
+COMMIT;
 
 -- Step 2: Update existing data to new values (can be in transaction now)
+BEGIN;
 UPDATE "public"."Payment" SET source = 'TPV' WHERE source = 'AVOQADO_TPV';
 UPDATE "public"."Payment" SET source = 'OTHER' WHERE source = 'UNKNOWN';
 -- DASHBOARD_TEST stays as is
@@ -39,3 +40,5 @@ BEGIN
   -- Set default to TPV (most common case)
   ALTER TABLE "public"."Payment" ALTER COLUMN "source" SET DEFAULT 'TPV';
 END $$;
+
+COMMIT;
