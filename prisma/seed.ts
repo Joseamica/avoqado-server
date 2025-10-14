@@ -1,6 +1,8 @@
 import { faker } from '@faker-js/faker'
 import {
   AccountType,
+  AlertStatus,
+  AlertType,
   ChargeType,
   FeatureCategory,
   InvitationStatus,
@@ -16,10 +18,13 @@ import {
   OrderStatus,
   OrderType,
   PaymentMethod,
+  PaymentSource,
   PaymentStatus,
   PrismaClient,
   ProductType,
   ProviderType,
+  RawMaterialCategory,
+  RawMaterialMovementType,
   ReceiptStatus,
   ReviewSource,
   SettlementStatus,
@@ -29,9 +34,12 @@ import {
   TransactionCardType,
   TransactionStatus,
   TransactionType,
+  Unit,
+  UnitType,
   VenueType,
 } from '@prisma/client'
 import bcrypt from 'bcryptjs'
+import { getUnitType } from '../src/services/dashboard/rawMaterial.service'
 
 const prisma = new PrismaClient()
 
@@ -42,7 +50,7 @@ const HASH_ROUNDS = 10
 // ==========================================
 const SEED_CONFIG = {
   // Time series configuration
-  DAYS: parseInt(process.env.SEED_DAYS || '30'), // Reduced from 90 to 30 days
+  DAYS: parseInt(process.env.SEED_DAYS || '60'), // Default to ~2 months of historical data
   TIMEZONE: process.env.SEED_TIMEZONE || 'America/Mexico_City',
 
   // Volume configuration
@@ -287,6 +295,18 @@ async function resetDatabase() {
     ['PaymentAllocations', () => prisma.paymentAllocation.deleteMany()],
     ['Reviews', () => prisma.review.deleteMany()],
     ['ProductModifierGroups', () => prisma.productModifierGroup.deleteMany()],
+    // Inventory Management - most dependent first
+    ['RecipeLines', () => prisma.recipeLine.deleteMany()],
+    ['Recipes', () => prisma.recipe.deleteMany()],
+    ['LowStockAlerts', () => prisma.lowStockAlert.deleteMany()],
+    ['RawMaterialMovements', () => prisma.rawMaterialMovement.deleteMany()],
+    ['StockBatches', () => prisma.stockBatch.deleteMany()],
+    ['SupplierPricing', () => prisma.supplierPricing.deleteMany()],
+    ['PurchaseOrderItems', () => prisma.purchaseOrderItem.deleteMany()],
+    ['PurchaseOrders', () => prisma.purchaseOrder.deleteMany()],
+    ['RawMaterials', () => prisma.rawMaterial.deleteMany()],
+    ['Suppliers', () => prisma.supplier.deleteMany()],
+    // End Inventory Management
     ['InventoryMovements', () => prisma.inventoryMovement.deleteMany()],
     ['MenuCategoryAssignments', () => prisma.menuCategoryAssignment.deleteMany()],
     ['VenueFeatures', () => prisma.venueFeature.deleteMany()],
@@ -724,7 +744,6 @@ async function main() {
     prisma.organization.create({
       data: { name: 'Grupo Avoqado Prime', email: 'billing@avoqadoprime.com', phone: faker.phone.number(), taxId: 'AVP123456XYZ' },
     }),
-    prisma.organization.create({ data: { name: faker.company.name(), email: faker.internet.email(), phone: faker.phone.number() } }),
   ])
   console.log(`  Created ${organizations.length} organizations.`)
 
@@ -808,11 +827,19 @@ async function main() {
     })
     console.log(`  Created a sample invitation.`)
 
-    // --- Bucle de Venues (3 para Avoqado, 2 para otras organizaciones) ---
-    const venueCount = orgIndex === 0 ? 3 : 2
-    for (let i = 0; i < venueCount; i++) {
-      const venueName = orgIndex === 0 ? `Avoqado ${i === 0 ? 'Centro' : i === 1 ? 'Sur' : 'Norte'}` : `${faker.company.name()} Branch`
-      const venueSlug = generateSlug(venueName)
+    // --- Bucle de Venues: solo dos venues (uno completo, otro vacio) ---
+    const venuesConfig =
+      orgIndex === 0
+        ? [
+            { name: 'Avoqado Full', slug: 'avoqado-full', seedFullData: true },
+            { name: 'Avoqado Empty', slug: 'avoqado-empty', seedFullData: false },
+          ]
+        : []
+
+    for (const [index, venueConfig] of venuesConfig.entries()) {
+      const venueName = venueConfig.name
+      const venueSlug = venueConfig.slug || generateSlug(venueName)
+      const isFullVenue = venueConfig.seedFullData
       const venue = await prisma.venue.create({
         data: {
           organizationId: org.id,
@@ -833,26 +860,10 @@ async function main() {
       })
       console.log(`    -> Created Venue: ${venue.name}.`)
 
-      // ✅ PASO 1: CREAR ÁREAS PARA CADA VENUE
-      const areaNames = ['Salón Principal', 'Terraza', 'Barra']
-      const createdAreas = await Promise.all(
-        areaNames.map(name =>
-          prisma.area.create({
-            data: {
-              venueId: venue.id,
-              name: name,
-              description: `Área de ${name.toLowerCase()} del restaurante.`,
-            },
-          }),
-        ),
-      )
-      console.log(`      - Created ${createdAreas.length} areas.`)
-      // Asignar Staff a este Venue
+      let venueAssignments = 0
       for (const staffWithRole of createdStaffList) {
         if ([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN].includes(staffWithRole.assignedRole) || Math.random() > 0.3) {
-          // Set PIN 0000 for superadmin at Avoqado Centro
-          const pin =
-            staffWithRole.assignedRole === StaffRole.SUPERADMIN && venue.name === 'Avoqado Centro' ? '0000' : faker.string.numeric(4)
+          const pin = staffWithRole.assignedRole === StaffRole.SUPERADMIN && isFullVenue ? '0000' : faker.string.numeric(4)
 
           await prisma.staffVenue.create({
             data: {
@@ -860,11 +871,15 @@ async function main() {
               venueId: venue.id,
               role: staffWithRole.assignedRole,
               active: true,
-              pin: pin, // Set venue-specific PIN
+              pin,
             },
           })
+          venueAssignments += 1
 
-          // Create notification preferences for this staff member at this venue
+          if (!isFullVenue) {
+            continue
+          }
+
           const notificationTypes = [
             NotificationType.NEW_ORDER,
             NotificationType.ORDER_READY,
@@ -877,12 +892,10 @@ async function main() {
           ]
 
           for (const type of notificationTypes) {
-            // Different roles get different notification preferences
             let enabled = true
             let priority: NotificationPriority = NotificationPriority.NORMAL
             let channels: NotificationChannel[] = [NotificationChannel.IN_APP]
 
-            // Customize based on role
             if (staffWithRole.assignedRole === StaffRole.ADMIN || staffWithRole.assignedRole === StaffRole.OWNER) {
               channels = [NotificationChannel.IN_APP, NotificationChannel.EMAIL]
               if (type === NotificationType.POS_DISCONNECTED || type === NotificationType.LOW_INVENTORY) {
@@ -895,7 +908,7 @@ async function main() {
               }
             } else if (staffWithRole.assignedRole === StaffRole.WAITER) {
               if (type === NotificationType.LOW_INVENTORY) {
-                enabled = false // Waiters don't need inventory alerts
+                enabled = false
               }
               if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
                 priority = NotificationPriority.HIGH
@@ -917,116 +930,145 @@ async function main() {
           }
         }
       }
-      console.log(`      - Assigned staff to ${venue.name} and created notification preferences.`)
 
-      // Settings y Features
-      await prisma.venueSettings.create({ data: { venueId: venue.id, trackInventory: true, allowReservations: true } })
-      for (const feature of allFeatures) {
-        if (Math.random() > 0.5) {
-          await prisma.venueFeature.create({ data: { venueId: venue.id, featureId: feature.id, monthlyPrice: feature.monthlyPrice } })
-        }
+      if (isFullVenue) {
+        console.log(`      - Assigned ${venueAssignments} staff to ${venue.name} and created notification preferences for active roles.`)
+      } else {
+        console.log(`      - Assigned ${venueAssignments} staff to ${venue.name} (empty venue, no preferences created).`)
       }
-      console.log(`      - Created VenueSettings and assigned Features.`)
+
+      await prisma.venueSettings.create({
+        data: {
+          venueId: venue.id,
+          trackInventory: isFullVenue,
+          allowReservations: isFullVenue,
+        },
+      })
+      if (isFullVenue) {
+        for (const feature of allFeatures) {
+          await prisma.venueFeature.create({
+            data: {
+              venueId: venue.id,
+              featureId: feature.id,
+              monthlyPrice: feature.monthlyPrice,
+            },
+          })
+        }
+        console.log(`      - Created VenueSettings and assigned all Features.`)
+      } else {
+        console.log(`      - Created minimal VenueSettings for ${venue.name}.`)
+      }
 
       // --- Payment Configuration for this Venue ---
-      await prisma.venuePaymentConfig.create({
-        data: {
-          venueId: venue.id,
-          primaryAccountId: mentaMerchantPrimary.id,
-          secondaryAccountId: mentaMerchantSecondary.id,
-          tertiaryAccountId: i === 0 ? clipMerchant.id : null, // Only first venue gets Clip as tertiary
-          routingRules: {
-            factura: 'secondary', // Use secondary account when customer needs invoice
-            amount_over: 5000, // Use tertiary for amounts over $5000 MXN
-            customer_type: {
-              business: 'secondary', // Business customers use secondary
-            },
-            bin_routing: {
-              '4111': 'secondary', // Route specific BINs to secondary
-              '5555': 'tertiary',
-            },
-            time_based: {
-              peak_hours: {
-                start: '18:00',
-                end: '22:00',
-                account: 'tertiary', // Use tertiary during peak hours
-              },
-            },
-          },
-        },
-      })
-
-      // --- Venue Pricing Structures (what you charge venues) ---
-      // Primary account pricing (with margins over provider costs)
-      await prisma.venuePricingStructure.create({
-        data: {
-          venueId: venue.id,
-          accountType: AccountType.PRIMARY,
-          debitRate: 0.02, // 2.0% (0.5% margin over 1.5% cost)
-          creditRate: 0.03, // 3.0% (0.5% margin over 2.5% cost)
-          amexRate: 0.0425, // 4.25% (0.75% margin over 3.5% cost)
-          internationalRate: 0.045, // 4.5% (0.5% margin over 4.0% cost)
-          fixedFeePerTransaction: 0.75, // 0.75 MXN (0.25 margin over 0.50 cost)
-          monthlyServiceFee: 799.0, // 799 MXN (299 margin over 500 cost)
-          effectiveFrom: new Date('2024-01-01'),
-          active: true,
-          contractReference: `CONTRACT-${venue.slug.toUpperCase()}-PRIMARY`,
-          notes: `Standard pricing for ${venue.name} - Primary Account`,
-        },
-      })
-
-      // Secondary account pricing (higher margins due to invoice capability)
-      await prisma.venuePricingStructure.create({
-        data: {
-          venueId: venue.id,
-          accountType: AccountType.SECONDARY,
-          debitRate: 0.022, // 2.2% (0.6% margin over 1.6% cost)
-          creditRate: 0.032, // 3.2% (0.5% margin over 2.7% cost)
-          amexRate: 0.045, // 4.5% (0.8% margin over 3.7% cost)
-          internationalRate: 0.048, // 4.8% (0.6% margin over 4.2% cost)
-          fixedFeePerTransaction: 0.9, // 0.90 MXN (0.30 margin over 0.60 cost)
-          monthlyServiceFee: 999.0, // 999 MXN (399 margin over 600 cost)
-          effectiveFrom: new Date('2024-01-01'),
-          active: true,
-          contractReference: `CONTRACT-${venue.slug.toUpperCase()}-SECONDARY`,
-          notes: `Premium pricing for ${venue.name} - Secondary Account with invoice capability`,
-        },
-      })
-
-      // Tertiary account pricing (if Clip is available)
-      if (i === 0) {
-        await prisma.venuePricingStructure.create({
+      if (isFullVenue) {
+        await prisma.venuePaymentConfig.create({
           data: {
             venueId: venue.id,
-            accountType: AccountType.TERTIARY,
-            debitRate: 0.035, // 3.5% (0.7% margin over 2.8% Clip cost)
-            creditRate: 0.036, // 3.6% (0.7% margin over 2.9% cost)
-            amexRate: 0.0425, // 4.25% (0.75% margin over 3.5% cost)
-            internationalRate: 0.045, // 4.5% (0.5% margin over 4.0% cost)
-            fixedFeePerTransaction: 0.5, // 0.50 MXN (0.50 margin since Clip has no fixed fee)
-            monthlyServiceFee: 299.0, // 299 MXN (299 margin since Clip has no monthly fee)
-            effectiveFrom: new Date('2024-01-01'),
-            active: true,
-            contractReference: `CONTRACT-${venue.slug.toUpperCase()}-TERTIARY`,
-            notes: `Digital wallet pricing for ${venue.name} - Clip integration`,
+            primaryAccountId: mentaMerchantPrimary.id,
+            secondaryAccountId: mentaMerchantSecondary.id,
+            tertiaryAccountId: index === 0 ? clipMerchant.id : null,
+            routingRules: {
+              factura: 'secondary',
+              amount_over: 5000,
+              customer_type: {
+                business: 'secondary',
+              },
+              bin_routing: {
+                '4111': 'secondary',
+                '5555': 'tertiary',
+              },
+              time_based: {
+                peak_hours: {
+                  start: '18:00',
+                  end: '22:00',
+                  account: 'tertiary',
+                },
+              },
+            },
           },
         })
       }
 
-      console.log(`      - Created payment configuration and pricing structures.`)
+      // --- Venue Pricing Structures (what you charge venues) ---
+      if (isFullVenue) {
+        await prisma.venuePricingStructure.create({
+          data: {
+            venueId: venue.id,
+            accountType: AccountType.PRIMARY,
+            debitRate: Number(mentaPrimaryCosts.debitRate) + 0.004,
+            creditRate: Number(mentaPrimaryCosts.creditRate) + 0.005,
+            amexRate: Number(mentaPrimaryCosts.amexRate) + 0.006,
+            internationalRate: Number(mentaPrimaryCosts.internationalRate) + 0.007,
+            fixedFeePerTransaction: Number(mentaPrimaryCosts.fixedCostPerTransaction) + 0.4,
+            monthlyServiceFee: 799.0,
+            active: true,
+            effectiveFrom: new Date('2024-01-01'),
+            contractReference: 'MENTA-2024-PRIMARY-RT01',
+          },
+        })
+        await prisma.venuePricingStructure.create({
+          data: {
+            venueId: venue.id,
+            accountType: AccountType.SECONDARY,
+            debitRate: Number(mentaSecondaryCosts.debitRate) + 0.004,
+            creditRate: Number(mentaSecondaryCosts.creditRate) + 0.005,
+            amexRate: Number(mentaSecondaryCosts.amexRate) + 0.006,
+            internationalRate: Number(mentaSecondaryCosts.internationalRate) + 0.007,
+            fixedFeePerTransaction: Number(mentaSecondaryCosts.fixedCostPerTransaction) + 0.4,
+            monthlyServiceFee: 899.0,
+            active: true,
+            effectiveFrom: new Date('2024-01-01'),
+            contractReference: 'MENTA-2024-SECONDARY-RT01',
+          },
+        })
+        console.log(`      - Created venue pricing structures.`)
+      }
+
+      if (!isFullVenue) {
+        console.log(`      - Skipping detailed seeding for ${venue.name} (empty sandbox).`)
+        continue
+      }
+
+      const areaNames = ['Salon Principal', 'Terraza', 'Barra']
+      const createdAreas = await Promise.all(
+        areaNames.map(name =>
+          prisma.area.create({
+            data: {
+              venueId: venue.id,
+              name,
+              description: `Area de ${name.toLowerCase()} del restaurante.`,
+            },
+          }),
+        ),
+      )
+      console.log(`      - Created ${createdAreas.length} areas.`)
+
+      const tables = await Promise.all(
+        Array.from({ length: 5 }).map((_, t) =>
+          prisma.table.create({
+            data: {
+              venueId: venue.id,
+              number: `M${t + 1}`,
+              areaId: getRandomItem(createdAreas).id,
+              capacity: getRandomItem([2, 4, 6]),
+              qrCode: faker.string.uuid(),
+            },
+          }),
+        ),
+      )
+      console.log(`      - Created ${tables.length} tables.`)
 
       const terminals = await Promise.all(
         Array.from({ length: 3 }).map((_, t) => {
-          // Create varied TPV health scenarios for testing
           const scenarios = [
             {
               status: TerminalStatus.ACTIVE,
-              lastHeartbeat: new Date(Date.now() - 30 * 1000), // 30 seconds ago - online
+              lastHeartbeat: new Date(Date.now() - 30 * 1000),
               version: '2.1.4',
               systemInfo: {
                 platform: 'Android 13',
                 memory: { total: 4096, free: 2048, used: 2048 },
-                uptime: 86400, // 24 hours in seconds
+                uptime: 86400,
                 cpuUsage: 15.2,
                 diskSpace: { total: 64000, free: 32000, used: 32000 },
                 batteryLevel: 85,
@@ -1037,12 +1079,12 @@ async function main() {
             },
             {
               status: TerminalStatus.MAINTENANCE,
-              lastHeartbeat: new Date(Date.now() - 10 * 60 * 1000), // 10 minutes ago - maintenance
+              lastHeartbeat: new Date(Date.now() - 10 * 60 * 1000),
               version: '2.1.3',
               systemInfo: {
                 platform: 'Android 12',
                 memory: { total: 2048, free: 512, used: 1536 },
-                uptime: 43200, // 12 hours in seconds
+                uptime: 43200,
                 cpuUsage: 5.8,
                 diskSpace: { total: 32000, free: 8000, used: 24000 },
                 batteryLevel: 45,
@@ -1053,12 +1095,12 @@ async function main() {
             },
             {
               status: TerminalStatus.INACTIVE,
-              lastHeartbeat: new Date(Date.now() - 5 * 60 * 1000), // 5 minutes ago - will be detected as offline
+              lastHeartbeat: new Date(Date.now() - 5 * 60 * 1000),
               version: '2.0.8',
               systemInfo: {
                 platform: 'Android 11',
-                memory: { total: 4096, free: 1024, used: 3072 },
-                uptime: 7200, // 2 hours in seconds
+                memory: { total: 1024, free: 128, used: 896 },
+                uptime: 7200,
                 cpuUsage: 35.7,
                 diskSpace: { total: 64000, free: 16000, used: 48000 },
                 batteryLevel: 12,
@@ -1070,25 +1112,16 @@ async function main() {
           ]
 
           const scenario = scenarios[t] || scenarios[0]
+          const isPrimaryVenueTerminal = t === 0 && venue.name.includes('Avoqado Full')
 
-          // Use actual device serial for the first terminal (development device)
-          const serialNumber =
-            t === 0 && venue.name.includes('Avoqado Centro')
-              ? '98282447347751' // Your actual Android device serial
-              : faker.string.uuid()
+          const serialNumber = isPrimaryVenueTerminal ? '98282447347751' : faker.string.uuid()
 
           return prisma.terminal.create({
             data: {
-              id:
-                t === 0 && venue.name.includes('Avoqado Centro')
-                  ? '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122' // Menta terminal UUID (must match MerchantAccount.credentialsEncrypted.terminalId)
-                  : undefined, // Let Prisma generate UUID for others
+              id: isPrimaryVenueTerminal ? '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122' : undefined,
               venueId: venue.id,
               serialNumber,
-              name:
-                t === 0 && venue.name.includes('Avoqado Centro')
-                  ? 'TPV Desarrollo (Android)' // Clear name for development device
-                  : `TPV ${t + 1}`,
+              name: isPrimaryVenueTerminal ? 'TPV Desarrollo (Android)' : `TPV ${t + 1}`,
               type: TerminalType.TPV_ANDROID,
               status: scenario.status,
               lastHeartbeat: scenario.lastHeartbeat,
@@ -1100,22 +1133,6 @@ async function main() {
         }),
       )
       console.log(`      - Created ${terminals.length} terminals.`)
-
-      const tables = await Promise.all(
-        Array.from({ length: 5 }).map((_, t) =>
-          prisma.table.create({
-            data: {
-              venueId: venue.id,
-              number: `M${t + 1}`,
-              areaId: getRandomItem(createdAreas).id,
-
-              capacity: getRandomItem([2, 4, 6]),
-              qrCode: faker.string.uuid(),
-            },
-          }),
-        ),
-      )
-      console.log(`      - Created ${tables.length} tables.`)
 
       const categories = await Promise.all(
         ['Entradas', 'Platos Fuertes', 'Postres', 'Bebidas', 'Sopas'].map((name, index) =>
@@ -1170,6 +1187,601 @@ async function main() {
       )
       console.log(`      - Created ${products.length} products with initial inventory.`)
 
+      // ==========================================
+      // INVENTORY MANAGEMENT SEEDING (Avoqado Full ONLY)
+      // ==========================================
+      if (venue.name === 'Avoqado Full') {
+        console.log(`      - 🥑 Seeding comprehensive inventory data for ${venue.name}...`)
+
+        // Enable INVENTORY_MANAGEMENT feature for Avoqado Full
+        const inventoryFeature = allFeatures.find(f => f.code === 'INVENTORY_TRACKING')
+        if (inventoryFeature) {
+          const existingVenueFeature = await prisma.venueFeature.findFirst({
+            where: { venueId: venue.id, featureId: inventoryFeature.id },
+          })
+          if (!existingVenueFeature) {
+            await prisma.venueFeature.create({
+              data: { venueId: venue.id, featureId: inventoryFeature.id, monthlyPrice: inventoryFeature.monthlyPrice },
+            })
+            console.log(`      - ✅ Enabled INVENTORY_TRACKING feature`)
+          }
+        }
+
+        // Create comprehensive RawMaterials with different categories
+        const rawMaterialsData = [
+          // MEAT
+          {
+            name: 'Pollo Pechuga',
+            sku: 'MEAT-POLLO-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 50,
+            unit: Unit.KILOGRAM,
+            minimumStock: 10,
+            reorderPoint: 15,
+            maximumStock: 100,
+            costPerUnit: 85.5,
+            avgCostPerUnit: 85.5,
+            perishable: true,
+            shelfLifeDays: 5,
+            description: 'Pechuga de pollo fresca, sin hueso',
+          },
+          {
+            name: 'Carne de Res Molida',
+            sku: 'MEAT-RES-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 35,
+            unit: Unit.KILOGRAM,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 80,
+            costPerUnit: 120.0,
+            avgCostPerUnit: 120.0,
+            perishable: true,
+            shelfLifeDays: 3,
+            description: 'Carne molida de res 80/20',
+          },
+          // VEGETABLES
+          {
+            name: 'Tomate Roma',
+            sku: 'VEG-TOMATE-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 25,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 50,
+            costPerUnit: 18.5,
+            avgCostPerUnit: 18.5,
+            perishable: true,
+            shelfLifeDays: 7,
+            description: 'Tomate roma fresco',
+          },
+          {
+            name: 'Cebolla Blanca',
+            sku: 'VEG-CEBOLLA-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 40,
+            unit: Unit.KILOGRAM,
+            minimumStock: 10,
+            reorderPoint: 15,
+            maximumStock: 80,
+            costPerUnit: 22.0,
+            avgCostPerUnit: 22.0,
+            perishable: true,
+            shelfLifeDays: 14,
+            description: 'Cebolla blanca nacional',
+          },
+          {
+            name: 'Lechuga Romana',
+            sku: 'VEG-LECHUGA-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 15,
+            unit: Unit.KILOGRAM,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 30,
+            costPerUnit: 28.0,
+            avgCostPerUnit: 28.0,
+            perishable: true,
+            shelfLifeDays: 5,
+            description: 'Lechuga romana fresca',
+          },
+          // DAIRY
+          {
+            name: 'Queso Manchego',
+            sku: 'DAIRY-QUESO-001',
+            category: RawMaterialCategory.DAIRY,
+            currentStock: 20,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
+            costPerUnit: 180.0,
+            avgCostPerUnit: 180.0,
+            perishable: true,
+            shelfLifeDays: 30,
+            description: 'Queso manchego añejado',
+          },
+          {
+            name: 'Crema Ácida',
+            sku: 'DAIRY-CREMA-001',
+            category: RawMaterialCategory.DAIRY,
+            currentStock: 12,
+            unit: Unit.LITER,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 25,
+            costPerUnit: 45.0,
+            avgCostPerUnit: 45.0,
+            perishable: true,
+            shelfLifeDays: 14,
+            description: 'Crema ácida natural',
+          },
+          // GRAINS
+          {
+            name: 'Arroz Blanco',
+            sku: 'GRAIN-ARROZ-001',
+            category: RawMaterialCategory.GRAINS,
+            currentStock: 100,
+            unit: Unit.KILOGRAM,
+            minimumStock: 20,
+            reorderPoint: 30,
+            maximumStock: 200,
+            costPerUnit: 18.0,
+            avgCostPerUnit: 18.0,
+            perishable: false,
+            description: 'Arroz blanco grano largo',
+          },
+          {
+            name: 'Frijol Negro',
+            sku: 'GRAIN-FRIJOL-001',
+            category: RawMaterialCategory.GRAINS,
+            currentStock: 80,
+            unit: Unit.KILOGRAM,
+            minimumStock: 15,
+            reorderPoint: 25,
+            maximumStock: 150,
+            costPerUnit: 22.0,
+            avgCostPerUnit: 22.0,
+            perishable: false,
+            description: 'Frijol negro seleccionado',
+          },
+          // SPICES
+          {
+            name: 'Sal de Mar',
+            sku: 'SPICE-SAL-001',
+            category: RawMaterialCategory.SPICES,
+            currentStock: 30,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 10,
+            maximumStock: 60,
+            costPerUnit: 12.0,
+            avgCostPerUnit: 12.0,
+            perishable: false,
+            description: 'Sal de mar fina',
+          },
+          {
+            name: 'Pimienta Negra Molida',
+            sku: 'SPICE-PIMIENTA-001',
+            category: RawMaterialCategory.SPICES,
+            currentStock: 8,
+            unit: Unit.KILOGRAM,
+            minimumStock: 2,
+            reorderPoint: 3,
+            maximumStock: 15,
+            costPerUnit: 250.0,
+            avgCostPerUnit: 250.0,
+            perishable: false,
+            description: 'Pimienta negra recién molida',
+          },
+          // OILS
+          {
+            name: 'Aceite de Oliva Extra Virgen',
+            sku: 'OIL-OLIVA-001',
+            category: RawMaterialCategory.OILS,
+            currentStock: 25,
+            unit: Unit.LITER,
+            minimumStock: 5,
+            reorderPoint: 10,
+            maximumStock: 50,
+            costPerUnit: 185.0,
+            avgCostPerUnit: 185.0,
+            perishable: false,
+            description: 'Aceite de oliva extra virgen importado',
+          },
+          {
+            name: 'Aceite Vegetal',
+            sku: 'OIL-VEGETAL-001',
+            category: RawMaterialCategory.OILS,
+            currentStock: 40,
+            unit: Unit.LITER,
+            minimumStock: 10,
+            reorderPoint: 15,
+            maximumStock: 80,
+            costPerUnit: 32.0,
+            avgCostPerUnit: 32.0,
+            perishable: false,
+            description: 'Aceite vegetal para cocina',
+          },
+          // BEVERAGES
+          {
+            name: 'Coca-Cola 600ml',
+            sku: 'BEV-COCA-001',
+            category: RawMaterialCategory.BEVERAGES,
+            currentStock: 200,
+            unit: Unit.UNIT,
+            minimumStock: 50,
+            reorderPoint: 80,
+            maximumStock: 400,
+            costPerUnit: 12.5,
+            avgCostPerUnit: 12.5,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Coca-Cola botella 600ml',
+          },
+          {
+            name: 'Agua Mineral 1L',
+            sku: 'BEV-AGUA-001',
+            category: RawMaterialCategory.BEVERAGES,
+            currentStock: 300,
+            unit: Unit.UNIT,
+            minimumStock: 80,
+            reorderPoint: 120,
+            maximumStock: 600,
+            costPerUnit: 8.0,
+            avgCostPerUnit: 8.0,
+            perishable: false,
+            description: 'Agua mineral embotellada 1L',
+          },
+        ]
+
+        const createdRawMaterials = []
+        for (const rmData of rawMaterialsData) {
+          const rawMaterial = await prisma.rawMaterial.create({
+            data: {
+              ...rmData,
+              venueId: venue.id,
+              unitType: getUnitType(rmData.unit),
+              active: true,
+            },
+          })
+
+          // Create initial stock batch for each raw material
+          const batch = await prisma.stockBatch.create({
+            data: {
+              rawMaterialId: rawMaterial.id,
+              venueId: venue.id,
+              batchNumber: `BATCH-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+              initialQuantity: rmData.currentStock,
+              remainingQuantity: rmData.currentStock,
+              unit: rmData.unit,
+              costPerUnit: rmData.costPerUnit,
+              receivedDate: faker.date.recent({ days: 15 }),
+              expirationDate:
+                rmData.perishable && rmData.shelfLifeDays ? new Date(Date.now() + rmData.shelfLifeDays * 24 * 60 * 60 * 1000) : null,
+            },
+          })
+
+          // Create initial movement record
+          await prisma.rawMaterialMovement.create({
+            data: {
+              rawMaterialId: rawMaterial.id,
+              venueId: venue.id,
+              batchId: batch.id,
+              type: RawMaterialMovementType.PURCHASE,
+              quantity: rmData.currentStock,
+              unit: rmData.unit,
+              previousStock: 0,
+              newStock: rmData.currentStock,
+              costImpact: rmData.costPerUnit * rmData.currentStock,
+              reason: 'Stock inicial - Seed data',
+              reference: `SEED-${Date.now()}`,
+            },
+          })
+
+          createdRawMaterials.push(rawMaterial)
+        }
+
+        console.log(`      - ✅ Created ${createdRawMaterials.length} raw materials with stock batches`)
+
+        // Create simple recipes for beverage products (1:1 mapping with raw materials)
+        const bebidasCategory = categories.find(c => c.name === 'Bebidas')
+        if (bebidasCategory) {
+          const bebidaProducts = products.filter(p => p.categoryId === bebidasCategory.id).slice(0, 2)
+          const cocaCola = createdRawMaterials.find(rm => rm.sku === 'BEV-COCA-001')
+          const aguaMineral = createdRawMaterials.find(rm => rm.sku === 'BEV-AGUA-001')
+
+          if (bebidaProducts[0] && cocaCola) {
+            const cocaRecipe = await prisma.recipe.create({
+              data: {
+                productId: bebidaProducts[0].id,
+                portionYield: 1,
+                totalCost: Number(cocaCola.costPerUnit),
+                prepTime: 0,
+                cookTime: 0,
+                notes: 'Simple product - direct raw material mapping',
+              },
+            })
+            await prisma.recipeLine.create({
+              data: {
+                recipeId: cocaRecipe.id,
+                rawMaterialId: cocaCola.id,
+                quantity: 1,
+                unit: Unit.UNIT,
+                isOptional: false,
+              },
+            })
+          }
+
+          if (bebidaProducts[1] && aguaMineral) {
+            const aguaRecipe = await prisma.recipe.create({
+              data: {
+                productId: bebidaProducts[1].id,
+                portionYield: 1,
+                totalCost: Number(aguaMineral.costPerUnit),
+                prepTime: 0,
+                cookTime: 0,
+                notes: 'Simple product - direct raw material mapping',
+              },
+            })
+            await prisma.recipeLine.create({
+              data: {
+                recipeId: aguaRecipe.id,
+                rawMaterialId: aguaMineral.id,
+                quantity: 1,
+                unit: Unit.UNIT,
+                isOptional: false,
+              },
+            })
+          }
+          console.log(`      - ✅ Created ${Math.min(bebidaProducts.length, 2)} simple recipes for beverage products`)
+        }
+
+        // Create recipes with recipe lines for RECIPE_BASED products
+        const platosCategory = categories.find(c => c.name === 'Platos Fuertes')
+        if (platosCategory) {
+          const platoProducts = products.filter(p => p.categoryId === platosCategory.id).slice(0, 3)
+
+          // Recipe 1: Chicken dish
+          if (platoProducts[0]) {
+            const recipe1 = await prisma.recipe.create({
+              data: {
+                productId: platoProducts[0].id,
+                portionYield: 1,
+                totalCost: 0, // Will be calculated from ingredients
+                prepTime: 30,
+                cookTime: 45,
+                notes: 'Cortar el pollo, sazonar, cocinar a fuego medio por 45 minutos.',
+              },
+            })
+
+            // Add recipe lines
+            const pollo = createdRawMaterials.find(rm => rm.sku === 'MEAT-POLLO-001')
+            const arroz = createdRawMaterials.find(rm => rm.sku === 'GRAIN-ARROZ-001')
+            const aceiteOliva = createdRawMaterials.find(rm => rm.sku === 'OIL-OLIVA-001')
+
+            if (pollo && arroz && aceiteOliva) {
+              await prisma.recipeLine.createMany({
+                data: [
+                  {
+                    recipeId: recipe1.id,
+                    rawMaterialId: pollo.id,
+                    quantity: 0.25, // 250g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                  {
+                    recipeId: recipe1.id,
+                    rawMaterialId: arroz.id,
+                    quantity: 0.1, // 100g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                  {
+                    recipeId: recipe1.id,
+                    rawMaterialId: aceiteOliva.id,
+                    quantity: 0.02, // 20ml per serving
+                    unit: Unit.LITER,
+                    isOptional: false,
+                  },
+                ],
+              })
+            }
+          }
+
+          // Recipe 2: Beef dish
+          if (platoProducts[1]) {
+            const recipe2 = await prisma.recipe.create({
+              data: {
+                productId: platoProducts[1].id,
+                portionYield: 1,
+                totalCost: 0, // Will be calculated from ingredients
+                prepTime: 20,
+                cookTime: 30,
+                notes: 'Preparar la carne molida con especias, cocinar con verduras.',
+              },
+            })
+
+            const carneRes = createdRawMaterials.find(rm => rm.sku === 'MEAT-RES-001')
+            const tomate = createdRawMaterials.find(rm => rm.sku === 'VEG-TOMATE-001')
+            const cebolla = createdRawMaterials.find(rm => rm.sku === 'VEG-CEBOLLA-001')
+            const frijol = createdRawMaterials.find(rm => rm.sku === 'GRAIN-FRIJOL-001')
+
+            if (carneRes && tomate && cebolla && frijol) {
+              await prisma.recipeLine.createMany({
+                data: [
+                  {
+                    recipeId: recipe2.id,
+                    rawMaterialId: carneRes.id,
+                    quantity: 0.2, // 200g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                  {
+                    recipeId: recipe2.id,
+                    rawMaterialId: tomate.id,
+                    quantity: 0.08, // 80g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                  {
+                    recipeId: recipe2.id,
+                    rawMaterialId: cebolla.id,
+                    quantity: 0.05, // 50g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                  {
+                    recipeId: recipe2.id,
+                    rawMaterialId: frijol.id,
+                    quantity: 0.12, // 120g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                ],
+              })
+            }
+          }
+
+          // Recipe 3: Salad
+          if (platoProducts[2]) {
+            const recipe3 = await prisma.recipe.create({
+              data: {
+                productId: platoProducts[2].id,
+                portionYield: 1,
+                totalCost: 0, // Will be calculated from ingredients
+                prepTime: 15,
+                cookTime: 0,
+                notes: 'Lavar y cortar verduras, mezclar con aderezo.',
+              },
+            })
+
+            const lechuga = createdRawMaterials.find(rm => rm.sku === 'VEG-LECHUGA-001')
+            const tomate = createdRawMaterials.find(rm => rm.sku === 'VEG-TOMATE-001')
+            const queso = createdRawMaterials.find(rm => rm.sku === 'DAIRY-QUESO-001')
+            const aceiteOliva = createdRawMaterials.find(rm => rm.sku === 'OIL-OLIVA-001')
+
+            if (lechuga && tomate && queso && aceiteOliva) {
+              await prisma.recipeLine.createMany({
+                data: [
+                  {
+                    recipeId: recipe3.id,
+                    rawMaterialId: lechuga.id,
+                    quantity: 0.15, // 150g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                  {
+                    recipeId: recipe3.id,
+                    rawMaterialId: tomate.id,
+                    quantity: 0.1, // 100g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: false,
+                  },
+                  {
+                    recipeId: recipe3.id,
+                    rawMaterialId: queso.id,
+                    quantity: 0.03, // 30g per serving
+                    unit: Unit.KILOGRAM,
+                    isOptional: true,
+                  },
+                  {
+                    recipeId: recipe3.id,
+                    rawMaterialId: aceiteOliva.id,
+                    quantity: 0.015, // 15ml per serving
+                    unit: Unit.LITER,
+                    isOptional: false,
+                  },
+                ],
+              })
+            }
+          }
+
+          console.log(`      - ✅ Created 5 recipes with recipe lines (2 simple beverage + 3 complex food dishes)`)
+        }
+
+        // Create some additional movements (purchases and usage) for realistic history
+        const sampleMovements = []
+        for (let i = 0; i < 10; i++) {
+          const randomRawMaterial = getRandomItem(createdRawMaterials.slice(0, 5))
+          const movementDate = faker.date.recent({ days: 7 })
+          const isDeduction = Math.random() > 0.6 // 40% purchases, 60% deductions
+
+          if (isDeduction) {
+            const deductionQuantity = faker.number.float({ min: 0.5, max: 3, fractionDigits: 2 })
+            const previousStock = Number(randomRawMaterial.currentStock)
+            const newStock = Math.max(0, previousStock - deductionQuantity)
+
+            sampleMovements.push({
+              rawMaterialId: randomRawMaterial.id,
+              venueId: venue.id,
+              type: RawMaterialMovementType.USAGE,
+              quantity: -deductionQuantity,
+              unit: randomRawMaterial.unit,
+              previousStock,
+              newStock,
+              costImpact: -(Number(randomRawMaterial.costPerUnit) * deductionQuantity),
+              reason: 'Uso en preparación de platillos',
+              createdAt: movementDate,
+            })
+
+            // Update raw material stock
+            await prisma.rawMaterial.update({
+              where: { id: randomRawMaterial.id },
+              data: { currentStock: newStock },
+            })
+          } else {
+            const additionQuantity = faker.number.float({ min: 5, max: 20, fractionDigits: 2 })
+            const previousStock = Number(randomRawMaterial.currentStock)
+            const newStock = previousStock + additionQuantity
+
+            sampleMovements.push({
+              rawMaterialId: randomRawMaterial.id,
+              venueId: venue.id,
+              type: RawMaterialMovementType.PURCHASE,
+              quantity: additionQuantity,
+              unit: randomRawMaterial.unit,
+              previousStock,
+              newStock,
+              costImpact: Number(randomRawMaterial.costPerUnit) * additionQuantity,
+              reason: 'Compra a proveedor',
+              reference: `PO-${faker.string.alphanumeric(6).toUpperCase()}`,
+              createdAt: movementDate,
+            })
+
+            // Update raw material stock
+            await prisma.rawMaterial.update({
+              where: { id: randomRawMaterial.id },
+              data: { currentStock: newStock },
+            })
+          }
+        }
+
+        if (sampleMovements.length > 0) {
+          await prisma.rawMaterialMovement.createMany({ data: sampleMovements })
+          console.log(`      - ✅ Created ${sampleMovements.length} sample stock movements (purchases and usage)`)
+        }
+
+        // Create a low stock alert for demonstration
+        const lowStockItem = createdRawMaterials.find(rm => Number(rm.currentStock) <= Number(rm.reorderPoint))
+        if (lowStockItem) {
+          await prisma.lowStockAlert.create({
+            data: {
+              venueId: venue.id,
+              rawMaterialId: lowStockItem.id,
+              alertType: Number(lowStockItem.currentStock) === 0 ? AlertType.OUT_OF_STOCK : AlertType.LOW_STOCK,
+              threshold: lowStockItem.reorderPoint,
+              currentLevel: lowStockItem.currentStock,
+              status: AlertStatus.ACTIVE,
+            },
+          })
+          console.log(`      - ✅ Created low stock alert for demonstration`)
+        }
+
+        console.log(`      - 🎉 Inventory seeding completed for ${venue.name}!`)
+      }
+
       // ✅ LÍNEA CORREGIDA: Se añade el tipo explícito al array
       const sellableProductTypes: ProductType[] = [ProductType.FOOD, ProductType.BEVERAGE, ProductType.ALCOHOL, ProductType.RETAIL]
       const sellableProducts = products.filter(p => sellableProductTypes.includes(p.type))
@@ -1214,7 +1826,8 @@ async function main() {
 
         const dayVolume = getOrderVolumeForDay(currentDate)
         const dayMultiplier = isAvoqadoVenue ? 1 : 0.3 // Avoqado venues get full data
-        const actualVolume = Math.round(dayVolume * dayMultiplier)
+        const scaledVolume = Math.round(dayVolume * dayMultiplier)
+        const actualVolume = isFullVenue ? Math.max(1, scaledVolume) : scaledVolume
 
         if (actualVolume === 0) continue
 
@@ -1375,6 +1988,14 @@ async function main() {
                 ? PaymentMethod.CASH
                 : getRandomItem([PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD])
 
+            const paymentSource = getRandomItem([
+              PaymentSource.TPV,
+              PaymentSource.DASHBOARD_TEST,
+              PaymentSource.QR,
+              PaymentSource.WEB,
+              PaymentSource.POS,
+            ])
+
             const feePercentage = parseFloat(venue.feeValue.toString())
             const feeAmount = total * feePercentage
             const netAmount = total - feeAmount
@@ -1391,6 +2012,7 @@ async function main() {
                 amount: total,
                 tipAmount,
                 method: paymentMethod,
+                source: paymentSource,
                 status: TransactionStatus.COMPLETED,
                 splitType: 'FULLPAYMENT',
                 processor: paymentMethod !== PaymentMethod.CASH ? 'stripe' : null,
