@@ -162,10 +162,7 @@ export async function createVenuePaymentConfig(data: VenuePaymentConfigCreateInp
 /**
  * Update payment config for a venue
  */
-export async function updateVenuePaymentConfig(
-  configId: string,
-  data: VenuePaymentConfigUpdateInput,
-) {
+export async function updateVenuePaymentConfig(configId: string, data: VenuePaymentConfigUpdateInput) {
   // Verify config exists
   const existingConfig = await prisma.venuePaymentConfig.findUnique({
     where: { id: configId },

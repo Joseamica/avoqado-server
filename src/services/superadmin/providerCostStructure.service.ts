@@ -57,10 +57,7 @@ interface UpdateProviderCostStructureData {
  * @param includeInactive Include inactive cost structures (default: false)
  * @returns List of cost structures ordered by effectiveFrom DESC
  */
-export async function getProviderCostStructures(
-  merchantAccountId?: string,
-  includeInactive: boolean = false,
-) {
+export async function getProviderCostStructures(merchantAccountId?: string, includeInactive: boolean = false) {
   const where: any = {}
 
   if (merchantAccountId) {
@@ -211,10 +208,7 @@ export async function createProviderCostStructure(data: CreateProviderCostStruct
     where: {
       merchantAccountId: data.merchantAccountId,
       active: true,
-      OR: [
-        { effectiveTo: null },
-        { effectiveTo: { gte: data.effectiveFrom } },
-      ],
+      OR: [{ effectiveTo: null }, { effectiveTo: { gte: data.effectiveFrom } }],
     },
   })
 

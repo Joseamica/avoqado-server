@@ -94,16 +94,7 @@ export async function getMerchantAccountCredentials(req: Request, res: Response,
  */
 export async function createMerchantAccount(req: Request, res: Response, next: NextFunction) {
   try {
-    const {
-      providerId,
-      externalMerchantId,
-      alias,
-      displayName,
-      active,
-      displayOrder,
-      credentials,
-      providerConfig,
-    } = req.body
+    const { providerId, externalMerchantId, alias, displayName, active, displayOrder, credentials, providerConfig } = req.body
 
     // Validate required fields
     if (!providerId) {
@@ -154,15 +145,7 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
 export async function updateMerchantAccount(req: Request, res: Response, next: NextFunction) {
   try {
     const { id } = req.params
-    const {
-      externalMerchantId,
-      alias,
-      displayName,
-      active,
-      displayOrder,
-      credentials,
-      providerConfig,
-    } = req.body
+    const { externalMerchantId, alias, displayName, active, displayOrder, credentials, providerConfig } = req.body
 
     const account = await merchantAccountService.updateMerchantAccount(id, {
       externalMerchantId,

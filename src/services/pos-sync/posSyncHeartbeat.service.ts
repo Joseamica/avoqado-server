@@ -221,8 +221,6 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
       return
     }
 
-    const venue = validationResult.venue
-
     if (validationResult.fromCache) {
       logger.debug(`[Heartbeat Service] Venue ${venueId} validado exitosamente desde cache`)
     } else {

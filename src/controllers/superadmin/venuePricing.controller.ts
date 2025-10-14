@@ -51,14 +51,7 @@ export async function getVenuePaymentConfig(req: Request, res: Response, next: N
  */
 export async function createVenuePaymentConfig(req: Request, res: Response, next: NextFunction) {
   try {
-    const {
-      venueId,
-      primaryAccountId,
-      secondaryAccountId,
-      tertiaryAccountId,
-      routingRules,
-      preferredProcessor,
-    } = req.body
+    const { venueId, primaryAccountId, secondaryAccountId, tertiaryAccountId, routingRules, preferredProcessor } = req.body
 
     // Validate required fields
     if (!venueId) {
@@ -99,13 +92,7 @@ export async function createVenuePaymentConfig(req: Request, res: Response, next
 export async function updateVenuePaymentConfig(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const {
-      primaryAccountId,
-      secondaryAccountId,
-      tertiaryAccountId,
-      routingRules,
-      preferredProcessor,
-    } = req.body
+    const { primaryAccountId, secondaryAccountId, tertiaryAccountId, routingRules, preferredProcessor } = req.body
 
     const config = await venuePricingService.updateVenuePaymentConfig(venueId, {
       primaryAccountId,
@@ -186,10 +173,7 @@ export async function getActivePricingStructure(req: Request, res: Response, nex
   try {
     const { venueId, accountType } = req.params
 
-    const pricingStructure = await venuePricingService.getActivePricingStructure(
-      venueId,
-      accountType as AccountType,
-    )
+    const pricingStructure = await venuePricingService.getActivePricingStructure(venueId, accountType as AccountType)
 
     if (!pricingStructure) {
       res.json({
@@ -284,14 +268,7 @@ export async function createVenuePricingStructure(req: Request, res: Response, n
  */
 export async function createFlatRatePricingStructure(req: Request, res: Response, next: NextFunction) {
   try {
-    const {
-      venueId,
-      accountType,
-      effectiveFrom,
-      flatRate,
-      monthlyServiceFee,
-      notes,
-    } = req.body
+    const { venueId, accountType, effectiveFrom, flatRate, monthlyServiceFee, notes } = req.body
 
     // Validate required fields
     if (!venueId) {

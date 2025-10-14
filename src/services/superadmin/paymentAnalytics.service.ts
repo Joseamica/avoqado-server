@@ -337,10 +337,7 @@ export async function getVenueProfitMetrics(venueId: string, dateRange?: DateRan
  * @param granularity Aggregation granularity (daily, weekly, monthly)
  * @returns Time-series data
  */
-export async function getProfitTimeSeries(
-  dateRange?: DateRange,
-  granularity: 'daily' | 'weekly' | 'monthly' = 'daily',
-) {
+export async function getProfitTimeSeries(dateRange?: DateRange, granularity: 'daily' | 'weekly' | 'monthly' = 'daily') {
   const { startDate, endDate } = getDateRange(dateRange)
 
   logger.info('Calculating profit time series', { startDate, endDate, granularity })

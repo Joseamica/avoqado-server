@@ -53,11 +53,7 @@ function decryptCredentials(encryptedData: any): any {
       throw new Error('Invalid encrypted data format')
     }
 
-    const decipher = crypto.createDecipheriv(
-      ALGORITHM,
-      Buffer.from(ENCRYPTION_KEY),
-      Buffer.from(encryptedData.iv, 'hex')
-    )
+    const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY), Buffer.from(encryptedData.iv, 'hex'))
 
     let decrypted = decipher.update(encryptedData.encrypted, 'hex', 'utf8')
     decrypted += decipher.final('utf8')
@@ -105,10 +101,7 @@ interface UpdateMerchantAccountData {
  * @param filters Optional filters for provider, active status
  * @returns List of merchant accounts (credentials NOT decrypted)
  */
-export async function getMerchantAccounts(filters?: {
-  providerId?: string
-  active?: boolean
-}) {
+export async function getMerchantAccounts(filters?: { providerId?: string; active?: boolean }) {
   const where: any = {}
 
   if (filters?.providerId) {
@@ -136,10 +129,7 @@ export async function getMerchantAccounts(filters?: {
         },
       },
     },
-    orderBy: [
-      { displayOrder: 'asc' },
-      { createdAt: 'desc' },
-    ],
+    orderBy: [{ displayOrder: 'asc' }, { createdAt: 'desc' }],
   })
 
   // Remove encrypted credentials from response for security
@@ -385,11 +375,7 @@ export async function deleteMerchantAccount(id: string) {
   // Check if account is being used
   const venueConfigs = await prisma.venuePaymentConfig.count({
     where: {
-      OR: [
-        { primaryAccountId: id },
-        { secondaryAccountId: id },
-        { tertiaryAccountId: id },
-      ],
+      OR: [{ primaryAccountId: id }, { secondaryAccountId: id }, { tertiaryAccountId: id }],
     },
   })
 

@@ -24,27 +24,15 @@ export const createVenueSchema = z.object({
     timezone: z.string().optional().default('America/Mexico_City'),
     currency: z.string().min(3).max(3).optional().default('MXN'),
 
-    address: z
-      .string()
-      .min(5, { message: 'La dirección debe tener al menos 5 caracteres.' })
-      .optional()
-      .nullable(),
+    address: z.string().min(5, { message: 'La dirección debe tener al menos 5 caracteres.' }).optional().nullable(),
 
     city: z.string().min(2, { message: 'La ciudad debe tener al menos 2 caracteres.' }).optional().nullable(),
 
-    state: z
-      .string()
-      .min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' })
-      .optional()
-      .nullable(),
+    state: z.string().min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' }).optional().nullable(),
 
     country: z.string().min(2).max(2).optional().default('MX'),
 
-    zipCode: z
-      .string()
-      .min(4, { message: 'El código postal debe tener al menos 4 caracteres.' })
-      .optional()
-      .nullable(),
+    zipCode: z.string().min(4, { message: 'El código postal debe tener al menos 4 caracteres.' }).optional().nullable(),
 
     latitude: z.number({ invalid_type_error: 'La latitud debe ser un número.' }).min(-90).max(90).optional().nullable(),
 
