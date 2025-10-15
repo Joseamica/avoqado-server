@@ -9,6 +9,13 @@ import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.mid
 import { authorizeRole } from '@/middlewares/authorizeRole.middleware'
 import { StaffRole } from '@/security'
 
+// Import payment provider routes
+import paymentProviderRoutes from '../superadmin/paymentProvider.routes'
+import merchantAccountRoutes from '../superadmin/merchantAccount.routes'
+import providerCostStructureRoutes from '../superadmin/providerCostStructure.routes'
+import venuePricingRoutes from '../superadmin/venuePricing.routes'
+import paymentAnalyticsRoutes from '../superadmin/paymentAnalytics.routes'
+
 // Import cost management validation schemas
 import {
   profitMetricsQuerySchema,
@@ -111,6 +118,21 @@ router.get('/profit/export', validateRequest(exportProfitDataQuerySchema), costM
 
 // Support endpoints for dropdowns and selection
 router.get('/providers', superadminController.getProvidersList)
-router.get('/merchant-accounts', validateRequest(merchantAccountsQuerySchema), superadminController.getMerchantAccountsList)
+router.get('/merchant-accounts/list', validateRequest(merchantAccountsQuerySchema), superadminController.getMerchantAccountsList)
+
+// Payment Provider Management
+router.use('/payment-providers', paymentProviderRoutes)
+
+// Merchant Account Management (Full CRUD)
+router.use('/merchant-accounts', merchantAccountRoutes)
+
+// Provider Cost Structure Management
+router.use('/provider-cost-structures', providerCostStructureRoutes)
+
+// Venue Pricing Management (Payment Config + Pricing Structures)
+router.use('/venue-pricing', venuePricingRoutes)
+
+// Payment Analytics (Revenue & Profit Reporting)
+router.use('/payment-analytics', paymentAnalyticsRoutes)
 
 export default router

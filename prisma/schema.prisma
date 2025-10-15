@@ -49,17 +49,17 @@ model Venue {
   currency String    @default("MXN")
 
   // Location
-  address   String
-  city      String
-  state     String
-  country   String   @default("MX")
-  zipCode   String
+  address   String?
+  city      String?
+  state     String?
+  country   String?  @default("MX")
+  zipCode   String?
   latitude  Decimal? @db.Decimal(10, 8)
   longitude Decimal? @db.Decimal(11, 8)
 
   // Contact
-  phone   String
-  email   String
+  phone   String?
+  email   String?
   website String?
 
   // Branding
@@ -120,6 +120,15 @@ model Venue {
   pricingStructures    VenuePricingStructure[]
   monthlyProfits       MonthlyVenueProfit[]
 
+  // ✅ NEW: Inventory Management
+  rawMaterials         RawMaterial[]
+  suppliers            Supplier[]
+  purchaseOrders       PurchaseOrder[]
+  pricingPolicies      PricingPolicy[]
+  rawMaterialMovements RawMaterialMovement[]
+  lowStockAlerts       LowStockAlert[]
+  stockBatches         StockBatch[] // FIFO batch tracking
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -144,9 +153,10 @@ model VenueSettings {
   badReviewThreshold Int     @default(3)
 
   // Inventory
-  trackInventory    Boolean @default(false)
-  lowStockAlert     Boolean @default(true)
-  lowStockThreshold Int     @default(10)
+  trackInventory    Boolean       @default(false)
+  lowStockAlert     Boolean       @default(true)
+  lowStockThreshold Int           @default(10)
+  costingMethod     CostingMethod @default(FIFO) // Inventory costing strategy
 
   // Customer features
   allowReservations Boolean @default(false)
@@ -458,12 +468,16 @@ model Product {
 
   // Inventory tracking
   trackInventory Boolean @default(false)
-  unit           String? // "pza", "kg", "lt", etc.
+  unit           Unit? // Measurement unit for inventory
 
   // Status
   active         Boolean   @default(true)
   availableFrom  DateTime?
   availableUntil DateTime?
+
+  // Soft delete
+  deletedAt DateTime? // Soft delete timestamp
+  deletedBy String? // Staff ID who deleted
 
   // POS Integration
   externalId   String? // ID from POS
@@ -477,6 +491,8 @@ model Product {
   inventory      Inventory?
   orderItems     OrderItem[]
   modifierGroups ProductModifierGroup[]
+  recipe         Recipe? // ✅ NEW: Recipe composition
+  pricingPolicy  PricingPolicy? // ✅ NEW: Pricing strategy
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -530,6 +546,436 @@ model InventoryMovement {
   @@index([inventoryId])
   @@index([type])
   @@index([createdAt])
+}
+
+// ==========================================
+// NOTE: ADVANCED INVENTORY MANAGEMENT (RAW MATERIALS & RECIPES)
+// ==========================================
+
+// Raw materials / ingredients that compose products
+model RawMaterial {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Basic info
+  name        String
+  description String?
+  sku         String // Internal tracking code
+  category    RawMaterialCategory @default(OTHER)
+
+  // Stock tracking
+  currentStock  Decimal  @db.Decimal(12, 3)
+  unit          Unit // Base unit of measurement
+  unitType      UnitType // Type of unit (WEIGHT, VOLUME, COUNT)
+  minimumStock  Decimal  @db.Decimal(12, 3) // Low stock threshold
+  reorderPoint  Decimal  @db.Decimal(12, 3) // Auto-reorder trigger
+  maximumStock  Decimal? @db.Decimal(12, 3) // Maximum storage capacity
+  reservedStock Decimal  @default(0) @db.Decimal(12, 3)
+
+  // Costing
+  costPerUnit    Decimal @db.Decimal(10, 4) // Current purchase price
+  avgCostPerUnit Decimal @db.Decimal(10, 4) // Weighted average cost
+
+  // Perishability
+  perishable    Boolean @default(false)
+  shelfLifeDays Int? // Expected shelf life in days (used to calculate batch expiration dates)
+
+  // Status
+  active      Boolean   @default(true)
+  lastCountAt DateTime?
+
+  // Soft delete
+  deletedAt DateTime? // Soft delete timestamp
+  deletedBy String? // Staff ID who deleted
+
+  // Relations
+  recipeLines        RecipeLine[]
+  movements          RawMaterialMovement[]
+  supplierPricing    SupplierPricing[]
+  purchaseOrderItems PurchaseOrderItem[]
+  lowStockAlerts     LowStockAlert[]
+  batches            StockBatch[] // FIFO batch tracking
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, sku])
+  @@index([venueId])
+  @@index([category])
+  @@index([active])
+  @@index([currentStock]) // For low stock queries
+  @@index([deletedAt]) // For filtering out deleted records
+}
+
+// Product recipes - composition of raw materials
+model Recipe {
+  id        String  @id @default(cuid())
+  productId String  @unique
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // Recipe details
+  portionYield Int     @default(1) // How many portions this recipe makes
+  totalCost    Decimal @db.Decimal(10, 4) // Calculated from ingredients
+  prepTime     Int? // minutes
+  cookTime     Int? // minutes
+  notes        String?
+
+  // Relations
+  lines RecipeLine[] // Individual ingredients
+
+  updatedAt DateTime @updatedAt
+
+  @@index([productId])
+}
+
+// Individual ingredients in a recipe with quantities
+model RecipeLine {
+  id            String      @id @default(cuid())
+  recipeId      String
+  recipe        Recipe      @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  rawMaterialId String
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id])
+
+  // Quantity details
+  quantity        Decimal  @db.Decimal(12, 3) // Amount needed
+  unit            Unit // Must match or be convertible to rawMaterial.unit
+  costPerServing  Decimal? @db.Decimal(10, 4) // Calculated
+  displayOrder    Int      @default(0)
+  isOptional      Boolean  @default(false)
+  substituteNotes String? // e.g., "Can use chicken instead of beef"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([recipeId, rawMaterialId])
+  @@index([recipeId])
+  @@index([rawMaterialId])
+}
+
+// Suppliers for raw materials
+model Supplier {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Basic info
+  name        String
+  contactName String?
+  email       String?
+  phone       String?
+  website     String?
+
+  // Address
+  address String?
+  city    String?
+  state   String?
+  country String? @default("MX")
+  zipCode String?
+
+  // Tax
+  taxId String?
+
+  // Performance metrics
+  rating           Decimal @default(3.0) @db.Decimal(3, 2) // 1.0 - 5.0
+  reliabilityScore Decimal @default(0.7) @db.Decimal(3, 2) // 0.0 - 1.0
+
+  // Ordering details
+  leadTimeDays Int      @default(3) // Average delivery time
+  minimumOrder Decimal? @db.Decimal(12, 2) // Minimum order value
+
+  // Status
+  active Boolean @default(true)
+  notes  String?
+
+  // Soft delete
+  deletedAt DateTime? // Soft delete timestamp
+  deletedBy String? // Staff ID who deleted
+
+  // Relations
+  pricing        SupplierPricing[]
+  purchaseOrders PurchaseOrder[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, name])
+  @@index([venueId])
+  @@index([active])
+  @@index([rating])
+  @@index([deletedAt]) // For filtering out deleted records
+}
+
+// Supplier pricing history for raw materials
+model SupplierPricing {
+  id            String      @id @default(cuid())
+  supplierId    String
+  supplier      Supplier    @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  rawMaterialId String
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+
+  // Pricing
+  pricePerUnit    Decimal  @db.Decimal(10, 4)
+  unit            Unit // Must match rawMaterial unit or be convertible
+  minimumQuantity Decimal  @default(1) @db.Decimal(12, 3)
+  bulkDiscount    Decimal? @db.Decimal(5, 4) // Percentage discount for bulk
+
+  // Period
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  // Status
+  active Boolean @default(true)
+
+  // Tracking
+  lastOrderDate DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([supplierId, rawMaterialId, effectiveFrom])
+  @@index([supplierId])
+  @@index([rawMaterialId])
+  @@index([effectiveFrom])
+  @@index([active])
+}
+
+// Purchase orders to suppliers
+model PurchaseOrder {
+  id         String   @id @default(cuid())
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  // Order details
+  orderNumber          String              @unique
+  status               PurchaseOrderStatus @default(DRAFT)
+  orderDate            DateTime
+  expectedDeliveryDate DateTime?
+  receivedDate         DateTime?
+
+  // Amounts
+  subtotal  Decimal @db.Decimal(12, 2)
+  taxAmount Decimal @default(0) @db.Decimal(10, 2)
+  total     Decimal @db.Decimal(12, 2)
+  taxRate   Decimal @default(0.16) @db.Decimal(5, 4)
+
+  // Tracking
+  createdById String?
+  createdBy   String? // Staff ID who created
+  receivedBy  String? // Staff ID who received
+
+  // Approval tracking
+  approvedBy      String? // Staff ID who approved
+  approvedAt      DateTime?
+  rejectedBy      String? // Staff ID who rejected
+  rejectedAt      DateTime?
+  rejectionReason String?
+
+  notes String?
+
+  // Relations
+  items PurchaseOrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([supplierId])
+  @@index([status])
+  @@index([orderDate])
+}
+
+// Individual items in a purchase order
+model PurchaseOrderItem {
+  id              String        @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  rawMaterialId   String
+  rawMaterial     RawMaterial   @relation(fields: [rawMaterialId], references: [id])
+
+  // Quantities
+  quantityOrdered  Decimal @db.Decimal(12, 3)
+  quantityReceived Decimal @default(0) @db.Decimal(12, 3)
+  unit             Unit
+
+  // Pricing
+  unitPrice Decimal @db.Decimal(10, 4)
+  total     Decimal @db.Decimal(12, 2)
+
+  notes String?
+
+  // Relations
+  batches StockBatch[] // FIFO batch tracking
+
+  @@index([purchaseOrderId])
+  @@index([rawMaterialId])
+}
+
+// Pricing policies for products
+model PricingPolicy {
+  id        String  @id @default(cuid())
+  venueId   String
+  venue     Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  productId String  @unique
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // Pricing strategy
+  pricingStrategy          PricingStrategy @default(MANUAL)
+  targetFoodCostPercentage Decimal?        @db.Decimal(5, 2) // e.g., 30.00 for 30%
+  targetMarkupPercentage   Decimal?        @db.Decimal(5, 2) // e.g., 50.00 for 50%
+
+  // Calculated prices
+  calculatedCost     Decimal  @db.Decimal(10, 4) // From recipe
+  suggestedPrice     Decimal? @db.Decimal(10, 2) // Auto-calculated
+  minimumPrice       Decimal? @db.Decimal(10, 2) // Floor price
+  currentPrice       Decimal  @db.Decimal(10, 2) // Active selling price
+  foodCostPercentage Decimal? @db.Decimal(5, 2) // Current food cost %
+
+  // Tracking
+  lastReviewedAt DateTime?
+  lastUpdatedBy  String? // Staff ID
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([pricingStrategy])
+}
+
+// Unit conversion system (standalone, not tied to specific raw materials)
+model UnitConversion {
+  id String @id @default(cuid())
+
+  fromUnit         Unit     // Source unit (e.g., KILOGRAM)
+  toUnit           Unit     // Target unit (e.g., GRAM)
+  conversionFactor Decimal  @db.Decimal(12, 6) // 1 kg = 1000 g → factor = 1000
+  unitType         UnitType // Type category (WEIGHT, VOLUME, COUNT)
+
+  // System-provided conversions (vs custom venue-specific ones)
+  isSystemDefault Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([fromUnit, toUnit])
+  @@index([fromUnit])
+  @@index([toUnit])
+  @@index([unitType])
+  @@index([isSystemDefault])
+}
+
+// Raw material stock movements
+model RawMaterialMovement {
+  id            String      @id @default(cuid())
+  rawMaterialId String
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  venueId       String
+  venue         Venue       @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  type          RawMaterialMovementType
+  quantity      Decimal                 @db.Decimal(12, 3) // Positive or negative
+  unit          Unit
+  previousStock Decimal                 @db.Decimal(12, 3)
+  newStock      Decimal                 @db.Decimal(12, 3)
+
+  // Cost impact
+  costImpact Decimal? @db.Decimal(10, 4) // How this affected total cost
+
+  // Batch tracking for FIFO
+  batchId String?
+  batch   StockBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+
+  // References
+  reason    String?
+  reference String? // Order ID, PO ID, etc.
+
+  // Tracking
+  createdBy String? // Staff ID
+  createdAt DateTime @default(now())
+
+  @@index([rawMaterialId])
+  @@index([venueId])
+  @@index([type])
+  @@index([batchId])
+  @@index([createdAt])
+}
+
+// Low stock alerts for raw materials
+model LowStockAlert {
+  id            String      @id @default(cuid())
+  venueId       String
+  venue         Venue       @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  rawMaterialId String
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+
+  alertType    AlertType
+  threshold    Decimal     @db.Decimal(12, 3) // Stock level that triggered alert
+  currentLevel Decimal     @db.Decimal(12, 3)
+  status       AlertStatus @default(ACTIVE)
+
+  // Tracking
+  acknowledgedBy String? // Staff ID
+  acknowledgedAt DateTime?
+  resolvedBy     String? // Staff ID
+  resolvedAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId])
+  @@index([rawMaterialId])
+  @@index([status])
+  @@index([alertType])
+  @@index([createdAt])
+}
+
+// ==========================================
+// NOTE: FIFO BATCH TRACKING
+// ==========================================
+
+// Stock batches for FIFO inventory costing and tracking
+model StockBatch {
+  id            String      @id @default(cuid())
+  rawMaterialId String
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  venueId       String
+  venue         Venue       @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Purchase details (optional - manual adjustments may not have PO)
+  purchaseOrderItemId String?
+  purchaseOrderItem   PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
+
+  // Batch tracking
+  batchNumber       String // Generated identifier (e.g., "BATCH-20231013-001")
+  initialQuantity   Decimal @db.Decimal(12, 3) // Original quantity received
+  remainingQuantity Decimal @db.Decimal(12, 3) // Current remaining quantity
+  unit              Unit // Must match rawMaterial.unit
+
+  // Costing (locked at time of receipt)
+  costPerUnit Decimal @db.Decimal(10, 4) // Historical cost for FIFO accuracy
+
+  // Dates
+  receivedDate   DateTime // When this batch was received
+  expirationDate DateTime? // Optional expiration date
+
+  // Status
+  status     BatchStatus @default(ACTIVE)
+  depletedAt DateTime? // When fully consumed
+
+  // Relations
+  movements RawMaterialMovement[] // Movements from this batch
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([rawMaterialId, batchNumber])
+  @@index([rawMaterialId])
+  @@index([venueId])
+  @@index([status])
+  @@index([receivedDate]) // Critical for FIFO ordering (oldest first)
+  @@index([expirationDate]) // For expiration tracking
+  @@index([purchaseOrderItemId])
 }
 
 // ==========================================
@@ -884,6 +1330,7 @@ model Payment {
 
   // Payment info
   method    PaymentMethod
+  source    PaymentSource     @default(OTHER)
   status    TransactionStatus @default(PENDING)
   splitType SplitType         @default(FULLPAYMENT) // How this payment was split (audit trail)
   type      PaymentType?      @default(REGULAR) // How this payment was split (audit trail)
@@ -925,6 +1372,7 @@ model Payment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([source])
   @@index([authorizationNumber]) // ✅ NUEVO ÍNDICE
   @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
   @@index([cardBrand]) // ✅ NUEVO ÍNDICE
@@ -1734,6 +2182,17 @@ model PosCommand {
 // NOTE: ENUMS
 // ==========================================
 
+enum PaymentSource {
+  TPV // Terminal
+  DASHBOARD_TEST // Test payments from superadmin dashboard
+  QR // Customer QR
+  WEB // Website
+  APP // Mobile app
+  PHONE // Phone order
+  POS // Direct from POS
+  OTHER
+}
+
 enum BusinessType {
   RESTAURANT
   RETAIL
@@ -2088,6 +2547,7 @@ enum CardEntryMode {
 enum PaymentType {
   REGULAR // Normal order-based payment
   FAST // Quick payment without order items
+  TEST // Test payments from superadmin dashboard
   REFUND // Future: refund payments
   ADJUSTMENT // Future: manual adjustments
 }
@@ -2234,4 +2694,157 @@ enum TimeEntryStatus {
   ON_BREAK // Currently on break
   CLOCKED_OUT // Finished shift
   ADMIN_EDITED // Modified by admin
+}
+
+// ==========================================
+// NOTE: INVENTORY MANAGEMENT ENUMS
+// ==========================================
+
+enum RawMaterialCategory {
+  MEAT
+  POULTRY
+  SEAFOOD
+  DAIRY
+  CHEESE
+  EGGS
+  VEGETABLES
+  FRUITS
+  GRAINS
+  BREAD
+  PASTA
+  RICE
+  BEANS
+  SPICES
+  HERBS
+  OILS
+  SAUCES
+  CONDIMENTS
+  BEVERAGES
+  ALCOHOL
+  CLEANING
+  PACKAGING
+  OTHER
+}
+
+enum PurchaseOrderStatus {
+  DRAFT // Being created
+  PENDING_APPROVAL // Awaiting manager/admin approval
+  REJECTED // Approval rejected
+  APPROVED // Approved, ready to send
+  SENT // Sent to supplier
+  CONFIRMED // Supplier confirmed
+  SHIPPED // In transit
+  PARTIAL // Partially received
+  RECEIVED // Fully received
+  CANCELLED // Cancelled
+}
+
+enum PricingStrategy {
+  MANUAL // User sets price manually
+  AUTO_MARKUP // Auto-calculate based on cost + markup %
+  AUTO_TARGET_MARGIN // Auto-calculate based on target food cost %
+}
+
+enum UnitCategory {
+  WEIGHT // kg, g, lb, oz
+  VOLUME // L, ml, gal, oz
+  COUNT // units, pieces, dozen
+}
+
+enum RawMaterialMovementType {
+  PURCHASE // Received from supplier
+  USAGE // Used in production (recipe)
+  ADJUSTMENT // Manual stock adjustment
+  SPOILAGE // Wasted/expired/damaged
+  TRANSFER // Moved to another venue
+  COUNT // Physical inventory count correction
+  RETURN // Returned to supplier
+}
+
+enum AlertType {
+  LOW_STOCK // Below minimum stock
+  OUT_OF_STOCK // Stock is zero
+  EXPIRING_SOON // Approaching expiration date
+  OVER_STOCK // Above maximum stock
+}
+
+enum AlertStatus {
+  ACTIVE // Alert is active
+  ACKNOWLEDGED // Staff has seen it
+  RESOLVED // Issue fixed
+  DISMISSED // Manually dismissed
+}
+
+enum BatchStatus {
+  ACTIVE // Has remaining quantity available
+  DEPLETED // Fully consumed (remainingQuantity = 0)
+  EXPIRED // Past expiration date
+  QUARANTINED // Quality issue, should not be used
+}
+
+enum CostingMethod {
+  FIFO // First-In-First-Out: Uses oldest batch costs
+  WEIGHTED_AVERAGE // Weighted average of all batch costs
+  STANDARD_COST // Fixed standard cost regardless of actual costs
+}
+
+// ==========================================
+// NOTE: UNIT MEASUREMENT SYSTEM
+// ==========================================
+
+enum UnitType {
+  WEIGHT
+  VOLUME
+  COUNT
+  LENGTH
+  TEMPERATURE
+  TIME
+}
+
+enum Unit {
+  // Weight units
+  GRAM
+  KILOGRAM
+  MILLIGRAM
+  POUND
+  OUNCE
+  TON
+
+  // Volume units - Liquid
+  MILLILITER
+  LITER
+  GALLON
+  QUART
+  PINT
+  CUP
+  FLUID_OUNCE
+  TABLESPOON
+  TEASPOON
+
+  // Count units
+  UNIT
+  PIECE
+  DOZEN
+  CASE
+  BOX
+  BAG
+  BOTTLE
+  CAN
+  JAR
+
+  // Length units (for items like pasta, rope, etc.)
+  METER
+  CENTIMETER
+  MILLIMETER
+  INCH
+  FOOT
+
+  // Temperature (for cooking)
+  CELSIUS
+  FAHRENHEIT
+
+  // Time (for recipes)
+  MINUTE
+  HOUR
+  DAY
 }

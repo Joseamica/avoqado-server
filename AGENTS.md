@@ -131,6 +131,270 @@ The system implements a hierarchical role-based access control (RBAC) system wit
 - **Role-based middleware** automatically enforces permissions at the API level
 - **Special handling** for cross-venue access based on role hierarchy
 
+### Granular Permission System
+
+Beyond role-based access, the platform implements a **granular permission system** that controls what users can do at the **action level**. This enables fine-tuned control over feature access.
+
+#### Permission Format
+
+Permissions follow the format: `"resource:action"`
+
+**Examples:**
+- `"tpv:create"` - Create TPV terminals
+- `"menu:update"` - Update menu items
+- `"analytics:export"` - Export analytics data
+- `"shifts:delete"` - Delete shifts
+- `"orders:refund"` - Process refunds
+
+#### Wildcard Permissions
+
+- `"*:*"` - All permissions (ADMIN, OWNER, SUPERADMIN)
+- `"tpv:*"` - All TPV actions (create, read, update, delete, command)
+- `"*:read"` - Read access to all resources
+
+#### Default Permissions by Role
+
+From `src/lib/permissions.ts`:
+
+```typescript
+// VIEWER - Read-only
+'home:read', 'analytics:read', 'menu:read', 'orders:read', 'payments:read',
+'shifts:read', 'reviews:read', 'teams:read', 'tpv:read'
+
+// WAITER - Order and table management
+'menu:read', 'menu:create', 'menu:update', 'orders:*', 'payments:read',
+'payments:create', 'tables:*', 'tpv:read'
+
+// CASHIER - Payment operations
+'menu:read', 'orders:read', 'payments:*', 'shifts:read', 'tpv:read'
+
+// MANAGER - Operations
+'analytics:read', 'analytics:export', 'menu:*', 'orders:*', 'payments:refund',
+'shifts:*', 'tpv:read', 'tpv:create', 'tpv:update', 'tpv:command'
+
+// ADMIN, OWNER, SUPERADMIN - Full access
+'*:*'
+```
+
+#### Middleware Usage
+
+**File:** `src/middlewares/checkPermission.middleware.ts`
+
+**Available middleware functions:**
+- `checkPermission(permission: string)` - Require single permission
+- `checkAnyPermission(permissions: string[])` - Require at least one permission
+- `checkAllPermissions(permissions: string[])` - Require all permissions
+
+**Route Protection Examples:**
+
+```typescript
+// Single permission
+router.post('/venues/:venueId/tpvs',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:create'),
+  tpvController.createTpv
+)
+
+// Any permission (OR logic)
+router.put('/venues/:venueId/menu',
+  authenticateTokenMiddleware,
+  checkAnyPermission(['menu:update', 'admin:write']),
+  menuController.updateMenu
+)
+
+// All permissions (AND logic)
+router.delete('/venues/:venueId/shifts/:shiftId',
+  authenticateTokenMiddleware,
+  checkAllPermissions(['shifts:delete', 'admin:delete']),
+  shiftController.deleteShift
+)
+```
+
+#### Custom Permissions
+
+Beyond default role-based permissions, venues can assign **custom permissions** to individual staff members via the `StaffVenue.permissions` JSON field.
+
+**How it works:**
+1. Staff member has default permissions from their role
+2. Custom permissions are added from `StaffVenue.permissions` array
+3. Final permissions = Default + Custom
+
+**Example:**
+
+```typescript
+// WAITER role has default permissions:
+['menu:read', 'orders:create', 'tpv:read', ...]
+
+// WAITER with custom permissions:
+{
+  role: 'WAITER',
+  permissions: ['inventory:read', 'analytics:export']  // Extra permissions
+}
+
+// Final permissions = Default + Custom:
+['menu:read', 'orders:create', 'tpv:read', ..., 'inventory:read', 'analytics:export']
+```
+
+#### Adding Permissions to New Routes
+
+**Step-by-step guide:**
+
+1. **Define permission constant** in `src/lib/permissions.ts`:
+```typescript
+[StaffRole.MANAGER]: [
+  // ... existing permissions
+  'reports:create',
+  'reports:export',
+]
+```
+
+2. **Protect route** in `src/routes/dashboard.routes.ts`:
+```typescript
+router.post('/venues/:venueId/reports',
+  authenticateTokenMiddleware,
+  checkPermission('reports:create'),
+  reportController.create
+)
+```
+
+3. **Update frontend permissions** in `avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts` (MUST MATCH backend exactly!)
+
+4. **Use in frontend component**:
+```typescript
+import { usePermissions } from '@/hooks/usePermissions'
+
+function ReportsPage() {
+  const { can } = usePermissions()
+
+  return (
+    <>
+      {can('reports:create') && <Button>Create Report</Button>}
+      {can('reports:export') && <Button>Export</Button>}
+    </>
+  )
+}
+```
+
+#### Permission Validation Flow
+
+**Full stack permission check:**
+
+```
+1. User requests protected endpoint
+   └─ Frontend: PermissionGate checks permission (UX only)
+
+2. HTTP request sent to backend
+   └─ Middleware: checkPermission() validates permission
+       ├─ Extract user role from authContext
+       ├─ Get default permissions for role
+       ├─ Merge with custom permissions from StaffVenue
+       ├─ Check if user has required permission
+       ├─ Has permission? → next()
+       └─ No permission? → 403 Forbidden
+
+3. Response returned to frontend
+   └─ Success: Process data
+   └─ Error: Show permission error message
+```
+
+#### Common Permission Patterns
+
+**Resource-based permissions:**
+- `menu:create`, `menu:read`, `menu:update`, `menu:delete`
+- `tpv:create`, `tpv:read`, `tpv:update`, `tpv:delete`, `tpv:command`
+- `orders:create`, `orders:read`, `orders:update`, `orders:cancel`, `orders:refund`
+
+**Action-based permissions:**
+- `analytics:export` - Export analytics data
+- `shifts:close` - Close active shift
+- `payments:refund` - Process payment refunds
+- `admin:write` - Admin write operations
+- `admin:delete` - Admin delete operations
+
+#### CRITICAL: Frontend-Backend Sync
+
+**⚠️ MANDATORY**: Frontend and backend DEFAULT_PERMISSIONS must match EXACTLY!
+
+**Backend:** `avoqado-server/src/lib/permissions.ts`
+**Frontend:** `avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts`
+
+**Why?**
+- Frontend permissions control UX (show/hide buttons)
+- Backend permissions control security (API access)
+- Mismatch causes confusing UX or security vulnerabilities
+
+**Sync checklist when adding permissions:**
+- [ ] Add to backend `DEFAULT_PERMISSIONS`
+- [ ] Add to frontend `defaultPermissions`
+- [ ] Verify both have identical permission strings
+- [ ] Test in frontend with different roles
+- [ ] Test in backend with API calls
+
+#### Permission Testing
+
+**Manual testing:**
+
+```bash
+# 1. Get JWT token for test user
+curl -X POST "http://localhost:12344/api/v1/auth/login" \
+  -d '{"email": "waiter@test.com", "password": "test123"}'
+
+# 2. Try protected endpoint (should succeed)
+curl -X GET "http://localhost:12344/api/v1/dashboard/venues/{venueId}/menu" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. Try forbidden endpoint (should fail with 403)
+curl -X POST "http://localhost:12344/api/v1/dashboard/venues/{venueId}/tpvs" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Automated testing:**
+
+```typescript
+// tests/api-tests/permissions.test.ts
+describe('Permission Middleware', () => {
+  it('should allow MANAGER to create TPV', async () => {
+    const token = await getTokenForRole('MANAGER')
+    const response = await request(app)
+      .post(`/api/v1/dashboard/venues/${venueId}/tpvs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(tpvData)
+
+    expect(response.status).toBe(201)
+  })
+
+  it('should deny WAITER from creating TPV', async () => {
+    const token = await getTokenForRole('WAITER')
+    const response = await request(app)
+      .post(`/api/v1/dashboard/venues/${venueId}/tpvs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(tpvData)
+
+    expect(response.status).toBe(403)
+    expect(response.body.message).toContain("Permission 'tpv:create' required")
+  })
+})
+```
+
+#### Best Practices
+
+1. **Use specific permissions** - `"menu:update"` not `"*:*"` for non-admin routes
+2. **Name consistently** - Resource first, action second (`resource:action`)
+3. **Document new permissions** - Update CLAUDE.md and AGENTS.md
+4. **Keep frontend/backend synced** - Same permissions in both codebases
+5. **Test with multiple roles** - Verify WAITER can't access MANAGER features
+6. **Never skip backend validation** - Frontend permissions are UX only
+7. **Use wildcard sparingly** - Only for ADMIN/OWNER/SUPERADMIN roles
+
+#### Related Files
+
+- **Backend permissions:** `src/lib/permissions.ts`
+- **Backend middleware:** `src/middlewares/checkPermission.middleware.ts`
+- **Backend routes:** `src/routes/dashboard.routes.ts`
+- **Frontend permissions:** `avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts`
+- **Frontend hook:** `avoqado-web-dashboard/src/hooks/usePermissions.ts`
+- **Frontend component:** `avoqado-web-dashboard/src/components/PermissionGate.tsx`
+
 ### Technical Stack
 
 - **Framework**: Express.js with TypeScript
@@ -392,6 +656,115 @@ logger.info(`Payment processed successfully for terminal: ${terminalId}`)
 4. **Iterate** → Fix based on log analysis
 5. **Clean** → Remove debug logs once working
 6. **Commit** → Only production-ready code
+
+## 🍔 Order → Payment → Inventory Flow (Critical Business Logic)
+
+### Overview
+
+When a customer completes a payment, the system automatically deducts inventory using **FIFO (First-In-First-Out) batch tracking**. This is one of the most critical business flows in the platform.
+
+### Flow Diagram
+
+```
+1. Waiter creates Order → Order status: PENDING
+2. Payment received → Order status: PAID
+3. ✅ Payment fully covers total → Trigger automatic inventory deduction
+4. For each OrderItem → Find Recipe → Deduct ingredients using FIFO
+5. Create VenueTransaction + TransactionCosts → Track profit
+```
+
+### Key Files
+
+- **Payment trigger**: `src/services/tpv/payment.tpv.service.ts:98-147`
+- **FIFO deduction**: `src/services/dashboard/rawMaterial.service.ts:468-537`
+- **Batch tracking**: `src/services/dashboard/rawMaterial.service.ts:395-466` (`deductStockFIFO`)
+
+### Critical Business Rules
+
+1. **Stock deduction ONLY happens when order is fully paid** (`totalPaid >= order.total`)
+2. **FIFO batch consumption**: Oldest batches (`receivedDate` ASC) are consumed first
+3. **Recipe-based deduction**: Each product links to a recipe with multiple ingredients
+4. **Non-blocking failures**: Payment succeeds even if stock deduction fails (logged as warning)
+5. **Low stock alerts**: Auto-generated when `currentStock <= reorderPoint`
+6. **Optional ingredients**: Skipped if unavailable (marked `isOptional: true` in recipe)
+7. **Profit tracking**: Revenue + costs recorded in `VenueTransaction` + `TransactionCost`
+
+### Real-World Example
+
+**Product**: Hamburger (sells for $5.00)
+**Recipe**:
+- 150g ground beef ($0.80/100g) = $1.20
+- 1 bun ($0.30 each) = $0.30
+- 20g cheese ($0.50/100g) = $0.10
+**Total Cost**: $1.60 per burger
+
+**Order**: 3 hamburgers
+1. Revenue: 3 × $5.00 = $15.00
+2. Cost: 3 × $1.60 = $4.80
+3. Profit: $15.00 - $4.80 = $10.20
+
+**Inventory Deduction** (FIFO):
+- Batch #1 (2024-01-01, 300g beef) → Deduct 450g → Consumes all 300g, needs 150g more
+- Batch #2 (2024-01-05, 500g beef) → Deduct 150g → 350g remaining
+- Buns (oldest batch first) → Deduct 3 units
+- Cheese (oldest batch first) → Deduct 60g
+
+### Testing the Flow
+
+```bash
+# 1. Create test data
+npm run migrate
+npm run seed  # Creates test venue, products, recipes, stock batches
+
+# 2. Create order
+curl -X POST "http://localhost:12344/api/v1/tpv/venues/{venueId}/orders" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "items": [{"productId": "hamburger-id", "quantity": 3}],
+    "tableId": "table-1"
+  }'
+
+# 3. Add payment (triggers inventory deduction)
+curl -X POST "http://localhost:12344/api/v1/tpv/venues/{venueId}/orders/{orderId}/payments" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "amount": 15.00,
+    "method": "CASH"
+  }'
+
+# 4. Verify stock deduction
+npm run studio  # Check RawMaterial.currentStock and RawMaterialMovement records
+
+# 5. Check logs for FIFO deduction
+tail -f logs/app.log | grep "🎯\|✅\|⚠️"
+```
+
+### Debugging Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| Stock not deducted | Order not fully paid | Check `totalPaid >= order.total` |
+| FIFO order wrong | Invalid `receivedDate` | Verify batch `receivedDate` timestamps |
+| Insufficient stock warning | Low inventory | Check `currentStock` vs recipe requirements |
+| Missing recipe | Product has no recipe | Create recipe or skip inventory tracking |
+| Optional ingredient skipped | `isOptional: true` | Expected behavior, check logs |
+
+### Agent Guidelines for Inventory Features
+
+When working on inventory-related features:
+
+1. **Always test payment → deduction flow** using the steps above
+2. **Verify FIFO ordering** by checking `RawMaterialMovement.createdAt` timestamps
+3. **Monitor logs** for `🎯 Starting inventory deduction` and `✅ Stock deducted successfully`
+4. **Check edge cases**: insufficient stock, missing recipes, optional ingredients
+5. **Update tests** in `tests/workflows/` when modifying deduction logic
+6. **Document changes** in both `AGENTS.md` and `CLAUDE.md`
+
+### Related Documentation
+
+- Full implementation details: `CLAUDE.md` (root) → "Order → Payment → Inventory Flow"
+- Database schema: `docs/DATABASE_SCHEMA.md` → RawMaterial, StockBatch, Recipe models
+- Frontend UI: `avoqado-web-dashboard/CLAUDE.md` → "Inventory Management System"
 
 ## Known Limitations
 

@@ -32,11 +32,15 @@ export interface ReorderProductsDto {
 }
 
 /**
- * Get all products for a venue
+ * Get all products for a venue (excluding soft-deleted)
  */
-export async function getProducts(venueId: string): Promise<Product[]> {
+export async function getProducts(venueId: string, options?: { includeRecipe?: boolean; categoryId?: string }): Promise<Product[]> {
   const products = await prisma.product.findMany({
-    where: { venueId },
+    where: {
+      venueId,
+      deletedAt: null, // Exclude soft-deleted products
+      ...(options?.categoryId && { categoryId: options.categoryId }),
+    },
     include: {
       category: true,
       modifierGroups: {
@@ -44,6 +48,17 @@ export async function getProducts(venueId: string): Promise<Product[]> {
           group: true,
         },
       },
+      ...(options?.includeRecipe && {
+        recipe: {
+          include: {
+            lines: {
+              include: {
+                rawMaterial: true,
+              },
+            },
+          },
+        },
+      }),
     },
     orderBy: { displayOrder: 'asc' },
   })
@@ -52,13 +67,14 @@ export async function getProducts(venueId: string): Promise<Product[]> {
 }
 
 /**
- * Get a single product by ID
+ * Get a single product by ID (excluding soft-deleted)
  */
 export async function getProduct(venueId: string, productId: string): Promise<Product | null> {
   const product = await prisma.product.findFirst({
     where: {
       id: productId,
       venueId,
+      deletedAt: null, // Exclude soft-deleted products
     },
     include: {
       category: true,
@@ -195,20 +211,29 @@ export async function updateProduct(venueId: string, productId: string, productD
 }
 
 /**
- * Delete a product
+ * Delete a product (soft delete)
  */
-export async function deleteProduct(venueId: string, productId: string): Promise<void> {
-  // First check if product exists and belongs to venue
+export async function deleteProduct(venueId: string, productId: string, userId: string): Promise<void> {
+  // First check if product exists and belongs to venue (and is not already deleted)
   const existingProduct = await prisma.product.findFirst({
-    where: { id: productId, venueId },
+    where: {
+      id: productId,
+      venueId,
+      deletedAt: null, // Ensure product is not already soft-deleted
+    },
   })
 
   if (!existingProduct) {
     throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
   }
 
-  await prisma.product.delete({
+  // Soft delete: set deletedAt and deletedBy instead of physically removing the record
+  await prisma.product.update({
     where: { id: productId },
+    data: {
+      deletedAt: new Date(),
+      deletedBy: userId,
+    },
   })
 }
 

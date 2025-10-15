@@ -24,32 +24,28 @@ export const createVenueSchema = z.object({
     timezone: z.string().optional().default('America/Mexico_City'),
     currency: z.string().min(3).max(3).optional().default('MXN'),
 
-    address: z
-      .string({ required_error: 'La dirección es requerida.' })
-      .min(5, { message: 'La dirección debe tener al menos 5 caracteres.' }),
+    address: z.string().min(5, { message: 'La dirección debe tener al menos 5 caracteres.' }).optional().nullable(),
 
-    city: z.string({ required_error: 'La ciudad es requerida.' }).min(2, { message: 'La ciudad debe tener al menos 2 caracteres.' }),
+    city: z.string().min(2, { message: 'La ciudad debe tener al menos 2 caracteres.' }).optional().nullable(),
 
-    state: z
-      .string({ required_error: 'El estado/provincia es requerido.' })
-      .min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' }),
+    state: z.string().min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' }).optional().nullable(),
 
     country: z.string().min(2).max(2).optional().default('MX'),
 
-    zipCode: z
-      .string({ required_error: 'El código postal es requerido.' })
-      .min(4, { message: 'El código postal debe tener al menos 4 caracteres.' }),
+    zipCode: z.string().min(4, { message: 'El código postal debe tener al menos 4 caracteres.' }).optional().nullable(),
 
     latitude: z.number({ invalid_type_error: 'La latitud debe ser un número.' }).min(-90).max(90).optional().nullable(),
 
     longitude: z.number({ invalid_type_error: 'La longitud debe ser un número.' }).min(-180).max(180).optional().nullable(),
 
     phone: z
-      .string({ required_error: 'El teléfono es requerido.' })
+      .string()
       .min(7, { message: 'El teléfono debe tener al menos 7 dígitos.' })
-      .regex(/^[+]?[0-9\s-()]*$/, { message: 'Formato de teléfono inválido.' }),
+      .regex(/^[+]?[0-9\s-()]*$/, { message: 'Formato de teléfono inválido.' })
+      .optional()
+      .nullable(),
 
-    email: z.string({ required_error: 'El email es requerido.' }).email({ message: 'Formato de email inválido.' }),
+    email: z.string().email({ message: 'Formato de email inválido.' }).optional().nullable(),
 
     website: z.string().url({ message: 'Formato de URL de sitio web inválido.' }).optional().nullable(),
     logo: z.string().url({ message: 'URL de logo inválida.' }).optional().nullable(),
