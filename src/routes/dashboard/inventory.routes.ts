@@ -891,6 +891,21 @@ router.put(
   productWizardController.setProductInventoryType,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}/switch-inventory-type:
+ *   post:
+ *     tags: [Inventory - Product Status]
+ *     summary: Switch inventory type (auto-conversion between SIMPLE_STOCK ↔ RECIPE_BASED)
+ *     description: Automatically removes old configuration and switches to new inventory type
+ */
+router.post(
+  '/products/:productId/switch-inventory-type',
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  validateRequest(SetProductInventoryTypeSchema), // Requires inventoryType in body (SIMPLE_STOCK or RECIPE_BASED)
+  productWizardController.switchInventoryType,
+)
+
 // ===========================================
 // COST RECALCULATION ROUTES (NEW)
 // ===========================================

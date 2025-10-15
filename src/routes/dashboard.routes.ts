@@ -77,7 +77,7 @@ import {
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 import { createTestPaymentSchema, getTestPaymentsSchema } from '../schemas/dashboard/testing.schema'
 
-const router = express.Router()
+const router = express.Router({ mergeParams: true })
 
 // Superadmin routes - highest priority
 router.use('/superadmin', superadminRoutes)

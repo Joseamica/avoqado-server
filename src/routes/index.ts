@@ -7,7 +7,7 @@ import publicRoutes from './public.routes'
 import posSyncRoutes from './pos-sync.routes'
 import invitationRoutes from './invitations.routes'
 
-const router = express.Router()
+const router = express.Router({ mergeParams: true })
 
 router.use('/dashboard', dashboardRoutes) // All dashboard routes under /api/v1/dashboard
 router.use('/analytics', analyticsRoutes) // Executive analytics endpoints

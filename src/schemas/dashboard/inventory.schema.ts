@@ -192,7 +192,7 @@ export const CreateRecipeSchema = z.object({
         quantity: z.number().positive(),
         unit: z.nativeEnum(Unit),
         isOptional: z.boolean().default(false),
-        substituteNotes: z.string().optional(),
+        substituteNotes: z.string().nullish(), // Accept null, undefined, or string
       }),
     ),
   }),
@@ -215,7 +215,7 @@ export const UpdateRecipeSchema = z.object({
           quantity: z.number().positive(),
           unit: z.nativeEnum(Unit),
           isOptional: z.boolean().default(false),
-          substituteNotes: z.string().optional(),
+          substituteNotes: z.string().nullish(), // Accept null, undefined, or string
         }),
       )
       .optional(),
@@ -232,7 +232,7 @@ export const AddRecipeLineSchema = z.object({
     quantity: z.number().positive(),
     unit: z.nativeEnum(Unit),
     isOptional: z.boolean().default(false),
-    substituteNotes: z.string().optional(),
+    substituteNotes: z.string().nullish(), // Accept null, undefined, or string
   }),
 })
 
@@ -660,7 +660,7 @@ export const ProductWizardStep3RecipeSchema = z.object({
           quantity: z.number().positive('Quantity must be positive'),
           unit: z.nativeEnum(Unit),
           isOptional: z.boolean().default(false),
-          substituteNotes: z.string().optional(),
+          substituteNotes: z.string().nullish(), // Accept null, undefined, or string
         }),
       )
       .min(1, 'At least one ingredient is required'),
@@ -702,7 +702,7 @@ export const CreateProductWithInventorySchema = z.object({
             quantity: z.number().positive(),
             unit: z.nativeEnum(Unit),
             isOptional: z.boolean().default(false),
-            substituteNotes: z.string().optional(),
+            substituteNotes: z.string().nullish(), // Accept null, undefined, or string
           }),
         ),
       })
@@ -718,6 +718,7 @@ export const GetWizardProgressSchema = z.object({
 
 export const SetProductInventoryTypeSchema = z.object({
   params: z.object({
+    venueId: z.string().cuid(),
     productId: z.string().cuid(),
   }),
   body: z.object({

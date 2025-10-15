@@ -318,3 +318,34 @@ export async function getRecipeCostVariances(req: Request, res: Response, next: 
     next(error)
   }
 }
+
+/**
+ * Switch inventory type (auto-conversion)
+ * Handles conversion between SIMPLE_STOCK ↔ RECIPE_BASED
+ */
+export async function switchInventoryType(req: Request, res: Response, next: NextFunction) {
+  try {
+    console.log('🔧 [DEBUG] Controller req.params:', req.params)
+    console.log('🔧 [DEBUG] Controller req.body:', req.body)
+
+    const { venueId, productId } = req.params
+    const { inventoryType } = req.body
+
+    if (!inventoryType) {
+      return res.status(400).json({
+        success: false,
+        error: 'inventoryType is required (SIMPLE_STOCK or RECIPE_BASED)',
+      })
+    }
+
+    const result = await productWizardService.switchInventoryType(venueId, productId, inventoryType)
+
+    res.json({
+      success: true,
+      message: result.message,
+      data: result,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

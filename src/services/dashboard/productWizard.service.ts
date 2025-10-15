@@ -165,10 +165,23 @@ export async function configureInventoryStep2(productId: string, data: WizardSte
 export async function setupSimpleStockStep3(venueId: string, productId: string, data: WizardStep3SimpleStockData) {
   const product = await prisma.product.findUnique({
     where: { id: productId },
+    include: {
+      recipe: {
+        select: { id: true },
+      },
+    },
   })
 
   if (!product) {
     throw new AppError('Product not found', 404)
+  }
+
+  // VALIDATION: Prevent SIMPLE_STOCK if product already has a recipe
+  if (product.recipe) {
+    throw new AppError(
+      'Cannot configure Simple Stock: This product already has a recipe configured. Please delete the recipe first or use Recipe-Based inventory.',
+      409,
+    )
   }
 
   // Create or update raw material for this product
@@ -248,6 +261,21 @@ export async function setupRecipeStep3(venueId: string, productId: string, data:
 
   if (product.venueId !== venueId) {
     throw new AppError('Product does not belong to this venue', 403)
+  }
+
+  // VALIDATION: Prevent RECIPE_BASED if product already has simple stock configured
+  const existingSimpleStock = await prisma.rawMaterial.findFirst({
+    where: {
+      venueId,
+      sku: `PRODUCT-${productId}`,
+    },
+  })
+
+  if (existingSimpleStock) {
+    throw new AppError(
+      'Cannot configure Recipe: This product already has Simple Stock configured. Please delete the simple stock configuration first or use Simple Stock inventory.',
+      409,
+    )
   }
 
   // Validate that all ingredients exist
@@ -401,6 +429,7 @@ export async function getWizardProgress(productId: string) {
         ? {
             currentStock: simpleStockMaterial.currentStock.toNumber(),
             reorderPoint: simpleStockMaterial.reorderPoint.toNumber(),
+            costPerUnit: simpleStockMaterial.costPerUnit.toNumber(),
           }
         : inventoryType === 'RECIPE_BASED' && product.recipe
           ? {
@@ -417,4 +446,83 @@ export async function getWizardProgress(productId: string) {
           : 'recipe_setup'
         : 'complete',
   }
+}
+
+/**
+ * Switch inventory type (auto-conversion)
+ * Handles conversion between SIMPLE_STOCK ↔ RECIPE_BASED
+ * Automatically removes old configuration and updates inventoryType
+ */
+export async function switchInventoryType(venueId: string, productId: string, newType: InventoryType) {
+  return await prisma.$transaction(async tx => {
+    // Verify product exists and belongs to venue
+    const product = await tx.product.findUnique({
+      where: { id: productId },
+      include: {
+        recipe: {
+          select: { id: true },
+        },
+      },
+    })
+
+    if (!product) {
+      throw new AppError('Product not found', 404)
+    }
+
+    console.log('🔧 [DEBUG] switchInventoryType:', { venueId, productId, productVenueId: product.venueId, newType })
+
+    if (product.venueId !== venueId) {
+      console.error('❌ [DEBUG] Venue mismatch!', { requestVenueId: venueId, productVenueId: product.venueId })
+      throw new AppError('Product does not belong to this venue', 403)
+    }
+
+    // Perform conversion based on newType
+    if (newType === 'RECIPE_BASED') {
+      // Switching TO RECIPE_BASED: Remove existing simple stock
+      const existingRawMaterial = await tx.rawMaterial.findFirst({
+        where: {
+          venueId,
+          sku: `PRODUCT-${productId}`,
+        },
+      })
+
+      if (existingRawMaterial) {
+        // Delete the simple stock raw material
+        await tx.rawMaterial.delete({
+          where: { id: existingRawMaterial.id },
+        })
+      }
+    } else if (newType === 'SIMPLE_STOCK') {
+      // Switching TO SIMPLE_STOCK: Remove existing recipe
+      if (product.recipe) {
+        // Delete recipe lines first (foreign key constraint)
+        await tx.recipeLine.deleteMany({
+          where: { recipeId: product.recipe.id },
+        })
+
+        // Then delete the recipe
+        await tx.recipe.delete({
+          where: { id: product.recipe.id },
+        })
+      }
+    }
+
+    // Update product's inventoryType in externalData
+    const externalData = (product.externalData as any) || {}
+    await tx.product.update({
+      where: { id: productId },
+      data: {
+        externalData: {
+          ...externalData,
+          inventoryType: newType,
+        },
+      },
+    })
+
+    return {
+      success: true,
+      newType,
+      message: `Inventory type switched to ${newType} successfully`,
+    }
+  })
 }
