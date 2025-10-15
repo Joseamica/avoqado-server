@@ -363,6 +363,17 @@ export async function sendLowStockAlertNotification(
       ? `${rawMaterial.name} (${rawMaterial.sku}) is out of stock. Please reorder immediately.`
       : `${rawMaterial.name} (${rawMaterial.sku}) is running low. Current stock: ${currentStock} ${unit} (Threshold: ${threshold} ${unit})`
 
+    // Get venue slug for proper URL construction
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { slug: true },
+    })
+
+    if (!venue) {
+      logger.warn(`Venue not found: ${venueId}`)
+      return
+    }
+
     // Send notification to each relevant staff member
     for (const staff of staffToNotify) {
       await sendNotification({
@@ -371,8 +382,8 @@ export async function sendLowStockAlertNotification(
         type: notificationType,
         title,
         message,
-        actionUrl: `/venues/${venueId}/inventory/raw-materials/${rawMaterialId}`,
-        actionLabel: 'View Details',
+        actionUrl: `/inventory?highlight=${rawMaterialId}`,
+        actionLabel: 'Gestionar Inventario',
         entityType: 'RawMaterial',
         entityId: rawMaterialId,
         metadata: {
