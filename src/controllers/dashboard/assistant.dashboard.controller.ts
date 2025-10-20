@@ -2,8 +2,9 @@ import { NextFunction, Request, Response } from 'express'
 import assistantService from '../../services/dashboard/assistant.dashboard.service'
 import { AILearningService } from '../../services/dashboard/ai-learning.service'
 import { AssistantQueryDto, FeedbackSubmissionDto } from '../../schemas/dashboard/assistant.schema'
-import { UnauthorizedError } from '../../errors/AppError'
+import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import prisma from '../../utils/prismaClient'
 
 const aiLearningService = new AILearningService()
 
@@ -27,11 +28,35 @@ interface AuthenticatedRequest extends Request {
  */
 export const processAssistantQuery = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { message, conversationHistory }: AssistantQueryDto = req.body
+    const { message, conversationHistory, venueSlug, userId }: AssistantQueryDto = req.body
 
     // Verificar que el usuario esté autenticado
     if (!req.authContext?.userId || !req.authContext?.venueId) {
       throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    if (userId && userId !== req.authContext.userId) {
+      logger.warn('🚨 userId mismatch detected in assistant query', {
+        expectedUserId: req.authContext.userId,
+        receivedUserId: userId,
+      })
+      throw new ForbiddenError('Los identificadores enviados no coinciden con tu sesión activa.')
+    }
+
+    if (venueSlug) {
+      const venueRecord = await prisma.venue.findUnique({
+        where: { id: req.authContext.venueId },
+        select: { slug: true },
+      })
+
+      if (!venueRecord || venueRecord.slug !== venueSlug) {
+        logger.warn('🚨 venueSlug mismatch detected in assistant query', {
+          expectedVenueId: req.authContext.venueId,
+          expectedSlug: venueRecord?.slug,
+          receivedSlug: venueSlug,
+        })
+        throw new ForbiddenError('El venue seleccionado no coincide con tu sesión activa.')
+      }
     }
 
     // Procesar la consulta del asistente (el schema ya convierte los timestamps)

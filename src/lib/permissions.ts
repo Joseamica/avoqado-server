@@ -50,12 +50,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
 
   /**
    * WAITER: Order and table management
+   * - Can VIEW menu (read-only) to take orders
+   * - Cannot create/edit menu items (MANAGER+ only)
    */
   [StaffRole.WAITER]: [
     'home:read',
-    'menu:read',
-    'menu:create',
-    'menu:update',
+    'menu:read', // Read-only access to menus, categories, products, modifiers
     'orders:read',
     'orders:create',
     'orders:update',

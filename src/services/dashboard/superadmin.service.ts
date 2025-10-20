@@ -332,48 +332,29 @@ export async function getAllVenuesForSuperadmin(): Promise<SuperadminVenue[]> {
  * Get all platform features for management
  */
 export async function getAllPlatformFeatures(): Promise<PlatformFeature[]> {
-  // For now, return static features since we don't have a features table yet
-  // In a real implementation, this would query a features table
-  return [
-    {
-      id: '1',
-      code: 'ai_chatbot',
-      name: 'AI Chatbot',
-      description: 'Intelligent customer support chatbot powered by AI',
-      category: 'AI',
-      status: 'ACTIVE',
-      pricingModel: 'FIXED',
-      basePrice: 49.99,
-      isCore: false,
-      createdAt: '2024-01-15T10:00:00Z',
-      updatedAt: '2024-01-15T10:00:00Z',
-    },
-    {
-      id: '2',
-      code: 'advanced_analytics',
-      name: 'Advanced Analytics',
-      description: 'Deep insights and custom reports for business intelligence',
-      category: 'ANALYTICS',
-      status: 'ACTIVE',
-      pricingModel: 'TIERED',
-      basePrice: 29.99,
-      isCore: false,
-      createdAt: '2024-01-10T10:00:00Z',
-      updatedAt: '2024-01-10T10:00:00Z',
-    },
-    {
-      id: '3',
-      code: 'pos_integration',
-      name: 'POS Integration',
-      description: 'Core point-of-sale system integration',
-      category: 'CORE',
-      status: 'ACTIVE',
-      pricingModel: 'FREE',
-      isCore: true,
-      createdAt: '2024-01-01T10:00:00Z',
-      updatedAt: '2024-01-01T10:00:00Z',
-    },
-  ]
+  try {
+    const features = await prisma.feature.findMany({
+      where: { active: true },
+      orderBy: { name: 'asc' },
+    })
+
+    return features.map(feature => ({
+      id: feature.id,
+      code: feature.code,
+      name: feature.name,
+      description: feature.description || '',
+      category: feature.category,
+      status: feature.active ? 'ACTIVE' : 'INACTIVE',
+      pricingModel: 'FIXED', // Default since Feature doesn't have this field yet
+      basePrice: Number(feature.monthlyPrice) || 0,
+      isCore: false, // Default since Feature doesn't have this field yet
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }))
+  } catch (error) {
+    logger.error('Error getting platform features from database:', error)
+    throw new Error('Failed to fetch platform features')
+  }
 }
 
 /**

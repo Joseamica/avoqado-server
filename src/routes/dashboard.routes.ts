@@ -1179,7 +1179,7 @@ router.delete(
 router.get(
   '/venues/:venueId/payments/:paymentId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('payments:read'), // Allows WAITER+ to view payment details (read-only)
   paymentController.getPayment,
 )
 /**
@@ -1212,14 +1212,14 @@ router.get(
 router.post(
   '/venues/:venueId/payments/:paymentId/send-receipt',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('payments:refund'), // Requires MANAGER+ to send receipts (administrative action)
   paymentController.sendPaymentReceipt,
 )
 
 router.get(
   '/venues/:venueId/payments/:paymentId/receipts',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('payments:read'), // Allows WAITER+ to view payment receipts (read-only)
   paymentController.getPaymentReceipts,
 )
 

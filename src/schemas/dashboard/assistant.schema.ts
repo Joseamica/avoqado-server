@@ -27,6 +27,8 @@ export const assistantQuerySchema = z.object({
       .min(1, 'El mensaje no puede estar vacío.')
       .max(2000, 'El mensaje no puede exceder 2000 caracteres.'),
     conversationHistory: z.array(conversationEntrySchema).max(50, 'El historial no puede exceder 50 entradas.').optional(),
+    venueSlug: z.string().trim().min(1, 'El identificador del venue no puede estar vacío.').optional(),
+    userId: z.string().trim().min(1, 'El identificador del usuario no puede estar vacío.').optional(),
   }),
 })
 

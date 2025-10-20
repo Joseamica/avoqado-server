@@ -10,6 +10,7 @@ interface TextToSqlQuery {
   conversationHistory?: ConversationEntry[]
   venueId: string
   userId: string
+  venueSlug?: string
 }
 
 interface ConversationEntry {
@@ -312,6 +313,7 @@ CRITICAL ENUM VALUES:
     try {
       // Double-check security before execution
       const normalizedQuery = sqlQuery.toLowerCase()
+      const trimmedQuery = normalizedQuery.trim()
 
       if (!normalizedQuery.includes('select')) {
         throw new Error('Query must be a SELECT statement')
@@ -319,6 +321,28 @@ CRITICAL ENUM VALUES:
 
       if (!normalizedQuery.includes(venueId.toLowerCase())) {
         throw new Error('Query must filter by venue ID')
+      }
+
+      const semicolonMatch = trimmedQuery.indexOf(';')
+      if (semicolonMatch !== -1 && semicolonMatch !== trimmedQuery.length - 1) {
+        throw new Error('Multiple SQL statements are not allowed')
+      }
+
+      const disallowedPatterns = [/\bor\s+1\s*=\s*1\b/i, /\bor\s+'1'\s*=\s*'1'\b/i, /\bor\s+true\b/i, /\bunion\b/i, /--/, /\/\*/]
+
+      for (const pattern of disallowedPatterns) {
+        if (pattern.test(normalizedQuery)) {
+          throw new Error('Query contains potentially unsafe patterns')
+        }
+      }
+
+      const uuidRegex = /'([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})'/gi
+      let uuidMatch: RegExpExecArray | null
+      const normalizedVenueId = venueId.toLowerCase()
+      while ((uuidMatch = uuidRegex.exec(normalizedQuery)) !== null) {
+        if (uuidMatch[1].toLowerCase() !== normalizedVenueId) {
+          throw new Error('Query references unauthorized identifiers')
+        }
       }
 
       // Execute the raw SQL query
@@ -371,13 +395,24 @@ CRITICAL ENUM VALUES:
   // RESULT INTERPRETATION
   // ============================
 
-  private async interpretQueryResult(originalQuestion: string, sqlResult: any, sqlExplanation: string): Promise<string> {
+  private async interpretQueryResult(
+    originalQuestion: string,
+    sqlResult: any,
+    sqlExplanation: string,
+    venueSlug?: string,
+  ): Promise<string> {
+    const venueContext = venueSlug
+      ? `\nCONTEXTO DEL VENUE ACTIVO: El usuario está autenticado en el venue con slug "${venueSlug}".\nSi la pregunta menciona otro venue distinto, deja claro que solo puedes responder con datos de "${venueSlug}" y aclara cualquier diferencia.`
+      : ''
+
     const interpretPrompt = `
 Eres un asistente de restaurante que interpreta resultados de bases de datos.
 
 PREGUNTA ORIGINAL: "${originalQuestion}"
 CONSULTA EJECUTADA: ${sqlExplanation}
 RESULTADO DE LA BASE DE DATOS: ${JSON.stringify(sqlResult, null, 2)}
+
+${venueContext}
 
 Interpreta este resultado y responde en español de manera natural y útil:
 
@@ -662,7 +697,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       // Step 5: Interpret the results naturally (only if validation passed)
-      const naturalResponse = await this.interpretQueryResult(query.message, execution.result, sqlGeneration.explanation)
+      const naturalResponse = await this.interpretQueryResult(query.message, execution.result, sqlGeneration.explanation, query.venueSlug)
 
       logger.info('✅ Text-to-SQL query completed successfully', {
         venueId: query.venueId,
@@ -800,6 +835,12 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     try {
       // 1. EMPTY RESULT VALIDATION
       if (!result || (Array.isArray(result) && result.length === 0)) {
+        errors.push('No se encontraron datos para los criterios especificados')
+        return { isValid: false, errors }
+      }
+
+      // 1.1 NULL RESULT VALIDATION
+      if (!this.resultContainsMeaningfulData(result)) {
         errors.push('No se encontraron datos para los criterios especificados')
         return { isValid: false, errors }
       }
@@ -968,6 +1009,40 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
 
     return { isValid: errors.length === 0, errors }
+  }
+
+  private resultContainsMeaningfulData(result: any): boolean {
+    const isMeaningfulValue = (value: unknown): boolean => {
+      if (value === null || value === undefined) {
+        return false
+      }
+      if (typeof value === 'string') {
+        return value.trim().length > 0
+      }
+      return true
+    }
+
+    if (!result) {
+      return false
+    }
+
+    if (Array.isArray(result)) {
+      if (result.length === 0) {
+        return false
+      }
+      return result.some(row => {
+        if (row && typeof row === 'object') {
+          return Object.values(row as Record<string, unknown>).some(isMeaningfulValue)
+        }
+        return isMeaningfulValue(row)
+      })
+    }
+
+    if (typeof result === 'object') {
+      return Object.values(result as Record<string, unknown>).some(isMeaningfulValue)
+    }
+
+    return isMeaningfulValue(result)
   }
 
   // ============================

@@ -754,10 +754,11 @@ async function main() {
     const createdStaffList: (any & { assignedRole: StaffRole })[] = []
 
     // --- Staff de la Organización ---
+    // Solo crear SUPERADMIN y OWNER a nivel organización (tienen acceso a todos los venues)
     const staffToCreate =
       orgIndex === 0
         ? [
-            // Staff específico para la primera organización
+            // Staff global con acceso a todos los venues
             {
               email: 'superadmin@superadmin.com',
               password: 'superadmin',
@@ -766,10 +767,6 @@ async function main() {
               lastName: 'Admin',
             },
             { email: 'owner@owner.com', password: 'owner', role: StaffRole.OWNER, firstName: 'Main', lastName: 'Owner' },
-            { email: 'admin@admin.com', password: 'admin', role: StaffRole.ADMIN, firstName: 'Venue', lastName: 'Admin' },
-            { email: 'manager@manager.com', password: 'manager', role: StaffRole.MANAGER, firstName: 'Shift', lastName: 'Manager' },
-            { email: 'waiter@waiter.com', password: 'waiter', role: StaffRole.WAITER, firstName: 'John', lastName: 'Waiter' },
-            { email: 'waiter2@waiter.com', password: 'waiter', role: StaffRole.WAITER, firstName: 'Jane', lastName: 'Waitress' },
           ]
         : [
             // Staff para organizaciones aleatorias
@@ -807,25 +804,28 @@ async function main() {
       })
       createdStaffList.push({ ...staffMember, assignedRole: staffData.role })
     }
-    console.log(`  Created ${createdStaffList.length} staff members.`)
+    console.log(`  Created ${createdStaffList.length} global staff members (SUPERADMIN, OWNER).`)
 
-    const mainAdmin = createdStaffList.find(s => [StaffRole.ADMIN, StaffRole.OWNER].includes(s.assignedRole))!
+    // Para invitaciones usamos OWNER como invitador
+    const mainInviter = createdStaffList.find(s => s.assignedRole === StaffRole.OWNER)
 
     // --- Invitaciones ---
-    await prisma.invitation.create({
-      data: {
-        email: faker.internet.email(),
-        role: StaffRole.ADMIN,
-        type: InvitationType.VENUE_ADMIN,
-        organizationId: org.id,
-        token: faker.string.uuid(),
-        expiresAt: faker.date.future(),
-        status: InvitationStatus.PENDING,
-        invitedById: mainAdmin.id,
-        message: 'Te invito a ser admin de nuestro nuevo local.',
-      },
-    })
-    console.log(`  Created a sample invitation.`)
+    if (mainInviter) {
+      await prisma.invitation.create({
+        data: {
+          email: faker.internet.email(),
+          role: StaffRole.ADMIN,
+          type: InvitationType.VENUE_ADMIN,
+          organizationId: org.id,
+          token: faker.string.uuid(),
+          expiresAt: faker.date.future(),
+          status: InvitationStatus.PENDING,
+          invitedById: mainInviter.id,
+          message: 'Te invito a ser admin de nuestro nuevo local.',
+        },
+      })
+      console.log(`  Created a sample invitation.`)
+    }
 
     // --- Bucle de Venues: solo dos venues (uno completo, otro vacio) ---
     const venuesConfig =
@@ -860,9 +860,85 @@ async function main() {
       })
       console.log(`    -> Created Venue: ${venue.name}.`)
 
+      // Crear staff específico para este venue (solo para org 0)
+      const venueSpecificStaff: (any & { assignedRole: StaffRole })[] = []
+      if (orgIndex === 0) {
+        const suffix = index === 0 ? '' : '2' // '' para avoqado-full, '2' para avoqado-empty
+        const venueStaffToCreate = [
+          {
+            email: `admin${suffix}@admin${suffix}.com`,
+            password: suffix ? `admin${suffix}` : 'admin',
+            role: StaffRole.ADMIN,
+            firstName: 'Admin',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `manager${suffix}@manager${suffix}.com`,
+            password: suffix ? `manager${suffix}` : 'manager',
+            role: StaffRole.MANAGER,
+            firstName: 'Manager',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `cashier${suffix}@cashier${suffix}.com`,
+            password: suffix ? `cashier${suffix}` : 'cashier',
+            role: StaffRole.CASHIER,
+            firstName: 'Cashier',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `waiter${suffix}@waiter${suffix}.com`,
+            password: suffix ? `waiter${suffix}` : 'waiter',
+            role: StaffRole.WAITER,
+            firstName: 'Waiter',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `kitchen${suffix}@kitchen${suffix}.com`,
+            password: suffix ? `kitchen${suffix}` : 'kitchen',
+            role: StaffRole.KITCHEN,
+            firstName: 'Kitchen',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `host${suffix}@host${suffix}.com`,
+            password: suffix ? `host${suffix}` : 'host',
+            role: StaffRole.HOST,
+            firstName: 'Host',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `viewer${suffix}@viewer${suffix}.com`,
+            password: suffix ? `viewer${suffix}` : 'viewer',
+            role: StaffRole.VIEWER,
+            firstName: 'Viewer',
+            lastName: `Venue ${index + 1}`,
+          },
+        ]
+
+        for (const staffData of venueStaffToCreate) {
+          const staffMember = await prisma.staff.create({
+            data: {
+              organizationId: org.id,
+              email: staffData.email,
+              password: await bcrypt.hash(staffData.password, HASH_ROUNDS),
+              firstName: staffData.firstName,
+              lastName: staffData.lastName,
+              phone: faker.phone.number(),
+              active: true,
+              emailVerified: true,
+            },
+          })
+          venueSpecificStaff.push({ ...staffMember, assignedRole: staffData.role })
+        }
+        console.log(`      - Created ${venueSpecificStaff.length} venue-specific staff members.`)
+      }
+
       let venueAssignments = 0
+
+      // Asignar staff global (SUPERADMIN, OWNER) a este venue
       for (const staffWithRole of createdStaffList) {
-        if ([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN].includes(staffWithRole.assignedRole) || Math.random() > 0.3) {
+        if ([StaffRole.SUPERADMIN, StaffRole.OWNER].includes(staffWithRole.assignedRole)) {
           const pin = staffWithRole.assignedRole === StaffRole.SUPERADMIN && isFullVenue ? '0000' : faker.string.numeric(4)
 
           await prisma.staffVenue.create({
@@ -931,10 +1007,100 @@ async function main() {
         }
       }
 
+      // Asignar staff específico del venue
+      for (const staffWithRole of venueSpecificStaff) {
+        const pin = faker.string.numeric(4)
+
+        await prisma.staffVenue.create({
+          data: {
+            staffId: staffWithRole.id,
+            venueId: venue.id,
+            role: staffWithRole.assignedRole,
+            active: true,
+            pin,
+          },
+        })
+        venueAssignments += 1
+
+        if (!isFullVenue) {
+          continue
+        }
+
+        const notificationTypes = [
+          NotificationType.NEW_ORDER,
+          NotificationType.ORDER_READY,
+          NotificationType.PAYMENT_RECEIVED,
+          NotificationType.LOW_INVENTORY,
+          NotificationType.NEW_REVIEW,
+          NotificationType.SHIFT_REMINDER,
+          NotificationType.POS_DISCONNECTED,
+          NotificationType.ANNOUNCEMENT,
+        ]
+
+        for (const type of notificationTypes) {
+          let enabled = true
+          let priority: NotificationPriority = NotificationPriority.NORMAL
+          let channels: NotificationChannel[] = [NotificationChannel.IN_APP]
+
+          if (staffWithRole.assignedRole === StaffRole.ADMIN) {
+            channels = [NotificationChannel.IN_APP, NotificationChannel.EMAIL]
+            if (type === NotificationType.POS_DISCONNECTED || type === NotificationType.LOW_INVENTORY) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.MANAGER) {
+            if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+              priority = NotificationPriority.HIGH
+              channels = [NotificationChannel.IN_APP, NotificationChannel.PUSH]
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.WAITER) {
+            if (type === NotificationType.LOW_INVENTORY) {
+              enabled = false
+            }
+            if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.KITCHEN) {
+            if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.CASHIER) {
+            if (type === NotificationType.PAYMENT_RECEIVED) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.VIEWER) {
+            // Viewer has minimal notifications
+            if (
+              type !== NotificationType.ANNOUNCEMENT &&
+              type !== NotificationType.SHIFT_REMINDER &&
+              type !== NotificationType.NEW_REVIEW
+            ) {
+              enabled = false
+            }
+          }
+
+          await prisma.notificationPreference.create({
+            data: {
+              staffId: staffWithRole.id,
+              venueId: venue.id,
+              type,
+              enabled,
+              channels,
+              priority,
+              quietStart: faker.helpers.arrayElement(['22:00', '23:00', null]),
+              quietEnd: faker.helpers.arrayElement(['07:00', '08:00', null]),
+            },
+          })
+        }
+      }
+
       if (isFullVenue) {
-        console.log(`      - Assigned ${venueAssignments} staff to ${venue.name} and created notification preferences for active roles.`)
+        console.log(
+          `      - Assigned ${venueAssignments} staff to ${venue.name} (${createdStaffList.length} global + ${venueSpecificStaff.length} venue-specific) and created notification preferences.`,
+        )
       } else {
-        console.log(`      - Assigned ${venueAssignments} staff to ${venue.name} (empty venue, no preferences created).`)
+        console.log(
+          `      - Assigned ${venueAssignments} staff to ${venue.name} (${createdStaffList.length} global + ${venueSpecificStaff.length} venue-specific).`,
+        )
       }
 
       await prisma.venueSettings.create({
