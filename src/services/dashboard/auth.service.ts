@@ -93,14 +93,10 @@ export async function loginStaff(loginData: LoginDto) {
     photoUrl: staff.photoUrl,
     venues: staff.venues.map(sv => {
       // Get custom permissions for this venue + role combination
-      const customPerms = customRolePermissions.find(
-        crp => crp.venueId === sv.venueId && crp.role === sv.role
-      )
+      const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
 
       // If custom permissions exist, use them; otherwise use defaults
-      const permissions = customPerms
-        ? (customPerms.permissions as string[])
-        : DEFAULT_PERMISSIONS[sv.role] || []
+      const permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[sv.role] || []
 
       return {
         id: sv.venue.id,

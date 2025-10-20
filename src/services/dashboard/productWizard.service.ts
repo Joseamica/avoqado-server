@@ -4,6 +4,7 @@ import { Unit } from '@prisma/client'
 import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
 import { setProductInventoryType, InventoryType } from './productInventoryIntegration.service'
+import logger from '@/config/logger'
 
 /**
  * Product Creation Wizard Service
@@ -469,10 +470,10 @@ export async function switchInventoryType(venueId: string, productId: string, ne
       throw new AppError('Product not found', 404)
     }
 
-    console.log('🔧 [DEBUG] switchInventoryType:', { venueId, productId, productVenueId: product.venueId, newType })
+    logger.info('🔧 [DEBUG] switchInventoryType:', { venueId, productId, productVenueId: product.venueId, newType })
 
     if (product.venueId !== venueId) {
-      console.error('❌ [DEBUG] Venue mismatch!', { requestVenueId: venueId, productVenueId: product.venueId })
+      logger.error('❌ [DEBUG] Venue mismatch!', { requestVenueId: venueId, productVenueId: product.venueId })
       throw new AppError('Product does not belong to this venue', 403)
     }
 

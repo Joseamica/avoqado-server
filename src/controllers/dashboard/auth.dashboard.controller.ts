@@ -212,14 +212,10 @@ export const getAuthStatus = async (req: Request, res: Response) => {
 
     // Enrich all venues with custom role permissions
     const enrichedVenues = directVenues.map(venue => {
-      const customPerms = customRolePermissions.find(
-        crp => crp.venueId === venue.id && crp.role === venue.role
-      )
+      const customPerms = customRolePermissions.find(crp => crp.venueId === venue.id && crp.role === venue.role)
 
       // If custom permissions exist, use them; otherwise use defaults
-      const permissions = customPerms
-        ? (customPerms.permissions as string[])
-        : DEFAULT_PERMISSIONS[venue.role as StaffRole] || []
+      const permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[venue.role as StaffRole] || []
 
       return {
         ...venue,
