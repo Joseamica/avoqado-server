@@ -140,7 +140,8 @@ export const socketAuthenticationMiddleware = (socket: AuthenticatedSocket, next
 
 /**
  * Socket Authorization Middleware Factory
- * Similar to authorizeRole.middleware.ts but for sockets
+ * Role-based authorization for Socket.IO connections
+ * Note: HTTP routes use checkPermission middleware for granular permission-based authorization
  */
 export const socketAuthorizationMiddleware = (allowedRoles: string[]) => {
   return (socket: AuthenticatedSocket, next: (err?: Error) => void): void => {

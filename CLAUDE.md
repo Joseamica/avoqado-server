@@ -16,6 +16,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 - `npm run studio` - Launch Prisma Studio for database exploration
 - `npx prisma generate` - Generate Prisma Client after schema changes
 
+**⚠️ CRITICAL DATABASE MIGRATION POLICY:**
+
+- **NEVER use `npx prisma db push`** - This bypasses migration history and causes drift
+- **ALWAYS create proper migrations** using `npx prisma migrate dev --name {description}`
+- **If migration drift occurs**: Use `npx prisma migrate reset --force` to reset the database, then run your new migration
+- **Why this matters**: Migration history is the source of truth for production deployments. Using `db push` creates inconsistencies between dev and production schemas.
+
 ### Testing
 
 - `npm test` - Run all tests with Jest
@@ -481,9 +488,9 @@ Order → OrderItem → Product → Recipe → RecipeLine → RawMaterial → St
 ### Authentication & Authorization
 
 - JWT-based authentication with refresh tokens
-- Role-based access control (RBAC) - 9 role levels
+- Permission-based access control (ABAC) - Granular permission system
 - Session management with Redis
-- Middleware: `authenticateToken`, `authorizeRole`
+- Middleware: `authenticateToken`, `checkPermission`
 
 **⚠️ CRITICAL: Request Context Pattern**
 
@@ -521,8 +528,8 @@ even though authentication succeeded.
 **Where to find this**:
 
 - Middleware: `src/middlewares/authenticateToken.middleware.ts:37` - Sets `req.authContext`
-- Middleware: `src/middlewares/authorizeRole.middleware.ts:14,23` - Reads `req.authContext`
-- Middleware: `src/middlewares/checkPermission.middleware.ts:25` - Reads `req.authContext`
+- Middleware: `src/middlewares/checkPermission.middleware.ts:25` - Reads `req.authContext` (current standard)
+- Middleware: `src/middlewares/authorizeRole.middleware.ts:14,23` - Reads `req.authContext` (deprecated - use checkPermission instead)
 
 ### Granular Permission System (Action-Based Permissions)
 
@@ -703,6 +710,235 @@ model StaffVenue {
    - Resource should be singular: `tpv`, `menu`, `order`, `payment`
    - Action should be standard CRUD + custom: `read`, `create`, `update`, `delete`, `command`, `export`, `respond`
    - Format: `resource:action`
+
+#### `authorizeRole` vs `checkPermission` - Understanding the Paradigm Shift
+
+The system has fully migrated from role-based authorization (`authorizeRole`) to permission-based authorization (`checkPermission`). **These are fundamentally different approaches**, not just extensions. All routes now use `checkPermission` exclusively.
+
+##### `authorizeRole` - Legacy Role-Based Approach (RBAC)
+
+```typescript
+authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER])
+```
+
+**How it works:**
+- **Question**: "Is your role in this list?"
+- **Static check** - Cannot be customized per venue
+- **All or nothing** - If you're a WAITER, you're blocked. Period.
+
+**Limitations:**
+- ❌ Very rigid - Cannot grant extra permissions to lower roles
+- ❌ Cannot remove permissions from higher roles (OWNER always has full access)
+- ❌ Same permissions for all venues (no per-venue customization)
+- ❌ No granularity - You either have full role access or none
+
+**Example problem:**
+```typescript
+// Analytics route
+router.get('/venues/:venueId/analytics',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  analyticsController.getData
+)
+
+// ❌ WAITER blocked - No way to grant analytics access to a specific WAITER
+// ❌ OWNER has access - No way to restrict analytics from a specific OWNER
+```
+
+##### `checkPermission` - Modern Permission-Based Approach (ABAC)
+
+```typescript
+checkPermission('menu:read')
+```
+
+**How it works:**
+- **Question**: "Do you have this specific permission?"
+- **Dynamic check** - Queries `VenueRolePermission` table on each request
+- **Granular control** - Permissions calculated using override/merge logic
+
+**Advantages:**
+
+1. **Override Mode** (for wildcard roles: ADMIN, OWNER, SUPERADMIN)
+   ```typescript
+   // Example: OWNER in a specific venue
+   Default permissions: ['*:*']  // All permissions
+   Custom permissions:  ['orders:read', 'payments:read']  // Only these 2
+
+   // Result: Uses ONLY custom (complete override)
+   // ✅ OWNER can access orders and payments
+   // ❌ OWNER CANNOT access menu (menu:read not in custom list)
+   ```
+
+2. **Merge Mode** (for non-wildcard roles: WAITER, CASHIER, etc.)
+   ```typescript
+   // Example: WAITER in a specific venue
+   Default permissions: ['menu:read', 'orders:create', 'tpv:read']
+   Custom permissions:  ['inventory:read', 'analytics:export']
+
+   // Result: Default + Custom (additive merge)
+   // ✅ WAITER has ALL default permissions PLUS the 2 custom ones
+   Final: ['menu:read', 'orders:create', 'tpv:read', 'inventory:read', 'analytics:export']
+   ```
+
+3. **Per-Venue Customization**
+   ```typescript
+   // Venue A: WAITER has default permissions only
+   VenueRolePermission: null
+
+   // Venue B: WAITER has extra permissions
+   VenueRolePermission: {
+     venueId: 'venue_B',
+     role: 'WAITER',
+     permissions: ['inventory:read', 'shifts:close']
+   }
+
+   // ✅ Same user, different permissions based on venue context
+   ```
+
+##### Real-World Comparison
+
+**Scenario:** An OWNER wants to give analytics access to a WAITER, but NOT menu editing.
+
+**❌ With `authorizeRole` (impossible):**
+```typescript
+// Analytics route
+router.get('/venues/:venueId/analytics',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  // WAITER blocked - No way to grant access
+)
+
+// Menu route
+router.post('/venues/:venueId/menu/products',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  // WAITER blocked - Correct, but not granular
+)
+```
+
+**✅ With `checkPermission` (flexible):**
+```typescript
+// Analytics route
+router.get('/venues/:venueId/analytics',
+  authenticateTokenMiddleware,
+  checkPermission('analytics:read'),
+  // ✅ WAITER can access if custom permission granted
+)
+
+// Menu route
+router.post('/venues/:venueId/menu/products',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  // ✅ WAITER blocked - Doesn't have this permission
+)
+
+// In database:
+VenueRolePermission {
+  venueId: 'venue_123',
+  role: 'WAITER',
+  permissions: ['analytics:read', 'analytics:export']  // Extra permissions granted
+}
+```
+
+##### Key Differences Summary
+
+| Aspect | `authorizeRole` | `checkPermission` |
+|--------|----------------|-------------------|
+| **Type** | Role-based (RBAC) | Permission-based (ABAC) |
+| **Flexibility** | Static, same for all venues | Dynamic, customizable per venue |
+| **Granularity** | Full role (all or nothing) | Specific permission (resource:action) |
+| **Customization** | ❌ Impossible | ✅ Via `VenueRolePermission` table |
+| **Remove perms from OWNER** | ❌ Impossible | ✅ Override mode |
+| **Add perms to WAITER** | ❌ Impossible | ✅ Merge mode |
+| **Database queries** | None | Queries `VenueRolePermission` each request |
+
+##### Migration Example
+
+**Before (role-based):**
+```typescript
+router.get(
+  '/venues/:venueId/menucategories',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]), // ❌ Rigid
+  menuController.listMenuCategoriesHandler,
+)
+```
+
+**After (permission-based):**
+```typescript
+router.get(
+  '/venues/:venueId/menucategories',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'), // ✅ Flexible + customizable
+  menuController.listMenuCategoriesHandler,
+)
+```
+
+**Result:** The system now respects custom permissions configured in the `VenueRolePermission` table, enabling use cases like "OWNER without menu access" or "WAITER with analytics access".
+
+##### When to Use Each
+
+**Use `checkPermission`** (REQUIRED for all new routes):
+- ✅ **ALL features** - Business-critical and administrative features
+- ✅ Granular control over permissions
+- ✅ Per-venue permission customization
+- ✅ Flexible permission assignment to any role
+
+**Do NOT use `authorizeRole`** (deprecated):
+- ❌ **Deprecated** - Do not use in new code
+- ❌ Exists only for reference and understanding migration
+- ❌ All existing routes have been migrated to `checkPermission`
+- ❌ Use `checkPermission` with appropriate permission strings instead (e.g., `system:manage` for SUPERADMIN-only features)
+
+##### Migration Status
+
+**🎉 100% MIGRATION COMPLETE - PURE SINGLE PARADIGM ACHIEVED**
+
+All 74 routes in the codebase now use `checkPermission` middleware. Zero exceptions. No hybrid approach.
+
+**Completed migrations:**
+- ✅ Menu routes - 38 routes (menucategories, menus, products, modifiers, modifier-groups)
+- ✅ Orders routes - 4 routes (read, update, delete)
+- ✅ Payments routes - 2 routes (read receipts)
+- ✅ Reviews routes - 1 route (read)
+- ✅ Analytics routes - 4 routes (general stats, metrics, charts)
+- ✅ Venues routes - 5 routes (create, read, update, delete, enhanced)
+- ✅ Teams routes - 8 routes (list, invite, update, delete, resend)
+- ✅ Notifications routes - 3 routes (send, bulk send)
+- ✅ System routes - 4 routes (payment config, testing endpoints)
+- ✅ Permission Management routes - 5 routes (role permissions CRUD, hierarchy)
+
+**Total: 74 routes using `checkPermission` ✅**
+
+**New Permission Strings (System & Settings):**
+
+These permissions are covered by the `*:*` wildcard for SUPERADMIN, OWNER, and ADMIN:
+
+```typescript
+'system:config'     // SUPERADMIN - Payment provider configuration
+'system:test'       // SUPERADMIN - Testing payment endpoints
+'settings:manage'   // OWNER/ADMIN - Role permission management
+```
+
+**Why 100% migration matters:**
+
+- ✅ **Pure single paradigm** - Follows Stripe/AWS/GitHub patterns exactly
+- ✅ **Zero confusion** - Developers always use `checkPermission`, no exceptions
+- ✅ **Maximum flexibility** - Even system routes can be customized via VenueRolePermission
+- ✅ **Future-proof** - Can grant `system:test` to non-SUPERADMINs if needed
+- ✅ **Self-documenting** - Permission strings clearly describe what each route does
+
+**Verification:**
+
+```bash
+# Count total checkPermission uses (should be 74 + 1 import = 75)
+grep -c "checkPermission" src/routes/dashboard.routes.ts
+# Result: 75
+
+# Count authorizeRole uses (should be ONLY the import = 1)
+grep "authorizeRole" src/routes/dashboard.routes.ts | wc -l
+# Result: 1 (just the import statement)
+```
 
 #### Implementing Admin Permission Management UI (Future)
 
