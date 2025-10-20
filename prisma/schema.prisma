@@ -91,6 +91,7 @@ model Venue {
   posConnectionStatus PosConnectionStatus?
   invitations         Invitation[]
   staff               StaffVenue[]
+  rolePermissions     VenueRolePermission[]
   menuCategories      MenuCategory[]
   menus               Menu[]
   products            Product[]
@@ -234,6 +235,9 @@ model Staff {
   // Time tracking
   timeEntries TimeEntry[]
 
+  // Role permission management
+  modifiedRolePermissions VenueRolePermission[] @relation("ModifiedRolePermissions")
+
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
@@ -278,6 +282,32 @@ model StaffVenue {
   @@index([venueId])
   @@index([role])
   @@index([pin]) // ✅ Índice para búsquedas de PIN
+}
+
+// ==========================================
+// NOTE: ROLE PERMISSIONS MANAGEMENT
+// ==========================================
+
+/// Venue-specific role permission configurations.
+/// Allows OWNER and ADMIN to customize default permissions for each role.
+model VenueRolePermission {
+  id          String    @id @default(cuid())
+  venueId     String
+  venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  role        StaffRole
+  permissions String[]  // Custom permissions array: ["menu:read", "orders:create", ...]
+
+  // Audit trail
+  modifiedBy String
+  modifier   Staff  @relation("ModifiedRolePermissions", fields: [modifiedBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, role]) // One permission config per role per venue
+  @@index([venueId])
+  @@index([role])
+  @@index([modifiedBy])
 }
 
 model Invitation {

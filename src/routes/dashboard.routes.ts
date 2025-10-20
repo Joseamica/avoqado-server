@@ -28,6 +28,7 @@ import * as notificationController from '../controllers/dashboard/notification.d
 import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
+import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import inventoryRoutes from './dashboard/inventory.routes'
@@ -3724,6 +3725,174 @@ router.delete(
   authenticateTokenMiddleware,
   authorizeRole([StaffRole.SUPERADMIN]),
   testingController.deleteTestPayment,
+)
+
+// ==========================================
+// ROLE PERMISSIONS MANAGEMENT ROUTES
+// ==========================================
+// Allows OWNER and ADMIN to customize permissions for each role
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/role-permissions:
+ *   get:
+ *     tags: [Role Permissions]
+ *     summary: Get all role permissions for a venue
+ *     description: Returns both custom and default permissions for each role
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: List of all role permissions
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/role-permissions',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  rolePermissionController.getAllRolePermissions,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/role-permissions/{role}:
+ *   get:
+ *     tags: [Role Permissions]
+ *     summary: Get permissions for a specific role
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: role
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [VIEWER, HOST, KITCHEN, WAITER, CASHIER, MANAGER, ADMIN, OWNER, SUPERADMIN]
+ *     responses:
+ *       200:
+ *         description: Role permissions
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/role-permissions/:role',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  rolePermissionController.getRolePermissions,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/role-permissions/{role}:
+ *   put:
+ *     tags: [Role Permissions]
+ *     summary: Update permissions for a specific role
+ *     description: Includes hierarchy and self-lockout validation
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: role
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - permissions
+ *             properties:
+ *               permissions:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 example: ["menu:read", "menu:create", "orders:read"]
+ *     responses:
+ *       200:
+ *         description: Permissions updated successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.put(
+  '/venues/:venueId/role-permissions/:role',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  rolePermissionController.updateRolePermissions,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/role-permissions/{role}:
+ *   delete:
+ *     tags: [Role Permissions]
+ *     summary: Delete custom permissions (revert to defaults)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: role
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Reverted to default permissions
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.delete(
+  '/venues/:venueId/role-permissions/:role',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  rolePermissionController.deleteRolePermissions,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/role-permissions/hierarchy:
+ *   get:
+ *     tags: [Role Permissions]
+ *     summary: Get role hierarchy information
+ *     description: Returns which roles can modify which other roles, critical permissions, etc.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Role hierarchy information
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/role-permissions/hierarchy',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  rolePermissionController.getRoleHierarchyInfo,
 )
 
 export default router
