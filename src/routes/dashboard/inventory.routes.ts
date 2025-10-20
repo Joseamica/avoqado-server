@@ -1,7 +1,6 @@
 import { Router } from 'express'
-import { StaffRole } from '@prisma/client'
 import { validateRequest } from '../../middlewares/validation'
-import { authorizeRole } from '../../middlewares/authorizeRole.middleware'
+import { checkPermission } from '../../middlewares/checkPermission.middleware'
 
 // Import controllers
 import * as rawMaterialController from '../../controllers/dashboard/inventory/rawMaterial.controller'
@@ -82,7 +81,7 @@ const router = Router({ mergeParams: true })
  */
 router.get(
   '/raw-materials',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(GetRawMaterialsQuerySchema),
   rawMaterialController.getRawMaterials,
 )
@@ -96,7 +95,7 @@ router.get(
  */
 router.get(
   '/raw-materials/:rawMaterialId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(RawMaterialIdParamsSchema),
   rawMaterialController.getRawMaterial,
 )
@@ -110,7 +109,7 @@ router.get(
  */
 router.post(
   '/raw-materials',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:create'),
   validateRequest(CreateRawMaterialSchema),
   rawMaterialController.createRawMaterial,
 )
@@ -124,7 +123,7 @@ router.post(
  */
 router.put(
   '/raw-materials/:rawMaterialId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:update'),
   validateRequest(UpdateRawMaterialSchema),
   rawMaterialController.updateRawMaterial,
 )
@@ -138,7 +137,7 @@ router.put(
  */
 router.delete(
   '/raw-materials/:rawMaterialId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:delete'),
   validateRequest(RawMaterialIdParamsSchema),
   rawMaterialController.deleteRawMaterial,
 )
@@ -152,7 +151,7 @@ router.delete(
  */
 router.post(
   '/raw-materials/:rawMaterialId/adjust-stock',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(AdjustStockSchema),
   rawMaterialController.adjustStock,
 )
@@ -166,7 +165,7 @@ router.post(
  */
 router.get(
   '/raw-materials/:rawMaterialId/movements',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(RawMaterialIdParamsSchema),
   rawMaterialController.getStockMovements,
 )
@@ -180,7 +179,7 @@ router.get(
  */
 router.get(
   '/raw-materials/:rawMaterialId/recipes',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(RawMaterialIdParamsSchema),
   rawMaterialController.getRawMaterialRecipes,
 )
@@ -198,7 +197,7 @@ router.get(
  */
 router.get(
   '/products/:productId/recipe',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ProductIdParamsSchema),
   recipeController.getRecipe,
 )
@@ -212,7 +211,7 @@ router.get(
  */
 router.post(
   '/products/:productId/recipe',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(CreateRecipeSchema),
   recipeController.createRecipe,
 )
@@ -226,7 +225,7 @@ router.post(
  */
 router.put(
   '/products/:productId/recipe',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(UpdateRecipeSchema),
   recipeController.updateRecipe,
 )
@@ -240,7 +239,7 @@ router.put(
  */
 router.delete(
   '/products/:productId/recipe',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:delete'),
   validateRequest(ProductIdParamsSchema),
   recipeController.deleteRecipe,
 )
@@ -254,7 +253,7 @@ router.delete(
  */
 router.post(
   '/products/:productId/recipe/lines',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(AddRecipeLineSchema),
   recipeController.addRecipeLine,
 )
@@ -266,11 +265,7 @@ router.post(
  *     tags: [Inventory - Recipes]
  *     summary: Remove ingredient from recipe
  */
-router.delete(
-  '/products/:productId/recipe/lines/:recipeLineId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  recipeController.removeRecipeLine,
-)
+router.delete('/products/:productId/recipe/lines/:recipeLineId', checkPermission('inventory:delete'), recipeController.removeRecipeLine)
 
 // ===========================================
 // PRICING ROUTES
@@ -285,7 +280,7 @@ router.delete(
  */
 router.get(
   '/products/:productId/pricing-policy',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ProductIdParamsSchema),
   pricingController.getPricingPolicy,
 )
@@ -299,7 +294,7 @@ router.get(
  */
 router.post(
   '/products/:productId/pricing-policy',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(CreatePricingPolicySchema),
   pricingController.createPricingPolicy,
 )
@@ -313,7 +308,7 @@ router.post(
  */
 router.put(
   '/products/:productId/pricing-policy',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(UpdatePricingPolicySchema),
   pricingController.updatePricingPolicy,
 )
@@ -327,7 +322,7 @@ router.put(
  */
 router.get(
   '/products/:productId/calculate-price',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(CalculatePriceSchema),
   pricingController.calculatePrice,
 )
@@ -339,11 +334,7 @@ router.get(
  *     tags: [Inventory - Pricing]
  *     summary: Apply suggested price to product
  */
-router.post(
-  '/products/:productId/apply-suggested-price',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  pricingController.applySuggestedPrice,
-)
+router.post('/products/:productId/apply-suggested-price', checkPermission('inventory:read'), pricingController.applySuggestedPrice)
 
 /**
  * @openapi
@@ -352,7 +343,7 @@ router.post(
  *     tags: [Inventory - Pricing]
  *     summary: Get pricing analysis for all products
  */
-router.get('/pricing-analysis', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), pricingController.getPricingAnalysis)
+router.get('/pricing-analysis', checkPermission('inventory:read'), pricingController.getPricingAnalysis)
 
 // ===========================================
 // SUPPLIERS ROUTES
@@ -365,7 +356,7 @@ router.get('/pricing-analysis', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGE
  *     tags: [Inventory - Suppliers]
  *     summary: Get all suppliers
  */
-router.get('/suppliers', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), supplierController.getSuppliers)
+router.get('/suppliers', checkPermission('inventory:read'), supplierController.getSuppliers)
 
 /**
  * @openapi
@@ -376,7 +367,7 @@ router.get('/suppliers', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), su
  */
 router.get(
   '/suppliers/:supplierId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(SupplierIdParamsSchema),
   supplierController.getSupplier,
 )
@@ -388,12 +379,7 @@ router.get(
  *     tags: [Inventory - Suppliers]
  *     summary: Create a new supplier
  */
-router.post(
-  '/suppliers',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  validateRequest(CreateSupplierSchema),
-  supplierController.createSupplier,
-)
+router.post('/suppliers', checkPermission('inventory:read'), validateRequest(CreateSupplierSchema), supplierController.createSupplier)
 
 /**
  * @openapi
@@ -404,7 +390,7 @@ router.post(
  */
 router.put(
   '/suppliers/:supplierId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(UpdateSupplierSchema),
   supplierController.updateSupplier,
 )
@@ -418,7 +404,7 @@ router.put(
  */
 router.delete(
   '/suppliers/:supplierId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:delete'),
   validateRequest(SupplierIdParamsSchema),
   supplierController.deleteSupplier,
 )
@@ -432,7 +418,7 @@ router.delete(
  */
 router.post(
   '/suppliers/:supplierId/pricing',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(CreateSupplierPricingSchema),
   supplierController.createSupplierPricing,
 )
@@ -446,7 +432,7 @@ router.post(
  */
 router.get(
   '/raw-materials/:rawMaterialId/supplier-pricing',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   supplierController.getSupplierPricingHistory,
 )
 
@@ -459,7 +445,7 @@ router.get(
  */
 router.get(
   '/raw-materials/:rawMaterialId/supplier-recommendations',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(GetSupplierRecommendationsSchema),
   supplierController.getSupplierRecommendations,
 )
@@ -471,11 +457,7 @@ router.get(
  *     tags: [Inventory - Suppliers]
  *     summary: Get supplier performance metrics
  */
-router.get(
-  '/suppliers/:supplierId/performance',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  supplierController.getSupplierPerformance,
-)
+router.get('/suppliers/:supplierId/performance', checkPermission('inventory:read'), supplierController.getSupplierPerformance)
 
 // ===========================================
 // PURCHASE ORDERS ROUTES
@@ -490,7 +472,7 @@ router.get(
  */
 router.get(
   '/purchase-orders',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(GetPurchaseOrdersQuerySchema),
   purchaseOrderController.getPurchaseOrders,
 )
@@ -504,7 +486,7 @@ router.get(
  */
 router.get(
   '/purchase-orders/:purchaseOrderId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(PurchaseOrderIdParamsSchema),
   purchaseOrderController.getPurchaseOrder,
 )
@@ -518,7 +500,7 @@ router.get(
  */
 router.post(
   '/purchase-orders',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(CreatePurchaseOrderSchema),
   purchaseOrderController.createPurchaseOrder,
 )
@@ -532,7 +514,7 @@ router.post(
  */
 router.put(
   '/purchase-orders/:purchaseOrderId',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(UpdatePurchaseOrderSchema),
   purchaseOrderController.updatePurchaseOrder,
 )
@@ -544,11 +526,7 @@ router.put(
  *     tags: [Inventory - Purchase Orders]
  *     summary: Approve a purchase order
  */
-router.post(
-  '/purchase-orders/:purchaseOrderId/approve',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  purchaseOrderController.approvePurchaseOrder,
-)
+router.post('/purchase-orders/:purchaseOrderId/approve', checkPermission('inventory:read'), purchaseOrderController.approvePurchaseOrder)
 
 /**
  * @openapi
@@ -559,7 +537,7 @@ router.post(
  */
 router.post(
   '/purchase-orders/:purchaseOrderId/receive',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ReceivePurchaseOrderSchema),
   purchaseOrderController.receivePurchaseOrder,
 )
@@ -571,11 +549,7 @@ router.post(
  *     tags: [Inventory - Purchase Orders]
  *     summary: Cancel a purchase order
  */
-router.post(
-  '/purchase-orders/:purchaseOrderId/cancel',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  purchaseOrderController.cancelPurchaseOrder,
-)
+router.post('/purchase-orders/:purchaseOrderId/cancel', checkPermission('inventory:read'), purchaseOrderController.cancelPurchaseOrder)
 
 /**
  * @openapi
@@ -584,7 +558,7 @@ router.post(
  *     tags: [Inventory - Purchase Orders]
  *     summary: Get purchase order statistics
  */
-router.get('/purchase-orders/stats', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), purchaseOrderController.getPurchaseOrderStats)
+router.get('/purchase-orders/stats', checkPermission('inventory:read'), purchaseOrderController.getPurchaseOrderStats)
 
 // ===========================================
 // ALERTS ROUTES
@@ -597,7 +571,7 @@ router.get('/purchase-orders/stats', authorizeRole([StaffRole.ADMIN, StaffRole.M
  *     tags: [Inventory - Alerts]
  *     summary: Get all alerts
  */
-router.get('/alerts', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), validateRequest(GetAlertsQuerySchema), alertController.getAlerts)
+router.get('/alerts', checkPermission('inventory:read'), validateRequest(GetAlertsQuerySchema), alertController.getAlerts)
 
 /**
  * @openapi
@@ -606,7 +580,7 @@ router.get('/alerts', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), valid
  *     tags: [Inventory - Alerts]
  *     summary: Get active alerts count
  */
-router.get('/alerts/count', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), alertController.getActiveAlertsCount)
+router.get('/alerts/count', checkPermission('inventory:read'), alertController.getActiveAlertsCount)
 
 /**
  * @openapi
@@ -615,7 +589,7 @@ router.get('/alerts/count', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
  *     tags: [Inventory - Alerts]
  *     summary: Get alerts by category
  */
-router.get('/alerts/by-category', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), alertController.getAlertsByCategory)
+router.get('/alerts/by-category', checkPermission('inventory:read'), alertController.getAlertsByCategory)
 
 /**
  * @openapi
@@ -626,7 +600,7 @@ router.get('/alerts/by-category', authorizeRole([StaffRole.ADMIN, StaffRole.MANA
  */
 router.post(
   '/alerts/:alertId/acknowledge',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(AcknowledgeAlertSchema),
   alertController.acknowledgeAlert,
 )
@@ -640,7 +614,7 @@ router.post(
  */
 router.post(
   '/alerts/:alertId/resolve',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ResolveAlertSchema),
   alertController.resolveAlert,
 )
@@ -652,7 +626,7 @@ router.post(
  *     tags: [Inventory - Alerts]
  *     summary: Dismiss an alert
  */
-router.post('/alerts/:alertId/dismiss', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), alertController.dismissAlert)
+router.post('/alerts/:alertId/dismiss', checkPermission('inventory:read'), alertController.dismissAlert)
 
 /**
  * @openapi
@@ -661,7 +635,7 @@ router.post('/alerts/:alertId/dismiss', authorizeRole([StaffRole.ADMIN, StaffRol
  *     tags: [Inventory - Alerts]
  *     summary: Get alert history for a raw material
  */
-router.get('/raw-materials/:rawMaterialId/alerts', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), alertController.getAlertHistory)
+router.get('/raw-materials/:rawMaterialId/alerts', checkPermission('inventory:read'), alertController.getAlertHistory)
 
 /**
  * @openapi
@@ -670,7 +644,7 @@ router.get('/raw-materials/:rawMaterialId/alerts', authorizeRole([StaffRole.ADMI
  *     tags: [Inventory - Alerts]
  *     summary: Get alert statistics
  */
-router.get('/alerts/stats', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), alertController.getAlertStats)
+router.get('/alerts/stats', checkPermission('inventory:read'), alertController.getAlertStats)
 
 /**
  * @openapi
@@ -679,7 +653,7 @@ router.get('/alerts/stats', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
  *     tags: [Inventory - Alerts]
  *     summary: Create manual alert
  */
-router.post('/alerts', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), alertController.createManualAlert)
+router.post('/alerts', checkPermission('inventory:read'), alertController.createManualAlert)
 
 // ===========================================
 // REPORTS ROUTES
@@ -692,12 +666,7 @@ router.post('/alerts', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), aler
  *     tags: [Inventory - Reports]
  *     summary: Get Product Mix (PMIX) report
  */
-router.get(
-  '/reports/pmix',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  validateRequest(GetPMIXReportSchema),
-  reportController.getPMIXReport,
-)
+router.get('/reports/pmix', checkPermission('inventory:read'), validateRequest(GetPMIXReportSchema), reportController.getPMIXReport)
 
 /**
  * @openapi
@@ -708,7 +677,7 @@ router.get(
  */
 router.get(
   '/reports/profitability',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(GetProfitabilityReportSchema),
   reportController.getProfitabilityReport,
 )
@@ -722,7 +691,7 @@ router.get(
  */
 router.get(
   '/reports/ingredient-usage',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(GetIngredientUsageReportSchema),
   reportController.getIngredientUsageReport,
 )
@@ -734,7 +703,7 @@ router.get(
  *     tags: [Inventory - Reports]
  *     summary: Get cost variance report
  */
-router.get('/reports/cost-variance', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), reportController.getCostVarianceReport)
+router.get('/reports/cost-variance', checkPermission('inventory:read'), reportController.getCostVarianceReport)
 
 /**
  * @openapi
@@ -743,7 +712,7 @@ router.get('/reports/cost-variance', authorizeRole([StaffRole.ADMIN, StaffRole.M
  *     tags: [Inventory - Reports]
  *     summary: Get inventory valuation report
  */
-router.get('/reports/valuation', authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]), reportController.getInventoryValuation)
+router.get('/reports/valuation', checkPermission('inventory:read'), reportController.getInventoryValuation)
 
 // ===========================================
 // PRODUCT WIZARD ROUTES (NEW)
@@ -758,7 +727,7 @@ router.get('/reports/valuation', authorizeRole([StaffRole.ADMIN, StaffRole.MANAG
  */
 router.get(
   '/should-use-inventory',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(VenueIdParamsSchema),
   productWizardController.shouldUseInventory,
 )
@@ -772,7 +741,7 @@ router.get(
  */
 router.post(
   '/wizard/step1',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ProductWizardStep1Schema),
   productWizardController.createProductStep1,
 )
@@ -786,7 +755,7 @@ router.post(
  */
 router.post(
   '/products/:productId/wizard/step2',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ProductWizardStep2Schema),
   productWizardController.configureInventoryStep2,
 )
@@ -800,7 +769,7 @@ router.post(
  */
 router.post(
   '/products/:productId/wizard/step3-simple',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ProductWizardStep3SimpleStockSchema),
   productWizardController.setupSimpleStockStep3,
 )
@@ -814,7 +783,7 @@ router.post(
  */
 router.post(
   '/products/:productId/wizard/step3-recipe',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(ProductWizardStep3RecipeSchema),
   productWizardController.setupRecipeStep3,
 )
@@ -828,7 +797,7 @@ router.post(
  */
 router.get(
   '/products/:productId/wizard/progress',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(GetWizardProgressSchema),
   productWizardController.getWizardProgress,
 )
@@ -842,7 +811,7 @@ router.get(
  */
 router.post(
   '/wizard/complete',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(CreateProductWithInventorySchema),
   productWizardController.createProductWithInventory,
 )
@@ -858,11 +827,7 @@ router.post(
  *     tags: [Inventory - Product Status]
  *     summary: Get inventory status for a product
  */
-router.get(
-  '/products/:productId/inventory-status',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  productWizardController.getProductInventoryStatus,
-)
+router.get('/products/:productId/inventory-status', checkPermission('inventory:read'), productWizardController.getProductInventoryStatus)
 
 /**
  * @openapi
@@ -871,11 +836,7 @@ router.get(
  *     tags: [Inventory - Product Status]
  *     summary: Get inventory type for a product
  */
-router.get(
-  '/products/:productId/inventory-type',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  productWizardController.getProductInventoryType,
-)
+router.get('/products/:productId/inventory-type', checkPermission('inventory:read'), productWizardController.getProductInventoryType)
 
 /**
  * @openapi
@@ -886,7 +847,7 @@ router.get(
  */
 router.put(
   '/products/:productId/inventory-type',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(SetProductInventoryTypeSchema),
   productWizardController.setProductInventoryType,
 )
@@ -901,7 +862,7 @@ router.put(
  */
 router.post(
   '/products/:productId/switch-inventory-type',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(SetProductInventoryTypeSchema), // Requires inventoryType in body (SIMPLE_STOCK or RECIPE_BASED)
   productWizardController.switchInventoryType,
 )
@@ -919,7 +880,7 @@ router.post(
  */
 router.get(
   '/raw-materials/:rawMaterialId/preview-cost-change',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(PreviewCostChangeSchema),
   productWizardController.previewCostChange,
 )
@@ -933,7 +894,7 @@ router.get(
  */
 router.post(
   '/raw-materials/:rawMaterialId/trigger-cost-recalculation',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(TriggerCostRecalculationSchema),
   productWizardController.triggerCostRecalculation,
 )
@@ -947,7 +908,7 @@ router.post(
  */
 router.get(
   '/stale-recipes',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(VenueIdParamsSchema),
   productWizardController.getStaleRecipes,
 )
@@ -961,7 +922,7 @@ router.get(
  */
 router.post(
   '/recalculate-stale-recipes',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(VenueIdParamsSchema),
   productWizardController.recalculateStaleRecipes,
 )
@@ -975,7 +936,7 @@ router.post(
  */
 router.post(
   '/recalculate-all-recipes',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(VenueIdParamsSchema),
   productWizardController.recalculateAllRecipes,
 )
@@ -989,7 +950,7 @@ router.post(
  */
 router.get(
   '/recipe-cost-variances',
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('inventory:read'),
   validateRequest(GetRecipeCostVariancesSchema),
   productWizardController.getRecipeCostVariances,
 )

@@ -4,6 +4,7 @@ import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import { LoginDto } from '../../schemas/dashboard/auth.schema'
 import { StaffRole } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
+import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 
 export async function loginStaff(loginData: LoginDto) {
   const { email, password, venueId } = loginData
@@ -69,7 +70,20 @@ export async function loginStaff(loginData: LoginDto) {
     data: { lastLoginAt: new Date() },
   })
 
-  // 6. Formatear respuesta
+  // 6. Fetch custom role permissions for all venues
+  const venueIds = staff.venues.map(sv => sv.venueId)
+  const customRolePermissions = await prisma.venueRolePermission.findMany({
+    where: {
+      venueId: { in: venueIds },
+    },
+    select: {
+      venueId: true,
+      role: true,
+      permissions: true,
+    },
+  })
+
+  // 7. Formatear respuesta with merged permissions
   const sanitizedStaff = {
     id: staff.id,
     email: staff.email,
@@ -77,13 +91,26 @@ export async function loginStaff(loginData: LoginDto) {
     lastName: staff.lastName,
     organizationId: staff.organizationId,
     photoUrl: staff.photoUrl,
-    venues: staff.venues.map(sv => ({
-      id: sv.venue.id,
-      name: sv.venue.name,
-      slug: sv.venue.slug,
-      logo: sv.venue.logo,
-      role: sv.role,
-    })),
+    venues: staff.venues.map(sv => {
+      // Get custom permissions for this venue + role combination
+      const customPerms = customRolePermissions.find(
+        crp => crp.venueId === sv.venueId && crp.role === sv.role
+      )
+
+      // If custom permissions exist, use them; otherwise use defaults
+      const permissions = customPerms
+        ? (customPerms.permissions as string[])
+        : DEFAULT_PERMISSIONS[sv.role] || []
+
+      return {
+        id: sv.venue.id,
+        name: sv.venue.name,
+        slug: sv.venue.slug,
+        logo: sv.venue.logo,
+        role: sv.role,
+        permissions, // Include permissions in response
+      }
+    }),
   }
 
   return {

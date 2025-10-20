@@ -1,82 +1,80 @@
 import express, { RequestHandler } from 'express'
 import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
-import { authorizeRole } from '../middlewares/authorizeRole.middleware' // Verifica esta ruta
-import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
 
 // Importa StaffRole desde @prisma/client si ahí es donde está definido tu enum de Prisma
 // o desde donde lo hayas exportado como enum de TS (si es una copia manual)
-import { StaffRole } from '@prisma/client' // O '../security' si StaffRole está definido ahí como un enum de TS manualmente
 
 // Importa el SCHEMA de Zod, no el tipo DTO, para el middleware de validación
-import { createVenueSchema, listVenuesQuerySchema } from '../schemas/dashboard/venue.schema'
-import { enhancedCreateVenueSchema } from '../schemas/dashboard/cost-management.schema'
-import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
-import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
+import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
-import * as googleOAuthController from '../controllers/dashboard/googleOAuth.controller'
-import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
-import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
-import * as orderController from '../controllers/dashboard/order.dashboard.controller'
-import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import * as generalStatsController from '../controllers/dashboard/generalStats.dashboard.controller'
+import * as googleOAuthController from '../controllers/dashboard/googleOAuth.controller'
+import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
+import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
+import * as orderController from '../controllers/dashboard/order.dashboard.controller'
+import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
+import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
+import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
-import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
-import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
-import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
-import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
-import superadminRoutes from './dashboard/superadmin.routes'
-import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
-import inventoryRoutes from './dashboard/inventory.routes'
+import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
+import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
+import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
+import { loginSchema, switchVenueSchema, updateAccountSchema } from '../schemas/dashboard/auth.schema'
+import { enhancedCreateVenueSchema } from '../schemas/dashboard/cost-management.schema'
+import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
 import {
-  CreateMenuCategorySchema,
-  UpdateMenuCategorySchema,
-  GetMenuCategoryParamsSchema, // For GET one, DELETE
-  VenueIdParamsSchema, // For listing all under a venue or POST to a venue
-  ReorderMenuCategoriesSchema,
-} from '../schemas/dashboard/menuCategory.schema'
-import {
-  // Menu schemas
-  CreateMenuSchema,
-  UpdateMenuSchema,
-  GetMenuParamsSchema,
-  CloneMenuSchema,
-  MenuQuerySchema,
-  ReorderMenusSchema,
-  // Product schemas
-  CreateProductSchema,
-  UpdateProductSchema,
-  GetProductParamsSchema,
-  // Modifier schemas
-  CreateModifierGroupSchema,
-  UpdateModifierGroupSchema,
-  GetModifierGroupParamsSchema,
-  ModifierGroupQuerySchema,
-  CreateModifierSchema,
-  UpdateModifierSchema,
-  GetModifierParamsSchema,
   // Assignment schemas
   AssignCategoryToMenuSchema,
   AssignModifierGroupToProductSchema,
+  CloneMenuSchema,
+  // Menu schemas
+  CreateMenuSchema,
+  // Modifier schemas
+  CreateModifierGroupSchema,
+  CreateModifierSchema,
+  // Product schemas
+  CreateProductSchema,
+  GetMenuParamsSchema,
+  GetModifierGroupParamsSchema,
+  GetModifierParamsSchema,
+  GetProductParamsSchema,
+  MenuQuerySchema,
+  ModifierGroupQuerySchema,
   RemoveModifierGroupFromProductParamsSchema,
+  ReorderMenusSchema,
   ReorderProductsSchema,
+  UpdateMenuSchema,
+  UpdateModifierGroupSchema,
+  UpdateModifierSchema,
+  UpdateProductSchema,
 } from '../schemas/dashboard/menu.schema'
-import { loginSchema, switchVenueSchema, updateAccountSchema } from '../schemas/dashboard/auth.schema'
-import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
 import {
-  VenueIdParamsSchema as TeamVenueIdParamsSchema,
-  TeamMemberParamsSchema,
+  CreateMenuCategorySchema,
+  GetMenuCategoryParamsSchema, // For listing all under a venue or POST to a venue
+  ReorderMenuCategoriesSchema,
+  UpdateMenuCategorySchema, // For GET one, DELETE
+  VenueIdParamsSchema, // For listing all under a venue or POST to a venue
+} from '../schemas/dashboard/menuCategory.schema'
+import {
   InvitationParamsSchema,
-  TeamMembersQuerySchema,
   InviteTeamMemberSchema,
+  TeamMemberParamsSchema,
+  TeamMembersQuerySchema,
+  VenueIdParamsSchema as TeamVenueIdParamsSchema,
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
-import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 import { createTestPaymentSchema, getTestPaymentsSchema } from '../schemas/dashboard/testing.schema'
+import { createVenueSchema, listVenuesQuerySchema } from '../schemas/dashboard/venue.schema'
+import inventoryRoutes from './dashboard/inventory.routes'
+import superadminRoutes from './dashboard/superadmin.routes'
+import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -611,7 +609,7 @@ router.get('/auth/google/check-invitation', googleOAuthController.checkInvitatio
 router.get(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(VenueIdParamsSchema), // Validate venueId from params
   menuController.listMenuCategoriesHandler,
 )
@@ -653,7 +651,7 @@ router.get(
 router.post(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:create'),
   validateRequest(CreateMenuCategorySchema),
   menuController.createMenuCategoryHandler,
 )
@@ -693,7 +691,7 @@ router.post(
 router.post(
   '/venues/:venueId/menucategories/reorder',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('menu:update'),
   validateRequest(ReorderMenuCategoriesSchema),
   menuController.reorderMenuCategoriesHandler,
 )
@@ -722,7 +720,7 @@ router.post(
 router.get(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.getMenuCategoryHandler,
 )
@@ -758,7 +756,7 @@ router.get(
 router.patch(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateMenuCategorySchema),
   menuController.updateMenuCategoryHandler,
 )
@@ -783,22 +781,17 @@ router.patch(
 router.delete(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:delete'),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.deleteMenuCategoryHandler,
 )
 
 // router.get('/venues/:venueId/menus', getMenusHandler) // This seems to be a duplicate or old route
-router.get(
-  '/venues/:venueId/menus',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
-  menuController.getMenusHandler,
-)
+router.get('/venues/:venueId/menus', authenticateTokenMiddleware, checkPermission('menu:read'), menuController.getMenusHandler)
 router.post(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:create'),
   validateRequest(CreateMenuCategorySchema),
   menuController.createMenuCategoryHandler,
 )
@@ -806,7 +799,7 @@ router.post(
 router.get(
   '/venues/:venueId/menucategories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(VenueIdParamsSchema), // Validate venueId from params
   menuController.listMenuCategoriesHandler,
 )
@@ -814,7 +807,7 @@ router.get(
 router.post(
   '/venues/:venueId/menucategories/reorder',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(ReorderMenuCategoriesSchema),
   menuController.reorderMenuCategoriesHandler,
 )
@@ -822,7 +815,7 @@ router.post(
 router.get(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.getMenuCategoryHandler,
 )
@@ -830,7 +823,7 @@ router.get(
 router.patch(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateMenuCategorySchema),
   menuController.updateMenuCategoryHandler,
 )
@@ -838,7 +831,7 @@ router.patch(
 router.delete(
   '/venues/:venueId/menucategories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:delete'),
   validateRequest(GetMenuCategoryParamsSchema),
   menuController.deleteMenuCategoryHandler,
 )
@@ -870,12 +863,7 @@ router.delete(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
-router.get(
-  '/venues/:venueId/reviews',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
-  reviewController.getReviewsData,
-)
+router.get('/venues/:venueId/reviews', authenticateTokenMiddleware, checkPermission('reviews:read'), reviewController.getReviewsData)
 
 // Rutas de Venue para el Dashboard
 /**
@@ -905,7 +893,7 @@ router.get(
 router.post(
   '/venues',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN]),
+  checkPermission('venues:manage'),
   validateRequest(createVenueSchema), // Pasas el schema de Zod
   venueController.createVenue, // Llamas al método del controlador
 )
@@ -977,7 +965,7 @@ router.post(
 router.post(
   '/venues/enhanced',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]), // Allow both OWNER and ADMIN
+  checkPermission('venues:manage'),
   validateRequest(enhancedCreateVenueSchema),
   venueController.createEnhancedVenue,
 )
@@ -1008,7 +996,7 @@ router.post(
 router.get(
   '/venues',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('venues:read'),
   validateRequest(listVenuesQuerySchema), // Validar query params
   venueController.listVenues as unknown as RequestHandler, // Type assertion for controller
 )
@@ -1033,12 +1021,7 @@ router.get(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
-router.get(
-  '/venues/:venueId',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  venueController.getVenueById,
-)
+router.get('/venues/:venueId', authenticateTokenMiddleware, checkPermission('venues:read'), venueController.getVenueById)
 
 /**
  * @openapi
@@ -1066,12 +1049,7 @@ router.get(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
-router.put(
-  '/venues/:venueId',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  venueController.updateVenue,
-)
+router.put('/venues/:venueId', authenticateTokenMiddleware, checkPermission('venues:manage'), venueController.updateVenue)
 
 /**
  * @openapi
@@ -1089,12 +1067,7 @@ router.put(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
-router.delete(
-  '/venues/:venueId',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER]),
-  venueController.deleteVenue,
-)
+router.delete('/venues/:venueId', authenticateTokenMiddleware, checkPermission('venues:manage'), venueController.deleteVenue)
 
 //Rutas de Payment para el Dashboard
 /**
@@ -1120,12 +1093,7 @@ router.delete(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
-router.get(
-  '/venues/:venueId/payments',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
-  paymentController.getPaymentsData,
-)
+router.get('/venues/:venueId/payments', authenticateTokenMiddleware, checkPermission('payments:read'), paymentController.getPaymentsData)
 
 /**
  * @openapi
@@ -1153,28 +1121,28 @@ router.get(
 router.get(
   '/venues/:venueId/orders', // Nueva ruta semántica
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
+  checkPermission('orders:read'),
   orderController.getOrdersData, // Apunta al nuevo controlador
 )
 
 router.get(
   '/venues/:venueId/orders/:orderId', // Nueva ruta semántica
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
+  checkPermission('orders:read'),
   orderController.getOrder, // Apunta al nuevo controlador
 )
 
 router.put(
   '/venues/:venueId/orders/:orderId', // Nueva ruta semántica
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('orders:update'),
   orderController.updateOrder, // Apunta al nuevo controlador
 )
 
 router.delete(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('orders:delete'),
   orderController.deleteOrder,
 )
 router.get(
@@ -1244,12 +1212,12 @@ router.get(
 router.get(
   '/venues/:venueId/receipts/:receiptId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER]),
+  checkPermission('payments:read'),
   paymentController.getReceiptById,
 )
 
 // Venue Payment Configuration routes (SUPERADMIN only)
-router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, authorizeRole([StaffRole.SUPERADMIN]), venuePaymentConfigRoutes)
+router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, checkPermission('system:config'), venuePaymentConfigRoutes)
 
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
@@ -1681,7 +1649,7 @@ router.post(
 router.get(
   '/venues/:venueId/general-stats',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
+  checkPermission('analytics:read'),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getGeneralStats,
 )
@@ -1722,7 +1690,7 @@ router.get(
 router.get(
   '/venues/:venueId/basic-metrics',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
+  checkPermission('analytics:read'),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getBasicMetrics,
 )
@@ -1765,7 +1733,7 @@ router.get(
 router.get(
   '/venues/:venueId/charts/:chartType',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
+  checkPermission('analytics:read'),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getChartData,
 )
@@ -1808,7 +1776,7 @@ router.get(
 router.get(
   '/venues/:venueId/metrics/:metricType',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.SUPERADMIN, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.CASHIER]),
+  checkPermission('analytics:read'),
   validateRequest(z.object({ query: GeneralStatsQuerySchema })),
   generalStatsController.getExtendedMetrics,
 )
@@ -1821,7 +1789,7 @@ router.get(
 router.get(
   '/venues/:venueId/menus',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(MenuQuerySchema),
   menuController.getMenusHandler,
 )
@@ -1829,7 +1797,7 @@ router.get(
 router.post(
   '/venues/:venueId/menus',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:create'),
   validateRequest(CreateMenuSchema),
   menuController.createMenuHandler,
 )
@@ -1837,7 +1805,7 @@ router.post(
 router.get(
   '/venues/:venueId/menus/:menuId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(GetMenuParamsSchema),
   menuController.getMenuHandler,
 )
@@ -1845,7 +1813,7 @@ router.get(
 router.patch(
   '/venues/:venueId/menus/:menuId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateMenuSchema),
   menuController.updateMenuHandler,
 )
@@ -1853,7 +1821,7 @@ router.patch(
 router.delete(
   '/venues/:venueId/menus/:menuId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:delete'),
   validateRequest(GetMenuParamsSchema),
   menuController.deleteMenuHandler,
 )
@@ -1861,7 +1829,7 @@ router.delete(
 router.post(
   '/venues/:venueId/menus/:menuId/clone',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:create'),
   validateRequest(CloneMenuSchema),
   menuController.cloneMenuHandler,
 )
@@ -1869,7 +1837,7 @@ router.post(
 router.post(
   '/venues/:venueId/menus/reorder',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(ReorderMenusSchema),
   menuController.reorderMenusHandler,
 )
@@ -1877,7 +1845,7 @@ router.post(
 router.put(
   '/venues/:venueId/products/reorder',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(ReorderProductsSchema),
   menuController.reorderProductsHandler,
 )
@@ -1886,7 +1854,7 @@ router.put(
 router.post(
   '/venues/:venueId/menus/:menuId/categories',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(AssignCategoryToMenuSchema),
   menuController.assignCategoryToMenuHandler,
 )
@@ -1894,7 +1862,7 @@ router.post(
 router.delete(
   '/venues/:venueId/menus/:menuId/categories/:categoryId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(GetMenuParamsSchema),
   menuController.removeCategoryFromMenuHandler,
 )
@@ -1945,7 +1913,7 @@ router.delete(
 router.get(
   '/venues/:venueId/modifier-groups',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(ModifierGroupQuerySchema),
   menuController.listModifierGroupsHandler,
 )
@@ -1982,7 +1950,7 @@ router.get(
 router.post(
   '/venues/:venueId/modifier-groups',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:create'),
   validateRequest(CreateModifierGroupSchema),
   menuController.createModifierGroupHandler,
 )
@@ -2011,7 +1979,7 @@ router.post(
 router.get(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(GetModifierGroupParamsSchema),
   menuController.getModifierGroupHandler,
 )
@@ -2047,7 +2015,7 @@ router.get(
 router.patch(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateModifierGroupSchema),
   menuController.updateModifierGroupHandler,
 )
@@ -2083,7 +2051,7 @@ router.patch(
 router.put(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateModifierGroupSchema),
   menuController.updateModifierGroupHandler,
 )
@@ -2108,7 +2076,7 @@ router.put(
 router.delete(
   '/venues/:venueId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:delete'),
   validateRequest(GetModifierGroupParamsSchema),
   menuController.deleteModifierGroupHandler,
 )
@@ -2141,7 +2109,7 @@ router.delete(
 router.get(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(GetModifierGroupParamsSchema),
   menuController.listModifiersHandler,
 )
@@ -2177,7 +2145,7 @@ router.get(
 router.post(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:create'),
   validateRequest(CreateModifierSchema),
   menuController.createModifierHandler,
 )
@@ -2207,7 +2175,7 @@ router.post(
 router.get(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(GetModifierParamsSchema),
   menuController.getModifierHandler,
 )
@@ -2244,7 +2212,7 @@ router.get(
 router.patch(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateModifierSchema),
   menuController.updateModifierHandler,
 )
@@ -2281,7 +2249,7 @@ router.patch(
 router.put(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateModifierSchema),
   menuController.updateModifierHandler,
 )
@@ -2307,7 +2275,7 @@ router.put(
 router.delete(
   '/venues/:venueId/modifier-groups/:modifierGroupId/modifiers/:modifierId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:delete'),
   validateRequest(GetModifierParamsSchema),
   menuController.deleteModifierHandler,
 )
@@ -2348,7 +2316,7 @@ router.delete(
 router.post(
   '/venues/:venueId/products/:productId/modifier-groups',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(AssignModifierGroupToProductSchema),
   menuController.assignModifierGroupToProductHandler,
 )
@@ -2374,7 +2342,7 @@ router.post(
 router.delete(
   '/venues/:venueId/products/:productId/modifier-groups/:modifierGroupId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(RemoveModifierGroupFromProductParamsSchema),
   menuController.removeModifierGroupFromProductHandler,
 )
@@ -2424,7 +2392,7 @@ router.delete(
 router.get(
   '/venues/:venueId/products',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER, StaffRole.OWNER]),
+  checkPermission('menu:read'),
   validateRequest(VenueIdParamsSchema),
   productController.getProductsHandler,
 )
@@ -2457,7 +2425,7 @@ router.get(
 router.post(
   '/venues/:venueId/products',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:create'),
   validateRequest(CreateProductSchema),
   productController.createProductHandler,
 )
@@ -2482,7 +2450,7 @@ router.post(
 router.get(
   '/venues/:venueId/products/:productId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]),
+  checkPermission('menu:read'),
   validateRequest(GetProductParamsSchema),
   productController.getProductHandler,
 )
@@ -2514,7 +2482,7 @@ router.get(
 router.put(
   '/venues/:venueId/products/:productId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(UpdateProductSchema),
   productController.updateProductHandler,
 )
@@ -2539,7 +2507,7 @@ router.put(
 router.delete(
   '/venues/:venueId/products/:productId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:delete'),
   validateRequest(GetProductParamsSchema),
   productController.deleteProductHandler,
 )
@@ -2564,7 +2532,7 @@ router.delete(
 router.patch(
   '/venues/:venueId/products/:productId/image',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
+  checkPermission('menu:update'),
   validateRequest(GetProductParamsSchema),
   productController.deleteProductImageHandler,
 )
@@ -2634,7 +2602,7 @@ router.patch(
 router.get(
   '/venues/:venueId/team',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:read'),
   validateRequest(z.object({ params: TeamVenueIdParamsSchema.shape.params, query: TeamMembersQuerySchema.shape.query })),
   teamController.getTeamMembers,
 )
@@ -2686,7 +2654,7 @@ router.get(
 router.post(
   '/venues/:venueId/team',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:invite'),
   validateRequest(InviteTeamMemberSchema),
   teamController.inviteTeamMember,
 )
@@ -2709,7 +2677,7 @@ router.post(
 router.get(
   '/venues/:venueId/team/invitations',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:read'),
   validateRequest(TeamVenueIdParamsSchema),
   teamController.getPendingInvitations,
 )
@@ -2734,7 +2702,7 @@ router.get(
 router.delete(
   '/venues/:venueId/team/invitations/:invitationId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:delete'),
   validateRequest(InvitationParamsSchema),
   teamController.cancelInvitation,
 )
@@ -2759,7 +2727,7 @@ router.delete(
 router.post(
   '/venues/:venueId/team/invitations/:invitationId/resend',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:invite'),
   validateRequest(InvitationParamsSchema),
   teamController.resendInvitation,
 )
@@ -2784,7 +2752,7 @@ router.post(
 router.get(
   '/venues/:venueId/team/:teamMemberId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:read'),
   validateRequest(TeamMemberParamsSchema),
   teamController.getTeamMember,
 )
@@ -2820,7 +2788,7 @@ router.get(
 router.patch(
   '/venues/:venueId/team/:teamMemberId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:update'),
   validateRequest(UpdateTeamMemberSchema),
   teamController.updateTeamMember,
 )
@@ -2846,7 +2814,7 @@ router.patch(
 router.delete(
   '/venues/:venueId/team/:teamMemberId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('teams:delete'),
   validateRequest(TeamMemberParamsSchema),
   teamController.removeTeamMember,
 )
@@ -3196,12 +3164,7 @@ router.get('/notifications/types', authenticateTokenMiddleware, notificationCont
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
-router.post(
-  '/notifications',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN]),
-  notificationController.createNotification,
-)
+router.post('/notifications', authenticateTokenMiddleware, checkPermission('notifications:send'), notificationController.createNotification)
 
 /**
  * @openapi
@@ -3235,7 +3198,7 @@ router.post(
 router.post(
   '/notifications/bulk',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN]),
+  checkPermission('notifications:send'),
   notificationController.sendBulkNotification,
 )
 
@@ -3272,7 +3235,7 @@ router.post(
 router.post(
   '/notifications/venue/:venueId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.SUPERADMIN]),
+  checkPermission('notifications:send'),
   notificationController.sendVenueNotification,
 )
 
@@ -3622,7 +3585,7 @@ router.post(
 router.post(
   '/testing/payment/fast',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.SUPERADMIN]),
+  checkPermission('system:test'),
   validateRequest(createTestPaymentSchema),
   testingController.createTestPayment,
 )
@@ -3681,7 +3644,7 @@ router.post(
 router.get(
   '/testing/payments',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.SUPERADMIN]),
+  checkPermission('system:test'),
   validateRequest(getTestPaymentsSchema),
   testingController.getTestPayments,
 )
@@ -3723,7 +3686,7 @@ router.get(
 router.delete(
   '/testing/payment/:paymentId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.SUPERADMIN]),
+  checkPermission('system:test'),
   testingController.deleteTestPayment,
 )
 
@@ -3757,7 +3720,7 @@ router.delete(
 router.get(
   '/venues/:venueId/role-permissions',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('settings:manage'),
   rolePermissionController.getAllRolePermissions,
 )
 
@@ -3790,7 +3753,7 @@ router.get(
 router.get(
   '/venues/:venueId/role-permissions/:role',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('settings:manage'),
   rolePermissionController.getRolePermissions,
 )
 
@@ -3838,7 +3801,7 @@ router.get(
 router.put(
   '/venues/:venueId/role-permissions/:role',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('settings:manage'),
   rolePermissionController.updateRolePermissions,
 )
 
@@ -3870,7 +3833,7 @@ router.put(
 router.delete(
   '/venues/:venueId/role-permissions/:role',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('settings:manage'),
   rolePermissionController.deleteRolePermissions,
 )
 
@@ -3891,7 +3854,7 @@ router.delete(
 router.get(
   '/role-permissions/hierarchy',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  checkPermission('settings:manage'),
   rolePermissionController.getRoleHierarchyInfo,
 )
 

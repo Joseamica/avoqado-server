@@ -7,6 +7,7 @@ import { UpdateAccountDto } from '../../schemas/dashboard/auth.schema'
 import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
+import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 
 /**
  * Endpoint para verificar el estado de autenticación de un usuario.
@@ -100,6 +101,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
 
     // Create a map of venue IDs that user already has a direct relationship with
     const directVenueIds = new Set(directVenues.map(v => v.id))
+
+    // Fetch custom role permissions for direct venues
+    const venueIds = staff.venues.map(sv => sv.venue.id)
+    const customRolePermissions = await prisma.venueRolePermission.findMany({
+      where: {
+        venueId: { in: venueIds },
+      },
+      select: {
+        venueId: true,
+        role: true,
+        permissions: true,
+      },
+    })
 
     // If SUPERADMIN, fetch all venues in the system
     if (isSuperAdmin) {
@@ -196,6 +210,23 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       highestRole = StaffRole.OWNER
     }
 
+    // Enrich all venues with custom role permissions
+    const enrichedVenues = directVenues.map(venue => {
+      const customPerms = customRolePermissions.find(
+        crp => crp.venueId === venue.id && crp.role === venue.role
+      )
+
+      // If custom permissions exist, use them; otherwise use defaults
+      const permissions = customPerms
+        ? (customPerms.permissions as string[])
+        : DEFAULT_PERMISSIONS[venue.role as StaffRole] || []
+
+      return {
+        ...venue,
+        permissions, // Add permissions to each venue
+      }
+    })
+
     // Formatear respuesta
     const userPayload = {
       id: staff.id,
@@ -206,7 +237,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       photoUrl: staff.photoUrl,
       organizationId: staff.organizationId,
       role: highestRole, // Add explicit role field
-      venues: directVenues, // Use our enhanced directVenues array with all accessible venues
+      venues: enrichedVenues, // Use enriched venues with permissions
     }
 
     return res.status(200).json({

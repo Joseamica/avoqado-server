@@ -6,8 +6,7 @@ import { validateRequest } from '../../middlewares/validation'
 
 import { z } from 'zod'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
-import { authorizeRole } from '@/middlewares/authorizeRole.middleware'
-import { StaffRole } from '@/security'
+import { checkPermission } from '@/middlewares/checkPermission.middleware'
 
 // Import payment provider routes
 import paymentProviderRoutes from '../superadmin/paymentProvider.routes'
@@ -35,8 +34,8 @@ const router = Router()
 
 // All superadmin routes require authentication
 router.use(authenticateTokenMiddleware)
-// And must be SUPERADMIN
-router.use(authorizeRole([StaffRole.SUPERADMIN]))
+// And must have system:manage permission (SUPERADMIN only)
+router.use(checkPermission('system:manage'))
 
 // Schema for venue suspension
 const suspendVenueSchema = z.object({

@@ -11,7 +11,17 @@ import { StaffRole } from '@prisma/client'
  *   - "tpv:read" = Can view TPV terminals
  *   - "tpv:create" = Can create TPV terminals
  *   - "analytics:export" = Can export analytics data
+ *   - "settings:manage" = Can manage role permissions (OWNER/ADMIN only)
+ *   - "system:manage" = Can access superadmin features (SUPERADMIN only)
+ *   - "system:config" = Can configure system settings (SUPERADMIN only)
+ *   - "system:test" = Can access testing endpoints (SUPERADMIN only)
  *   - "*:*" = All permissions (wildcard)
+ *
+ * Special permissions (not in default arrays, covered by *:*):
+ *   - "settings:manage" = Role permission management (OWNER/ADMIN)
+ *   - "system:manage" = Superadmin features (venue mgmt, features, revenue, costs)
+ *   - "system:config" = Payment provider configuration (SUPERADMIN)
+ *   - "system:test" = Testing payment endpoints (SUPERADMIN)
  */
 export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   /**
@@ -214,8 +224,19 @@ export const CRITICAL_PERMISSIONS = ['settings:manage', 'settings:read', 'teams:
 /**
  * Check if a user has permission based on role and custom permissions
  *
+ * ⚠️ CRITICAL: This logic must match the frontend in:
+ * `avoqado-web-dashboard/src/hooks/usePermissions.ts`
+ *
+ * Permission Resolution Strategy:
+ * - OVERRIDE MODE (wildcard roles with custom permissions):
+ *   If role has "*:*" in defaults AND custom permissions exist,
+ *   use ONLY custom permissions (allows removing permissions from OWNER/ADMIN/SUPERADMIN)
+ *
+ * - MERGE MODE (non-wildcard roles):
+ *   Merge default + custom permissions (allows adding extra permissions to lower roles)
+ *
  * @param role User's role
- * @param customPermissions Custom permissions from StaffVenue.permissions (optional)
+ * @param customPermissions Custom permissions from VenueRolePermission (optional)
  * @param requiredPermission Permission to check (format: "resource:action")
  * @returns true if user has permission
  */
@@ -223,8 +244,25 @@ export function hasPermission(role: StaffRole, customPermissions: string[] | nul
   // Get default permissions for role
   const defaultPermissions = DEFAULT_PERMISSIONS[role] || []
 
-  // Merge with custom permissions
-  const allPermissions = [...defaultPermissions, ...(customPermissions || [])]
+  // Determine which permissions to use
+  let allPermissions: string[]
+
+  // OVERRIDE MODE for wildcard roles (OWNER, ADMIN, SUPERADMIN)
+  // If role has wildcard (*:*) in defaults AND custom permissions exist,
+  // use ONLY custom permissions (complete override, not merge)
+  // This allows removing permissions from high-level roles
+  const hasWildcardDefaults = defaultPermissions.includes('*:*')
+  const hasCustomPermissions = customPermissions && customPermissions.length > 0
+
+  if (hasWildcardDefaults && hasCustomPermissions) {
+    // Override mode: custom permissions replace defaults entirely
+    allPermissions = customPermissions
+  } else {
+    // MERGE MODE for non-wildcard roles
+    // Merge default + custom permissions
+    // Custom permissions can add new permissions on top of defaults
+    allPermissions = [...defaultPermissions, ...(customPermissions || [])]
+  }
 
   // Check for wildcard (all permissions)
   if (allPermissions.includes('*:*')) return true

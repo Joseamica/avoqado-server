@@ -1,10 +1,9 @@
 import express from 'express'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
-import { authorizeRole } from '@/middlewares/authorizeRole.middleware'
+import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import { analyticsOverviewQuerySchema } from '@/schemas/analytics/analytics.schema'
 import { getAnalyticsOverview } from '@/controllers/analytics/overview.analytics.controller'
-import { StaffRole } from '@prisma/client'
 
 const router = express.Router()
 
@@ -54,7 +53,7 @@ router.get(
   '/overview',
   authenticateTokenMiddleware,
   // Allow broad read roles; masking applied for non-execs in controller/service
-  authorizeRole([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.VIEWER]),
+  checkPermission('analytics:read'),
   validateRequest(analyticsOverviewQuerySchema),
   getAnalyticsOverview,
 )
