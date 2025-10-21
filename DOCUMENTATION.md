@@ -117,7 +117,8 @@ una petición es el siguiente:
 - **Propósito**: Contener lógica reutilizable que opera sobre las peticiones HTTP.
 - **Archivos Clave**:
   - **`authenticateToken.middleware.ts`**: Valida el JWT. Si es válido, decodifica el payload y lo adjunta a `req.authContext`.
-  - **`checkPermission.middleware.ts`**: Middleware factory que comprueba si el usuario tiene un permiso específico (formato `"resource:action"`).
+  - **`checkPermission.middleware.ts`**: Middleware factory que comprueba si el usuario tiene un permiso específico (formato
+    `"resource:action"`).
   - **`authorizeRole.middleware.ts`**: Middleware factory obsoleto basado en roles (usar `checkPermission` en su lugar).
   - **`validation.ts`**: Middleware factory que toma un schema de Zod y valida `req.body`, `req.query` o `req.params`.
 - **Conexiones**: Son utilizados en la capa de `routes` para proteger y validar endpoints.

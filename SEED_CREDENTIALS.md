@@ -6,10 +6,10 @@ Este documento contiene las credenciales de todos los usuarios creados por el se
 
 Estos usuarios tienen acceso a **ambos venues** (Avoqado Full y Avoqado Empty):
 
-| Role | Email | Password | Description |
-|------|-------|----------|-------------|
-| SUPERADMIN | superadmin@superadmin.com | superadmin | Acceso completo al sistema |
-| OWNER | owner@owner.com | owner | Propietario de la organización |
+| Role       | Email                     | Password   | Description                    |
+| ---------- | ------------------------- | ---------- | ------------------------------ |
+| SUPERADMIN | superadmin@superadmin.com | superadmin | Acceso completo al sistema     |
+| OWNER      | owner@owner.com           | owner      | Propietario de la organización |
 
 ---
 
@@ -17,15 +17,15 @@ Estos usuarios tienen acceso a **ambos venues** (Avoqado Full y Avoqado Empty):
 
 Estos usuarios **solo** tienen acceso al venue **Avoqado Full**:
 
-| Role | Email | Password | Description |
-|------|-------|----------|-------------|
-| ADMIN | admin@admin.com | admin | Administrador del venue |
-| MANAGER | manager@manager.com | manager | Gerente del venue |
-| CASHIER | cashier@cashier.com | cashier | Cajero del venue |
-| WAITER | waiter@waiter.com | waiter | Mesero del venue |
-| KITCHEN | kitchen@kitchen.com | kitchen | Personal de cocina |
-| HOST | host@host.com | host | Host/Recepcionista |
-| VIEWER | viewer@viewer.com | viewer | Solo lectura |
+| Role    | Email               | Password | Description             |
+| ------- | ------------------- | -------- | ----------------------- |
+| ADMIN   | admin@admin.com     | admin    | Administrador del venue |
+| MANAGER | manager@manager.com | manager  | Gerente del venue       |
+| CASHIER | cashier@cashier.com | cashier  | Cajero del venue        |
+| WAITER  | waiter@waiter.com   | waiter   | Mesero del venue        |
+| KITCHEN | kitchen@kitchen.com | kitchen  | Personal de cocina      |
+| HOST    | host@host.com       | host     | Host/Recepcionista      |
+| VIEWER  | viewer@viewer.com   | viewer   | Solo lectura            |
 
 ---
 
@@ -33,15 +33,15 @@ Estos usuarios **solo** tienen acceso al venue **Avoqado Full**:
 
 Estos usuarios **solo** tienen acceso al venue **Avoqado Empty**:
 
-| Role | Email | Password | Description |
-|------|-------|----------|-------------|
-| ADMIN | admin2@admin2.com | admin2 | Administrador del venue |
-| MANAGER | manager2@manager2.com | manager2 | Gerente del venue |
-| CASHIER | cashier2@cashier2.com | cashier2 | Cajero del venue |
-| WAITER | waiter2@waiter2.com | waiter2 | Mesero del venue |
-| KITCHEN | kitchen2@kitchen2.com | kitchen2 | Personal de cocina |
-| HOST | host2@host2.com | host2 | Host/Recepcionista |
-| VIEWER | viewer2@viewer2.com | viewer2 | Solo lectura |
+| Role    | Email                 | Password | Description             |
+| ------- | --------------------- | -------- | ----------------------- |
+| ADMIN   | admin2@admin2.com     | admin2   | Administrador del venue |
+| MANAGER | manager2@manager2.com | manager2 | Gerente del venue       |
+| CASHIER | cashier2@cashier2.com | cashier2 | Cajero del venue        |
+| WAITER  | waiter2@waiter2.com   | waiter2  | Mesero del venue        |
+| KITCHEN | kitchen2@kitchen2.com | kitchen2 | Personal de cocina      |
+| HOST    | host2@host2.com       | host2    | Host/Recepcionista      |
+| VIEWER  | viewer2@viewer2.com   | viewer2  | Solo lectura            |
 
 ---
 
@@ -50,6 +50,7 @@ Estos usuarios **solo** tienen acceso al venue **Avoqado Empty**:
 El patrón utilizado es consistente y fácil de recordar:
 
 - **Avoqado Full**:
+
   - Email: `{role}@{role}.com`
   - Password: `{role}`
   - Ejemplo: `manager@manager.com` / `manager`
@@ -62,32 +63,38 @@ El patrón utilizado es consistente y fácil de recordar:
 ## Permisos por Rol
 
 ### SUPERADMIN
+
 - Acceso completo a todo el sistema
 - Puede administrar múltiples organizaciones
 - PIN en Avoqado Full: `0000`
 
 ### OWNER
+
 - Acceso completo a todos los venues de la organización
 - Puede crear y administrar venues
 - Gestión completa de staff
 
 ### ADMIN
+
 - Acceso completo al venue asignado
 - Gestión de staff, configuración, reportes financieros
 - No puede crear venues
 
 ### MANAGER
+
 - Acceso a operaciones del venue
 - Gestión de turnos, inventario, reportes operacionales
 - Puede procesar reembolsos (`payments:refund`)
 - Puede exportar datos (`analytics:export`)
 
 ### CASHIER
+
 - Procesamiento de pagos
 - Gestión básica de órdenes
 - Operaciones de TPV
 
 ### WAITER
+
 - Gestión de órdenes y mesas
 - Creación de pagos (`payments:create`)
 - Lectura de pagos (`payments:read`)
@@ -96,15 +103,18 @@ El patrón utilizado es consistente y fácil de recordar:
 - **NO** puede procesar reembolsos o enviar recibos
 
 ### KITCHEN
+
 - Acceso al sistema de display de cocina
 - Seguimiento de preparación de órdenes
 
 ### HOST
+
 - Gestión de reservaciones
 - Asignación de mesas
 - Recepción de clientes
 
 ### VIEWER
+
 - Acceso de solo lectura
 - Puede ver reportes y datos
 - No puede modificar nada

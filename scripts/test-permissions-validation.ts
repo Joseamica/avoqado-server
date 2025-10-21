@@ -4,11 +4,7 @@
  */
 
 import prisma from '../src/utils/prismaClient'
-import {
-  updateRolePermissions,
-  getAllRolePermissions,
-  deleteRolePermissions,
-} from '../src/services/dashboard/rolePermission.service'
+import { updateRolePermissions, getAllRolePermissions, deleteRolePermissions } from '../src/services/dashboard/rolePermission.service'
 import { StaffRole } from '@prisma/client'
 
 async function testPermissionValidation() {

@@ -1,4 +1,5 @@
 # Enum Synchronization Reference
+
 # Backend ↔ Frontend Enum Values
 
 **CRITICAL**: Frontend and backend MUST use the same enum values.
@@ -6,14 +7,16 @@
 ## 📋 Inventory Enums
 
 ### RawMaterialMovementType
+
 **Backend** (`@prisma/client`):
+
 ```typescript
 enum RawMaterialMovementType {
   PURCHASE = 'PURCHASE',
   USAGE = 'USAGE',
   ADJUSTMENT = 'ADJUSTMENT',
   COUNT = 'COUNT',
-  SPOILAGE = 'SPOILAGE',        // ⚠️ NOT 'WASTE'
+  SPOILAGE = 'SPOILAGE', // ⚠️ NOT 'WASTE'
   TRANSFER_IN = 'TRANSFER_IN',
   TRANSFER_OUT = 'TRANSFER_OUT',
   RETURN = 'RETURN',
@@ -21,21 +24,24 @@ enum RawMaterialMovementType {
 ```
 
 **Frontend** (Use exactly these strings):
+
 ```typescript
 export const MOVEMENT_TYPES = {
   PURCHASE: 'PURCHASE',
   USAGE: 'USAGE',
   ADJUSTMENT: 'ADJUSTMENT',
   COUNT: 'COUNT',
-  SPOILAGE: 'SPOILAGE',          // ⚠️ NOT 'WASTE'
+  SPOILAGE: 'SPOILAGE', // ⚠️ NOT 'WASTE'
   TRANSFER_IN: 'TRANSFER_IN',
   TRANSFER_OUT: 'TRANSFER_OUT',
   RETURN: 'RETURN',
-} as const;
+} as const
 ```
 
 ### PurchaseOrderStatus
+
 **Backend**:
+
 ```typescript
 enum PurchaseOrderStatus {
   DRAFT = 'DRAFT',
@@ -52,6 +58,7 @@ enum PurchaseOrderStatus {
 ```
 
 **Frontend**:
+
 ```typescript
 export const PO_STATUSES = {
   DRAFT: 'DRAFT',
@@ -64,11 +71,13 @@ export const PO_STATUSES = {
   PARTIAL: 'PARTIAL',
   RECEIVED: 'RECEIVED',
   CANCELLED: 'CANCELLED',
-} as const;
+} as const
 ```
 
 ### RawMaterialCategory
+
 **Backend**:
+
 ```typescript
 enum RawMaterialCategory {
   MEAT = 'MEAT',
@@ -98,7 +107,9 @@ enum RawMaterialCategory {
 ```
 
 ### Unit
+
 **Backend**:
+
 ```typescript
 enum Unit {
   // Weight
@@ -150,7 +161,9 @@ enum Unit {
 ```
 
 ### UnitType
+
 **Backend**:
+
 ```typescript
 enum UnitType {
   WEIGHT = 'WEIGHT',
@@ -163,29 +176,35 @@ enum UnitType {
 ```
 
 ### CostingMethod
+
 **Backend**:
+
 ```typescript
 enum CostingMethod {
-  FIFO = 'FIFO',              // First In, First Out
-  LIFO = 'LIFO',              // Last In, First Out (not implemented)
+  FIFO = 'FIFO', // First In, First Out
+  LIFO = 'LIFO', // Last In, First Out (not implemented)
   WEIGHTED_AVERAGE = 'WEIGHTED_AVERAGE',
   STANDARD_COST = 'STANDARD_COST',
 }
 ```
 
 ### AlertType
+
 **Backend**:
+
 ```typescript
 enum AlertType {
   LOW_STOCK = 'LOW_STOCK',
   OUT_OF_STOCK = 'OUT_OF_STOCK',
-  EXPIRING_SOON = 'EXPIRING_SOON',    // ⚠️ NOT 'EXPIRED'
+  EXPIRING_SOON = 'EXPIRING_SOON', // ⚠️ NOT 'EXPIRED'
   OVER_STOCK = 'OVER_STOCK',
 }
 ```
 
 ### NotificationChannel
+
 **Backend**:
+
 ```typescript
 enum NotificationChannel {
   IN_APP = 'IN_APP',
@@ -198,37 +217,57 @@ enum NotificationChannel {
 ## 🎯 Product Inventory Type (NEW)
 
 **Backend Type** (not in database, stored in `externalData` JSON field):
+
 ```typescript
 type InventoryType = 'NONE' | 'SIMPLE_STOCK' | 'RECIPE_BASED'
 ```
 
 **Frontend**:
+
 ```typescript
 export const INVENTORY_TYPES = {
-  NONE: 'NONE',                    // Services, no inventory tracking
-  SIMPLE_STOCK: 'SIMPLE_STOCK',    // Retail, jewelry (-1 per sale)
-  RECIPE_BASED: 'RECIPE_BASED',    // Restaurants, ingredient-based
-} as const;
+  NONE: 'NONE', // Services, no inventory tracking
+  SIMPLE_STOCK: 'SIMPLE_STOCK', // Retail, jewelry (-1 per sale)
+  RECIPE_BASED: 'RECIPE_BASED', // Restaurants, ingredient-based
+} as const
 ```
 
 ## ⚠️ Common Mistakes
 
 ### ❌ WRONG
+
 ```typescript
 // Frontend
-{ type: 'WASTE' }           // Backend expects 'SPOILAGE'
-{ type: 'EXPIRED' }          // Backend expects 'EXPIRING_SOON'
-{ status: 'PENDING' }        // Backend expects 'PENDING_APPROVAL'
-{ total: 100 }              // PurchaseOrder field is 'total' (correct)
+{
+  type: 'WASTE'
+} // Backend expects 'SPOILAGE'
+{
+  type: 'EXPIRED'
+} // Backend expects 'EXPIRING_SOON'
+{
+  status: 'PENDING'
+} // Backend expects 'PENDING_APPROVAL'
+{
+  total: 100
+} // PurchaseOrder field is 'total' (correct)
 ```
 
 ### ✅ CORRECT
+
 ```typescript
 // Frontend
-{ type: 'SPOILAGE' }
-{ type: 'EXPIRING_SOON' }
-{ status: 'PENDING_APPROVAL' }
-{ total: 100 }
+{
+  type: 'SPOILAGE'
+}
+{
+  type: 'EXPIRING_SOON'
+}
+{
+  status: 'PENDING_APPROVAL'
+}
+{
+  total: 100
+}
 ```
 
 ## 🔄 API Response Format
@@ -264,15 +303,7 @@ Create a types file in frontend:
 
 export type InventoryType = 'NONE' | 'SIMPLE_STOCK' | 'RECIPE_BASED'
 
-export type MovementType =
-  | 'PURCHASE'
-  | 'USAGE'
-  | 'ADJUSTMENT'
-  | 'COUNT'
-  | 'SPOILAGE'
-  | 'TRANSFER_IN'
-  | 'TRANSFER_OUT'
-  | 'RETURN'
+export type MovementType = 'PURCHASE' | 'USAGE' | 'ADJUSTMENT' | 'COUNT' | 'SPOILAGE' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'RETURN'
 
 export type PurchaseOrderStatus =
   | 'DRAFT'
@@ -286,11 +317,7 @@ export type PurchaseOrderStatus =
   | 'RECEIVED'
   | 'CANCELLED'
 
-export type AlertType =
-  | 'LOW_STOCK'
-  | 'OUT_OF_STOCK'
-  | 'EXPIRING_SOON'
-  | 'OVER_STOCK'
+export type AlertType = 'LOW_STOCK' | 'OUT_OF_STOCK' | 'EXPIRING_SOON' | 'OVER_STOCK'
 
 // ... etc
 ```
