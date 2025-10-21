@@ -7,7 +7,7 @@ node_modules
 .env.local
 .env.development
 
-CLAUDE.md
+# CLAUDE.md
 
 # Log files
 logs/

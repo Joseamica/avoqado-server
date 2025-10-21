@@ -1,7 +1,6 @@
 import express, { Request, Response, Router } from 'express'
-import { StaffRole } from '@prisma/client' // StaffRole from Prisma
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
-import { authorizeRole } from '../middlewares/authorizeRole.middleware' // Corrected import
+import { checkPermission } from '../middlewares/checkPermission.middleware'
 
 const router: Router = express.Router({ mergeParams: true })
 
@@ -157,7 +156,7 @@ const router: Router = express.Router({ mergeParams: true })
 router.post(
   '/venues/:venueId/orders',
   authenticateTokenMiddleware, // Apply authentication middleware
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.WAITER]), // Apply authorization middleware
+  checkPermission('orders:create'), // Apply permission-based authorization
   (req: Request, res: Response) => {
     const { venueId } = req.params
     const orderData = req.body // Debería coincidir con CreateOrderRequest

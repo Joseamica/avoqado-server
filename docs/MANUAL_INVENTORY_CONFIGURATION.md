@@ -208,6 +208,7 @@ WHERE p.id = 'YOUR_PRODUCT_ID';
 ```
 
 Expected output should show:
+
 - Product with `inventoryType: SIMPLE_STOCK` in externalData
 - Linked RawMaterial with current stock
 - StockBatch with initial quantity
@@ -238,6 +239,7 @@ npx tsx test-inventory-deduction.ts
 ```
 
 This will:
+
 1. Show stock before sale
 2. Simulate selling 3 units
 3. Show stock after sale
@@ -253,12 +255,14 @@ The system supports various unit types:
 - **Unit**: `GRAM`, `KILOGRAM`, `LITER`, `PIECE`, `UNIT`, `DOZEN`, etc.
 
 For retail products (jewelry, clothing, electronics), use:
+
 - `unitType: COUNT`
 - `unit: PIECE` or `UNIT`
 
 ### RawMaterial Categories
 
 Available categories:
+
 - `MEAT`, `POULTRY`, `SEAFOOD`, `DAIRY`, `VEGETABLES`, `FRUITS`
 - `GRAINS`, `SPICES`, `OILS`, `BEVERAGES`, `ALCOHOL`
 - `CLEANING`, `PACKAGING`, `OTHER`
@@ -303,6 +307,7 @@ The `productInventoryIntegration.service.ts` will:
 **For most users**: Use the Product Wizard (guided UI)
 
 **Use manual configuration when**:
+
 - Migrating from legacy system
 - Bulk importing products
 - Integrating with external ERP
@@ -322,6 +327,7 @@ The `productInventoryIntegration.service.ts` will:
 **Problem**: Service returns `inventoryType: 'NONE'`
 
 **Solutions**:
+
 1. Check venue has `INVENTORY_MANAGEMENT` feature active
 2. Verify product's `externalData.inventoryType` is set to `SIMPLE_STOCK`
 3. Ensure RawMaterial is linked via `externalData.rawMaterialId`
@@ -331,6 +337,7 @@ The `productInventoryIntegration.service.ts` will:
 **Problem**: `Available: 0, Requested: 3`
 
 **Solutions**:
+
 1. Check `RawMaterial.currentStock` is greater than 0
 2. Verify the `rawMaterialId` in product's `externalData` matches actual RawMaterial
 3. Ensure StockBatch has `remainingQuantity > 0`
@@ -340,6 +347,7 @@ The `productInventoryIntegration.service.ts` will:
 **Problem**: Sale completes but stock unchanged
 
 **Solutions**:
+
 1. Check if venue feature is active
 2. Verify product has correct `inventoryType` in `externalData`
 3. Look for error logs in `RawMaterialMovement` table
@@ -347,6 +355,7 @@ The `productInventoryIntegration.service.ts` will:
 ## Support
 
 For questions or issues, refer to:
+
 - Main documentation: `CLAUDE.md`
 - Database schema: `DATABASE_SCHEMA.md`
 - Inventory architecture: `productInventoryIntegration.service.ts` comments

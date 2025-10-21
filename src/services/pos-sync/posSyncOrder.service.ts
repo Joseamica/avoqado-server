@@ -20,15 +20,31 @@ interface RecentPayment {
 const recentPayments = new Map<string, RecentPayment>()
 const PAYMENT_CACHE_TTL = 30000 // 30 seconds
 
-// Clean up expired entries
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, payment] of recentPayments.entries()) {
-    if (now - payment.timestamp > PAYMENT_CACHE_TTL) {
-      recentPayments.delete(key)
+// Clean up expired entries - only in production/development, not in tests
+let cleanupInterval: NodeJS.Timeout | null = null
+
+if (process.env.NODE_ENV !== 'test') {
+  cleanupInterval = setInterval(() => {
+    const now = Date.now()
+    for (const [key, payment] of recentPayments.entries()) {
+      if (now - payment.timestamp > PAYMENT_CACHE_TTL) {
+        recentPayments.delete(key)
+      }
     }
+  }, 60000) // Clean every minute
+}
+
+/**
+ * Cleanup function to clear the interval and prevent memory leaks
+ * Should be called when shutting down or in test teardown
+ */
+export function cleanupPaymentCache(): void {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval)
+    cleanupInterval = null
   }
-}, 60000) // Clean every minute
+  recentPayments.clear()
+}
 
 /**
  * Track a payment command that was sent to POS to prevent double deduction

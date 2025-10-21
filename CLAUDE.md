@@ -16,6 +16,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 - `npm run studio` - Launch Prisma Studio for database exploration
 - `npx prisma generate` - Generate Prisma Client after schema changes
 
+**⚠️ CRITICAL DATABASE MIGRATION POLICY:**
+
+- **NEVER use `npx prisma db push`** - This bypasses migration history and causes drift
+- **ALWAYS create proper migrations** using `npx prisma migrate dev --name {description}`
+- **If migration drift occurs**: Use `npx prisma migrate reset --force` to reset the database, then run your new migration
+- **Why this matters**: Migration history is the source of truth for production deployments. Using `db push` creates inconsistencies between
+  dev and production schemas.
+
 ### Testing
 
 - `npm test` - Run all tests with Jest
@@ -25,11 +33,138 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 - `npm run test:coverage` - Generate test coverage report
 - `npm run test:watch` - Run tests in watch mode
 
+**⚠️ CRITICAL TESTING POLICY FOR MAJOR CHANGES:**
+
+After implementing or modifying significant features, you MUST create a dedicated test script to validate the changes before committing:
+
+- **ALWAYS create a test script** in `scripts/` folder for major changes (new features, security fixes, complex business logic)
+- **Test ALL edge cases** - Don't just test the happy path; test error conditions, boundary cases, and potential conflicts
+- **Verify no regressions** - Ensure existing functionality still works correctly after your changes
+- **Run tests BEFORE committing** - Never commit untested code that could break production
+- **Why this matters**: Test scripts catch integration issues that unit tests miss. They validate that changes work end-to-end with real
+  database interactions and business logic flows.
+
+**🚨 REGRESSION & SIDE EFFECTS - THE GOLDEN RULE:**
+
+When you fix or implement something, you MUST NOT break something else. This is the most common source of production bugs.
+
+- **Regression**: Your change breaks existing functionality that was working before
+- **Side Effect**: Your change unexpectedly affects unrelated parts of the system
+
+**Examples of regressions to watch for:**
+
+```typescript
+// ❌ BAD: You add typo detection, but now normal permissions don't save
+// ❌ BAD: You add override mode validation, but now MANAGER can't modify WAITER
+// ❌ BAD: You optimize a query, but now it returns incomplete data
+// ❌ BAD: You fix a bug in orders, but now payments fail
+```
+
+**How to prevent regressions:**
+
+1. **ALWAYS add regression tests** alongside your feature tests
+2. **Test the old behavior** - Ensure what worked before still works
+3. **Test related features** - If you modify permissions, test all permission operations
+4. **Run the full test suite** - `npm test` before committing
+5. **Think about dependencies** - What other parts of the code rely on what you changed?
+
+**Test structure requirement:**
+
+```typescript
+// ✅ GOOD: Your test file should have BOTH sections
+
+// 1. NEW FEATURE TESTS (what you built)
+TEST 1: New feature works correctly
+TEST 2: Error cases handled properly
+TEST 3: Edge cases covered
+
+// 2. REGRESSION TESTS (what you didn't break)
+TEST 4: Existing feature A still works
+TEST 5: Existing feature B still works
+TEST 6: Related feature C still works
+```
+
+**Example workflow (Test Scripts → Jest Migration):**
+
+Test scripts in `scripts/` are TEMPORARY for rapid development testing. They MUST be migrated to Jest tests before committing.
+
+```bash
+# 1. Implement feature in src/services/
+vim src/services/dashboard/venue.dashboard.service.ts
+
+# 2. Create TEMPORARY test script for rapid validation
+touch scripts/test-venue-update.ts
+# Write tests using direct database calls
+npx ts-node -r tsconfig-paths/register scripts/test-venue-update.ts
+# ✅ All tests pass
+
+# 3. Migrate to PERMANENT Jest test
+vim tests/unit/services/dashboard/venue.dashboard.service.test.ts
+# Use mocks, follow existing test patterns (Arrange-Act-Assert)
+npm test -- tests/unit/services/dashboard/venue.dashboard.service.test.ts
+# ✅ All tests pass
+
+# 4. Delete the temporary script
+rm scripts/test-venue-update.ts
+
+# 5. Commit ONLY the code + Jest test (NOT the script)
+git add src/services/dashboard/venue.dashboard.service.ts
+git add tests/unit/services/dashboard/venue.dashboard.service.test.ts
+git commit -m "fix: timezone field not saving in venue update"
+```
+
+**Why migrate to Jest?**
+
+- ✅ **Permanent** - Tests run in CI/CD, catch future regressions
+- ✅ **Fast** - Mocked tests run in milliseconds
+- ✅ **Isolated** - Don't depend on seed data or database state
+- ✅ **Professional** - Follows industry standard testing patterns
+
+**When to use each:**
+
+- `scripts/test-*.ts` - ⚡ Quick validation during development (TEMPORARY)
+- `tests/unit/**/*.test.ts` - ✅ Permanent tests with mocks (COMMIT THESE)
+- `tests/api-tests/**/*.test.ts` - 🔗 Integration tests with real DB (COMMIT THESE)
+
+**Recent examples:**
+
+- `tests/unit/services/dashboard/venue.dashboard.service.test.ts` - Venue update with timezone fix + regressions
+- `scripts/test-permissions-validation.ts` - Temporary script (kept as reference for complex integration testing)
+
 ### Code Quality
 
 - `npm run lint` - Run ESLint
 - `npm run lint:fix` - Auto-fix ESLint issues
 - `npm run format` - Format code with Prettier
+
+**⚡ AUTO-FORMAT POLICY (Claude):**
+
+After editing or creating TypeScript/JavaScript files, Claude will **automatically** execute:
+
+```bash
+npm run format && npm run lint:fix
+```
+
+This ensures:
+- ✅ Zero prettier/eslint warnings in commits
+- ✅ Consistent code style across all files
+- ✅ No manual formatting needed (like Cmd+S in VSCode)
+
+**When it runs:**
+- After using `Write` or `Edit` tools on `.ts`, `.tsx`, `.js`, `.jsx` files
+- Before committing code changes
+- Runs on entire project to catch any inconsistencies
+
+**What it does:**
+1. `npm run format` - Formats all files with Prettier
+2. `npm run lint:fix` - Auto-fixes ESLint issues
+
+**Expected output:**
+```
+✓ Files formatted
+✓ Lint issues fixed
+⚠ Minor warnings OK (unused vars, config options)
+```
 
 ## Architecture Overview
 
@@ -713,6 +848,254 @@ model StaffVenue {
    - Resource should be singular: `tpv`, `menu`, `order`, `payment`
    - Action should be standard CRUD + custom: `read`, `create`, `update`, `delete`, `command`, `export`, `respond`
    - Format: `resource:action`
+
+#### `authorizeRole` vs `checkPermission` - Understanding the Paradigm Shift
+
+The system has fully migrated from role-based authorization (`authorizeRole`) to permission-based authorization (`checkPermission`). **These
+are fundamentally different approaches**, not just extensions. All routes now use `checkPermission` exclusively.
+
+##### `authorizeRole` - Legacy Role-Based Approach (RBAC)
+
+```typescript
+authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER])
+```
+
+**How it works:**
+
+- **Question**: "Is your role in this list?"
+- **Static check** - Cannot be customized per venue
+- **All or nothing** - If you're a WAITER, you're blocked. Period.
+
+**Limitations:**
+
+- ❌ Very rigid - Cannot grant extra permissions to lower roles
+- ❌ Cannot remove permissions from higher roles (OWNER always has full access)
+- ❌ Same permissions for all venues (no per-venue customization)
+- ❌ No granularity - You either have full role access or none
+
+**Example problem:**
+
+```typescript
+// Analytics route
+router.get(
+  '/venues/:venueId/analytics',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  analyticsController.getData,
+)
+
+// ❌ WAITER blocked - No way to grant analytics access to a specific WAITER
+// ❌ OWNER has access - No way to restrict analytics from a specific OWNER
+```
+
+##### `checkPermission` - Modern Permission-Based Approach (ABAC)
+
+```typescript
+checkPermission('menu:read')
+```
+
+**How it works:**
+
+- **Question**: "Do you have this specific permission?"
+- **Dynamic check** - Queries `VenueRolePermission` table on each request
+- **Granular control** - Permissions calculated using override/merge logic
+
+**Advantages:**
+
+1. **Override Mode** (for wildcard roles: ADMIN, OWNER, SUPERADMIN)
+
+   ```typescript
+   // Example: OWNER in a specific venue
+   Default permissions: ['*:*']  // All permissions
+   Custom permissions:  ['orders:read', 'payments:read']  // Only these 2
+
+   // Result: Uses ONLY custom (complete override)
+   // ✅ OWNER can access orders and payments
+   // ❌ OWNER CANNOT access menu (menu:read not in custom list)
+   ```
+
+2. **Merge Mode** (for non-wildcard roles: WAITER, CASHIER, etc.)
+
+   ```typescript
+   // Example: WAITER in a specific venue
+   Default permissions: ['menu:read', 'orders:create', 'tpv:read']
+   Custom permissions:  ['inventory:read', 'analytics:export']
+
+   // Result: Default + Custom (additive merge)
+   // ✅ WAITER has ALL default permissions PLUS the 2 custom ones
+   Final: ['menu:read', 'orders:create', 'tpv:read', 'inventory:read', 'analytics:export']
+   ```
+
+3. **Per-Venue Customization**
+
+   ```typescript
+   // Venue A: WAITER has default permissions only
+   VenueRolePermission: null
+
+   // Venue B: WAITER has extra permissions
+   VenueRolePermission: {
+     venueId: 'venue_B',
+     role: 'WAITER',
+     permissions: ['inventory:read', 'shifts:close']
+   }
+
+   // ✅ Same user, different permissions based on venue context
+   ```
+
+##### Real-World Comparison
+
+**Scenario:** An OWNER wants to give analytics access to a WAITER, but NOT menu editing.
+
+**❌ With `authorizeRole` (impossible):**
+
+```typescript
+// Analytics route
+router.get(
+  '/venues/:venueId/analytics',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  // WAITER blocked - No way to grant access
+)
+
+// Menu route
+router.post(
+  '/venues/:venueId/menu/products',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  // WAITER blocked - Correct, but not granular
+)
+```
+
+**✅ With `checkPermission` (flexible):**
+
+```typescript
+// Analytics route
+router.get('/venues/:venueId/analytics',
+  authenticateTokenMiddleware,
+  checkPermission('analytics:read'),
+  // ✅ WAITER can access if custom permission granted
+)
+
+// Menu route
+router.post('/venues/:venueId/menu/products',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  // ✅ WAITER blocked - Doesn't have this permission
+)
+
+// In database:
+VenueRolePermission {
+  venueId: 'venue_123',
+  role: 'WAITER',
+  permissions: ['analytics:read', 'analytics:export']  // Extra permissions granted
+}
+```
+
+##### Key Differences Summary
+
+| Aspect                      | `authorizeRole`             | `checkPermission`                          |
+| --------------------------- | --------------------------- | ------------------------------------------ |
+| **Type**                    | Role-based (RBAC)           | Permission-based (ABAC)                    |
+| **Flexibility**             | Static, same for all venues | Dynamic, customizable per venue            |
+| **Granularity**             | Full role (all or nothing)  | Specific permission (resource:action)      |
+| **Customization**           | ❌ Impossible               | ✅ Via `VenueRolePermission` table         |
+| **Remove perms from OWNER** | ❌ Impossible               | ✅ Override mode                           |
+| **Add perms to WAITER**     | ❌ Impossible               | ✅ Merge mode                              |
+| **Database queries**        | None                        | Queries `VenueRolePermission` each request |
+
+##### Migration Example
+
+**Before (role-based):**
+
+```typescript
+router.get(
+  '/venues/:venueId/menucategories',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]), // ❌ Rigid
+  menuController.listMenuCategoriesHandler,
+)
+```
+
+**After (permission-based):**
+
+```typescript
+router.get(
+  '/venues/:venueId/menucategories',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'), // ✅ Flexible + customizable
+  menuController.listMenuCategoriesHandler,
+)
+```
+
+**Result:** The system now respects custom permissions configured in the `VenueRolePermission` table, enabling use cases like "OWNER without
+menu access" or "WAITER with analytics access".
+
+##### When to Use Each
+
+**Use `checkPermission`** (REQUIRED for all new routes):
+
+- ✅ **ALL features** - Business-critical and administrative features
+- ✅ Granular control over permissions
+- ✅ Per-venue permission customization
+- ✅ Flexible permission assignment to any role
+
+**Do NOT use `authorizeRole`** (deprecated):
+
+- ❌ **Deprecated** - Do not use in new code
+- ❌ Exists only for reference and understanding migration
+- ❌ All existing routes have been migrated to `checkPermission`
+- ❌ Use `checkPermission` with appropriate permission strings instead (e.g., `system:manage` for SUPERADMIN-only features)
+
+##### Migration Status
+
+**🎉 100% MIGRATION COMPLETE - PURE SINGLE PARADIGM ACHIEVED**
+
+All 74 routes in the codebase now use `checkPermission` middleware. Zero exceptions. No hybrid approach.
+
+**Completed migrations:**
+
+- ✅ Menu routes - 38 routes (menucategories, menus, products, modifiers, modifier-groups)
+- ✅ Orders routes - 4 routes (read, update, delete)
+- ✅ Payments routes - 2 routes (read receipts)
+- ✅ Reviews routes - 1 route (read)
+- ✅ Analytics routes - 4 routes (general stats, metrics, charts)
+- ✅ Venues routes - 5 routes (create, read, update, delete, enhanced)
+- ✅ Teams routes - 8 routes (list, invite, update, delete, resend)
+- ✅ Notifications routes - 3 routes (send, bulk send)
+- ✅ System routes - 4 routes (payment config, testing endpoints)
+- ✅ Permission Management routes - 5 routes (role permissions CRUD, hierarchy)
+
+**Total: 74 routes using `checkPermission` ✅**
+
+**New Permission Strings (System & Settings):**
+
+These permissions are covered by the `*:*` wildcard for SUPERADMIN, OWNER, and ADMIN:
+
+```typescript
+'system:config' // SUPERADMIN - Payment provider configuration
+'system:test' // SUPERADMIN - Testing payment endpoints
+'settings:manage' // OWNER/ADMIN - Role permission management
+```
+
+**Why 100% migration matters:**
+
+- ✅ **Pure single paradigm** - Follows Stripe/AWS/GitHub patterns exactly
+- ✅ **Zero confusion** - Developers always use `checkPermission`, no exceptions
+- ✅ **Maximum flexibility** - Even system routes can be customized via VenueRolePermission
+- ✅ **Future-proof** - Can grant `system:test` to non-SUPERADMINs if needed
+- ✅ **Self-documenting** - Permission strings clearly describe what each route does
+
+**Verification:**
+
+```bash
+# Count total checkPermission uses (should be 74 + 1 import = 75)
+grep -c "checkPermission" src/routes/dashboard.routes.ts
+# Result: 75
+
+# Count authorizeRole uses (should be ONLY the import = 1)
+grep "authorizeRole" src/routes/dashboard.routes.ts | wc -l
+# Result: 1 (just the import statement)
+```
 
 #### Implementing Admin Permission Management UI (Future)
 

@@ -3,6 +3,7 @@ import textToSqlAssistantService from '../../services/dashboard/text-to-sql-assi
 import { AssistantQueryDto } from '../../schemas/dashboard/assistant.schema'
 import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import prisma from '../../utils/prismaClient'
 
 /**
  * Detecta si una consulta contiene información sensible que requiere rol SUPERADMIN
@@ -110,11 +111,45 @@ const hasPermissionForSensitiveQuery = (userRole: string): boolean => {
  */
 export const processTextToSqlQuery = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { message, conversationHistory }: AssistantQueryDto = req.body
+    const { message, conversationHistory, venueSlug, userId }: AssistantQueryDto = req.body
 
     // Verificar que el usuario esté autenticado
     if (!req.authContext?.userId || !req.authContext?.venueId || !req.authContext?.role) {
       throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    // Validar coherencia del userId enviado por el cliente
+    if (userId && userId !== req.authContext.userId) {
+      logger.warn('🚨 userId mismatch detected in Text-to-SQL request', {
+        expectedUserId: req.authContext.userId,
+        receivedUserId: userId,
+      })
+      throw new ForbiddenError('Los identificadores enviados no coinciden con tu sesión activa.')
+    }
+
+    // Validar coherencia del venueSlug si fue enviado por el cliente
+    const currentVenueRecord = await prisma.venue.findUnique({
+      where: { id: req.authContext.venueId },
+      select: { slug: true },
+    })
+
+    if (!currentVenueRecord) {
+      logger.error('Authenticated venue not found in database', {
+        venueId: req.authContext.venueId,
+        userId: req.authContext.userId,
+      })
+      throw new ForbiddenError('No se encontró información del venue activo')
+    }
+
+    if (venueSlug) {
+      if (currentVenueRecord.slug !== venueSlug) {
+        logger.warn('🚨 venueSlug mismatch detected in Text-to-SQL request', {
+          expectedVenueId: req.authContext.venueId,
+          expectedSlug: currentVenueRecord?.slug,
+          receivedSlug: venueSlug,
+        })
+        throw new ForbiddenError('El venue seleccionado no coincide con tu sesión activa.')
+      }
     }
 
     // Verificar permisos para consultas sensibles
@@ -147,6 +182,7 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       conversationHistory,
       venueId: req.authContext.venueId,
       userId: req.authContext.userId,
+      venueSlug: currentVenueRecord?.slug,
     })
 
     // Log del resultado
@@ -163,25 +199,43 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
     })
 
     // Respuesta exitosa con metadatos de consulta SQL
+    const { sqlQuery, queryResult, metadata, ...assistantPayload } = response
+
+    const sanitizedMetadata: Record<string, unknown> = {
+      confidence: assistantPayload.confidence,
+      queryGenerated: metadata?.queryGenerated,
+      queryExecuted: metadata?.queryExecuted,
+      rowsReturned: metadata?.rowsReturned,
+      executionTime: metadata?.executionTime,
+    }
+
+    if (metadata && 'bulletproofValidation' in metadata) {
+      sanitizedMetadata.bulletproofValidation = (metadata as any).bulletproofValidation
+    }
+
+    const includeDebugInfo = process.env.NODE_ENV !== 'production' && req.authContext.role === 'SUPERADMIN'
+
+    if (includeDebugInfo) {
+      if (metadata?.dataSourcesUsed) {
+        sanitizedMetadata.dataSourcesUsed = metadata.dataSourcesUsed
+      }
+
+      const debugSample =
+        Array.isArray(queryResult) || queryResult === null || typeof queryResult !== 'object' ? queryResult : { ...queryResult }
+
+      sanitizedMetadata.debug = {
+        sqlQuery,
+        sample: Array.isArray(debugSample) ? debugSample.slice(0, 5) : debugSample,
+      }
+    }
+
     res.json({
       success: true,
       data: {
-        response: response.response,
-        suggestions: response.suggestions || [],
-        trainingDataId: response.trainingDataId, // Include for feedback functionality
-        metadata: {
-          confidence: response.confidence,
-          queryGenerated: response.metadata.queryGenerated,
-          queryExecuted: response.metadata.queryExecuted,
-          rowsReturned: response.metadata.rowsReturned,
-          executionTime: response.metadata.executionTime,
-          dataSourcesUsed: response.metadata.dataSourcesUsed,
-          // Include SQL query in development for debugging
-          ...(process.env.NODE_ENV === 'development' && {
-            sqlQuery: response.sqlQuery,
-            queryResult: response.queryResult,
-          }),
-        },
+        response: assistantPayload.response,
+        suggestions: assistantPayload.suggestions || [],
+        trainingDataId: assistantPayload.trainingDataId, // Include for feedback functionality
+        metadata: sanitizedMetadata,
       },
     })
   } catch (error) {

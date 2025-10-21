@@ -488,9 +488,9 @@ async function main() {
       type: NotificationType.LOW_INVENTORY,
       language: 'es',
       title: 'Stock Bajo',
-      message: 'El producto {{productName}} tiene stock bajo ({{currentStock}} unidades).',
+      message: '{{rawMaterialName}} ({{sku}}) tiene stock bajo ({{currentStock}} {{unit}}).',
       actionLabel: 'Gestionar Inventario',
-      variables: ['productName', 'currentStock'],
+      variables: ['rawMaterialName', 'sku', 'currentStock', 'unit'],
     },
     {
       type: NotificationType.NEW_REVIEW,
@@ -754,10 +754,11 @@ async function main() {
     const createdStaffList: (any & { assignedRole: StaffRole })[] = []
 
     // --- Staff de la Organización ---
+    // Solo crear SUPERADMIN y OWNER a nivel organización (tienen acceso a todos los venues)
     const staffToCreate =
       orgIndex === 0
         ? [
-            // Staff específico para la primera organización
+            // Staff global con acceso a todos los venues
             {
               email: 'superadmin@superadmin.com',
               password: 'superadmin',
@@ -766,10 +767,6 @@ async function main() {
               lastName: 'Admin',
             },
             { email: 'owner@owner.com', password: 'owner', role: StaffRole.OWNER, firstName: 'Main', lastName: 'Owner' },
-            { email: 'admin@admin.com', password: 'admin', role: StaffRole.ADMIN, firstName: 'Venue', lastName: 'Admin' },
-            { email: 'manager@manager.com', password: 'manager', role: StaffRole.MANAGER, firstName: 'Shift', lastName: 'Manager' },
-            { email: 'waiter@waiter.com', password: 'waiter', role: StaffRole.WAITER, firstName: 'John', lastName: 'Waiter' },
-            { email: 'waiter2@waiter.com', password: 'waiter', role: StaffRole.WAITER, firstName: 'Jane', lastName: 'Waitress' },
           ]
         : [
             // Staff para organizaciones aleatorias
@@ -807,25 +804,28 @@ async function main() {
       })
       createdStaffList.push({ ...staffMember, assignedRole: staffData.role })
     }
-    console.log(`  Created ${createdStaffList.length} staff members.`)
+    console.log(`  Created ${createdStaffList.length} global staff members (SUPERADMIN, OWNER).`)
 
-    const mainAdmin = createdStaffList.find(s => [StaffRole.ADMIN, StaffRole.OWNER].includes(s.assignedRole))!
+    // Para invitaciones usamos OWNER como invitador
+    const mainInviter = createdStaffList.find(s => s.assignedRole === StaffRole.OWNER)
 
     // --- Invitaciones ---
-    await prisma.invitation.create({
-      data: {
-        email: faker.internet.email(),
-        role: StaffRole.ADMIN,
-        type: InvitationType.VENUE_ADMIN,
-        organizationId: org.id,
-        token: faker.string.uuid(),
-        expiresAt: faker.date.future(),
-        status: InvitationStatus.PENDING,
-        invitedById: mainAdmin.id,
-        message: 'Te invito a ser admin de nuestro nuevo local.',
-      },
-    })
-    console.log(`  Created a sample invitation.`)
+    if (mainInviter) {
+      await prisma.invitation.create({
+        data: {
+          email: faker.internet.email(),
+          role: StaffRole.ADMIN,
+          type: InvitationType.VENUE_ADMIN,
+          organizationId: org.id,
+          token: faker.string.uuid(),
+          expiresAt: faker.date.future(),
+          status: InvitationStatus.PENDING,
+          invitedById: mainInviter.id,
+          message: 'Te invito a ser admin de nuestro nuevo local.',
+        },
+      })
+      console.log(`  Created a sample invitation.`)
+    }
 
     // --- Bucle de Venues: solo dos venues (uno completo, otro vacio) ---
     const venuesConfig =
@@ -860,9 +860,85 @@ async function main() {
       })
       console.log(`    -> Created Venue: ${venue.name}.`)
 
+      // Crear staff específico para este venue (solo para org 0)
+      const venueSpecificStaff: (any & { assignedRole: StaffRole })[] = []
+      if (orgIndex === 0) {
+        const suffix = index === 0 ? '' : '2' // '' para avoqado-full, '2' para avoqado-empty
+        const venueStaffToCreate = [
+          {
+            email: `admin${suffix}@admin${suffix}.com`,
+            password: suffix ? `admin${suffix}` : 'admin',
+            role: StaffRole.ADMIN,
+            firstName: 'Admin',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `manager${suffix}@manager${suffix}.com`,
+            password: suffix ? `manager${suffix}` : 'manager',
+            role: StaffRole.MANAGER,
+            firstName: 'Manager',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `cashier${suffix}@cashier${suffix}.com`,
+            password: suffix ? `cashier${suffix}` : 'cashier',
+            role: StaffRole.CASHIER,
+            firstName: 'Cashier',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `waiter${suffix}@waiter${suffix}.com`,
+            password: suffix ? `waiter${suffix}` : 'waiter',
+            role: StaffRole.WAITER,
+            firstName: 'Waiter',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `kitchen${suffix}@kitchen${suffix}.com`,
+            password: suffix ? `kitchen${suffix}` : 'kitchen',
+            role: StaffRole.KITCHEN,
+            firstName: 'Kitchen',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `host${suffix}@host${suffix}.com`,
+            password: suffix ? `host${suffix}` : 'host',
+            role: StaffRole.HOST,
+            firstName: 'Host',
+            lastName: `Venue ${index + 1}`,
+          },
+          {
+            email: `viewer${suffix}@viewer${suffix}.com`,
+            password: suffix ? `viewer${suffix}` : 'viewer',
+            role: StaffRole.VIEWER,
+            firstName: 'Viewer',
+            lastName: `Venue ${index + 1}`,
+          },
+        ]
+
+        for (const staffData of venueStaffToCreate) {
+          const staffMember = await prisma.staff.create({
+            data: {
+              organizationId: org.id,
+              email: staffData.email,
+              password: await bcrypt.hash(staffData.password, HASH_ROUNDS),
+              firstName: staffData.firstName,
+              lastName: staffData.lastName,
+              phone: faker.phone.number(),
+              active: true,
+              emailVerified: true,
+            },
+          })
+          venueSpecificStaff.push({ ...staffMember, assignedRole: staffData.role })
+        }
+        console.log(`      - Created ${venueSpecificStaff.length} venue-specific staff members.`)
+      }
+
       let venueAssignments = 0
+
+      // Asignar staff global (SUPERADMIN, OWNER) a este venue
       for (const staffWithRole of createdStaffList) {
-        if ([StaffRole.SUPERADMIN, StaffRole.OWNER, StaffRole.ADMIN].includes(staffWithRole.assignedRole) || Math.random() > 0.3) {
+        if ([StaffRole.SUPERADMIN, StaffRole.OWNER].includes(staffWithRole.assignedRole)) {
           const pin = staffWithRole.assignedRole === StaffRole.SUPERADMIN && isFullVenue ? '0000' : faker.string.numeric(4)
 
           await prisma.staffVenue.create({
@@ -931,10 +1007,100 @@ async function main() {
         }
       }
 
+      // Asignar staff específico del venue
+      for (const staffWithRole of venueSpecificStaff) {
+        const pin = faker.string.numeric(4)
+
+        await prisma.staffVenue.create({
+          data: {
+            staffId: staffWithRole.id,
+            venueId: venue.id,
+            role: staffWithRole.assignedRole,
+            active: true,
+            pin,
+          },
+        })
+        venueAssignments += 1
+
+        if (!isFullVenue) {
+          continue
+        }
+
+        const notificationTypes = [
+          NotificationType.NEW_ORDER,
+          NotificationType.ORDER_READY,
+          NotificationType.PAYMENT_RECEIVED,
+          NotificationType.LOW_INVENTORY,
+          NotificationType.NEW_REVIEW,
+          NotificationType.SHIFT_REMINDER,
+          NotificationType.POS_DISCONNECTED,
+          NotificationType.ANNOUNCEMENT,
+        ]
+
+        for (const type of notificationTypes) {
+          let enabled = true
+          let priority: NotificationPriority = NotificationPriority.NORMAL
+          let channels: NotificationChannel[] = [NotificationChannel.IN_APP]
+
+          if (staffWithRole.assignedRole === StaffRole.ADMIN) {
+            channels = [NotificationChannel.IN_APP, NotificationChannel.EMAIL]
+            if (type === NotificationType.POS_DISCONNECTED || type === NotificationType.LOW_INVENTORY) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.MANAGER) {
+            if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+              priority = NotificationPriority.HIGH
+              channels = [NotificationChannel.IN_APP, NotificationChannel.PUSH]
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.WAITER) {
+            if (type === NotificationType.LOW_INVENTORY) {
+              enabled = false
+            }
+            if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.KITCHEN) {
+            if (type === NotificationType.NEW_ORDER || type === NotificationType.ORDER_READY) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.CASHIER) {
+            if (type === NotificationType.PAYMENT_RECEIVED) {
+              priority = NotificationPriority.HIGH
+            }
+          } else if (staffWithRole.assignedRole === StaffRole.VIEWER) {
+            // Viewer has minimal notifications
+            if (
+              type !== NotificationType.ANNOUNCEMENT &&
+              type !== NotificationType.SHIFT_REMINDER &&
+              type !== NotificationType.NEW_REVIEW
+            ) {
+              enabled = false
+            }
+          }
+
+          await prisma.notificationPreference.create({
+            data: {
+              staffId: staffWithRole.id,
+              venueId: venue.id,
+              type,
+              enabled,
+              channels,
+              priority,
+              quietStart: faker.helpers.arrayElement(['22:00', '23:00', null]),
+              quietEnd: faker.helpers.arrayElement(['07:00', '08:00', null]),
+            },
+          })
+        }
+      }
+
       if (isFullVenue) {
-        console.log(`      - Assigned ${venueAssignments} staff to ${venue.name} and created notification preferences for active roles.`)
+        console.log(
+          `      - Assigned ${venueAssignments} staff to ${venue.name} (${createdStaffList.length} global + ${venueSpecificStaff.length} venue-specific) and created notification preferences.`,
+        )
       } else {
-        console.log(`      - Assigned ${venueAssignments} staff to ${venue.name} (empty venue, no preferences created).`)
+        console.log(
+          `      - Assigned ${venueAssignments} staff to ${venue.name} (${createdStaffList.length} global + ${venueSpecificStaff.length} venue-specific).`,
+        )
       }
 
       await prisma.venueSettings.create({
@@ -1135,7 +1301,7 @@ async function main() {
       console.log(`      - Created ${terminals.length} terminals.`)
 
       const categories = await Promise.all(
-        ['Entradas', 'Platos Fuertes', 'Postres', 'Bebidas', 'Sopas'].map((name, index) =>
+        ['Hamburguesas', 'Tacos Mexicanos', 'Pizzas', 'Entradas', 'Bebidas'].map((name, index) =>
           prisma.menuCategory.create({ data: { venueId: venue.id, name, slug: generateSlug(name), displayOrder: index } }),
         ),
       )
@@ -1149,24 +1315,64 @@ async function main() {
       )
       console.log(`      - Created a main menu and assigned categories.`)
 
+      // Define realistic products for each category
+      const realProductsData: Record<string, { name: string; price: number; description: string }[]> = {
+        Hamburguesas: [
+          { name: 'Hamburguesa Clásica', price: 129.0, description: 'Carne de res, queso cheddar, lechuga, tomate, cebolla y pepinillos' },
+          { name: 'Hamburguesa BBQ', price: 149.0, description: 'Carne de res, tocino, queso, salsa BBQ y aros de cebolla' },
+          { name: 'Hamburguesa Doble', price: 169.0, description: 'Doble carne, doble queso, lechuga y tomate' },
+          { name: 'Hamburguesa de Pollo', price: 119.0, description: 'Pechuga de pollo, lechuga, mayonesa y tomate' },
+        ],
+        'Tacos Mexicanos': [
+          { name: 'Tacos de Carne Asada', price: 89.0, description: 'Tres tacos de carne asada con cebolla, cilantro y salsa' },
+          { name: 'Tacos al Pastor', price: 89.0, description: 'Tres tacos al pastor con piña, cebolla, cilantro y salsa' },
+          { name: 'Tacos de Pollo', price: 79.0, description: 'Tres tacos de pollo con lechuga, crema y queso' },
+          { name: 'Tacos de Pescado', price: 99.0, description: 'Tres tacos de pescado con col morada y mayonesa chipotle' },
+        ],
+        Pizzas: [
+          { name: 'Pizza Pepperoni', price: 189.0, description: 'Salsa de tomate, mozzarella y pepperoni' },
+          { name: 'Pizza Hawaiana', price: 179.0, description: 'Salsa de tomate, mozzarella, jamón y piña' },
+          {
+            name: 'Pizza Vegetariana',
+            price: 169.0,
+            description: 'Salsa de tomate, mozzarella, pimientos, cebolla, champiñones y aceitunas',
+          },
+          { name: 'Pizza 4 Quesos', price: 199.0, description: 'Salsa de tomate, mozzarella, parmesano, gorgonzola y manchego' },
+        ],
+        Entradas: [
+          { name: 'Alitas Buffalo', price: 129.0, description: 'Alitas de pollo con salsa buffalo y aderezo ranch' },
+          { name: 'Nachos con Queso', price: 89.0, description: 'Totopos con queso cheddar fundido, jalapeños y crema' },
+          { name: 'Papas a la Francesa', price: 49.0, description: 'Papas fritas crujientes con ketchup' },
+          { name: 'Aros de Cebolla', price: 69.0, description: 'Aros de cebolla empanizados con salsa ranch' },
+        ],
+        Bebidas: [
+          { name: 'Coca-Cola 600ml', price: 25.0, description: 'Refresco de cola' },
+          { name: 'Agua Mineral 1L', price: 20.0, description: 'Agua mineral natural' },
+          { name: 'Cerveza Corona', price: 45.0, description: 'Cerveza clara mexicana' },
+          { name: 'Limonada Natural', price: 35.0, description: 'Limonada fresca hecha en casa' },
+        ],
+      }
+
       const products = await Promise.all(
-        categories.flatMap(category =>
-          Array.from({ length: 8 }).map(() =>
+        categories.flatMap(category => {
+          const categoryProducts = realProductsData[category.name] || []
+          return categoryProducts.map((productData, index) =>
             prisma.product.create({
               data: {
                 venueId: venue.id,
-                name: faker.commerce.productName(),
-                sku: `${category.slug.toUpperCase()}-${faker.string.alphanumeric(6)}`,
+                name: productData.name,
+                sku: `${category.slug.toUpperCase()}-${String(index + 1).padStart(3, '0')}`,
                 categoryId: category.id,
-                price: parseFloat(faker.commerce.price({ min: 50, max: 450 })),
+                price: productData.price,
+                description: productData.description,
                 trackInventory: true,
                 type: category.name === 'Bebidas' ? ProductType.BEVERAGE : ProductType.FOOD,
-                tags: [faker.lorem.word(), faker.lorem.word()],
+                tags: category.name === 'Bebidas' ? ['Bebida'] : ['Plato'],
                 imageUrl: faker.image.urlLoremFlickr({ category: 'food' }),
               },
             }),
-          ),
-        ),
+          )
+        }),
       )
       await Promise.all(
         products.map(async product => {
@@ -1207,90 +1413,88 @@ async function main() {
           }
         }
 
-        // Create comprehensive RawMaterials with different categories
+        // Create comprehensive RawMaterials for burgers, tacos, pizzas, appetizers, and drinks
         const rawMaterialsData = [
-          // MEAT
+          // ==================== MEAT ====================
           {
-            name: 'Pollo Pechuga',
-            sku: 'MEAT-POLLO-001',
+            name: 'Carne Molida de Res',
+            sku: 'MEAT-BEEF-001',
             category: RawMaterialCategory.MEAT,
             currentStock: 50,
             unit: Unit.KILOGRAM,
             minimumStock: 10,
             reorderPoint: 15,
             maximumStock: 100,
-            costPerUnit: 85.5,
-            avgCostPerUnit: 85.5,
-            perishable: true,
-            shelfLifeDays: 5,
-            description: 'Pechuga de pollo fresca, sin hueso',
-          },
-          {
-            name: 'Carne de Res Molida',
-            sku: 'MEAT-RES-001',
-            category: RawMaterialCategory.MEAT,
-            currentStock: 35,
-            unit: Unit.KILOGRAM,
-            minimumStock: 8,
-            reorderPoint: 12,
-            maximumStock: 80,
             costPerUnit: 120.0,
             avgCostPerUnit: 120.0,
             perishable: true,
             shelfLifeDays: 3,
-            description: 'Carne molida de res 80/20',
-          },
-          // VEGETABLES
-          {
-            name: 'Tomate Roma',
-            sku: 'VEG-TOMATE-001',
-            category: RawMaterialCategory.VEGETABLES,
-            currentStock: 25,
-            unit: Unit.KILOGRAM,
-            minimumStock: 5,
-            reorderPoint: 8,
-            maximumStock: 50,
-            costPerUnit: 18.5,
-            avgCostPerUnit: 18.5,
-            perishable: true,
-            shelfLifeDays: 7,
-            description: 'Tomate roma fresco',
+            description: 'Carne molida de res 80/20 para hamburguesas',
           },
           {
-            name: 'Cebolla Blanca',
-            sku: 'VEG-CEBOLLA-001',
-            category: RawMaterialCategory.VEGETABLES,
+            name: 'Carne de Res para Asar',
+            sku: 'MEAT-BEEF-002',
+            category: RawMaterialCategory.MEAT,
             currentStock: 40,
+            unit: Unit.KILOGRAM,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 80,
+            costPerUnit: 150.0,
+            avgCostPerUnit: 150.0,
+            perishable: true,
+            shelfLifeDays: 5,
+            description: 'Carne de res para tacos de carne asada',
+          },
+          {
+            name: 'Pechuga de Pollo',
+            sku: 'MEAT-CHICKEN-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 45,
             unit: Unit.KILOGRAM,
             minimumStock: 10,
             reorderPoint: 15,
-            maximumStock: 80,
-            costPerUnit: 22.0,
-            avgCostPerUnit: 22.0,
-            perishable: true,
-            shelfLifeDays: 14,
-            description: 'Cebolla blanca nacional',
-          },
-          {
-            name: 'Lechuga Romana',
-            sku: 'VEG-LECHUGA-001',
-            category: RawMaterialCategory.VEGETABLES,
-            currentStock: 15,
-            unit: Unit.KILOGRAM,
-            minimumStock: 3,
-            reorderPoint: 5,
-            maximumStock: 30,
-            costPerUnit: 28.0,
-            avgCostPerUnit: 28.0,
+            maximumStock: 90,
+            costPerUnit: 85.0,
+            avgCostPerUnit: 85.0,
             perishable: true,
             shelfLifeDays: 5,
-            description: 'Lechuga romana fresca',
+            description: 'Pechuga de pollo sin hueso para hamburguesas y tacos',
           },
-          // DAIRY
           {
-            name: 'Queso Manchego',
-            sku: 'DAIRY-QUESO-001',
-            category: RawMaterialCategory.DAIRY,
+            name: 'Alitas de Pollo',
+            sku: 'MEAT-WINGS-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 30,
+            unit: Unit.KILOGRAM,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 60,
+            costPerUnit: 75.0,
+            avgCostPerUnit: 75.0,
+            perishable: true,
+            shelfLifeDays: 5,
+            description: 'Alitas de pollo frescas para alitas buffalo',
+          },
+          {
+            name: 'Carne de Cerdo Marinada',
+            sku: 'MEAT-PORK-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 35,
+            unit: Unit.KILOGRAM,
+            minimumStock: 7,
+            reorderPoint: 10,
+            maximumStock: 70,
+            costPerUnit: 110.0,
+            avgCostPerUnit: 110.0,
+            perishable: true,
+            shelfLifeDays: 3,
+            description: 'Carne de cerdo marinada estilo al pastor',
+          },
+          {
+            name: 'Tocino',
+            sku: 'MEAT-BACON-001',
+            category: RawMaterialCategory.MEAT,
             currentStock: 20,
             unit: Unit.KILOGRAM,
             minimumStock: 5,
@@ -1299,112 +1503,552 @@ async function main() {
             costPerUnit: 180.0,
             avgCostPerUnit: 180.0,
             perishable: true,
+            shelfLifeDays: 14,
+            description: 'Tocino ahumado en rebanadas',
+          },
+          {
+            name: 'Jamón',
+            sku: 'MEAT-HAM-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 15,
+            unit: Unit.KILOGRAM,
+            minimumStock: 4,
+            reorderPoint: 6,
+            maximumStock: 30,
+            costPerUnit: 140.0,
+            avgCostPerUnit: 140.0,
+            perishable: true,
+            shelfLifeDays: 14,
+            description: 'Jamón de pavo para pizza hawaiana',
+          },
+          {
+            name: 'Pepperoni',
+            sku: 'MEAT-PEPP-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 25,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 10,
+            maximumStock: 50,
+            costPerUnit: 200.0,
+            avgCostPerUnit: 200.0,
+            perishable: true,
+            shelfLifeDays: 21,
+            description: 'Pepperoni en rebanadas para pizza',
+          },
+          {
+            name: 'Filete de Pescado',
+            sku: 'MEAT-FISH-001',
+            category: RawMaterialCategory.MEAT,
+            currentStock: 20,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
+            costPerUnit: 160.0,
+            avgCostPerUnit: 160.0,
+            perishable: true,
+            shelfLifeDays: 2,
+            description: 'Filete de pescado blanco para tacos',
+          },
+          // ==================== DAIRY ====================
+          {
+            name: 'Queso Cheddar',
+            sku: 'DAIRY-CHEDDAR-001',
+            category: RawMaterialCategory.DAIRY,
+            currentStock: 30,
+            unit: Unit.KILOGRAM,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 60,
+            costPerUnit: 180.0,
+            avgCostPerUnit: 180.0,
+            perishable: true,
             shelfLifeDays: 30,
-            description: 'Queso manchego añejado',
+            description: 'Queso cheddar en rebanadas para hamburguesas y nachos',
+          },
+          {
+            name: 'Queso Mozzarella',
+            sku: 'DAIRY-MOZZ-001',
+            category: RawMaterialCategory.DAIRY,
+            currentStock: 40,
+            unit: Unit.KILOGRAM,
+            minimumStock: 10,
+            reorderPoint: 15,
+            maximumStock: 80,
+            costPerUnit: 160.0,
+            avgCostPerUnit: 160.0,
+            perishable: true,
+            shelfLifeDays: 21,
+            description: 'Queso mozzarella para pizzas',
+          },
+          {
+            name: 'Queso Manchego',
+            sku: 'DAIRY-MANCH-001',
+            category: RawMaterialCategory.DAIRY,
+            currentStock: 20,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
+            costPerUnit: 220.0,
+            avgCostPerUnit: 220.0,
+            perishable: true,
+            shelfLifeDays: 30,
+            description: 'Queso manchego rallado para tacos y pizza',
+          },
+          {
+            name: 'Queso Parmesano',
+            sku: 'DAIRY-PARM-001',
+            category: RawMaterialCategory.DAIRY,
+            currentStock: 15,
+            unit: Unit.KILOGRAM,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 30,
+            costPerUnit: 280.0,
+            avgCostPerUnit: 280.0,
+            perishable: true,
+            shelfLifeDays: 60,
+            description: 'Queso parmesano rallado para pizza 4 quesos',
+          },
+          {
+            name: 'Queso Gorgonzola',
+            sku: 'DAIRY-GORG-001',
+            category: RawMaterialCategory.DAIRY,
+            currentStock: 10,
+            unit: Unit.KILOGRAM,
+            minimumStock: 2,
+            reorderPoint: 4,
+            maximumStock: 20,
+            costPerUnit: 320.0,
+            avgCostPerUnit: 320.0,
+            perishable: true,
+            shelfLifeDays: 30,
+            description: 'Queso gorgonzola para pizza 4 quesos',
           },
           {
             name: 'Crema Ácida',
-            sku: 'DAIRY-CREMA-001',
+            sku: 'DAIRY-CREAM-001',
             category: RawMaterialCategory.DAIRY,
-            currentStock: 12,
+            currentStock: 20,
             unit: Unit.LITER,
-            minimumStock: 3,
-            reorderPoint: 5,
-            maximumStock: 25,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
             costPerUnit: 45.0,
             avgCostPerUnit: 45.0,
             perishable: true,
             shelfLifeDays: 14,
-            description: 'Crema ácida natural',
+            description: 'Crema ácida para tacos y nachos',
           },
-          // GRAINS
+          // ==================== VEGETABLES ====================
           {
-            name: 'Arroz Blanco',
-            sku: 'GRAIN-ARROZ-001',
-            category: RawMaterialCategory.GRAINS,
-            currentStock: 100,
-            unit: Unit.KILOGRAM,
-            minimumStock: 20,
-            reorderPoint: 30,
-            maximumStock: 200,
-            costPerUnit: 18.0,
-            avgCostPerUnit: 18.0,
-            perishable: false,
-            description: 'Arroz blanco grano largo',
-          },
-          {
-            name: 'Frijol Negro',
-            sku: 'GRAIN-FRIJOL-001',
-            category: RawMaterialCategory.GRAINS,
-            currentStock: 80,
-            unit: Unit.KILOGRAM,
-            minimumStock: 15,
-            reorderPoint: 25,
-            maximumStock: 150,
-            costPerUnit: 22.0,
-            avgCostPerUnit: 22.0,
-            perishable: false,
-            description: 'Frijol negro seleccionado',
-          },
-          // SPICES
-          {
-            name: 'Sal de Mar',
-            sku: 'SPICE-SAL-001',
-            category: RawMaterialCategory.SPICES,
-            currentStock: 30,
+            name: 'Lechuga Romana',
+            sku: 'VEG-LETTUCE-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 25,
             unit: Unit.KILOGRAM,
             minimumStock: 5,
             reorderPoint: 10,
-            maximumStock: 60,
-            costPerUnit: 12.0,
-            avgCostPerUnit: 12.0,
-            perishable: false,
-            description: 'Sal de mar fina',
+            maximumStock: 50,
+            costPerUnit: 28.0,
+            avgCostPerUnit: 28.0,
+            perishable: true,
+            shelfLifeDays: 5,
+            description: 'Lechuga romana fresca para hamburguesas y tacos',
           },
           {
-            name: 'Pimienta Negra Molida',
-            sku: 'SPICE-PIMIENTA-001',
-            category: RawMaterialCategory.SPICES,
-            currentStock: 8,
+            name: 'Tomate Roma',
+            sku: 'VEG-TOMATO-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 30,
             unit: Unit.KILOGRAM,
-            minimumStock: 2,
-            reorderPoint: 3,
-            maximumStock: 15,
-            costPerUnit: 250.0,
-            avgCostPerUnit: 250.0,
-            perishable: false,
-            description: 'Pimienta negra recién molida',
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 60,
+            costPerUnit: 18.5,
+            avgCostPerUnit: 18.5,
+            perishable: true,
+            shelfLifeDays: 7,
+            description: 'Tomate roma fresco para hamburguesas',
           },
-          // OILS
           {
-            name: 'Aceite de Oliva Extra Virgen',
-            sku: 'OIL-OLIVA-001',
-            category: RawMaterialCategory.OILS,
+            name: 'Cebolla Blanca',
+            sku: 'VEG-ONION-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 40,
+            unit: Unit.KILOGRAM,
+            minimumStock: 10,
+            reorderPoint: 15,
+            maximumStock: 80,
+            costPerUnit: 22.0,
+            avgCostPerUnit: 22.0,
+            perishable: true,
+            shelfLifeDays: 14,
+            description: 'Cebolla blanca para hamburguesas, tacos y pizza',
+          },
+          {
+            name: 'Pepinillos',
+            sku: 'VEG-PICKLES-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 50,
+            unit: Unit.UNIT,
+            minimumStock: 10,
+            reorderPoint: 20,
+            maximumStock: 100,
+            costPerUnit: 35.0,
+            avgCostPerUnit: 35.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Pepinillos en vinagre (frasco 500g)',
+          },
+          {
+            name: 'Cilantro',
+            sku: 'VEG-CILANTRO-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 5,
+            unit: Unit.KILOGRAM,
+            minimumStock: 1,
+            reorderPoint: 2,
+            maximumStock: 10,
+            costPerUnit: 40.0,
+            avgCostPerUnit: 40.0,
+            perishable: true,
+            shelfLifeDays: 7,
+            description: 'Cilantro fresco para tacos',
+          },
+          {
+            name: 'Col Morada',
+            sku: 'VEG-CABBAGE-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 15,
+            unit: Unit.KILOGRAM,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 30,
+            costPerUnit: 15.0,
+            avgCostPerUnit: 15.0,
+            perishable: true,
+            shelfLifeDays: 14,
+            description: 'Col morada para tacos de pescado',
+          },
+          {
+            name: 'Pimientos Morrones',
+            sku: 'VEG-BELL-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 20,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
+            costPerUnit: 35.0,
+            avgCostPerUnit: 35.0,
+            perishable: true,
+            shelfLifeDays: 10,
+            description: 'Pimientos morrones mixtos para pizza vegetariana',
+          },
+          {
+            name: 'Champiñones',
+            sku: 'VEG-MUSHROOM-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 12,
+            unit: Unit.KILOGRAM,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 25,
+            costPerUnit: 55.0,
+            avgCostPerUnit: 55.0,
+            perishable: true,
+            shelfLifeDays: 7,
+            description: 'Champiñones frescos para pizza',
+          },
+          {
+            name: 'Aceitunas Negras',
+            sku: 'VEG-OLIVES-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 30,
+            unit: Unit.UNIT,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 60,
+            costPerUnit: 45.0,
+            avgCostPerUnit: 45.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Aceitunas negras rebanadas (lata 400g)',
+          },
+          {
+            name: 'Piña',
+            sku: 'VEG-PINEAPPLE-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 25,
+            unit: Unit.KILOGRAM,
+            minimumStock: 5,
+            reorderPoint: 10,
+            maximumStock: 50,
+            costPerUnit: 25.0,
+            avgCostPerUnit: 25.0,
+            perishable: true,
+            shelfLifeDays: 5,
+            description: 'Piña fresca para pizza hawaiana y tacos al pastor',
+          },
+          {
+            name: 'Jalapeños',
+            sku: 'VEG-JALAP-001',
+            category: RawMaterialCategory.VEGETABLES,
+            currentStock: 20,
+            unit: Unit.UNIT,
+            minimumStock: 5,
+            reorderPoint: 10,
+            maximumStock: 40,
+            costPerUnit: 30.0,
+            avgCostPerUnit: 30.0,
+            perishable: true,
+            shelfLifeDays: 90,
+            description: 'Jalapeños en vinagre (frasco 500g) para nachos',
+          },
+          // ==================== GRAINS ====================
+          {
+            name: 'Pan de Hamburguesa',
+            sku: 'GRAIN-BUN-001',
+            category: RawMaterialCategory.GRAINS,
+            currentStock: 200,
+            unit: Unit.UNIT,
+            minimumStock: 40,
+            reorderPoint: 60,
+            maximumStock: 400,
+            costPerUnit: 8.0,
+            avgCostPerUnit: 8.0,
+            perishable: true,
+            shelfLifeDays: 7,
+            description: 'Pan para hamburguesa con ajonjolí',
+          },
+          {
+            name: 'Tortillas de Maíz',
+            sku: 'GRAIN-TORTILLA-001',
+            category: RawMaterialCategory.GRAINS,
+            currentStock: 500,
+            unit: Unit.UNIT,
+            minimumStock: 100,
+            reorderPoint: 150,
+            maximumStock: 1000,
+            costPerUnit: 2.0,
+            avgCostPerUnit: 2.0,
+            perishable: true,
+            shelfLifeDays: 10,
+            description: 'Tortillas de maíz para tacos',
+          },
+          {
+            name: 'Masa para Pizza',
+            sku: 'GRAIN-DOUGH-001',
+            category: RawMaterialCategory.GRAINS,
+            currentStock: 30,
+            unit: Unit.KILOGRAM,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 60,
+            costPerUnit: 35.0,
+            avgCostPerUnit: 35.0,
+            perishable: true,
+            shelfLifeDays: 3,
+            description: 'Masa fresca para pizza',
+          },
+          {
+            name: 'Papas',
+            sku: 'GRAIN-POTATO-001',
+            category: RawMaterialCategory.GRAINS,
+            currentStock: 80,
+            unit: Unit.KILOGRAM,
+            minimumStock: 20,
+            reorderPoint: 30,
+            maximumStock: 150,
+            costPerUnit: 15.0,
+            avgCostPerUnit: 15.0,
+            perishable: false,
+            description: 'Papas para papas a la francesa',
+          },
+          {
+            name: 'Totopos',
+            sku: 'GRAIN-CHIPS-001',
+            category: RawMaterialCategory.GRAINS,
+            currentStock: 50,
+            unit: Unit.UNIT,
+            minimumStock: 10,
+            reorderPoint: 20,
+            maximumStock: 100,
+            costPerUnit: 40.0,
+            avgCostPerUnit: 40.0,
+            perishable: false,
+            description: 'Totopos de maíz (bolsa 1kg) para nachos',
+          },
+          // ==================== SAUCES ====================
+          {
+            name: 'Salsa BBQ',
+            sku: 'SAUCE-BBQ-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 20,
+            unit: Unit.LITER,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
+            costPerUnit: 85.0,
+            avgCostPerUnit: 85.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Salsa BBQ para hamburguesas',
+          },
+          {
+            name: 'Mayonesa',
+            sku: 'SAUCE-MAYO-001',
+            category: RawMaterialCategory.SAUCES,
             currentStock: 25,
             unit: Unit.LITER,
             minimumStock: 5,
             reorderPoint: 10,
             maximumStock: 50,
-            costPerUnit: 185.0,
-            avgCostPerUnit: 185.0,
-            perishable: false,
-            description: 'Aceite de oliva extra virgen importado',
+            costPerUnit: 65.0,
+            avgCostPerUnit: 65.0,
+            perishable: true,
+            shelfLifeDays: 120,
+            description: 'Mayonesa para hamburguesas y tacos',
           },
           {
-            name: 'Aceite Vegetal',
-            sku: 'OIL-VEGETAL-001',
-            category: RawMaterialCategory.OILS,
-            currentStock: 40,
+            name: 'Mayonesa Chipotle',
+            sku: 'SAUCE-CHIPMAYO-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 15,
             unit: Unit.LITER,
-            minimumStock: 10,
-            reorderPoint: 15,
-            maximumStock: 80,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 30,
+            costPerUnit: 95.0,
+            avgCostPerUnit: 95.0,
+            perishable: true,
+            shelfLifeDays: 120,
+            description: 'Mayonesa chipotle para tacos de pescado',
+          },
+          {
+            name: 'Salsa de Tomate',
+            sku: 'SAUCE-TOMATO-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 30,
+            unit: Unit.LITER,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 60,
+            costPerUnit: 50.0,
+            avgCostPerUnit: 50.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Salsa de tomate para pizza',
+          },
+          {
+            name: 'Salsa Verde',
+            sku: 'SAUCE-GREEN-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 20,
+            unit: Unit.LITER,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
+            costPerUnit: 70.0,
+            avgCostPerUnit: 70.0,
+            perishable: true,
+            shelfLifeDays: 90,
+            description: 'Salsa verde para tacos',
+          },
+          {
+            name: 'Salsa Roja',
+            sku: 'SAUCE-RED-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 20,
+            unit: Unit.LITER,
+            minimumStock: 5,
+            reorderPoint: 8,
+            maximumStock: 40,
+            costPerUnit: 70.0,
+            avgCostPerUnit: 70.0,
+            perishable: true,
+            shelfLifeDays: 90,
+            description: 'Salsa roja picante para tacos',
+          },
+          {
+            name: 'Salsa Buffalo',
+            sku: 'SAUCE-BUFFALO-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 15,
+            unit: Unit.LITER,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 30,
+            costPerUnit: 95.0,
+            avgCostPerUnit: 95.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Salsa buffalo picante para alitas',
+          },
+          {
+            name: 'Ketchup',
+            sku: 'SAUCE-KETCHUP-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 25,
+            unit: Unit.LITER,
+            minimumStock: 5,
+            reorderPoint: 10,
+            maximumStock: 50,
+            costPerUnit: 60.0,
+            avgCostPerUnit: 60.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Ketchup para papas',
+          },
+          {
+            name: 'Mostaza',
+            sku: 'SAUCE-MUSTARD-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 15,
+            unit: Unit.LITER,
+            minimumStock: 3,
+            reorderPoint: 5,
+            maximumStock: 30,
+            costPerUnit: 55.0,
+            avgCostPerUnit: 55.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Mostaza amarilla para hamburguesas',
+          },
+          {
+            name: 'Aderezo Ranch',
+            sku: 'SAUCE-RANCH-001',
+            category: RawMaterialCategory.SAUCES,
+            currentStock: 18,
+            unit: Unit.LITER,
+            minimumStock: 4,
+            reorderPoint: 6,
+            maximumStock: 36,
+            costPerUnit: 75.0,
+            avgCostPerUnit: 75.0,
+            perishable: true,
+            shelfLifeDays: 120,
+            description: 'Aderezo ranch para alitas y aros de cebolla',
+          },
+          // ==================== OILS ====================
+          {
+            name: 'Aceite Vegetal',
+            sku: 'OIL-VEG-001',
+            category: RawMaterialCategory.OILS,
+            currentStock: 50,
+            unit: Unit.LITER,
+            minimumStock: 15,
+            reorderPoint: 20,
+            maximumStock: 100,
             costPerUnit: 32.0,
             avgCostPerUnit: 32.0,
             perishable: false,
-            description: 'Aceite vegetal para cocina',
+            description: 'Aceite vegetal para freír',
           },
-          // BEVERAGES
+          // ==================== BEVERAGES ====================
           {
             name: 'Coca-Cola 600ml',
             sku: 'BEV-COCA-001',
@@ -1434,9 +2078,69 @@ async function main() {
             perishable: false,
             description: 'Agua mineral embotellada 1L',
           },
+          {
+            name: 'Cerveza Corona 355ml',
+            sku: 'BEV-CORONA-001',
+            category: RawMaterialCategory.BEVERAGES,
+            currentStock: 150,
+            unit: Unit.UNIT,
+            minimumStock: 40,
+            reorderPoint: 60,
+            maximumStock: 300,
+            costPerUnit: 20.0,
+            avgCostPerUnit: 20.0,
+            perishable: true,
+            shelfLifeDays: 365,
+            description: 'Cerveza Corona clara 355ml',
+          },
+          {
+            name: 'Limones',
+            sku: 'BEV-LIME-001',
+            category: RawMaterialCategory.BEVERAGES,
+            currentStock: 10,
+            unit: Unit.KILOGRAM,
+            minimumStock: 2,
+            reorderPoint: 4,
+            maximumStock: 20,
+            costPerUnit: 30.0,
+            avgCostPerUnit: 30.0,
+            perishable: true,
+            shelfLifeDays: 14,
+            description: 'Limones frescos para limonada y tacos',
+          },
+          {
+            name: 'Azúcar',
+            sku: 'BEV-SUGAR-001',
+            category: RawMaterialCategory.BEVERAGES,
+            currentStock: 40,
+            unit: Unit.KILOGRAM,
+            minimumStock: 10,
+            reorderPoint: 15,
+            maximumStock: 80,
+            costPerUnit: 20.0,
+            avgCostPerUnit: 20.0,
+            perishable: false,
+            description: 'Azúcar blanca para limonada',
+          },
+          // ==================== OTHER ====================
+          {
+            name: 'Aros de Cebolla Empanizados',
+            sku: 'OTHER-ONIONRINGS-001',
+            category: RawMaterialCategory.OTHER,
+            currentStock: 30,
+            unit: Unit.KILOGRAM,
+            minimumStock: 8,
+            reorderPoint: 12,
+            maximumStock: 60,
+            costPerUnit: 90.0,
+            avgCostPerUnit: 90.0,
+            perishable: true,
+            shelfLifeDays: 180,
+            description: 'Aros de cebolla empanizados congelados',
+          },
         ]
 
-        const createdRawMaterials = []
+        const createdRawMaterials: any[] = []
         for (const rmData of rawMaterialsData) {
           const rawMaterial = await prisma.rawMaterial.create({
             data: {
@@ -1485,221 +2189,623 @@ async function main() {
 
         console.log(`      - ✅ Created ${createdRawMaterials.length} raw materials with stock batches`)
 
-        // Create simple recipes for beverage products (1:1 mapping with raw materials)
-        const bebidasCategory = categories.find(c => c.name === 'Bebidas')
-        if (bebidasCategory) {
-          const bebidaProducts = products.filter(p => p.categoryId === bebidasCategory.id).slice(0, 2)
-          const cocaCola = createdRawMaterials.find(rm => rm.sku === 'BEV-COCA-001')
-          const aguaMineral = createdRawMaterials.find(rm => rm.sku === 'BEV-AGUA-001')
+        // ==================== CREATE RECIPES ====================
+        let recipeCount = 0
 
-          if (bebidaProducts[0] && cocaCola) {
-            const cocaRecipe = await prisma.recipe.create({
+        // Helper function to find product by name
+        const findProduct = (name: string) => products.find(p => p.name === name)
+        const findRM = (sku: string) => createdRawMaterials.find(rm => rm.sku === sku)
+
+        // ===== BEBIDAS (Simple 1:1 mapping) =====
+        const cocaColaProduct = findProduct('Coca-Cola 600ml')
+        const aguaMineralProduct = findProduct('Agua Mineral 1L')
+        const cervezaCoronaProduct = findProduct('Cerveza Corona')
+        const limonadaProduct = findProduct('Limonada Natural')
+
+        if (cocaColaProduct) {
+          const cocaCola = findRM('BEV-COCA-001')
+          if (cocaCola) {
+            const recipe = await prisma.recipe.create({
               data: {
-                productId: bebidaProducts[0].id,
+                productId: cocaColaProduct.id,
                 portionYield: 1,
                 totalCost: Number(cocaCola.costPerUnit),
                 prepTime: 0,
                 cookTime: 0,
-                notes: 'Simple product - direct raw material mapping',
+                notes: 'Servir frío',
               },
             })
             await prisma.recipeLine.create({
-              data: {
-                recipeId: cocaRecipe.id,
-                rawMaterialId: cocaCola.id,
-                quantity: 1,
-                unit: Unit.UNIT,
-                isOptional: false,
-              },
+              data: { recipeId: recipe.id, rawMaterialId: cocaCola.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
             })
+            recipeCount++
           }
+        }
 
-          if (bebidaProducts[1] && aguaMineral) {
-            const aguaRecipe = await prisma.recipe.create({
+        if (aguaMineralProduct) {
+          const aguaMineral = findRM('BEV-AGUA-001')
+          if (aguaMineral) {
+            const recipe = await prisma.recipe.create({
               data: {
-                productId: bebidaProducts[1].id,
+                productId: aguaMineralProduct.id,
                 portionYield: 1,
                 totalCost: Number(aguaMineral.costPerUnit),
                 prepTime: 0,
                 cookTime: 0,
-                notes: 'Simple product - direct raw material mapping',
+                notes: 'Servir frío',
               },
             })
             await prisma.recipeLine.create({
+              data: { recipeId: recipe.id, rawMaterialId: aguaMineral.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
+            })
+            recipeCount++
+          }
+        }
+
+        if (cervezaCoronaProduct) {
+          const cerveza = findRM('BEV-CORONA-001')
+          if (cerveza) {
+            const recipe = await prisma.recipe.create({
               data: {
-                recipeId: aguaRecipe.id,
-                rawMaterialId: aguaMineral.id,
-                quantity: 1,
-                unit: Unit.UNIT,
+                productId: cervezaCoronaProduct.id,
+                portionYield: 1,
+                totalCost: Number(cerveza.costPerUnit),
+                prepTime: 0,
+                cookTime: 0,
+                notes: 'Servir bien frío con limón',
+              },
+            })
+            await prisma.recipeLine.create({
+              data: { recipeId: recipe.id, rawMaterialId: cerveza.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
+            })
+            recipeCount++
+          }
+        }
+
+        if (limonadaProduct) {
+          const limones = findRM('BEV-LIME-001')
+          const azucar = findRM('BEV-SUGAR-001')
+          if (limones && azucar) {
+            const recipe = await prisma.recipe.create({
+              data: {
+                productId: limonadaProduct.id,
+                portionYield: 1,
+                totalCost: 0,
+                prepTime: 5,
+                cookTime: 0,
+                notes: 'Exprimir limones, mezclar con agua y azúcar, servir con hielo',
+              },
+            })
+            await prisma.recipeLine.createMany({
+              data: [
+                { recipeId: recipe.id, rawMaterialId: limones.id, quantity: 0.15, unit: Unit.KILOGRAM, isOptional: false }, // ~3 limones
+                { recipeId: recipe.id, rawMaterialId: azucar.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false }, // 50g azúcar
+              ],
+            })
+            recipeCount++
+          }
+        }
+
+        // ===== HAMBURGUESAS =====
+        const hamburguesaClasica = findProduct('Hamburguesa Clásica')
+        if (hamburguesaClasica) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: hamburguesaClasica.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 12,
+              notes: 'Cocinar la carne en plancha a fuego medio-alto por 6 min por lado. Armar la hamburguesa con los ingredientes.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-BUN-001')!.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-BEEF-001')!.id, quantity: 0.15, unit: Unit.KILOGRAM, isOptional: false }, // 150g beef patty
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('DAIRY-CHEDDAR-001')!.id,
+                quantity: 0.03,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 30g cheese
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-LETTUCE-001')!.id, quantity: 0.02, unit: Unit.KILOGRAM, isOptional: false }, // 20g lettuce
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-TOMATO-001')!.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false }, // 50g tomato (2 slices)
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-ONION-001')!.id, quantity: 0.02, unit: Unit.KILOGRAM, isOptional: false }, // 20g onion
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-PICKLES-001')!.id, quantity: 0.01, unit: Unit.UNIT, isOptional: false }, // few pickles
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-MAYO-001')!.id, quantity: 0.015, unit: Unit.LITER, isOptional: false }, // 15ml mayo
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-KETCHUP-001')!.id, quantity: 0.015, unit: Unit.LITER, isOptional: false }, // 15ml ketchup
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-MUSTARD-001')!.id, quantity: 0.01, unit: Unit.LITER, isOptional: false }, // 10ml mustard
+            ],
+          })
+          recipeCount++
+        }
+
+        const hamburguesaBBQ = findProduct('Hamburguesa BBQ')
+        if (hamburguesaBBQ) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: hamburguesaBBQ.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 12,
+              cookTime: 15,
+              notes: 'Cocinar la carne y el tocino. Armar con salsa BBQ y aros de cebolla.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-BUN-001')!.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-BEEF-001')!.id, quantity: 0.15, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-BACON-001')!.id, quantity: 0.04, unit: Unit.KILOGRAM, isOptional: false }, // 40g bacon (2 strips)
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('DAIRY-CHEDDAR-001')!.id,
+                quantity: 0.03,
+                unit: Unit.KILOGRAM,
                 isOptional: false,
               },
-            })
-          }
-          console.log(`      - ✅ Created ${Math.min(bebidaProducts.length, 2)} simple recipes for beverage products`)
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-BBQ-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml BBQ sauce
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('OTHER-ONIONRINGS-001')!.id,
+                quantity: 0.05,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 50g onion rings
+            ],
+          })
+          recipeCount++
         }
 
-        // Create recipes with recipe lines for RECIPE_BASED products
-        const platosCategory = categories.find(c => c.name === 'Platos Fuertes')
-        if (platosCategory) {
-          const platoProducts = products.filter(p => p.categoryId === platosCategory.id).slice(0, 3)
-
-          // Recipe 1: Chicken dish
-          if (platoProducts[0]) {
-            const recipe1 = await prisma.recipe.create({
-              data: {
-                productId: platoProducts[0].id,
-                portionYield: 1,
-                totalCost: 0, // Will be calculated from ingredients
-                prepTime: 30,
-                cookTime: 45,
-                notes: 'Cortar el pollo, sazonar, cocinar a fuego medio por 45 minutos.',
-              },
-            })
-
-            // Add recipe lines
-            const pollo = createdRawMaterials.find(rm => rm.sku === 'MEAT-POLLO-001')
-            const arroz = createdRawMaterials.find(rm => rm.sku === 'GRAIN-ARROZ-001')
-            const aceiteOliva = createdRawMaterials.find(rm => rm.sku === 'OIL-OLIVA-001')
-
-            if (pollo && arroz && aceiteOliva) {
-              await prisma.recipeLine.createMany({
-                data: [
-                  {
-                    recipeId: recipe1.id,
-                    rawMaterialId: pollo.id,
-                    quantity: 0.25, // 250g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                  {
-                    recipeId: recipe1.id,
-                    rawMaterialId: arroz.id,
-                    quantity: 0.1, // 100g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                  {
-                    recipeId: recipe1.id,
-                    rawMaterialId: aceiteOliva.id,
-                    quantity: 0.02, // 20ml per serving
-                    unit: Unit.LITER,
-                    isOptional: false,
-                  },
-                ],
-              })
-            }
-          }
-
-          // Recipe 2: Beef dish
-          if (platoProducts[1]) {
-            const recipe2 = await prisma.recipe.create({
-              data: {
-                productId: platoProducts[1].id,
-                portionYield: 1,
-                totalCost: 0, // Will be calculated from ingredients
-                prepTime: 20,
-                cookTime: 30,
-                notes: 'Preparar la carne molida con especias, cocinar con verduras.',
-              },
-            })
-
-            const carneRes = createdRawMaterials.find(rm => rm.sku === 'MEAT-RES-001')
-            const tomate = createdRawMaterials.find(rm => rm.sku === 'VEG-TOMATE-001')
-            const cebolla = createdRawMaterials.find(rm => rm.sku === 'VEG-CEBOLLA-001')
-            const frijol = createdRawMaterials.find(rm => rm.sku === 'GRAIN-FRIJOL-001')
-
-            if (carneRes && tomate && cebolla && frijol) {
-              await prisma.recipeLine.createMany({
-                data: [
-                  {
-                    recipeId: recipe2.id,
-                    rawMaterialId: carneRes.id,
-                    quantity: 0.2, // 200g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                  {
-                    recipeId: recipe2.id,
-                    rawMaterialId: tomate.id,
-                    quantity: 0.08, // 80g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                  {
-                    recipeId: recipe2.id,
-                    rawMaterialId: cebolla.id,
-                    quantity: 0.05, // 50g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                  {
-                    recipeId: recipe2.id,
-                    rawMaterialId: frijol.id,
-                    quantity: 0.12, // 120g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                ],
-              })
-            }
-          }
-
-          // Recipe 3: Salad
-          if (platoProducts[2]) {
-            const recipe3 = await prisma.recipe.create({
-              data: {
-                productId: platoProducts[2].id,
-                portionYield: 1,
-                totalCost: 0, // Will be calculated from ingredients
-                prepTime: 15,
-                cookTime: 0,
-                notes: 'Lavar y cortar verduras, mezclar con aderezo.',
-              },
-            })
-
-            const lechuga = createdRawMaterials.find(rm => rm.sku === 'VEG-LECHUGA-001')
-            const tomate = createdRawMaterials.find(rm => rm.sku === 'VEG-TOMATE-001')
-            const queso = createdRawMaterials.find(rm => rm.sku === 'DAIRY-QUESO-001')
-            const aceiteOliva = createdRawMaterials.find(rm => rm.sku === 'OIL-OLIVA-001')
-
-            if (lechuga && tomate && queso && aceiteOliva) {
-              await prisma.recipeLine.createMany({
-                data: [
-                  {
-                    recipeId: recipe3.id,
-                    rawMaterialId: lechuga.id,
-                    quantity: 0.15, // 150g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                  {
-                    recipeId: recipe3.id,
-                    rawMaterialId: tomate.id,
-                    quantity: 0.1, // 100g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: false,
-                  },
-                  {
-                    recipeId: recipe3.id,
-                    rawMaterialId: queso.id,
-                    quantity: 0.03, // 30g per serving
-                    unit: Unit.KILOGRAM,
-                    isOptional: true,
-                  },
-                  {
-                    recipeId: recipe3.id,
-                    rawMaterialId: aceiteOliva.id,
-                    quantity: 0.015, // 15ml per serving
-                    unit: Unit.LITER,
-                    isOptional: false,
-                  },
-                ],
-              })
-            }
-          }
-
-          console.log(`      - ✅ Created 5 recipes with recipe lines (2 simple beverage + 3 complex food dishes)`)
+        const hamburguesaDoble = findProduct('Hamburguesa Doble')
+        if (hamburguesaDoble) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: hamburguesaDoble.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 15,
+              notes: 'Dos carnes de 150g, doble queso. Armar como hamburguesa clásica.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-BUN-001')!.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-BEEF-001')!.id, quantity: 0.3, unit: Unit.KILOGRAM, isOptional: false }, // 300g (2x150g)
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('DAIRY-CHEDDAR-001')!.id,
+                quantity: 0.06,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 60g cheese (2 slices)
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-LETTUCE-001')!.id, quantity: 0.02, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-TOMATO-001')!.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-MAYO-001')!.id, quantity: 0.015, unit: Unit.LITER, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-KETCHUP-001')!.id, quantity: 0.015, unit: Unit.LITER, isOptional: false },
+            ],
+          })
+          recipeCount++
         }
+
+        const hamburguesaPollo = findProduct('Hamburguesa de Pollo')
+        if (hamburguesaPollo) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: hamburguesaPollo.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 12,
+              notes: 'Cocinar la pechuga de pollo a la plancha. Armar con mayonesa.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-BUN-001')!.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('MEAT-CHICKEN-001')!.id,
+                quantity: 0.15,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 150g chicken breast
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-LETTUCE-001')!.id, quantity: 0.02, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-TOMATO-001')!.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-MAYO-001')!.id, quantity: 0.02, unit: Unit.LITER, isOptional: false }, // 20ml mayo
+            ],
+          })
+          recipeCount++
+        }
+
+        // ===== TACOS MEXICANOS =====
+        const tacosCarneAsada = findProduct('Tacos de Carne Asada')
+        if (tacosCarneAsada) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: tacosCarneAsada.id,
+              portionYield: 3,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 8,
+              notes: 'Cocinar la carne a la parrilla. Servir en 3 tortillas con cebolla y cilantro picado.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-TORTILLA-001')!.id, quantity: 3, unit: Unit.UNIT, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-BEEF-002')!.id, quantity: 0.15, unit: Unit.KILOGRAM, isOptional: false }, // 150g beef
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-ONION-001')!.id, quantity: 0.03, unit: Unit.KILOGRAM, isOptional: false }, // 30g onion
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('VEG-CILANTRO-001')!.id,
+                quantity: 0.01,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 10g cilantro
+              { recipeId: recipe.id, rawMaterialId: findRM('BEV-LIME-001')!.id, quantity: 0.02, unit: Unit.KILOGRAM, isOptional: false }, // 1 lime
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-GREEN-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml salsa
+            ],
+          })
+          recipeCount++
+        }
+
+        const tacosAlPastor = findProduct('Tacos al Pastor')
+        if (tacosAlPastor) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: tacosAlPastor.id,
+              portionYield: 3,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 10,
+              notes: 'Cocinar la carne al pastor con piña. Servir en 3 tortillas con cebolla y cilantro.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-TORTILLA-001')!.id, quantity: 3, unit: Unit.UNIT, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-PORK-001')!.id, quantity: 0.15, unit: Unit.KILOGRAM, isOptional: false }, // 150g pork
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('VEG-PINEAPPLE-001')!.id,
+                quantity: 0.05,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 50g pineapple
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-ONION-001')!.id, quantity: 0.03, unit: Unit.KILOGRAM, isOptional: false },
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('VEG-CILANTRO-001')!.id,
+                quantity: 0.01,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              },
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-RED-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false },
+            ],
+          })
+          recipeCount++
+        }
+
+        const tacosPollo = findProduct('Tacos de Pollo')
+        if (tacosPollo) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: tacosPollo.id,
+              portionYield: 3,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 12,
+              notes: 'Cocinar pollo desmenuzado. Servir en 3 tortillas con lechuga, crema y queso.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-TORTILLA-001')!.id, quantity: 3, unit: Unit.UNIT, isOptional: false },
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('MEAT-CHICKEN-001')!.id,
+                quantity: 0.15,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              },
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-LETTUCE-001')!.id, quantity: 0.03, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-CREAM-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml cream
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-MANCH-001')!.id, quantity: 0.03, unit: Unit.KILOGRAM, isOptional: false }, // 30g cheese
+            ],
+          })
+          recipeCount++
+        }
+
+        const tacosPescado = findProduct('Tacos de Pescado')
+        if (tacosPescado) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: tacosPescado.id,
+              portionYield: 3,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 8,
+              notes: 'Freír el pescado empanizado. Servir en 3 tortillas con col morada y mayonesa chipotle.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-TORTILLA-001')!.id, quantity: 3, unit: Unit.UNIT, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-FISH-001')!.id, quantity: 0.15, unit: Unit.KILOGRAM, isOptional: false }, // 150g fish
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-CABBAGE-001')!.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false }, // 50g cabbage
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-CHIPMAYO-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml chipotle mayo
+              { recipeId: recipe.id, rawMaterialId: findRM('BEV-LIME-001')!.id, quantity: 0.02, unit: Unit.KILOGRAM, isOptional: false }, // 1 lime
+              { recipeId: recipe.id, rawMaterialId: findRM('OIL-VEG-001')!.id, quantity: 0.05, unit: Unit.LITER, isOptional: false }, // 50ml oil for frying
+            ],
+          })
+          recipeCount++
+        }
+
+        // ===== PIZZAS =====
+        const pizzaPepperoni = findProduct('Pizza Pepperoni')
+        if (pizzaPepperoni) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: pizzaPepperoni.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 15,
+              cookTime: 18,
+              notes: 'Estirar la masa, agregar salsa y queso mozzarella, cubrir con pepperoni. Hornear a 220°C por 18 min.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-DOUGH-001')!.id, quantity: 0.3, unit: Unit.KILOGRAM, isOptional: false }, // 300g dough
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-TOMATO-001')!.id, quantity: 0.08, unit: Unit.LITER, isOptional: false }, // 80ml sauce
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-MOZZ-001')!.id, quantity: 0.2, unit: Unit.KILOGRAM, isOptional: false }, // 200g mozzarella
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-PEPP-001')!.id, quantity: 0.08, unit: Unit.KILOGRAM, isOptional: false }, // 80g pepperoni
+            ],
+          })
+          recipeCount++
+        }
+
+        const pizzaHawaiana = findProduct('Pizza Hawaiana')
+        if (pizzaHawaiana) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: pizzaHawaiana.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 15,
+              cookTime: 18,
+              notes: 'Masa con salsa, mozzarella, jamón y piña. Hornear a 220°C por 18 min.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-DOUGH-001')!.id, quantity: 0.3, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-TOMATO-001')!.id, quantity: 0.08, unit: Unit.LITER, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-MOZZ-001')!.id, quantity: 0.2, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-HAM-001')!.id, quantity: 0.1, unit: Unit.KILOGRAM, isOptional: false }, // 100g ham
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('VEG-PINEAPPLE-001')!.id,
+                quantity: 0.15,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 150g pineapple
+            ],
+          })
+          recipeCount++
+        }
+
+        const pizzaVegetariana = findProduct('Pizza Vegetariana')
+        if (pizzaVegetariana) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: pizzaVegetariana.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 20,
+              cookTime: 18,
+              notes: 'Masa con salsa, mozzarella y vegetales variados. Hornear a 220°C por 18 min.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-DOUGH-001')!.id, quantity: 0.3, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-TOMATO-001')!.id, quantity: 0.08, unit: Unit.LITER, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-MOZZ-001')!.id, quantity: 0.2, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-BELL-001')!.id, quantity: 0.08, unit: Unit.KILOGRAM, isOptional: false }, // 80g bell peppers
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-ONION-001')!.id, quantity: 0.06, unit: Unit.KILOGRAM, isOptional: false }, // 60g onion
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('VEG-MUSHROOM-001')!.id,
+                quantity: 0.08,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 80g mushrooms
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-OLIVES-001')!.id, quantity: 0.03, unit: Unit.UNIT, isOptional: false }, // ~30g olives
+            ],
+          })
+          recipeCount++
+        }
+
+        const pizza4Quesos = findProduct('Pizza 4 Quesos')
+        if (pizza4Quesos) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: pizza4Quesos.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 15,
+              cookTime: 18,
+              notes: 'Masa con salsa y cuatro tipos de queso. Hornear a 220°C por 18 min.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-DOUGH-001')!.id, quantity: 0.3, unit: Unit.KILOGRAM, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-TOMATO-001')!.id, quantity: 0.08, unit: Unit.LITER, isOptional: false },
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-MOZZ-001')!.id, quantity: 0.12, unit: Unit.KILOGRAM, isOptional: false }, // 120g mozzarella
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-PARM-001')!.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false }, // 50g parmesan
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-GORG-001')!.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false }, // 50g gorgonzola
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-MANCH-001')!.id, quantity: 0.05, unit: Unit.KILOGRAM, isOptional: false }, // 50g manchego
+            ],
+          })
+          recipeCount++
+        }
+
+        // ===== ENTRADAS =====
+        const alitasBuffalo = findProduct('Alitas Buffalo')
+        if (alitasBuffalo) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: alitasBuffalo.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 20,
+              notes: 'Freír las alitas hasta que estén crujientes. Bañar con salsa buffalo y servir con aderezo ranch.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('MEAT-WINGS-001')!.id, quantity: 0.3, unit: Unit.KILOGRAM, isOptional: false }, // 300g wings (~6 pieces)
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-BUFFALO-001')!.id, quantity: 0.05, unit: Unit.LITER, isOptional: false }, // 50ml buffalo sauce
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-RANCH-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml ranch
+              { recipeId: recipe.id, rawMaterialId: findRM('OIL-VEG-001')!.id, quantity: 0.1, unit: Unit.LITER, isOptional: false }, // 100ml oil for frying
+            ],
+          })
+          recipeCount++
+        }
+
+        const nachosQueso = findProduct('Nachos con Queso')
+        if (nachosQueso) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: nachosQueso.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 5,
+              cookTime: 5,
+              notes: 'Calentar totopos en horno. Derretir queso cheddar y servir con jalapeños y crema.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              { recipeId: recipe.id, rawMaterialId: findRM('GRAIN-CHIPS-001')!.id, quantity: 0.15, unit: Unit.UNIT, isOptional: false }, // 150g chips
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('DAIRY-CHEDDAR-001')!.id,
+                quantity: 0.1,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 100g cheese
+              { recipeId: recipe.id, rawMaterialId: findRM('VEG-JALAP-001')!.id, quantity: 0.02, unit: Unit.UNIT, isOptional: false }, // jalapeños
+              { recipeId: recipe.id, rawMaterialId: findRM('DAIRY-CREAM-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml cream
+            ],
+          })
+          recipeCount++
+        }
+
+        const papasFrancesas = findProduct('Papas a la Francesa')
+        if (papasFrancesas) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: papasFrancesas.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 10,
+              cookTime: 8,
+              notes: 'Cortar papas en bastones. Freír hasta que estén doradas y crujientes. Servir con ketchup.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('GRAIN-POTATO-001')!.id,
+                quantity: 0.25,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 250g potatoes
+              { recipeId: recipe.id, rawMaterialId: findRM('OIL-VEG-001')!.id, quantity: 0.1, unit: Unit.LITER, isOptional: false }, // 100ml oil
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-KETCHUP-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml ketchup
+            ],
+          })
+          recipeCount++
+        }
+
+        const arosCebolla = findProduct('Aros de Cebolla')
+        if (arosCebolla) {
+          const recipe = await prisma.recipe.create({
+            data: {
+              productId: arosCebolla.id,
+              portionYield: 1,
+              totalCost: 0,
+              prepTime: 5,
+              cookTime: 8,
+              notes: 'Freír los aros de cebolla empanizados congelados. Servir con aderezo ranch.',
+            },
+          })
+          await prisma.recipeLine.createMany({
+            data: [
+              {
+                recipeId: recipe.id,
+                rawMaterialId: findRM('OTHER-ONIONRINGS-001')!.id,
+                quantity: 0.15,
+                unit: Unit.KILOGRAM,
+                isOptional: false,
+              }, // 150g onion rings
+              { recipeId: recipe.id, rawMaterialId: findRM('OIL-VEG-001')!.id, quantity: 0.08, unit: Unit.LITER, isOptional: false }, // 80ml oil
+              { recipeId: recipe.id, rawMaterialId: findRM('SAUCE-RANCH-001')!.id, quantity: 0.03, unit: Unit.LITER, isOptional: false }, // 30ml ranch
+            ],
+          })
+          recipeCount++
+        }
+
+        console.log(`      - ✅ Created ${recipeCount} realistic recipes with ingredient details`)
+
+        // Recalculate recipe costs based on ingredients
+        console.log(`      - 🔄 Recalculating recipe costs...`)
+        const allRecipes = await prisma.recipe.findMany({
+          where: { product: { venueId: venue.id } },
+          include: {
+            lines: {
+              include: {
+                rawMaterial: true,
+              },
+            },
+          },
+        })
+
+        for (const recipe of allRecipes) {
+          let totalCost = 0
+
+          // Update costPerServing for each recipe line
+          for (const line of recipe.lines) {
+            const costPerUnit = Number(line.rawMaterial.costPerUnit)
+            const quantity = Number(line.quantity)
+            const lineCost = quantity * costPerUnit
+            const costPerServing = lineCost / recipe.portionYield
+
+            totalCost += lineCost
+
+            // Update the recipe line with costPerServing
+            await prisma.recipeLine.update({
+              where: { id: line.id },
+              data: { costPerServing },
+            })
+          }
+
+          // Update recipe total cost
+          await prisma.recipe.update({
+            where: { id: recipe.id },
+            data: { totalCost },
+          })
+        }
+        console.log(`      - ✅ Updated costs for ${allRecipes.length} recipes`)
 
         // Create some additional movements (purchases and usage) for realistic history
         const sampleMovements = []
@@ -2334,6 +3440,13 @@ async function main() {
         include: { staff: true },
       })
 
+      // Get existing raw materials for this venue to use in LOW_INVENTORY notifications
+      const venueRawMaterials = await prisma.rawMaterial.findMany({
+        where: { venueId: venue.id, active: true },
+        select: { id: true, name: true, sku: true, currentStock: true, unit: true },
+        take: 5,
+      })
+
       if (venueStaff.length > 0) {
         const notifications = []
 
@@ -2390,15 +3503,35 @@ async function main() {
               break
 
             case NotificationType.LOW_INVENTORY:
-              const productName = faker.commerce.productName()
-              const currentStock = faker.number.int({ min: 1, max: 9 })
-              title = 'Stock Bajo'
-              message = `El producto ${productName} tiene stock bajo (${currentStock} unidades).`
-              actionUrl = '/inventory'
-              actionLabel = 'Gestionar Inventario'
-              entityType = 'inventory'
-              entityId = faker.string.uuid()
-              metadata = { productName, currentStock }
+              // Use a real raw material if available, otherwise create fake data
+              if (venueRawMaterials.length > 0) {
+                const rawMaterial = getRandomItem(venueRawMaterials)
+                const currentStock = Number(rawMaterial.currentStock)
+                title = '📉 Stock Bajo'
+                message = `${rawMaterial.name} (${rawMaterial.sku}) tiene stock bajo (${currentStock.toFixed(2)} ${rawMaterial.unit}).`
+                actionUrl = `/inventory/raw-materials?highlight=${rawMaterial.id}`
+                actionLabel = 'Gestionar Inventario'
+                entityType = 'RawMaterial'
+                entityId = rawMaterial.id
+                metadata = {
+                  rawMaterialName: rawMaterial.name,
+                  sku: rawMaterial.sku,
+                  currentStock,
+                  unit: rawMaterial.unit,
+                  alertType: 'LOW_STOCK',
+                }
+              } else {
+                // Fallback if no raw materials exist
+                const productName = faker.commerce.productName()
+                const currentStock = faker.number.int({ min: 1, max: 9 })
+                title = 'Stock Bajo'
+                message = `El producto ${productName} tiene stock bajo (${currentStock} unidades).`
+                actionUrl = '/inventory/raw-materials'
+                actionLabel = 'Gestionar Inventario'
+                entityType = 'RawMaterial'
+                entityId = null
+                metadata = { productName, currentStock }
+              }
               break
 
             case NotificationType.NEW_REVIEW:

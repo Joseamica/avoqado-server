@@ -2,8 +2,7 @@
 import { Router, Request, Response, NextFunction } from 'express'
 import { validateRequest } from '../middlewares/validation' // Zod validation middleware
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
-import { authorizeRole } from '../middlewares/authorizeRole.middleware'
-import { StaffRole } from '@prisma/client' // Assuming StaffRole enum
+import { checkPermission } from '../middlewares/checkPermission.middleware'
 import AppError from '../errors/AppError' // For custom errors
 import logger from '../config/logger' // Winston logger
 import { CreateProductSchema, UpdateProductSchema, GetProductParamsSchema } from '@/schemas/dashboard/menu.schema'
@@ -74,7 +73,7 @@ router.get('/:productId', (req: Request, res: Response, next: NextFunction) => {
 router.post(
   '/',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN]), // Only Managers or Admins can create
+  checkPermission('menu:create'), // Requires menu create permission
   validateRequest(CreateProductSchema), // Validate request body using Zod
   (req: Request, res: Response, next: NextFunction) => {
     const { venueId } = req.params
@@ -112,7 +111,7 @@ router.post(
 router.put(
   '/:productId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN]),
+  checkPermission('menu:update'),
   validateRequest(UpdateProductSchema),
   (req: Request, res: Response, next: NextFunction) => {
     const { venueId, productId } = req.params
@@ -147,7 +146,7 @@ router.put(
 router.delete(
   '/:productId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN]),
+  checkPermission('menu:delete'),
   validateRequest(GetProductParamsSchema),
   (req: Request, res: Response, next: NextFunction) => {
     const { venueId, productId } = req.params

@@ -63,13 +63,13 @@ una petición es el siguiente:
 
 - **Propósito**: Definir los endpoints de la API, asociando URLs a middlewares y controladores.
 - **Ejemplo (`dashboard.routes.ts`**):
-  - **Dependencias**: `express.Router`, controladores (`venue.dashboard.controller`), middlewares (`authenticateToken`, `authorizeRole`,
+  - **Dependencias**: `express.Router`, controladores (`venue.dashboard.controller`), middlewares (`authenticateToken`, `checkPermission`,
     `validateRequest`) y schemas de Zod.
   - **Lógica Principal**: Crea una instancia de `express.Router()` y define las rutas para un contexto específico (ej. `dashboard`). Cada
     definición de ruta es una cadena de ejecución:
     1. `router.post('/venues', ...)`: Define el método HTTP y la URL.
     2. `authenticateTokenMiddleware`: Primer middleware, asegura que el usuario esté autenticado.
-    3. `authorizeRole(['ADMIN'])`: Segundo, asegura que el usuario tenga el rol adecuado.
+    3. `checkPermission('venues:create')`: Segundo, verifica que el usuario tenga el permiso específico.
     4. `validateRequest(createVenueSchema)`: Tercero, valida el cuerpo de la petición.
     5. `venueController.create`: La función del controlador que se ejecuta si todo lo anterior pasa.
   - **Conexiones**: Las rutas son el "pegamento" de la aplicación. Son importadas por `src/routes/index.ts`, que las agrupa y exporta al
@@ -117,8 +117,9 @@ una petición es el siguiente:
 - **Propósito**: Contener lógica reutilizable que opera sobre las peticiones HTTP.
 - **Archivos Clave**:
   - **`authenticateToken.middleware.ts`**: Valida el JWT. Si es válido, decodifica el payload y lo adjunta a `req.authContext`.
-  - **`authorizeRole.middleware.ts`**: Middleware factory que comprueba si el rol del usuario (`req.authContext.role`) está en una lista de
-    roles permitidos.
+  - **`checkPermission.middleware.ts`**: Middleware factory que comprueba si el usuario tiene un permiso específico (formato
+    `"resource:action"`).
+  - **`authorizeRole.middleware.ts`**: Middleware factory obsoleto basado en roles (usar `checkPermission` en su lugar).
   - **`validation.ts`**: Middleware factory que toma un schema de Zod y valida `req.body`, `req.query` o `req.params`.
 - **Conexiones**: Son utilizados en la capa de `routes` para proteger y validar endpoints.
 

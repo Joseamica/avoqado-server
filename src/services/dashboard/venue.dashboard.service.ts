@@ -114,6 +114,7 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     logo: updateData.logo,
     cuisine: updateData.cuisine,
     type: updateData.type,
+    timezone: updateData.timezone,
     utc: updateData.utc,
     language: updateData.language,
     dynamicMenu: updateData.dynamicMenu,

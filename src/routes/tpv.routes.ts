@@ -1,8 +1,7 @@
 import express from 'express'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
-import { authorizeRole } from '../middlewares/authorizeRole.middleware'
-import { StaffRole } from '@prisma/client'
+import { checkPermission } from '../middlewares/checkPermission.middleware'
 import {
   venueIdParamSchema,
   serialNumberParamSchema,
@@ -153,13 +152,13 @@ const router = express.Router()
  *         description: Internal server error
  */
 /**
- * SECURITY UPDATE: This endpoint now requires authentication and authorized staff roles.
- * Middlewares order: authenticateTokenMiddleware -> authorizeRole -> validateRequest -> controller
+ * SECURITY UPDATE: This endpoint now requires authentication and permission checks.
+ * Middlewares order: authenticateTokenMiddleware -> checkPermission -> validateRequest -> controller
  */
 router.get(
   '/venues/:venueId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('home:read'),
   validateRequest(venueIdParamSchema),
   venueController.getVenueById,
 )
@@ -362,7 +361,7 @@ router.get('/status-sync/:serialNumber', validateRequest(serialNumberParamSchema
 router.get(
   '/venues/:venueId/orders',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('orders:read'),
   validateRequest(venueIdParamSchema),
   orderController.getOrders,
 )
@@ -498,7 +497,7 @@ router.get(
 router.get(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('orders:read'),
   validateRequest(orderParamsSchema),
   orderController.getOrder,
 )
@@ -619,7 +618,7 @@ router.get(
 router.get(
   '/venues/:venueId/payments',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('payments:read'),
   validateRequest(paymentsQuerySchema),
   paymentController.getPayments,
 )
@@ -700,7 +699,7 @@ router.get(
 router.get(
   '/venues/:venueId/merchant-accounts',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('payments:read'),
   validateRequest(venueIdParamSchema),
   paymentController.getMerchantAccounts,
 )
@@ -794,7 +793,7 @@ router.get(
 router.post(
   '/venues/:venueId/menta/route',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('payments:create'),
   validateRequest(paymentRouteSchema),
   paymentController.getMentaRoute,
 )
@@ -860,7 +859,7 @@ router.post(
 router.get(
   '/venues/:venueId/shift',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('shifts:read'),
   validateRequest(shiftQuerySchema),
   shiftController.getCurrentShift,
 )
@@ -944,12 +943,7 @@ router.get(
  *       500:
  *         description: Internal server error
  */
-router.post(
-  '/venues/:venueId/shifts/open',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
-  shiftController.openShift,
-)
+router.post('/venues/:venueId/shifts/open', authenticateTokenMiddleware, checkPermission('shifts:create'), shiftController.openShift)
 
 /**
  * @openapi
@@ -1052,7 +1046,7 @@ router.post(
 router.post(
   '/venues/:venueId/shifts/:shiftId/close',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
+  checkPermission('shifts:close'),
   shiftController.closeShift,
 )
 
@@ -1156,7 +1150,7 @@ router.post(
 router.get(
   '/venues/:venueId/shifts',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('shifts:read'),
   validateRequest(shiftsQuerySchema),
   shiftController.getShifts,
 )
@@ -1258,7 +1252,7 @@ router.get(
 router.get(
   '/venues/:venueId/shifts-summary',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('shifts:read'),
   validateRequest(shiftsSummaryQuerySchema),
   shiftController.getShiftsSummary,
 )
@@ -1483,7 +1477,7 @@ router.post('/venues/:venueId/auth', authController.staffSignIn)
 router.post(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('payments:create'),
   validateRequest(recordPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentController.recordPayment,
@@ -1599,7 +1593,7 @@ router.post(
 router.post(
   '/venues/:venueId/fast',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.CASHIER, StaffRole.WAITER, StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
+  checkPermission('payments:create'),
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentController.recordFastPayment,
@@ -1635,7 +1629,7 @@ router.post('/time-entries/:timeEntryId/break/end', authenticateTokenMiddleware,
 router.get(
   '/venues/:venueId/time-entries',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
+  checkPermission('shifts:manage'),
   timeEntryController.getTimeEntries,
 )
 
@@ -1650,7 +1644,7 @@ router.get('/staff/:staffId/time-summary', authenticateTokenMiddleware, timeEntr
 router.get(
   '/venues/:venueId/time-entries/active',
   authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER, StaffRole.SUPERADMIN]),
+  checkPermission('shifts:manage'),
   timeEntryController.getCurrentlyClockedInStaff,
 )
 

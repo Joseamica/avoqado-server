@@ -1,6 +1,8 @@
 import { posSyncService } from '../../../../src/services/pos-sync/posSync.service'
 import { processPosAreaEvent as mockProcessPosAreaEvent } from '../../../../src/services/pos-sync/posSyncArea.service'
-import { processPosOrderEvent as mockProcessPosOrderEvent } from '../../../../src/services/pos-sync/posSyncOrder.service'
+import {
+  processPosOrderEvent as mockProcessPosOrderEvent,
+} from '../../../../src/services/pos-sync/posSyncOrder.service'
 import { processPosShiftEvent as mockProcessPosShiftEvent } from '../../../../src/services/pos-sync/posSyncShift.service'
 import { posSyncStaffService } from '../../../../src/services/pos-sync/posSyncStaff.service'
 const mockProcessPosStaffEvent = posSyncStaffService.processPosStaffEvent
@@ -18,6 +20,11 @@ describe('POS Sync Service (posSync.service.ts)', () => {
     ;(mockProcessPosOrderEvent as jest.Mock).mockClear()
     ;(mockProcessPosShiftEvent as jest.Mock).mockClear()
     ;(mockProcessPosStaffEvent as jest.Mock).mockClear()
+  })
+
+  afterAll(() => {
+    // Clean up any timers to prevent Jest from hanging
+    jest.clearAllTimers()
   })
 
   it('should export posSyncService object', () => {

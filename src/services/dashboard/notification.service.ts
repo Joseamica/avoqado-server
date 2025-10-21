@@ -382,7 +382,7 @@ export async function sendLowStockAlertNotification(
         type: notificationType,
         title,
         message,
-        actionUrl: `/inventory?highlight=${rawMaterialId}`,
+        actionUrl: `/inventory/raw-materials?highlight=${rawMaterialId}`,
         actionLabel: 'Gestionar Inventario',
         entityType: 'RawMaterial',
         entityId: rawMaterialId,

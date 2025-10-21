@@ -1,4 +1,4 @@
-import { processPosOrderEvent } from '../../../../src/services/pos-sync/posSyncOrder.service'
+import { processPosOrderEvent, cleanupPaymentCache } from '../../../../src/services/pos-sync/posSyncOrder.service'
 import prisma from '../../../../src/utils/prismaClient'
 import logger from '../../../../src/config/logger'
 import { posSyncStaffService } from '../../../../src/services/pos-sync/posSyncStaff.service'
@@ -53,6 +53,11 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
       }
       return await callback(mockTx)
     })
+  })
+
+  afterAll(() => {
+    // Clean up the setInterval to prevent Jest from hanging
+    cleanupPaymentCache()
   })
 
   const venueId = 'test-venue-id'

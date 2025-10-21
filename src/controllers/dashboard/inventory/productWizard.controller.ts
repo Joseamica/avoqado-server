@@ -3,6 +3,7 @@ import * as productWizardService from '../../../services/dashboard/productWizard
 import * as productInventoryService from '../../../services/dashboard/productInventoryIntegration.service'
 import * as costRecalculationService from '../../../services/dashboard/costRecalculationTrigger.service'
 import * as recipeRecalculationService from '../../../services/dashboard/recipeRecalculation.service'
+import logger from '@/config/logger'
 
 /**
  * Check if venue should use inventory (recommendations)
@@ -325,8 +326,8 @@ export async function getRecipeCostVariances(req: Request, res: Response, next: 
  */
 export async function switchInventoryType(req: Request, res: Response, next: NextFunction) {
   try {
-    console.log('🔧 [DEBUG] Controller req.params:', req.params)
-    console.log('🔧 [DEBUG] Controller req.body:', req.body)
+    logger.info('🔧 [DEBUG] Controller req.params:', req.params)
+    logger.info('🔧 [DEBUG] Controller req.body:', req.body)
 
     const { venueId, productId } = req.params
     const { inventoryType } = req.body
