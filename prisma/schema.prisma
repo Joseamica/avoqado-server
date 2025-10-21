@@ -308,6 +308,8 @@ model VenueRolePermission {
   @@index([venueId])
   @@index([role])
   @@index([modifiedBy])
+  @@index([venueId, updatedAt]) // Audit trail: recent changes per venue
+  @@index([modifiedBy, updatedAt]) // Audit trail: who changed what when
 }
 
 model Invitation {
