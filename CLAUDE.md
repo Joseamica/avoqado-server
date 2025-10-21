@@ -42,6 +42,43 @@ After implementing or modifying significant features, you MUST create a dedicate
 - **Run tests BEFORE committing** - Never commit untested code that could break production
 - **Why this matters**: Test scripts catch integration issues that unit tests miss. They validate that changes work end-to-end with real database interactions and business logic flows.
 
+**🚨 REGRESSION & SIDE EFFECTS - THE GOLDEN RULE:**
+
+When you fix or implement something, you MUST NOT break something else. This is the most common source of production bugs.
+
+- **Regression**: Your change breaks existing functionality that was working before
+- **Side Effect**: Your change unexpectedly affects unrelated parts of the system
+
+**Examples of regressions to watch for:**
+```typescript
+// ❌ BAD: You add typo detection, but now normal permissions don't save
+// ❌ BAD: You add override mode validation, but now MANAGER can't modify WAITER
+// ❌ BAD: You optimize a query, but now it returns incomplete data
+// ❌ BAD: You fix a bug in orders, but now payments fail
+```
+
+**How to prevent regressions:**
+1. **ALWAYS add regression tests** alongside your feature tests
+2. **Test the old behavior** - Ensure what worked before still works
+3. **Test related features** - If you modify permissions, test all permission operations
+4. **Run the full test suite** - `npm test` before committing
+5. **Think about dependencies** - What other parts of the code rely on what you changed?
+
+**Test structure requirement:**
+```typescript
+// ✅ GOOD: Your test file should have BOTH sections
+
+// 1. NEW FEATURE TESTS (what you built)
+TEST 1: New feature works correctly
+TEST 2: Error cases handled properly
+TEST 3: Edge cases covered
+
+// 2. REGRESSION TESTS (what you didn't break)
+TEST 4: Existing feature A still works
+TEST 5: Existing feature B still works
+TEST 6: Related feature C still works
+```
+
 **Example workflow:**
 ```bash
 # 1. Implement feature in src/services/
