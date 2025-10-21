@@ -1,8 +1,6 @@
 import { posSyncService } from '../../../../src/services/pos-sync/posSync.service'
 import { processPosAreaEvent as mockProcessPosAreaEvent } from '../../../../src/services/pos-sync/posSyncArea.service'
-import {
-  processPosOrderEvent as mockProcessPosOrderEvent,
-} from '../../../../src/services/pos-sync/posSyncOrder.service'
+import { processPosOrderEvent as mockProcessPosOrderEvent } from '../../../../src/services/pos-sync/posSyncOrder.service'
 import { processPosShiftEvent as mockProcessPosShiftEvent } from '../../../../src/services/pos-sync/posSyncShift.service'
 import { posSyncStaffService } from '../../../../src/services/pos-sync/posSyncStaff.service'
 const mockProcessPosStaffEvent = posSyncStaffService.processPosStaffEvent
