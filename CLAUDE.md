@@ -79,27 +79,49 @@ TEST 5: Existing feature B still works
 TEST 6: Related feature C still works
 ```
 
-**Example workflow:**
+**Example workflow (Test Scripts → Jest Migration):**
+
+Test scripts in `scripts/` are TEMPORARY for rapid development testing. They MUST be migrated to Jest tests before committing.
+
 ```bash
 # 1. Implement feature in src/services/
-# 2. Create test script
-touch scripts/test-my-feature.ts
+vim src/services/dashboard/venue.dashboard.service.ts
 
-# 3. Write comprehensive tests covering:
-#    - Happy path (feature works as expected)
-#    - Error cases (proper error handling)
-#    - Edge cases (boundary conditions, null values, etc.)
-#    - Integration (works with existing features)
+# 2. Create TEMPORARY test script for rapid validation
+touch scripts/test-venue-update.ts
+# Write tests using direct database calls
+npx ts-node -r tsconfig-paths/register scripts/test-venue-update.ts
+# ✅ All tests pass
 
-# 4. Run test before committing
-npx ts-node -r tsconfig-paths/register scripts/test-my-feature.ts
+# 3. Migrate to PERMANENT Jest test
+vim tests/unit/services/dashboard/venue.dashboard.service.test.ts
+# Use mocks, follow existing test patterns (Arrange-Act-Assert)
+npm test -- tests/unit/services/dashboard/venue.dashboard.service.test.ts
+# ✅ All tests pass
 
-# 5. Only commit if ALL tests pass
-git add . && git commit -m "feat: implement my feature"
+# 4. Delete the temporary script
+rm scripts/test-venue-update.ts
+
+# 5. Commit ONLY the code + Jest test (NOT the script)
+git add src/services/dashboard/venue.dashboard.service.ts
+git add tests/unit/services/dashboard/venue.dashboard.service.test.ts
+git commit -m "fix: timezone field not saving in venue update"
 ```
 
+**Why migrate to Jest?**
+- ✅ **Permanent** - Tests run in CI/CD, catch future regressions
+- ✅ **Fast** - Mocked tests run in milliseconds
+- ✅ **Isolated** - Don't depend on seed data or database state
+- ✅ **Professional** - Follows industry standard testing patterns
+
+**When to use each:**
+- `scripts/test-*.ts` - ⚡ Quick validation during development (TEMPORARY)
+- `tests/unit/**/*.test.ts` - ✅ Permanent tests with mocks (COMMIT THESE)
+- `tests/api-tests/**/*.test.ts` - 🔗 Integration tests with real DB (COMMIT THESE)
+
 **Recent examples:**
-- `scripts/test-permissions-validation.ts` - Validates permission system changes (override mode, typo detection, self-lockout protection)
+- `tests/unit/services/dashboard/venue.dashboard.service.test.ts` - Venue update with timezone fix + regressions
+- `scripts/test-permissions-validation.ts` - Temporary script (kept as reference for complex integration testing)
 
 ### Code Quality
 
