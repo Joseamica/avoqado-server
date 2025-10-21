@@ -32,6 +32,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 - `npm run test:coverage` - Generate test coverage report
 - `npm run test:watch` - Run tests in watch mode
 
+**⚠️ CRITICAL TESTING POLICY FOR MAJOR CHANGES:**
+
+After implementing or modifying significant features, you MUST create a dedicated test script to validate the changes before committing:
+
+- **ALWAYS create a test script** in `scripts/` folder for major changes (new features, security fixes, complex business logic)
+- **Test ALL edge cases** - Don't just test the happy path; test error conditions, boundary cases, and potential conflicts
+- **Verify no regressions** - Ensure existing functionality still works correctly after your changes
+- **Run tests BEFORE committing** - Never commit untested code that could break production
+- **Why this matters**: Test scripts catch integration issues that unit tests miss. They validate that changes work end-to-end with real database interactions and business logic flows.
+
+**Example workflow:**
+```bash
+# 1. Implement feature in src/services/
+# 2. Create test script
+touch scripts/test-my-feature.ts
+
+# 3. Write comprehensive tests covering:
+#    - Happy path (feature works as expected)
+#    - Error cases (proper error handling)
+#    - Edge cases (boundary conditions, null values, etc.)
+#    - Integration (works with existing features)
+
+# 4. Run test before committing
+npx ts-node -r tsconfig-paths/register scripts/test-my-feature.ts
+
+# 5. Only commit if ALL tests pass
+git add . && git commit -m "feat: implement my feature"
+```
+
+**Recent examples:**
+- `scripts/test-permissions-validation.ts` - Validates permission system changes (override mode, typo detection, self-lockout protection)
+
 ### Code Quality
 
 - `npm run lint` - Run ESLint
