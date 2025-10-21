@@ -23,6 +23,242 @@ import { StaffRole } from '@prisma/client'
  *   - "system:config" = Payment provider configuration (SUPERADMIN)
  *   - "system:test" = Testing payment endpoints (SUPERADMIN)
  */
+
+/**
+ * Permission Dependencies System
+ *
+ * This defines implicit permissions that are automatically granted when a user has a base permission.
+ * This prevents breaking API calls when endpoints need data from multiple resources.
+ *
+ * ⚠️ CRITICAL: This must match the frontend dependencies in:
+ * `avoqado-web-dashboard/src/lib/permissions/permissionDependencies.ts`
+ *
+ * Example:
+ * - User has "orders:read" permission
+ * - API endpoint needs to return product names, payment info
+ * - Instead of requiring 3 separate permissions, orders:read implicitly includes:
+ *   - products:read (to show product names)
+ *   - payments:read (to show payment summary)
+ *
+ * Approach inspired by GitHub, Linear, and Notion's permission systems.
+ */
+const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
+  // ===========================
+  // ORDERS - Viewing and Managing
+  // ===========================
+  'orders:read': [
+    'orders:read',
+    'products:read', // Need to see what products are in the order
+    'payments:read', // Need to see payment status/method (basic info)
+  ],
+  'orders:create': [
+    'orders:read', // Inherit read capabilities
+    'orders:create',
+    'products:read', // Need to select products
+    'menu:read', // Need to browse menu
+    'inventory:read', // Need to check stock availability
+  ],
+  'orders:update': [
+    'orders:read',
+    'orders:update',
+    'products:read',
+    'inventory:read', // May need to update stock when modifying order
+  ],
+  'orders:cancel': [
+    'orders:read',
+    'orders:cancel',
+    'payments:read', // Need to see if refund is needed
+  ],
+
+  // ===========================
+  // MENU - Products and Categories
+  // ===========================
+  'menu:read': ['menu:read'],
+  'menu:create': [
+    'menu:read', // Need to see existing menu structure
+    'menu:create',
+  ],
+  'menu:update': ['menu:read', 'menu:update'],
+  'menu:delete': ['menu:read', 'menu:delete'],
+
+  // ===========================
+  // PAYMENTS
+  // ===========================
+  'payments:read': [
+    'payments:read',
+    'orders:read', // Payments are tied to orders
+  ],
+  'payments:create': [
+    'payments:read',
+    'payments:create',
+    'orders:read', // Need to see order being paid
+  ],
+  'payments:refund': [
+    'payments:read',
+    'payments:refund',
+    'orders:read', // Need to see original order
+  ],
+
+  // ===========================
+  // SHIFTS
+  // ===========================
+  'shifts:read': [
+    'shifts:read',
+    'teams:read', // Need to see team members in shift
+    'payments:read', // Need to see shift revenue
+  ],
+  'shifts:create': [
+    'shifts:read',
+    'shifts:create',
+    'teams:read', // Need to assign team members
+  ],
+  'shifts:update': ['shifts:read', 'shifts:update', 'teams:read'],
+  'shifts:close': [
+    'shifts:read',
+    'shifts:close',
+    'payments:read', // Need to see all payments to close shift
+    'orders:read', // Need to see all orders in shift
+  ],
+
+  // ===========================
+  // INVENTORY
+  // ===========================
+  'inventory:read': [
+    'inventory:read',
+    'products:read', // Inventory items are linked to products
+  ],
+  'inventory:create': ['inventory:read', 'inventory:create', 'products:read'],
+  'inventory:update': ['inventory:read', 'inventory:update', 'products:read'],
+  'inventory:adjust': ['inventory:read', 'inventory:adjust', 'products:read'],
+
+  // ===========================
+  // TEAMS - Staff Management
+  // ===========================
+  'teams:read': ['teams:read'],
+  'teams:create': ['teams:read', 'teams:create'],
+  'teams:update': ['teams:read', 'teams:update'],
+  'teams:delete': ['teams:read', 'teams:delete'],
+  'teams:invite': ['teams:read', 'teams:invite'],
+
+  // ===========================
+  // TPV (Point of Sale)
+  // ===========================
+  'tpv:read': [
+    'tpv:read',
+    'orders:read', // TPV creates orders
+    'products:read', // Need to see products to sell
+    'payments:read', // Need to process payments
+  ],
+  'tpv:create': [
+    'tpv:read',
+    'tpv:create',
+    'orders:create', // TPV creates orders
+    'payments:create', // TPV processes payments
+  ],
+  'tpv:command': ['tpv:read', 'tpv:command', 'orders:read'],
+
+  // ===========================
+  // REVIEWS
+  // ===========================
+  'reviews:read': [
+    'reviews:read',
+    'orders:read', // Reviews are linked to orders
+  ],
+  'reviews:respond': ['reviews:read', 'reviews:respond'],
+
+  // ===========================
+  // ANALYTICS
+  // ===========================
+  'analytics:read': [
+    'analytics:read',
+    'orders:read', // Analytics show order data
+    'payments:read', // Analytics show payment data
+    'products:read', // Analytics show product performance
+  ],
+  'analytics:export': ['analytics:read', 'analytics:export', 'orders:read', 'payments:read'],
+
+  // ===========================
+  // VENUES - Settings
+  // ===========================
+  'venues:read': ['venues:read'],
+  'venues:update': ['venues:read', 'venues:update'],
+
+  // ===========================
+  // HOME - Dashboard
+  // ===========================
+  'home:read': [
+    'home:read',
+    'orders:read', // Dashboard shows order stats
+    'payments:read', // Dashboard shows payment stats
+    'analytics:read', // Dashboard uses analytics data
+  ],
+
+  // ===========================
+  // TABLES - Restaurant Tables
+  // ===========================
+  'tables:read': [
+    'tables:read',
+    'orders:read', // Tables show active orders
+  ],
+  'tables:update': ['tables:read', 'tables:update'],
+
+  // ===========================
+  // RESERVATIONS
+  // ===========================
+  'reservations:read': [
+    'reservations:read',
+    'tables:read', // Reservations are for tables
+  ],
+  'reservations:create': ['reservations:read', 'reservations:create', 'tables:read'],
+  'reservations:update': ['reservations:read', 'reservations:update'],
+  'reservations:cancel': ['reservations:read', 'reservations:cancel'],
+
+  // ===========================
+  // SETTINGS
+  // ===========================
+  'settings:read': ['settings:read'],
+  'settings:manage': ['settings:read', 'settings:manage'],
+}
+
+/**
+ * Resolves a list of permissions to include all implicit dependencies.
+ *
+ * @param permissions - Array of explicit permissions the user has
+ * @returns Set of all permissions including implicit dependencies
+ *
+ * @example
+ * ```typescript
+ * const userPermissions = ['orders:read', 'orders:create']
+ * const resolved = resolvePermissions(userPermissions)
+ * // resolved contains: orders:read, orders:create, products:read,
+ * //                    payments:read, menu:read, inventory:read
+ * ```
+ */
+function resolvePermissions(permissions: string[]): Set<string> {
+  const resolved = new Set<string>()
+
+  // Handle wildcard permission
+  if (permissions.includes('*:*')) {
+    resolved.add('*:*')
+    return resolved
+  }
+
+  for (const permission of permissions) {
+    // Add the base permission
+    resolved.add(permission)
+
+    // Add implicit dependencies
+    const dependencies = PERMISSION_DEPENDENCIES[permission]
+    if (dependencies) {
+      dependencies.forEach(dep => {
+        // Avoid infinite loops - don't resolve dependencies of dependencies
+        resolved.add(dep)
+      })
+    }
+  }
+
+  return resolved
+}
 export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   /**
    * VIEWER: Read-only access to most features
@@ -228,12 +464,18 @@ export const CRITICAL_PERMISSIONS = ['settings:manage', 'settings:read', 'teams:
  * `avoqado-web-dashboard/src/hooks/usePermissions.ts`
  *
  * Permission Resolution Strategy:
- * - OVERRIDE MODE (wildcard roles with custom permissions):
- *   If role has "*:*" in defaults AND custom permissions exist,
- *   use ONLY custom permissions (allows removing permissions from OWNER/ADMIN/SUPERADMIN)
+ * 1. SUPERADMIN EXCEPTION: Always has all permissions (no custom restrictions)
+ * 2. OVERRIDE MODE (wildcard roles with custom permissions):
+ *    If role has "*:*" in defaults AND custom permissions exist,
+ *    use ONLY custom permissions (allows removing permissions from OWNER/ADMIN)
+ * 3. MERGE MODE (non-wildcard roles):
+ *    Merge default + custom permissions (allows adding extra permissions to lower roles)
+ * 4. DEPENDENCY RESOLUTION: Expand permissions to include implicit dependencies
  *
- * - MERGE MODE (non-wildcard roles):
- *   Merge default + custom permissions (allows adding extra permissions to lower roles)
+ * Example:
+ * - User has "orders:read" permission
+ * - System automatically grants: "products:read", "payments:read" (implicit)
+ * - API calls for products and payments succeed without explicit grants
  *
  * @param role User's role
  * @param customPermissions Custom permissions from VenueRolePermission (optional)
@@ -250,8 +492,8 @@ export function hasPermission(role: StaffRole, customPermissions: string[] | nul
   // Get default permissions for role
   const defaultPermissions = DEFAULT_PERMISSIONS[role] || []
 
-  // Determine which permissions to use
-  let allPermissions: string[]
+  // Determine which base permissions to use (before dependency resolution)
+  let basePermissions: string[]
 
   // OVERRIDE MODE for wildcard roles (OWNER, ADMIN)
   // If role has wildcard (*:*) in defaults AND custom permissions exist,
@@ -262,13 +504,19 @@ export function hasPermission(role: StaffRole, customPermissions: string[] | nul
 
   if (hasWildcardDefaults && hasCustomPermissions) {
     // Override mode: custom permissions replace defaults entirely
-    allPermissions = customPermissions
+    basePermissions = customPermissions
   } else {
     // MERGE MODE for non-wildcard roles
     // Merge default + custom permissions
     // Custom permissions can add new permissions on top of defaults
-    allPermissions = [...defaultPermissions, ...(customPermissions || [])]
+    basePermissions = [...defaultPermissions, ...(customPermissions || [])]
   }
+
+  // RESOLVE IMPLICIT DEPENDENCIES
+  // Expand base permissions to include their implicit dependencies
+  // Example: 'orders:read' automatically includes 'products:read', 'payments:read'
+  const resolvedSet = resolvePermissions(basePermissions)
+  const allPermissions = Array.from(resolvedSet)
 
   // Check for wildcard (all permissions)
   if (allPermissions.includes('*:*')) return true
