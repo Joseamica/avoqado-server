@@ -133,7 +133,38 @@ export async function updateRolePermissions(
     }
   }
 
-  // 5. Validate permission format and detect unknown permissions
+  // 5. Override mode protection: prevent privilege escalation
+  // If target role is wildcard (OWNER/ADMIN/SUPERADMIN) and permissions are being restricted,
+  // ensure modifier has sufficient hierarchy level
+  const defaultPerms = DEFAULT_PERMISSIONS[role] || []
+  const isWildcardRole = defaultPerms.includes('*:*')
+  const isOverrideMode = isWildcardRole && !permissions.includes('*:*')
+
+  if (isOverrideMode) {
+    // Verify modifier can handle override mode for this role
+    const modifierLevel = ROLE_HIERARCHY[modifierRole] || 0
+    const targetLevel = ROLE_HIERARCHY[role] || 0
+
+    // Extra validation: ensure modifier is same level or higher
+    if (modifierLevel < targetLevel) {
+      throw new ForbiddenError(
+        `${modifierRole} cannot use override mode to restrict ${role} permissions. ` +
+          `Override mode for wildcard roles requires equal or higher hierarchy level.`,
+      )
+    }
+
+    // Log override mode usage for audit trail
+    logger.info(`Override mode activated for ${role} in venue ${venueId}`, {
+      venueId,
+      role,
+      modifiedById,
+      modifierRole,
+      permissionsCount: permissions.length,
+      message: 'Wildcard role permissions replaced with custom permissions (override mode)',
+    })
+  }
+
+  // 6. Validate permission format and detect unknown permissions
   const invalidPermissions: string[] = []
   const unknownPermissions: string[] = []
 
@@ -165,7 +196,7 @@ export async function updateRolePermissions(
     })
   }
 
-  // 6. Check if reverting to defaults (same as default permissions)
+  // 7. Check if reverting to defaults (same as default permissions)
   const defaultPermissions = DEFAULT_PERMISSIONS[role] || []
   const isSameAsDefault = permissions.length === defaultPermissions.length && permissions.every(p => defaultPermissions.includes(p))
 
@@ -191,7 +222,7 @@ export async function updateRolePermissions(
     }
   }
 
-  // 7. Upsert custom permissions
+  // 8. Upsert custom permissions
   const rolePermission = await prisma.venueRolePermission.upsert({
     where: {
       venueId_role: {
