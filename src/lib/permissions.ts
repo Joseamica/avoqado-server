@@ -130,6 +130,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'inventory:create': ['inventory:read', 'inventory:create', 'products:read'],
   'inventory:update': ['inventory:read', 'inventory:update', 'products:read'],
   'inventory:adjust': ['inventory:read', 'inventory:adjust', 'products:read'],
+  'inventory:delete': ['inventory:read', 'inventory:delete', 'products:read'],
 
   // ===========================
   // TEAMS - Staff Management
@@ -156,6 +157,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'payments:create', // TPV processes payments
   ],
   'tpv:command': ['tpv:read', 'tpv:command', 'orders:read'],
+  'tpv:delete': ['tpv:read', 'tpv:delete'],
 
   // ===========================
   // REVIEWS
@@ -211,7 +213,11 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   ],
   'reservations:create': ['reservations:read', 'reservations:create', 'tables:read'],
   'reservations:update': ['reservations:read', 'reservations:update'],
-  'reservations:cancel': ['reservations:read', 'reservations:cancel'],
+  'reservations:cancel': [
+    'reservations:read',
+    'reservations:cancel',
+    'tables:read', // Need to see table when canceling
+  ],
 
   // ===========================
   // SETTINGS
@@ -286,6 +292,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reservations:read',
     'reservations:create',
     'reservations:update',
+    'reservations:cancel',
     'teams:read',
   ],
 
@@ -357,11 +364,20 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv:read',
     'tpv:create',
     'tpv:update',
+    'tpv:delete',
     'tpv:command',
+    'inventory:read',
+    'inventory:create',
+    'inventory:update',
+    'inventory:delete',
+    'inventory:adjust',
     'reviews:read',
     'reviews:respond',
     'teams:read',
+    'teams:create',
     'teams:update',
+    'teams:delete',
+    'teams:invite',
   ],
 
   /**
