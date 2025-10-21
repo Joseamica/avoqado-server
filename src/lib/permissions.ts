@@ -579,3 +579,94 @@ export function isCriticalPermission(permission: string): boolean {
 export function getRoleHierarchyLevel(role: StaffRole): number {
   return ROLE_HIERARCHY[role] || 0
 }
+
+/**
+ * Get all valid permissions in the system
+ * Extracts unique permissions from DEFAULT_PERMISSIONS and PERMISSION_DEPENDENCIES
+ *
+ * @returns Array of all valid permission strings
+ */
+export function getAllValidPermissions(): string[] {
+  const permissions = new Set<string>()
+
+  // Add all permissions from DEFAULT_PERMISSIONS
+  Object.values(DEFAULT_PERMISSIONS).forEach(perms => {
+    perms.forEach(p => {
+      if (p !== '*:*') permissions.add(p)
+    })
+  })
+
+  // Add all permissions from PERMISSION_DEPENDENCIES keys
+  Object.keys(PERMISSION_DEPENDENCIES).forEach(p => {
+    permissions.add(p)
+  })
+
+  // Add all dependency permissions
+  Object.values(PERMISSION_DEPENDENCIES).forEach(deps => {
+    deps.forEach(p => {
+      if (p !== '*:*') permissions.add(p)
+    })
+  })
+
+  return Array.from(permissions).sort()
+}
+
+/**
+ * Check if a permission string is valid (exists in the system)
+ *
+ * @param permission Permission string to validate
+ * @returns true if permission is valid, false if unknown/typo
+ */
+export function isValidPermission(permission: string): boolean {
+  // Wildcard is always valid
+  if (permission === '*:*') return true
+
+  // Check if it's a resource:* or *:action wildcard
+  if (permission.includes('*')) {
+    const [resource, action] = permission.split(':')
+    if (resource === '*' || action === '*') {
+      // Validate the non-wildcard part exists in some permission
+      const allPerms = getAllValidPermissions()
+      return allPerms.some(p => {
+        const [r, a] = p.split(':')
+        if (resource === '*') return a === action
+        if (action === '*') return r === resource
+        return false
+      })
+    }
+  }
+
+  // Check exact match
+  const allPerms = getAllValidPermissions()
+  return allPerms.includes(permission)
+}
+
+/**
+ * Validate permission format
+ * Returns error message if invalid, null if valid
+ *
+ * @param permission Permission string to validate
+ * @returns Error message or null
+ */
+export function validatePermissionFormat(permission: string): string | null {
+  // Allow wildcard
+  if (permission === '*:*') return null
+
+  // Check format: "resource:action"
+  const parts = permission.split(':')
+  if (parts.length !== 2) {
+    return `Invalid format: "${permission}". Expected format: "resource:action"`
+  }
+
+  const [resource, action] = parts
+  if (!resource || !action) {
+    return `Invalid format: "${permission}". Both resource and action are required`
+  }
+
+  // Check if permission exists in system
+  if (!isValidPermission(permission)) {
+    return `Unknown permission: "${permission}". This may be a typo or deprecated permission`
+  }
+
+  return null
+}

@@ -1,7 +1,14 @@
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import { StaffRole } from '@prisma/client'
-import { DEFAULT_PERMISSIONS, canModifyRole, MODIFIABLE_ROLES_BY_LEVEL, CRITICAL_PERMISSIONS, ROLE_HIERARCHY } from '../../lib/permissions'
+import {
+  DEFAULT_PERMISSIONS,
+  canModifyRole,
+  MODIFIABLE_ROLES_BY_LEVEL,
+  CRITICAL_PERMISSIONS,
+  ROLE_HIERARCHY,
+  validatePermissionFormat,
+} from '../../lib/permissions'
 import logger from '@/config/logger'
 
 /**
@@ -126,21 +133,36 @@ export async function updateRolePermissions(
     }
   }
 
-  // 5. Validate permission format
-  const invalidPermissions = permissions.filter(p => {
-    // Allow wildcard
-    if (p === '*:*') return false
+  // 5. Validate permission format and detect unknown permissions
+  const invalidPermissions: string[] = []
+  const unknownPermissions: string[] = []
 
-    // Check format: "resource:action"
-    const parts = p.split(':')
-    if (parts.length !== 2) return true
-    if (!parts[0] || !parts[1]) return true
-
-    return false
+  permissions.forEach(p => {
+    const validationError = validatePermissionFormat(p)
+    if (validationError) {
+      // Check if it's a format error or just unknown permission
+      if (p.split(':').length !== 2 || !p.split(':')[0] || !p.split(':')[1]) {
+        invalidPermissions.push(p)
+      } else {
+        unknownPermissions.push(p)
+      }
+    }
   })
 
+  // Block invalid formats (critical error)
   if (invalidPermissions.length > 0) {
     throw new BadRequestError(`Invalid permission format: ${invalidPermissions.join(', ')}. Expected format: "resource:action"`)
+  }
+
+  // Warn about unknown permissions (may be typos, but don't block)
+  if (unknownPermissions.length > 0) {
+    logger.warn(`Unknown permissions detected for role ${role} in venue ${venueId}`, {
+      venueId,
+      role,
+      unknownPermissions,
+      modifiedById,
+      message: 'These permissions may be typos or deprecated. Please verify.',
+    })
   }
 
   // 6. Check if reverting to defaults (same as default permissions)
