@@ -29,6 +29,9 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   venue: {
     findMany: jest.fn(),
   },
+  venueRolePermission: {
+    findMany: jest.fn(),
+  },
   // Add other models and methods as needed for your tests
 }))
 
@@ -179,6 +182,8 @@ describe('Dashboard Auth Controller', () => {
           logo: null,
         },
       ])
+      // Mock prisma.venueRolePermission.findMany to return no custom permissions
+      ;(prisma.venueRolePermission.findMany as jest.Mock).mockResolvedValue([])
 
       await authController.getAuthStatus(req as Request, res as Response)
 
