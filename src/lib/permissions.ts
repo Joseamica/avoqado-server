@@ -241,13 +241,19 @@ export const CRITICAL_PERMISSIONS = ['settings:manage', 'settings:read', 'teams:
  * @returns true if user has permission
  */
 export function hasPermission(role: StaffRole, customPermissions: string[] | null | undefined, requiredPermission: string): boolean {
+  // SUPERADMIN EXCEPTION: Always use wildcard, never custom permissions
+  // This prevents accidental lockout if SUPERADMIN permissions are customized
+  if (role === StaffRole.SUPERADMIN) {
+    return true // SUPERADMIN always has all permissions
+  }
+
   // Get default permissions for role
   const defaultPermissions = DEFAULT_PERMISSIONS[role] || []
 
   // Determine which permissions to use
   let allPermissions: string[]
 
-  // OVERRIDE MODE for wildcard roles (OWNER, ADMIN, SUPERADMIN)
+  // OVERRIDE MODE for wildcard roles (OWNER, ADMIN)
   // If role has wildcard (*:*) in defaults AND custom permissions exist,
   // use ONLY custom permissions (complete override, not merge)
   // This allows removing permissions from high-level roles
