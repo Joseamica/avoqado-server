@@ -18,6 +18,8 @@ import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
+// Import Firebase Admin initialization
+import { initializeFirebase } from './config/firebase'
 
 const httpServer = http.createServer(app)
 
@@ -91,6 +93,15 @@ process.on('unhandledRejection', (reason, promise) => {
 // --- Application Startup Logic ---
 const startApplication = async (retries = 3) => {
   try {
+    // Initialize Firebase Admin SDK (for storage file deletion)
+    try {
+      initializeFirebase()
+      logger.info('✅ Firebase Admin SDK initialized')
+    } catch (error) {
+      logger.warn('⚠️  Firebase Admin SDK not initialized. File deletion from storage will be skipped.', error)
+      // Continue startup even if Firebase is not configured
+    }
+
     // Connect to RabbitMQ and ensure topology
     await connectToRabbitMQ()
 

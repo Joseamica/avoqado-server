@@ -7,6 +7,10 @@ node_modules
 .env.local
 .env.development
 
+# Firebase service account (NEVER commit credentials)
+firebase-service-account.json
+*firebase-adminsdk*.json
+
 # CLAUDE.md
 
 # Log files
