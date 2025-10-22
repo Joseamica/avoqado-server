@@ -1,6 +1,10 @@
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
+// ===== PRODUCTION VENUE FILTER =====
+// Excludes demo venues from analytics to prevent skewed metrics
+const PRODUCTION_VENUE_FILTER = { isDemo: false }
+
 export interface SuperadminDashboardData {
   kpis: {
     totalRevenue: number
@@ -117,18 +121,21 @@ export interface SuperadminVenue {
  */
 export async function getSuperadminDashboardData(): Promise<SuperadminDashboardData> {
   try {
-    // Get venue statistics
+    // Get venue statistics (exclude demo venues)
     const [totalVenues, activeVenues, totalUsers] = await Promise.all([
-      prisma.venue.count(),
-      prisma.venue.count({ where: { active: true } }),
+      prisma.venue.count({ where: PRODUCTION_VENUE_FILTER }),
+      prisma.venue.count({ where: { active: true, ...PRODUCTION_VENUE_FILTER } }),
       prisma.staff.count(),
     ])
 
-    // Get transaction data for revenue calculations
+    // Get transaction data for revenue calculations (exclude demo venues)
     const payments = await prisma.payment.findMany({
       where: {
         createdAt: {
           gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+        },
+        order: {
+          venue: PRODUCTION_VENUE_FILTER,
         },
       },
       include: {
@@ -158,12 +165,13 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
     // Calculate actual feature revenue from premium features
     const _featureRevenue = await calculateFeatureRevenue(new Date(new Date().getFullYear(), new Date().getMonth(), 1), new Date())
 
-    // Get recent venue registrations for growth metrics
+    // Get recent venue registrations for growth metrics (exclude demo venues)
     const recentVenues = await prisma.venue.findMany({
       where: {
         createdAt: {
           gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
         },
+        ...PRODUCTION_VENUE_FILTER,
       },
     })
 
@@ -223,10 +231,12 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
 
 /**
  * Get all venues with detailed information for superadmin management
+ * @param includeDemos - Whether to include demo venues (default: false)
  */
-export async function getAllVenuesForSuperadmin(): Promise<SuperadminVenue[]> {
+export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<SuperadminVenue[]> {
   try {
     const venues = await prisma.venue.findMany({
+      where: includeDemos ? undefined : PRODUCTION_VENUE_FILTER,
       include: {
         organization: {
           select: {
@@ -608,7 +618,7 @@ export async function getRevenueMetrics(startDate?: Date, endDate?: Date): Promi
     const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1)
     const end = endDate || new Date()
 
-    // Get all payments in the date range
+    // Get all payments in the date range (exclude demo venues)
     const payments = await prisma.payment.findMany({
       where: {
         createdAt: {
@@ -616,6 +626,9 @@ export async function getRevenueMetrics(startDate?: Date, endDate?: Date): Promi
           lte: end,
         },
         status: 'COMPLETED', // Only count completed payments
+        order: {
+          venue: PRODUCTION_VENUE_FILTER,
+        },
       },
       include: {
         order: {
@@ -689,13 +702,14 @@ export async function getRevenueBreakdown(startDate?: Date, endDate?: Date): Pro
  * Calculate subscription revenue from venue monthly fees (prorated)
  */
 async function calculateSubscriptionRevenue(startDate: Date, endDate: Date): Promise<number> {
-  // Get venues that were active during the period
+  // Get venues that were active during the period (exclude demo venues)
   const activeVenues = await prisma.venue.findMany({
     where: {
       active: true,
       createdAt: {
         lte: endDate,
       },
+      ...PRODUCTION_VENUE_FILTER,
     },
     select: {
       id: true,
@@ -777,7 +791,7 @@ async function calculateGrowthRate(startDate: Date, endDate: Date): Promise<numb
 }
 
 /**
- * Get revenue for a specific period
+ * Get revenue for a specific period (exclude demo venues)
  */
 async function getRevenueForPeriod(startDate: Date, endDate: Date): Promise<number> {
   const payments = await prisma.payment.findMany({
@@ -787,6 +801,9 @@ async function getRevenueForPeriod(startDate: Date, endDate: Date): Promise<numb
         lte: endDate,
       },
       status: 'COMPLETED',
+      order: {
+        venue: PRODUCTION_VENUE_FILTER,
+      },
     },
   })
 
@@ -794,7 +811,7 @@ async function getRevenueForPeriod(startDate: Date, endDate: Date): Promise<numb
 }
 
 /**
- * Get revenue breakdown by venue
+ * Get revenue breakdown by venue (exclude demo venues)
  */
 async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueRevenue[]> {
   try {
@@ -805,6 +822,9 @@ async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueR
           lte: endDate,
         },
         status: 'COMPLETED',
+        order: {
+          venue: PRODUCTION_VENUE_FILTER,
+        },
       },
       include: {
         order: {
@@ -853,7 +873,7 @@ async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueR
 }
 
 /**
- * Get revenue breakdown by time period (daily/weekly/monthly)
+ * Get revenue breakdown by time period (daily/weekly/monthly) - exclude demo venues
  */
 async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<PeriodRevenue[]> {
   try {
@@ -864,6 +884,9 @@ async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<Perio
           lte: endDate,
         },
         status: 'COMPLETED',
+        order: {
+          venue: PRODUCTION_VENUE_FILTER,
+        },
       },
     })
 
@@ -997,7 +1020,7 @@ async function calculatePlatformRevenue(
   settledRevenue: number
 }> {
   try {
-    // 1. Calculate actual commission revenue from fees collected
+    // 1. Calculate actual commission revenue from fees collected (exclude demo venues)
     const commissionRevenue = await prisma.payment.aggregate({
       where: {
         createdAt: {
@@ -1005,19 +1028,22 @@ async function calculatePlatformRevenue(
           lte: endDate,
         },
         status: 'COMPLETED',
+        order: {
+          venue: PRODUCTION_VENUE_FILTER,
+        },
       },
       _sum: {
         feeAmount: true,
       },
     })
 
-    // 2. Calculate subscription revenue from venue subscription fees
+    // 2. Calculate subscription revenue from venue subscription fees (already filtered)
     const subscriptionRevenue = await calculateSubscriptionRevenue(startDate, endDate)
 
-    // 3. Calculate feature revenue from premium features
+    // 3. Calculate feature revenue from premium features (already filtered)
     const featureRevenue = await calculateFeatureRevenue(startDate, endDate)
 
-    // 4. Calculate settled revenue (money actually received)
+    // 4. Calculate settled revenue (money actually received) - exclude demo venues
     const settledRevenue = await prisma.venueTransaction.aggregate({
       where: {
         createdAt: {
@@ -1026,6 +1052,7 @@ async function calculatePlatformRevenue(
         },
         status: 'SETTLED',
         type: 'PAYMENT',
+        venue: PRODUCTION_VENUE_FILTER,
       },
       _sum: {
         feeAmount: true,
@@ -1157,14 +1184,18 @@ export async function getMerchantAccountsList(providerId?: string) {
 }
 
 /**
- * Get simplified venues list for dropdowns
+ * Get simplified venues list for dropdowns (exclude demo venues by default)
+ * @param includeDemos - Whether to include demo venues (default: false)
  */
-export async function getVenuesListSimple() {
+export async function getVenuesListSimple(includeDemos = false) {
   try {
-    logger.info('Getting venues list (simple)')
+    logger.info('Getting venues list (simple)', { includeDemos })
 
     const venues = await prisma.venue.findMany({
-      where: { active: true },
+      where: {
+        active: true,
+        ...(includeDemos ? {} : PRODUCTION_VENUE_FILTER),
+      },
       select: {
         id: true,
         name: true,
