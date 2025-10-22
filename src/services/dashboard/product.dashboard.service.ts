@@ -43,6 +43,7 @@ export async function getProducts(venueId: string, options?: { includeRecipe?: b
     },
     include: {
       category: true,
+      inventory: true, // ✅ Include simple stock inventory
       modifierGroups: {
         include: {
           group: true,

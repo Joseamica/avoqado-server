@@ -6,6 +6,7 @@ import { checkPermission } from '../middlewares/checkPermission.middleware'
 import AppError from '../errors/AppError' // For custom errors
 import logger from '../config/logger' // Winston logger
 import { CreateProductSchema, UpdateProductSchema, GetProductParamsSchema } from '@/schemas/dashboard/menu.schema'
+import * as productService from '../services/dashboard/product.dashboard.service'
 
 const router = Router({ mergeParams: true }) // IMPORTANT: mergeParams allows access to parent router params
 
@@ -27,22 +28,26 @@ const mockProducts: Product[] = [
 // --- Product Routes ---
 
 // GET /api/v1/venues/:venueId/products
-// Get all products for a specific venue (Public or semi-public)
-router.get('/', (req: Request, res: Response, next: NextFunction) => {
-  const { venueId } = req.params // Access venueId from parent router thanks to mergeParams
-  logger.info(`Fetching products for venueId: ${venueId}`, { correlationId: req.correlationId })
+// Get all products for a specific venue
+router.get('/', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    logger.info(`Fetching products for venueId: ${venueId}`, { correlationId: req.correlationId })
 
-  if (!venueId) {
-    return next(new AppError('Venue ID is required to fetch products.', 400))
+    if (!venueId) {
+      return next(new AppError('Venue ID is required to fetch products.', 400))
+    }
+
+    const products = await productService.getProducts(venueId, { includeRecipe: true })
+
+    res.status(200).json({
+      message: `Products for venue ${venueId}`,
+      data: products,
+      correlationId: req.correlationId,
+    })
+  } catch (error) {
+    next(error)
   }
-
-  const venueProducts = mockProducts.filter(p => p.venueId === venueId)
-
-  res.status(200).json({
-    message: `Products for venue ${venueId}`,
-    data: venueProducts,
-    correlationId: req.correlationId,
-  })
 })
 
 // GET /api/v1/venues/:venueId/products/:productId

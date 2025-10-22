@@ -8,7 +8,7 @@ import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
-import { deductStockForRecipe } from '../dashboard/rawMaterial.service'
+import { deductInventoryForProduct } from '../dashboard/productInventoryIntegration.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -107,7 +107,7 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
       // Deduct stock for each product in the order
       for (const item of updatedOrder.items) {
         try {
-          await deductStockForRecipe(updatedOrder.venueId, item.productId, item.quantity, orderId)
+          await deductInventoryForProduct(updatedOrder.venueId, item.productId, item.quantity, orderId)
 
           logger.info('✅ Stock deducted successfully for product', {
             orderId,

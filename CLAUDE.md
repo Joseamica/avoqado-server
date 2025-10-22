@@ -146,20 +146,24 @@ npm run format && npm run lint:fix
 ```
 
 This ensures:
+
 - ✅ Zero prettier/eslint warnings in commits
 - ✅ Consistent code style across all files
 - ✅ No manual formatting needed (like Cmd+S in VSCode)
 
 **When it runs:**
+
 - After using `Write` or `Edit` tools on `.ts`, `.tsx`, `.js`, `.jsx` files
 - Before committing code changes
 - Runs on entire project to catch any inconsistencies
 
 **What it does:**
+
 1. `npm run format` - Formats all files with Prettier
 2. `npm run lint:fix` - Auto-fixes ESLint issues
 
 **Expected output:**
+
 ```
 ✓ Files formatted
 ✓ Lint issues fixed
