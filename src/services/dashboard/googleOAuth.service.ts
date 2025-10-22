@@ -163,6 +163,11 @@ export async function loginWithGoogle(
       throw new ForbiddenError('Invitation is missing venue information. Please contact your administrator.')
     }
 
+    // Validate invitation data consistency
+    if (invitation.venue.organizationId !== invitation.organizationId) {
+      throw new ForbiddenError('Invitation data inconsistency: venue organization mismatch. Please contact your administrator.')
+    }
+
     // Create new staff from invitation
     staff = await prisma.staff.create({
       data: {
@@ -171,7 +176,7 @@ export async function loginWithGoogle(
         lastName: googleUser.family_name || googleUser.name.split(' ').slice(1).join(' ') || '',
         photoUrl: googleUser.picture,
         emailVerified: true,
-        organizationId: invitation.venue.organizationId,
+        organizationId: invitation.organizationId,
         googleId: googleUser.id,
         active: true,
         lastLoginAt: new Date(),

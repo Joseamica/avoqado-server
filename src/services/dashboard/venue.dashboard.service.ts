@@ -100,50 +100,53 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     throw new NotFoundError(`Venue with ID ${venueId} not found in organization`)
   }
 
+  // Exclude organizationId from updates (prevent accidental modification)
+  const { organizationId: _, ...safeUpdateData } = updateData
+
   // Prepare the update data
   const venueUpdateData: any = {
-    name: updateData.name,
-    address: updateData.address,
-    city: updateData.city,
-    country: updateData.country,
-    phone: updateData.phone,
-    email: updateData.email,
-    website: updateData.website,
-    instagram: updateData.instagram,
-    image: updateData.image,
-    logo: updateData.logo,
-    cuisine: updateData.cuisine,
-    type: updateData.type,
-    timezone: updateData.timezone,
-    utc: updateData.utc,
-    language: updateData.language,
-    dynamicMenu: updateData.dynamicMenu,
-    wifiName: updateData.wifiName,
-    wifiPassword: updateData.wifiPassword,
-    posName: updateData.posName,
-    posUniqueId: updateData.posUniqueId,
-    softRestaurantVenueId: updateData.softRestaurantVenueId,
-    tipPercentage1: updateData.tipPercentage1,
-    tipPercentage2: updateData.tipPercentage2,
-    tipPercentage3: updateData.tipPercentage3,
-    tipPercentages: updateData.tipPercentages,
-    askNameOrdering: updateData.askNameOrdering,
-    googleBusinessId: updateData.googleBusinessId,
-    stripeAccountId: updateData.stripeAccountId,
-    specialPayment: updateData.specialPayment,
-    specialPaymentRef: updateData.specialPaymentRef,
+    name: safeUpdateData.name,
+    address: safeUpdateData.address,
+    city: safeUpdateData.city,
+    country: safeUpdateData.country,
+    phone: safeUpdateData.phone,
+    email: safeUpdateData.email,
+    website: safeUpdateData.website,
+    instagram: safeUpdateData.instagram,
+    image: safeUpdateData.image,
+    logo: safeUpdateData.logo,
+    cuisine: safeUpdateData.cuisine,
+    type: safeUpdateData.type,
+    timezone: safeUpdateData.timezone,
+    utc: safeUpdateData.utc,
+    language: safeUpdateData.language,
+    dynamicMenu: safeUpdateData.dynamicMenu,
+    wifiName: safeUpdateData.wifiName,
+    wifiPassword: safeUpdateData.wifiPassword,
+    posName: safeUpdateData.posName,
+    posUniqueId: safeUpdateData.posUniqueId,
+    softRestaurantVenueId: safeUpdateData.softRestaurantVenueId,
+    tipPercentage1: safeUpdateData.tipPercentage1,
+    tipPercentage2: safeUpdateData.tipPercentage2,
+    tipPercentage3: safeUpdateData.tipPercentage3,
+    tipPercentages: safeUpdateData.tipPercentages,
+    askNameOrdering: safeUpdateData.askNameOrdering,
+    googleBusinessId: safeUpdateData.googleBusinessId,
+    stripeAccountId: safeUpdateData.stripeAccountId,
+    specialPayment: safeUpdateData.specialPayment,
+    specialPaymentRef: safeUpdateData.specialPaymentRef,
   }
 
   // Handle feature updates if provided
-  if (updateData.feature) {
-    venueUpdateData.feature = updateData.feature
+  if (safeUpdateData.feature) {
+    venueUpdateData.feature = safeUpdateData.feature
   }
 
   // Handle menta updates if provided (simplified for now)
-  if (updateData.merchantIdA !== undefined) venueUpdateData.merchantIdA = updateData.merchantIdA
-  if (updateData.merchantIdB !== undefined) venueUpdateData.merchantIdB = updateData.merchantIdB
-  if (updateData.apiKeyA !== undefined) venueUpdateData.apiKeyA = updateData.apiKeyA
-  if (updateData.apiKeyB !== undefined) venueUpdateData.apiKeyB = updateData.apiKeyB
+  if (safeUpdateData.merchantIdA !== undefined) venueUpdateData.merchantIdA = safeUpdateData.merchantIdA
+  if (safeUpdateData.merchantIdB !== undefined) venueUpdateData.merchantIdB = safeUpdateData.merchantIdB
+  if (safeUpdateData.apiKeyA !== undefined) venueUpdateData.apiKeyA = safeUpdateData.apiKeyA
+  if (safeUpdateData.apiKeyB !== undefined) venueUpdateData.apiKeyB = safeUpdateData.apiKeyB
 
   // Remove null/undefined values
   Object.keys(venueUpdateData).forEach(key => {
