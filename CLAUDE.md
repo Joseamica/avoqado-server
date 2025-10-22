@@ -84,6 +84,35 @@ TEST 5: Existing feature B still works
 TEST 6: Related feature C still works
 ```
 
+**🗑️ TEMPORARY FILES NAMING CONVENTION:**
+
+When creating debugging or testing scripts in `scripts/`, follow these rules to prevent temporary files from being committed:
+
+1. **Add DELETE comment at the top of the file:**
+
+```typescript
+// ⚠️ DELETE AFTER: This is a temporary debugging script
+// Purpose: Find venue IDs by name for testing
+// Created: 2025-01-22
+// Delete when: Issue #123 is resolved
+
+import { PrismaClient } from '@prisma/client'
+// ... rest of code
+```
+
+2. **OR include indicator in filename:**
+
+```bash
+scripts/temp-find-venue-id.ts           # Prefix with "temp-"
+scripts/debug-permissions.ts             # Prefix with "debug-"
+scripts/find-venue-id-DELETE.ts          # Suffix with "-DELETE"
+```
+
+3. **When to delete:**
+   - Before committing if it was only for local debugging
+   - After the issue/feature is resolved
+   - When migrated to a proper Jest test
+
 **Example workflow (Test Scripts → Jest Migration):**
 
 Test scripts in `scripts/` are TEMPORARY for rapid development testing. They MUST be migrated to Jest tests before committing.

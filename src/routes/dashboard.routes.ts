@@ -1,5 +1,6 @@
 import express, { RequestHandler } from 'express'
 import { z } from 'zod'
+import multer from 'multer'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
@@ -10,6 +11,7 @@ import { validateRequest } from '../middlewares/validation' // Verifica esta rut
 // Importa el SCHEMA de Zod, no el tipo DTO, para el middleware de validación
 import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
+import * as featureController from '../controllers/dashboard/feature.controller'
 import * as generalStatsController from '../controllers/dashboard/generalStats.dashboard.controller'
 import * as googleOAuthController from '../controllers/dashboard/googleOAuth.controller'
 import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
@@ -71,12 +73,29 @@ import {
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
 import { createTestPaymentSchema, getTestPaymentsSchema } from '../schemas/dashboard/testing.schema'
-import { createVenueSchema, listVenuesQuerySchema } from '../schemas/dashboard/venue.schema'
+import { createVenueSchema, listVenuesQuerySchema, convertDemoVenueSchema } from '../schemas/dashboard/venue.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 
 const router = express.Router({ mergeParams: true })
+
+// Configure multer for document uploads (memory storage, max 10MB)
+const documentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept PDF, JPG, JPEG, PNG files
+    const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png']
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true)
+    } else {
+      cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed'))
+    }
+  },
+})
 
 // Superadmin routes - highest priority
 router.use('/superadmin', superadminRoutes)
@@ -1068,6 +1087,308 @@ router.put('/venues/:venueId', authenticateTokenMiddleware, checkPermission('ven
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
 router.delete('/venues/:venueId', authenticateTokenMiddleware, checkPermission('venues:manage'), venueController.deleteVenue)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/convert-from-demo:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Convert demo venue to real venue
+ *     description: Converts a demo venue to a real (production) venue by providing tax information
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rfc, legalName, fiscalRegime]
+ *             properties:
+ *               rfc:
+ *                 type: string
+ *                 description: RFC (Tax ID) for Mexico
+ *                 pattern: '^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$'
+ *                 example: 'XAXX010101000'
+ *               legalName:
+ *                 type: string
+ *                 description: Legal business name
+ *                 example: 'Mi Restaurante S.A. de C.V.'
+ *               fiscalRegime:
+ *                 type: string
+ *                 description: Tax regime code
+ *                 example: '601'
+ *               taxDocumentUrl:
+ *                 type: string
+ *                 format: uri
+ *                 description: URL to uploaded tax document
+ *                 nullable: true
+ *               idDocumentUrl:
+ *                 type: string
+ *                 format: uri
+ *                 description: URL to uploaded ID document
+ *                 nullable: true
+ *     responses:
+ *       200:
+ *         description: Venue successfully converted to real
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *                 data: { $ref: '#/components/schemas/Venue' }
+ *       400:
+ *         description: Venue is not in demo mode or validation failed
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/convert-from-demo',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  validateRequest(convertDemoVenueSchema) as RequestHandler,
+  venueController.convertDemoVenue,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/upload-document:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Upload venue document (tax or ID document)
+ *     description: |
+ *       Upload a document file for venue conversion. File will be auto-renamed based on field name or type parameter:
+ *       - Field name contains 'tax', 'csf', or 'fiscal' → CSF.{ext}
+ *       - Field name contains 'id' or 'identif' → ID.{ext}
+ *       - Query param type=csf → CSF.{ext}
+ *       - Query param type=id → ID.{ext}
+ *       - Otherwise → Document.{ext}
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: type, in: query, required: false, schema: { type: string, enum: [csf, id] }, description: 'Optional: Document type override. Auto-detected from field name if not provided.' }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: Document file (PDF, JPG, JPEG, or PNG). Use field name 'taxDocument' or 'idDocument' for auto-detection.
+ *     responses:
+ *       200:
+ *         description: Document uploaded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     buffer: { type: string, description: 'Base64 encoded file data' }
+ *                     filename: { type: string, description: 'Clean filename (CSF.pdf, ID.jpg, or Document.pdf)' }
+ *                     mimeType: { type: string }
+ *                     size: { type: number }
+ *       400:
+ *         description: No file uploaded or invalid file type
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/upload-document',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  documentUpload.single('file'),
+  venueController.uploadVenueDocument,
+)
+
+// --- Feature Routes (Step 4 of Onboarding) ---
+/**
+ * @openapi
+ * /api/v1/dashboard/features:
+ *   get:
+ *     tags: [Features]
+ *     summary: Get all available features
+ *     description: Returns list of all active features that venues can enable
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: List of available features
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                         format: cuid
+ *                       name:
+ *                         type: string
+ *                         description: Display name of the feature
+ *                         example: Control de Inventario
+ *                       code:
+ *                         type: string
+ *                         description: Unique feature code
+ *                         example: INVENTORY_TRACKING
+ *                       description:
+ *                         type: string
+ *                         description: Feature description
+ *                         example: Sistema completo de gestión de inventario
+ *                       category:
+ *                         type: string
+ *                         description: Feature category
+ *                         example: OPERATIONS
+ *                       active:
+ *                         type: boolean
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ */
+router.get('/features', authenticateTokenMiddleware, checkPermission('features:read'), featureController.getAvailableFeatures)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/features:
+ *   get:
+ *     tags: [Features]
+ *     summary: Get venue's enabled features
+ *     description: Returns features enabled for a specific venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: List of venue's enabled features
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                         format: cuid
+ *                       name:
+ *                         type: string
+ *                       code:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       category:
+ *                         type: string
+ *                       active:
+ *                         type: boolean
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       403:
+ *         $ref: '#/components/responses/ForbiddenError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
+ */
+router.get('/venues/:venueId/features', authenticateTokenMiddleware, checkPermission('features:read'), featureController.getVenueFeatures)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/features:
+ *   post:
+ *     tags: [Features]
+ *     summary: Save selected features for a venue
+ *     description: Enables specified features for a venue during onboarding or feature management
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [featureIds]
+ *             properties:
+ *               featureIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: cuid
+ *                 description: Array of feature IDs to enable for the venue
+ *                 example: ["cm123abc456", "cm456def789"]
+ *     responses:
+ *       200:
+ *         description: Features saved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                         format: cuid
+ *                       name:
+ *                         type: string
+ *                       code:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       category:
+ *                         type: string
+ *                       active:
+ *                         type: boolean
+ *       400:
+ *         description: Invalid request body
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 error:
+ *                   type: string
+ *                   example: Invalid or inactive feature IDs
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       403:
+ *         $ref: '#/components/responses/ForbiddenError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
+ */
+router.post(
+  '/venues/:venueId/features',
+  authenticateTokenMiddleware,
+  checkPermission('features:write'),
+  featureController.saveVenueFeatures,
+)
 
 //Rutas de Payment para el Dashboard
 /**

@@ -186,6 +186,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'venues:update': ['venues:read', 'venues:update'],
 
   // ===========================
+  // FEATURES - Venue Features
+  // ===========================
+  'features:read': ['features:read'],
+  'features:write': ['features:read', 'features:write'],
+
+  // ===========================
   // HOME - Dashboard
   // ===========================
   'home:read': [
@@ -278,6 +284,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'shifts:read',
     'reviews:read',
     'teams:read',
+    'features:read',
   ],
 
   /**
@@ -378,6 +385,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'teams:update',
     'teams:delete',
     'teams:invite',
+    'features:read',
+    'features:write',
   ],
 
   /**
