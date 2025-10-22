@@ -89,3 +89,23 @@ export const listVenuesQuerySchema = z.object({
   }),
 })
 export type ListVenuesQueryDto = z.infer<typeof listVenuesQuerySchema.shape.query>
+
+// Schema for converting demo venue to real venue
+export const convertDemoVenueSchema = z.object({
+  body: z.object({
+    rfc: z
+      .string({ required_error: 'RFC es requerido' })
+      .min(12, { message: 'RFC debe tener al menos 12 caracteres' })
+      .max(13, { message: 'RFC debe tener máximo 13 caracteres' })
+      .regex(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'Formato de RFC inválido' }),
+    legalName: z
+      .string({ required_error: 'Razón social es requerida' })
+      .min(3, { message: 'Razón social debe tener al menos 3 caracteres' }),
+    fiscalRegime: z.string({ required_error: 'Régimen fiscal es requerido' }).min(1, { message: 'Régimen fiscal es requerido' }),
+    // Document references will be handled separately via file upload endpoints
+    taxDocumentUrl: z.string().url().optional().nullable(),
+    idDocumentUrl: z.string().url().optional().nullable(),
+  }),
+})
+
+export type ConvertDemoVenueDto = z.infer<typeof convertDemoVenueSchema.shape.body>

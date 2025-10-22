@@ -6,6 +6,7 @@ import { Venue, AccountType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError' // Tu error personalizado
 import { generateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
+import { deleteVenueFolder } from '../storage.service'
 
 // Función para generar slugs (podría estar en un utilitario)
 
@@ -62,12 +63,16 @@ export async function listVenuesForOrganization(orgId: string, _queryOptions: an
   })
 }
 
-export async function getVenueById(orgId: string, venueId: string): Promise<Venue> {
+export async function getVenueById(orgId: string, venueId: string, options?: { skipOrgCheck?: boolean }): Promise<Venue> {
+  // SUPERADMIN can access venues across organizations (skipOrgCheck = true)
+  // Other roles (including OWNER) are restricted to their own organization
+  const whereClause: any = { id: venueId }
+  if (!options?.skipOrgCheck) {
+    whereClause.organizationId = orgId
+  }
+
   const venue = await prisma.venue.findFirst({
-    where: {
-      id: venueId,
-      organizationId: orgId,
-    },
+    where: whereClause,
     include: {
       menuCategories: true,
       modifierGroups: true,
@@ -90,10 +95,15 @@ export async function getVenueById(orgId: string, venueId: string): Promise<Venu
   return venue
 }
 
-export async function updateVenue(orgId: string, venueId: string, updateData: any): Promise<Venue> {
-  // Verify that the venue belongs to the organization
+export async function updateVenue(orgId: string, venueId: string, updateData: any, options?: { skipOrgCheck?: boolean }): Promise<Venue> {
+  // Verify that the venue belongs to the organization (unless SUPERADMIN)
+  const whereClause: any = { id: venueId }
+  if (!options?.skipOrgCheck) {
+    whereClause.organizationId = orgId
+  }
+
   const existingVenue = await prisma.venue.findFirst({
-    where: { id: venueId, organizationId: orgId },
+    where: whereClause,
   })
 
   if (!existingVenue) {
@@ -166,20 +176,277 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
   return updatedVenue
 }
 
-export async function deleteVenue(orgId: string, venueId: string): Promise<void> {
-  // Verify that the venue belongs to the organization
+export async function deleteVenue(orgId: string, venueId: string, options?: { skipOrgCheck?: boolean }): Promise<void> {
+  // Verify that the venue belongs to the organization (unless SUPERADMIN)
+  const whereClause: any = { id: venueId }
+  if (!options?.skipOrgCheck) {
+    whereClause.organizationId = orgId
+  }
+
   const existingVenue = await prisma.venue.findFirst({
-    where: { id: venueId, organizationId: orgId },
+    where: whereClause,
   })
 
   if (!existingVenue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found in organization`)
   }
 
-  // Delete the venue (this will cascade to related records based on schema)
-  await prisma.venue.delete({
-    where: { id: venueId },
+  // Delete all Firebase Storage files for this venue BEFORE deleting database records
+  // This is a "best effort" deletion - we don't want to block venue deletion if storage cleanup fails
+  logger.info(`🗑️  Deleting Firebase Storage files for venue: ${existingVenue.slug}`)
+  await deleteVenueFolder(existingVenue.slug).catch(error => {
+    logger.error(`❌ Failed to delete Firebase Storage folder for venue ${existingVenue.slug}`, error)
+    // Continue with database deletion even if storage cleanup fails
   })
+
+  // Use a transaction to delete all related data in the correct order
+  await prisma.$transaction(async tx => {
+    logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
+
+    // 1. Delete OrderItems (depends on Orders)
+    const orderIds = await tx.order.findMany({
+      where: { venueId },
+      select: { id: true },
+    })
+    const orderIdList = orderIds.map(o => o.id)
+
+    if (orderIdList.length > 0) {
+      const deletedOrderItems = await tx.orderItem.deleteMany({
+        where: { orderId: { in: orderIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedOrderItems.count} OrderItems`)
+
+      // 2. Delete OrderItemModifiers (depends on OrderItems)
+      const deletedOrderItemModifiers = await tx.orderItemModifier.deleteMany({
+        where: { orderItem: { orderId: { in: orderIdList } } },
+      })
+      logger.info(`  ✓ Deleted ${deletedOrderItemModifiers.count} OrderItemModifiers`)
+
+      // 3. Delete Payments (depends on Orders)
+      const deletedPayments = await tx.payment.deleteMany({
+        where: { orderId: { in: orderIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedPayments.count} Payments`)
+
+      // 4. Delete PaymentAllocations (depends on Payments)
+      const deletedPaymentAllocations = await tx.paymentAllocation.deleteMany({
+        where: { payment: { orderId: { in: orderIdList } } },
+      })
+      logger.info(`  ✓ Deleted ${deletedPaymentAllocations.count} PaymentAllocations`)
+
+      // 5. Delete VenueTransactions (depends on Payments via paymentId)
+      const paymentIds = await tx.payment.findMany({
+        where: { orderId: { in: orderIdList } },
+        select: { id: true },
+      })
+      const paymentIdList = paymentIds.map(p => p.id)
+
+      if (paymentIdList.length > 0) {
+        const deletedVenueTransactions = await tx.venueTransaction.deleteMany({
+          where: { paymentId: { in: paymentIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedVenueTransactions.count} VenueTransactions`)
+      }
+
+      // 6. Delete Orders
+      const deletedOrders = await tx.order.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedOrders.count} Orders`)
+    }
+
+    // 7. Delete Product-related data
+    const productIds = await tx.product.findMany({
+      where: { venueId },
+      select: { id: true },
+    })
+    const productIdList = productIds.map(p => p.id)
+
+    if (productIdList.length > 0) {
+      // Delete RecipeLines (depends on Recipes)
+      const recipeIds = await tx.recipe.findMany({
+        where: { productId: { in: productIdList } },
+        select: { id: true },
+      })
+      const recipeIdList = recipeIds.map(r => r.id)
+
+      if (recipeIdList.length > 0) {
+        const deletedRecipeLines = await tx.recipeLine.deleteMany({
+          where: { recipeId: { in: recipeIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedRecipeLines.count} RecipeLines`)
+      }
+
+      // Delete Recipes
+      const deletedRecipes = await tx.recipe.deleteMany({
+        where: { productId: { in: productIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedRecipes.count} Recipes`)
+
+      // Delete ProductModifierGroups
+      const deletedProductModifierGroups = await tx.productModifierGroup.deleteMany({
+        where: { productId: { in: productIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedProductModifierGroups.count} ProductModifierGroups`)
+
+      // Delete Inventory records
+      const deletedInventory = await tx.inventory.deleteMany({
+        where: { productId: { in: productIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedInventory.count} Inventory records`)
+
+      // Hard delete Products (venue deletion is destructive, so we remove all data)
+      const deletedProducts = await tx.product.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedProducts.count} Products`)
+    }
+
+    // 8. Delete Modifiers and ModifierGroups
+    const modifierGroupIds = await tx.modifierGroup.findMany({
+      where: { venueId },
+      select: { id: true },
+    })
+    const modifierGroupIdList = modifierGroupIds.map(mg => mg.id)
+
+    if (modifierGroupIdList.length > 0) {
+      const deletedModifiers = await tx.modifier.deleteMany({
+        where: { groupId: { in: modifierGroupIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedModifiers.count} Modifiers`)
+    }
+
+    const deletedModifierGroups = await tx.modifierGroup.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedModifierGroups.count} ModifierGroups`)
+
+    // 9. Delete MenuCategories and MenuCategoryAssignments
+    const categoryIds = await tx.menuCategory.findMany({
+      where: { venueId },
+      select: { id: true },
+    })
+    const categoryIdList = categoryIds.map(c => c.id)
+
+    if (categoryIdList.length > 0) {
+      const deletedMenuCategoryAssignments = await tx.menuCategoryAssignment.deleteMany({
+        where: { categoryId: { in: categoryIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedMenuCategoryAssignments.count} MenuCategoryAssignments`)
+    }
+
+    const deletedMenuCategories = await tx.menuCategory.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedMenuCategories.count} MenuCategories`)
+
+    // 10. Delete RawMaterials and related data
+    const rawMaterialIds = await tx.rawMaterial.findMany({
+      where: { venueId },
+      select: { id: true },
+    })
+    const rawMaterialIdList = rawMaterialIds.map(rm => rm.id)
+
+    if (rawMaterialIdList.length > 0) {
+      const deletedStockBatches = await tx.stockBatch.deleteMany({
+        where: { rawMaterialId: { in: rawMaterialIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedStockBatches.count} StockBatches`)
+
+      const deletedRawMaterialMovements = await tx.rawMaterialMovement.deleteMany({
+        where: { rawMaterialId: { in: rawMaterialIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedRawMaterialMovements.count} RawMaterialMovements`)
+
+      const deletedLowStockAlerts = await tx.lowStockAlert.deleteMany({
+        where: { rawMaterialId: { in: rawMaterialIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedLowStockAlerts.count} LowStockAlerts`)
+    }
+
+    const deletedRawMaterials = await tx.rawMaterial.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedRawMaterials.count} RawMaterials`)
+
+    // 11. Delete StaffVenue relationships
+    const deletedStaffVenue = await tx.staffVenue.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedStaffVenue.count} StaffVenue relationships`)
+
+    // 12. Delete VenueFeatures
+    const deletedVenueFeatures = await tx.venueFeature.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedVenueFeatures.count} VenueFeatures`)
+
+    // 13. Delete VenueSettings
+    const deletedVenueSettings = await tx.venueSettings.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedVenueSettings.count} VenueSettings`)
+
+    // 14. Delete Terminals
+    const deletedTerminals = await tx.terminal.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedTerminals.count} Terminals`)
+
+    // 15. Delete Reviews (not linked to payments, which cascade delete automatically)
+    const deletedReviews = await tx.review.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedReviews.count} Reviews`)
+
+    // 16. Delete Areas and Tables
+    const areaIds = await tx.area.findMany({
+      where: { venueId },
+      select: { id: true },
+    })
+    const areaIdList = areaIds.map(a => a.id)
+
+    if (areaIdList.length > 0) {
+      const deletedTables = await tx.table.deleteMany({
+        where: { areaId: { in: areaIdList } },
+      })
+      logger.info(`  ✓ Deleted ${deletedTables.count} Tables`)
+    }
+
+    const deletedAreas = await tx.area.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedAreas.count} Areas`)
+
+    // 17. Delete other venue-related data
+    const deletedVenuePaymentConfig = await tx.venuePaymentConfig.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedVenuePaymentConfig.count} VenuePaymentConfigs`)
+
+    const deletedVenuePricingStructure = await tx.venuePricingStructure.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedVenuePricingStructure.count} VenuePricingStructures`)
+
+    const deletedVenueRolePermissions = await tx.venueRolePermission.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedVenueRolePermissions.count} VenueRolePermissions`)
+
+    const deletedMonthlyVenueProfit = await tx.monthlyVenueProfit.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedMonthlyVenueProfit.count} MonthlyVenueProfits`)
+
+    // 18. Finally, delete the Venue itself
+    await tx.venue.delete({
+      where: { id: venueId },
+    })
+    logger.info(`  ✅ Venue ${venueId} deleted successfully`)
+  })
+
+  logger.info(`🎉 Venue deletion complete for venueId: ${venueId}`)
 }
 
 /**
@@ -375,4 +642,70 @@ async function setupPricingStructure(tx: any, venueId: string, venueData: Enhanc
     tier: venueData.pricingTier,
     monthlyFee: tier.monthlyServiceFee,
   })
+}
+
+/**
+ * Convert a demo venue to a real (production) venue
+ */
+export async function convertDemoVenue(
+  orgId: string,
+  venueId: string,
+  conversionData: {
+    rfc: string
+    legalName: string
+    fiscalRegime: string
+    taxDocumentUrl?: string | null
+    idDocumentUrl?: string | null
+  },
+  options?: { skipOrgCheck?: boolean },
+): Promise<Venue> {
+  logger.info('Converting demo venue to real', { orgId, venueId })
+
+  // Verify that the venue belongs to the organization (unless SUPERADMIN)
+  const whereClause: any = { id: venueId }
+  if (!options?.skipOrgCheck) {
+    whereClause.organizationId = orgId
+  }
+
+  const existingVenue = await prisma.venue.findFirst({
+    where: whereClause,
+  })
+
+  if (!existingVenue) {
+    logger.error('Venue not found for conversion', { venueId, orgId })
+    throw new NotFoundError(`Venue with ID ${venueId} not found in organization`)
+  }
+
+  // Verify that the venue is actually in demo mode
+  if (!existingVenue.isDemo) {
+    logger.error('Attempted to convert non-demo venue', { venueId })
+    throw new BadRequestError('This venue is not in demo mode')
+  }
+
+  // Update the venue to convert from demo to real
+  const updatedVenue = await prisma.venue.update({
+    where: { id: venueId },
+    data: {
+      isDemo: false,
+      demoExpiresAt: null,
+      // Store tax information in venue fields
+      // Note: You may want to create a separate VenueTaxInfo model if you need more fields
+      rfc: conversionData.rfc,
+      legalName: conversionData.legalName,
+      fiscalRegime: conversionData.fiscalRegime,
+      taxDocumentUrl: conversionData.taxDocumentUrl,
+      idDocumentUrl: conversionData.idDocumentUrl,
+    },
+    include: {
+      features: true,
+    },
+  })
+
+  logger.info('Demo venue successfully converted to real', {
+    venueId: updatedVenue.id,
+    venueName: updatedVenue.name,
+    rfc: conversionData.rfc,
+  })
+
+  return updatedVenue
 }
