@@ -7,6 +7,7 @@ import {
   FeatureCategory,
   InvitationStatus,
   InvitationType,
+  InventoryMethod,
   InvoiceStatus,
   KitchenStatus,
   MenuType,
@@ -319,6 +320,7 @@ async function resetDatabase() {
     ['Inventories', () => prisma.inventory.deleteMany()],
     ['Modifiers', () => prisma.modifier.deleteMany()],
     ['StaffVenues', () => prisma.staffVenue.deleteMany()],
+    ['VenueRolePermissions', () => prisma.venueRolePermission.deleteMany()],
     ['VenueSettings', () => prisma.venueSettings.deleteMany()],
     ['PosCommands', () => prisma.posCommand.deleteMany()],
     ['PosConnectionStatuses', () => prisma.posConnectionStatus.deleteMany()],
@@ -1353,11 +1355,31 @@ async function main() {
         ],
       }
 
+      // Helper function to determine inventory configuration for each product
+      const getInventoryConfig = (categoryName: string, productName: string) => {
+        // NO TRACKING: Simple products that don't need inventory
+        const noTrackingProducts = ['Papas a la Francesa', 'Aros de Cebolla']
+        if (noTrackingProducts.includes(productName)) {
+          return { trackInventory: false, inventoryMethod: null }
+        }
+
+        // QUANTITY TRACKING: Bottled/packaged items that are counted as units
+        const quantityProducts = ['Coca-Cola 600ml', 'Agua Mineral 1L', 'Cerveza Corona']
+        if (quantityProducts.includes(productName)) {
+          return { trackInventory: true, inventoryMethod: InventoryMethod.QUANTITY }
+        }
+
+        // RECIPE TRACKING: All other products (burgers, tacos, pizzas, appetizers with recipes, made drinks)
+        // This includes: Hamburguesas, Tacos, Pizzas, Alitas Buffalo, Nachos, Limonada
+        return { trackInventory: true, inventoryMethod: InventoryMethod.RECIPE }
+      }
+
       const products = await Promise.all(
         categories.flatMap(category => {
           const categoryProducts = realProductsData[category.name] || []
-          return categoryProducts.map((productData, index) =>
-            prisma.product.create({
+          return categoryProducts.map((productData, index) => {
+            const inventoryConfig = getInventoryConfig(category.name, productData.name)
+            return prisma.product.create({
               data: {
                 venueId: venue.id,
                 name: productData.name,
@@ -1365,17 +1387,20 @@ async function main() {
                 categoryId: category.id,
                 price: productData.price,
                 description: productData.description,
-                trackInventory: true,
+                trackInventory: inventoryConfig.trackInventory,
+                inventoryMethod: inventoryConfig.inventoryMethod,
                 type: category.name === 'Bebidas' ? ProductType.BEVERAGE : ProductType.FOOD,
                 tags: category.name === 'Bebidas' ? ['Bebida'] : ['Plato'],
                 imageUrl: faker.image.urlLoremFlickr({ category: 'food' }),
               },
-            }),
-          )
+            })
+          })
         }),
       )
+      // Only create Inventory records for QUANTITY products
+      const quantityProducts = products.filter(p => p.inventoryMethod === InventoryMethod.QUANTITY)
       await Promise.all(
-        products.map(async product => {
+        quantityProducts.map(async product => {
           const inventory = await prisma.inventory.create({
             data: { productId: product.id, venueId: venue.id, currentStock: 100, minimumStock: 10 },
           })
@@ -1391,7 +1416,15 @@ async function main() {
           })
         }),
       )
-      console.log(`      - Created ${products.length} products with initial inventory.`)
+
+      const noTrackingCount = products.filter(p => !p.trackInventory).length
+      const quantityCount = products.filter(p => p.inventoryMethod === InventoryMethod.QUANTITY).length
+      const recipeCount = products.filter(p => p.inventoryMethod === InventoryMethod.RECIPE).length
+
+      console.log(`      - Created ${products.length} products:`)
+      console.log(`        * ${noTrackingCount} without inventory tracking`)
+      console.log(`        * ${quantityCount} with QUANTITY tracking (Inventory table)`)
+      console.log(`        * ${recipeCount} with RECIPE tracking (will have recipes created later)`)
 
       // ==========================================
       // INVENTORY MANAGEMENT SEEDING (Avoqado Full ONLY)
@@ -2196,73 +2229,13 @@ async function main() {
         const findProduct = (name: string) => products.find(p => p.name === name)
         const findRM = (sku: string) => createdRawMaterials.find(rm => rm.sku === sku)
 
-        // ===== BEBIDAS (Simple 1:1 mapping) =====
-        const cocaColaProduct = findProduct('Coca-Cola 600ml')
-        const aguaMineralProduct = findProduct('Agua Mineral 1L')
-        const cervezaCoronaProduct = findProduct('Cerveza Corona')
+        // ===== BEBIDAS =====
+        // NOTE: Coca-Cola, Agua Mineral, and Cerveza use QUANTITY tracking (Inventory table)
+        // They do NOT need recipes - only Limonada (made from ingredients) needs a recipe
         const limonadaProduct = findProduct('Limonada Natural')
 
-        if (cocaColaProduct) {
-          const cocaCola = findRM('BEV-COCA-001')
-          if (cocaCola) {
-            const recipe = await prisma.recipe.create({
-              data: {
-                productId: cocaColaProduct.id,
-                portionYield: 1,
-                totalCost: Number(cocaCola.costPerUnit),
-                prepTime: 0,
-                cookTime: 0,
-                notes: 'Servir frío',
-              },
-            })
-            await prisma.recipeLine.create({
-              data: { recipeId: recipe.id, rawMaterialId: cocaCola.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
-            })
-            recipeCount++
-          }
-        }
-
-        if (aguaMineralProduct) {
-          const aguaMineral = findRM('BEV-AGUA-001')
-          if (aguaMineral) {
-            const recipe = await prisma.recipe.create({
-              data: {
-                productId: aguaMineralProduct.id,
-                portionYield: 1,
-                totalCost: Number(aguaMineral.costPerUnit),
-                prepTime: 0,
-                cookTime: 0,
-                notes: 'Servir frío',
-              },
-            })
-            await prisma.recipeLine.create({
-              data: { recipeId: recipe.id, rawMaterialId: aguaMineral.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
-            })
-            recipeCount++
-          }
-        }
-
-        if (cervezaCoronaProduct) {
-          const cerveza = findRM('BEV-CORONA-001')
-          if (cerveza) {
-            const recipe = await prisma.recipe.create({
-              data: {
-                productId: cervezaCoronaProduct.id,
-                portionYield: 1,
-                totalCost: Number(cerveza.costPerUnit),
-                prepTime: 0,
-                cookTime: 0,
-                notes: 'Servir bien frío con limón',
-              },
-            })
-            await prisma.recipeLine.create({
-              data: { recipeId: recipe.id, rawMaterialId: cerveza.id, quantity: 1, unit: Unit.UNIT, isOptional: false },
-            })
-            recipeCount++
-          }
-        }
-
-        if (limonadaProduct) {
+        // ✅ FIX: Only create recipe if product uses RECIPE inventory method
+        if (limonadaProduct && limonadaProduct.inventoryMethod === InventoryMethod.RECIPE) {
           const limones = findRM('BEV-LIME-001')
           const azucar = findRM('BEV-SUGAR-001')
           if (limones && azucar) {
@@ -2288,7 +2261,7 @@ async function main() {
 
         // ===== HAMBURGUESAS =====
         const hamburguesaClasica = findProduct('Hamburguesa Clásica')
-        if (hamburguesaClasica) {
+        if (hamburguesaClasica && hamburguesaClasica.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: hamburguesaClasica.id,
@@ -2323,7 +2296,7 @@ async function main() {
         }
 
         const hamburguesaBBQ = findProduct('Hamburguesa BBQ')
-        if (hamburguesaBBQ) {
+        if (hamburguesaBBQ && hamburguesaBBQ.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: hamburguesaBBQ.id,
@@ -2360,7 +2333,7 @@ async function main() {
         }
 
         const hamburguesaDoble = findProduct('Hamburguesa Doble')
-        if (hamburguesaDoble) {
+        if (hamburguesaDoble && hamburguesaDoble.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: hamburguesaDoble.id,
@@ -2392,7 +2365,7 @@ async function main() {
         }
 
         const hamburguesaPollo = findProduct('Hamburguesa de Pollo')
-        if (hamburguesaPollo) {
+        if (hamburguesaPollo && hamburguesaPollo.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: hamburguesaPollo.id,
@@ -2423,7 +2396,7 @@ async function main() {
 
         // ===== TACOS MEXICANOS =====
         const tacosCarneAsada = findProduct('Tacos de Carne Asada')
-        if (tacosCarneAsada) {
+        if (tacosCarneAsada && tacosCarneAsada.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: tacosCarneAsada.id,
@@ -2454,7 +2427,7 @@ async function main() {
         }
 
         const tacosAlPastor = findProduct('Tacos al Pastor')
-        if (tacosAlPastor) {
+        if (tacosAlPastor && tacosAlPastor.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: tacosAlPastor.id,
@@ -2491,7 +2464,7 @@ async function main() {
         }
 
         const tacosPollo = findProduct('Tacos de Pollo')
-        if (tacosPollo) {
+        if (tacosPollo && tacosPollo.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: tacosPollo.id,
@@ -2521,7 +2494,7 @@ async function main() {
         }
 
         const tacosPescado = findProduct('Tacos de Pescado')
-        if (tacosPescado) {
+        if (tacosPescado && tacosPescado.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: tacosPescado.id,
@@ -2547,7 +2520,7 @@ async function main() {
 
         // ===== PIZZAS =====
         const pizzaPepperoni = findProduct('Pizza Pepperoni')
-        if (pizzaPepperoni) {
+        if (pizzaPepperoni && pizzaPepperoni.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: pizzaPepperoni.id,
@@ -2570,7 +2543,7 @@ async function main() {
         }
 
         const pizzaHawaiana = findProduct('Pizza Hawaiana')
-        if (pizzaHawaiana) {
+        if (pizzaHawaiana && pizzaHawaiana.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: pizzaHawaiana.id,
@@ -2600,7 +2573,7 @@ async function main() {
         }
 
         const pizzaVegetariana = findProduct('Pizza Vegetariana')
-        if (pizzaVegetariana) {
+        if (pizzaVegetariana && pizzaVegetariana.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: pizzaVegetariana.id,
@@ -2632,7 +2605,7 @@ async function main() {
         }
 
         const pizza4Quesos = findProduct('Pizza 4 Quesos')
-        if (pizza4Quesos) {
+        if (pizza4Quesos && pizza4Quesos.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: pizza4Quesos.id,
@@ -2658,7 +2631,7 @@ async function main() {
 
         // ===== ENTRADAS =====
         const alitasBuffalo = findProduct('Alitas Buffalo')
-        if (alitasBuffalo) {
+        if (alitasBuffalo && alitasBuffalo.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: alitasBuffalo.id,
@@ -2681,7 +2654,7 @@ async function main() {
         }
 
         const nachosQueso = findProduct('Nachos con Queso')
-        if (nachosQueso) {
+        if (nachosQueso && nachosQueso.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: nachosQueso.id,
@@ -2710,7 +2683,7 @@ async function main() {
         }
 
         const papasFrancesas = findProduct('Papas a la Francesa')
-        if (papasFrancesas) {
+        if (papasFrancesas && papasFrancesas.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: papasFrancesas.id,
@@ -2738,7 +2711,7 @@ async function main() {
         }
 
         const arosCebolla = findProduct('Aros de Cebolla')
-        if (arosCebolla) {
+        if (arosCebolla && arosCebolla.inventoryMethod === InventoryMethod.RECIPE) {
           const recipe = await prisma.recipe.create({
             data: {
               productId: arosCebolla.id,

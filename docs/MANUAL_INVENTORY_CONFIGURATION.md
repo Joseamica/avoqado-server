@@ -64,21 +64,20 @@ SELECT
 FROM new_feature;
 ```
 
-### Step 2: Configure Product for SIMPLE_STOCK Inventory
+### Step 2: Configure Product for Quantity Inventory
 
-Update the product's `externalData` field to indicate it uses simple stock tracking:
+Update the product to use quantity-based inventory tracking:
 
 ```sql
 UPDATE "Product"
-SET "externalData" = jsonb_build_object(
-  'inventoryType', 'SIMPLE_STOCK',
-  'inventoryConfigured', true,
-  'wizardCompleted', true,
-  'trackStock', true
-)
+SET "trackInventory" = true,
+    "inventoryMethod" = 'QUANTITY'::"InventoryMethod"
 WHERE id = 'YOUR_PRODUCT_ID'
-RETURNING id, name, "externalData";
+RETURNING id, name, "trackInventory", "inventoryMethod";
 ```
+
+**Note**: The old approach using `externalData.inventoryType = 'SIMPLE_STOCK'` has been replaced with a dedicated `inventoryMethod` column
+for better performance and type safety.
 
 ### Step 3: Create RawMaterial Record
 
@@ -125,108 +124,81 @@ RETURNING id, name, sku;
 
 **Save the returned `id` - you'll need it for the next steps.**
 
-### Step 4: Link RawMaterial to Product
+### Step 4: Create Inventory Record
+
+With the new schema, products with `inventoryMethod = 'QUANTITY'` use the `Inventory` table instead of RawMaterial:
 
 ```sql
-UPDATE "Product"
-SET "externalData" = jsonb_build_object(
-  'inventoryType', 'SIMPLE_STOCK',
-  'inventoryConfigured', true,
-  'wizardCompleted', true,
-  'trackStock', true,
-  'rawMaterialId', 'RAW_MATERIAL_ID_FROM_STEP_3'
-)
-WHERE id = 'YOUR_PRODUCT_ID'
-RETURNING id, name, "externalData";
-```
-
-### Step 5: Create Initial Stock Batch
-
-```sql
-WITH new_batch_id AS (
-  SELECT 'cm' || substr(md5(random()::text), 1, 23) as id
-)
-INSERT INTO "StockBatch" (
+INSERT INTO "Inventory" (
   id,
-  "rawMaterialId",
+  "productId",
   "venueId",
-  "batchNumber",
-  "initialQuantity",
-  "remainingQuantity",
-  unit,
-  "costPerUnit",
-  "receivedDate",
-  status,
+  "currentStock",
+  "minimumStock",
   "updatedAt"
 )
-SELECT
-  new_batch_id.id,
-  'RAW_MATERIAL_ID_FROM_STEP_3',
+VALUES (
+  'cm' || substr(md5(random()::text), 1, 23),
+  'YOUR_PRODUCT_ID',
   'YOUR_VENUE_ID',
-  'BATCH-001',
-  100.000,  -- Initial quantity
-  100.000,  -- Remaining quantity
-  'PIECE'::"Unit",
-  10.00,    -- Cost per unit
-  NOW(),
-  'ACTIVE'::"BatchStatus",
+  100,  -- Initial stock
+  10,   -- Minimum stock threshold
   NOW()
-FROM new_batch_id
-RETURNING id, "batchNumber", "initialQuantity", "remainingQuantity";
+)
+RETURNING id, "productId", "currentStock", "minimumStock";
 ```
 
-### Step 6: Update RawMaterial Current Stock
+**Note**: The old approach stored `rawMaterialId` in `externalData`. The new architecture uses the `Inventory` relation table for cleaner
+data modeling.
 
-```sql
-UPDATE "RawMaterial"
-SET "currentStock" = 100.000,
-    "updatedAt" = NOW()
-WHERE id = 'RAW_MATERIAL_ID_FROM_STEP_3'
-RETURNING id, name, "currentStock";
-```
-
-### Step 7: Verify Configuration
+### Step 5: Verify Configuration
 
 ```sql
 SELECT
   p.id as product_id,
   p.name as product_name,
   p.price as product_price,
-  p."externalData" as product_config,
-  rm.id as raw_material_id,
-  rm.name as raw_material_name,
-  rm."currentStock" as current_stock,
-  rm."minimumStock" as min_stock,
-  rm."costPerUnit" as cost_per_unit,
-  sb.id as batch_id,
-  sb."batchNumber" as batch_number,
-  sb."remainingQuantity" as batch_remaining
+  p."trackInventory",
+  p."inventoryMethod",
+  i.id as inventory_id,
+  i."currentStock",
+  i."minimumStock"
 FROM "Product" p
-LEFT JOIN "RawMaterial" rm ON rm.id = (p."externalData"->>'rawMaterialId')
-LEFT JOIN "StockBatch" sb ON sb."rawMaterialId" = rm.id
+LEFT JOIN "Inventory" i ON i."productId" = p.id
 WHERE p.id = 'YOUR_PRODUCT_ID';
 ```
 
 Expected output should show:
 
-- Product with `inventoryType: SIMPLE_STOCK` in externalData
-- Linked RawMaterial with current stock
-- StockBatch with initial quantity
+- Product with `trackInventory = true` and `inventoryMethod = 'QUANTITY'`
+- Linked Inventory record with current stock and minimum stock
+- No `externalData.inventoryType` field (migrated to column)
 
 ## Example: Real Configuration
 
-Here's the actual example from "Small Ceramic Mouse" product:
+Here's an example configuration for a product with quantity tracking:
 
 ```sql
--- Product ID: cmgpk66hu00e9eqls2er060mz
--- Venue ID: cmgpk66ab009oeqlsnnyzx82z
--- RawMaterial ID: cm2f01688f7f44027bb3d246e
--- Batch ID: cm684d049b1bc78cd8b9deeeb
+-- Product ID: prod_123
+-- Venue ID: venue_456
+
+UPDATE "Product"
+SET "trackInventory" = true,
+    "inventoryMethod" = 'QUANTITY'::"InventoryMethod"
+WHERE id = 'prod_123';
+
+INSERT INTO "Inventory" (
+  id, "productId", "venueId", "currentStock", "minimumStock", "updatedAt"
+)
+VALUES (
+  'inv_789', 'prod_123', 'venue_456', 50, 10, NOW()
+);
 
 -- Result:
--- - 50 units of "Small Ceramic Mouse" in stock
--- - Cost per unit: $52.95
--- - Inventory successfully deducted when product sold
+-- - 50 units in stock
+-- - Minimum stock threshold: 10 units
+-- - Inventory automatically deducted when product sold
+-- - Low stock alert when stock <= 10
 ```
 
 ## Testing the Configuration
@@ -277,15 +249,30 @@ For finished retail goods, use `OTHER`.
 
 ### How the Service Works
 
-The `productInventoryIntegration.service.ts` will:
+The product inventory system now uses dedicated columns for cleaner architecture:
 
-1. Check if venue has `INVENTORY_MANAGEMENT` feature
-2. Read product's `externalData.inventoryType`
-3. If `SIMPLE_STOCK`:
-   - Look for RawMaterial by `externalData.rawMaterialId` (manual config)
-   - OR look for RawMaterial by SKU `PRODUCT-${productId}` (auto-created)
-4. Deduct stock when product is sold
-5. Create RawMaterialMovement record for audit trail
+1. **Check Product Inventory Method**:
+
+   - Reads `Product.trackInventory` and `Product.inventoryMethod`
+   - No JSON parsing - direct column access for performance
+
+2. **Quantity Tracking (`inventoryMethod = 'QUANTITY'`)**:
+
+   - Uses `Inventory` table for stock management
+   - Simple stock counting (bottles, units, pieces)
+   - Direct stock deduction via `Inventory.currentStock`
+   - Creates `InventoryMovement` record for audit trail
+
+3. **Recipe-Based (`inventoryMethod = 'RECIPE'`)**:
+
+   - Uses `Recipe` + `RawMaterial` tables
+   - Ingredient-based tracking with FIFO costing
+   - Deducts from `RawMaterial.currentStock` for each ingredient
+   - Creates `RawMaterialMovement` records
+
+4. **No Tracking (`trackInventory = false`)**:
+   - No stock deduction
+   - Only records revenue
 
 ## Advantages of Manual Configuration
 
@@ -324,13 +311,31 @@ The `productInventoryIntegration.service.ts` will:
 
 ### "No inventory deduction needed" error
 
-**Problem**: Service returns `inventoryType: 'NONE'`
+**Problem**: Service returns `inventoryMethod: null` or doesn't deduct stock
 
 **Solutions**:
 
 1. Check venue has `INVENTORY_MANAGEMENT` feature active
-2. Verify product's `externalData.inventoryType` is set to `SIMPLE_STOCK`
-3. Ensure RawMaterial is linked via `externalData.rawMaterialId`
+2. Verify product has `trackInventory = true`
+3. Verify product has `inventoryMethod = 'QUANTITY'` or `'RECIPE'`
+4. For Quantity tracking: Check `Inventory` record exists
+5. For Recipe tracking: Check `Recipe` record exists
+
+**Verification query**:
+
+```sql
+SELECT
+  p.id,
+  p.name,
+  p."trackInventory",
+  p."inventoryMethod",
+  i.id as inventory_id,
+  r.id as recipe_id
+FROM "Product" p
+LEFT JOIN "Inventory" i ON i."productId" = p.id
+LEFT JOIN "Recipe" r ON r."productId" = p.id
+WHERE p.id = 'YOUR_PRODUCT_ID';
+```
 
 ### "Insufficient stock" error
 
@@ -338,9 +343,16 @@ The `productInventoryIntegration.service.ts` will:
 
 **Solutions**:
 
-1. Check `RawMaterial.currentStock` is greater than 0
-2. Verify the `rawMaterialId` in product's `externalData` matches actual RawMaterial
-3. Ensure StockBatch has `remainingQuantity > 0`
+**For Quantity Tracking**:
+
+1. Check `Inventory.currentStock` is greater than 0
+2. Verify the `Inventory.productId` matches the product
+
+**For Recipe-Based**:
+
+1. Check `RawMaterial.currentStock` for each ingredient
+2. Ensure `StockBatch` has `remainingQuantity > 0`
+3. Verify recipe has ingredients defined
 
 ### Stock not deducting
 
@@ -349,8 +361,92 @@ The `productInventoryIntegration.service.ts` will:
 **Solutions**:
 
 1. Check if venue feature is active
-2. Verify product has correct `inventoryType` in `externalData`
-3. Look for error logs in `RawMaterialMovement` table
+2. Verify product has `trackInventory = true`
+3. Verify `inventoryMethod` is set (`'QUANTITY'` or `'RECIPE'`)
+4. For Quantity: Check `InventoryMovement` table for errors
+5. For Recipe: Check `RawMaterialMovement` table for errors
+6. Check backend logs for deduction errors
+
+## Migration from Old Schema
+
+### What Changed (October 2024)
+
+The inventory system was refactored from JSON-based to column-based storage:
+
+**Before**:
+
+```sql
+-- Old approach (JSON field)
+UPDATE "Product"
+SET "externalData" = '{"inventoryType": "SIMPLE_STOCK", "rawMaterialId": "rm_123"}'::jsonb
+WHERE id = 'prod_123';
+```
+
+**After**:
+
+```sql
+-- New approach (dedicated columns)
+UPDATE "Product"
+SET "trackInventory" = true,
+    "inventoryMethod" = 'QUANTITY'::"InventoryMethod"
+WHERE id = 'prod_123';
+
+-- Inventory table (instead of rawMaterialId reference)
+INSERT INTO "Inventory" (id, "productId", "venueId", "currentStock", "minimumStock")
+VALUES ('inv_456', 'prod_123', 'venue_789', 100, 10);
+```
+
+### Migration Benefits
+
+1. **Performance**: Indexed columns instead of JSON queries
+2. **Type Safety**: PostgreSQL enum validation
+3. **Cleaner Architecture**: Dedicated `Inventory` table for quantity tracking
+4. **Easier Queries**: No JSON parsing required
+5. **World-Class Pattern**: Follows Toast/Square/Shopify standards
+
+### Migration Guide
+
+If you have products using the old `externalData.inventoryType` approach:
+
+```sql
+-- 1. Check if migration is needed
+SELECT
+  id,
+  name,
+  "trackInventory",
+  "inventoryMethod",
+  "externalData"->>'inventoryType' as old_field
+FROM "Product"
+WHERE "externalData" ? 'inventoryType';
+
+-- 2. Apply migration (if needed)
+UPDATE "Product"
+SET "inventoryMethod" =
+  CASE "externalData"->>'inventoryType'
+    WHEN 'SIMPLE_STOCK' THEN 'QUANTITY'::"InventoryMethod"
+    WHEN 'RECIPE_BASED' THEN 'RECIPE'::"InventoryMethod"
+  END,
+  "trackInventory" = true
+WHERE "externalData" ? 'inventoryType';
+
+-- 3. Clean up old JSON field
+UPDATE "Product"
+SET "externalData" = "externalData" - 'inventoryType' - 'rawMaterialId'
+WHERE "externalData" ? 'inventoryType';
+
+-- 4. Create Inventory records for QUANTITY products
+-- (Manual step - requires knowing which products need Inventory)
+INSERT INTO "Inventory" (id, "productId", "venueId", "currentStock", "minimumStock")
+SELECT
+  'cm' || substr(md5(random()::text), 1, 23),
+  p.id,
+  p."venueId",
+  0,  -- Set initial stock
+  10  -- Set minimum threshold
+FROM "Product" p
+WHERE p."inventoryMethod" = 'QUANTITY'
+  AND NOT EXISTS (SELECT 1 FROM "Inventory" i WHERE i."productId" = p.id);
+```
 
 ## Support
 
@@ -358,4 +454,7 @@ For questions or issues, refer to:
 
 - Main documentation: `CLAUDE.md`
 - Database schema: `DATABASE_SCHEMA.md`
-- Inventory architecture: `productInventoryIntegration.service.ts` comments
+- Inventory workflow: `INVENTORY_WORKFLOW.md`
+- Migration details: `prisma/migrations/20251021210538_refactor_inventory_method_world_class/migration.sql`
+
+**Last updated**: 2025-01-21 (Schema refactor)

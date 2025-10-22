@@ -24,6 +24,8 @@ export interface UpdateProductDto {
   modifierGroupIds?: string[]
   active?: boolean
   displayOrder?: number
+  trackInventory?: boolean
+  inventoryMethod?: 'QUANTITY' | 'RECIPE' | null
 }
 
 export interface ReorderProductsDto {
@@ -34,7 +36,14 @@ export interface ReorderProductsDto {
 /**
  * Get all products for a venue (excluding soft-deleted)
  */
-export async function getProducts(venueId: string, options?: { includeRecipe?: boolean; categoryId?: string }): Promise<Product[]> {
+export async function getProducts(
+  venueId: string,
+  options?: {
+    includeRecipe?: boolean
+    categoryId?: string
+    orderBy?: 'displayOrder' | 'name' // ✅ WORLD-CLASS: Allow sorting by name or displayOrder
+  },
+): Promise<Product[]> {
   const products = await prisma.product.findMany({
     where: {
       venueId,
@@ -61,7 +70,7 @@ export async function getProducts(venueId: string, options?: { includeRecipe?: b
         },
       }),
     },
-    orderBy: { displayOrder: 'asc' },
+    orderBy: options?.orderBy === 'name' ? { name: 'asc' } : { displayOrder: 'asc' },
   })
 
   return products
@@ -161,6 +170,11 @@ export async function updateProduct(venueId: string, productId: string, productD
 
   // If modifierGroupIds is provided, update the relationships
   const updateData: any = productFields
+
+  // ✅ WORLD-CLASS: If trackInventory is set to false, clear inventoryMethod
+  if (productData.trackInventory === false) {
+    updateData.inventoryMethod = null
+  }
 
   if (modifierGroupIds !== undefined) {
     // Validate that all provided modifier group IDs exist and belong to the venue

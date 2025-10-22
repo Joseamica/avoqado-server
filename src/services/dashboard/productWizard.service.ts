@@ -3,7 +3,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { Unit } from '@prisma/client'
 import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
-import { setProductInventoryType, InventoryType } from './productInventoryIntegration.service'
+import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
 import logger from '@/config/logger'
 
 /**
@@ -23,7 +23,7 @@ export interface WizardStep1Data {
 export interface WizardStep2Data {
   // Inventory decision
   useInventory: boolean
-  inventoryType?: InventoryType // 'NONE' | 'SIMPLE_STOCK' | 'RECIPE_BASED'
+  inventoryMethod?: InventoryMethod // 'QUANTITY' | 'RECIPE'
 }
 
 export interface WizardStep3SimpleStockData {
@@ -110,52 +110,51 @@ export async function configureInventoryStep2(productId: string, data: WizardSte
     throw new AppError('Product not found', 404)
   }
 
-  if (!data.useInventory || data.inventoryType === 'NONE') {
+  if (!data.useInventory || !data.inventoryMethod) {
     // User doesn't want inventory tracking
-    await setProductInventoryType(productId, 'NONE')
-
     await prisma.product.update({
       where: { id: productId },
       data: {
+        trackInventory: false,
+        inventoryMethod: null,
         externalData: {
           ...(product.externalData as any),
           wizardCompleted: true,
           inventoryConfigured: true,
-          inventoryType: 'NONE',
         },
       },
     })
 
     return {
       success: true,
-      inventoryType: 'NONE',
+      inventoryMethod: null,
       nextStep: 'complete',
       message: 'Product created without inventory tracking',
     }
   }
 
-  if (!data.inventoryType) {
-    throw new AppError('Inventory type is required when useInventory is true', 400)
+  if (!data.inventoryMethod) {
+    throw new AppError('Inventory method is required when useInventory is true', 400)
   }
 
-  // Set inventory type
-  await setProductInventoryType(productId, data.inventoryType)
+  // Set inventory method (✅ WORLD-CLASS: Uses dedicated column)
+  await setProductInventoryMethod(productId, data.inventoryMethod)
 
   await prisma.product.update({
     where: { id: productId },
     data: {
       externalData: {
         ...(product.externalData as any),
-        inventoryType: data.inventoryType,
+        inventoryConfigured: true,
       },
     },
   })
 
   return {
     success: true,
-    inventoryType: data.inventoryType,
-    nextStep: data.inventoryType === 'SIMPLE_STOCK' ? 'simple_stock_setup' : 'recipe_setup',
-    message: `Inventory type set to ${data.inventoryType}`,
+    inventoryMethod: data.inventoryMethod,
+    nextStep: data.inventoryMethod === 'QUANTITY' ? 'simple_stock_setup' : 'recipe_setup',
+    message: `Inventory method set to ${data.inventoryMethod}`,
   }
 }
 
@@ -177,58 +176,48 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
     throw new AppError('Product not found', 404)
   }
 
-  // VALIDATION: Prevent SIMPLE_STOCK if product already has a recipe
+  // ✅ WORLD-CLASS: Auto-switch from RECIPE to QUANTITY if needed
+  // Instead of blocking with 409 error, intelligently clean up conflicting config
   if (product.recipe) {
-    throw new AppError(
-      'Cannot configure Simple Stock: This product already has a recipe configured. Please delete the recipe first or use Recipe-Based inventory.',
-      409,
-    )
+    logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
+    await switchInventoryMethod(venueId, productId, 'QUANTITY')
   }
 
-  // Create or update raw material for this product
-  const existingRawMaterial = await prisma.rawMaterial.findFirst({
+  // ✅ WORLD-CLASS: Create or update Inventory record (not RawMaterial!)
+  // QUANTITY tracking uses Inventory table for simple count-based tracking
+  const existingInventory = await prisma.inventory.findUnique({
     where: {
-      venueId,
-      sku: `PRODUCT-${productId}`,
+      productId,
     },
   })
 
-  if (existingRawMaterial) {
+  if (existingInventory) {
     // Update existing
-    await prisma.rawMaterial.update({
-      where: { id: existingRawMaterial.id },
+    await prisma.inventory.update({
+      where: { id: existingInventory.id },
       data: {
         currentStock: new Decimal(data.initialStock),
-        reorderPoint: new Decimal(data.reorderPoint),
-        costPerUnit: new Decimal(data.costPerUnit),
-        avgCostPerUnit: new Decimal(data.costPerUnit),
+        minimumStock: new Decimal(data.reorderPoint),
       },
     })
   } else {
     // Create new
-    await prisma.rawMaterial.create({
+    await prisma.inventory.create({
       data: {
+        productId,
         venueId,
-        name: product.name,
-        sku: `PRODUCT-${productId}`,
-        category: 'OTHER', // Use OTHER category for finished goods
-        unit: 'UNIT',
-        unitType: 'COUNT',
         currentStock: new Decimal(data.initialStock),
-        minimumStock: new Decimal(1), // Minimum stock threshold
-        reorderPoint: new Decimal(data.reorderPoint),
-        costPerUnit: new Decimal(data.costPerUnit),
-        avgCostPerUnit: new Decimal(data.costPerUnit),
-        active: true,
-        perishable: false,
+        minimumStock: new Decimal(data.reorderPoint),
+        reservedStock: new Decimal(0),
       },
     })
   }
 
-  // Mark wizard as complete
+  // Mark wizard as complete and save cost per unit
   await prisma.product.update({
     where: { id: productId },
     data: {
+      cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
       externalData: {
         ...(product.externalData as any),
         wizardCompleted: true,
@@ -239,11 +228,11 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
 
   return {
     success: true,
-    inventoryType: 'SIMPLE_STOCK',
+    inventoryMethod: 'QUANTITY',
     initialStock: data.initialStock,
-    reorderPoint: data.reorderPoint,
+    minimumStock: data.reorderPoint,
     nextStep: 'complete',
-    message: `Simple stock configured: ${data.initialStock} unit(s) in stock`,
+    message: `Simple stock tracking configured: ${data.initialStock} unit(s) in stock`,
   }
 }
 
@@ -264,19 +253,18 @@ export async function setupRecipeStep3(venueId: string, productId: string, data:
     throw new AppError('Product does not belong to this venue', 403)
   }
 
-  // VALIDATION: Prevent RECIPE_BASED if product already has simple stock configured
-  const existingSimpleStock = await prisma.rawMaterial.findFirst({
+  // ✅ WORLD-CLASS: Auto-switch from QUANTITY to RECIPE if needed
+  // Instead of blocking with 409 error, intelligently clean up conflicting config
+  const existingQuantityStock = await prisma.rawMaterial.findFirst({
     where: {
       venueId,
       sku: `PRODUCT-${productId}`,
     },
   })
 
-  if (existingSimpleStock) {
-    throw new AppError(
-      'Cannot configure Recipe: This product already has Simple Stock configured. Please delete the simple stock configuration first or use Simple Stock inventory.',
-      409,
-    )
+  if (existingQuantityStock) {
+    logger.info('🔄 Auto-switching from QUANTITY to RECIPE - cleaning up existing quantity tracking')
+    await switchInventoryMethod(venueId, productId, 'RECIPE')
   }
 
   // Validate that all ingredients exist
@@ -321,7 +309,7 @@ export async function setupRecipeStep3(venueId: string, productId: string, data:
 
   return {
     success: true,
-    inventoryType: 'RECIPE_BASED',
+    inventoryMethod: 'RECIPE',
     recipeId: recipe.id,
     recipeCost: recipe.totalCost.toNumber(),
     portionYield: data.portionYield,
@@ -354,16 +342,16 @@ export async function createProductWithInventory(
 
     // Step 3: Setup inventory details
     let step3Result
-    if (step2Result.inventoryType === 'SIMPLE_STOCK' && data.simpleStock) {
+    if (step2Result.inventoryMethod === 'QUANTITY' && data.simpleStock) {
       step3Result = await setupSimpleStockStep3(venueId, productId, data.simpleStock)
-    } else if (step2Result.inventoryType === 'RECIPE_BASED' && data.recipe) {
+    } else if (step2Result.inventoryMethod === 'RECIPE' && data.recipe) {
       step3Result = await setupRecipeStep3(venueId, productId, data.recipe)
     }
 
     return {
       success: true,
       productId,
-      inventoryType: step2Result.inventoryType,
+      inventoryMethod: step2Result.inventoryMethod,
       details: step3Result,
       message: 'Product created successfully with inventory configuration',
     }
@@ -405,13 +393,12 @@ export async function getWizardProgress(productId: string) {
   const externalData = (product.externalData as any) || {}
   const wizardCompleted = externalData.wizardCompleted || false
   const inventoryConfigured = externalData.inventoryConfigured || false
-  const inventoryType = externalData.inventoryType || 'NONE'
+  const inventoryMethod = product.inventoryMethod // ✅ WORLD-CLASS: Read from dedicated column
 
-  // Check if simple stock raw material exists
-  const simpleStockMaterial = await prisma.rawMaterial.findFirst({
+  // ✅ WORLD-CLASS: Check if quantity tracking inventory exists (Inventory table, not RawMaterial)
+  const inventoryRecord = await prisma.inventory.findUnique({
     where: {
-      venueId: product.venueId,
-      sku: `PRODUCT-${productId}`,
+      productId,
     },
   })
 
@@ -421,28 +408,29 @@ export async function getWizardProgress(productId: string) {
     wizardCompleted,
     steps: {
       productCreated: true,
-      inventoryDecided: !!externalData.inventoryType,
+      inventoryDecided: !!product.inventoryMethod,
       inventoryConfigured,
     },
-    inventoryType,
+    inventoryMethod,
     details:
-      inventoryType === 'SIMPLE_STOCK' && simpleStockMaterial
+      inventoryMethod === 'QUANTITY' && inventoryRecord
         ? {
-            currentStock: simpleStockMaterial.currentStock.toNumber(),
-            reorderPoint: simpleStockMaterial.reorderPoint.toNumber(),
-            costPerUnit: simpleStockMaterial.costPerUnit.toNumber(),
+            currentStock: inventoryRecord.currentStock.toNumber(),
+            minimumStock: inventoryRecord.minimumStock.toNumber(),
+            reservedStock: inventoryRecord.reservedStock.toNumber(),
+            costPerUnit: product.cost?.toNumber() || 0, // ✅ Include cost per unit
           }
-        : inventoryType === 'RECIPE_BASED' && product.recipe
+        : inventoryMethod === 'RECIPE' && product.recipe
           ? {
               recipeId: product.recipe.id,
               recipeCost: product.recipe.totalCost.toNumber(),
               ingredientCount: product.recipe.lines.length,
             }
           : null,
-    nextStep: !externalData.inventoryType
+    nextStep: !product.inventoryMethod
       ? 'inventory_decision'
       : !inventoryConfigured
-        ? inventoryType === 'SIMPLE_STOCK'
+        ? inventoryMethod === 'QUANTITY'
           ? 'simple_stock_setup'
           : 'recipe_setup'
         : 'complete',
@@ -450,11 +438,11 @@ export async function getWizardProgress(productId: string) {
 }
 
 /**
- * Switch inventory type (auto-conversion)
- * Handles conversion between SIMPLE_STOCK ↔ RECIPE_BASED
- * Automatically removes old configuration and updates inventoryType
+ * Switch inventory method (auto-conversion)
+ * Handles conversion between QUANTITY ↔ RECIPE
+ * Automatically removes old configuration and updates inventoryMethod
  */
-export async function switchInventoryType(venueId: string, productId: string, newType: InventoryType) {
+export async function switchInventoryMethod(venueId: string, productId: string, newMethod: InventoryMethod) {
   return await prisma.$transaction(async tx => {
     // Verify product exists and belongs to venue
     const product = await tx.product.findUnique({
@@ -470,31 +458,30 @@ export async function switchInventoryType(venueId: string, productId: string, ne
       throw new AppError('Product not found', 404)
     }
 
-    logger.info('🔧 [DEBUG] switchInventoryType:', { venueId, productId, productVenueId: product.venueId, newType })
+    logger.info('🔧 [DEBUG] switchInventoryMethod:', { venueId, productId, productVenueId: product.venueId, newMethod })
 
     if (product.venueId !== venueId) {
       logger.error('❌ [DEBUG] Venue mismatch!', { requestVenueId: venueId, productVenueId: product.venueId })
       throw new AppError('Product does not belong to this venue', 403)
     }
 
-    // Perform conversion based on newType
-    if (newType === 'RECIPE_BASED') {
-      // Switching TO RECIPE_BASED: Remove existing simple stock
-      const existingRawMaterial = await tx.rawMaterial.findFirst({
+    // Perform conversion based on newMethod
+    if (newMethod === 'RECIPE') {
+      // Switching TO RECIPE: Remove existing quantity tracking (Inventory table)
+      const existingInventory = await tx.inventory.findUnique({
         where: {
-          venueId,
-          sku: `PRODUCT-${productId}`,
+          productId,
         },
       })
 
-      if (existingRawMaterial) {
-        // Delete the simple stock raw material
-        await tx.rawMaterial.delete({
-          where: { id: existingRawMaterial.id },
+      if (existingInventory) {
+        // Delete the quantity tracking inventory record
+        await tx.inventory.delete({
+          where: { id: existingInventory.id },
         })
       }
-    } else if (newType === 'SIMPLE_STOCK') {
-      // Switching TO SIMPLE_STOCK: Remove existing recipe
+    } else if (newMethod === 'QUANTITY') {
+      // Switching TO QUANTITY: Remove existing recipe
       if (product.recipe) {
         // Delete recipe lines first (foreign key constraint)
         await tx.recipeLine.deleteMany({
@@ -508,22 +495,18 @@ export async function switchInventoryType(venueId: string, productId: string, ne
       }
     }
 
-    // Update product's inventoryType in externalData
-    const externalData = (product.externalData as any) || {}
+    // ✅ WORLD-CLASS: Update product's inventoryMethod column
     await tx.product.update({
       where: { id: productId },
       data: {
-        externalData: {
-          ...externalData,
-          inventoryType: newType,
-        },
+        inventoryMethod: newMethod,
       },
     })
 
     return {
       success: true,
-      newType,
-      message: `Inventory type switched to ${newType} successfully`,
+      newMethod,
+      message: `Inventory method switched to ${newMethod} successfully`,
     }
   })
 }

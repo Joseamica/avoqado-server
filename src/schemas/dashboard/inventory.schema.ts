@@ -4,6 +4,7 @@ import {
   PurchaseOrderStatus,
   PricingStrategy,
   RawMaterialMovementType,
+  MovementType,
   AlertType,
   AlertStatus,
   Unit,
@@ -589,10 +590,28 @@ export const ProductIdParamsSchema = z.object({
 })
 
 // ==========================================
+// PRODUCT INVENTORY (QUANTITY TRACKING) SCHEMAS
+// ==========================================
+
+export const AdjustProductInventoryStockSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    productId: z.string().cuid(),
+  }),
+  body: z.object({
+    quantity: z.number(),
+    type: z.nativeEnum(MovementType),
+    reason: z.string().optional(),
+    reference: z.string().optional(),
+  }),
+})
+
+// ==========================================
 // PRODUCT WIZARD SCHEMAS (NEW)
 // ==========================================
 
-export const InventoryTypeEnum = z.enum(['NONE', 'SIMPLE_STOCK', 'RECIPE_BASED'])
+// ✅ WORLD-CLASS: Inventory tracking method (Toast/Square/Shopify pattern)
+export const InventoryMethodEnum = z.enum(['QUANTITY', 'RECIPE'])
 
 export const ProductWizardStep1Schema = z.object({
   params: z.object({
@@ -614,19 +633,19 @@ export const ProductWizardStep2Schema = z.object({
   body: z
     .object({
       useInventory: z.boolean(),
-      inventoryType: InventoryTypeEnum.optional(),
+      inventoryMethod: InventoryMethodEnum.optional(),
     })
     .refine(
       data => {
-        // If useInventory is true, inventoryType must be provided
-        if (data.useInventory && !data.inventoryType) {
+        // If useInventory is true, inventoryMethod must be provided
+        if (data.useInventory && !data.inventoryMethod) {
           return false
         }
         return true
       },
       {
-        message: 'Inventory type is required when useInventory is true',
-        path: ['inventoryType'],
+        message: 'Inventory method is required when useInventory is true',
+        path: ['inventoryMethod'],
       },
     ),
 })
@@ -681,7 +700,7 @@ export const CreateProductWithInventorySchema = z.object({
     }),
     inventory: z.object({
       useInventory: z.boolean(),
-      inventoryType: InventoryTypeEnum.optional(),
+      inventoryMethod: InventoryMethodEnum.optional(),
     }),
     simpleStock: z
       .object({
@@ -716,13 +735,13 @@ export const GetWizardProgressSchema = z.object({
   }),
 })
 
-export const SetProductInventoryTypeSchema = z.object({
+export const SetProductInventoryMethodSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
     productId: z.string().cuid(),
   }),
   body: z.object({
-    inventoryType: InventoryTypeEnum,
+    inventoryMethod: InventoryMethodEnum,
   }),
 })
 

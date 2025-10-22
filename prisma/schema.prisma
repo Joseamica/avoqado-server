@@ -498,9 +498,10 @@ model Product {
   prepTime     Int? // minutes
   cookingNotes String?
 
-  // Inventory tracking
-  trackInventory Boolean @default(false)
-  unit           Unit? // Measurement unit for inventory
+  // Inventory tracking configuration
+  trackInventory  Boolean          @default(false)
+  inventoryMethod InventoryMethod? // ✅ WORLD-CLASS: How to track (QUANTITY | RECIPE)
+  unit            Unit? // Measurement unit for inventory
 
   // Status
   active         Boolean   @default(true)
@@ -2818,6 +2819,12 @@ enum CostingMethod {
   FIFO // First-In-First-Out: Uses oldest batch costs
   WEIGHTED_AVERAGE // Weighted average of all batch costs
   STANDARD_COST // Fixed standard cost regardless of actual costs
+}
+
+// ✅ WORLD-CLASS: Inventory tracking method (Toast/Square/Shopify pattern)
+enum InventoryMethod {
+  QUANTITY // Direct unit counting (retail, bar items)
+  RECIPE // Ingredient-based tracking (restaurant items)
 }
 
 // ==========================================

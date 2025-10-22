@@ -11,6 +11,7 @@ import * as purchaseOrderController from '../../controllers/dashboard/inventory/
 import * as alertController from '../../controllers/dashboard/inventory/alert.controller'
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
+import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
 
 // Import schemas
 import {
@@ -47,9 +48,11 @@ import {
   ProductWizardStep2Schema,
   ProductWizardStep3SimpleStockSchema,
   ProductWizardStep3RecipeSchema,
+  // NEW: Product Inventory (QUANTITY tracking) schemas
+  AdjustProductInventoryStockSchema,
   CreateProductWithInventorySchema,
   GetWizardProgressSchema,
-  SetProductInventoryTypeSchema,
+  SetProductInventoryMethodSchema,
   PreviewCostChangeSchema,
   TriggerCostRecalculationSchema,
   GetRecipeCostVariancesSchema,
@@ -831,40 +834,74 @@ router.get('/products/:productId/inventory-status', checkPermission('inventory:r
 
 /**
  * @openapi
- * /api/v1/dashboard/products/{productId}/inventory-type:
+ * /api/v1/dashboard/products/{productId}/inventory-method:
  *   get:
  *     tags: [Inventory - Product Status]
- *     summary: Get inventory type for a product
+ *     summary: Get inventory method for a product
  */
-router.get('/products/:productId/inventory-type', checkPermission('inventory:read'), productWizardController.getProductInventoryType)
+router.get('/products/:productId/inventory-method', checkPermission('inventory:read'), productWizardController.getProductInventoryMethod)
 
 /**
  * @openapi
- * /api/v1/dashboard/products/{productId}/inventory-type:
+ * /api/v1/dashboard/products/{productId}/inventory-method:
  *   put:
  *     tags: [Inventory - Product Status]
- *     summary: Set inventory type for a product
+ *     summary: Set inventory method for a product
  */
 router.put(
-  '/products/:productId/inventory-type',
+  '/products/:productId/inventory-method',
   checkPermission('inventory:read'),
-  validateRequest(SetProductInventoryTypeSchema),
-  productWizardController.setProductInventoryType,
+  validateRequest(SetProductInventoryMethodSchema),
+  productWizardController.setProductInventoryMethod,
 )
 
 /**
  * @openapi
- * /api/v1/dashboard/venues/{venueId}/products/{productId}/switch-inventory-type:
+ * /api/v1/dashboard/venues/{venueId}/products/{productId}/switch-inventory-method:
  *   post:
  *     tags: [Inventory - Product Status]
- *     summary: Switch inventory type (auto-conversion between SIMPLE_STOCK ↔ RECIPE_BASED)
- *     description: Automatically removes old configuration and switches to new inventory type
+ *     summary: Switch inventory method (auto-conversion between QUANTITY ↔ RECIPE)
+ *     description: Automatically removes old configuration and switches to new inventory method
  */
 router.post(
-  '/products/:productId/switch-inventory-type',
+  '/products/:productId/switch-inventory-method',
   checkPermission('inventory:read'),
-  validateRequest(SetProductInventoryTypeSchema), // Requires inventoryType in body (SIMPLE_STOCK or RECIPE_BASED)
-  productWizardController.switchInventoryType,
+  validateRequest(SetProductInventoryMethodSchema), // Requires inventoryMethod in body (QUANTITY or RECIPE)
+  productWizardController.switchInventoryMethod,
+)
+
+// ===========================================
+// PRODUCT INVENTORY (QUANTITY TRACKING) ROUTES
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/adjust-stock:
+ *   post:
+ *     tags: [Inventory - Product Stock]
+ *     summary: Adjust stock for a product with QUANTITY tracking
+ *     description: Increase or decrease stock for products using simple count-based inventory (not recipe-based)
+ */
+router.post(
+  '/products/:productId/adjust-stock',
+  checkPermission('inventory:update'),
+  validateRequest(AdjustProductInventoryStockSchema),
+  productInventoryController.adjustInventoryStockHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/movements:
+ *   get:
+ *     tags: [Inventory - Product Stock]
+ *     summary: Get stock movements for a product with QUANTITY tracking
+ *     description: View audit trail of stock changes for products using simple count-based inventory
+ */
+router.get(
+  '/products/:productId/movements',
+  checkPermission('inventory:read'),
+  validateRequest(ProductIdParamsSchema),
+  productInventoryController.getInventoryMovementsHandler,
 )
 
 // ===========================================

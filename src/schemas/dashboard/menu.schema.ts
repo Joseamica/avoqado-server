@@ -112,6 +112,7 @@ export const ProductSchema = z.object({
   prepTime: z.number().int().positive().nullable().optional(), // minutes
   cookingNotes: z.string().nullable().optional(),
   trackInventory: z.boolean().default(false),
+  inventoryMethod: z.enum(['QUANTITY', 'RECIPE']).nullable().optional(),
   unit: z.string().nullable().optional(),
   active: z.boolean().default(true),
   availableFrom: z.date().nullable().optional(),
@@ -139,6 +140,7 @@ export const CreateProductSchema = z.object({
     prepTime: z.number().int().positive().optional().nullable(),
     cookingNotes: z.string().optional().nullable(),
     trackInventory: z.boolean().optional(),
+    inventoryMethod: z.enum(['QUANTITY', 'RECIPE']).optional().nullable(),
     unit: z.string().optional().nullable(),
     active: z.boolean().optional(),
     availableFrom: z.string().datetime().optional().nullable(),

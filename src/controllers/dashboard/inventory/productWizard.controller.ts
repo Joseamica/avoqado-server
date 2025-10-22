@@ -44,7 +44,7 @@ export async function createProductStep1(req: Request, res: Response, next: Next
 }
 
 /**
- * Wizard Step 2: Configure inventory type
+ * Wizard Step 2: Configure inventory method
  */
 export async function configureInventoryStep2(req: Request, res: Response, next: NextFunction) {
   try {
@@ -64,7 +64,7 @@ export async function configureInventoryStep2(req: Request, res: Response, next:
 }
 
 /**
- * Wizard Step 3A: Setup simple stock (for retail/jewelry)
+ * Wizard Step 3A: Setup quantity tracking (for retail/jewelry)
  */
 export async function setupSimpleStockStep3(req: Request, res: Response, next: NextFunction) {
   try {
@@ -160,17 +160,17 @@ export async function getProductInventoryStatus(req: Request, res: Response, nex
 }
 
 /**
- * Get product inventory type
+ * Get product inventory method
  */
-export async function getProductInventoryType(req: Request, res: Response, next: NextFunction) {
+export async function getProductInventoryMethod(req: Request, res: Response, next: NextFunction) {
   try {
     const { productId } = req.params
 
-    const inventoryType = await productInventoryService.getProductInventoryType(productId)
+    const inventoryMethod = await productInventoryService.getProductInventoryMethod(productId)
 
     res.json({
       success: true,
-      data: { inventoryType },
+      data: { inventoryMethod },
     })
   } catch (error) {
     next(error)
@@ -178,14 +178,14 @@ export async function getProductInventoryType(req: Request, res: Response, next:
 }
 
 /**
- * Set product inventory type
+ * Set product inventory method
  */
-export async function setProductInventoryType(req: Request, res: Response, next: NextFunction) {
+export async function setProductInventoryMethod(req: Request, res: Response, next: NextFunction) {
   try {
     const { productId } = req.params
-    const { inventoryType } = req.body
+    const { inventoryMethod } = req.body
 
-    const result = await productInventoryService.setProductInventoryType(productId, inventoryType)
+    const result = await productInventoryService.setProductInventoryMethod(productId, inventoryMethod)
 
     res.json({
       success: true,
@@ -321,25 +321,25 @@ export async function getRecipeCostVariances(req: Request, res: Response, next: 
 }
 
 /**
- * Switch inventory type (auto-conversion)
- * Handles conversion between SIMPLE_STOCK ↔ RECIPE_BASED
+ * Switch inventory method (auto-conversion)
+ * Handles conversion between QUANTITY ↔ RECIPE
  */
-export async function switchInventoryType(req: Request, res: Response, next: NextFunction) {
+export async function switchInventoryMethod(req: Request, res: Response, next: NextFunction) {
   try {
     logger.info('🔧 [DEBUG] Controller req.params:', req.params)
     logger.info('🔧 [DEBUG] Controller req.body:', req.body)
 
     const { venueId, productId } = req.params
-    const { inventoryType } = req.body
+    const { inventoryMethod } = req.body
 
-    if (!inventoryType) {
+    if (!inventoryMethod) {
       return res.status(400).json({
         success: false,
-        error: 'inventoryType is required (SIMPLE_STOCK or RECIPE_BASED)',
+        error: 'inventoryMethod is required (QUANTITY or RECIPE)',
       })
     }
 
-    const result = await productWizardService.switchInventoryType(venueId, productId, inventoryType)
+    const result = await productWizardService.switchInventoryMethod(venueId, productId, inventoryMethod)
 
     res.json({
       success: true,

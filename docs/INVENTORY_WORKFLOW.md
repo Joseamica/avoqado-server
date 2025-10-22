@@ -35,9 +35,9 @@ Costo total = $10 + $60 + $5 = $75 MXN
 
 Son los items que tus clientes ven en el menú y pueden ordenar. Un producto puede:
 
-- **Sin inventario**: Solo registra ventas, no afecta stock (ejemplo: café ilimitado)
-- **Stock simple**: El producto mismo tiene stock (ejemplo: botellas de vino)
-- **Basado en receta**: El producto está compuesto por materias primas (ejemplo: hamburguesa)
+- **Sin inventario** (`trackInventory = false`): Solo registra ventas, no afecta stock (ejemplo: café ilimitado)
+- **Cantidad** (`inventoryMethod = 'QUANTITY'`): El producto mismo tiene stock (ejemplo: botellas de vino)
+- **Basado en receta** (`inventoryMethod = 'RECIPE'`): El producto está compuesto por materias primas (ejemplo: hamburguesa)
 
 ---
 
@@ -98,9 +98,9 @@ Seleccionas: **"Usar inventario basado en recetas"**
 
 Opciones disponibles:
 
-- ❌ Sin inventario → Solo registra ventas
-- ❌ Stock simple → El producto mismo tiene stock (ej: botellas)
-- ✅ **Basado en recetas** → El producto consume materias primas
+- ❌ Sin inventario (`trackInventory = false`) → Solo registra ventas
+- ❌ Cantidad (`inventoryMethod = 'QUANTITY'`) → El producto mismo tiene stock (ej: botellas)
+- ✅ **Basado en recetas** (`inventoryMethod = 'RECIPE'`) → El producto consume materias primas
 
 #### 3.3 Paso 3 - Configurar Receta
 
@@ -281,11 +281,9 @@ Content-Type: application/json
     "name": "Hamburguesa Sencilla",
     "description": "Deliciosa hamburguesa",
     "price": 120,
-    "categoryId": "cm..."
-  },
-  "inventory": {
-    "useInventory": true,
-    "inventoryType": "RECIPE_BASED"
+    "categoryId": "cm...",
+    "trackInventory": true,
+    "inventoryMethod": "RECIPE"
   },
   "recipe": {
     "portionYield": 1,
@@ -308,6 +306,20 @@ Content-Type: application/json
   }
 }
 ```
+
+### Actualizar Método de Inventario de un Producto
+
+```http
+PUT /api/v1/dashboard/venues/{venueId}/products/{productId}
+Content-Type: application/json
+
+{
+  "trackInventory": true,
+  "inventoryMethod": "QUANTITY"
+}
+```
+
+**Nota**: Si cambias `trackInventory` a `false`, el sistema automáticamente limpia `inventoryMethod` a `null`.
 
 ### Crear Solo Receta (Para Producto Existente)
 
@@ -467,4 +479,110 @@ Si tienes dudas adicionales sobre el sistema de inventario:
 
 ---
 
-**Última actualización**: 2025-01-13 **Versión**: 1.0
+## 🔄 Migración del Schema: externalData → inventoryMethod Column
+
+### Cambio Arquitectural (Octubre 2024)
+
+El sistema migró de almacenar el tipo de inventario en un campo JSON a una columna dedicada de base de datos.
+
+#### Antes (❌ Antiguo - JSON):
+
+```sql
+-- Almacenado en externalData JSON field
+UPDATE "Product"
+SET "externalData" = '{"inventoryType": "SIMPLE_STOCK"}'::jsonb
+WHERE id = 'prod_123';
+
+-- Valores antiguos:
+-- - "SIMPLE_STOCK" (stock por cantidad)
+-- - "RECIPE_BASED" (basado en recetas)
+```
+
+#### Ahora (✅ Nuevo - Columna Dedicada):
+
+```sql
+-- Columna dedicada con enum
+UPDATE "Product"
+SET "trackInventory" = true,
+    "inventoryMethod" = 'QUANTITY'::"InventoryMethod"
+WHERE id = 'prod_123';
+
+-- Valores nuevos:
+-- - 'QUANTITY' (antes SIMPLE_STOCK)
+-- - 'RECIPE' (antes RECIPE_BASED)
+-- - NULL (sin inventario)
+```
+
+### Beneficios del Nuevo Sistema
+
+1. **Performance**: Columna indexada (no JSON)
+2. **Type Safety**: Enum validado por PostgreSQL
+3. **Queries más rápidas**: Filtrado directo sin JSON parsing
+4. **Patrón World-Class**: Sigue el estándar de Toast/Square/Shopify
+
+### Migración Automática
+
+La migración `20251021210538_refactor_inventory_method_world_class` hizo:
+
+```sql
+-- 1. Crear enum
+CREATE TYPE "InventoryMethod" AS ENUM ('QUANTITY', 'RECIPE');
+
+-- 2. Agregar columna
+ALTER TABLE "Product" ADD COLUMN "inventoryMethod" "InventoryMethod";
+
+-- 3. Migrar datos existentes
+UPDATE "Product"
+SET "inventoryMethod" =
+  CASE "externalData"->>'inventoryType'
+    WHEN 'SIMPLE_STOCK' THEN 'QUANTITY'::"InventoryMethod"
+    WHEN 'RECIPE_BASED' THEN 'RECIPE'::"InventoryMethod"
+    ELSE NULL
+  END
+WHERE "externalData" ? 'inventoryType';
+
+-- 4. Productos con Inventory pero sin externalData
+UPDATE "Product" p
+SET "inventoryMethod" = 'QUANTITY'::"InventoryMethod"
+WHERE p."trackInventory" = true
+  AND p."inventoryMethod" IS NULL
+  AND EXISTS (SELECT 1 FROM "Inventory" i WHERE i."productId" = p.id);
+
+-- 5. Limpiar campo JSON antiguo
+UPDATE "Product"
+SET "externalData" = "externalData" - 'inventoryType'
+WHERE "externalData" ? 'inventoryType';
+
+-- 6. Agregar índice
+CREATE INDEX "Product_inventoryMethod_idx" ON "Product"("inventoryMethod");
+```
+
+### Cómo Verificar el Estado
+
+```sql
+-- Ver productos con inventario
+SELECT
+  id,
+  name,
+  "trackInventory",
+  "inventoryMethod",
+  "externalData"->>'inventoryType' as old_field
+FROM "Product"
+WHERE "trackInventory" = true;
+```
+
+**Resultado esperado**:
+
+- `inventoryMethod`: `'QUANTITY'` o `'RECIPE'`
+- `old_field`: `NULL` (campo antiguo fue limpiado)
+
+### Compatibilidad
+
+- ✅ Frontend actualizado para usar `inventoryMethod`
+- ✅ Backend service actualizado
+- ✅ ProductWizardDialog usa columna como source of truth
+- ✅ UpdateProductDto incluye `trackInventory` y `inventoryMethod`
+
+---
+
+**Última actualización**: 2025-01-21 **Versión**: 2.0 (Schema refactor)

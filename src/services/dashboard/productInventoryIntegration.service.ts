@@ -8,16 +8,19 @@ import { deductStockForRecipe } from './rawMaterial.service'
  * Product Inventory Integration Service
  * Handles different inventory models for different business types:
  * - NONE: Services (classes, consultations) - no inventory tracking
- * - SIMPLE_STOCK: Retail (jewelry, clothing) - simple -1 per sale
- * - RECIPE_BASED: Restaurants - ingredient-based costing
+ * - QUANTITY: Retail (jewelry, clothing) - direct unit counting
+ * - RECIPE: Restaurants - ingredient-based costing (FIFO)
+ *
+ * ✅ WORLD-CLASS PATTERN: Toast/Square/Shopify naming
  */
 
-export type InventoryType = 'NONE' | 'SIMPLE_STOCK' | 'RECIPE_BASED'
+export type InventoryMethod = 'QUANTITY' | 'RECIPE'
 
 /**
- * Determine inventory type based on product and venue configuration
+ * Determine inventory method based on product configuration
+ * Returns null if product doesn't track inventory
  */
-export async function getProductInventoryType(productId: string): Promise<InventoryType> {
+export async function getProductInventoryMethod(productId: string): Promise<InventoryMethod | null> {
   const product = await prisma.product.findUnique({
     where: { id: productId },
     include: {
@@ -47,52 +50,50 @@ export async function getProductInventoryType(productId: string): Promise<Invent
     throw new AppError('Product not found', 404)
   }
 
-  // Check if venue has inventory feature enabled
-  const hasInventoryFeature = product.venue.features.some(f => f.active)
-
-  if (!hasInventoryFeature) {
-    return 'NONE' // Venue doesn't use inventory
+  // If product doesn't track inventory, return null
+  if (!product.trackInventory) {
+    return null
   }
 
-  // If product has a recipe, use recipe-based inventory
+  // ✅ WORLD-CLASS: Read from dedicated column (not JSON!)
+  // Use explicit inventoryMethod if set
+  if (product.inventoryMethod) {
+    return product.inventoryMethod
+  }
+
+  // Fallback for legacy products: infer from relations
   if (product.recipe) {
-    return 'RECIPE_BASED'
+    return 'RECIPE'
   }
 
-  // Check if product externalData indicates simple stock tracking
-  // This would be set when creating/editing the product
-  const externalData = product.externalData as any
-  if (externalData?.inventoryType === 'SIMPLE_STOCK') {
-    return 'SIMPLE_STOCK'
-  }
-
-  // Default: no inventory tracking for this product
-  return 'NONE'
+  // Default: null (no tracking)
+  return null
 }
 
 /**
  * Process inventory deduction when a product is sold
- * Automatically determines the correct method based on inventory type
+ * Automatically determines the correct method based on inventory configuration
  */
 export async function deductInventoryForProduct(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
-  const inventoryType = await getProductInventoryType(productId)
+  const inventoryMethod = await getProductInventoryMethod(productId)
 
-  switch (inventoryType) {
-    case 'NONE':
-      // No inventory tracking needed
-      return {
-        inventoryType: 'NONE',
-        message: 'No inventory deduction needed',
-      }
+  // No inventory tracking
+  if (!inventoryMethod) {
+    return {
+      inventoryMethod: null,
+      message: 'No inventory deduction needed',
+    }
+  }
 
-    case 'SIMPLE_STOCK':
+  switch (inventoryMethod) {
+    case 'QUANTITY':
       return await deductSimpleStock(venueId, productId, quantity, orderId, staffId)
 
-    case 'RECIPE_BASED':
+    case 'RECIPE':
       return await deductRecipeBasedInventory(venueId, productId, quantity, orderId, staffId)
 
     default:
-      throw new AppError(`Unknown inventory type: ${inventoryType}`, 500)
+      throw new AppError(`Unknown inventory method: ${inventoryMethod}`, 500)
   }
 }
 
@@ -195,11 +196,11 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
   ])
 
   return {
-    inventoryType: 'SIMPLE_STOCK',
+    inventoryMethod: 'QUANTITY',
     rawMaterialId: rawMaterial.id,
     quantityDeducted: quantity,
     remainingStock: newStock.toNumber(),
-    message: `Deducted ${quantity} unit(s) from simple stock`,
+    message: `Deducted ${quantity} unit(s) from quantity tracking`,
   }
 }
 
@@ -212,17 +213,17 @@ async function deductRecipeBasedInventory(venueId: string, productId: string, qu
   await deductStockForRecipe(venueId, productId, quantity, orderId, staffId)
 
   return {
-    inventoryType: 'RECIPE_BASED',
+    inventoryMethod: 'RECIPE',
     message: `Deducted ingredients for ${quantity} portion(s) based on recipe`,
   }
 }
 
 /**
  * Get inventory status for a product
- * Returns different information based on inventory type
+ * Returns different information based on inventory method
  */
 export async function getProductInventoryStatus(venueId: string, productId: string) {
-  const inventoryType = await getProductInventoryType(productId)
+  const inventoryMethod = await getProductInventoryMethod(productId)
 
   const product = await prisma.product.findUnique({
     where: { id: productId },
@@ -251,15 +252,17 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
     throw new AppError('Product not found', 404)
   }
 
-  switch (inventoryType) {
-    case 'NONE':
-      return {
-        inventoryType: 'NONE',
-        available: true,
-        message: 'No inventory tracking',
-      }
+  // No inventory tracking
+  if (!inventoryMethod) {
+    return {
+      inventoryMethod: null,
+      available: true,
+      message: 'No inventory tracking',
+    }
+  }
 
-    case 'SIMPLE_STOCK': {
+  switch (inventoryMethod) {
+    case 'QUANTITY': {
       // First, check if product has a linked rawMaterialId in externalData
       const externalData = product.externalData as any
       let rawMaterial = null
@@ -281,7 +284,7 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
       }
 
       return {
-        inventoryType: 'SIMPLE_STOCK',
+        inventoryMethod: 'QUANTITY',
         available: rawMaterial ? rawMaterial.currentStock.greaterThan(0) : false,
         currentStock: rawMaterial?.currentStock.toNumber() || 0,
         reorderPoint: rawMaterial?.reorderPoint.toNumber() || 0,
@@ -290,10 +293,10 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
       }
     }
 
-    case 'RECIPE_BASED': {
+    case 'RECIPE': {
       if (!product.recipe) {
         return {
-          inventoryType: 'RECIPE_BASED',
+          inventoryMethod: 'RECIPE',
           available: true,
           message: 'Recipe not configured yet',
         }
@@ -317,7 +320,7 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
       if (maxPortions === Infinity) maxPortions = 0
 
       return {
-        inventoryType: 'RECIPE_BASED',
+        inventoryMethod: 'RECIPE',
         available: insufficientIngredients.length === 0 && maxPortions > 0,
         maxPortions: maxPortions > 0 ? maxPortions : 0,
         insufficientIngredients: insufficientIngredients.map(line => ({
@@ -338,7 +341,7 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
     }
 
     default:
-      throw new AppError(`Unknown inventory type: ${inventoryType}`, 500)
+      throw new AppError(`Unknown inventory type: ${inventoryMethod}`, 500)
   }
 }
 
@@ -380,13 +383,13 @@ export async function shouldProductUseInventory(venueId: string) {
         enabled: true,
       },
       {
-        type: 'SIMPLE_STOCK' as const,
+        type: 'QUANTITY' as const,
         label: 'wizard.step2.simpleStock',
         description: 'wizard.step2.simpleStockDesc',
         enabled: hasInventoryFeature,
       },
       {
-        type: 'RECIPE_BASED' as const,
+        type: 'RECIPE' as const,
         label: 'wizard.step2.recipeBased',
         description: 'wizard.step2.recipeBasedDesc',
         enabled: hasInventoryFeature,
@@ -396,10 +399,10 @@ export async function shouldProductUseInventory(venueId: string) {
 }
 
 /**
- * Set inventory type for a product
- * Updates product metadata to store the inventory type preference
+ * Set inventory method for a product
+ * ✅ WORLD-CLASS: Updates dedicated column (not JSON!)
  */
-export async function setProductInventoryType(productId: string, inventoryType: InventoryType) {
+export async function setProductInventoryMethod(productId: string, inventoryMethod: InventoryMethod) {
   const product = await prisma.product.findUnique({
     where: { id: productId },
   })
@@ -408,19 +411,18 @@ export async function setProductInventoryType(productId: string, inventoryType: 
     throw new AppError('Product not found', 404)
   }
 
-  const externalData = (product.externalData as any) || {}
-  externalData.inventoryType = inventoryType
-
+  // ✅ Write to dedicated column (world-class pattern)
   await prisma.product.update({
     where: { id: productId },
     data: {
-      externalData,
+      trackInventory: true, // Enable tracking
+      inventoryMethod, // Set method (QUANTITY | RECIPE)
     },
   })
 
   return {
     success: true,
-    inventoryType,
-    message: `Product inventory type set to ${inventoryType}`,
+    inventoryMethod,
+    message: `Product inventory method set to ${inventoryMethod}`,
   }
 }
