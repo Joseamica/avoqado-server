@@ -23,6 +23,7 @@ export async function loginStaff(loginData: LoginDto) {
               name: true,
               slug: true,
               logo: true,
+              isDemo: true,
             },
           },
         },
@@ -104,6 +105,7 @@ export async function loginStaff(loginData: LoginDto) {
         slug: sv.venue.slug,
         logo: sv.venue.logo,
         role: sv.role,
+        isDemo: sv.venue.isDemo,
         permissions, // Include permissions in response
       }
     }),

@@ -126,6 +126,7 @@ export async function loginWithGoogle(
               name: true,
               slug: true,
               logo: true,
+              isDemo: true,
             },
           },
         },
@@ -192,6 +193,7 @@ export async function loginWithGoogle(
                 name: true,
                 slug: true,
                 logo: true,
+                isDemo: true,
               },
             },
           },
@@ -232,6 +234,7 @@ export async function loginWithGoogle(
                 name: true,
                 slug: true,
                 logo: true,
+                isDemo: true,
               },
             },
           },
@@ -295,6 +298,7 @@ export async function loginWithGoogle(
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       role: sv.role,
+      isDemo: sv.venue.isDemo,
     })),
   }
 

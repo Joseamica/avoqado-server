@@ -50,6 +50,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 name: true,
                 slug: true,
                 logo: true,
+                isDemo: true,
                 features: {
                   select: {
                     active: true,
@@ -83,6 +84,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: string
       logo: string | null
       role?: any
+      isDemo?: boolean
       features?: any[]
     }
 
@@ -96,6 +98,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       role: sv.role,
+      isDemo: sv.venue.isDemo,
       features: sv.venue.features, // Incluir las features
     }))
 
@@ -124,6 +127,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
+          isDemo: true,
           features: {
             select: {
               active: true,
@@ -143,6 +147,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
+        isDemo: venue.isDemo,
         features: venue.features,
       }))
 
@@ -168,6 +173,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
+          isDemo: true,
           features: {
             select: {
               active: true,
@@ -187,6 +193,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
+        isDemo: venue.isDemo,
         features: venue.features,
       }))
 
