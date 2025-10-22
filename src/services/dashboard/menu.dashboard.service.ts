@@ -16,6 +16,8 @@ import {
 } from '../../schemas/dashboard/menu.schema'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
+import { deleteFileFromStorage } from '../storage.service'
+import logger from '../../config/logger'
 
 export async function getMenus(venueId: string): Promise<Menu[]> {
   return prisma.menu.findMany({
@@ -251,6 +253,15 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
   }
   if (category.children && category.children.length > 0) {
     throw new BadRequestError('Cannot delete category: it still has sub-categories. Please delete them first.')
+  }
+
+  // Delete image from Firebase Storage if it exists
+  if (category.imageUrl) {
+    logger.info(`🗑️  Deleting category image from storage: ${category.imageUrl}`)
+    await deleteFileFromStorage(category.imageUrl).catch(error => {
+      logger.error(`❌ Failed to delete category image from storage`, error)
+      // Continue with deletion even if storage cleanup fails
+    })
   }
 
   return prisma.menuCategory.delete({ where: { id: categoryId } })

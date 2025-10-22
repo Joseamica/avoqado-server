@@ -1,6 +1,8 @@
 import { Product, Prisma, ProductType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
+import { deleteFileFromStorage } from '../storage.service'
+import logger from '../../config/logger'
 
 export interface CreateProductDto {
   name: string
@@ -227,6 +229,7 @@ export async function updateProduct(venueId: string, productId: string, productD
 
 /**
  * Delete a product (soft delete)
+ * Also deletes the product image from Firebase Storage
  */
 export async function deleteProduct(venueId: string, productId: string, userId: string): Promise<void> {
   // First check if product exists and belongs to venue (and is not already deleted)
@@ -240,6 +243,15 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
 
   if (!existingProduct) {
     throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
+  }
+
+  // Delete image from Firebase Storage if it exists
+  if (existingProduct.imageUrl) {
+    logger.info(`🗑️  Deleting product image from storage: ${existingProduct.imageUrl}`)
+    await deleteFileFromStorage(existingProduct.imageUrl).catch(error => {
+      logger.error(`❌ Failed to delete product image from storage`, error)
+      // Continue with soft delete even if storage cleanup fails
+    })
   }
 
   // Soft delete: set deletedAt and deletedBy instead of physically removing the record
