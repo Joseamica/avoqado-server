@@ -77,9 +77,16 @@ model Venue {
   operationalSince DateTime?
 
   // ✅ NEW: Demo/onboarding tracking
-  isDemo              Boolean   @default(false) // Is this a demo venue?
-  demoExpiresAt       DateTime? // Demo expiration date
+  isDemo                Boolean   @default(false) // Is this a demo venue?
+  demoExpiresAt         DateTime? // Demo expiration date
   onboardingCompletedAt DateTime? // When onboarding was completed
+
+  // Tax Information (for converting from demo to real)
+  rfc             String? // RFC (Tax ID) for Mexico
+  legalName       String? // Legal business name (Razón social)
+  fiscalRegime    String? // Fiscal regime code
+  taxDocumentUrl  String? // URL to tax document (constancia de situación fiscal)
+  idDocumentUrl   String? // URL to ID document (INE/IFE)
 
   // POS Integration
   posType   PosType?
@@ -305,7 +312,7 @@ model VenueRolePermission {
   venueId     String
   venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
   role        StaffRole
-  permissions String[]  // Custom permissions array: ["menu:read", "orders:create", ...]
+  permissions String[] // Custom permissions array: ["menu:read", "orders:create", ...]
 
   // Audit trail
   modifiedBy String
@@ -383,7 +390,7 @@ model OnboardingProgress {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   // Progress tracking
-  currentStep    Int @default(0)
+  currentStep    Int  @default(0)
   completedSteps Json // Array of completed step numbers: [1, 2, 3]
 
   // Step 1: User info (captured during signup, stored for reference)
@@ -937,8 +944,8 @@ model PricingPolicy {
 model UnitConversion {
   id String @id @default(cuid())
 
-  fromUnit         Unit     // Source unit (e.g., KILOGRAM)
-  toUnit           Unit     // Target unit (e.g., GRAM)
+  fromUnit         Unit // Source unit (e.g., KILOGRAM)
+  toUnit           Unit // Target unit (e.g., GRAM)
   conversionFactor Decimal  @db.Decimal(12, 6) // 1 kg = 1000 g → factor = 1000
   unitType         UnitType // Type category (WEIGHT, VOLUME, COUNT)
 
