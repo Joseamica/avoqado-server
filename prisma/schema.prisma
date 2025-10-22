@@ -32,6 +32,11 @@ model Organization {
   invitations Invitation[]
   invoices    Invoice[]
 
+  // ✅ NEW: Onboarding tracking
+  onboardingProgress    OnboardingProgress?
+  onboardingCompletedAt DateTime?
+  onboardingStep        Int                 @default(0) // For resuming onboarding
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -70,6 +75,11 @@ model Venue {
   // Status
   active           Boolean   @default(true)
   operationalSince DateTime?
+
+  // ✅ NEW: Demo/onboarding tracking
+  isDemo              Boolean   @default(false) // Is this a demo venue?
+  demoExpiresAt       DateTime? // Demo expiration date
+  onboardingCompletedAt DateTime? // When onboarding was completed
 
   // POS Integration
   posType   PosType?
@@ -359,6 +369,52 @@ model Invitation {
   @@index([venueId])
   @@index([status]) // ✅ AGREGAR
   @@index([expiresAt]) // ✅ AGREGAR para queries de limpieza
+}
+
+// ==========================================
+// NOTE: ONBOARDING SYSTEM
+// ==========================================
+
+/// Tracks onboarding progress for new organizations/venues
+/// Stores step-by-step data collection for resume capability
+model OnboardingProgress {
+  id             String       @id @default(cuid())
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Progress tracking
+  currentStep    Int @default(0)
+  completedSteps Json // Array of completed step numbers: [1, 2, 3]
+
+  // Step 1: User info (captured during signup, stored for reference)
+  step1_userInfo Json? // {email, firstName, lastName, phone}
+
+  // Step 2: Onboarding type selection
+  step2_onboardingType OnboardingType? // DEMO or REAL
+
+  // Step 3: Business information
+  step3_businessInfo Json? // {name, type, venueType, timezone, address, phone, email}
+
+  // Step 4: Menu setup
+  step4_menuData Json? // {method: "manual" | "csv", categories: [...], products: [...]}
+
+  // Step 5: Team invitations (optional)
+  step5_teamInvites Json[] // [{email, role}, ...]
+
+  // Step 6: Premium features selection (optional)
+  step6_selectedFeatures String[] // ["inventory", "advanced_reports", "ai_assistant", "online_ordering"]
+
+  // Step 7: Payment configuration (CLABE)
+  step7_paymentInfo Json? // {clabe, bankName, accountHolder}
+
+  // Metadata
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  @@index([organizationId])
+  @@index([currentStep])
+  @@index([completedAt])
 }
 
 // ==========================================
@@ -2886,4 +2942,20 @@ enum Unit {
   MINUTE
   HOUR
   DAY
+}
+
+// ==========================================
+// NOTE: ONBOARDING ENUMS
+// ==========================================
+
+enum OnboardingType {
+  DEMO // Demo venue with pre-populated data
+  REAL // Real business venue
+}
+
+enum PremiumFeature {
+  INVENTORY // FIFO inventory management ($180-280 MXN/month)
+  ADVANCED_REPORTS // Advanced analytics and reporting ($180-280 MXN/month)
+  AI_ASSISTANT // AI chatbot and insights ($180-280 MXN/month)
+  ONLINE_ORDERING // QR ordering, web ordering, delivery apps ($180-280 MXN/month)
 }
