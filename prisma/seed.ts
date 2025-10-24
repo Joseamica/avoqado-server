@@ -378,32 +378,46 @@ async function main() {
   console.log('Seeding global data...')
   const featuresData = [
     {
-      code: 'ONLINE_ORDERING',
-      name: 'Pedidos en Línea',
-      description: 'Permite a los clientes ordenar desde la web o app QR.',
+      code: 'CHATBOT',
+      name: 'Chatbot Inteligente',
+      description: 'Chatbot con IA para atención automática de clientes 24/7.',
       category: FeatureCategory.OPERATIONS,
-      monthlyPrice: 29.99,
+      monthlyPrice: 399.0, // MXN
     },
     {
-      code: 'ADVANCED_REPORTS',
-      name: 'Reportes Avanzados',
-      description: 'Acceso a analíticas y reportes detallados.',
+      code: 'ADVANCED_ANALYTICS',
+      name: 'Analíticas Avanzadas',
+      description: 'Reportes detallados, tendencias de ventas, y análisis predictivo.',
       category: FeatureCategory.ANALYTICS,
-      monthlyPrice: 19.99,
-    },
-    {
-      code: 'AI_ASSISTANT_BUBBLE',
-      name: 'Asistente IA',
-      description: 'Asistente inteligente para análisis de datos y consultas sobre el restaurante.',
-      category: FeatureCategory.ANALYTICS,
-      monthlyPrice: 39.99,
+      monthlyPrice: 499.0, // MXN
     },
     {
       code: 'INVENTORY_TRACKING',
       name: 'Control de Inventario',
-      description: 'Gestión de stock de productos y alertas.',
+      description: 'Gestión FIFO de inventario, recetas, y alertas de stock bajo.',
       category: FeatureCategory.OPERATIONS,
-      monthlyPrice: 24.99,
+      monthlyPrice: 299.0, // MXN
+    },
+    {
+      code: 'LOYALTY_PROGRAM',
+      name: 'Programa de Lealtad',
+      description: 'Sistema de puntos y recompensas para clientes frecuentes.',
+      category: FeatureCategory.MARKETING,
+      monthlyPrice: 599.0, // MXN
+    },
+    {
+      code: 'ONLINE_ORDERING',
+      name: 'Pedidos en Línea',
+      description: 'Permite a los clientes ordenar desde la web o app con QR.',
+      category: FeatureCategory.INTEGRATIONS,
+      monthlyPrice: 799.0, // MXN
+    },
+    {
+      code: 'RESERVATIONS',
+      name: 'Sistema de Reservas',
+      description: 'Gestión de reservas de mesas con confirmación automática.',
+      category: FeatureCategory.OPERATIONS,
+      monthlyPrice: 399.0, // MXN
     },
   ]
 

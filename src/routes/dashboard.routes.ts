@@ -27,6 +27,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
+import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 import { loginSchema, switchVenueSchema, updateAccountSchema } from '../schemas/dashboard/auth.schema'
 import { enhancedCreateVenueSchema } from '../schemas/dashboard/cost-management.schema'
@@ -73,7 +74,7 @@ import {
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
 import { createTestPaymentSchema, getTestPaymentsSchema } from '../schemas/dashboard/testing.schema'
-import { createVenueSchema, listVenuesQuerySchema, convertDemoVenueSchema } from '../schemas/dashboard/venue.schema'
+import { createVenueSchema, listVenuesQuerySchema, convertDemoVenueSchema, addVenueFeaturesSchema } from '../schemas/dashboard/venue.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -1152,6 +1153,94 @@ router.post(
   checkPermission('venues:manage'),
   validateRequest(convertDemoVenueSchema) as RequestHandler,
   venueController.convertDemoVenue,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/features:
+ *   get:
+ *     tags: [Venue Features]
+ *     summary: Get venue feature status
+ *     description: Returns active features and available features for the venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Feature status retrieved successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/features',
+  authenticateTokenMiddleware,
+  checkPermission('venues:read'),
+  venueFeatureController.getVenueFeatures,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/features:
+ *   post:
+ *     tags: [Venue Features]
+ *     summary: Add features to venue
+ *     description: Add features to venue with trial subscriptions
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [featureCodes]
+ *             properties:
+ *               featureCodes:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ['CHATBOT', 'ADVANCED_ANALYTICS']
+ *               trialPeriodDays:
+ *                 type: number
+ *                 default: 5
+ *     responses:
+ *       201:
+ *         description: Features added successfully
+ *       400:
+ *         description: Venue does not have Stripe customer or validation failed
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/features',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  validateRequest(addVenueFeaturesSchema) as RequestHandler,
+  venueFeatureController.addVenueFeatures,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/features/{featureId}:
+ *   delete:
+ *     tags: [Venue Features]
+ *     summary: Remove feature from venue
+ *     description: Remove feature from venue and cancel Stripe subscription
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: featureId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Feature removed successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/features/:featureId',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  venueFeatureController.removeVenueFeature,
 )
 
 /**

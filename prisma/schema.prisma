@@ -27,6 +27,9 @@ model Organization {
   billingEmail   String?
   billingAddress Json?
 
+  // Stripe integration
+  stripeCustomerId String? @unique
+
   venues      Venue[]
   staff       Staff[]
   invitations Invitation[]
@@ -87,6 +90,10 @@ model Venue {
   fiscalRegime    String? // Fiscal regime code
   taxDocumentUrl  String? // URL to tax document (constancia de situación fiscal)
   idDocumentUrl   String? // URL to ID document (INE/IFE)
+
+  // Stripe integration (for trial subscriptions)
+  stripeCustomerId      String? @unique
+  stripePaymentMethodId String?
 
   // POS Integration
   posType   PosType?
@@ -1566,6 +1573,10 @@ model Feature {
   category     FeatureCategory
   monthlyPrice Decimal         @db.Decimal(10, 2)
 
+  // Stripe integration
+  stripeProductId String? @unique
+  stripePriceId   String? @unique
+
   active Boolean @default(true)
 
   venues VenueFeature[]
@@ -1582,7 +1593,11 @@ model VenueFeature {
   monthlyPrice Decimal @db.Decimal(10, 2)
 
   startDate DateTime  @default(now())
-  endDate   DateTime?
+  endDate   DateTime? // null = paid subscription, not-null = trial period
+
+  // Stripe integration
+  stripeSubscriptionId String? @unique
+  stripePriceId        String?
 
   @@unique([venueId, featureId])
   @@index([venueId])

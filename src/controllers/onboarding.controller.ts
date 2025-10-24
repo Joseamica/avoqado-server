@@ -395,6 +395,7 @@ export async function updateStep7(req: Request, res: Response, next: NextFunctio
 export async function completeOnboarding(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { organizationId } = req.params
+    const { stripePaymentMethodId } = req.body // Payment method from Stripe Elements
     const authContext = (req as any).authContext
 
     if (!authContext || !authContext.userId) {
@@ -426,6 +427,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       menuData: progress.step4_menuData as any,
       paymentInfo: progress.step7_paymentInfo as any,
       selectedFeatures: progress.step6_selectedFeatures || [],
+      stripePaymentMethodId, // Pass payment method for trial setup
     }
 
     // Create venue and assign to user

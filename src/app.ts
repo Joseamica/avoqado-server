@@ -13,11 +13,20 @@ import mainApiRouter from './routes' // Esto importa el 'router' exportado por d
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
 import orderRoutes from './routes/orders.routes'
+import webhookRoutes from './routes/webhook.routes'
 
 // Types (could be moved to a central types file)
 import { AvoqadoJwtPayload } from './security' // Assuming this is where the type is defined
 
 const app: Express = express()
+
+// ⚠️ IMPORTANT: Webhook routes MUST be mounted BEFORE configureCoreMiddlewares
+// Stripe webhooks require raw body (not JSON parsed) for signature verification
+app.use(
+  '/api/v1/webhooks',
+  express.raw({ type: 'application/json' }), // Raw body parser for Stripe signature verification
+  webhookRoutes,
+)
 
 // Configure core middlewares (helmet, cors, compression, body-parsers, cookie-parser, session, request-logger)
 configureCoreMiddlewares(app)

@@ -1,8 +1,30 @@
 // src/controllers/dashboard/venue.dashboard.controller.ts
+
+/**
+ * Venue Dashboard Controller
+ *
+ * ⚠️ DESIGN PRINCIPLE: Thin Controller Pattern
+ *
+ * Controllers are HTTP orchestration layers that:
+ * 1. Extract data from HTTP request (req.body, req.params, req.authContext)
+ * 2. Call service layer with clean data (no HTTP concepts)
+ * 3. Send HTTP response (res.status(...).json(...))
+ * 4. Pass errors to global error handler (next(error))
+ *
+ * Controllers should NOT:
+ * ❌ Contain business logic (belongs in services)
+ * ❌ Access database directly (use services)
+ * ❌ Perform complex validations (use Zod schemas + middleware)
+ *
+ * Why thin controllers?
+ * - Business logic is reusable (services can be called from CLI, tests, etc.)
+ * - Easier to test (mock services instead of HTTP)
+ * - Clear separation of concerns (HTTP ≠ Business Logic)
+ */
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 
-import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema' // Ajusta la ruta
+import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import logger from '../../config/logger'
 

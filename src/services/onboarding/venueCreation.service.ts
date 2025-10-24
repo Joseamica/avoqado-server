@@ -10,6 +10,8 @@ import { addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
 import { seedDemoVenue } from './demoSeed.service'
+import * as stripeService from '@/services/stripe.service'
+import logger from '@/config/logger'
 
 // Types
 export interface CreateVenueInput {
@@ -47,6 +49,7 @@ export interface CreateVenueInput {
     accountHolder?: string
   }
   selectedFeatures?: string[]
+  stripePaymentMethodId?: string // Payment method collected via Stripe Elements
 }
 
 export interface CreateVenueResult {
@@ -68,7 +71,7 @@ export interface CreateVenueResult {
  * @returns Created venue and metadata
  */
 export async function createVenueFromOnboarding(input: CreateVenueInput): Promise<CreateVenueResult> {
-  const { organizationId, userId, onboardingType, businessInfo, menuData, paymentInfo, selectedFeatures } = input
+  const { organizationId, userId, onboardingType, businessInfo, menuData, paymentInfo, selectedFeatures, stripePaymentMethodId } = input
 
   // Generate unique slug
   const baseSlug = slugify(businessInfo.name)
@@ -158,9 +161,16 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     // For now, just store it as venue metadata
   }
 
-  // Enable selected premium features
+  // Enable selected premium features with Stripe trial
   if (selectedFeatures && selectedFeatures.length > 0) {
-    await enablePremiumFeatures(venue.id, selectedFeatures)
+    await enablePremiumFeatures(
+      venue.id,
+      organizationId,
+      businessInfo.email || '',
+      businessInfo.name,
+      selectedFeatures,
+      stripePaymentMethodId,
+    )
   }
 
   return result
@@ -231,7 +241,7 @@ async function createMenuFromOnboarding(
   for (const product of products) {
     const categoryId = categoryMap.get(product.categorySlug)
     if (!categoryId) {
-      console.warn(`Category ${product.categorySlug} not found for product ${product.name}`)
+      logger.warn(`Category ${product.categorySlug} not found for product ${product.name}`)
       continue
     }
 
@@ -256,31 +266,69 @@ async function createMenuFromOnboarding(
 }
 
 /**
- * Enables premium features for a venue
+ * Enables premium features for a venue with Stripe trial subscriptions
  *
  * @param venueId - Venue ID
+ * @param organizationId - Organization ID
+ * @param email - Organization email
+ * @param name - Organization name
  * @param featureCodes - Array of feature codes to enable
+ * @param paymentMethodId - Optional Stripe payment method ID
  */
-async function enablePremiumFeatures(venueId: string, featureCodes: string[]): Promise<void> {
-  // Get features from database
-  const features = await prisma.feature.findMany({
-    where: {
-      code: {
-        in: featureCodes,
-      },
-      active: true,
-    },
-  })
+async function enablePremiumFeatures(
+  venueId: string,
+  organizationId: string,
+  email: string,
+  name: string,
+  featureCodes: string[],
+  paymentMethodId?: string,
+): Promise<void> {
+  try {
+    logger.info(`🎯 Enabling premium features for venue ${venueId}: ${featureCodes.join(', ')}`)
 
-  // Create venue feature relationships
-  for (const feature of features) {
-    await prisma.venueFeature.create({
-      data: {
-        venueId,
-        featureId: feature.id,
+    // Step 1: Get or create Stripe customer
+    const customerId = await stripeService.getOrCreateStripeCustomer(organizationId, email, name)
+
+    // Step 2: Attach payment method if provided
+    if (paymentMethodId) {
+      await stripeService.updatePaymentMethod(customerId, paymentMethodId)
+      logger.info(`✅ Payment method attached to customer ${customerId}`)
+    }
+
+    // Step 3: Ensure features are synced to Stripe
+    await stripeService.syncFeaturesToStripe()
+
+    // Step 4: Create trial subscriptions (5 days)
+    const subscriptionIds = await stripeService.createTrialSubscriptions(customerId, venueId, featureCodes, 5)
+
+    logger.info(`✅ Created ${subscriptionIds.length} trial subscriptions for venue ${venueId}`)
+  } catch (error) {
+    logger.error(`❌ Error enabling premium features for venue ${venueId}:`, error)
+    // Don't throw - allow venue creation to succeed even if Stripe fails
+    // Features will be created but without Stripe subscription
+    logger.warn(`⚠️  Falling back to non-Stripe feature creation`)
+
+    // Fallback: Create VenueFeature records without Stripe
+    const features = await prisma.feature.findMany({
+      where: {
+        code: {
+          in: featureCodes,
+        },
         active: true,
-        monthlyPrice: feature.monthlyPrice,
       },
     })
+
+    for (const feature of features) {
+      await prisma.venueFeature.create({
+        data: {
+          venueId,
+          featureId: feature.id,
+          active: true,
+          monthlyPrice: feature.monthlyPrice,
+          startDate: new Date(),
+          endDate: addDays(new Date(), 5), // 5 day trial
+        },
+      })
+    }
   }
 }

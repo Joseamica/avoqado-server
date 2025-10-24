@@ -1,14 +1,38 @@
 // src/services/dashboard/venue.dashboard.service.ts
-import prisma from '../../utils/prismaClient' // Tu instancia de Prisma Client
-import { CreateVenueDto } from '../../schemas/dashboard/venue.schema' // Ajusta la ruta
+
+/**
+ * Venue Dashboard Service
+ *
+ * ⚠️ DESIGN PRINCIPLE: HTTP-Agnostic Business Logic Layer
+ *
+ * Services are the CORE of the application and contain ALL business logic:
+ * - Database operations (via Prisma)
+ * - Business validations (uniqueness checks, constraints)
+ * - Complex calculations and transformations
+ * - Integration with external services (Stripe, Storage, etc.)
+ *
+ * Services are HTTP-agnostic:
+ * ✅ Accept primitive types and DTOs (string, number, objects)
+ * ✅ Return data or throw errors (never touch req/res)
+ * ✅ Throw AppError subclasses for business rule violations
+ * ❌ Never import Express types (Request, Response)
+ * ❌ Never deal with HTTP status codes directly
+ *
+ * Why HTTP-agnostic?
+ * - Reusable from anywhere: HTTP controllers, CLI scripts, background jobs, tests
+ * - Easier to test: No HTTP mocking needed, just call functions with data
+ * - True separation of concerns: Business logic ≠ Transport layer
+ * - Framework independent: Could switch from Express to Fastify without touching services
+ */
+import prisma from '../../utils/prismaClient'
+import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType } from '@prisma/client'
-import { BadRequestError, NotFoundError } from '../../errors/AppError' // Tu error personalizado
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder } from '../storage.service'
-
-// Función para generar slugs (podría estar en un utilitario)
+import { getOrCreateStripeCustomer, updatePaymentMethod, createTrialSubscriptions } from '../stripe.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -656,6 +680,8 @@ export async function convertDemoVenue(
     fiscalRegime: string
     taxDocumentUrl?: string | null
     idDocumentUrl?: string | null
+    selectedFeatures?: string[]
+    paymentMethodId?: string
   },
   options?: { skipOrgCheck?: boolean },
 ): Promise<Venue> {
@@ -682,6 +708,55 @@ export async function convertDemoVenue(
     throw new BadRequestError('This venue is not in demo mode')
   }
 
+  // 🎯 STRIPE INTEGRATION: Create customer and attach payment method
+  let stripeCustomerId: string | undefined
+  let stripePaymentMethodId: string | undefined
+
+  // Only process Stripe if payment method is provided
+  if (conversionData.paymentMethodId) {
+    logger.info('🔄 Processing Stripe customer and payment method', { venueId, orgId })
+
+    try {
+      // Get organization to obtain contact email and name
+      const organization = await prisma.organization.findUnique({
+        where: { id: orgId },
+        include: {
+          staff: {
+            take: 1, // Get first staff member for billing contact
+            orderBy: { createdAt: 'asc' }, // Oldest = likely owner
+          },
+        },
+      })
+
+      if (!organization) {
+        throw new NotFoundError(`Organization with ID ${orgId} not found`)
+      }
+
+      // Use organization email or first staff member's email for Stripe customer
+      const billingEmail = organization.email || organization.staff[0]?.email
+      if (!billingEmail) {
+        throw new BadRequestError('Organization does not have a valid email for billing')
+      }
+
+      // Create or get Stripe customer for the organization
+      stripeCustomerId = await getOrCreateStripeCustomer(orgId, billingEmail, organization.name || conversionData.legalName)
+
+      // Attach payment method to customer and set as default
+      await updatePaymentMethod(stripeCustomerId, conversionData.paymentMethodId)
+      stripePaymentMethodId = conversionData.paymentMethodId
+
+      logger.info('✅ Stripe customer and payment method configured', {
+        venueId,
+        stripeCustomerId,
+        stripePaymentMethodId,
+      })
+    } catch (error) {
+      logger.error('❌ Error setting up Stripe customer/payment method', { error, venueId, orgId })
+      // Re-throw error to prevent venue conversion if Stripe setup fails
+      throw error
+    }
+  }
+
   // Update the venue to convert from demo to real
   const updatedVenue = await prisma.venue.update({
     where: { id: venueId },
@@ -695,6 +770,9 @@ export async function convertDemoVenue(
       fiscalRegime: conversionData.fiscalRegime,
       taxDocumentUrl: conversionData.taxDocumentUrl,
       idDocumentUrl: conversionData.idDocumentUrl,
+      // Store Stripe IDs if payment method was provided
+      stripeCustomerId,
+      stripePaymentMethodId,
     },
     include: {
       features: true,
@@ -706,6 +784,38 @@ export async function convertDemoVenue(
     venueName: updatedVenue.name,
     rfc: conversionData.rfc,
   })
+
+  // 🎯 STRIPE INTEGRATION: Create trial subscriptions for selected features
+  if (conversionData.selectedFeatures && conversionData.selectedFeatures.length > 0 && stripeCustomerId) {
+    logger.info('🔄 Creating trial subscriptions for selected features', {
+      venueId,
+      featureCount: conversionData.selectedFeatures.length,
+      features: conversionData.selectedFeatures,
+    })
+
+    try {
+      const subscriptionIds = await createTrialSubscriptions(
+        stripeCustomerId,
+        venueId,
+        conversionData.selectedFeatures,
+        5, // 5 days trial period
+      )
+
+      logger.info('✅ Trial subscriptions created successfully', {
+        venueId,
+        subscriptionCount: subscriptionIds.length,
+        subscriptionIds,
+      })
+    } catch (error) {
+      logger.error('❌ Error creating trial subscriptions', {
+        error,
+        venueId,
+        features: conversionData.selectedFeatures,
+      })
+      // Don't throw - venue conversion already succeeded, subscriptions can be created later
+      // This allows user to still access the venue even if Stripe subscriptions fail
+    }
+  }
 
   return updatedVenue
 }

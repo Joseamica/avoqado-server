@@ -2,6 +2,53 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with the backend server codebase.
 
+## 📚 Documentation Policy
+
+**Single Source of Truth:** This CLAUDE.md file is the ONLY markdown documentation file. Do NOT create separate .md files.
+
+**What goes in CLAUDE.md:**
+
+- 📐 Architecture diagrams (Mermaid format)
+- 🤔 Design decisions (WHY, not HOW)
+- 🗺️ Feature map (WHERE things are located)
+- 🚨 Critical gotchas (non-obvious behaviors)
+
+**What does NOT go in CLAUDE.md:**
+
+- ❌ Implementation details (let code speak for itself)
+- ❌ API documentation (use JSDoc + OpenAPI)
+- ❌ Usage examples (put in code comments or tests)
+- ❌ Lists that can be queried from database (e.g., feature codes → `SELECT code FROM Feature`)
+
+**Where implementation details belong:**
+
+1. **Code comments** - For edge cases, workarounds, non-obvious reasons
+2. **Tests** - For usage examples and complete flows
+3. **JSDoc/TSDoc** - For function documentation
+4. **OpenAPI** - For API endpoint documentation
+
+**Golden rule:** If the code + tests explain it clearly → Don't document it. If there's a non-obvious reason → Document it here.
+
+**Keeping documentation up-to-date:**
+
+How to prevent documentation from becoming stale:
+
+1. **Document WHY, not HOW** - Architecture decisions (WHY) rarely change, implementation details (HOW) change constantly
+2. **Tests as living documentation** - Tests can't become outdated (they fail if code changes)
+3. **Git pre-commit hook** - Reminds you to update CLAUDE.md when critical architecture files change (`.git/hooks/pre-commit`)
+
+The git hook checks these critical files:
+- `src/app.ts` - Main application setup
+- `src/utils/prismaClient.ts` - Database connection singleton
+- `src/services/stripe.service.ts` - Stripe integration core
+- `src/services/stripe.webhook.service.ts` - Webhook event handlers
+- `src/middlewares/checkFeatureAccess.middleware.ts` - Feature access control
+- `prisma/schema.prisma` - Database schema
+
+When you modify any of these, the hook reminds you to check if CLAUDE.md needs updating. You can skip the reminder if you only changed implementation details (HOW), not architectural decisions (WHY).
+
+---
+
 ## Development Commands
 
 ### Build and Development
@@ -183,16 +230,42 @@ This is a restaurant management platform backend with multi-tenant architecture 
 
 ### Layered Architecture
 
+**Request Flow:**
+
 ```
 Routes → Middleware → Controllers → Services → Prisma (Database)
 ```
 
-- **Routes** (`/src/routes/`) - HTTP endpoint definitions with middleware chains
-- **Controllers** (`/src/controllers/`) - HTTP request orchestration (thin layer)
-- **Services** (`/src/services/`) - Business logic implementation (core layer)
-- **Middlewares** (`/src/middlewares/`) - Cross-cutting concerns (auth, validation, logging)
-- **Schemas** (`/src/schemas/`) - Zod validation schemas and TypeScript types
-- **Prisma** - Database access layer
+**Design Principles:**
+
+- **Separation of Concerns** - Each layer has a single responsibility
+- **Unidirectional Dependency Flow** - Dependencies flow inward (controllers depend on services, not vice versa)
+- **HTTP Agnostic Core** - Business logic (services) knows nothing about HTTP
+- **Thin Controllers** - Controllers orchestrate, services contain logic
+
+**Layer Responsibilities:**
+
+| Layer                                 | Purpose                         | What it does                                    | What it does NOT do                   |
+| ------------------------------------- | ------------------------------- | ----------------------------------------------- | ------------------------------------- |
+| **Routes** (`/src/routes/`)           | HTTP endpoint definitions       | Attach middleware chains to URLs                | Business logic, data access           |
+| **Controllers** (`/src/controllers/`) | HTTP orchestration (thin layer) | Extract req data, call services, send responses | Business validation, database access  |
+| **Services** (`/src/services/`)       | Business logic (core layer)     | Validations, calculations, database operations  | HTTP concerns (req/res), status codes |
+| **Middlewares** (`/src/middlewares/`) | Cross-cutting concerns          | Auth, validation, logging, permissions          | Business logic, data persistence      |
+| **Schemas** (`/src/schemas/`)         | Data validation                 | Zod schemas for request/response validation     | Business rules enforcement            |
+| **Prisma**                            | Database access layer           | ORM for type-safe database queries              | Business logic                        |
+
+**Why This Architecture?**
+
+- ✅ Business logic reusable (CLI, tests, background jobs)
+- ✅ Easier testing (mock services, not HTTP)
+- ✅ Framework independent (could switch Express → Fastify)
+- ✅ Clear boundaries reduce coupling
+
+**See code comments in:**
+
+- `src/controllers/dashboard/venue.dashboard.controller.ts:1-21` - Thin controller pattern explained
+- `src/services/dashboard/venue.dashboard.service.ts:1-24` - HTTP-agnostic service pattern explained
+- `src/utils/prismaClient.ts:3-21` - Singleton pattern for database connection pooling
 
 ### Multi-Tenant Architecture
 
@@ -813,6 +886,73 @@ indicator showing role defaults vs custom overrides / Permission inheritance dis
 - **API tests**: Endpoint integration
 - **Workflow tests**: End-to-end business flows
 - Coverage thresholds: 70% global, 80% for critical services
+
+### Stripe Integration & Feature Access Control
+
+**Architecture:** Subscription-based feature access with trial periods
+
+```
+Venue Conversion → Create Stripe Customer → Attach Payment Method → Create Trial Subscriptions
+                                                                              ↓
+                                                                    VenueFeature records (active=true, endDate=5 days)
+                                                                              ↓
+Stripe Webhooks → customer.subscription.updated → Update VenueFeature (trial→paid or deactivate)
+                                                                              ↓
+Feature Access Middleware → checkFeatureAccess('ANALYTICS') → Validate active + trial not expired
+```
+
+**Design Decisions:**
+
+- **Why 5-day trial?** Balance between evaluation time and conversion pressure
+- **Why endDate field?** `endDate=null` = paid forever, `endDate!=null` = trial with expiration
+- **Why webhooks?** Auto-handle payment failures, trial expirations without manual checks
+- **Why middleware instead of service checks?** Centralized enforcement, can't be bypassed
+
+**Feature Map:**
+
+| Component                    | Location                                                     | Purpose                                    |
+| ---------------------------- | ------------------------------------------------------------ | ------------------------------------------ |
+| Stripe customer creation     | `src/services/stripe.service.ts:getOrCreateStripeCustomer()` | Creates/retrieves Stripe customer          |
+| Trial subscriptions          | `src/services/stripe.service.ts:createTrialSubscriptions()`  | Creates 5-day trials for selected features |
+| Venue conversion integration | `src/services/dashboard/venue.dashboard.service.ts:688-801`  | Integrates Stripe into demo→prod flow      |
+| Feature management endpoints | `src/routes/dashboard.routes.ts:1163-1249`                   | GET/POST/DELETE /venues/:id/features       |
+| Webhook handlers             | `src/services/stripe.webhook.service.ts`                     | subscription.updated, invoice.paid, etc    |
+| Webhook endpoint             | `src/routes/webhook.routes.ts` + `src/app.ts:23-29`          | POST /webhooks/stripe (raw body)           |
+| Feature access middleware    | `src/middlewares/checkFeatureAccess.middleware.ts`           | Validates subscription before access       |
+
+**Critical Gotchas:**
+
+⚠️ **Webhook body parsing:** Webhooks MUST be mounted BEFORE `express.json()` middleware (requires raw buffer for signature verification) ⚠️
+**Trial expiration:** Check `endDate < now` even if `active=true` - webhook may not have fired yet ⚠️ **Non-blocking payments:** Inventory
+deduction failures DON'T block payment success (logged only) ⚠️ **Feature codes:** Must match `Feature.code` in database (query:
+`SELECT code FROM Feature`) ⚠️ **Subscription cancellation:** Use Stripe API (don't just update DB) - webhook will sync state back
+
+**Usage Example:**
+
+```typescript
+// Protect premium endpoint with feature access
+router.get(
+  '/venues/:venueId/analytics',
+  authenticateTokenMiddleware, // 1. Validate JWT
+  checkPermission('analytics:read'), // 2. Validate permission
+  checkFeatureAccess('ANALYTICS'), // 3. Validate subscription
+  analyticsController.getData,
+)
+```
+
+**Environment Variables:**
+
+- `STRIPE_SECRET_KEY` - Stripe API secret key (sk*test*... or sk*live*...)
+- `STRIPE_WEBHOOK_SECRET` - Webhook signing secret (whsec\_...) from Stripe CLI or Dashboard
+
+**Testing:**
+
+```bash
+# Test webhooks locally
+stripe listen --forward-to localhost:12344/api/v1/webhooks/stripe
+stripe trigger customer.subscription.updated
+stripe trigger invoice.payment_succeeded
+```
 
 ---
 
