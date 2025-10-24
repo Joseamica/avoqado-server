@@ -1,6 +1,14 @@
 import { updateVenue } from '../../../../src/services/dashboard/venue.dashboard.service'
 import { NotFoundError } from '../../../../src/errors/AppError'
 
+// Mock Stripe service to prevent initialization errors
+jest.mock('../../../../src/services/stripe.service', () => ({
+  __esModule: true,
+  getOrCreateStripeCustomer: jest.fn(),
+  createTrialSubscriptions: jest.fn(),
+  cancelStripeSubscription: jest.fn(),
+}))
+
 // Mock Prisma Client
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
