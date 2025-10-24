@@ -38,6 +38,7 @@ How to prevent documentation from becoming stale:
 3. **Git pre-commit hook** - Reminds you to update CLAUDE.md when critical architecture files change (`.git/hooks/pre-commit`)
 
 The git hook checks these critical files:
+
 - `src/app.ts` - Main application setup
 - `src/utils/prismaClient.ts` - Database connection singleton
 - `src/services/stripe.service.ts` - Stripe integration core
@@ -45,7 +46,8 @@ The git hook checks these critical files:
 - `src/middlewares/checkFeatureAccess.middleware.ts` - Feature access control
 - `prisma/schema.prisma` - Database schema
 
-When you modify any of these, the hook reminds you to check if CLAUDE.md needs updating. You can skip the reminder if you only changed implementation details (HOW), not architectural decisions (WHY).
+When you modify any of these, the hook reminds you to check if CLAUDE.md needs updating. You can skip the reminder if you only changed
+implementation details (HOW), not architectural decisions (WHY).
 
 ---
 
@@ -879,6 +881,41 @@ indicator showing role defaults vs custom overrides / Permission inheritance dis
 - Correlation IDs for request tracing
 - Log levels: debug, info, warn, error
 - Structured logging with metadata
+
+**Log Files Location:**
+
+- **Directory**: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/logs`
+- **Naming Convention**: `development.log`, `development1.log`, `development2.log`, ..., `developmentN.log`
+- **Log Rotation**: When logs reach a certain size, they rotate to numbered files
+
+**Debugging with Logs:**
+
+When debugging issues, always check the **most recent log file** (highest number):
+
+```bash
+# Example: If you have 8 log files (development.log → development7.log)
+# Check the LAST file (development7.log) for most recent entries
+tail -n 100 logs/development7.log
+
+# Or find the latest log file automatically and show last 100 lines
+ls -t logs/development*.log | head -1 | xargs tail -n 100
+
+# Live tail (watch logs in real-time)
+tail -f logs/$(ls -t logs/development*.log | head -1)
+
+# Search for errors in latest log
+ls -t logs/development*.log | head -1 | xargs grep -i "error"
+
+# Search for specific patterns with emojis (inventory operations)
+ls -t logs/development*.log | head -1 | xargs grep "🎯\|✅\|⚠️"
+```
+
+**Why Check the Highest Numbered File?**
+
+- Log files rotate when they reach max size
+- `development.log` → oldest logs (rotated out)
+- `development7.log` → **newest logs** (current active writes)
+- Always inspect the highest number to see the most recent application activity
 
 ### Testing Strategy
 

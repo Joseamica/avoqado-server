@@ -8,6 +8,9 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { createTrialSubscriptions, cancelSubscription } from '../stripe.service'
+import Stripe from 'stripe'
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
 /**
  * Add features to a venue with Stripe trial subscriptions
@@ -26,6 +29,7 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
     select: {
       id: true,
       name: true,
+      slug: true,
       stripeCustomerId: true,
       stripePaymentMethodId: true,
       features: {
@@ -63,15 +67,77 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
     return []
   }
 
+  // Check if venue has ever had these features before (even if canceled)
+  // If they had a trial before, don't give them another one
+  const previousFeatures = await prisma.venueFeature.findMany({
+    where: {
+      venueId,
+      feature: {
+        code: {
+          in: newFeatureCodes,
+        },
+      },
+    },
+    include: {
+      feature: true,
+    },
+  })
+
+  const previousFeatureCodes = previousFeatures.map(vf => vf.feature.code)
+
+  // Only give trial to features they've NEVER had before
+  const firstTimeFeatures = newFeatureCodes.filter(code => !previousFeatureCodes.includes(code))
+  const returningFeatures = newFeatureCodes.filter(code => previousFeatureCodes.includes(code))
+
   logger.info('Creating subscriptions for new features', {
     venueId,
     newFeatureCodes,
     alreadyActive: activeFeatureCodes,
+    firstTimeFeatures,
+    returningFeatures,
   })
 
   // Create trial subscriptions for new features
   try {
-    const subscriptionIds = await createTrialSubscriptions(venue.stripeCustomerId, venueId, newFeatureCodes, trialPeriodDays)
+    // First-time features get trial period
+    const firstTimeTrialDays = firstTimeFeatures.length > 0 ? trialPeriodDays : 0
+    // Returning features get NO trial (immediate payment)
+    const returningTrialDays = 0
+
+    const subscriptionIds: string[] = []
+
+    // Create trial subscriptions for first-time features
+    if (firstTimeFeatures.length > 0) {
+      const firstTimeIds = await createTrialSubscriptions(
+        venue.stripeCustomerId,
+        venueId,
+        firstTimeFeatures,
+        firstTimeTrialDays,
+        venue.name,
+        venue.slug,
+      )
+      subscriptionIds.push(...firstTimeIds)
+      logger.info('✅ Trial subscriptions created for first-time features', {
+        features: firstTimeFeatures,
+        trialDays: firstTimeTrialDays,
+      })
+    }
+
+    // Create immediate (no trial) subscriptions for returning features
+    if (returningFeatures.length > 0) {
+      const returningIds = await createTrialSubscriptions(
+        venue.stripeCustomerId,
+        venueId,
+        returningFeatures,
+        returningTrialDays,
+        venue.name,
+        venue.slug,
+      )
+      subscriptionIds.push(...returningIds)
+      logger.info('✅ Paid subscriptions created for returning features (no trial)', {
+        features: returningFeatures,
+      })
+    }
 
     logger.info('✅ Features added successfully', {
       venueId,
@@ -199,34 +265,84 @@ export async function getVenueFeatureStatus(venueId: string) {
   })
 
   const activeFeatureIds = venue.features.map(vf => vf.featureId)
+  const availableFeatures = allFeatures.filter(f => !activeFeatureIds.includes(f.id))
+
+  // Get historical feature usage (including canceled) to determine if features were previously used
+  const previousFeatures = await prisma.venueFeature.findMany({
+    where: {
+      venueId,
+      featureId: {
+        in: availableFeatures.map(f => f.id),
+      },
+    },
+    select: {
+      featureId: true,
+    },
+  })
+
+  const previousFeatureIds = new Set(previousFeatures.map(vf => vf.featureId))
+
+  // Get payment method details from Stripe if available
+  let paymentMethod: {
+    brand: string
+    last4: string
+    expMonth: number
+    expYear: number
+  } | null = null
+
+  if (venue.stripePaymentMethodId) {
+    try {
+      const pm = await stripe.paymentMethods.retrieve(venue.stripePaymentMethodId)
+      if (pm.card) {
+        paymentMethod = {
+          brand: pm.card.brand,
+          last4: pm.card.last4,
+          expMonth: pm.card.exp_month,
+          expYear: pm.card.exp_year,
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to retrieve payment method from Stripe', {
+        venueId,
+        paymentMethodId: venue.stripePaymentMethodId,
+        error,
+      })
+    }
+  }
 
   const result = {
     venueId: venue.id,
     venueName: venue.name,
     hasStripeCustomer: !!venue.stripeCustomerId,
     hasPaymentMethod: !!venue.stripePaymentMethodId,
+    paymentMethod,
     activeFeatures: venue.features.map(vf => ({
       id: vf.id,
+      venueId: vf.venueId,
       featureId: vf.feature.id,
-      code: vf.feature.code,
-      name: vf.feature.name,
+      feature: {
+        id: vf.feature.id,
+        code: vf.feature.code,
+        name: vf.feature.name,
+        description: vf.feature.description,
+      },
+      active: vf.active,
       monthlyPrice: vf.monthlyPrice,
       startDate: vf.startDate,
       endDate: vf.endDate,
       stripeSubscriptionId: vf.stripeSubscriptionId,
-      isTrialActive: vf.endDate ? new Date() <= vf.endDate : false,
+      stripePriceId: vf.stripePriceId,
     })),
-    availableFeatures: allFeatures
-      .filter(f => !activeFeatureIds.includes(f.id))
-      .map(f => ({
-        id: f.id,
-        code: f.code,
-        name: f.name,
-        description: f.description,
-        monthlyPrice: f.monthlyPrice,
-        stripeProductId: f.stripeProductId,
-        stripePriceId: f.stripePriceId,
-      })),
+    availableFeatures: availableFeatures.map(f => ({
+      id: f.id,
+      code: f.code,
+      name: f.name,
+      description: f.description,
+      monthlyPrice: f.monthlyPrice,
+      stripeProductId: f.stripeProductId,
+      stripePriceId: f.stripePriceId,
+      hadPreviously: previousFeatureIds.has(f.id), // NEW: Indicates if feature was previously used
+    })),
   }
 
   return result

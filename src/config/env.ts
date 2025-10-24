@@ -44,4 +44,7 @@ export const MENTA_USERNAME = process.env.MENTA_USERNAME
 export const MENTA_PASSWORD = process.env.MENTA_PASSWORD
 export const MENTA_MERCHANT_API_KEY = process.env.MENTA_MERCHANT_API_KEY
 
+// Frontend URL for deep links in emails (e.g., dashboard.avoqado.app)
+export const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'
+
 logger.info('Environment variables loaded and checked.')

@@ -74,7 +74,14 @@ import {
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
 import { createTestPaymentSchema, getTestPaymentsSchema } from '../schemas/dashboard/testing.schema'
-import { createVenueSchema, listVenuesQuerySchema, convertDemoVenueSchema, addVenueFeaturesSchema } from '../schemas/dashboard/venue.schema'
+import {
+  createVenueSchema,
+  listVenuesQuerySchema,
+  convertDemoVenueSchema,
+  addVenueFeaturesSchema,
+  updatePaymentMethodSchema,
+  createBillingPortalSessionSchema,
+} from '../schemas/dashboard/venue.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -1091,6 +1098,109 @@ router.delete('/venues/:venueId', authenticateTokenMiddleware, checkPermission('
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/payment-method:
+ *   put:
+ *     tags: [Venues]
+ *     summary: Update venue payment method
+ *     description: Updates the Stripe payment method for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [paymentMethodId]
+ *             properties:
+ *               paymentMethodId:
+ *                 type: string
+ *                 description: Stripe payment method ID
+ *                 example: pm_1234567890abcdef
+ *     responses:
+ *       200:
+ *         description: Payment method updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: Payment method updated successfully }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/payment-method',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  validateRequest(updatePaymentMethodSchema) as RequestHandler,
+  venueController.updateVenuePaymentMethod,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/billing-portal:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Create Stripe Customer Portal session
+ *     description: |
+ *       Generates a URL to Stripe's hosted billing portal where customers can:
+ *       - View subscription details
+ *       - Update payment methods
+ *       - View invoices and payment history
+ *       - Cancel subscriptions
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               returnUrl:
+ *                 type: string
+ *                 format: uri
+ *                 description: URL to redirect to after customer exits portal
+ *                 example: https://dashboard.example.com/settings/billing
+ *             required:
+ *               - returnUrl
+ *     responses:
+ *       200:
+ *         description: Billing portal session URL generated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 url: { type: string, format: uri, example: https://billing.stripe.com/session/... }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/billing-portal',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  validateRequest(createBillingPortalSessionSchema) as RequestHandler,
+  venueController.createBillingPortalSession,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/convert-from-demo:
  *   post:
  *     tags: [Venues]
@@ -1477,6 +1587,94 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('features:write'),
   featureController.saveVenueFeatures,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/invoices:
+ *   get:
+ *     tags: [Billing]
+ *     summary: Get Stripe invoices for a venue
+ *     description: Retrieves all invoices from Stripe for the venue's organization
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: List of invoices retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     invoices:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           id:
+ *                             type: string
+ *                           number:
+ *                             type: string
+ *                           created:
+ *                             type: number
+ *                           amount_due:
+ *                             type: number
+ *                           currency:
+ *                             type: string
+ *                           status:
+ *                             type: string
+ *                             enum: [paid, open, draft, uncollectible, void]
+ *                           description:
+ *                             type: string
+ *                           invoice_pdf:
+ *                             type: string
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       403:
+ *         $ref: '#/components/responses/ForbiddenError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
+ */
+router.get(
+  '/venues/:venueId/invoices',
+  authenticateTokenMiddleware,
+  checkPermission('features:read'),
+  venueFeatureController.getVenueInvoices,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/invoices/{invoiceId}/download:
+ *   get:
+ *     tags: [Billing]
+ *     summary: Download invoice PDF
+ *     description: Redirects to Stripe's hosted PDF for the invoice
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: invoiceId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       302:
+ *         description: Redirects to invoice PDF URL
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       403:
+ *         $ref: '#/components/responses/ForbiddenError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
+ */
+router.get(
+  '/venues/:venueId/invoices/:invoiceId/download',
+  authenticateTokenMiddleware,
+  checkPermission('features:read'),
+  venueFeatureController.downloadInvoice,
 )
 
 //Rutas de Payment para el Dashboard

@@ -32,7 +32,13 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder } from '../storage.service'
-import { getOrCreateStripeCustomer, updatePaymentMethod, createTrialSubscriptions } from '../stripe.service'
+import {
+  getOrCreateStripeCustomer,
+  updatePaymentMethod,
+  createTrialSubscriptions,
+  createCustomerPortalSession,
+  syncFeaturesToStripe,
+} from '../stripe.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -738,8 +744,14 @@ export async function convertDemoVenue(
         throw new BadRequestError('Organization does not have a valid email for billing')
       }
 
-      // Create or get Stripe customer for the organization
-      stripeCustomerId = await getOrCreateStripeCustomer(orgId, billingEmail, organization.name || conversionData.legalName)
+      // Create or get Stripe customer for the organization (with venue info)
+      stripeCustomerId = await getOrCreateStripeCustomer(
+        orgId,
+        billingEmail,
+        organization.name || conversionData.legalName,
+        existingVenue.name, // venueName
+        existingVenue.slug, // venueSlug
+      )
 
       // Attach payment method to customer and set as default
       await updatePaymentMethod(stripeCustomerId, conversionData.paymentMethodId)
@@ -794,11 +806,17 @@ export async function convertDemoVenue(
     })
 
     try {
+      // Ensure features are synced to Stripe (creates products/prices if missing)
+      logger.info('🔄 Ensuring features are synced to Stripe...')
+      await syncFeaturesToStripe()
+
       const subscriptionIds = await createTrialSubscriptions(
         stripeCustomerId,
         venueId,
         conversionData.selectedFeatures,
         5, // 5 days trial period
+        updatedVenue.name, // venueName
+        updatedVenue.slug, // venueSlug
       )
 
       logger.info('✅ Trial subscriptions created successfully', {
@@ -818,4 +836,111 @@ export async function convertDemoVenue(
   }
 
   return updatedVenue
+}
+
+/**
+ * Update venue payment method
+ * Updates the Stripe payment method for a venue
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID
+ * @param paymentMethodId - New Stripe payment method ID
+ * @param options - Optional parameters
+ * @returns Updated venue
+ */
+export async function updateVenuePaymentMethod(
+  orgId: string,
+  venueId: string,
+  paymentMethodId: string,
+  options: { skipOrgCheck?: boolean } = {},
+): Promise<void> {
+  logger.info('Updating venue payment method', { venueId, paymentMethodId })
+
+  // Get venue with Stripe customer ID
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+    select: {
+      id: true,
+      name: true,
+      stripeCustomerId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  if (!venue.stripeCustomerId) {
+    throw new BadRequestError('Venue does not have Stripe customer configured')
+  }
+
+  // Update payment method in Stripe
+  await updatePaymentMethod(venue.stripeCustomerId, paymentMethodId)
+
+  // Update payment method ID in database
+  await prisma.venue.update({
+    where: { id: venueId },
+    data: {
+      stripePaymentMethodId: paymentMethodId,
+    },
+  })
+
+  logger.info('✅ Venue payment method updated successfully', {
+    venueId,
+    venueName: venue.name,
+    paymentMethodId,
+  })
+}
+
+/**
+ * Create Stripe Customer Portal session
+ * Generates a secure URL to Stripe's hosted billing portal
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID
+ * @param returnUrl - URL to redirect user after they're done
+ * @param options - Optional parameters
+ * @returns Portal session URL
+ */
+export async function createVenueBillingPortalSession(
+  orgId: string,
+  venueId: string,
+  returnUrl: string,
+  options: { skipOrgCheck?: boolean } = {},
+): Promise<string> {
+  logger.info('Creating billing portal session', { venueId, returnUrl })
+
+  // Get venue with Stripe customer ID
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+    select: {
+      id: true,
+      name: true,
+      stripeCustomerId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  if (!venue.stripeCustomerId) {
+    throw new BadRequestError('Venue does not have Stripe customer configured')
+  }
+
+  // Create portal session
+  const portalUrl = await createCustomerPortalSession(venue.stripeCustomerId, returnUrl)
+
+  logger.info('✅ Billing portal session created', {
+    venueId,
+    venueName: venue.name,
+  })
+
+  return portalUrl
 }

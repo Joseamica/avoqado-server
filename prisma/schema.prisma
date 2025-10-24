@@ -1596,8 +1596,10 @@ model VenueFeature {
   endDate   DateTime? // null = paid subscription, not-null = trial period
 
   // Stripe integration
-  stripeSubscriptionId String? @unique
-  stripePriceId        String?
+  stripeSubscriptionId     String?   @unique
+  stripeSubscriptionItemId String?   @unique
+  stripePriceId            String?
+  trialEndDate             DateTime? // When the trial period ends
 
   @@unique([venueId, featureId])
   @@index([venueId])
@@ -1911,6 +1913,25 @@ model ProviderEventLog {
   @@index([venueId])
   @@index([status])
   @@index([providerId])
+}
+
+// Stripe webhook event tracking for idempotency
+// Prevents duplicate processing of webhook events
+model StripeWebhookEvent {
+  id        String   @id @default(cuid())
+  eventId   String   @unique // Stripe event.id
+  type      String   // Event type (e.g., "customer.subscription.updated")
+  processed Boolean  @default(false) // Whether event processing completed successfully
+  createdAt DateTime @default(now())
+
+  // Failure tracking for observability
+  failureReason String?   // Error message if processing failed
+  failedAt      DateTime? // When the processing failed
+  retryCount    Int       @default(0) // Number of times Stripe retried this event
+
+  @@index([eventId])
+  @@index([processed])
+  @@index([retryCount]) // For monitoring retry patterns
 }
 
 // ==========================================
@@ -2697,6 +2718,12 @@ enum NotificationType {
   VENUE_SUSPENDED
   HIGH_COMMISSION_ALERT
   REVENUE_MILESTONE
+
+  // Subscription notifications
+  SUBSCRIPTION_TRIAL_ENDING
+  SUBSCRIPTION_ACTIVATED
+  SUBSCRIPTION_CANCELLED
+  SUBSCRIPTION_PAYMENT_FAILED
 
   // General
   ANNOUNCEMENT

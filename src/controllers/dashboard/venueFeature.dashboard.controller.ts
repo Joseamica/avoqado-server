@@ -4,6 +4,8 @@
 
 import { Request, Response, NextFunction } from 'express'
 import * as venueFeatureService from '../../services/dashboard/venueFeature.dashboard.service'
+import * as stripeService from '../../services/stripe.service'
+import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 
 /**
@@ -101,6 +103,88 @@ export async function removeVenueFeature(
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params?.venueId,
       featureId: req.params?.featureId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get Stripe invoices for a venue
+ * GET /api/v1/dashboard/venues/:venueId/invoices
+ */
+export async function getVenueInvoices(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+
+    logger.info('Getting invoices for venue', { venueId })
+
+    // Get venue's organization to find Stripe customer ID
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      include: { organization: true },
+    })
+
+    if (!venue) {
+      res.status(404).json({
+        success: false,
+        error: 'Venue not found',
+      })
+      return
+    }
+
+    if (!venue.organization.stripeCustomerId) {
+      // No Stripe customer = no invoices
+      res.status(200).json({
+        success: true,
+        data: {
+          invoices: [],
+        },
+      })
+      return
+    }
+
+    // Fetch invoices from Stripe
+    const invoices = await stripeService.getCustomerInvoices(venue.organization.stripeCustomerId)
+
+    res.status(200).json({
+      success: true,
+      data: {
+        invoices,
+      },
+    })
+  } catch (error) {
+    logger.error('Error getting venue invoices', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Download invoice PDF
+ * GET /api/v1/dashboard/venues/:venueId/invoices/:invoiceId/download
+ */
+export async function downloadInvoice(
+  req: Request<{ venueId: string; invoiceId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, invoiceId } = req.params
+
+    logger.info('Downloading invoice', { venueId, invoiceId })
+
+    // Get invoice PDF URL from Stripe
+    const pdfUrl = await stripeService.getInvoicePdfUrl(invoiceId)
+
+    // Redirect to Stripe's hosted PDF
+    res.redirect(pdfUrl)
+  } catch (error) {
+    logger.error('Error downloading invoice', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+      invoiceId: req.params?.invoiceId,
     })
     next(error)
   }

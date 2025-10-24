@@ -7,6 +7,10 @@
 import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { FRONTEND_URL } from '@/config/env'
+import emailService from './email.service'
+import { createNotification } from './dashboard/notification.dashboard.service'
+import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
 
 /**
  * Handle subscription updated event
@@ -242,6 +246,101 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
 }
 
 /**
+ * Send trial ending notifications (email + in-app) to venue owners and admins
+ * Called by handleSubscriptionTrialWillEnd
+ *
+ * @param venueId - Venue ID
+ * @param venueName - Venue name
+ * @param featureName - Feature name
+ * @param trialEndDate - Trial end date
+ */
+async function sendTrialEndingNotifications(venueId: string, venueName: string, featureName: string, trialEndDate: Date): Promise<void> {
+  try {
+    // 1. Query venue staff with OWNER and ADMIN roles
+    const staffMembers = await prisma.staffVenue.findMany({
+      where: {
+        venueId,
+        role: { in: [StaffRole.OWNER, StaffRole.ADMIN] },
+      },
+      include: {
+        staff: {
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+
+    if (staffMembers.length === 0) {
+      logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
+      return
+    }
+
+    logger.info(`📧 Sending trial ending notifications to ${staffMembers.length} staff members`, { venueId })
+
+    // 2. Generate billing portal URL
+    const billingPortalUrl = `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+
+    // 3. Send notifications to each staff member
+    for (const staffVenue of staffMembers) {
+      const { staff } = staffVenue
+
+      try {
+        // 3a. Create in-app notification
+        await createNotification({
+          recipientId: staff.id,
+          venueId,
+          type: NotificationType.SUBSCRIPTION_TRIAL_ENDING,
+          title: `⏰ Prueba gratuita terminando pronto`,
+          message: `Tu prueba gratuita de ${featureName} termina el ${trialEndDate.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric' })}. Actualiza tu método de pago para continuar usando esta función.`,
+          metadata: {
+            featureName,
+            trialEndDate: trialEndDate.toISOString(),
+            billingPortalUrl,
+          },
+          channels: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+          priority: NotificationPriority.HIGH,
+        })
+
+        logger.info('✅ In-app notification created', { userId: staff.id, venueId })
+
+        // 3b. Send email notification
+        const emailSent = await emailService.sendTrialEndingEmail(staff.email, {
+          venueName,
+          featureName,
+          trialEndDate,
+          billingPortalUrl,
+        })
+
+        if (emailSent) {
+          logger.info('✅ Email sent successfully', { email: staff.email, venueId })
+        } else {
+          logger.warn('⚠️ Email failed to send', { email: staff.email, venueId })
+        }
+      } catch (notificationError) {
+        // Log but don't throw - notifications should not block webhook success
+        logger.error('❌ Failed to send notification to staff member', {
+          staffId: staff.id,
+          email: staff.email,
+          error: notificationError instanceof Error ? notificationError.message : 'Unknown error',
+        })
+      }
+    }
+
+    logger.info('✅ Trial ending notifications sent successfully', { venueId, staffCount: staffMembers.length })
+  } catch (error) {
+    // Log but don't throw - notifications should not block webhook success
+    logger.error('❌ Failed to send trial ending notifications', {
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Handle subscription trial will end event
  * Triggered 3 days before trial ends (configurable in Stripe)
  *
@@ -273,13 +372,85 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
     trialEnd,
   })
 
-  // TODO: Send notification to venue owner about trial ending
-  // TODO: Create in-app notification
+  // Send notifications to venue owners and admins
+  if (trialEnd) {
+    await sendTrialEndingNotifications(venueFeature.venueId, venueFeature.venue.name, venueFeature.feature.name, trialEnd)
+  }
+}
+
+/**
+ * Handle customer deleted event
+ * Triggered when a customer is permanently deleted from Stripe
+ *
+ * @param customer - Stripe Customer object
+ */
+export async function handleCustomerDeleted(customer: Stripe.Customer) {
+  const customerId = customer.id
+
+  logger.warn('📥 Webhook: Customer deleted from Stripe', {
+    customerId,
+    email: customer.email,
+    name: customer.name,
+  })
+
+  // Find organization with this Stripe customer
+  const organization = await prisma.organization.findFirst({
+    where: { stripeCustomerId: customerId },
+    include: {
+      venues: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  })
+
+  if (!organization) {
+    logger.warn('⚠️ Webhook: No organization found for deleted customer', { customerId })
+    return
+  }
+
+  logger.warn('⚠️ Webhook: Removing Stripe customer ID from organization', {
+    organizationId: organization.id,
+    organizationName: organization.name,
+    venueCount: organization.venues.length,
+    customerId,
+  })
+
+  // Clear Stripe customer ID from organization
+  await prisma.organization.update({
+    where: { id: organization.id },
+    data: {
+      stripeCustomerId: null,
+    },
+  })
+
+  // Deactivate all venue features (since payment method is gone)
+  const deactivatedCount = await prisma.venueFeature.updateMany({
+    where: {
+      venue: {
+        organizationId: organization.id,
+      },
+      active: true,
+    },
+    data: {
+      active: false,
+    },
+  })
+
+  logger.warn('⚠️ Webhook: Deactivated all features due to customer deletion', {
+    organizationId: organization.id,
+    deactivatedFeatures: deactivatedCount.count,
+  })
 }
 
 /**
  * Main webhook event dispatcher
  * Routes events to appropriate handlers
+ *
+ * Implements idempotency to prevent duplicate event processing
+ * by tracking events in the StripeWebhookEvent table
  *
  * @param event - Stripe Event object
  */
@@ -287,6 +458,32 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
   logger.info('📥 Webhook received', { type: event.type, id: event.id })
 
   try {
+    // 🔒 ATOMIC IDEMPOTENCY: Create event record to claim this event
+    // If another process already claimed it, Prisma will throw unique constraint error
+    try {
+      await prisma.stripeWebhookEvent.create({
+        data: {
+          eventId: event.id,
+          type: event.type,
+          processed: false,
+        },
+      })
+    } catch (error: any) {
+      // P2002 = Unique constraint violation (eventId already exists)
+      if (error.code === 'P2002') {
+        logger.info('⏭️ Webhook event already being processed by another instance, skipping', {
+          eventId: event.id,
+          type: event.type,
+        })
+        return
+      }
+      // Re-throw other errors
+      throw error
+    }
+
+    logger.info('🎯 Processing webhook event', { type: event.type, id: event.id })
+
+    // Process event based on type
     switch (event.type) {
       case 'customer.subscription.updated':
         await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
@@ -308,17 +505,66 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
         await handleSubscriptionTrialWillEnd(event.data.object as Stripe.Subscription)
         break
 
+      case 'customer.deleted':
+        await handleCustomerDeleted(event.data.object as Stripe.Customer)
+        break
+
       default:
         logger.info('ℹ️ Webhook: Unhandled event type', { type: event.type })
     }
 
+    // 🔒 IDEMPOTENCY: Mark event as processed after successful completion
+    await prisma.stripeWebhookEvent.update({
+      where: { eventId: event.id },
+      data: { processed: true },
+    })
+
     logger.info('✅ Webhook processed successfully', { type: event.type, id: event.id })
-  } catch (error) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+
     logger.error('❌ Webhook processing failed', {
       type: event.type,
       id: event.id,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: errorMessage,
     })
+
+    // Track failure in database for observability
+    try {
+      await prisma.stripeWebhookEvent.update({
+        where: { eventId: event.id },
+        data: {
+          processed: false,
+          failureReason: errorMessage,
+          failedAt: new Date(),
+          retryCount: { increment: 1 },
+        },
+      })
+
+      // If failed 3+ times, log critical alert (in production, send to PagerDuty/Slack)
+      const failedEvent = await prisma.stripeWebhookEvent.findUnique({
+        where: { eventId: event.id },
+        select: { retryCount: true },
+      })
+
+      if (failedEvent && failedEvent.retryCount >= 3) {
+        logger.error('🚨 CRITICAL: Webhook failed 3+ times', {
+          eventId: event.id,
+          type: event.type,
+          retryCount: failedEvent.retryCount,
+          error: errorMessage,
+        })
+        // TODO: Send alert to ops team (Slack/PagerDuty)
+        // await alertOps(`Webhook ${event.id} failed ${failedEvent.retryCount} times`)
+      }
+    } catch (dbError) {
+      // Don't throw if DB update fails - webhook failure is more important
+      logger.warn('⚠️ Failed to update webhook failure tracking', {
+        eventId: event.id,
+        error: dbError instanceof Error ? dbError.message : 'Unknown error',
+      })
+    }
+
     throw error
   }
 }
@@ -330,4 +576,5 @@ export default {
   handleInvoicePaymentSucceeded,
   handleInvoicePaymentFailed,
   handleSubscriptionTrialWillEnd,
+  handleCustomerDeleted,
 }

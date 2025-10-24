@@ -125,3 +125,24 @@ export const addVenueFeaturesSchema = z.object({
 })
 
 export type AddVenueFeaturesDto = z.infer<typeof addVenueFeaturesSchema.shape.body>
+
+// Schema for updating venue payment method
+export const updatePaymentMethodSchema = z.object({
+  body: z.object({
+    paymentMethodId: z
+      .string({ required_error: 'Payment method ID is required' })
+      .min(1, { message: 'Payment method ID cannot be empty' })
+      .startsWith('pm_', { message: 'Invalid Stripe payment method ID format' }),
+  }),
+})
+
+export type UpdatePaymentMethodDto = z.infer<typeof updatePaymentMethodSchema.shape.body>
+
+// Schema for creating Stripe Customer Portal session
+export const createBillingPortalSessionSchema = z.object({
+  body: z.object({
+    returnUrl: z.string({ required_error: 'Return URL is required' }).url({ message: 'Invalid URL format' }),
+  }),
+})
+
+export type CreateBillingPortalSessionDto = z.infer<typeof createBillingPortalSessionSchema.shape.body>

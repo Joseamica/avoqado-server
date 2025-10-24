@@ -24,6 +24,13 @@ interface ReceiptEmailData {
   venueLogoUrl?: string
 }
 
+interface TrialEndingEmailData {
+  venueName: string
+  featureName: string
+  trialEndDate: Date
+  billingPortalUrl: string
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -247,6 +254,113 @@ class EmailService {
       Esta invitación expirará en 7 días.
       
       Saludos,
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendTrialEndingEmail(email: string, data: TrialEndingEmailData): Promise<boolean> {
+    const subject = `⏰ Tu prueba gratuita de ${data.featureName} está por terminar - ${data.venueName}`
+    const trialEndDateFormatted = data.trialEndDate.toLocaleDateString('es-MX', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Tu prueba gratuita está por terminar</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">⏰ Tu prueba gratuita está por terminar</h1>
+              <p style="color: #e8f4f8; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola,</p>
+
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                Te escribimos para recordarte que tu <strong>prueba gratuita de ${data.featureName}</strong> está por terminar el <strong>${trialEndDateFormatted}</strong>.
+              </p>
+
+              <div style="background: #fff8e1; border-left: 4px solid #ffc107; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  ⚠️ <strong>Importante:</strong> Después de esta fecha, la función será desactivada automáticamente si no actualizas tu método de pago.
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  Para continuar usando ${data.featureName} sin interrupciones, actualiza tu método de pago ahora.
+                </p>
+              </div>
+
+              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0; text-align: center;">
+                <p style="font-size: 16px; margin-bottom: 20px; color: #555;">Actualiza tu método de pago:</p>
+                <a href="${data.billingPortalUrl}"
+                   style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                          color: white;
+                          padding: 15px 35px;
+                          text-decoration: none;
+                          border-radius: 25px;
+                          font-weight: bold;
+                          font-size: 16px;
+                          display: inline-block;
+                          box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+                          transition: all 0.3s ease;">
+                  💳 Ir a Facturación
+                </a>
+              </div>
+
+              <div style="background: #f9f9f9; border-left: 4px solid #667eea; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  💡 <strong>¿Por qué ${data.featureName}?</strong>
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  Esta función te ayuda a gestionar mejor tu restaurante y mejorar la experiencia de tus clientes. No pierdas acceso a todas estas ventajas.
+                </p>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                ¿Necesitas ayuda? Contáctanos en cualquier momento.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Hola,
+
+      Tu prueba gratuita de ${data.featureName} está por terminar el ${trialEndDateFormatted}.
+
+      ⚠️ IMPORTANTE: Después de esta fecha, la función será desactivada automáticamente si no actualizas tu método de pago.
+
+      Para continuar usando ${data.featureName} sin interrupciones, actualiza tu método de pago ahora:
+
+      ${data.billingPortalUrl}
+
+      ¿Por qué ${data.featureName}?
+      Esta función te ayuda a gestionar mejor tu restaurante y mejorar la experiencia de tus clientes.
+
+      ¿Necesitas ayuda? Contáctanos en cualquier momento.
+
       Equipo de Avoqado
     `
 

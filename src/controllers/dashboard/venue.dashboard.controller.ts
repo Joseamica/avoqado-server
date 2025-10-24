@@ -327,3 +327,75 @@ export async function uploadVenueDocument(req: Request<{ venueId: string }>, res
     next(error)
   }
 }
+
+/**
+ * Update venue payment method
+ * Allows venue owner to change the Stripe payment method
+ */
+export async function updateVenuePaymentMethod(
+  req: Request<{ venueId: string }, any, { paymentMethodId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+    const { paymentMethodId } = req.body
+
+    // Call service to update payment method
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    await venueDashboardService.updateVenuePaymentMethod(orgId, venueId, paymentMethodId, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      message: 'Payment method updated successfully',
+    })
+  } catch (error) {
+    logger.error('Error updating venue payment method', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Create Stripe Customer Portal session
+ * Generates a URL to Stripe's hosted billing portal for subscription management
+ */
+export async function createBillingPortalSession(
+  req: Request<{ venueId: string }, any, { returnUrl: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+    const { returnUrl } = req.body
+
+    // Call service to create billing portal session
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const portalUrl = await venueDashboardService.createVenueBillingPortalSession(orgId, venueId, returnUrl, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      url: portalUrl,
+    })
+  } catch (error) {
+    logger.error('Error creating billing portal session', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}

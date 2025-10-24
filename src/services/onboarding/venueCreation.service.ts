@@ -170,6 +170,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       businessInfo.name,
       selectedFeatures,
       stripePaymentMethodId,
+      venue.name, // venueName
+      venue.slug, // venueSlug
     )
   }
 
@@ -274,6 +276,8 @@ async function createMenuFromOnboarding(
  * @param name - Organization name
  * @param featureCodes - Array of feature codes to enable
  * @param paymentMethodId - Optional Stripe payment method ID
+ * @param venueName - Venue name for identification
+ * @param venueSlug - Venue slug for identification
  */
 async function enablePremiumFeatures(
   venueId: string,
@@ -282,12 +286,14 @@ async function enablePremiumFeatures(
   name: string,
   featureCodes: string[],
   paymentMethodId?: string,
+  venueName?: string,
+  venueSlug?: string,
 ): Promise<void> {
   try {
     logger.info(`🎯 Enabling premium features for venue ${venueId}: ${featureCodes.join(', ')}`)
 
-    // Step 1: Get or create Stripe customer
-    const customerId = await stripeService.getOrCreateStripeCustomer(organizationId, email, name)
+    // Step 1: Get or create Stripe customer (with venue info)
+    const customerId = await stripeService.getOrCreateStripeCustomer(organizationId, email, name, venueName, venueSlug)
 
     // Step 2: Attach payment method if provided
     if (paymentMethodId) {
@@ -298,8 +304,8 @@ async function enablePremiumFeatures(
     // Step 3: Ensure features are synced to Stripe
     await stripeService.syncFeaturesToStripe()
 
-    // Step 4: Create trial subscriptions (5 days)
-    const subscriptionIds = await stripeService.createTrialSubscriptions(customerId, venueId, featureCodes, 5)
+    // Step 4: Create trial subscriptions (5 days) with venue info
+    const subscriptionIds = await stripeService.createTrialSubscriptions(customerId, venueId, featureCodes, 5, venueName, venueSlug)
 
     logger.info(`✅ Created ${subscriptionIds.length} trial subscriptions for venue ${venueId}`)
   } catch (error) {

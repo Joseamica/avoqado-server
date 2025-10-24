@@ -758,7 +758,7 @@ async function main() {
   console.log('Seeding organizations...')
   const organizations = await Promise.all([
     prisma.organization.create({
-      data: { name: 'Grupo Avoqado Prime', email: 'billing@avoqadoprime.com', phone: faker.phone.number(), taxId: 'AVP123456XYZ' },
+      data: { name: 'Grupo Avoqado Prime', email: 'hola@avoqado.com', phone: faker.phone.number(), taxId: 'AVP123456XYZ' },
     }),
   ])
   console.log(`  Created ${organizations.length} organizations.`)
