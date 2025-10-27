@@ -255,7 +255,8 @@ async function sendPaymentFailedNotifications(
 
       try {
         // Determine notification priority based on attempt count
-        const priority = attemptCount >= 3 ? NotificationPriority.URGENT : attemptCount >= 2 ? NotificationPriority.HIGH : NotificationPriority.NORMAL
+        const priority =
+          attemptCount >= 3 ? NotificationPriority.URGENT : attemptCount >= 2 ? NotificationPriority.HIGH : NotificationPriority.NORMAL
 
         // 3a. Create in-app notification
         await createNotification({
@@ -363,7 +364,8 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   let last4: string | undefined
   try {
     if (invoice.default_payment_method) {
-      const paymentMethodId = typeof invoice.default_payment_method === 'string' ? invoice.default_payment_method : invoice.default_payment_method.id
+      const paymentMethodId =
+        typeof invoice.default_payment_method === 'string' ? invoice.default_payment_method : invoice.default_payment_method.id
       const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
       const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId)
       last4 = paymentMethod.card?.last4

@@ -242,10 +242,7 @@ export async function previewSubscriptionChange(
     }
 
     // Get proration preview from Stripe
-    const prorationDetails = await stripeService.previewSubscriptionProration(
-      venueFeature.stripeSubscriptionId,
-      newFeature.stripePriceId,
-    )
+    const prorationDetails = await stripeService.previewSubscriptionProration(venueFeature.stripeSubscriptionId, newFeature.stripePriceId)
 
     res.status(200).json({
       success: true,
@@ -327,10 +324,7 @@ export async function updateSubscription(
     }
 
     // Update subscription in Stripe
-    const updatedSubscription = await stripeService.updateSubscriptionPrice(
-      venueFeature.stripeSubscriptionId,
-      newFeature.stripePriceId,
-    )
+    const updatedSubscription = await stripeService.updateSubscriptionPrice(venueFeature.stripeSubscriptionId, newFeature.stripePriceId)
 
     // Update VenueFeature record
     const updatedVenueFeature = await prisma.venueFeature.update({
