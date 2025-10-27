@@ -15,7 +15,7 @@ import { handleStripeWebhookEvent, handleCustomerDeleted, handleSubscriptionUpda
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    stripeWebhookEvent: {
+    webhookEvent: {
       findUnique: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
@@ -55,6 +55,13 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
 describe('Stripe Webhook Service - Critical Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Default mock for webhookEvent.create - tests can override if needed
+    ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValue({
+      id: 'webhook_default_id',
+      stripeEventId: 'evt_default',
+      eventType: 'default.event',
+      status: 'PENDING',
+    })
   })
 
   describe('🔒 TEST 1: Idempotency - Prevent Duplicate Processing', () => {
@@ -77,7 +84,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       }
 
       // First call - should process
-      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({
         id: 'webhook_1',
         eventId: 'evt_test_123',
         type: 'customer.subscription.updated',
@@ -93,22 +100,22 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         venue: { id: 'venue_1', name: 'Test Venue' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
-      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValueOnce({})
 
       await handleStripeWebhookEvent(mockEvent)
 
-      expect(prisma.stripeWebhookEvent.create).toHaveBeenCalledTimes(1)
+      expect(prisma.webhookEvent.create).toHaveBeenCalledTimes(1)
       expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
 
       // Second call - should skip (idempotency)
       const P2002Error = new Error('Unique constraint violation')
       ;(P2002Error as any).code = 'P2002'
-      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockRejectedValueOnce(P2002Error)
+      ;(prisma.webhookEvent.create as jest.Mock).mockRejectedValueOnce(P2002Error)
 
       await handleStripeWebhookEvent(mockEvent)
 
       // Should NOT process again
-      expect(prisma.stripeWebhookEvent.create).toHaveBeenCalledTimes(2)
+      expect(prisma.webhookEvent.create).toHaveBeenCalledTimes(2)
       expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1) // Still 1, not 2
     })
 
@@ -131,7 +138,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       }
 
       // First call succeeds
-      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({
         id: 'webhook_1',
         eventId: 'evt_concurrent_123',
       })
@@ -144,13 +151,13 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         venue: { name: 'Test' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
-      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockResolvedValue({})
+      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
 
       // Other 9 calls get P2002 (already processing)
       const P2002Error = new Error('Unique constraint violation')
       ;(P2002Error as any).code = 'P2002'
       for (let i = 0; i < 9; i++) {
-        ;(prisma.stripeWebhookEvent.create as jest.Mock).mockRejectedValueOnce(P2002Error)
+        ;(prisma.webhookEvent.create as jest.Mock).mockRejectedValueOnce(P2002Error)
       }
 
       // Simulate 10 concurrent webhooks
@@ -490,7 +497,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       }
 
       // Mock: Event creation succeeds
-      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({
         id: 'webhook_1',
         eventId: 'evt_error_123',
       })
@@ -499,8 +506,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       ;(prisma.venueFeature.findFirst as jest.Mock).mockRejectedValueOnce(new Error('Database connection failed'))
 
       // Mock: Failure tracking
-      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockResolvedValueOnce({})
-      ;(prisma.stripeWebhookEvent.findUnique as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.webhookEvent.findUnique as jest.Mock).mockResolvedValueOnce({
         eventId: 'evt_error_123',
         retryCount: 1,
       })
@@ -508,12 +515,12 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Database connection failed')
 
       // Should track failure
-      expect(prisma.stripeWebhookEvent.update).toHaveBeenCalledWith({
-        where: { eventId: 'evt_error_123' },
+      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
+        where: { id: 'webhook_1' },
         data: {
-          processed: false,
-          failureReason: 'Database connection failed',
-          failedAt: expect.any(Date),
+          status: 'FAILED',
+          errorMessage: 'Database connection failed',
+          processingTime: expect.any(Number),
           retryCount: { increment: 1 },
         },
       })
@@ -537,15 +544,15 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         },
       }
 
-      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({
         id: 'webhook_1',
         eventId: 'evt_critical_failure',
       })
       ;(prisma.venueFeature.findFirst as jest.Mock).mockRejectedValueOnce(new Error('Critical error'))
-      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValueOnce({})
 
       // Mock: 3 retries already happened
-      ;(prisma.stripeWebhookEvent.findUnique as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.webhookEvent.findUnique as jest.Mock).mockResolvedValueOnce({
         eventId: 'evt_critical_failure',
         retryCount: 3, // Critical threshold
       })
@@ -554,8 +561,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
 
       // Should log critical alert (in production: send to PagerDuty/Slack)
       // Verify it checked retry count
-      expect(prisma.stripeWebhookEvent.findUnique).toHaveBeenCalledWith({
-        where: { eventId: 'evt_critical_failure' },
+      expect(prisma.webhookEvent.findUnique).toHaveBeenCalledWith({
+        where: { id: 'webhook_1' },
         select: { retryCount: true },
       })
     })
@@ -578,19 +585,19 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         },
       }
 
-      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({
         id: 'webhook_1',
         eventId: 'evt_db_error',
       })
       ;(prisma.venueFeature.findFirst as jest.Mock).mockRejectedValueOnce(new Error('Processing error'))
 
       // Database update fails when tracking error
-      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockRejectedValueOnce(new Error('Database write failed'))
+      ;(prisma.webhookEvent.update as jest.Mock).mockRejectedValueOnce(new Error('Database write failed'))
 
       await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Processing error')
 
       // Should NOT throw secondary error, just log warning
-      expect(prisma.stripeWebhookEvent.update).toHaveBeenCalled()
+      expect(prisma.webhookEvent.update).toHaveBeenCalled()
     })
   })
 

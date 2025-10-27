@@ -653,6 +653,49 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
         paymentMethodId,
         fingerprint,
       })
+
+      // Set this payment method as default for the customer
+      try {
+        await stripe.customers.update(customerId, {
+          invoice_settings: {
+            default_payment_method: paymentMethodId,
+          },
+        })
+
+        logger.info('✅ Webhook: Payment method set as default in Stripe', {
+          paymentMethodId,
+          customerId,
+          last4: paymentMethod.card?.last4,
+          brand: paymentMethod.card?.brand,
+        })
+
+        // Update Venue record in database with payment method ID
+        try {
+          await prisma.venue.updateMany({
+            where: { stripeCustomerId: customerId },
+            data: { stripePaymentMethodId: paymentMethodId },
+          })
+
+          logger.info('✅ Webhook: Payment method saved to venue database', {
+            paymentMethodId,
+            customerId,
+          })
+        } catch (dbUpdateError) {
+          logger.error('❌ Webhook: Failed to update venue payment method in database', {
+            paymentMethodId,
+            customerId,
+            error: dbUpdateError instanceof Error ? dbUpdateError.message : 'Unknown error',
+          })
+          // Don't throw - Stripe is already updated, database sync can be retried
+        }
+      } catch (setDefaultError) {
+        logger.error('❌ Webhook: Failed to set payment method as default', {
+          paymentMethodId,
+          customerId,
+          error: setDefaultError instanceof Error ? setDefaultError.message : 'Unknown error',
+        })
+        // Don't throw - setting as default is important but not critical for the webhook
+      }
     }
   } catch (error) {
     // Don't throw - this is informational and shouldn't block the webhook
@@ -682,15 +725,17 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
     // 🔒 ATOMIC IDEMPOTENCY: Create event record to claim this event
     // If another process already claimed it, Prisma will throw unique constraint error
     try {
-      await prisma.stripeWebhookEvent.create({
+      const webhookEvent = await prisma.webhookEvent.create({
         data: {
-          eventId: event.id,
-          type: event.type,
-          processed: false,
+          stripeEventId: event.id,
+          eventType: event.type,
+          payload: event as any,
+          status: 'PENDING',
         },
       })
+      webhookEventId = webhookEvent.id
     } catch (error: any) {
-      // P2002 = Unique constraint violation (eventId already exists)
+      // P2002 = Unique constraint violation (stripeEventId already exists)
       if (error.code === 'P2002') {
         logger.info('⏭️ Webhook event already being processed by another instance, skipping', {
           eventId: event.id,
@@ -702,8 +747,8 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       throw error
     }
 
-    // 📊 CREATE MONITORING LOG: Store full event for debugging/observability
-    // Extract venueId from event data if available
+    // 📊 Update webhook event with venue info if available
+    // Extract venueId from event data
     let venueId: string | null = null
     const eventData = event.data.object as any
 
@@ -720,16 +765,13 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       venueId = venueFeature?.venueId || null
     }
 
-    const webhookEvent = await prisma.webhookEvent.create({
-      data: {
-        stripeEventId: event.id,
-        eventType: event.type,
-        payload: event as any, // Store full event payload as JSON
-        status: 'PENDING',
-        venueId: venueId,
-      },
-    })
-    webhookEventId = webhookEvent.id
+    // Update the webhook event with venueId if found
+    if (venueId && webhookEventId) {
+      await prisma.webhookEvent.update({
+        where: { id: webhookEventId },
+        data: { venueId },
+      })
+    }
 
     logger.info('🎯 Processing webhook event', { type: event.type, id: event.id, webhookEventId })
 
@@ -767,12 +809,6 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
         logger.info('ℹ️ Webhook: Unhandled event type', { type: event.type })
     }
 
-    // 🔒 IDEMPOTENCY: Mark event as processed after successful completion
-    await prisma.stripeWebhookEvent.update({
-      where: { eventId: event.id },
-      data: { processed: true },
-    })
-
     // 📊 UPDATE MONITORING LOG: Mark as success with processing time
     const processingTime = Date.now() - startTime
     if (webhookEventId) {
@@ -796,21 +832,10 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       error: errorMessage,
     })
 
-    // Track failure in database for observability
-    try {
-      await prisma.stripeWebhookEvent.update({
-        where: { eventId: event.id },
-        data: {
-          processed: false,
-          failureReason: errorMessage,
-          failedAt: new Date(),
-          retryCount: { increment: 1 },
-        },
-      })
-
-      // 📊 UPDATE MONITORING LOG: Mark as failed with error details
-      const processingTime = Date.now() - startTime
-      if (webhookEventId) {
+    // 📊 UPDATE MONITORING LOG: Mark as failed with error details
+    const processingTime = Date.now() - startTime
+    if (webhookEventId) {
+      try {
         await prisma.webhookEvent.update({
           where: { id: webhookEventId },
           data: {
@@ -820,30 +845,36 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
             retryCount: { increment: 1 },
           },
         })
+      } catch (updateError) {
+        logger.error('Failed to update webhook event status', { updateError })
       }
 
       // If failed 3+ times, log critical alert (in production, send to PagerDuty/Slack)
-      const failedEvent = await prisma.stripeWebhookEvent.findUnique({
-        where: { eventId: event.id },
-        select: { retryCount: true },
-      })
+      if (webhookEventId) {
+        try {
+          const failedEvent = await prisma.webhookEvent.findUnique({
+            where: { id: webhookEventId },
+            select: { retryCount: true },
+          })
 
-      if (failedEvent && failedEvent.retryCount >= 3) {
-        logger.error('🚨 CRITICAL: Webhook failed 3+ times', {
-          eventId: event.id,
-          type: event.type,
-          retryCount: failedEvent.retryCount,
-          error: errorMessage,
-        })
-        // TODO: Send alert to ops team (Slack/PagerDuty)
-        // await alertOps(`Webhook ${event.id} failed ${failedEvent.retryCount} times`)
+          if (failedEvent && failedEvent.retryCount >= 3) {
+            logger.error('🚨 CRITICAL: Webhook failed 3+ times', {
+              eventId: event.id,
+              type: event.type,
+              retryCount: failedEvent.retryCount,
+              error: errorMessage,
+            })
+            // TODO: Send alert to ops team (Slack/PagerDuty)
+            // await alertOps(`Webhook ${event.id} failed ${failedEvent.retryCount} times`)
+          }
+        } catch (dbError) {
+          // Don't throw if DB query fails - webhook failure is more important
+          logger.warn('⚠️ Failed to check webhook retry count', {
+            eventId: event.id,
+            error: dbError instanceof Error ? dbError.message : 'Unknown error',
+          })
+        }
       }
-    } catch (dbError) {
-      // Don't throw if DB update fails - webhook failure is more important
-      logger.warn('⚠️ Failed to update webhook failure tracking', {
-        eventId: event.id,
-        error: dbError instanceof Error ? dbError.message : 'Unknown error',
-      })
     }
 
     throw error

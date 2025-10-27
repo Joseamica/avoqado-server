@@ -303,7 +303,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
         )
       })
 
-      it('should continue creating subscriptions even if one fails', async () => {
+      it('should throw error if any subscription fails', async () => {
         const mockCustomerId = 'cus_123'
         const mockVenueId = 'venue_123'
 
@@ -334,11 +334,15 @@ describe('Stripe Service - Comprehensive Tests', () => {
         mockStripeInstance.subscriptions.create.mockResolvedValueOnce({ id: 'sub_2' })
         ;(prisma.venueFeature.upsert as jest.Mock).mockResolvedValue({})
 
-        const result = await stripeService.createTrialSubscriptions(mockCustomerId, mockVenueId, ['FEATURE_1', 'FEATURE_2'])
+        // Should throw error with details about failed subscription
+        await expect(stripeService.createTrialSubscriptions(mockCustomerId, mockVenueId, ['FEATURE_1', 'FEATURE_2'])).rejects.toThrow(
+          'Failed to create 1 subscription(s): FEATURE_1: Payment method required',
+        )
 
-        // Should only return successful subscription
-        expect(result).toEqual(['sub_2'])
-        expect(prisma.venueFeature.upsert).toHaveBeenCalledTimes(1) // Only for successful one
+        // Should still attempt to create all subscriptions
+        expect(mockStripeInstance.subscriptions.create).toHaveBeenCalledTimes(2)
+        // But only successful ones should create VenueFeature
+        expect(prisma.venueFeature.upsert).toHaveBeenCalledTimes(1)
       })
 
       it('should set endDate to null for paid subscriptions (trialDays = 0)', async () => {

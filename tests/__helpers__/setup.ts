@@ -52,6 +52,10 @@ const prismaMock: any = {
   digitalReceipt: createMockModel(),
   venueTransaction: createMockModel(),
   billV2: createMockModel(),
+  // Stripe-related models
+  feature: createMockModel(),
+  venueFeature: createMockModel(),
+  webhookEvent: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
