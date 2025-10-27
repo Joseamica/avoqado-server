@@ -35,6 +35,7 @@ beforeAll(async () => {
     __esModule: true,
     getDashboardData: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'dashboard' }),
     getAllVenues: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venues' }),
+    getVenuesListSimple: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venues-list' }),
     getVenueDetails: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venue-details' }),
     approveVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'approve' }),
     suspendVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'suspend' }),
@@ -42,6 +43,10 @@ beforeAll(async () => {
     createFeature: (_req: any, res: any) => res.status(201).json({ ok: true, action: 'create-feature' }),
     enableFeatureForVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'enable-feature' }),
     disableFeatureForVenue: (_req: any, res: any) => res.status(204).send(),
+    getRevenueMetrics: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'revenue-metrics' }),
+    getRevenueBreakdown: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'revenue-breakdown' }),
+    getProvidersList: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'providers' }),
+    getMerchantAccountsList: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'merchant-accounts' }),
   }))
 
   // Dynamically import the app after setting env and mocks

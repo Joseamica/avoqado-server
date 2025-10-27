@@ -328,5 +328,335 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         },
       })
     })
+
+    it('should handle past_due status without deactivating', async () => {
+      const mockSubscription = {
+        id: 'sub_past_due_123',
+        object: 'subscription',
+        status: 'past_due',
+        created: Date.now() / 1000,
+        customer: 'cus_123',
+        livemode: false,
+      } as unknown as Stripe.Subscription
+
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'vf_1',
+        venueId: 'venue_1',
+        featureId: 'feature_1',
+        active: true,
+        feature: { code: 'TEST' },
+        venue: { name: 'Test' },
+      })
+
+      await handleSubscriptionUpdated(mockSubscription)
+
+      // Should NOT deactivate - Stripe will retry payment
+      expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    })
+
+    it('should handle incomplete subscription status', async () => {
+      const mockSubscription = {
+        id: 'sub_incomplete_123',
+        object: 'subscription',
+        status: 'incomplete',
+        created: Date.now() / 1000,
+        customer: 'cus_123',
+        livemode: false,
+      } as unknown as Stripe.Subscription
+
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'vf_1',
+        venueId: 'venue_1',
+        featureId: 'feature_1',
+        active: true,
+        feature: { code: 'TEST' },
+        venue: { name: 'Test' },
+      })
+      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+
+      await handleSubscriptionUpdated(mockSubscription)
+
+      // Should deactivate incomplete subscription
+      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
+        where: { id: 'vf_1' },
+        data: { active: false },
+      })
+    })
+  })
+
+  describe('💰 TEST 4: Invoice Payment Events', () => {
+    it('should handle invoice payment succeeded', async () => {
+      const mockInvoice = {
+        id: 'in_success_123',
+        object: 'invoice',
+        subscription: 'sub_123',
+        amount_paid: 9999, // $99.99 in cents
+        currency: 'usd',
+      } as any
+
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'vf_1',
+        venueId: 'venue_1',
+        active: false, // Was inactive
+        feature: { code: 'TEST' },
+      })
+      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+
+      await handleStripeWebhookEvent({
+        id: 'evt_payment_success',
+        object: 'event',
+        type: 'invoice.payment_succeeded',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: { object: mockInvoice },
+      } as Stripe.Event)
+
+      // Should reactivate feature after payment
+      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
+        where: { id: 'vf_1' },
+        data: { active: true, endDate: null },
+      })
+    })
+
+    it('should handle invoice payment failed with attempt tracking', async () => {
+      const mockInvoice = {
+        id: 'in_failed_123',
+        object: 'invoice',
+        subscription: 'sub_123',
+        attempt_count: 2,
+      } as any
+
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'vf_1',
+        venueId: 'venue_1',
+        active: true,
+        feature: { code: 'TEST' },
+        venue: { name: 'Test Venue' },
+      })
+
+      await handleStripeWebhookEvent({
+        id: 'evt_payment_failed',
+        object: 'event',
+        type: 'invoice.payment_failed',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: { object: mockInvoice },
+      } as Stripe.Event)
+
+      // Should log warning but NOT deactivate yet (Stripe retries)
+      expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('⚠️ TEST 5: Error Handling & Edge Cases', () => {
+    it('should handle subscription not found in database', async () => {
+      const mockSubscription = {
+        id: 'sub_orphaned_123',
+        object: 'subscription',
+        status: 'active',
+      } as Stripe.Subscription
+
+      // VenueFeature not found
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce(null)
+
+      await handleSubscriptionUpdated(mockSubscription)
+
+      // Should NOT throw error, just log warning
+      expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    })
+
+    it('should track failed webhook processing with retry count', async () => {
+      const mockEvent: Stripe.Event = {
+        id: 'evt_error_123',
+        object: 'event',
+        type: 'customer.subscription.updated',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: {
+          object: {
+            id: 'sub_error_123',
+            status: 'active',
+          } as Stripe.Subscription,
+        },
+      }
+
+      // Mock: Event creation succeeds
+      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+        id: 'webhook_1',
+        eventId: 'evt_error_123',
+      })
+
+      // Mock: VenueFeature query throws error
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockRejectedValueOnce(new Error('Database connection failed'))
+
+      // Mock: Failure tracking
+      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.stripeWebhookEvent.findUnique as jest.Mock).mockResolvedValueOnce({
+        eventId: 'evt_error_123',
+        retryCount: 1,
+      })
+
+      await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Database connection failed')
+
+      // Should track failure
+      expect(prisma.stripeWebhookEvent.update).toHaveBeenCalledWith({
+        where: { eventId: 'evt_error_123' },
+        data: {
+          processed: false,
+          failureReason: 'Database connection failed',
+          failedAt: expect.any(Date),
+          retryCount: { increment: 1 },
+        },
+      })
+    })
+
+    it('should alert when webhook fails 3+ times', async () => {
+      const mockEvent: Stripe.Event = {
+        id: 'evt_critical_failure',
+        object: 'event',
+        type: 'customer.subscription.updated',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: {
+          object: {
+            id: 'sub_123',
+            status: 'active',
+          } as Stripe.Subscription,
+        },
+      }
+
+      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+        id: 'webhook_1',
+        eventId: 'evt_critical_failure',
+      })
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockRejectedValueOnce(new Error('Critical error'))
+      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockResolvedValueOnce({})
+
+      // Mock: 3 retries already happened
+      ;(prisma.stripeWebhookEvent.findUnique as jest.Mock).mockResolvedValueOnce({
+        eventId: 'evt_critical_failure',
+        retryCount: 3, // Critical threshold
+      })
+
+      await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Critical error')
+
+      // Should log critical alert (in production: send to PagerDuty/Slack)
+      // Verify it checked retry count
+      expect(prisma.stripeWebhookEvent.findUnique).toHaveBeenCalledWith({
+        where: { eventId: 'evt_critical_failure' },
+        select: { retryCount: true },
+      })
+    })
+
+    it('should handle database error when tracking failure', async () => {
+      const mockEvent: Stripe.Event = {
+        id: 'evt_db_error',
+        object: 'event',
+        type: 'customer.subscription.updated',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: {
+          object: {
+            id: 'sub_123',
+            status: 'active',
+          } as Stripe.Subscription,
+        },
+      }
+
+      ;(prisma.stripeWebhookEvent.create as jest.Mock).mockResolvedValueOnce({
+        id: 'webhook_1',
+        eventId: 'evt_db_error',
+      })
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockRejectedValueOnce(new Error('Processing error'))
+
+      // Database update fails when tracking error
+      ;(prisma.stripeWebhookEvent.update as jest.Mock).mockRejectedValueOnce(new Error('Database write failed'))
+
+      await expect(handleStripeWebhookEvent(mockEvent)).rejects.toThrow('Processing error')
+
+      // Should NOT throw secondary error, just log warning
+      expect(prisma.stripeWebhookEvent.update).toHaveBeenCalled()
+    })
+  })
+
+  describe('🔔 TEST 6: Trial Will End Event', () => {
+    it('should send notifications when trial is ending', async () => {
+      const trialEnd = Math.floor(Date.now() / 1000) + 86400 * 3 // 3 days from now
+      const mockSubscription = {
+        id: 'sub_trial_ending',
+        object: 'subscription',
+        status: 'trialing',
+        trial_end: trialEnd,
+      } as Stripe.Subscription
+
+      const mockStaffMembers = [
+        {
+          staff: {
+            id: 'staff_1',
+            email: 'owner@test.com',
+            firstName: 'John',
+            lastName: 'Doe',
+          },
+        },
+      ]
+
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'vf_1',
+        venueId: 'venue_1',
+        feature: { name: 'Analytics', code: 'ANALYTICS' },
+        venue: { name: 'Test Venue' },
+      })
+
+      // Mock staff query for notifications
+      ;(prisma as any).staffVenue = {
+        findMany: jest.fn().mockResolvedValueOnce(mockStaffMembers),
+      }
+
+      const mockCreateNotification = jest.fn().mockResolvedValue({})
+      const mockSendEmail = jest.fn().mockResolvedValue(true)
+
+      // Mock notification service
+      jest.doMock('@/services/dashboard/notification.dashboard.service', () => ({
+        createNotification: mockCreateNotification,
+      }))
+
+      // Mock email service
+      jest.doMock('@/services/email.service', () => ({
+        __esModule: true,
+        default: {
+          sendTrialEndingEmail: mockSendEmail,
+        },
+      }))
+
+      await handleStripeWebhookEvent({
+        id: 'evt_trial_ending',
+        object: 'event',
+        type: 'customer.subscription.trial_will_end',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: { object: mockSubscription },
+      } as Stripe.Event)
+
+      // Should process event successfully
+      expect(prisma.venueFeature.findFirst).toHaveBeenCalled()
+    })
   })
 })

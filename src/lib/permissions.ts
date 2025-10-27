@@ -390,17 +390,45 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   ],
 
   /**
-   * ADMIN: Full venue management
+   * ADMIN: Full venue management (excluding system-level permissions)
    */
   [StaffRole.ADMIN]: [
-    '*:*', // All permissions
+    'home:*',
+    'analytics:*',
+    'menu:*',
+    'orders:*',
+    'payments:*',
+    'shifts:*',
+    'reviews:*',
+    'teams:*',
+    'features:*',
+    'tpv:*',
+    'tables:*',
+    'reservations:*',
+    'inventory:*',
+    'products:*',
+    'settings:manage', // Can manage role permissions
   ],
 
   /**
-   * OWNER: Full organization access
+   * OWNER: Full organization access (excluding system-level permissions)
    */
   [StaffRole.OWNER]: [
-    '*:*', // All permissions
+    'home:*',
+    'analytics:*',
+    'menu:*',
+    'orders:*',
+    'payments:*',
+    'shifts:*',
+    'reviews:*',
+    'teams:*',
+    'features:*',
+    'tpv:*',
+    'tables:*',
+    'reservations:*',
+    'inventory:*',
+    'products:*',
+    'settings:manage', // Can manage role permissions
   ],
 
   /**

@@ -399,3 +399,129 @@ export async function createBillingPortalSession(
     next(error)
   }
 }
+
+/**
+ * List payment methods for a venue
+ */
+export async function listVenuePaymentMethods(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Organization context not found'))
+    }
+
+    const venueId: string = req.params.venueId
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const paymentMethods = await venueDashboardService.listVenuePaymentMethods(orgId, venueId, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      data: paymentMethods,
+    })
+  } catch (error) {
+    logger.error('Error listing payment methods', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Detach (delete) a payment method from a venue
+ */
+export async function detachVenuePaymentMethod(
+  req: Request<{ venueId: string; paymentMethodId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Organization context not found'))
+    }
+
+    const venueId: string = req.params.venueId
+    const paymentMethodId: string = req.params.paymentMethodId
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+
+    await venueDashboardService.detachVenuePaymentMethod(orgId, venueId, paymentMethodId, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      message: 'Payment method deleted successfully',
+    })
+  } catch (error) {
+    logger.error('Error detaching payment method', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+      paymentMethodId: req.params?.paymentMethodId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Set default payment method for a venue
+ */
+export async function setVenueDefaultPaymentMethod(
+  req: Request<{ venueId: string }, any, { paymentMethodId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Organization context not found'))
+    }
+
+    const venueId: string = req.params.venueId
+    const { paymentMethodId } = req.body
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+
+    await venueDashboardService.setVenueDefaultPaymentMethod(orgId, venueId, paymentMethodId, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      message: 'Default payment method set successfully',
+    })
+  } catch (error) {
+    logger.error('Error setting default payment method', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Create SetupIntent for collecting payment method
+ */
+export async function createVenueSetupIntent(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Organization context not found'))
+    }
+
+    const venueId: string = req.params.venueId
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+
+    const clientSecret = await venueDashboardService.createVenueSetupIntent(orgId, venueId, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      data: { clientSecret },
+    })
+  } catch (error) {
+    logger.error('Error creating SetupIntent', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}

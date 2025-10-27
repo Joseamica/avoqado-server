@@ -21,6 +21,8 @@ import {
   ReviewSource,
   MenuType,
   InventoryMethod,
+  BatchStatus,
+  RawMaterialMovementType,
 } from '@prisma/client'
 import { subDays, subHours } from 'date-fns'
 import prisma from '@/utils/prismaClient'
@@ -577,12 +579,50 @@ async function seedRawMaterials(venueId: string) {
 
   const createdMaterials = []
   for (const material of materials) {
+    // Create raw material
     const created = await prisma.rawMaterial.create({
       data: {
         venueId,
         ...material,
       },
     })
+
+    // Create initial FIFO batch for the stock
+    if (material.currentStock > 0) {
+      const batchNumber = `BATCH-DEMO-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`
+
+      const batch = await prisma.stockBatch.create({
+        data: {
+          venueId,
+          rawMaterialId: created.id,
+          batchNumber,
+          initialQuantity: material.currentStock,
+          remainingQuantity: material.currentStock,
+          unit: material.unit,
+          costPerUnit: material.costPerUnit,
+          receivedDate: new Date(),
+          status: BatchStatus.ACTIVE,
+        },
+      })
+
+      // Create movement record for initial stock
+      await prisma.rawMaterialMovement.create({
+        data: {
+          venueId,
+          rawMaterialId: created.id,
+          batchId: batch.id,
+          type: RawMaterialMovementType.ADJUSTMENT,
+          quantity: material.currentStock,
+          unit: material.unit,
+          previousStock: 0,
+          newStock: material.currentStock,
+          costImpact: material.costPerUnit * material.currentStock,
+          reason: 'Stock inicial - Demo venue',
+          reference: `DEMO-${Date.now()}`,
+        },
+      })
+    }
+
     createdMaterials.push(created)
   }
 

@@ -13,8 +13,8 @@
     "moduleResolution": "node",
     "typeRoots": ["./node_modules/@types", "../node_modules/@types"]
   },
-  "include": ["src/**/*.ts", "prisma/**/*.ts"],
-  "exclude": ["node_modules", "dist", "tests/**/*", "**/*.test.ts", "**/*.spec.ts", "**/__tests__/**/*"],
+  "include": ["src/**/*.ts", "prisma/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist"],
   "ts-node": {
     "files": true,
     "compilerOptions": {

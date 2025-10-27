@@ -486,6 +486,47 @@ export async function getInvoicePdfUrl(invoiceId: string): Promise<string> {
   return invoice.invoice_pdf
 }
 
+/**
+ * List all payment methods for a Stripe customer
+ *
+ * @param customerId - Stripe customer ID
+ * @returns Array of payment method objects
+ */
+export async function listPaymentMethods(customerId: string) {
+  const paymentMethods = await stripe.paymentMethods.list({
+    customer: customerId,
+    type: 'card',
+  })
+
+  logger.info(`✅ Listed ${paymentMethods.data.length} payment methods for customer ${customerId}`)
+  return paymentMethods.data
+}
+
+/**
+ * Detach (delete) a payment method from a customer
+ *
+ * @param paymentMethodId - Stripe payment method ID
+ */
+export async function detachPaymentMethod(paymentMethodId: string) {
+  await stripe.paymentMethods.detach(paymentMethodId)
+  logger.info(`✅ Payment method ${paymentMethodId} detached`)
+}
+
+/**
+ * Set a payment method as the default for a customer
+ *
+ * @param customerId - Stripe customer ID
+ * @param paymentMethodId - Stripe payment method ID
+ */
+export async function setDefaultPaymentMethod(customerId: string, paymentMethodId: string) {
+  await stripe.customers.update(customerId, {
+    invoice_settings: {
+      default_payment_method: paymentMethodId,
+    },
+  })
+  logger.info(`✅ Set default payment method ${paymentMethodId} for customer ${customerId}`)
+}
+
 export default {
   getOrCreateStripeCustomer,
   syncFeaturesToStripe,
@@ -496,4 +537,7 @@ export default {
   createTrialSetupIntent,
   getCustomerInvoices,
   getInvoicePdfUrl,
+  listPaymentMethods,
+  detachPaymentMethod,
+  setDefaultPaymentMethod,
 }

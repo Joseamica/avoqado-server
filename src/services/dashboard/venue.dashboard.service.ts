@@ -38,6 +38,10 @@ import {
   createTrialSubscriptions,
   createCustomerPortalSession,
   syncFeaturesToStripe,
+  listPaymentMethods,
+  detachPaymentMethod,
+  setDefaultPaymentMethod,
+  createTrialSetupIntent,
 } from '../stripe.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
@@ -922,6 +926,141 @@ export async function createVenueBillingPortalSession(
     select: {
       id: true,
       name: true,
+      slug: true,
+      stripeCustomerId: true,
+      organizationId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // If venue doesn't have Stripe customer, create one
+  let stripeCustomerId = venue.stripeCustomerId
+  if (!stripeCustomerId) {
+    logger.info('🆕 Venue has no Stripe customer - creating one now', {
+      venueId,
+      venueName: venue.name,
+      orgId: venue.organizationId,
+    })
+
+    // Get organization details
+    const organization = await prisma.organization.findUnique({
+      where: { id: venue.organizationId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+      },
+    })
+
+    if (!organization) {
+      throw new NotFoundError('Organization not found')
+    }
+
+    // Find an OWNER of this organization (via any venue in the org)
+    const ownerStaffVenue = await prisma.staffVenue.findFirst({
+      where: {
+        role: 'OWNER',
+        venue: {
+          organizationId: organization.id,
+        },
+      },
+      select: {
+        staff: {
+          select: {
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+
+    const ownerEmail = ownerStaffVenue?.staff.email || organization.email
+    const ownerName = ownerStaffVenue ? `${ownerStaffVenue.staff.firstName} ${ownerStaffVenue.staff.lastName}` : organization.name
+
+    // Create Stripe customer for this venue/organization
+    stripeCustomerId = await getOrCreateStripeCustomer(organization.id, ownerEmail, ownerName, venue.name, venue.slug)
+
+    // Update venue with new customer ID
+    await prisma.venue.update({
+      where: { id: venueId },
+      data: { stripeCustomerId },
+    })
+
+    logger.info('✅ Stripe customer created and linked to venue', {
+      venueId,
+      stripeCustomerId,
+    })
+  }
+
+  // Create portal session
+  const portalUrl = await createCustomerPortalSession(stripeCustomerId, returnUrl)
+
+  logger.info('✅ Billing portal session created', {
+    venueId,
+    venueName: venue.name,
+  })
+
+  return portalUrl
+}
+
+/**
+ * List payment methods for a venue
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID
+ * @param options - Optional parameters
+ * @returns Array of payment methods
+ */
+export async function listVenuePaymentMethods(orgId: string, venueId: string, options: { skipOrgCheck?: boolean } = {}) {
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+    select: {
+      id: true,
+      stripeCustomerId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  if (!venue.stripeCustomerId) {
+    // No customer yet - return empty array
+    return []
+  }
+
+  const paymentMethods = await listPaymentMethods(venue.stripeCustomerId)
+  return paymentMethods
+}
+
+/**
+ * Detach a payment method from a venue
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID
+ * @param paymentMethodId - Stripe payment method ID
+ * @param options - Optional parameters
+ */
+export async function detachVenuePaymentMethod(
+  orgId: string,
+  venueId: string,
+  paymentMethodId: string,
+  options: { skipOrgCheck?: boolean } = {},
+) {
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+    select: {
+      id: true,
       stripeCustomerId: true,
     },
   })
@@ -934,13 +1073,131 @@ export async function createVenueBillingPortalSession(
     throw new BadRequestError('Venue does not have Stripe customer configured')
   }
 
-  // Create portal session
-  const portalUrl = await createCustomerPortalSession(venue.stripeCustomerId, returnUrl)
+  await detachPaymentMethod(paymentMethodId)
+  logger.info('✅ Payment method detached from venue', { venueId, paymentMethodId })
+}
 
-  logger.info('✅ Billing portal session created', {
-    venueId,
-    venueName: venue.name,
+/**
+ * Set default payment method for a venue
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID
+ * @param paymentMethodId - Stripe payment method ID
+ * @param options - Optional parameters
+ */
+export async function setVenueDefaultPaymentMethod(
+  orgId: string,
+  venueId: string,
+  paymentMethodId: string,
+  options: { skipOrgCheck?: boolean } = {},
+) {
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+    select: {
+      id: true,
+      stripeCustomerId: true,
+    },
   })
 
-  return portalUrl
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  if (!venue.stripeCustomerId) {
+    throw new BadRequestError('Venue does not have Stripe customer configured')
+  }
+
+  await setDefaultPaymentMethod(venue.stripeCustomerId, paymentMethodId)
+
+  // Update venue record with the default payment method ID
+  await prisma.venue.update({
+    where: { id: venueId },
+    data: { stripePaymentMethodId: paymentMethodId },
+  })
+
+  logger.info('✅ Default payment method set for venue', { venueId, paymentMethodId })
+}
+
+/**
+ * Create SetupIntent for a venue (to collect payment method)
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID
+ * @param options - Optional parameters
+ * @returns SetupIntent client secret
+ */
+export async function createVenueSetupIntent(orgId: string, venueId: string, options: { skipOrgCheck?: boolean } = {}) {
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      stripeCustomerId: true,
+      organizationId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // If venue doesn't have Stripe customer, create one
+  let stripeCustomerId = venue.stripeCustomerId
+  if (!stripeCustomerId) {
+    logger.info('🆕 Venue has no Stripe customer - creating one now', {
+      venueId,
+      venueName: venue.name,
+      orgId: venue.organizationId,
+    })
+
+    // Get organization details
+    const organization = await prisma.organization.findUnique({
+      where: { id: venue.organizationId },
+      select: { id: true, name: true, email: true },
+    })
+
+    if (!organization) {
+      throw new NotFoundError(`Organization with ID ${venue.organizationId} not found`)
+    }
+
+    // Find an OWNER of this organization
+    const ownerStaffVenue = await prisma.staffVenue.findFirst({
+      where: {
+        role: 'OWNER',
+        venue: { organizationId: organization.id },
+      },
+      select: {
+        staff: {
+          select: { email: true, firstName: true, lastName: true },
+        },
+      },
+    })
+
+    const ownerEmail = ownerStaffVenue?.staff.email || organization.email
+    const ownerName = ownerStaffVenue ? `${ownerStaffVenue.staff.firstName} ${ownerStaffVenue.staff.lastName}` : organization.name
+
+    // Create Stripe customer
+    stripeCustomerId = await getOrCreateStripeCustomer(organization.id, ownerEmail, ownerName, venue.name, venue.slug)
+
+    // Update venue with new customer ID
+    await prisma.venue.update({
+      where: { id: venueId },
+      data: { stripeCustomerId },
+    })
+
+    logger.info('✅ Stripe customer created and linked to venue', { venueId, stripeCustomerId })
+  }
+
+  // Create SetupIntent
+  const clientSecret = await createTrialSetupIntent(stripeCustomerId)
+  logger.info('✅ SetupIntent created for venue', { venueId, stripeCustomerId })
+
+  return clientSecret
 }

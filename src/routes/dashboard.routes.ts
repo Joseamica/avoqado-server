@@ -1201,6 +1201,160 @@ router.post(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/payment-methods:
+ *   get:
+ *     tags: [Venues]
+ *     summary: List payment methods for a venue
+ *     description: Returns all saved payment methods (credit cards) for the venue's Stripe customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: List of payment methods
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string, example: pm_1234567890 }
+ *                       card:
+ *                         type: object
+ *                         properties:
+ *                           brand: { type: string, example: visa }
+ *                           last4: { type: string, example: "4242" }
+ *                           exp_month: { type: number, example: 12 }
+ *                           exp_year: { type: number, example: 2025 }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/payment-methods',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  venueController.listVenuePaymentMethods,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/payment-methods/{paymentMethodId}:
+ *   delete:
+ *     tags: [Venues]
+ *     summary: Delete a payment method
+ *     description: Detaches a payment method from the venue's Stripe customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: paymentMethodId, in: path, required: true, schema: { type: string, example: pm_1234567890 } }
+ *     responses:
+ *       200:
+ *         description: Payment method deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: Payment method deleted successfully }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/payment-methods/:paymentMethodId',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  venueController.detachVenuePaymentMethod,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/payment-methods/set-default:
+ *   put:
+ *     tags: [Venues]
+ *     summary: Set default payment method
+ *     description: Sets a payment method as the default for subscriptions and invoices
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [paymentMethodId]
+ *             properties:
+ *               paymentMethodId:
+ *                 type: string
+ *                 example: pm_1234567890
+ *     responses:
+ *       200:
+ *         description: Default payment method set successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: Default payment method set successfully }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/payment-methods/set-default',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  venueController.setVenueDefaultPaymentMethod,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/setup-intent:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Create SetupIntent for payment method collection
+ *     description: Creates a Stripe SetupIntent to collect payment method details without charging. Returns client secret for Stripe Elements.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: SetupIntent created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     clientSecret:
+ *                       type: string
+ *                       example: seti_1234567890_secret_abcdef
+ *                       description: Client secret for Stripe Elements CardElement
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/setup-intent',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  venueController.createVenueSetupIntent,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/convert-from-demo:
  *   post:
  *     tags: [Venues]

@@ -31,6 +31,7 @@ const createMockModel = () => ({
 const prismaMock: any = {
   staff: createMockModel(),
   venue: createMockModel(),
+  venueRolePermission: createMockModel(),
   notification: createMockModel(),
   notificationPreference: createMockModel(),
   notificationTemplate: createMockModel(),
@@ -67,10 +68,14 @@ jest.mock('@/utils/prismaClient', () => ({
 
 // Mock logger to prevent console noise during tests
 jest.mock('@/config/logger', () => ({
-  info: jest.fn(),
-  error: jest.fn(),
-  warn: jest.fn(),
-  debug: jest.fn(),
+  __esModule: true,
+  default: {
+    info: jest.fn(),
+    error: jest.fn(),
+    warn: jest.fn(),
+    debug: jest.fn(),
+    log: jest.fn(),
+  },
 }))
 
 console.log('Jest global setup file loaded.')
