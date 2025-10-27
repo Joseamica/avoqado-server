@@ -31,6 +31,16 @@ interface TrialEndingEmailData {
   billingPortalUrl: string
 }
 
+interface PaymentFailedEmailData {
+  venueName: string
+  featureName: string
+  attemptCount: number
+  amountDue: number
+  currency: string
+  billingPortalUrl: string
+  last4?: string // Last 4 digits of card
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -360,6 +370,146 @@ class EmailService {
       Esta función te ayuda a gestionar mejor tu restaurante y mejorar la experiencia de tus clientes.
 
       ¿Necesitas ayuda? Contáctanos en cualquier momento.
+
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendPaymentFailedEmail(email: string, data: PaymentFailedEmailData): Promise<boolean> {
+    const subject = `🚨 Problema con el pago de ${data.featureName} - ${data.venueName}`
+    const amountFormatted = new Intl.NumberFormat('es-MX', {
+      style: 'currency',
+      currency: data.currency.toUpperCase(),
+    }).format(data.amountDue / 100) // Convert cents to currency
+
+    // Customize message based on attempt count
+    let urgencyLevel = ''
+    let urgencyColor = '#ffc107'
+    let nextSteps = ''
+
+    if (data.attemptCount === 1) {
+      urgencyLevel = 'Intento 1 de 3'
+      urgencyColor = '#ffc107'
+      nextSteps = 'Stripe intentará cobrar nuevamente en los próximos días. Por favor, actualiza tu método de pago lo antes posible.'
+    } else if (data.attemptCount === 2) {
+      urgencyLevel = 'Intento 2 de 3 - Acción Requerida'
+      urgencyColor = '#ff9800'
+      nextSteps = 'Este es el segundo intento fallido. Si el próximo intento también falla, tu suscripción será cancelada automáticamente.'
+    } else {
+      urgencyLevel = 'ÚLTIMO INTENTO - Acción Urgente'
+      urgencyColor = '#f44336'
+      nextSteps =
+        'Este es el último intento. Si no actualizas tu método de pago inmediatamente, tu suscripción será cancelada y perderás acceso a esta función.'
+    }
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Problema con el pago</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #f44336 0%, #e91e63 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">🚨 Problema con el pago</h1>
+              <p style="color: #ffebee; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola,</p>
+
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                No pudimos procesar el pago de <strong>${amountFormatted}</strong> para tu suscripción de <strong>${data.featureName}</strong>.
+              </p>
+
+              <div style="background: #ffebee; border-left: 4px solid ${urgencyColor}; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  ⚠️ <strong>${urgencyLevel}</strong>
+                </p>
+                ${
+                  data.last4
+                    ? `<p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  💳 Tarjeta terminada en <strong>${data.last4}</strong>
+                </p>`
+                    : ''
+                }
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  ${nextSteps}
+                </p>
+              </div>
+
+              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0; text-align: center;">
+                <p style="font-size: 16px; margin-bottom: 20px; color: #555;">Actualiza tu método de pago ahora:</p>
+                <a href="${data.billingPortalUrl}"
+                   style="background: linear-gradient(135deg, #f44336 0%, #e91e63 100%);
+                          color: white;
+                          padding: 15px 35px;
+                          text-decoration: none;
+                          border-radius: 25px;
+                          font-weight: bold;
+                          font-size: 16px;
+                          display: inline-block;
+                          box-shadow: 0 4px 15px rgba(244, 67, 54, 0.3);
+                          transition: all 0.3s ease;">
+                  💳 Actualizar Método de Pago
+                </a>
+              </div>
+
+              <div style="background: #f9f9f9; border-left: 4px solid #2196f3; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  💡 <strong>Razones comunes de rechazo:</strong>
+                </p>
+                <ul style="font-size: 14px; margin: 10px 0 0 20px; color: #666; padding: 0;">
+                  <li>Fondos insuficientes en la tarjeta</li>
+                  <li>Tarjeta vencida o cerca de vencer</li>
+                  <li>Límite de crédito alcanzado</li>
+                  <li>Bloqueo temporal del banco</li>
+                </ul>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                ¿Necesitas ayuda? Contáctanos en cualquier momento o verifica con tu banco.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Hola,
+
+      No pudimos procesar el pago de ${amountFormatted} para tu suscripción de ${data.featureName}.
+
+      ⚠️ ${urgencyLevel}
+      ${data.last4 ? `💳 Tarjeta terminada en ${data.last4}` : ''}
+
+      ${nextSteps}
+
+      Actualiza tu método de pago ahora:
+      ${data.billingPortalUrl}
+
+      Razones comunes de rechazo:
+      - Fondos insuficientes en la tarjeta
+      - Tarjeta vencida o cerca de vencer
+      - Límite de crédito alcanzado
+      - Bloqueo temporal del banco
+
+      ¿Necesitas ayuda? Contáctanos en cualquier momento o verifica con tu banco.
 
       Equipo de Avoqado
     `

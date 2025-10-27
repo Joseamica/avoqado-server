@@ -1745,6 +1745,92 @@ router.post(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/features/{featureId}/proration-preview:
+ *   post:
+ *     tags: [Features]
+ *     summary: Preview proration for subscription change
+ *     description: Calculate how much will be charged/credited when changing to a different feature tier
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: featureId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               newFeatureCode:
+ *                 type: string
+ *                 example: ANALYTICS_PRO
+ *     responses:
+ *       200:
+ *         description: Proration preview calculated successfully
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
+ */
+router.post(
+  '/venues/:venueId/features/:featureId/proration-preview',
+  authenticateTokenMiddleware,
+  checkPermission('features:read'),
+  venueFeatureController.previewSubscriptionChange,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/features/{featureId}/subscription:
+ *   put:
+ *     tags: [Features]
+ *     summary: Update subscription to new feature/price
+ *     description: Change subscription to a different feature tier with automatic proration
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: featureId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               newFeatureCode:
+ *                 type: string
+ *                 example: ANALYTICS_PRO
+ *     responses:
+ *       200:
+ *         description: Subscription updated successfully
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
+ */
+router.put(
+  '/venues/:venueId/features/:featureId/subscription',
+  authenticateTokenMiddleware,
+  checkPermission('features:write'),
+  venueFeatureController.updateSubscription,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/invoices:
  *   get:
  *     tags: [Billing]
@@ -1829,6 +1915,43 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('features:read'),
   venueFeatureController.downloadInvoice,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/invoices/{invoiceId}/retry:
+ *   post:
+ *     tags: [Invoices]
+ *     summary: Retry payment for failed invoice
+ *     description: Manually retry payment for a failed invoice using the customer's default payment method
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: invoiceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Payment retry successful
+ *       400:
+ *         description: Invoice cannot be paid or no payment method available
+ *       401:
+ *         $ref: '#/components/responses/UnauthorizedError'
+ *       403:
+ *         $ref: '#/components/responses/ForbiddenError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
+ */
+router.post(
+  '/venues/:venueId/invoices/:invoiceId/retry',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  venueFeatureController.retryInvoicePayment,
 )
 
 //Rutas de Payment para el Dashboard

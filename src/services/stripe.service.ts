@@ -247,6 +247,7 @@ export async function createTrialSubscriptions(
   }
 
   const subscriptionIds: string[] = []
+  const errors: { featureCode: string; error: Error }[] = []
 
   // Create individual subscription for each feature
   for (const feature of features) {
@@ -322,8 +323,21 @@ export async function createTrialSubscriptions(
       subscriptionIds.push(subscription.id)
       logger.info(`  ✅ Created trial subscription ${subscription.id} for feature ${feature.code}`)
     } catch (error) {
-      logger.error(`  ❌ Error creating subscription for feature ${feature.code}:`, error)
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      logger.error(`  ❌ Error creating subscription for feature ${feature.code}: ${errorMessage}`)
+      errors.push({
+        featureCode: feature.code,
+        error: error instanceof Error ? error : new Error(errorMessage),
+      })
     }
+  }
+
+  // If any subscriptions failed, throw error with details
+  if (errors.length > 0) {
+    const errorDetails = errors.map(e => `${e.featureCode}: ${e.error.message}`).join('; ')
+    throw new Error(
+      `Failed to create ${errors.length} subscription(s): ${errorDetails}. Please ensure you have a valid payment method attached.`,
+    )
   }
 
   return subscriptionIds
@@ -484,6 +498,160 @@ export async function getInvoicePdfUrl(invoiceId: string): Promise<string> {
 
   logger.info(`✅ Retrieved PDF URL for invoice ${invoiceId}`)
   return invoice.invoice_pdf
+}
+
+/**
+ * Preview proration for subscription change
+ * Shows how much the customer will be charged/credited when changing subscription
+ *
+ * @param subscriptionId - Stripe subscription ID
+ * @param newPriceId - New Stripe price ID to change to
+ * @returns Proration details with amount and description
+ */
+export async function previewSubscriptionProration(
+  subscriptionId: string,
+  newPriceId: string,
+): Promise<{
+  prorationAmount: number
+  currency: string
+  nextInvoiceAmount: number
+  immediateCharge: boolean
+  description: string
+}> {
+  // Get current subscription
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId)
+
+  if (!subscription.items.data[0]) {
+    throw new Error('Subscription has no items')
+  }
+
+  const currentItem = subscription.items.data[0]
+  const currentPrice = await stripe.prices.retrieve(currentItem.price.id)
+  const newPrice = await stripe.prices.retrieve(newPriceId)
+
+  // Calculate time remaining in current period
+  const now = Math.floor(Date.now() / 1000)
+  const periodEnd = (subscription as any).current_period_end
+  const periodStart = (subscription as any).current_period_start
+  const totalPeriodSeconds = periodEnd - periodStart
+  const remainingSeconds = periodEnd - now
+  const percentageRemaining = remainingSeconds / totalPeriodSeconds
+
+  // Calculate amounts (Stripe prices are in cents)
+  const currentAmount = currentPrice.unit_amount || 0
+  const newAmount = newPrice.unit_amount || 0
+  const priceDiff = newAmount - currentAmount
+
+  // Calculate prorated amount
+  // For upgrade: charge the difference prorated for remaining time
+  // For downgrade: credit the difference prorated for remaining time
+  const prorationAmount = Math.round(priceDiff * percentageRemaining)
+  const immediateCharge = prorationAmount > 0
+
+  const currency = currentPrice.currency
+  let description = ''
+
+  if (immediateCharge) {
+    description = `You'll be charged ${(prorationAmount / 100).toFixed(2)} ${currency.toUpperCase()} today (prorated)`
+  } else if (prorationAmount < 0) {
+    description = `You'll receive a ${(Math.abs(prorationAmount) / 100).toFixed(2)} ${currency.toUpperCase()} credit (prorated)`
+  } else {
+    description = 'No immediate charge - change takes effect on next billing cycle'
+  }
+
+  logger.info(`💰 Proration preview calculated`, {
+    subscriptionId,
+    currentAmount,
+    newAmount,
+    prorationAmount,
+    percentageRemaining,
+    immediateCharge,
+  })
+
+  return {
+    prorationAmount,
+    currency,
+    nextInvoiceAmount: newAmount,
+    immediateCharge,
+    description,
+  }
+}
+
+/**
+ * Update subscription to a new price with proration
+ *
+ * @param subscriptionId - Stripe subscription ID
+ * @param newPriceId - New Stripe price ID
+ * @returns Updated subscription
+ */
+export async function updateSubscriptionPrice(subscriptionId: string, newPriceId: string): Promise<Stripe.Subscription> {
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId)
+
+  if (!subscription.items.data[0]) {
+    throw new Error('Subscription has no items')
+  }
+
+  const currentItem = subscription.items.data[0]
+
+  logger.info(`🔄 Updating subscription ${subscriptionId} to new price ${newPriceId}`)
+
+  const updatedSubscription = await stripe.subscriptions.update(subscriptionId, {
+    items: [
+      {
+        id: currentItem.id,
+        price: newPriceId,
+      },
+    ],
+    proration_behavior: 'always_invoice',
+    proration_date: Math.floor(Date.now() / 1000),
+  })
+
+  logger.info(`✅ Subscription updated successfully`, {
+    subscriptionId,
+    newPriceId,
+    status: updatedSubscription.status,
+  })
+
+  return updatedSubscription
+}
+
+/**
+ * Retry payment for a failed invoice
+ * Uses Stripe's invoice.pay() API to manually retry payment with the customer's default payment method
+ *
+ * @param invoiceId - Stripe invoice ID
+ * @returns Paid invoice object
+ * @throws Error if invoice is already paid or cannot be paid
+ */
+export async function retryInvoicePayment(invoiceId: string): Promise<Stripe.Invoice> {
+  // First retrieve the invoice to check its status
+  const invoice = await stripe.invoices.retrieve(invoiceId)
+
+  // Validate invoice can be paid
+  if (invoice.status === 'paid') {
+    throw new Error(`Invoice ${invoiceId} is already paid`)
+  }
+
+  if (invoice.status !== 'open' && invoice.status !== 'uncollectible') {
+    throw new Error(`Invoice ${invoiceId} cannot be paid (status: ${invoice.status})`)
+  }
+
+  logger.info(`🔄 Retrying payment for invoice ${invoiceId}`, {
+    amount: invoice.amount_due,
+    currency: invoice.currency,
+    attemptCount: invoice.attempt_count,
+  })
+
+  // Attempt to pay the invoice
+  const paidInvoice = await stripe.invoices.pay(invoiceId)
+
+  logger.info(`✅ Invoice payment successful`, {
+    invoiceId,
+    status: paidInvoice.status,
+    amountPaid: paidInvoice.amount_paid,
+  })
+
+  return paidInvoice
 }
 
 /**

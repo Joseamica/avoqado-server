@@ -200,6 +200,122 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
 }
 
 /**
+ * Send payment failed notifications (email + in-app) to venue owners and admins
+ * Called by handleInvoicePaymentFailed
+ *
+ * @param venueId - Venue ID
+ * @param venueName - Venue name
+ * @param featureName - Feature name
+ * @param attemptCount - Payment attempt count (1-3)
+ * @param amountDue - Amount due in cents
+ * @param currency - Currency code (usd, mxn, etc.)
+ * @param last4 - Last 4 digits of card (optional)
+ */
+async function sendPaymentFailedNotifications(
+  venueId: string,
+  venueName: string,
+  featureName: string,
+  attemptCount: number,
+  amountDue: number,
+  currency: string,
+  last4?: string,
+): Promise<void> {
+  try {
+    // 1. Query venue staff with OWNER and ADMIN roles
+    const staffMembers = await prisma.staffVenue.findMany({
+      where: {
+        venueId,
+        role: { in: [StaffRole.OWNER, StaffRole.ADMIN] },
+      },
+      include: {
+        staff: {
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+
+    if (staffMembers.length === 0) {
+      logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
+      return
+    }
+
+    logger.info(`📧 Sending payment failed notifications to ${staffMembers.length} staff members`, { venueId, attemptCount })
+
+    // 2. Generate billing portal URL
+    const billingPortalUrl = `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+
+    // 3. Send notifications to each staff member
+    for (const staffVenue of staffMembers) {
+      const { staff } = staffVenue
+
+      try {
+        // Determine notification priority based on attempt count
+        const priority = attemptCount >= 3 ? NotificationPriority.URGENT : attemptCount >= 2 ? NotificationPriority.HIGH : NotificationPriority.NORMAL
+
+        // 3a. Create in-app notification
+        await createNotification({
+          recipientId: staff.id,
+          venueId,
+          type: NotificationType.PAYMENT_FAILED,
+          title: `🚨 Problema con el pago de ${featureName}`,
+          message: `No pudimos procesar el pago de tu suscripción (Intento ${attemptCount} de 3). Por favor, actualiza tu método de pago inmediatamente.`,
+          metadata: {
+            featureName,
+            attemptCount,
+            amountDue,
+            currency,
+            last4,
+            billingPortalUrl,
+          },
+          channels: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+          priority,
+        })
+
+        logger.info('✅ In-app notification created', { userId: staff.id, venueId, attemptCount })
+
+        // 3b. Send email notification
+        const emailSent = await emailService.sendPaymentFailedEmail(staff.email, {
+          venueName,
+          featureName,
+          attemptCount,
+          amountDue,
+          currency,
+          billingPortalUrl,
+          last4,
+        })
+
+        if (emailSent) {
+          logger.info('✅ Payment failed email sent successfully', { email: staff.email, venueId, attemptCount })
+        } else {
+          logger.warn('⚠️ Payment failed email failed to send', { email: staff.email, venueId, attemptCount })
+        }
+      } catch (notificationError) {
+        // Log but don't throw - notifications should not block webhook success
+        logger.error('❌ Failed to send payment failed notification to staff member', {
+          staffId: staff.id,
+          email: staff.email,
+          error: notificationError instanceof Error ? notificationError.message : 'Unknown error',
+        })
+      }
+    }
+
+    logger.info('✅ Payment failed notifications sent successfully', { venueId, staffCount: staffMembers.length, attemptCount })
+  } catch (error) {
+    // Log but don't throw - notifications should not block webhook success
+    logger.error('❌ Failed to send payment failed notifications', {
+      venueId,
+      attemptCount,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Handle invoice payment failed event
  * Triggered when subscription payment fails
  *
@@ -209,12 +325,16 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
   const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
   const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
-  const attemptCount = invoice.attempt_count
+  const attemptCount = invoice.attempt_count || 1
+  const amountDue = invoice.amount_due
+  const currency = invoice.currency
 
   logger.warn('📥 Webhook: Invoice payment failed', {
     invoiceId: invoice.id,
     subscriptionId: subscriptionIdStr,
     attemptCount,
+    amountDue,
+    currency,
   })
 
   if (!subscriptionIdStr) {
@@ -232,9 +352,6 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
     return
   }
 
-  // After 3 failed attempts, Stripe will cancel the subscription
-  // We'll wait for subscription.deleted event to deactivate feature
-  // For now, just log the warning
   logger.warn('⚠️ Webhook: Payment failed for feature', {
     venueId: venueFeature.venueId,
     featureCode: venueFeature.feature.code,
@@ -242,7 +359,29 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
     maxAttempts: 3,
   })
 
-  // TODO: Send notification to venue owner about payment failure
+  // Get payment method details from Stripe (if available)
+  let last4: string | undefined
+  try {
+    if (invoice.default_payment_method) {
+      const paymentMethodId = typeof invoice.default_payment_method === 'string' ? invoice.default_payment_method : invoice.default_payment_method.id
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+      const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId)
+      last4 = paymentMethod.card?.last4
+    }
+  } catch (error) {
+    logger.warn('⚠️ Could not retrieve payment method details', { invoiceId: invoice.id })
+  }
+
+  // Send notifications to venue owners and admins
+  await sendPaymentFailedNotifications(
+    venueFeature.venueId,
+    venueFeature.venue.name,
+    venueFeature.feature.name,
+    attemptCount,
+    amountDue,
+    currency,
+    last4,
+  )
 }
 
 /**
@@ -446,6 +585,83 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
 }
 
 /**
+ * Handle payment method attached event
+ * Triggered when a payment method is attached to a customer
+ * Detects and removes duplicate cards based on fingerprint
+ *
+ * @param paymentMethod - Stripe PaymentMethod object
+ */
+export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentMethod) {
+  const paymentMethodId = paymentMethod.id
+  const customerId = paymentMethod.customer as string
+  const fingerprint = paymentMethod.card?.fingerprint
+
+  logger.info('📥 Webhook: Payment method attached', {
+    paymentMethodId,
+    customerId,
+    fingerprint,
+    last4: paymentMethod.card?.last4,
+    brand: paymentMethod.card?.brand,
+  })
+
+  if (!customerId) {
+    logger.warn('⚠️ Webhook: Payment method has no customer', { paymentMethodId })
+    return
+  }
+
+  if (!fingerprint) {
+    logger.warn('⚠️ Webhook: Payment method has no fingerprint (not a card)', { paymentMethodId })
+    return
+  }
+
+  try {
+    // Get all payment methods for this customer
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+    const paymentMethods = await stripe.paymentMethods.list({
+      customer: customerId,
+      type: 'card',
+    })
+
+    // Find duplicates (same fingerprint, different ID)
+    const duplicates = paymentMethods.data.filter(
+      (pm: Stripe.PaymentMethod) => pm.card?.fingerprint === fingerprint && pm.id !== paymentMethodId,
+    )
+
+    if (duplicates.length > 0) {
+      logger.warn('⚠️ Webhook: Duplicate payment method detected', {
+        newPaymentMethodId: paymentMethodId,
+        existingPaymentMethodIds: duplicates.map((pm: Stripe.PaymentMethod) => pm.id),
+        fingerprint,
+        last4: paymentMethod.card?.last4,
+      })
+
+      // Detach the newly added payment method (keep the older one)
+      await stripe.paymentMethods.detach(paymentMethodId)
+
+      logger.info('✅ Webhook: Duplicate payment method removed', {
+        removedPaymentMethodId: paymentMethodId,
+        keptPaymentMethodId: duplicates[0].id,
+      })
+
+      // Note: This won't send an error to the user immediately since the webhook
+      // happens asynchronously. The frontend will simply not see the new payment method
+      // appear in the list when it refreshes.
+    } else {
+      logger.info('✅ Webhook: Payment method is unique, no duplicates found', {
+        paymentMethodId,
+        fingerprint,
+      })
+    }
+  } catch (error) {
+    // Don't throw - this is informational and shouldn't block the webhook
+    logger.error('❌ Webhook: Failed to check for duplicate payment methods', {
+      paymentMethodId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Main webhook event dispatcher
  * Routes events to appropriate handlers
  *
@@ -456,6 +672,9 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
  */
 export async function handleStripeWebhookEvent(event: Stripe.Event) {
   logger.info('📥 Webhook received', { type: event.type, id: event.id })
+
+  const startTime = Date.now()
+  let webhookEventId: string | null = null
 
   try {
     // 🔒 ATOMIC IDEMPOTENCY: Create event record to claim this event
@@ -481,7 +700,36 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       throw error
     }
 
-    logger.info('🎯 Processing webhook event', { type: event.type, id: event.id })
+    // 📊 CREATE MONITORING LOG: Store full event for debugging/observability
+    // Extract venueId from event data if available
+    let venueId: string | null = null
+    const eventData = event.data.object as any
+
+    // Try to find venueId from subscription metadata
+    if (eventData.metadata?.venueId) {
+      venueId = eventData.metadata.venueId
+    } else if (eventData.subscription) {
+      // For invoice events, fetch subscription to get venueId
+      const subscriptionId = typeof eventData.subscription === 'string' ? eventData.subscription : eventData.subscription.id
+      const venueFeature = await prisma.venueFeature.findFirst({
+        where: { stripeSubscriptionId: subscriptionId },
+        select: { venueId: true },
+      })
+      venueId = venueFeature?.venueId || null
+    }
+
+    const webhookEvent = await prisma.webhookEvent.create({
+      data: {
+        stripeEventId: event.id,
+        eventType: event.type,
+        payload: event as any, // Store full event payload as JSON
+        status: 'PENDING',
+        venueId: venueId,
+      },
+    })
+    webhookEventId = webhookEvent.id
+
+    logger.info('🎯 Processing webhook event', { type: event.type, id: event.id, webhookEventId })
 
     // Process event based on type
     switch (event.type) {
@@ -509,6 +757,10 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
         await handleCustomerDeleted(event.data.object as Stripe.Customer)
         break
 
+      case 'payment_method.attached':
+        await handlePaymentMethodAttached(event.data.object as Stripe.PaymentMethod)
+        break
+
       default:
         logger.info('ℹ️ Webhook: Unhandled event type', { type: event.type })
     }
@@ -519,7 +771,20 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       data: { processed: true },
     })
 
-    logger.info('✅ Webhook processed successfully', { type: event.type, id: event.id })
+    // 📊 UPDATE MONITORING LOG: Mark as success with processing time
+    const processingTime = Date.now() - startTime
+    if (webhookEventId) {
+      await prisma.webhookEvent.update({
+        where: { id: webhookEventId },
+        data: {
+          status: 'SUCCESS',
+          processingTime,
+          processedAt: new Date(),
+        },
+      })
+    }
+
+    logger.info('✅ Webhook processed successfully', { type: event.type, id: event.id, processingTime: `${processingTime}ms` })
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
 
@@ -540,6 +805,20 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
           retryCount: { increment: 1 },
         },
       })
+
+      // 📊 UPDATE MONITORING LOG: Mark as failed with error details
+      const processingTime = Date.now() - startTime
+      if (webhookEventId) {
+        await prisma.webhookEvent.update({
+          where: { id: webhookEventId },
+          data: {
+            status: 'FAILED',
+            errorMessage: errorMessage,
+            processingTime,
+            retryCount: { increment: 1 },
+          },
+        })
+      }
 
       // If failed 3+ times, log critical alert (in production, send to PagerDuty/Slack)
       const failedEvent = await prisma.stripeWebhookEvent.findUnique({
@@ -577,4 +856,5 @@ export default {
   handleInvoicePaymentFailed,
   handleSubscriptionTrialWillEnd,
   handleCustomerDeleted,
+  handlePaymentMethodAttached,
 }

@@ -154,6 +154,9 @@ model Venue {
   lowStockAlerts       LowStockAlert[]
   stockBatches         StockBatch[] // FIFO batch tracking
 
+  // ✅ NEW: Webhook event logging
+  webhookEvents        WebhookEvent[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1605,6 +1608,34 @@ model VenueFeature {
   @@index([venueId])
 }
 
+// ==========================================
+// NOTE: STRIPE WEBHOOK LOGGING
+// ==========================================
+
+model WebhookEvent {
+  id              String   @id @default(cuid())
+  stripeEventId   String   @unique // Stripe's event ID (evt_xxx)
+  eventType       String   // e.g., "customer.subscription.updated"
+  payload         Json     // Full Stripe event payload
+  status          WebhookEventStatus @default(PENDING)
+  errorMessage    String?  @db.Text
+  processingTime  Int?     // Time in milliseconds
+  retryCount      Int      @default(0)
+
+  // Related entities (optional)
+  venueId         String?
+  venue           Venue?   @relation(fields: [venueId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime @default(now())
+  processedAt     DateTime? // When successfully processed
+
+  @@index([stripeEventId])
+  @@index([eventType])
+  @@index([status])
+  @@index([venueId])
+  @@index([createdAt])
+}
+
 model FeeSchedule {
   id          String  @id @default(cuid())
   name        String
@@ -2513,6 +2544,13 @@ enum InvoiceStatus {
   PAID
   OVERDUE
   CANCELLED
+}
+
+enum WebhookEventStatus {
+  PENDING    // Webhook received, not yet processed
+  SUCCESS    // Processed successfully
+  FAILED     // Processing failed
+  RETRYING   // Currently retrying after failure
 }
 
 enum ReviewSource {

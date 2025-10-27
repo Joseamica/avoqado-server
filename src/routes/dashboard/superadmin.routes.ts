@@ -14,6 +14,7 @@ import merchantAccountRoutes from '../superadmin/merchantAccount.routes'
 import providerCostStructureRoutes from '../superadmin/providerCostStructure.routes'
 import venuePricingRoutes from '../superadmin/venuePricing.routes'
 import paymentAnalyticsRoutes from '../superadmin/paymentAnalytics.routes'
+import webhookRoutes from '../superadmin/webhook.routes'
 
 // Import cost management validation schemas
 import {
@@ -133,5 +134,8 @@ router.use('/venue-pricing', venuePricingRoutes)
 
 // Payment Analytics (Revenue & Profit Reporting)
 router.use('/payment-analytics', paymentAnalyticsRoutes)
+
+// Webhook Monitoring & Debugging
+router.use('/webhooks', webhookRoutes)
 
 export default router

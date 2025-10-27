@@ -189,3 +189,240 @@ export async function downloadInvoice(
     next(error)
   }
 }
+
+/**
+ * Preview proration for subscription change
+ * POST /api/v1/dashboard/venues/:venueId/features/:featureId/proration-preview
+ * Body: { newFeatureCode: string }
+ */
+export async function previewSubscriptionChange(
+  req: Request<{ venueId: string; featureId: string }, any, { newFeatureCode: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, featureId } = req.params
+    const { newFeatureCode } = req.body
+
+    logger.info('Previewing subscription change', { venueId, featureId, newFeatureCode })
+
+    // Get current VenueFeature with subscription ID
+    const venueFeature = await prisma.venueFeature.findUnique({
+      where: { id: featureId },
+      include: { feature: true },
+    })
+
+    if (!venueFeature) {
+      res.status(404).json({
+        success: false,
+        error: 'Feature subscription not found',
+      })
+      return
+    }
+
+    if (!venueFeature.stripeSubscriptionId) {
+      res.status(400).json({
+        success: false,
+        error: 'No active subscription found for this feature',
+      })
+      return
+    }
+
+    // Get new feature to get its Stripe price ID
+    const newFeature = await prisma.feature.findUnique({
+      where: { code: newFeatureCode },
+    })
+
+    if (!newFeature || !newFeature.stripePriceId) {
+      res.status(404).json({
+        success: false,
+        error: 'Target feature not found or has no price',
+      })
+      return
+    }
+
+    // Get proration preview from Stripe
+    const prorationDetails = await stripeService.previewSubscriptionProration(
+      venueFeature.stripeSubscriptionId,
+      newFeature.stripePriceId,
+    )
+
+    res.status(200).json({
+      success: true,
+      data: {
+        currentFeature: {
+          id: venueFeature.feature.id,
+          code: venueFeature.feature.code,
+          name: venueFeature.feature.name,
+          price: venueFeature.monthlyPrice,
+        },
+        newFeature: {
+          id: newFeature.id,
+          code: newFeature.code,
+          name: newFeature.name,
+          price: newFeature.monthlyPrice,
+        },
+        proration: prorationDetails,
+      },
+    })
+  } catch (error) {
+    logger.error('Error previewing subscription change', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+      featureId: req.params?.featureId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Update subscription to new feature/price
+ * PUT /api/v1/dashboard/venues/:venueId/features/:featureId/subscription
+ * Body: { newFeatureCode: string }
+ */
+export async function updateSubscription(
+  req: Request<{ venueId: string; featureId: string }, any, { newFeatureCode: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, featureId } = req.params
+    const { newFeatureCode } = req.body
+
+    logger.info('Updating subscription', { venueId, featureId, newFeatureCode })
+
+    // Get current VenueFeature
+    const venueFeature = await prisma.venueFeature.findUnique({
+      where: { id: featureId },
+      include: { feature: true },
+    })
+
+    if (!venueFeature) {
+      res.status(404).json({
+        success: false,
+        error: 'Feature subscription not found',
+      })
+      return
+    }
+
+    if (!venueFeature.stripeSubscriptionId) {
+      res.status(400).json({
+        success: false,
+        error: 'No active subscription found',
+      })
+      return
+    }
+
+    // Get new feature
+    const newFeature = await prisma.feature.findUnique({
+      where: { code: newFeatureCode },
+    })
+
+    if (!newFeature || !newFeature.stripePriceId) {
+      res.status(404).json({
+        success: false,
+        error: 'Target feature not found or has no price',
+      })
+      return
+    }
+
+    // Update subscription in Stripe
+    const updatedSubscription = await stripeService.updateSubscriptionPrice(
+      venueFeature.stripeSubscriptionId,
+      newFeature.stripePriceId,
+    )
+
+    // Update VenueFeature record
+    const updatedVenueFeature = await prisma.venueFeature.update({
+      where: { id: featureId },
+      data: {
+        featureId: newFeature.id,
+        monthlyPrice: newFeature.monthlyPrice,
+      },
+      include: { feature: true },
+    })
+
+    logger.info('✅ Subscription updated successfully', {
+      venueId,
+      oldFeature: venueFeature.feature.code,
+      newFeature: newFeature.code,
+      subscriptionId: updatedSubscription.id,
+    })
+
+    res.status(200).json({
+      success: true,
+      data: updatedVenueFeature,
+      message: 'Subscription updated successfully',
+    })
+  } catch (error) {
+    logger.error('Error updating subscription', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+      featureId: req.params?.featureId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Retry failed invoice payment
+ * POST /api/v1/dashboard/venues/:venueId/invoices/:invoiceId/retry
+ */
+export async function retryInvoicePayment(
+  req: Request<{ venueId: string; invoiceId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, invoiceId } = req.params
+
+    logger.info('Retrying invoice payment', { venueId, invoiceId })
+
+    // Get venue's organization to verify customer
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      include: { organization: true },
+    })
+
+    if (!venue) {
+      res.status(404).json({
+        success: false,
+        error: 'Venue not found',
+      })
+      return
+    }
+
+    if (!venue.organization.stripeCustomerId) {
+      res.status(400).json({
+        success: false,
+        error: 'No Stripe customer associated with this venue',
+      })
+      return
+    }
+
+    // Retry payment using Stripe
+    const paidInvoice = await stripeService.retryInvoicePayment(invoiceId)
+
+    logger.info('✅ Invoice payment retry successful', {
+      venueId,
+      invoiceId,
+      amount: paidInvoice.amount_due,
+      status: paidInvoice.status,
+    })
+
+    res.status(200).json({
+      success: true,
+      data: {
+        invoice: paidInvoice,
+      },
+      message: 'Payment retry successful',
+    })
+  } catch (error) {
+    logger.error('Error retrying invoice payment', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+      invoiceId: req.params?.invoiceId,
+    })
+    next(error)
+  }
+}
