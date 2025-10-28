@@ -25,7 +25,11 @@ jest.mock('@/utils/prismaClient', () => ({
       update: jest.fn(),
       updateMany: jest.fn(),
     },
-    organization: {
+    staffVenue: {
+      findMany: jest.fn(),
+    },
+    venue: {
+      findUnique: jest.fn(),
       findFirst: jest.fn(),
       update: jest.fn(),
     },
@@ -174,7 +178,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
   })
 
   describe('❌ TEST 2: Customer Deletion - Proper Cleanup', () => {
-    it('should deactivate all venue features when customer is deleted', async () => {
+    it('should deactivate venue features when customer is deleted', async () => {
       const mockCustomer: Stripe.Customer = {
         id: 'cus_test_123',
         object: 'customer',
@@ -184,38 +188,35 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         livemode: false,
       } as Stripe.Customer
 
-      // Mock organization with customer
-      ;(prisma.organization.findFirst as jest.Mock).mockResolvedValueOnce({
-        id: 'org_1',
-        name: 'Test Org',
+      // Mock venue with customer
+      ;(prisma.venue.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'venue_1',
+        name: 'Test Venue',
+        slug: 'test-venue',
         stripeCustomerId: 'cus_test_123',
-        venues: [
-          { id: 'venue_1', name: 'Venue 1' },
-          { id: 'venue_2', name: 'Venue 2' },
-        ],
       })
-      ;(prisma.organization.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venue.update as jest.Mock).mockResolvedValueOnce({})
       ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({ count: 5 })
 
       await handleCustomerDeleted(mockCustomer)
 
       // Should clear customer ID
-      expect(prisma.organization.update).toHaveBeenCalledWith({
-        where: { id: 'org_1' },
+      expect(prisma.venue.update).toHaveBeenCalledWith({
+        where: { id: 'venue_1' },
         data: { stripeCustomerId: null },
       })
 
-      // Should deactivate all features
+      // Should deactivate venue's features
       expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
         where: {
-          venue: { organizationId: 'org_1' },
+          venueId: 'venue_1',
           active: true,
         },
         data: { active: false },
       })
     })
 
-    it('should handle missing organization gracefully', async () => {
+    it('should handle missing venue gracefully', async () => {
       const mockCustomer: Stripe.Customer = {
         id: 'cus_orphaned_123',
         object: 'customer',
@@ -224,13 +225,13 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         livemode: false,
       } as Stripe.Customer
 
-      // No organization found
-      ;(prisma.organization.findFirst as jest.Mock).mockResolvedValueOnce(null)
+      // No venue found
+      ;(prisma.venue.findFirst as jest.Mock).mockResolvedValueOnce(null)
 
       await handleCustomerDeleted(mockCustomer)
 
       // Should NOT throw error, just log warning
-      expect(prisma.organization.update).not.toHaveBeenCalled()
+      expect(prisma.venue.update).not.toHaveBeenCalled()
       expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
     })
   })
@@ -436,13 +437,25 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         attempt_count: 2,
       } as any
 
-      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+      const mockVenueFeature = {
         id: 'vf_1',
         venueId: 'venue_1',
         active: true,
-        feature: { code: 'TEST' },
-        venue: { name: 'Test Venue' },
-      })
+        feature: { code: 'TEST', name: 'Test Feature' },
+        venue: {
+          name: 'Test Venue',
+          organization: {
+            email: 'test@example.com',
+            stripeCustomerId: 'cus_test123',
+          },
+        },
+      }
+
+      // Mock all database queries (persist across all calls)
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(mockVenueFeature)
+      ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValue([])
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ slug: 'test-venue' })
+      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue(mockVenueFeature)
 
       await handleStripeWebhookEvent({
         id: 'evt_payment_failed',
@@ -456,8 +469,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         data: { object: mockInvoice },
       } as Stripe.Event)
 
-      // Should log warning but NOT deactivate yet (Stripe retries)
-      expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+      // Should track payment failure (attempt count 2)
+      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
+        where: { id: 'vf_1' },
+        data: expect.objectContaining({
+          paymentFailureCount: 2,
+          lastPaymentAttempt: expect.any(Date),
+        }),
+      })
     })
   })
 

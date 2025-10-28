@@ -19,12 +19,9 @@ import * as retryUtils from '@/utils/retry'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    organization: {
-      findUnique: jest.fn(),
-      update: jest.fn(),
-    },
     venue: {
       findUnique: jest.fn(),
+      update: jest.fn(),
     },
     feature: {
       findMany: jest.fn(),
@@ -109,14 +106,14 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
   describe('🔑 TEST 1: Customer Creation & Management', () => {
     describe('getOrCreateStripeCustomer()', () => {
-      it('should create new Stripe customer when organization has none', async () => {
-        const mockOrgId = 'org_123'
+      it('should create new Stripe customer when venue has none', async () => {
+        const mockVenueId = 'venue_123'
         const mockEmail = 'test@example.com'
         const mockName = 'Test User'
 
-        // Mock: Organization without Stripe customer
-        ;(prisma.organization.findUnique as jest.Mock).mockResolvedValueOnce({
-          id: mockOrgId,
+        // Mock: Venue without Stripe customer
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({
+          id: mockVenueId,
           stripeCustomerId: null,
         })
 
@@ -127,13 +124,13 @@ describe('Stripe Service - Comprehensive Tests', () => {
           name: mockName,
         })
 
-        // Mock: Update organization with new customer ID
-        ;(prisma.organization.update as jest.Mock).mockResolvedValueOnce({
-          id: mockOrgId,
+        // Mock: Update venue with new customer ID
+        ;(prisma.venue.update as jest.Mock).mockResolvedValueOnce({
+          id: mockVenueId,
           stripeCustomerId: 'cus_new_123',
         })
 
-        const result = await stripeService.getOrCreateStripeCustomer(mockOrgId, mockEmail, mockName)
+        const result = await stripeService.getOrCreateStripeCustomer(mockVenueId, mockEmail, mockName)
 
         expect(result).toBe('cus_new_123')
         expect(mockStripeInstance.customers.create).toHaveBeenCalledWith({
@@ -141,41 +138,41 @@ describe('Stripe Service - Comprehensive Tests', () => {
           name: mockName,
           description: undefined,
           metadata: {
-            organizationId: mockOrgId,
+            venueId: mockVenueId,
           },
         })
-        expect(prisma.organization.update).toHaveBeenCalledWith({
-          where: { id: mockOrgId },
+        expect(prisma.venue.update).toHaveBeenCalledWith({
+          where: { id: mockVenueId },
           data: { stripeCustomerId: 'cus_new_123' },
         })
       })
 
       it('should return existing customer ID without creating new one', async () => {
-        const mockOrgId = 'org_existing'
+        const mockVenueId = 'venue_existing'
         const existingCustomerId = 'cus_existing_123'
 
-        // Mock: Organization with existing Stripe customer
-        ;(prisma.organization.findUnique as jest.Mock).mockResolvedValueOnce({
-          id: mockOrgId,
+        // Mock: Venue with existing Stripe customer
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({
+          id: mockVenueId,
           stripeCustomerId: existingCustomerId,
         })
 
-        const result = await stripeService.getOrCreateStripeCustomer(mockOrgId, 'test@example.com', 'Test User')
+        const result = await stripeService.getOrCreateStripeCustomer(mockVenueId, 'test@example.com', 'Test User')
 
         expect(result).toBe(existingCustomerId)
         expect(mockStripeInstance.customers.create).not.toHaveBeenCalled()
-        expect(prisma.organization.update).not.toHaveBeenCalled()
+        expect(prisma.venue.update).not.toHaveBeenCalled()
       })
 
       it('should update customer description when venue info provided', async () => {
-        const mockOrgId = 'org_with_customer'
+        const mockVenueId = 'venue_with_customer'
         const existingCustomerId = 'cus_update_123'
         const venueName = 'Test Venue'
         const venueSlug = 'test-venue'
 
-        // Mock: Organization with existing customer
-        ;(prisma.organization.findUnique as jest.Mock).mockResolvedValueOnce({
-          id: mockOrgId,
+        // Mock: Venue with existing customer
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({
+          id: mockVenueId,
           stripeCustomerId: existingCustomerId,
         })
 
@@ -184,35 +181,35 @@ describe('Stripe Service - Comprehensive Tests', () => {
           description: `Venue: ${venueName} (${venueSlug})`,
         })
 
-        const result = await stripeService.getOrCreateStripeCustomer(mockOrgId, 'test@example.com', 'Test User', venueName, venueSlug)
+        const result = await stripeService.getOrCreateStripeCustomer(mockVenueId, 'test@example.com', 'Test User', venueName, venueSlug)
 
         expect(result).toBe(existingCustomerId)
         expect(mockStripeInstance.customers.update).toHaveBeenCalledWith(existingCustomerId, {
           description: `Venue: ${venueName} (${venueSlug})`,
           metadata: {
-            organizationId: mockOrgId,
+            venueId: mockVenueId,
             venueSlug,
           },
         })
       })
 
       it('should handle Stripe API errors gracefully', async () => {
-        const mockOrgId = 'org_error'
+        const mockVenueId = 'venue_error'
 
-        ;(prisma.organization.findUnique as jest.Mock).mockResolvedValueOnce({
-          id: mockOrgId,
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({
+          id: mockVenueId,
           stripeCustomerId: null,
         })
 
         // Mock: Stripe API error
         mockStripeInstance.customers.create.mockRejectedValueOnce(new Error('Stripe API unavailable'))
 
-        await expect(stripeService.getOrCreateStripeCustomer(mockOrgId, 'test@example.com', 'Test User')).rejects.toThrow(
+        await expect(stripeService.getOrCreateStripeCustomer(mockVenueId, 'test@example.com', 'Test User')).rejects.toThrow(
           'Stripe API unavailable',
         )
 
         // Should NOT save incomplete customer
-        expect(prisma.organization.update).not.toHaveBeenCalled()
+        expect(prisma.venue.update).not.toHaveBeenCalled()
       })
     })
   })
@@ -527,11 +524,54 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
   describe('📄 TEST 4: Invoices', () => {
     describe('getCustomerInvoices()', () => {
-      it('should retrieve invoice list for customer', async () => {
+      it('should retrieve invoice list for customer with pagination', async () => {
         const mockCustomerId = 'cus_123'
         const mockInvoices = [
           { id: 'in_1', amount_due: 9999, status: 'paid' },
           { id: 'in_2', amount_due: 19999, status: 'open' },
+        ]
+
+        // Mock returns 2 invoices (limit=10, so no hasMore)
+        mockStripeInstance.invoices.list.mockResolvedValueOnce({
+          data: mockInvoices,
+          has_more: false,
+        })
+
+        const result = await stripeService.getCustomerInvoices(mockCustomerId, { limit: 10 })
+
+        expect(result).toEqual({
+          invoices: mockInvoices,
+          hasMore: false,
+          lastInvoiceId: 'in_2',
+        })
+        expect(mockStripeInstance.invoices.list).toHaveBeenCalledWith({
+          customer: mockCustomerId,
+          limit: 11, // Fetches limit+1 to check hasMore
+        })
+      })
+
+      it('should default to 10 invoices if limit not specified', async () => {
+        const mockInvoice = { id: 'in_1', amount_due: 5000, status: 'paid' }
+        mockStripeInstance.invoices.list.mockResolvedValueOnce({ data: [mockInvoice] })
+
+        const result = await stripeService.getCustomerInvoices('cus_123')
+
+        expect(result).toEqual({
+          invoices: [mockInvoice],
+          hasMore: false,
+          lastInvoiceId: 'in_1',
+        })
+        expect(mockStripeInstance.invoices.list).toHaveBeenCalledWith({
+          customer: 'cus_123',
+          limit: 11, // Default 10 + 1 for hasMore check
+        })
+      })
+
+      it('should handle pagination with starting_after parameter', async () => {
+        const mockCustomerId = 'cus_123'
+        const mockInvoices = [
+          { id: 'in_3', amount_due: 7500, status: 'paid' },
+          { id: 'in_4', amount_due: 8500, status: 'open' },
         ]
 
         mockStripeInstance.invoices.list.mockResolvedValueOnce({
@@ -539,23 +579,43 @@ describe('Stripe Service - Comprehensive Tests', () => {
           has_more: false,
         })
 
-        const result = await stripeService.getCustomerInvoices(mockCustomerId, 10)
+        const result = await stripeService.getCustomerInvoices(mockCustomerId, {
+          limit: 10,
+          starting_after: 'in_2',
+        })
 
-        expect(result).toEqual(mockInvoices)
+        expect(result).toEqual({
+          invoices: mockInvoices,
+          hasMore: false,
+          lastInvoiceId: 'in_4',
+        })
         expect(mockStripeInstance.invoices.list).toHaveBeenCalledWith({
           customer: mockCustomerId,
-          limit: 10,
+          limit: 11,
+          starting_after: 'in_2',
         })
       })
 
-      it('should default to 100 invoices if limit not specified', async () => {
-        mockStripeInstance.invoices.list.mockResolvedValueOnce({ data: [] })
+      it('should detect hasMore when result exceeds limit', async () => {
+        const mockCustomerId = 'cus_123'
+        // Return 11 invoices (limit=10, so hasMore=true)
+        const mockInvoices = Array.from({ length: 11 }, (_, i) => ({
+          id: `in_${i + 1}`,
+          amount_due: 1000,
+          status: 'paid',
+        }))
 
-        await stripeService.getCustomerInvoices('cus_123')
+        mockStripeInstance.invoices.list.mockResolvedValueOnce({
+          data: mockInvoices,
+          has_more: false,
+        })
 
-        expect(mockStripeInstance.invoices.list).toHaveBeenCalledWith({
-          customer: 'cus_123',
-          limit: 100, // Default
+        const result = await stripeService.getCustomerInvoices(mockCustomerId, { limit: 10 })
+
+        expect(result).toEqual({
+          invoices: mockInvoices.slice(0, 10), // Only first 10 returned
+          hasMore: true, // Detected from 11th invoice
+          lastInvoiceId: 'in_10',
         })
       })
     })
@@ -780,8 +840,8 @@ describe('Stripe Service - Comprehensive Tests', () => {
           }
         }
       })
-      ;(prisma.organization.findUnique as jest.Mock).mockResolvedValue({
-        id: 'org_retry',
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({
+        id: 'venue_retry',
         stripeCustomerId: null,
       })
 
@@ -790,17 +850,17 @@ describe('Stripe Service - Comprehensive Tests', () => {
         .mockRejectedValueOnce({ type: 'api_error', message: 'Transient error' })
         .mockRejectedValueOnce({ type: 'api_error', message: 'Transient error' })
         .mockResolvedValueOnce({ id: 'cus_success_after_retry' })
-      ;(prisma.organization.update as jest.Mock).mockResolvedValue({})
+      ;(prisma.venue.update as jest.Mock).mockResolvedValue({})
 
-      const result = await stripeService.getOrCreateStripeCustomer('org_retry', 'test@example.com', 'Test User')
+      const result = await stripeService.getOrCreateStripeCustomer('venue_retry', 'test@example.com', 'Test User')
 
       expect(result).toBe('cus_success_after_retry')
     })
 
     it('should not retry on permanent Stripe errors (invalid_request_error)', async () => {
       ;(retryUtils.shouldRetryStripeError as jest.Mock).mockReturnValue(false)
-      ;(prisma.organization.findUnique as jest.Mock).mockResolvedValue({
-        id: 'org_permanent_error',
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({
+        id: 'venue_permanent_error',
         stripeCustomerId: null,
       })
 
@@ -809,7 +869,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
       ;(stripeError as any).type = 'invalid_request_error'
       mockStripeInstance.customers.create.mockRejectedValueOnce(stripeError)
 
-      await expect(stripeService.getOrCreateStripeCustomer('org_permanent_error', 'test@example.com', 'Test User')).rejects.toThrow(
+      await expect(stripeService.getOrCreateStripeCustomer('venue_permanent_error', 'test@example.com', 'Test User')).rejects.toThrow(
         'Invalid API key',
       )
     })

@@ -11,6 +11,8 @@ import { FRONTEND_URL } from '@/config/env'
 import emailService from './email.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
 import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
+import { handlePaymentFailure, generateBillingPortalUrl } from './stripe.service'
+import socketManager from '../communication/sockets'
 
 /**
  * Handle subscription updated event
@@ -59,6 +61,22 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         featureCode: venueFeature.feature.code,
         subscriptionId,
       })
+
+      // 🔔 Emit socket event for real-time UI update
+      if (socketManager.getServer()) {
+        socketManager.broadcastToVenue(venueFeature.venueId, 'subscription.activated' as any, {
+          featureId: venueFeature.featureId,
+          featureCode: venueFeature.feature.code,
+          subscriptionId,
+          status: 'active',
+          endDate: null,
+          timestamp: new Date(),
+        })
+        logger.info('📡 Socket event emitted: subscription.activated', {
+          venueId: venueFeature.venueId,
+          featureCode: venueFeature.feature.code,
+        })
+      }
       break
 
     case 'trialing':
@@ -102,6 +120,21 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         subscriptionId,
         status,
       })
+
+      // 🔔 Emit socket event for real-time UI update
+      if (socketManager.getServer()) {
+        socketManager.broadcastToVenue(venueFeature.venueId, 'subscription.deactivated' as any, {
+          featureId: venueFeature.featureId,
+          featureCode: venueFeature.feature.code,
+          subscriptionId,
+          status,
+          timestamp: new Date(),
+        })
+        logger.info('📡 Socket event emitted: subscription.deactivated', {
+          venueId: venueFeature.venueId,
+          featureCode: venueFeature.feature.code,
+        })
+      }
       break
 
     case 'incomplete':
@@ -185,13 +218,16 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
     return
   }
 
-  // Ensure feature is active (should already be, but double-check)
+  // Ensure feature is active
+  // This handles two cases:
+  // 1. First-time activation (trialPeriodDays=0, created with active=false)
+  // 2. Reactivation after payment failure suspension
   if (!venueFeature.active) {
     await prisma.venueFeature.update({
       where: { id: venueFeature.id },
       data: { active: true, endDate: null },
     })
-    logger.info('✅ Webhook: Feature reactivated after payment', {
+    logger.info('✅ Webhook: Feature activated after successful payment', {
       venueId: venueFeature.venueId,
       featureCode: venueFeature.feature.code,
       amountPaid,
@@ -200,8 +236,11 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
 }
 
 /**
- * Send payment failed notifications (email + in-app) to venue owners and admins
+ * Send payment failed in-app notifications to venue owners and admins
  * Called by handleInvoicePaymentFailed
+ *
+ * NOTE: Email notifications are sent by handlePaymentFailure() in stripe.service.ts
+ * to avoid duplicate emails and ensure consistent Stripe billing portal URLs
  *
  * @param venueId - Venue ID
  * @param venueName - Venue name
@@ -244,12 +283,20 @@ async function sendPaymentFailedNotifications(
       return
     }
 
-    logger.info(`📧 Sending payment failed notifications to ${staffMembers.length} staff members`, { venueId, attemptCount })
+    logger.info(`🔔 Creating in-app notifications for ${staffMembers.length} staff members`, { venueId, attemptCount })
 
-    // 2. Generate billing portal URL
-    const billingPortalUrl = `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+    // 2. Get venue slug for billing URL
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { slug: true },
+    })
 
-    // 3. Send notifications to each staff member
+    // 3. Generate billing portal URL for in-app notification (using venue-slug)
+    const billingPortalUrl = venue?.slug
+      ? `${FRONTEND_URL}/dashboard/venues/${venue.slug}/billing`
+      : `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+
+    // 3. Send in-app notifications to each staff member
     for (const staffVenue of staffMembers) {
       const { staff } = staffVenue
 
@@ -258,13 +305,24 @@ async function sendPaymentFailedNotifications(
         const priority =
           attemptCount >= 3 ? NotificationPriority.URGENT : attemptCount >= 2 ? NotificationPriority.HIGH : NotificationPriority.NORMAL
 
-        // 3a. Create in-app notification
+        // Build message with card details if available
+        const cardInfo = last4 ? ` terminada en ${last4}` : ''
+        const urgencyMessage =
+          attemptCount >= 3
+            ? '\n\n⚠️ ÚLTIMO INTENTO: Tu suscripción será cancelada si no actualizas tu método de pago.'
+            : attemptCount >= 2
+              ? '\n\nSi no actualizas, perderás acceso a esta función.'
+              : ''
+
+        // Create in-app notification with actionUrl and actionLabel
         await createNotification({
           recipientId: staff.id,
           venueId,
           type: NotificationType.PAYMENT_FAILED,
-          title: `🚨 Problema con el pago de ${featureName}`,
-          message: `No pudimos procesar el pago de tu suscripción (Intento ${attemptCount} de 3). Por favor, actualiza tu método de pago inmediatamente.`,
+          title: `🚨 Pago rechazado - ${featureName}`,
+          message: `Tu tarjeta${cardInfo} fue rechazada.\n\nPor favor usa un método de pago diferente para mantener tu suscripción activa.\n\n(Intento ${attemptCount} de 3)${urgencyMessage}`,
+          actionUrl: billingPortalUrl, // ✅ Frontend will redirect here on click
+          actionLabel: 'Actualizar método de pago', // ✅ Button text
           metadata: {
             featureName,
             attemptCount,
@@ -273,31 +331,14 @@ async function sendPaymentFailedNotifications(
             last4,
             billingPortalUrl,
           },
-          channels: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+          channels: [NotificationChannel.IN_APP],
           priority,
         })
 
         logger.info('✅ In-app notification created', { userId: staff.id, venueId, attemptCount })
-
-        // 3b. Send email notification
-        const emailSent = await emailService.sendPaymentFailedEmail(staff.email, {
-          venueName,
-          featureName,
-          attemptCount,
-          amountDue,
-          currency,
-          billingPortalUrl,
-          last4,
-        })
-
-        if (emailSent) {
-          logger.info('✅ Payment failed email sent successfully', { email: staff.email, venueId, attemptCount })
-        } else {
-          logger.warn('⚠️ Payment failed email failed to send', { email: staff.email, venueId, attemptCount })
-        }
       } catch (notificationError) {
         // Log but don't throw - notifications should not block webhook success
-        logger.error('❌ Failed to send payment failed notification to staff member', {
+        logger.error('❌ Failed to create in-app notification for staff member', {
           staffId: staff.id,
           email: staff.email,
           error: notificationError instanceof Error ? notificationError.message : 'Unknown error',
@@ -305,10 +346,10 @@ async function sendPaymentFailedNotifications(
       }
     }
 
-    logger.info('✅ Payment failed notifications sent successfully', { venueId, staffCount: staffMembers.length, attemptCount })
+    logger.info('✅ In-app notifications created successfully', { venueId, staffCount: staffMembers.length, attemptCount })
   } catch (error) {
     // Log but don't throw - notifications should not block webhook success
-    logger.error('❌ Failed to send payment failed notifications', {
+    logger.error('❌ Failed to send in-app notifications', {
       venueId,
       attemptCount,
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -370,7 +411,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
       const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId)
       last4 = paymentMethod.card?.last4
     }
-  } catch (error) {
+  } catch {
     logger.warn('⚠️ Could not retrieve payment method details', { invoiceId: invoice.id })
   }
 
@@ -384,6 +425,15 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
     currency,
     last4,
   )
+
+  // Handle payment failure with dunning management
+  // This will update failure tracking, set grace periods, and handle suspension
+  await handlePaymentFailure(subscriptionIdStr, attemptCount, {
+    invoiceId: invoice.id,
+    amountDue,
+    currency,
+    last4,
+  })
 }
 
 /**
@@ -422,15 +472,28 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
 
     logger.info(`📧 Sending trial ending notifications to ${staffMembers.length} staff members`, { venueId })
 
-    // 2. Generate billing portal URL
-    const billingPortalUrl = `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+    // 2. Get venue organization to generate Stripe billing portal URL
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: {
+        slug: true,
+        stripeCustomerId: true,
+      },
+    })
 
-    // 3. Send notifications to each staff member
+    // 3. Generate Stripe billing portal URL (or fallback to dashboard with venue-slug)
+    const returnUrl = venue?.slug
+      ? `${FRONTEND_URL}/dashboard/venues/${venue.slug}/billing`
+      : `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+
+    const billingPortalUrl = venue?.stripeCustomerId ? await generateBillingPortalUrl(venue.stripeCustomerId, returnUrl) : returnUrl
+
+    // 4. Send notifications to each staff member
     for (const staffVenue of staffMembers) {
       const { staff } = staffVenue
 
       try {
-        // 3a. Create in-app notification
+        // 4a. Create in-app notification
         await createNotification({
           recipientId: staff.id,
           venueId,
@@ -448,7 +511,7 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
 
         logger.info('✅ In-app notification created', { userId: staff.id, venueId })
 
-        // 3b. Send email notification
+        // 4b. Send email notification with Stripe billing portal URL
         const emailSent = await emailService.sendTrialEndingEmail(staff.email, {
           venueName,
           featureName,
@@ -534,45 +597,39 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
     name: customer.name,
   })
 
-  // Find organization with this Stripe customer
-  const organization = await prisma.organization.findFirst({
+  // Find venue with this Stripe customer
+  const venue = await prisma.venue.findFirst({
     where: { stripeCustomerId: customerId },
-    include: {
-      venues: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
     },
   })
 
-  if (!organization) {
-    logger.warn('⚠️ Webhook: No organization found for deleted customer', { customerId })
+  if (!venue) {
+    logger.warn('⚠️ Webhook: No venue found for deleted customer', { customerId })
     return
   }
 
-  logger.warn('⚠️ Webhook: Removing Stripe customer ID from organization', {
-    organizationId: organization.id,
-    organizationName: organization.name,
-    venueCount: organization.venues.length,
+  logger.warn('⚠️ Webhook: Removing Stripe customer ID from venue', {
+    venueId: venue.id,
+    venueName: venue.name,
     customerId,
   })
 
-  // Clear Stripe customer ID from organization
-  await prisma.organization.update({
-    where: { id: organization.id },
+  // Clear Stripe customer ID from venue
+  await prisma.venue.update({
+    where: { id: venue.id },
     data: {
       stripeCustomerId: null,
     },
   })
 
-  // Deactivate all venue features (since payment method is gone)
+  // Deactivate only this venue's features (since payment method is gone)
   const deactivatedCount = await prisma.venueFeature.updateMany({
     where: {
-      venue: {
-        organizationId: organization.id,
-      },
+      venueId: venue.id,
       active: true,
     },
     data: {
@@ -580,8 +637,8 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
     },
   })
 
-  logger.warn('⚠️ Webhook: Deactivated all features due to customer deletion', {
-    organizationId: organization.id,
+  logger.warn('⚠️ Webhook: Deactivated venue features due to customer deletion', {
+    venueId: venue.id,
     deactivatedFeatures: deactivatedCount.count,
   })
 }
@@ -671,15 +728,30 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
 
         // Update Venue record in database with payment method ID
         try {
-          await prisma.venue.updateMany({
+          // Find venue by Stripe customer ID
+          const venue = await prisma.venue.findUnique({
             where: { stripeCustomerId: customerId },
-            data: { stripePaymentMethodId: paymentMethodId },
+            select: { id: true },
           })
 
-          logger.info('✅ Webhook: Payment method saved to venue database', {
-            paymentMethodId,
-            customerId,
-          })
+          if (venue) {
+            // Update venue's payment method
+            await prisma.venue.update({
+              where: { id: venue.id },
+              data: { stripePaymentMethodId: paymentMethodId },
+            })
+
+            logger.info('✅ Webhook: Payment method saved to venue database', {
+              paymentMethodId,
+              customerId,
+              venueId: venue.id,
+            })
+          } else {
+            logger.warn('⚠️ Webhook: No venue found with stripeCustomerId', {
+              customerId,
+              paymentMethodId,
+            })
+          }
         } catch (dbUpdateError) {
           logger.error('❌ Webhook: Failed to update venue payment method in database', {
             paymentMethodId,
