@@ -81,6 +81,10 @@ model Venue {
   demoExpiresAt         DateTime? // Demo expiration date
   onboardingCompletedAt DateTime? // When onboarding was completed
 
+  // Legal Entity Type
+  entityType     EntityType? // PERSONA_FISICA or PERSONA_MORAL
+  legalDocuments Json?       // Metadata for uploaded legal documents
+
   // Tax Information (for converting from demo to real)
   rfc             String? // RFC (Tax ID) for Mexico
   legalName       String? // Legal business name (Razón social)
@@ -88,6 +92,19 @@ model Venue {
   taxDocumentUrl  String? // URL to tax document (constancia de situación fiscal)
   idDocumentUrl   String? // URL to ID document (INE/IFE)
   actaDocumentUrl String? // URL to Acta Constitutiva
+
+  // KYC Documents (required by payment processor)
+  rfcDocumentUrl          String? // RFC certificate document
+  comprobanteDomicilioUrl String? // Address proof (utility bill, bank statement)
+  caratulaBancariaUrl     String? // Bank statement with CLABE visible
+  poderLegalUrl           String? // Power of attorney (Persona Moral only)
+
+  // KYC Verification Status
+  kycStatus             VerificationStatus @default(PENDING_REVIEW)
+  kycCompletedAt        DateTime? // When KYC verification was completed
+  kycRejectionReason    String?   @db.Text // Reason for rejection (if REJECTED)
+  kycRejectedDocuments  String[]  @default([]) // Specific documents rejected (e.g., ["ineUrl", "rfcDocumentUrl"])
+  kycVerifiedBy         String? // Superadmin user ID who verified
 
   // Stripe integration (for trial subscriptions)
   stripeCustomerId      String? @unique
@@ -1846,6 +1863,11 @@ model MerchantAccount {
   active       Boolean @default(true) // Enable/disable account
   displayOrder Int     @default(0) // For consistent ordering in UI
 
+  // Bank Account Information (CLABE for Mexican accounts)
+  clabeNumber   String? // 18-digit CLABE (Clave Bancaria Estandarizada)
+  bankName      String? // Bank name (e.g., "BBVA", "Santander", "Banorte")
+  accountHolder String? // Legal account holder name (must match Venue legalName)
+
   // Encrypted credentials (provider-agnostic)
   credentialsEncrypted Json // Different per provider
 
@@ -2369,6 +2391,18 @@ enum BusinessType {
   OTHER
 }
 
+enum EntityType {
+  PERSONA_FISICA  // Natural person / individual
+  PERSONA_MORAL   // Legal entity / company
+}
+
+enum VerificationStatus {
+  PENDING_REVIEW // Awaiting Superadmin KYC review
+  IN_REVIEW      // Superadmin is currently reviewing
+  VERIFIED       // KYC approved, venue can operate
+  REJECTED       // KYC rejected, needs resubmission
+}
+
 enum VenueType {
   RESTAURANT
   BAR
@@ -2766,6 +2800,12 @@ enum NotificationType {
   SUBSCRIPTION_ACTIVATED
   SUBSCRIPTION_CANCELLED
   SUBSCRIPTION_PAYMENT_FAILED
+
+  // KYC notifications (Superadmin)
+  NEW_KYC_SUBMISSION // New venue submitted KYC documents
+  KYC_APPROVED       // KYC was approved by superadmin
+  KYC_REJECTED       // KYC was rejected by superadmin
+  KYC_IN_REVIEW      // KYC marked as in review
 
   // General
   ANNOUNCEMENT
