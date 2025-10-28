@@ -347,7 +347,9 @@ async function resetDatabase() {
     ['Staff', () => prisma.staff.deleteMany()],
     ['Venues', () => prisma.venue.deleteMany()],
     ['Organizations', () => prisma.organization.deleteMany()],
-    ['Features', () => prisma.feature.deleteMany()],
+    // ⚠️ DON'T delete Features - they keep Stripe IDs across seed runs
+    // Upsert will update existing features without losing stripeProductId/stripePriceId
+    // ['Features', () => prisma.feature.deleteMany()],
     ['Customers', () => prisma.customer.deleteMany()],
   ]
 
@@ -431,6 +433,13 @@ async function main() {
   }
   const allFeatures = await prisma.feature.findMany()
   console.log(`  Created ${allFeatures.length} global features.`)
+
+  // Note: Seed creates features in DB, but Stripe sync happens separately
+  // Stripe products/prices are created automatically during:
+  // 1. Onboarding (venueCreation.service.ts calls syncFeaturesToStripe)
+  // 2. Demo conversion (venue.dashboard.service.ts calls syncFeaturesToStripe)
+  // To manually sync: npx ts-node -r tsconfig-paths/register scripts/sync-features-to-stripe.ts
+  console.log('  💡 To sync features to Stripe, run: npx ts-node -r tsconfig-paths/register scripts/sync-features-to-stripe.ts')
 
   const feeSchedule = await prisma.feeSchedule.create({
     data: {
