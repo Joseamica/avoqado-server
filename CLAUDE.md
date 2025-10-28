@@ -199,9 +199,7 @@ git commit -m "fix: timezone field not saving in venue update"
 
 - `npm run lint` - Run ESLint
 - `npm run lint:fix` - Auto-fix ESLint issues
-- `npm run format` - Format code with Prettier
-
-**⚡ AUTO-FORMAT POLICY (Claude):**
+- `npm run format` - Format code with Prettier **⚡ AUTO-FORMAT POLICY (Claude):**
 
 After editing or creating TypeScript/JavaScript files, Claude will **automatically** execute: `npm run format && npm run lint:fix`
 
@@ -316,184 +314,29 @@ The system implements a hierarchical role-based access control (RBAC) system wit
 - **TPV Services** (`src/services/tpv/`) - Point-of-sale terminal operations
 - **POS Sync Services** (`src/services/pos-sync/`) - Legacy POS integration
 
-## 🍔 Order → Payment → Inventory Flow (CRITICAL BUSINESS LOGIC)
+## 🍔 Order → Payment → Inventory Flow
 
-### Overview
+**WHY**: Automatic inventory tracking prevents stockouts and calculates real-time profit margins.
 
-This is the **most critical business flow** in the platform. When an order is fully paid, the system automatically deducts inventory using
-FIFO (First-In-First-Out) batch tracking.
+**Design Decision**: Deduct inventory ONLY when order is fully paid (not when created) to handle partial payments and order cancellations
+correctly.
 
-### Complete Flow Diagram
+**Core Flow**: Order Creation → Payment Processing → (if fully paid) → FIFO Batch Deduction → Profit Tracking
 
-```
-1. ORDER CREATION [TPV or Dashboard]
-   ├─ POST /api/v1/tpv/venues/{venueId}/orders
-   ├─ Controller: order.tpv.controller.ts → createOrder()
-   ├─ Service: order.tpv.service.ts → createOrder()
-   └─ Result: Order with status="CONFIRMED", paymentStatus="PENDING"
-   ⚠️ NO INVENTORY DEDUCTION YET
+**Key Files**:
 
-2. PAYMENT PROCESSING
-   ├─ POST /api/v1/tpv/venues/{venueId}/orders/{orderId}/payments
-   ├─ Controller: payment.tpv.controller.ts → recordPayment()
-   ├─ Service: payment.tpv.service.ts → recordOrderPayment()
-   │   ├─ Create Payment record
-   │   ├─ Create VenueTransaction (revenue tracking)
-   │   ├─ Create TransactionCost (profit tracking)
-   │   └─ Check if order is fully paid:
-   │       ├─ totalPaid < order.total → paymentStatus="PARTIAL"
-   │       └─ totalPaid >= order.total → paymentStatus="PAID", status="COMPLETED"
-   │           └─ 🎯 TRIGGER AUTOMATIC INVENTORY DEDUCTION
+- Payment service: `src/services/tpv/payment.tpv.service.ts:recordOrderPayment()`
+- Inventory deduction: `src/services/dashboard/rawMaterial.service.ts:deductStockForRecipe()`
+- FIFO logic: `src/services/dashboard/rawMaterial.service.ts:deductStockFIFO()`
 
-3. INVENTORY DEDUCTION [payment.tpv.service.ts:98-147]
-   For each OrderItem:
-   ├─ Call deductStockForRecipe(venueId, productId, quantity, orderId)
-   ├─ Product has NO recipe? → Skip (log warning, not error)
-   ├─ Insufficient stock? → Skip (log warning, payment still succeeds)
-   └─ Success: Deduct inventory via FIFO
+**📖 Complete Documentation**: See `docs/INVENTORY_FLOW.md` for:
 
-4. FIFO BATCH DEDUCTION [rawMaterial.service.ts:468-537]
-   For each ingredient in recipe:
-   ├─ Skip if ingredient.isOptional = true
-   ├─ Calculate needed: ingredient.quantity × portions sold
-   ├─ Call deductStockFIFO() → [rawMaterial.service.ts:395-466]
-   │   ├─ Query: SELECT * FROM StockBatch WHERE rawMaterialId=? AND status=ACTIVE ORDER BY receivedDate ASC
-   │   ├─ Batch 1 (oldest): Deduct up to remainingQuantity
-   │   ├─ Batch depleted? → Update status=DEPLETED, move to Batch 2
-   │   └─ Repeat until full quantity deducted
-   ├─ Create RawMaterialMovement record (audit trail)
-   ├─ Update RawMaterial.currentStock (-quantity)
-   └─ Check if currentStock <= reorderPoint:
-       └─ Create LowStockAlert + emit Socket.IO notification
-
-5. PROFIT TRACKING
-   ├─ Recipe Cost = SUM(ingredient.quantity × ingredient.costPerUnit)
-   ├─ Sale Price = Product.price
-   ├─ Gross Profit = Sale Price - Recipe Cost
-   └─ Records: VenueTransaction (revenue) / TransactionCost (detailed costs) / MonthlyVenueProfit (aggregated)
-```
-
-### Key Files and Line Numbers
-
-| File                                                            | Function                    | Lines   | Purpose                                               |
-| --------------------------------------------------------------- | --------------------------- | ------- | ----------------------------------------------------- |
-| `src/services/tpv/payment.tpv.service.ts`                       | `recordOrderPayment()`      | 98-147  | Triggers inventory deduction when order is fully paid |
-| `src/services/dashboard/rawMaterial.service.ts`                 | `deductStockForRecipe()`    | 468-537 | Orchestrates recipe-based deduction                   |
-| `src/services/dashboard/rawMaterial.service.ts`                 | `deductStockFIFO()`         | 395-466 | Implements FIFO batch consumption                     |
-| `src/services/dashboard/productInventoryIntegration.service.ts` | `getProductInventoryType()` | 14-38   | Determines inventory strategy                         |
-
-### Critical Business Rules
-
-1. ✅ **Stock deduction ONLY when fully paid**: `totalPaid >= order.total`
-2. ✅ **Non-blocking failures**: Payment succeeds even if deduction fails
-3. ✅ **FIFO batch consumption**: Oldest batches first (`receivedDate ASC`)
-4. ✅ **Recipe-based deduction**: Each product links to recipe with ingredients
-5. ✅ **Optional ingredients**: Skipped if unavailable (`isOptional: true`)
-6. ✅ **Low stock alerts**: Auto-generated when `currentStock <= reorderPoint`
-7. ✅ **Partial payments**: Do NOT trigger deduction
-
-### Real-World Example: 3 Hamburgers
-
-**Recipe (1 burger):** 1 bun @ $0.50 = $0.50 / 1 beef patty @ $2.00 = $2.00 / 2 cheese slices @ $0.30 each = $0.60 / 50g lettuce @
-$0.50/100g = $0.25 / **Total Cost: $3.35 | Sale Price: $12.99 | Profit: $9.64 (74.2% margin)**
-
-**Order Flow:**
-
-1. Waiter creates order: 3 burgers = $38.97 (total with tax)
-2. Customer pays: $38.97 + $5.00 tip = $43.97
-3. **Payment triggers inventory deduction** (totalPaid >= order.total ✓)
-4. **Stock deducted (FIFO):** 3 buns → Batch 1 (Oct 1, oldest) / 3 beef patties → Batch 1 (Oct 1) / 6 cheese slices → Batch 2 (Oct 3, after
-   Batch 1 depleted) / 150g lettuce → Batch 1 (Oct 2)
-5. **Revenue tracked:** VenueTransaction: $43.97 gross / TransactionCost: $10.05 cost (3 × $3.35) / Profit: $33.92 (77.2% margin including
-   tip)
-6. **Low stock alert**: If any ingredient <= reorderPoint
-
-### FIFO Batch Example
-
-```typescript
-// Buns inventory before order:
-Batch 1: 50 units, received Oct 4, expires Oct 9  (OLDEST)
-Batch 2: 100 units, received Oct 9, expires Oct 14
-Batch 3: 150 units, received Oct 14, expires Oct 19 (NEWEST)
-// Order requires 60 buns:
-Step 1: Deduct 50 from Batch 1 → Batch 1 DEPLETED
-Step 2: Deduct 10 from Batch 2 → Batch 2 has 90 remaining
-Step 3: Batch 3 untouched (still 150)
-// Result: Oldest stock used first, reducing waste!
-```
-
-### Edge Cases & Error Handling
-
-| Scenario                        | Behavior                    | Code Location                    |
-| ------------------------------- | --------------------------- | -------------------------------- |
-| No recipe for product           | Skip deduction, log warning | `payment.tpv.service.ts:126-132` |
-| Insufficient stock              | Skip deduction, log warning | `rawMaterial.service.ts:442-448` |
-| Partial payment                 | No deduction                | `payment.tpv.service.ts:95-97`   |
-| Optional ingredient unavailable | Skip ingredient, continue   | `rawMaterial.service.ts:483`     |
-| Batch expired                   | Skip batch, use next        | `rawMaterial.service.ts:419-424` |
-| Order cancelled                 | No deduction                | Only COMPLETED orders trigger    |
-
-### API Endpoints
-
-**Create Order:** `POST /api/v1/tpv/venues/{venueId}/orders` - Authorization: Bearer {token} -
-`{"items": [{"productId": "prod_123", "quantity": 3, "notes": "No onions"}], "tableId": "table_5", "customerName": "John Doe"}`
-
-**Record Payment (triggers inventory deduction):** `POST /api/v1/tpv/venues/{venueId}/orders/{orderId}/payments` - Authorization: Bearer
-{token} - `{"amount": 38.97, "method": "CASH", "reference": "CASH-001"}`
-
-**View Stock Movements:** `GET /api/v1/dashboard/venues/{venueId}/raw-materials/{materialId}/movements` - Authorization: Bearer {token}
-
-### Testing the Flow
-
-**Automated Tests:** `npm run test:workflows` (Includes inventory deduction tests) / `npm run test:tpv` (TPV-specific tests)
-
-**Manual Testing:** `npm run migrate && npm run seed` → `npm run dev` → Create order via curl → Record payment →
-`tail -f logs/app.log | grep "🎯\|✅\|⚠️"` → Verify in `npm run studio` (Check: RawMaterial.currentStock, StockBatch.remainingQuantity,
-RawMaterialMovement)
-
-### Debugging Common Issues
-
-**Stock not deducting:** Check 1: Is order fully paid? `totalPaid >= total` / Check 2: Does product have recipe? / Check 3: Are ingredients
-available? `rawMaterial.currentStock`
-
-**Wrong FIFO order:**
-`SELECT id, receivedDate, remainingQuantity, status FROM "StockBatch" WHERE "rawMaterialId" = 'rm_123' ORDER BY "receivedDate" ASC;` (Should
-show oldest first with status='ACTIVE')
-
-**Low stock alert not generated:** Check reorder point: `currentStock <= reorderPoint` triggers alert
-
-### Socket.IO Events
-
-```typescript
-// Low stock alert
-socket.to(`venue_${venueId}`).emit('inventory.lowStock', { rawMaterialId, name, currentStock, reorderPoint, unit })
-// Stock movement
-socket.to(`venue_${venueId}`).emit('inventory.stockMoved', { rawMaterialId, type, quantity, reference })
-```
-
-### Database Models
-
-**Key relationships:** `Order → OrderItem → Product → Recipe → RecipeLine → RawMaterial → StockBatch / RawMaterialMovement / LowStockAlert`
-
-**Critical fields:** `Order.totalPaid` vs `Order.total` (Determines if deduction triggers) / `StockBatch.receivedDate` (FIFO ordering) /
-`StockBatch.status` (ACTIVE or DEPLETED) / `RawMaterial.currentStock` (Auto-calculated) / `RawMaterial.reorderPoint` (Low stock threshold) /
-`RecipeLine.isOptional` (Skip if unavailable)
-
-### Best Practices
-
-1. **Always use transactions** for stock deduction to ensure atomicity
-2. **Log extensively** during inventory operations (use emojis: 🎯 ✅ ⚠️)
-3. **Never block payments** due to inventory issues
-4. **Always validate** `totalPaid >= total` before deduction
-5. **Test FIFO order** by creating multiple batches with different dates
-6. **Monitor logs** for `⚠️` warnings about missing recipes or low stock
-
-### Related Documentation
-
-- **Root CLAUDE.md**: Full flow diagram with examples
-- **Dashboard CLAUDE.md**: UI components and frontend integration
-- **AGENTS.md** (this project): Agent-specific guidelines
-- **DATABASE_SCHEMA.md**: Complete schema documentation
+- Complete flow diagram with all steps
+- Real-world example (3 hamburgers order)
+- FIFO batch consumption logic
+- Edge cases and error handling
+- API endpoints and testing instructions
+- Debugging common issues
 
 ---
 
@@ -501,361 +344,38 @@ socket.to(`venue_${venueId}`).emit('inventory.stockMoved', { rawMaterialId, type
 
 ### Authentication & Authorization
 
-- JWT-based authentication with refresh tokens
-- Permission-based access control (ABAC) - Granular permission system
-- Session management with Redis
-- Middleware: `authenticateToken`, `checkPermission`
+**WHY**: JWT-based auth provides stateless authentication, permission-based access control (ABAC) enables flexible per-venue customization.
 
-**⚠️ CRITICAL: Request Context Pattern**
-
-The `authenticateTokenMiddleware` attaches user information to `req.authContext`, NOT `req.user`:
+**Critical Pattern**: Use `req.authContext` NOT `req.user`:
 
 ```typescript
-// ✅ CORRECT - Use authContext
+// ✅ CORRECT
 const authContext = (req as any).authContext
-if (!authContext || !authContext.role) {
-  return res.status(401).json({ error: 'Unauthorized' })
-}
-const userRole = authContext.role // StaffRole
-const userId = authContext.userId
-const venueId = authContext.venueId
-const orgId = authContext.orgId
+const { userId, venueId, orgId, role } = authContext
+
 // ❌ WRONG - req.user does NOT exist
 const user = (req as any).user // undefined!
 ```
 
-**AuthContext Structure** (from `src/security.ts`):
-`interface AuthContext { userId: string; orgId: string; venueId: string; role: StaffRole }`
-
-**Common Mistake**: Creating new middleware that reads `req.user` instead of `req.authContext`, causing "No user found in request" errors
-even though authentication succeeded.
-
-**Where to find this:** Middleware: `src/middlewares/authenticateToken.middleware.ts:37` (Sets `req.authContext`) /
-`src/middlewares/checkPermission.middleware.ts:25` (Reads `req.authContext`, current standard) /
-`src/middlewares/authorizeRole.middleware.ts:14,23` (Reads `req.authContext`, deprecated - use checkPermission instead)
-
-### Granular Permission System (Action-Based Permissions)
-
-The platform uses a **granular permission system** based on action-based permissions (inspired by Fortune 500 companies like Stripe, AWS,
-GitHub).
+**Middleware**: `authenticateToken` (sets authContext), `checkPermission` (validates permissions)
 
 **Permission Format**: `"resource:action"` (e.g., `"tpv:create"`, `"menu:update"`, `"analytics:export"`)
 
-**Two-Layer Permission System:** 1. **Default Role-Based Permissions** - Defined in `src/lib/permissions.ts` / 2. **Custom Permissions** -
-Stored in `StaffVenue.permissions` JSON field (Prisma schema)
-
-**Key Files:** `src/lib/permissions.ts` (Permission constants and validation logic) / `src/middlewares/checkPermission.middleware.ts`
-(Route-level permission middleware) / Prisma Schema: `StaffVenue.permissions` field (JSON array for custom permissions)
-
-#### Permission Middleware
-
-**Basic usage (single permission):**
-
-```typescript
-import { checkPermission } from '../middlewares/checkPermission.middleware'
-router.get('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminals)
-router.post('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:create'), tpvController.createTpv)
-```
-
-**Multiple permissions (requires ANY):**
-
-```typescript
-import { checkAnyPermission } from '../middlewares/checkPermission.middleware'
-router.get(
-  '/venues/:venueId/analytics',
-  authenticateTokenMiddleware,
-  checkAnyPermission(['analytics:read', 'analytics:export']),
-  analyticsController.getData,
-)
-```
-
-**Multiple permissions (requires ALL):**
-
-```typescript
-import { checkAllPermissions } from '../middlewares/checkPermission.middleware'
-router.post(
-  '/venues/:venueId/admin/dangerous-action',
-  authenticateTokenMiddleware,
-  checkAllPermissions(['admin:write', 'admin:delete']),
-  adminController.dangerousAction,
-)
-```
-
-#### Wildcard Permissions
-
-- `"*:*"` - All permissions (ADMIN, OWNER, SUPERADMIN roles)
-- `"tpv:*"` - All TPV actions (create, read, update, delete, command)
-- `"*:read"` - Read access to all resources
-
-#### Default Permissions by Role (from `src/lib/permissions.ts`)
-
-**VIEWER:** `'home:read', 'analytics:read', 'menu:read', 'orders:read', 'payments:read', 'shifts:read', 'reviews:read', 'teams:read'`
-
-**WAITER:**
-`'menu:read', 'menu:create', 'menu:update', 'orders:read', 'orders:create', 'orders:update', 'payments:read', 'payments:create', 'shifts:read', 'tables:read', 'tables:update', 'reviews:read', 'teams:read', 'tpv:read'`
-
-**MANAGER:**
-`'analytics:read', 'analytics:export', 'menu:*', 'orders:*', 'payments:read', 'payments:create', 'payments:refund', 'shifts:*', 'tpv:read', 'tpv:create', 'tpv:update', 'tpv:command', 'reviews:respond', 'teams:update'`
-
-**ADMIN, OWNER, SUPERADMIN:** `'*:*'` (Full access)
-
-#### Custom Permissions (Future Feature)
-
-The system supports custom permissions via `StaffVenue.permissions` JSON field:
-
-**Database schema** (`prisma/schema.prisma`):
-
-```prisma
-model StaffVenue {
-  id          String   @id @default(cuid())
-  staffId     String
-  venueId     String
-  role        StaffRole
-  permissions Json?    // Custom permissions array: ["feature:action", ...]
-  // ...
-}
-```
-
-**Usage** (currently TODO - not in JWT):
-
-```typescript
-// Custom permissions can override/extend default role permissions
-// Example: WAITER with custom "inventory:read" permission
-{staffId: "user_123", venueId: "venue_456", role: "WAITER", permissions: ["inventory:read", "reports:export"]}
-```
-
-**⚠️ Current Limitation**: Custom permissions are NOT included in JWT tokens yet. They need to be: 1. Added to JWT payload during token
-generation (`src/security.ts`) / 2. OR fetched from database during permission checks
-
-#### Permission Best Practices
-
-1. **Use granular permissions** instead of role checks when possible
-   ```typescript
-   // ✅ GOOD - Permission-based
-   router.post('/tpvs', authenticateTokenMiddleware, checkPermission('tpv:create'), ...)
-   // ❌ BAD - Role-based (too rigid)
-   router.post('/tpvs', authenticateTokenMiddleware, authorizeRole(['MANAGER', 'ADMIN']), ...)
-   ```
-2. **Keep frontend and backend permissions in sync** - Frontend: `avoqado-web-dashboard/src/lib/permissions/defaultPermissions.ts` /
-   Backend: `avoqado-server/src/lib/permissions.ts` / ⚠️ **CRITICAL**: Both files must have identical permission arrays for each role
-3. **Always document new permissions** when adding features - Add permission to `DEFAULT_PERMISSIONS` constant / Update this documentation
-   with new permission strings / Update frontend permission configuration
-4. **Permission naming convention:** Resource should be singular: `tpv`, `menu`, `order`, `payment` / Action should be standard CRUD +
-   custom: `read`, `create`, `update`, `delete`, `command`, `export`, `respond` / Format: `resource:action`
-
-#### `authorizeRole` vs `checkPermission` - Understanding the Paradigm Shift
-
-The system has fully migrated from role-based authorization (`authorizeRole`) to permission-based authorization (`checkPermission`). **These
-are fundamentally different approaches**, not just extensions. All routes now use `checkPermission` exclusively.
-
-##### `authorizeRole` - Legacy Role-Based Approach (RBAC)
-
-`authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER])`
-
-**How it works:** Question: "Is your role in this list?" / Static check - Cannot be customized per venue / All or nothing - If you're a
-WAITER, you're blocked. Period.
-
-**Limitations:** ❌ Very rigid - Cannot grant extra permissions to lower roles / ❌ Cannot remove permissions from higher roles (OWNER
-always has full access) / ❌ Same permissions for all venues (no per-venue customization) / ❌ No granularity - You either have full role
-access or none
-
-**Example problem:**
-
-```typescript
-// Analytics route
-router.get(
-  '/venues/:venueId/analytics',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]),
-  analyticsController.getData,
-)
-// ❌ WAITER blocked - No way to grant analytics access to a specific WAITER
-// ❌ OWNER has access - No way to restrict analytics from a specific OWNER
-```
-
-##### `checkPermission` - Modern Permission-Based Approach (ABAC)
-
-`checkPermission('menu:read')`
-
-**How it works:** Question: "Do you have this specific permission?" / Dynamic check - Queries `VenueRolePermission` table on each request /
-Granular control - Permissions calculated using override/merge logic
-
-**Advantages:**
-
-**1. Override Mode** (for wildcard roles: ADMIN, OWNER, SUPERADMIN)
-
-```typescript
-// Example: OWNER in a specific venue
-Default permissions: ['*:*']  // All permissions
-Custom permissions:  ['orders:read', 'payments:read']  // Only these 2
-// Result: Uses ONLY custom (complete override)
-// ✅ OWNER can access orders and payments
-// ❌ OWNER CANNOT access menu (menu:read not in custom list)
-```
-
-**2. Merge Mode** (for non-wildcard roles: WAITER, CASHIER, etc.)
-
-```typescript
-// Example: WAITER in a specific venue
-Default permissions: ['menu:read', 'orders:create', 'tpv:read']
-Custom permissions:  ['inventory:read', 'analytics:export']
-// Result: Default + Custom (additive merge)
-// ✅ WAITER has ALL default permissions PLUS the 2 custom ones
-Final: ['menu:read', 'orders:create', 'tpv:read', 'inventory:read', 'analytics:export']
-```
-
-**3. Per-Venue Customization**
-
-```typescript
-// Venue A: WAITER has default permissions only
-VenueRolePermission: null
-// Venue B: WAITER has extra permissions
-VenueRolePermission: {venueId: 'venue_B', role: 'WAITER', permissions: ['inventory:read', 'shifts:close']}
-// ✅ Same user, different permissions based on venue context
-```
-
-##### Real-World Comparison
-
-**Scenario:** An OWNER wants to give analytics access to a WAITER, but NOT menu editing.
-
-**❌ With `authorizeRole` (impossible):**
-
-```typescript
-// Analytics route
-router.get(
-  '/venues/:venueId/analytics',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]) /* WAITER blocked - No way to grant access */,
-)
-// Menu route
-router.post(
-  '/venues/:venueId/menu/products',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]) /* WAITER blocked - Correct, but not granular */,
-)
-```
-
-**✅ With `checkPermission` (flexible):**
-
-```typescript
-// Analytics route
-router.get('/venues/:venueId/analytics', authenticateTokenMiddleware, checkPermission('analytics:read'), /* ✅ WAITER can access if custom permission granted */)
-// Menu route
-router.post('/venues/:venueId/menu/products', authenticateTokenMiddleware, checkPermission('menu:create'), /* ✅ WAITER blocked - Doesn't have this permission */)
-// In database:
-VenueRolePermission {venueId: 'venue_123', role: 'WAITER', permissions: ['analytics:read', 'analytics:export']}
-```
-
-##### Key Differences Summary
-
-| Aspect                      | `authorizeRole`             | `checkPermission`                          |
-| --------------------------- | --------------------------- | ------------------------------------------ |
-| **Type**                    | Role-based (RBAC)           | Permission-based (ABAC)                    |
-| **Flexibility**             | Static, same for all venues | Dynamic, customizable per venue            |
-| **Granularity**             | Full role (all or nothing)  | Specific permission (resource:action)      |
-| **Customization**           | ❌ Impossible               | ✅ Via `VenueRolePermission` table         |
-| **Remove perms from OWNER** | ❌ Impossible               | ✅ Override mode                           |
-| **Add perms to WAITER**     | ❌ Impossible               | ✅ Merge mode                              |
-| **Database queries**        | None                        | Queries `VenueRolePermission` each request |
-
-##### Migration Example
-
-**Before (role-based):**
-
-```typescript
-router.get(
-  '/venues/:venueId/menucategories',
-  authenticateTokenMiddleware,
-  authorizeRole([StaffRole.ADMIN, StaffRole.MANAGER, StaffRole.OWNER]),
-  menuController.listMenuCategoriesHandler,
-) // ❌ Rigid
-```
-
-**After (permission-based):**
-
-```typescript
-router.get(
-  '/venues/:venueId/menucategories',
-  authenticateTokenMiddleware,
-  checkPermission('menu:read'),
-  menuController.listMenuCategoriesHandler,
-) // ✅ Flexible + customizable
-```
-
-**Result:** The system now respects custom permissions configured in the `VenueRolePermission` table, enabling use cases like "OWNER without
-menu access" or "WAITER with analytics access".
-
-##### When to Use Each
-
-**Use `checkPermission`** (REQUIRED for all new routes): ✅ **ALL features** - Business-critical and administrative features / ✅ Granular
-control over permissions / ✅ Per-venue permission customization / ✅ Flexible permission assignment to any role
-
-**Do NOT use `authorizeRole`** (deprecated): ❌ **Deprecated** - Do not use in new code / ❌ Exists only for reference and understanding
-migration / ❌ All existing routes have been migrated to `checkPermission` / ❌ Use `checkPermission` with appropriate permission strings
-instead (e.g., `system:manage` for SUPERADMIN-only features)
-
-##### Migration Status
-
-**🎉 100% MIGRATION COMPLETE - PURE SINGLE PARADIGM ACHIEVED**
-
-All 74 routes in the codebase now use `checkPermission` middleware. Zero exceptions. No hybrid approach.
-
-**Completed migrations:** ✅ Menu routes - 38 routes (menucategories, menus, products, modifiers, modifier-groups) / ✅ Orders routes - 4
-routes (read, update, delete) / ✅ Payments routes - 2 routes (read receipts) / ✅ Reviews routes - 1 route (read) / ✅ Analytics routes - 4
-routes (general stats, metrics, charts) / ✅ Venues routes - 5 routes (create, read, update, delete, enhanced) / ✅ Teams routes - 8 routes
-(list, invite, update, delete, resend) / ✅ Notifications routes - 3 routes (send, bulk send) / ✅ System routes - 4 routes (payment config,
-testing endpoints) / ✅ Permission Management routes - 5 routes (role permissions CRUD, hierarchy)
-
-**Total: 74 routes using `checkPermission` ✅**
-
-**New Permission Strings (System & Settings):** These permissions are covered by the `*:*` wildcard for SUPERADMIN, OWNER, and ADMIN:
-
-```typescript
-'system:config' // SUPERADMIN - Payment provider configuration
-'system:test' // SUPERADMIN - Testing payment endpoints
-'settings:manage' // OWNER/ADMIN - Role permission management
-```
-
-**Why 100% migration matters:** ✅ **Pure single paradigm** - Follows Stripe/AWS/GitHub patterns exactly / ✅ **Zero confusion** -
-Developers always use `checkPermission`, no exceptions / ✅ **Maximum flexibility** - Even system routes can be customized via
-VenueRolePermission / ✅ **Future-proof** - Can grant `system:test` to non-SUPERADMINs if needed / ✅ **Self-documenting** - Permission
-strings clearly describe what each route does
-
-**Verification:**
-
-```bash
-# Count total checkPermission uses (should be 74 + 1 import = 75)
-grep -c "checkPermission" src/routes/dashboard.routes.ts  # Result: 75
-# Count authorizeRole uses (should be ONLY the import = 1)
-grep "authorizeRole" src/routes/dashboard.routes.ts | wc -l  # Result: 1 (just the import statement)
-```
-
-#### Implementing Admin Permission Management UI (Future)
-
-Since `StaffVenue.permissions` exists in the schema, you can build an admin UI to: 1. **View staff permissions** per venue / 2. **Assign
-custom permissions** to individual staff members / 3. **Override default role permissions** with granular control
-
-**Example implementation approach:**
-
-```typescript
-// Backend endpoint to update staff permissions
-router.put(
-  '/venues/:venueId/staff/:staffId/permissions',
-  authenticateTokenMiddleware,
-  checkPermission('staff:manage'),
-  async (req, res) => {
-    const { permissions } = req.body // Array of permission strings
-    await prisma.staffVenue.update({
-      where: { staffId_venueId: { staffId: req.params.staffId, venueId: req.params.venueId } },
-      data: { permissions },
-    })
-    res.json({ success: true })
-  },
-)
-```
-
-**Frontend UI requirements:** Checkbox grid: Rows = resources, Columns = actions / Separate section for custom permissions / Visual
-indicator showing role defaults vs custom overrides / Permission inheritance display (role → custom)
+**Key Files**:
+
+- Auth middleware: `src/middlewares/authenticateToken.middleware.ts`
+- Permission middleware: `src/middlewares/checkPermission.middleware.ts`
+- Permission definitions: `src/lib/permissions.ts`
+- Database: `StaffVenue.permissions` JSON field (custom per-venue permissions)
+
+**📖 Complete Documentation**: See `docs/PERMISSIONS_SYSTEM.md` for:
+
+- Complete permission system architecture
+- Two-layer permission system (default + custom)
+- Override vs Merge modes for different roles
+- `authorizeRole` vs `checkPermission` comparison
+- Migration guide and best practices
+- Permission middleware usage examples
 
 ### Real-Time Communication
 
@@ -926,70 +446,38 @@ ls -t logs/development*.log | head -1 | xargs grep "🎯\|✅\|⚠️"
 
 ### Stripe Integration & Feature Access Control
 
-**Architecture:** Subscription-based feature access with trial periods
+**WHY**: Subscription-based feature access enables monetization with trial periods, automatic billing, and feature gating.
 
-```
-Venue Conversion → Create Stripe Customer → Attach Payment Method → Create Trial Subscriptions
-                                                                              ↓
-                                                                    VenueFeature records (active=true, endDate=5 days)
-                                                                              ↓
-Stripe Webhooks → customer.subscription.updated → Update VenueFeature (trial→paid or deactivate)
-                                                                              ↓
-Feature Access Middleware → checkFeatureAccess('ANALYTICS') → Validate active + trial not expired
-```
+**Design Decision**: Trial ends at 5 days (not 2 days as originally documented) - balance between evaluation time and conversion pressure.
 
-**Design Decisions:**
+**Critical Migration (2025-10-28)**: Moved Stripe customers from Organization to Venue level. All Stripe operations now use `venueId`.
 
-- **Why 5-day trial?** Balance between evaluation time and conversion pressure
-- **Why endDate field?** `endDate=null` = paid forever, `endDate!=null` = trial with expiration
-- **Why webhooks?** Auto-handle payment failures, trial expirations without manual checks
-- **Why middleware instead of service checks?** Centralized enforcement, can't be bypassed
+**Core Flow**: Venue Conversion → Create Stripe Customer (Venue-level) → Create Trial Subscriptions → Webhooks Update VenueFeature →
+Middleware Validates Access
 
-**Feature Map:**
+**Key Files**:
 
-| Component                    | Location                                                     | Purpose                                    |
-| ---------------------------- | ------------------------------------------------------------ | ------------------------------------------ |
-| Stripe customer creation     | `src/services/stripe.service.ts:getOrCreateStripeCustomer()` | Creates/retrieves Stripe customer          |
-| Trial subscriptions          | `src/services/stripe.service.ts:createTrialSubscriptions()`  | Creates 5-day trials for selected features |
-| Venue conversion integration | `src/services/dashboard/venue.dashboard.service.ts:688-801`  | Integrates Stripe into demo→prod flow      |
-| Feature management endpoints | `src/routes/dashboard.routes.ts:1163-1249`                   | GET/POST/DELETE /venues/:id/features       |
-| Webhook handlers             | `src/services/stripe.webhook.service.ts`                     | subscription.updated, invoice.paid, etc    |
-| Webhook endpoint             | `src/routes/webhook.routes.ts` + `src/app.ts:23-29`          | POST /webhooks/stripe (raw body)           |
-| Feature access middleware    | `src/middlewares/checkFeatureAccess.middleware.ts`           | Validates subscription before access       |
+- Customer creation: `src/services/stripe.service.ts:getOrCreateStripeCustomer()`
+- Feature sync: `src/services/stripe.service.ts:syncFeaturesToStripe()`
+- Trial subscriptions: `src/services/stripe.service.ts:createTrialSubscriptions()`
+- Webhook handlers: `src/services/stripe.webhook.service.ts`
+- Feature access middleware: `src/middlewares/checkFeatureAccess.middleware.ts`
 
-**Critical Gotchas:**
+**Critical Gotchas**:
 
-⚠️ **Webhook body parsing:** Webhooks MUST be mounted BEFORE `express.json()` middleware (requires raw buffer for signature verification) ⚠️
-**Trial expiration:** Check `endDate < now` even if `active=true` - webhook may not have fired yet ⚠️ **Non-blocking payments:** Inventory
-deduction failures DON'T block payment success (logged only) ⚠️ **Feature codes:** Must match `Feature.code` in database (query:
-`SELECT code FROM Feature`) ⚠️ **Subscription cancellation:** Use Stripe API (don't just update DB) - webhook will sync state back
+- ⚠️ Webhooks MUST be mounted BEFORE `express.json()` middleware
+- ⚠️ Always pass `venueId` to `getOrCreateStripeCustomer()`, NOT `orgId`
+- ⚠️ Seed script does NOT delete features (preserves Stripe IDs)
 
-**Usage Example:**
+**📖 Complete Documentation**: See `docs/STRIPE_INTEGRATION.md` for:
 
-```typescript
-// Protect premium endpoint with feature access
-router.get(
-  '/venues/:venueId/analytics',
-  authenticateTokenMiddleware, // 1. Validate JWT
-  checkPermission('analytics:read'), // 2. Validate permission
-  checkFeatureAccess('ANALYTICS'), // 3. Validate subscription
-  analyticsController.getData,
-)
-```
-
-**Environment Variables:**
-
-- `STRIPE_SECRET_KEY` - Stripe API secret key (sk*test*... or sk*live*...)
-- `STRIPE_WEBHOOK_SECRET` - Webhook signing secret (whsec\_...) from Stripe CLI or Dashboard
-
-**Testing:**
-
-```bash
-# Test webhooks locally
-stripe listen --forward-to localhost:12344/api/v1/webhooks/stripe
-stripe trigger customer.subscription.updated
-stripe trigger invoice.payment_succeeded
-```
+- Complete architecture and flow diagram
+- Organization → Venue migration details
+- Automatic feature sync system
+- Customer name format with venue slug
+- Webhook testing with Stripe CLI
+- Production migration guide
+- Common issues and debugging
 
 ---
 
