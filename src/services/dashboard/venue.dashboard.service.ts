@@ -129,6 +129,36 @@ export async function getVenueById(orgId: string, venueId: string, options?: { s
   return venue
 }
 
+/**
+ * Get venue by slug (for KYC resubmission page)
+ * Returns minimal venue data with KYC status
+ */
+export async function getVenueBySlug(orgId: string, venueSlug: string, options?: { skipOrgCheck?: boolean }): Promise<Venue> {
+  const whereClause: any = { slug: venueSlug }
+  if (!options?.skipOrgCheck) {
+    whereClause.organizationId = orgId
+  }
+
+  const venue = await prisma.venue.findUnique({
+    where: whereClause,
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      kycStatus: true,
+      kycRejectionReason: true,
+      entityType: true,
+      organizationId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with slug ${venueSlug} not found`)
+  }
+
+  return venue as Venue
+}
+
 export async function updateVenue(orgId: string, venueId: string, updateData: any, options?: { skipOrgCheck?: boolean }): Promise<Venue> {
   // Verify that the venue belongs to the organization (unless SUPERADMIN)
   const whereClause: any = { id: venueId }

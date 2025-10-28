@@ -328,6 +328,7 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
           totalMonthlyBill: 299,
           paymentStatus: 'PAID',
         },
+        kycStatus: venue.kycStatus || null, // Include KYC status for superadmin review
         createdAt: venue.createdAt.toISOString(),
         updatedAt: venue.updatedAt.toISOString(),
       }

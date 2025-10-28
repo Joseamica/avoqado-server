@@ -1,6 +1,7 @@
 // src/services/storage.service.ts
 import { getStorageBucket } from '../config/firebase'
 import logger from '../config/logger'
+import { v4 as uuidv4 } from 'uuid'
 
 /**
  * Extract file path from Firebase Storage URL
@@ -99,6 +100,44 @@ export async function deleteFilesFromStorage(fileUrls: (string | null | undefine
   logger.info(`✅ Successfully deleted ${successCount}/${validUrls.length} files from storage`)
 
   return successCount
+}
+
+/**
+ * Upload a file to Firebase Storage
+ * @param buffer - File buffer from multer
+ * @param filePath - Full path where to store the file (e.g., 'venues/my-venue/kyc/ine.pdf')
+ * @param contentType - MIME type of the file
+ * @returns Public download URL
+ */
+export async function uploadFileToStorage(buffer: Buffer, filePath: string, contentType: string): Promise<string> {
+  try {
+    const bucket = getStorageBucket()
+
+    if (!bucket) {
+      throw new Error('Firebase Storage not initialized')
+    }
+
+    // Upload file to Firebase Storage
+    const file = bucket.bucket().file(filePath)
+    await file.save(buffer, {
+      contentType,
+      metadata: {
+        firebaseStorageDownloadTokens: uuidv4(), // Generate download token
+      },
+    })
+
+    // Make file publicly accessible
+    await file.makePublic()
+
+    // Get public URL
+    const publicUrl = `https://storage.googleapis.com/${bucket.bucket().name}/${filePath}`
+
+    logger.info(`📤 Uploaded file to storage: ${filePath}`)
+    return publicUrl
+  } catch (error) {
+    logger.error(`❌ Failed to upload file to storage: ${filePath}`, error)
+    throw new Error(`Failed to upload file: ${error instanceof Error ? error.message : 'Unknown error'}`)
+  }
 }
 
 /**

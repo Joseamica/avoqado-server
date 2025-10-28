@@ -1,4 +1,6 @@
 import { NotificationType, NotificationChannel, NotificationPriority, AlertType, Prisma } from '@prisma/client'
+
+import * as resendService from '../resend.service'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
@@ -217,22 +219,45 @@ export async function sendNotification(payload: NotificationPayload): Promise<an
 }
 
 /**
- * Send email notification (placeholder)
+ * Send email notification via Resend
  */
 async function sendEmailNotification(notification: any): Promise<boolean> {
-  // TODO: Implement email sending logic
-  // Integration options:
-  // - SendGrid
-  // - AWS SES
-  // - Mailgun
-  // - Postmark
+  try {
+    // Handle KYC submission notifications specially (send to admin team)
+    if (notification.type === NotificationType.NEW_KYC_SUBMISSION) {
+      const venueName = notification.metadata?.venueName || 'Unknown Venue'
+      const venueId = notification.entityId || notification.metadata?.venueId || ''
+      const actionUrl = notification.actionUrl || ''
 
-  logger.info(`Email notification would be sent to: ${notification.recipient.email}`)
-  logger.info(`Subject: ${notification.title}`)
-  logger.info(`Body: ${notification.message}`)
+      logger.info(`📧 Sending KYC notification email for venue: ${venueName}`)
 
-  // For now, just log and return true
-  return true
+      return await resendService.sendKycSubmissionNotification({
+        venueName,
+        venueId,
+        actionUrl,
+      })
+    }
+
+    // Generic notification email (send to recipient)
+    if (!notification.recipient?.email) {
+      logger.warn(`No email address for recipient ${notification.recipientId}`)
+      return false
+    }
+
+    logger.info(`📧 Sending notification email to ${notification.recipient.email}`)
+
+    return await resendService.sendNotificationEmail(
+      notification.recipient.email,
+      notification.title,
+      notification.title,
+      notification.message,
+      notification.actionUrl,
+      notification.actionLabel,
+    )
+  } catch (error) {
+    logger.error('Failed to send email via Resend:', error)
+    return false
+  }
 }
 
 /**
