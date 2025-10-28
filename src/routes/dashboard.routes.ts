@@ -1394,6 +1394,11 @@ router.post(
  *                 format: uri
  *                 description: URL to uploaded ID document
  *                 nullable: true
+ *               actaDocumentUrl:
+ *                 type: string
+ *                 format: uri
+ *                 description: URL to uploaded Acta Constitutiva document
+ *                 nullable: true
  *     responses:
  *       200:
  *         description: Venue successfully converted to real

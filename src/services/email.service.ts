@@ -41,6 +41,21 @@ interface PaymentFailedEmailData {
   last4?: string // Last 4 digits of card
 }
 
+interface SubscriptionSuspendedEmailData {
+  venueName: string
+  featureName: string
+  suspendedAt: Date
+  gracePeriodEndsAt: Date
+  billingPortalUrl: string
+}
+
+interface SubscriptionCanceledEmailData {
+  venueName: string
+  featureName: string
+  canceledAt: Date
+  suspendedAt: Date
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -510,6 +525,235 @@ class EmailService {
       - Bloqueo temporal del banco
 
       ¿Necesitas ayuda? Contáctanos en cualquier momento o verifica con tu banco.
+
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendSubscriptionSuspendedEmail(email: string, data: SubscriptionSuspendedEmailData): Promise<boolean> {
+    const subject = `⛔ Tu suscripción de ${data.featureName} ha sido suspendida - ${data.venueName}`
+    const suspendedDateFormatted = data.suspendedAt.toLocaleDateString('es-MX', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+    const cancellationDateFormatted = data.gracePeriodEndsAt.toLocaleDateString('es-MX', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Suscripción suspendida</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #f44336 0%, #e91e63 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">⛔ Suscripción Suspendida</h1>
+              <p style="color: #ffebee; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola,</p>
+
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                Tu suscripción de <strong>${data.featureName}</strong> ha sido <strong>suspendida</strong> debido a múltiples intentos de pago fallidos.
+              </p>
+
+              <div style="background: #ffebee; border-left: 4px solid #f44336; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  🚨 <strong>Estado actual:</strong> Acceso bloqueado desde ${suspendedDateFormatted}
+                </p>
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  ⚠️ <strong>Fecha de cancelación definitiva:</strong> ${cancellationDateFormatted}
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  Si no actualizas tu método de pago antes de esta fecha, tu suscripción será <strong>cancelada permanentemente</strong>.
+                </p>
+              </div>
+
+              <div style="background: #fff3e0; border-left: 4px solid #ff9800; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  💡 <strong>¿Qué significa esto?</strong>
+                </p>
+                <ul style="font-size: 14px; margin: 10px 0 0 20px; color: #666; padding: 0;">
+                  <li>Tu acceso a ${data.featureName} está actualmente bloqueado</li>
+                  <li>Tus datos permanecen seguros y guardados</li>
+                  <li>Puedes reactivar tu suscripción actualizando tu método de pago</li>
+                  <li>Después del ${cancellationDateFormatted}, la suscripción será cancelada</li>
+                </ul>
+              </div>
+
+              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0; text-align: center;">
+                <p style="font-size: 16px; margin-bottom: 20px; color: #555;">Reactiva tu suscripción ahora:</p>
+                <a href="${data.billingPortalUrl}"
+                   style="background: linear-gradient(135deg, #4caf50 0%, #66bb6a 100%);
+                          color: white;
+                          padding: 15px 35px;
+                          text-decoration: none;
+                          border-radius: 25px;
+                          font-weight: bold;
+                          font-size: 16px;
+                          display: inline-block;
+                          box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
+                          transition: all 0.3s ease;">
+                  🔄 Actualizar Método de Pago
+                </a>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                ¿Necesitas ayuda? Contáctanos en cualquier momento.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Hola,
+
+      Tu suscripción de ${data.featureName} ha sido SUSPENDIDA debido a múltiples intentos de pago fallidos.
+
+      🚨 Estado actual: Acceso bloqueado desde ${suspendedDateFormatted}
+      ⚠️ Fecha de cancelación definitiva: ${cancellationDateFormatted}
+
+      ¿Qué significa esto?
+      - Tu acceso a ${data.featureName} está actualmente bloqueado
+      - Tus datos permanecen seguros y guardados
+      - Puedes reactivar tu suscripción actualizando tu método de pago
+      - Después del ${cancellationDateFormatted}, la suscripción será cancelada
+
+      Reactiva tu suscripción ahora:
+      ${data.billingPortalUrl}
+
+      ¿Necesitas ayuda? Contáctanos en cualquier momento.
+
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendSubscriptionCanceledEmail(email: string, data: SubscriptionCanceledEmailData): Promise<boolean> {
+    const subject = `❌ Tu suscripción de ${data.featureName} ha sido cancelada - ${data.venueName}`
+    const canceledDateFormatted = data.canceledAt.toLocaleDateString('es-MX', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+    const suspendedDateFormatted = data.suspendedAt.toLocaleDateString('es-MX', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Suscripción cancelada</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #424242 0%, #616161 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">❌ Suscripción Cancelada</h1>
+              <p style="color: #e0e0e0; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola,</p>
+
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                Tu suscripción de <strong>${data.featureName}</strong> ha sido <strong>cancelada permanentemente</strong> el ${canceledDateFormatted} debido a problemas de pago no resueltos.
+              </p>
+
+              <div style="background: #f5f5f5; border-left: 4px solid #9e9e9e; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  📅 <strong>Fecha de suspensión:</strong> ${suspendedDateFormatted}
+                </p>
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  ❌ <strong>Fecha de cancelación:</strong> ${canceledDateFormatted}
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  Tu acceso a ${data.featureName} ha sido completamente desactivado.
+                </p>
+              </div>
+
+              <div style="background: #e3f2fd; border-left: 4px solid #2196f3; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  💡 <strong>¿Quieres volver a activar ${data.featureName}?</strong>
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  Puedes reactivar tu suscripción en cualquier momento. Tus datos previos permanecen seguros y podrás recuperar el acceso inmediatamente después de configurar tu método de pago.
+                </p>
+              </div>
+
+              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0; text-align: center;">
+                <p style="font-size: 16px; margin-bottom: 20px; color: #555;">¿Listo para volver?</p>
+                <p style="font-size: 14px; margin-bottom: 20px; color: #666;">
+                  Contáctanos y te ayudaremos a reactivar tu suscripción.
+                </p>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Hola,
+
+      Tu suscripción de ${data.featureName} ha sido CANCELADA PERMANENTEMENTE el ${canceledDateFormatted} debido a problemas de pago no resueltos.
+
+      📅 Fecha de suspensión: ${suspendedDateFormatted}
+      ❌ Fecha de cancelación: ${canceledDateFormatted}
+
+      Tu acceso a ${data.featureName} ha sido completamente desactivado.
+
+      ¿Quieres volver a activar ${data.featureName}?
+      Puedes reactivar tu suscripción en cualquier momento. Tus datos previos permanecen seguros y podrás recuperar el acceso inmediatamente después de configurar tu método de pago.
+
+      Contáctanos si necesitas ayuda.
+
+      Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.
 
       Equipo de Avoqado
     `

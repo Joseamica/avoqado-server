@@ -402,6 +402,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reviews:*',
     'teams:*',
     'features:*',
+    'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
     'tables:*',
     'reservations:*',
@@ -423,6 +424,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reviews:*',
     'teams:*',
     'features:*',
+    'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
     'tables:*',
     'reservations:*',
