@@ -27,6 +27,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
+import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 import { loginSchema, switchVenueSchema, updateAccountSchema } from '../schemas/dashboard/auth.schema'
@@ -1030,6 +1031,41 @@ router.get(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/slug/{slug}:
+ *   get:
+ *     tags: [Venues]
+ *     summary: Get a venue by slug (for KYC resubmission page)
+ *     description: Returns minimal venue data with KYC status fields
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: slug, in: path, required: true, schema: { type: string }, description: Venue slug }
+ *     responses:
+ *       200:
+ *         description: Venue data with KYC status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     name: { type: string }
+ *                     slug: { type: string }
+ *                     kycStatus: { type: string, enum: [PENDING, APPROVED, REJECTED] }
+ *                     kycRejectionReason: { type: string, nullable: true }
+ *                     entityType: { type: string, enum: [PERSONA_FISICA, PERSONA_MORAL] }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get('/venues/slug/:slug', authenticateTokenMiddleware, checkPermission('venues:read'), venueController.getVenueBySlug)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}:
  *   get:
  *     tags: [Venues]
@@ -1568,6 +1604,21 @@ router.post(
   checkPermission('venues:manage'),
   documentUpload.single('file'),
   venueController.uploadVenueDocument,
+)
+
+// Venue KYC Resubmission (after rejection)
+router.post(
+  '/venues/:venueId/kyc/resubmit',
+  authenticateTokenMiddleware,
+  documentUpload.fields([
+    { name: 'ineUrl', maxCount: 1 },
+    { name: 'rfcDocumentUrl', maxCount: 1 },
+    { name: 'comprobanteDomicilioUrl', maxCount: 1 },
+    { name: 'caratulaBancariaUrl', maxCount: 1 },
+    { name: 'actaDocumentUrl', maxCount: 1 },
+    { name: 'poderLegalUrl', maxCount: 1 },
+  ]),
+  venueKycController.resubmitKycDocuments,
 )
 
 // --- Feature Routes (Step 4 of Onboarding) ---

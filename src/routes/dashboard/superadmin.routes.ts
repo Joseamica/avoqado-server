@@ -15,6 +15,7 @@ import providerCostStructureRoutes from '../superadmin/providerCostStructure.rou
 import venuePricingRoutes from '../superadmin/venuePricing.routes'
 import paymentAnalyticsRoutes from '../superadmin/paymentAnalytics.routes'
 import webhookRoutes from '../superadmin/webhook.routes'
+import kycReviewRoutes from '../superadmin/kycReview.routes'
 
 // Import cost management validation schemas
 import {
@@ -137,5 +138,8 @@ router.use('/payment-analytics', paymentAnalyticsRoutes)
 
 // Webhook Monitoring & Debugging
 router.use('/webhooks', webhookRoutes)
+
+// KYC Review & Approval Workflow
+router.use('/kyc', kycReviewRoutes)
 
 export default router

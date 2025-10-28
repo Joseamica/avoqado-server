@@ -7,6 +7,7 @@ import publicRoutes from './public.routes'
 import posSyncRoutes from './pos-sync.routes'
 import invitationRoutes from './invitations.routes'
 import onboardingRoutes from './onboarding.routes'
+import superadminRoutes from './superadmin.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -17,5 +18,6 @@ router.use('/public', publicRoutes) // All public routes under /api/v1/public
 router.use('/pos-sync', posSyncRoutes) // All posSync routes under /api/posSync
 router.use('/invitations', invitationRoutes) // All invitation routes under /api/v1/invitations
 router.use('/onboarding', onboardingRoutes) // All onboarding routes under /api/v1/onboarding
+router.use('/superadmin', superadminRoutes) // All superadmin routes under /api/v1/superadmin
 
 export default router
