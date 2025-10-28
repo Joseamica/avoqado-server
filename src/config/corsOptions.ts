@@ -11,6 +11,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'https://develop.avoqado-web-dashboard.pages.dev',
       'https://demo-avoqado-web-dashboard.pages.dev',
       'https://demo.dashboard.avoqado.io',
+      'https://staging.dashboard.avoqado.io',
     ],
     production: ['https://dashboard.avoqado.io', 'https://dashboardv2.avoqado.io', 'https://demo.dashboard.avoqado.io'],
   }
