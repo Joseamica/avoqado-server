@@ -27,9 +27,6 @@ model Organization {
   billingEmail   String?
   billingAddress Json?
 
-  // Stripe integration
-  stripeCustomerId String? @unique
-
   venues      Venue[]
   staff       Staff[]
   invitations Invitation[]
@@ -90,6 +87,7 @@ model Venue {
   fiscalRegime    String? // Fiscal regime code
   taxDocumentUrl  String? // URL to tax document (constancia de situación fiscal)
   idDocumentUrl   String? // URL to ID document (INE/IFE)
+  actaDocumentUrl String? // URL to Acta Constitutiva
 
   // Stripe integration (for trial subscriptions)
   stripeCustomerId      String? @unique
@@ -1603,6 +1601,12 @@ model VenueFeature {
   stripeSubscriptionItemId String?   @unique
   stripePriceId            String?
   trialEndDate             DateTime? // When the trial period ends
+
+  // Payment failure & grace period tracking
+  suspendedAt         DateTime? // When the subscription was suspended due to payment failure
+  gracePeriodEndsAt   DateTime? // When the grace period ends (7 days after first failure)
+  lastPaymentAttempt  DateTime? // Last time payment was attempted
+  paymentFailureCount Int       @default(0) // Number of consecutive payment failures
 
   @@unique([venueId, featureId])
   @@index([venueId])
