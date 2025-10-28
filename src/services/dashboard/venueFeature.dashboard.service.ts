@@ -4,11 +4,11 @@
  * Handles adding and removing features to venues with Stripe subscription management
  */
 
-import prisma from '../../utils/prismaClient'
+import Stripe from 'stripe'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import { createTrialSubscriptions, cancelSubscription } from '../stripe.service'
-import Stripe from 'stripe'
+import prisma from '../../utils/prismaClient'
+import { cancelSubscription, createTrialSubscriptions } from '../stripe.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -18,10 +18,11 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
  * @param venueId - Venue ID
  * @param featureCodes - Array of feature codes to add
  * @param trialPeriodDays - Number of trial days (default: 5)
+ * @param paymentMethodId - Optional Stripe payment method ID to use for subscription
  * @returns Array of created VenueFeature records
  */
-export async function addFeaturesToVenue(venueId: string, featureCodes: string[], trialPeriodDays: number = 5) {
-  logger.info('Adding features to venue', { venueId, featureCodes, trialPeriodDays })
+export async function addFeaturesToVenue(venueId: string, featureCodes: string[], trialPeriodDays: number = 5, paymentMethodId?: string) {
+  logger.info('Adding features to venue', { venueId, featureCodes, trialPeriodDays, paymentMethodId })
 
   // Get venue with Stripe customer ID
   const venue = await prisma.venue.findUnique({
@@ -115,11 +116,13 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
         firstTimeTrialDays,
         venue.name,
         venue.slug,
+        paymentMethodId,
       )
       subscriptionIds.push(...firstTimeIds)
       logger.info('✅ Trial subscriptions created for first-time features', {
         features: firstTimeFeatures,
         trialDays: firstTimeTrialDays,
+        paymentMethodId: paymentMethodId || 'default',
       })
     }
 
@@ -132,10 +135,12 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
         returningTrialDays,
         venue.name,
         venue.slug,
+        paymentMethodId,
       )
       subscriptionIds.push(...returningIds)
       logger.info('✅ Paid subscriptions created for returning features (no trial)', {
         features: returningFeatures,
+        paymentMethodId: paymentMethodId || 'default',
       })
     }
 

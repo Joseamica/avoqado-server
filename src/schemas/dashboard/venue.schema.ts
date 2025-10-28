@@ -105,6 +105,7 @@ export const convertDemoVenueSchema = z.object({
     // Document references will be handled separately via file upload endpoints
     taxDocumentUrl: z.string().url().optional().nullable(),
     idDocumentUrl: z.string().url().optional().nullable(),
+    actaDocumentUrl: z.string().url().optional().nullable(),
     // Stripe integration fields (optional)
     selectedFeatures: z.array(z.string()).optional(),
     paymentMethodId: z.string().optional(),
@@ -120,7 +121,7 @@ export const addVenueFeaturesSchema = z.object({
       .array(z.string())
       .min(1, { message: 'Al menos un feature code es requerido' })
       .max(10, { message: 'Máximo 10 features a la vez' }),
-    trialPeriodDays: z.number().int().min(0).max(30).optional().default(5),
+    trialPeriodDays: z.number().int().min(0).max(30).optional().default(2),
   }),
 })
 

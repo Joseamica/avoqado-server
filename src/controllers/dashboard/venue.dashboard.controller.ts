@@ -273,6 +273,8 @@ export async function uploadVenueDocument(req: Request<{ venueId: string }>, res
       const fieldName = file.fieldname.toLowerCase()
       if (fieldName.includes('tax') || fieldName.includes('csf') || fieldName.includes('fiscal')) {
         documentType = 'csf'
+      } else if (fieldName.includes('acta')) {
+        documentType = 'acta'
       } else if (fieldName.includes('id') || fieldName.includes('identif')) {
         documentType = 'id'
       } else {
@@ -289,6 +291,8 @@ export async function uploadVenueDocument(req: Request<{ venueId: string }>, res
     let cleanFilename: string
     if (documentType === 'csf') {
       cleanFilename = `CSF.${extension}`
+    } else if (documentType === 'acta') {
+      cleanFilename = `ACTA.${extension}`
     } else if (documentType === 'id') {
       cleanFilename = `ID.${extension}`
     } else {

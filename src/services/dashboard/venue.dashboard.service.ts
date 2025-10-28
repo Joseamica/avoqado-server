@@ -690,6 +690,7 @@ export async function convertDemoVenue(
     fiscalRegime: string
     taxDocumentUrl?: string | null
     idDocumentUrl?: string | null
+    actaDocumentUrl?: string | null
     selectedFeatures?: string[]
     paymentMethodId?: string
   },
@@ -748,9 +749,9 @@ export async function convertDemoVenue(
         throw new BadRequestError('Organization does not have a valid email for billing')
       }
 
-      // Create or get Stripe customer for the organization (with venue info)
+      // Create or get Stripe customer for the venue
       stripeCustomerId = await getOrCreateStripeCustomer(
-        orgId,
+        venueId,
         billingEmail,
         organization.name || conversionData.legalName,
         existingVenue.name, // venueName
@@ -786,6 +787,7 @@ export async function convertDemoVenue(
       fiscalRegime: conversionData.fiscalRegime,
       taxDocumentUrl: conversionData.taxDocumentUrl,
       idDocumentUrl: conversionData.idDocumentUrl,
+      actaDocumentUrl: conversionData.actaDocumentUrl,
       // Store Stripe IDs if payment method was provided
       stripeCustomerId,
       stripePaymentMethodId,
@@ -981,8 +983,8 @@ export async function createVenueBillingPortalSession(
     const ownerEmail = ownerStaffVenue?.staff.email || organization.email
     const ownerName = ownerStaffVenue ? `${ownerStaffVenue.staff.firstName} ${ownerStaffVenue.staff.lastName}` : organization.name
 
-    // Create Stripe customer for this venue/organization
-    stripeCustomerId = await getOrCreateStripeCustomer(organization.id, ownerEmail, ownerName, venue.name, venue.slug)
+    // Create Stripe customer for this venue
+    stripeCustomerId = await getOrCreateStripeCustomer(venueId, ownerEmail, ownerName, venue.name, venue.slug)
 
     // Update venue with new customer ID
     await prisma.venue.update({
@@ -1183,8 +1185,8 @@ export async function createVenueSetupIntent(orgId: string, venueId: string, opt
     const ownerEmail = ownerStaffVenue?.staff.email || organization.email
     const ownerName = ownerStaffVenue ? `${ownerStaffVenue.staff.firstName} ${ownerStaffVenue.staff.lastName}` : organization.name
 
-    // Create Stripe customer
-    stripeCustomerId = await getOrCreateStripeCustomer(organization.id, ownerEmail, ownerName, venue.name, venue.slug)
+    // Create Stripe customer for venue
+    stripeCustomerId = await getOrCreateStripeCustomer(venueId, ownerEmail, ownerName, venue.name, venue.slug)
 
     // Update venue with new customer ID
     await prisma.venue.update({

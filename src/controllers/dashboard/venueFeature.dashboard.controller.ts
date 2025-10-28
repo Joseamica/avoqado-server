@@ -39,31 +39,62 @@ export async function getVenueFeatures(req: Request<{ venueId: string }>, res: R
  *
  * Body: {
  *   featureCodes: string[],
- *   trialPeriodDays?: number
+ *   trialPeriodDays?: number,
+ *   paymentMethodId?: string
  * }
  */
 export async function addVenueFeatures(
-  req: Request<{ venueId: string }, any, { featureCodes: string[]; trialPeriodDays?: number }>,
+  req: Request<{ venueId: string }, any, { featureCodes: string[]; trialPeriodDays?: number; paymentMethodId?: string }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
     const { venueId } = req.params
-    const { featureCodes, trialPeriodDays = 5 } = req.body
+    const { featureCodes, trialPeriodDays = 5, paymentMethodId } = req.body
 
     logger.info('Adding features to venue', {
       venueId,
       featureCodes,
       trialPeriodDays,
+      paymentMethodId: paymentMethodId || 'default',
     })
 
-    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, trialPeriodDays)
+    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, trialPeriodDays, paymentMethodId)
 
-    res.status(201).json({
+    // Separate features by status for better UI feedback
+    const activeFeatures = createdFeatures.filter(f => f.active)
+    const pendingFeatures = createdFeatures.filter(f => !f.active)
+
+    // Get venue slug for billing URL
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { slug: true },
+    })
+
+    const response: any = {
       success: true,
       data: createdFeatures,
-      message: `${createdFeatures.length} feature(s) added successfully with ${trialPeriodDays}-day trial`,
-    })
+      summary: {
+        total: createdFeatures.length,
+        active: activeFeatures.length,
+        pending: pendingFeatures.length,
+      },
+    }
+
+    // Provide clear feedback based on payment status
+    if (pendingFeatures.length > 0) {
+      const pendingNames = pendingFeatures.map(f => f.feature.name).join(', ')
+      response.message = `Payment required for ${pendingFeatures.length} feature(s): ${pendingNames}`
+      response.paymentRequired = true
+      response.billingUrl = venue?.slug ? `/dashboard/venues/${venue.slug}/billing` : `/dashboard/venues/${venueId}/billing`
+    } else if (activeFeatures.length > 0) {
+      response.message = `${activeFeatures.length} feature(s) activated successfully`
+      response.paymentRequired = false
+    } else {
+      response.message = 'No features were added'
+    }
+
+    res.status(201).json(response)
   } catch (error) {
     logger.error('Error adding features to venue', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -109,19 +140,24 @@ export async function removeVenueFeature(
 }
 
 /**
- * Get Stripe invoices for a venue
- * GET /api/v1/dashboard/venues/:venueId/invoices
+ * Get Stripe invoices for a venue with pagination
+ * GET /api/v1/dashboard/venues/:venueId/invoices?limit=10&starting_after=in_xxxxx
  */
 export async function getVenueInvoices(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10
+    const starting_after = req.query.starting_after as string | undefined
 
-    logger.info('Getting invoices for venue', { venueId })
+    logger.info('Getting invoices for venue', { venueId, limit, starting_after })
 
-    // Get venue's organization to find Stripe customer ID
+    // Get venue to find Stripe customer ID
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      include: { organization: true },
+      select: {
+        id: true,
+        stripeCustomerId: true,
+      },
     })
 
     if (!venue) {
@@ -132,24 +168,30 @@ export async function getVenueInvoices(req: Request<{ venueId: string }>, res: R
       return
     }
 
-    if (!venue.organization.stripeCustomerId) {
+    if (!venue.stripeCustomerId) {
       // No Stripe customer = no invoices
       res.status(200).json({
         success: true,
         data: {
           invoices: [],
+          hasMore: false,
         },
       })
       return
     }
 
-    // Fetch invoices from Stripe
-    const invoices = await stripeService.getCustomerInvoices(venue.organization.stripeCustomerId)
+    // Fetch invoices from Stripe with pagination
+    const result = await stripeService.getCustomerInvoices(venue.stripeCustomerId, {
+      limit,
+      starting_after,
+    })
 
     res.status(200).json({
       success: true,
       data: {
-        invoices,
+        invoices: result.invoices,
+        hasMore: result.hasMore,
+        lastInvoiceId: result.lastInvoiceId,
       },
     })
   } catch (error) {
@@ -372,10 +414,13 @@ export async function retryInvoicePayment(
 
     logger.info('Retrying invoice payment', { venueId, invoiceId })
 
-    // Get venue's organization to verify customer
+    // Get venue to verify customer
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      include: { organization: true },
+      select: {
+        id: true,
+        stripeCustomerId: true,
+      },
     })
 
     if (!venue) {
@@ -386,7 +431,7 @@ export async function retryInvoicePayment(
       return
     }
 
-    if (!venue.organization.stripeCustomerId) {
+    if (!venue.stripeCustomerId) {
       res.status(400).json({
         success: false,
         error: 'No Stripe customer associated with this venue',
@@ -416,6 +461,62 @@ export async function retryInvoicePayment(
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params?.venueId,
       invoiceId: req.params?.invoiceId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get payment methods for venue
+ * GET /api/v1/dashboard/venues/:venueId/payment-methods
+ */
+export async function getPaymentMethods(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+
+    logger.info('Getting payment methods for venue', { venueId })
+
+    // Get venue to find Stripe customer ID
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: {
+        id: true,
+        stripeCustomerId: true,
+      },
+    })
+
+    if (!venue) {
+      res.status(404).json({
+        success: false,
+        error: 'Venue not found',
+      })
+      return
+    }
+
+    if (!venue.stripeCustomerId) {
+      // No Stripe customer = no payment methods
+      res.status(200).json({
+        success: true,
+        data: {
+          paymentMethods: [],
+        },
+      })
+      return
+    }
+
+    // Fetch payment methods from Stripe
+    const paymentMethods = await stripeService.listPaymentMethods(venue.stripeCustomerId)
+
+    res.status(200).json({
+      success: true,
+      data: {
+        paymentMethods,
+      },
+    })
+  } catch (error) {
+    logger.error('Error getting payment methods', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
     })
     next(error)
   }

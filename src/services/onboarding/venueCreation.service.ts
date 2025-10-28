@@ -162,10 +162,17 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
   }
 
   // Enable selected premium features with Stripe trial
+  logger.info(`🔍 Checking premium features for venue ${venue.id}:`, {
+    selectedFeatures: selectedFeatures || [],
+    featuresCount: selectedFeatures?.length || 0,
+    hasPaymentMethod: !!stripePaymentMethodId,
+    paymentMethodId: stripePaymentMethodId || 'none',
+  })
+
   if (selectedFeatures && selectedFeatures.length > 0) {
+    logger.info(`✅ Enabling ${selectedFeatures.length} premium features for venue ${venue.id}`)
     await enablePremiumFeatures(
       venue.id,
-      organizationId,
       businessInfo.email || '',
       businessInfo.name,
       selectedFeatures,
@@ -173,6 +180,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       venue.name, // venueName
       venue.slug, // venueSlug
     )
+  } else {
+    logger.warn(`⚠️ No premium features to enable for venue ${venue.id} (selectedFeatures is empty or null)`)
   }
 
   return result
@@ -281,7 +290,6 @@ async function createMenuFromOnboarding(
  */
 async function enablePremiumFeatures(
   venueId: string,
-  organizationId: string,
   email: string,
   name: string,
   featureCodes: string[],
@@ -293,7 +301,7 @@ async function enablePremiumFeatures(
     logger.info(`🎯 Enabling premium features for venue ${venueId}: ${featureCodes.join(', ')}`)
 
     // Step 1: Get or create Stripe customer (with venue info)
-    const customerId = await stripeService.getOrCreateStripeCustomer(organizationId, email, name, venueName, venueSlug)
+    const customerId = await stripeService.getOrCreateStripeCustomer(venueId, email, name, venueName, venueSlug)
 
     // Step 2: Attach payment method if provided
     if (paymentMethodId) {
@@ -304,8 +312,16 @@ async function enablePremiumFeatures(
     // Step 3: Ensure features are synced to Stripe
     await stripeService.syncFeaturesToStripe()
 
-    // Step 4: Create trial subscriptions (5 days) with venue info
-    const subscriptionIds = await stripeService.createTrialSubscriptions(customerId, venueId, featureCodes, 5, venueName, venueSlug)
+    // Step 4: Create trial subscriptions (2 days) with venue info and payment method
+    const subscriptionIds = await stripeService.createTrialSubscriptions(
+      customerId,
+      venueId,
+      featureCodes,
+      2,
+      venueName,
+      venueSlug,
+      paymentMethodId,
+    )
 
     logger.info(`✅ Created ${subscriptionIds.length} trial subscriptions for venue ${venueId}`)
   } catch (error) {

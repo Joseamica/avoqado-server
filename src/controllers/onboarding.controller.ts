@@ -340,11 +340,18 @@ export async function updateStep6(req: Request, res: Response, next: NextFunctio
     const { organizationId } = req.params
     const { selectedFeatures } = req.body
 
+    logger.info(`🎯 Step 6: Saving selected features for organization ${organizationId}:`, {
+      selectedFeatures,
+      count: selectedFeatures?.length || 0,
+    })
+
     const progress = await onboardingProgressService.updateOnboardingStep(organizationId, 6, {
       step6_selectedFeatures: selectedFeatures,
     })
 
-    logger.info(`Step 6 completed for organization: ${organizationId}`)
+    logger.info(`✅ Step 6 completed for organization: ${organizationId}`, {
+      savedFeatures: progress.step6_selectedFeatures,
+    })
 
     res.status(200).json({
       message: 'Step 6 completed successfully',
@@ -417,6 +424,14 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
     if (!progress.step3_businessInfo) {
       throw new BadRequestError('Step 3 (Business Info) must be completed')
     }
+
+    // Log payment method and features before creating venue
+    logger.info(`🎯 Completing onboarding for organization ${organizationId}:`, {
+      stripePaymentMethodId: stripePaymentMethodId || 'none',
+      selectedFeatures: progress.step6_selectedFeatures || [],
+      featuresCount: (progress.step6_selectedFeatures || []).length,
+      onboardingType: progress.step2_onboardingType,
+    })
 
     // Prepare venue creation input
     const venueInput: venueCreationService.CreateVenueInput = {
