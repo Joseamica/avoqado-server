@@ -12,7 +12,18 @@ export async function loginStaff(loginData: LoginDto) {
   // 1. Buscar staff con TODOS sus venues (no solo el solicitado)
   const staff = await prisma.staff.findUnique({
     where: { email: email.toLowerCase() },
-    include: {
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      password: true,
+      active: true,
+      photoUrl: true,
+      phone: true,
+      organizationId: true,
+      createdAt: true,
+      lastLoginAt: true,
       organization: true,
       venues: {
         where: { active: true },
@@ -92,6 +103,9 @@ export async function loginStaff(loginData: LoginDto) {
     lastName: staff.lastName,
     organizationId: staff.organizationId,
     photoUrl: staff.photoUrl,
+    phone: staff.phone,
+    createdAt: staff.createdAt,
+    lastLogin: staff.lastLoginAt,
     venues: staff.venues.map(sv => {
       // Get custom permissions for this venue + role combination
       const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)

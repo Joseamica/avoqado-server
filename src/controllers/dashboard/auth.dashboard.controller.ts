@@ -39,7 +39,10 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         email: true,
         emailVerified: true,
         photoUrl: true,
+        phone: true,
         organizationId: true,
+        createdAt: true,
+        lastLoginAt: true,
         venues: {
           where: { active: true },
           select: {
@@ -238,8 +241,11 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       email: staff.email,
       isVerified: staff.emailVerified,
       photoUrl: staff.photoUrl,
+      phone: staff.phone,
       organizationId: staff.organizationId,
       role: highestRole, // Add explicit role field
+      createdAt: staff.createdAt,
+      lastLogin: staff.lastLoginAt,
       venues: enrichedVenues, // Use enriched venues with permissions
     }
 
