@@ -88,6 +88,30 @@ export function checkFeatureAccess(featureCode: string) {
         return
       }
 
+      // Check if subscription is suspended due to payment failure
+      if (venueFeature.suspendedAt) {
+        logger.warn('⚠️ Feature access denied: Subscription suspended', {
+          venueId,
+          userId,
+          featureCode,
+          suspendedAt: venueFeature.suspendedAt,
+          gracePeriodEndsAt: venueFeature.gracePeriodEndsAt,
+          paymentFailureCount: venueFeature.paymentFailureCount,
+        })
+
+        res.status(403).json({
+          error: 'Subscription suspended',
+          message: `Your subscription for ${venueFeature.feature.name} has been suspended due to payment failure. Please update your payment method to restore access.`,
+          featureCode,
+          featureName: venueFeature.feature.name,
+          suspended: true,
+          suspendedAt: venueFeature.suspendedAt,
+          gracePeriodEndsAt: venueFeature.gracePeriodEndsAt,
+          paymentFailureCount: venueFeature.paymentFailureCount,
+        })
+        return
+      }
+
       // Feature is active - allow access
       // Optionally attach feature info to request for use in controllers
       ;(req as any).venueFeature = {
@@ -196,6 +220,30 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         return
       }
 
+      // Check if subscription is suspended due to payment failure
+      if (venueFeature.suspendedAt) {
+        logger.warn('⚠️ Feature access denied: Subscription suspended', {
+          venueId,
+          userId,
+          featureCode: venueFeature.feature.code,
+          suspendedAt: venueFeature.suspendedAt,
+          gracePeriodEndsAt: venueFeature.gracePeriodEndsAt,
+          paymentFailureCount: venueFeature.paymentFailureCount,
+        })
+
+        res.status(403).json({
+          error: 'Subscription suspended',
+          message: `Your subscription for ${venueFeature.feature.name} has been suspended due to payment failure. Please update your payment method to restore access.`,
+          featureCode: venueFeature.feature.code,
+          featureName: venueFeature.feature.name,
+          suspended: true,
+          suspendedAt: venueFeature.suspendedAt,
+          gracePeriodEndsAt: venueFeature.gracePeriodEndsAt,
+          paymentFailureCount: venueFeature.paymentFailureCount,
+        })
+        return
+      }
+
       // Attach feature info to request
       ;(req as any).venueFeature = {
         id: venueFeature.id,
@@ -273,6 +321,16 @@ export async function hasFeatureAccess(
         isTrialing: true,
         trialEndsAt: venueFeature.endDate,
         reason: 'Trial expired',
+      }
+    }
+
+    // Check if subscription is suspended
+    if (venueFeature.suspendedAt) {
+      return {
+        hasAccess: false,
+        isTrialing: false,
+        trialEndsAt: null,
+        reason: 'Subscription suspended due to payment failure',
       }
     }
 
