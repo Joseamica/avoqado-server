@@ -9,6 +9,42 @@
 
 import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
+
+// Mock Stripe service BEFORE importing webhook service to prevent Stripe SDK initialization error
+jest.mock('@/services/stripe.service', () => ({
+  __esModule: true,
+  default: jest.fn(),
+  getOrCreateStripeCustomer: jest.fn(),
+  createTrialSubscriptions: jest.fn(),
+  cancelSubscription: jest.fn(),
+  updatePaymentMethod: jest.fn(),
+  createTrialSetupIntent: jest.fn(),
+  convertTrialToPaid: jest.fn(),
+  getCustomerInvoices: jest.fn(),
+  getInvoicePdfUrl: jest.fn(),
+  syncFeaturesToStripe: jest.fn(),
+  createCustomerPortalSession: jest.fn(),
+  handlePaymentFailure: jest.fn().mockImplementation(async (subscriptionId, attemptCount, context) => {
+    // Mock implementation that updates venueFeature with payment failure tracking
+    const prismaModule = require('@/utils/prismaClient')
+    const prisma = prismaModule.default
+
+    const venueFeature = await prisma.venueFeature.findFirst({
+      where: { stripeSubscriptionId: subscriptionId },
+    })
+
+    if (venueFeature) {
+      await prisma.venueFeature.update({
+        where: { id: venueFeature.id },
+        data: {
+          paymentFailureCount: attemptCount,
+          lastPaymentAttempt: new Date(),
+        },
+      })
+    }
+  }),
+}))
+
 import { handleStripeWebhookEvent, handleCustomerDeleted, handleSubscriptionUpdated } from '@/services/stripe.webhook.service'
 
 // Mock dependencies
