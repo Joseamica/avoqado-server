@@ -26,6 +26,22 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
 }
 
 /**
+ * Map payment source from Android app format to PaymentSource enum
+ * @param source The source string from the app (e.g., "AVOQADO_TPV")
+ * @returns Valid PaymentSource enum value
+ */
+function mapPaymentSource(source?: string): PaymentSource {
+  if (!source) return 'OTHER'
+
+  // Map "AVOQADO_TPV" from Android app to "TPV" enum value
+  if (source === 'AVOQADO_TPV') return 'TPV'
+
+  // Check if it's a valid PaymentSource enum value
+  const validSources: PaymentSource[] = ['TPV', 'DASHBOARD_TEST', 'QR', 'WEB', 'APP', 'PHONE', 'POS', 'OTHER']
+  return validSources.includes(source as PaymentSource) ? (source as PaymentSource) : 'OTHER'
+}
+
+/**
  * Update order totals directly in backend for standalone mode
  * @param orderId Order ID to update
  * @param paymentAmount Total payment amount (including tip)
@@ -542,7 +558,7 @@ export async function recordOrderPayment(
       method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
       status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
       splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
-      source: (paymentData.source || 'OTHER') as PaymentSource, // ✅ NEW: Dedicated source field with PaymentSource enum
+      source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
       processor: 'TBD',
       processorId: paymentData.mentaOperationId,
       processorData: {
@@ -569,7 +585,7 @@ export async function recordOrderPayment(
       posRawData: {
         splitType: paymentData.splitType,
         staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
-        source: paymentData.source || 'TPV', // ✅ UPDATED: Use TPV instead of AVOQADO_TPV
+        source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
         paidProductsId: paymentData.paidProductsId || [],
         ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
         ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
@@ -858,6 +874,16 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
+  // Map source from Android app format to PaymentSource enum
+  const mapPaymentSource = (source?: string): PaymentSource => {
+    if (!source) return 'OTHER'
+    // Map "AVOQADO_TPV" from Android app to "TPV" enum value
+    if (source === 'AVOQADO_TPV') return 'TPV'
+    // Check if it's a valid PaymentSource enum value
+    const validSources = ['TPV', 'DASHBOARD_TEST', 'QR', 'WEB', 'APP', 'PHONE', 'POS', 'OTHER']
+    return validSources.includes(source) ? (source as PaymentSource) : 'OTHER'
+  }
+
   // Create the fast payment record (no order association)
   const payment = await prisma.payment.create({
     data: {
@@ -868,7 +894,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
       status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
       splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
-      source: (paymentData.source || 'OTHER') as PaymentSource, // ✅ NEW: Dedicated source field with PaymentSource enum
+      source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
       processor: 'TBD',
       type: 'FAST',
       processorId: paymentData.mentaOperationId,
@@ -896,7 +922,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       posRawData: {
         splitType: 'FULLPAYMENT',
         staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
-        source: paymentData.source || 'TPV', // ✅ UPDATED: Use TPV instead of AVOQADO_TPV
+        source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
         paymentType: 'FAST',
         ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
       },
