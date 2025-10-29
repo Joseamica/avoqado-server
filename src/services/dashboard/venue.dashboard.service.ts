@@ -31,7 +31,7 @@ import { Venue, AccountType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
-import { deleteVenueFolder } from '../storage.service'
+import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
 import {
   getOrCreateStripeCustomer,
   updatePaymentMethod,
@@ -176,6 +176,32 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
 
   // Exclude organizationId from updates (prevent accidental modification)
   const { organizationId: _, ...safeUpdateData } = updateData
+
+  // 🗑️ AUTO-CLEANUP: Delete old logo from Firebase Storage if it's being changed/removed
+  if (safeUpdateData.logo !== undefined) {
+    // Logo field is being updated
+    const oldLogo = existingVenue.logo
+    const newLogo = safeUpdateData.logo || null // Treat empty string as null
+
+    // If logo is changing and there was an old logo, delete it from storage
+    if (oldLogo && oldLogo !== newLogo) {
+      logger.info(`🗑️  Auto-cleanup: Deleting old logo from Firebase Storage`, {
+        venueId,
+        oldLogo,
+        newLogo: newLogo || '(removed)',
+      })
+
+      await deleteFileFromStorage(oldLogo).catch(error => {
+        logger.error(`❌ Failed to auto-delete old logo from storage (non-blocking)`, {
+          venueId,
+          oldLogo,
+          error: error.message,
+        })
+        // Don't throw - continue with update even if storage cleanup fails
+        // This prevents blocking venue updates if Firebase Storage has issues
+      })
+    }
+  }
 
   // Prepare the update data
   const venueUpdateData: any = {
