@@ -258,6 +258,10 @@ model Staff {
   emailVerified Boolean      @default(false)
   invitations   Invitation[]
 
+  // Email Verification
+  emailVerificationCode    String?   // 4-digit PIN code
+  emailVerificationExpires DateTime? // Expiration time for verification code
+
   // Access
   venues            StaffVenue[]
   shifts            Shift[]
