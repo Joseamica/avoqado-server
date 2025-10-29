@@ -78,6 +78,11 @@ export const UpdateStep3Schema = z.object({
     name: z.string().min(1, 'Business name is required').max(100, 'Business name too long'),
     type: z.string().optional(),
     venueType: z.string().optional(),
+    entityType: z
+      .enum(['PERSONA_FISICA', 'PERSONA_MORAL'], {
+        errorMap: () => ({ message: 'Entity type must be PERSONA_FISICA or PERSONA_MORAL' }),
+      })
+      .optional(),
     timezone: z.string().default('America/Mexico_City'),
     address: z.string().optional(),
     city: z.string().optional(),
@@ -154,7 +159,7 @@ export const UpdateStep6Schema = z.object({
 })
 
 /**
- * Validates Step 7: CLABE Payment Info
+ * Validates Step 7: CLABE Payment Info & KYC Documents
  */
 export const UpdateStep7Schema = z.object({
   params: z.object({
@@ -173,6 +178,13 @@ export const UpdateStep7Schema = z.object({
       ),
     bankName: z.string().optional(),
     accountHolder: z.string().optional(),
+    // KYC Document URLs (uploaded to storage before submitting this step)
+    ineUrl: z.string().url('Invalid INE document URL').optional(),
+    rfcDocumentUrl: z.string().url('Invalid RFC document URL').optional(),
+    comprobanteDomicilioUrl: z.string().url('Invalid address proof URL').optional(),
+    caratulaBancariaUrl: z.string().url('Invalid bank statement URL').optional(),
+    actaConstitutivaUrl: z.string().url('Invalid Acta Constitutiva URL').optional(),
+    poderLegalUrl: z.string().url('Invalid power of attorney URL').optional(),
   }),
 })
 

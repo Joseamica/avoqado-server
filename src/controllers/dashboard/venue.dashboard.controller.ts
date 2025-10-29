@@ -84,6 +84,27 @@ export async function getVenueById(req: Request<{ venueId: string }>, res: Respo
   }
 }
 
+export async function getVenueBySlug(req: Request<{ slug: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+    const slug: string = req.params.slug
+
+    // SUPERADMIN can access any venue across organizations
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const venue = await venueDashboardService.getVenueBySlug(orgId, slug, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      data: venue,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function updateVenue(req: Request<{ venueId: string }, any, any>, res: Response, next: NextFunction): Promise<void> {
   try {
     const orgId = req.authContext?.orgId

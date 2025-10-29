@@ -11,6 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
 import { seedDemoVenue } from './demoSeed.service'
 import * as stripeService from '@/services/stripe.service'
+import * as kycReviewService from '@/services/superadmin/kycReview.service'
 import logger from '@/config/logger'
 
 // Types
@@ -22,6 +23,7 @@ export interface CreateVenueInput {
     name: string
     type?: BusinessType
     venueType?: VenueType
+    entityType?: 'PERSONA_FISICA' | 'PERSONA_MORAL' // Legal entity type
     timezone?: string
     address?: string
     city?: string
@@ -47,6 +49,13 @@ export interface CreateVenueInput {
     clabe: string
     bankName?: string
     accountHolder?: string
+    // KYC Document URLs
+    ineUrl?: string
+    rfcDocumentUrl?: string
+    comprobanteDomicilioUrl?: string
+    caratulaBancariaUrl?: string
+    actaConstitutivaUrl?: string
+    poderLegalUrl?: string
   }
   selectedFeatures?: string[]
   stripePaymentMethodId?: string // Payment method collected via Stripe Elements
@@ -100,6 +109,20 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       // Contact
       phone: businessInfo.phone,
       email: businessInfo.email,
+
+      // Legal Entity Type
+      entityType: businessInfo.entityType as any, // PERSONA_FISICA or PERSONA_MORAL
+
+      // KYC Documents (if provided in paymentInfo)
+      idDocumentUrl: paymentInfo?.ineUrl, // INE/IFE
+      rfcDocumentUrl: paymentInfo?.rfcDocumentUrl,
+      comprobanteDomicilioUrl: paymentInfo?.comprobanteDomicilioUrl,
+      caratulaBancariaUrl: paymentInfo?.caratulaBancariaUrl,
+      actaDocumentUrl: paymentInfo?.actaConstitutivaUrl, // Acta Constitutiva
+      poderLegalUrl: paymentInfo?.poderLegalUrl,
+
+      // KYC Status (default PENDING_REVIEW from schema)
+      // kycStatus will default to PENDING_REVIEW
 
       // Demo tracking
       isDemo,
@@ -159,6 +182,23 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     // TODO: Create VenuePaymentConfig with CLABE
     // This will be implemented when payment provider integration is ready
     // For now, just store it as venue metadata
+  }
+
+  // Notify superadmins if KYC documents were submitted (real venue, not demo)
+  if (!isDemo && paymentInfo) {
+    // Check if any KYC documents were provided
+    const hasKycDocuments =
+      paymentInfo.ineUrl ||
+      paymentInfo.rfcDocumentUrl ||
+      paymentInfo.comprobanteDomicilioUrl ||
+      paymentInfo.caratulaBancariaUrl ||
+      paymentInfo.actaConstitutivaUrl ||
+      paymentInfo.poderLegalUrl
+
+    if (hasKycDocuments) {
+      logger.info(`📤 Notifying superadmins about new KYC submission from ${venue.name}`)
+      await kycReviewService.notifySuperadminsNewKycSubmission(venue.id, venue.name)
+    }
   }
 
   // Enable selected premium features with Stripe trial

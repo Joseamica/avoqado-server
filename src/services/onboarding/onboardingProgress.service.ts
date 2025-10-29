@@ -21,6 +21,7 @@ export interface OnboardingStepData {
     name: string
     type: string
     venueType: string
+    entityType?: 'PERSONA_FISICA' | 'PERSONA_MORAL' // Legal entity type
     timezone: string
     address?: string
     city?: string
@@ -48,6 +49,13 @@ export interface OnboardingStepData {
     clabe: string
     bankName?: string
     accountHolder?: string
+    // KYC Document URLs (uploaded to S3/storage)
+    ineUrl?: string // INE/IFE (ID document)
+    rfcDocumentUrl?: string // RFC certificate
+    comprobanteDomicilioUrl?: string // Address proof
+    caratulaBancariaUrl?: string // Bank statement with CLABE
+    actaConstitutivaUrl?: string // Acta Constitutiva (Persona Moral only)
+    poderLegalUrl?: string // Power of attorney (Persona Moral only)
   }
 }
 

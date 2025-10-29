@@ -54,6 +54,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 slug: true,
                 logo: true,
                 isDemo: true,
+                kycStatus: true, // Include KYC status for access control
                 features: {
                   select: {
                     active: true,
@@ -88,6 +89,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       logo: string | null
       role?: any
       isDemo?: boolean
+      kycStatus?: string | null // Include KYC verification status
       features?: any[]
     }
 
@@ -102,6 +104,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       logo: sv.venue.logo,
       role: sv.role,
       isDemo: sv.venue.isDemo,
+      kycStatus: sv.venue.kycStatus, // Include KYC status
       features: sv.venue.features, // Incluir las features
     }))
 
@@ -131,6 +134,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: true,
           logo: true,
           isDemo: true,
+          kycStatus: true, // Include KYC status
           features: {
             select: {
               active: true,
@@ -151,6 +155,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         slug: venue.slug,
         logo: venue.logo,
         isDemo: venue.isDemo,
+        kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
       }))
 
@@ -177,6 +182,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: true,
           logo: true,
           isDemo: true,
+          kycStatus: true, // Include KYC status
           features: {
             select: {
               active: true,
@@ -197,6 +203,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         slug: venue.slug,
         logo: venue.logo,
         isDemo: venue.isDemo,
+        kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
       }))
 
