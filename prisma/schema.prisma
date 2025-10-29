@@ -76,10 +76,15 @@ model Venue {
   active           Boolean   @default(true)
   operationalSince DateTime?
 
-  // ✅ NEW: Demo/onboarding tracking
-  isDemo                Boolean   @default(false) // Is this a demo venue?
+  // ✅ Demo/onboarding tracking
+  isOnboardingDemo      Boolean   @default(false) // Is this an ONBOARDING demo venue?
   demoExpiresAt         DateTime? // Demo expiration date
   onboardingCompletedAt DateTime? // When onboarding was completed
+
+  // ✅ Live Demo (public demo.dashboard.avoqado.io)
+  isLiveDemo        Boolean   @default(false) // Is this a PUBLIC live demo venue?
+  liveDemoSessionId String?   @unique // Links to browser session
+  lastActivityAt    DateTime? @default(now()) // Track activity for cleanup
 
   // Legal Entity Type
   entityType     EntityType? // PERSONA_FISICA or PERSONA_MORAL
@@ -172,12 +177,33 @@ model Venue {
   // ✅ NEW: Webhook event logging
   webhookEvents        WebhookEvent[]
 
+  // ✅ NEW: Live Demo Session
+  liveDemoSession LiveDemoSession?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([organizationId])
   @@index([slug])
   @@index([active])
+}
+
+// ✅ Live Demo Session Tracking
+// Tracks temporary demo sessions for public demo (demo.dashboard.avoqado.io)
+model LiveDemoSession {
+  id             String   @id @default(cuid())
+  sessionId      String   @unique // Browser session cookie identifier
+  venueId        String   @unique
+  staffId        String   @unique
+  venue          Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  staff          Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+  lastActivityAt DateTime @default(now())
+  expiresAt      DateTime // createdAt + 5 hours
+
+  @@index([sessionId])
+  @@index([expiresAt]) // For cleanup queries
+  @@index([lastActivityAt]) // For activity monitoring
 }
 
 model VenueSettings {
@@ -287,6 +313,9 @@ model Staff {
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
+
+  // ✅ NEW: Live Demo Session
+  liveDemoSession LiveDemoSession?
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
