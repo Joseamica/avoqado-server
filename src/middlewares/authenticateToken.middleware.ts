@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { AuthContext } from '../security'
+import * as liveDemoService from '../services/liveDemo.service'
 
 export const authenticateTokenMiddleware = (req: Request, res: Response, next: NextFunction): void => {
   try {
@@ -35,6 +36,16 @@ export const authenticateTokenMiddleware = (req: Request, res: Response, next: N
     }
 
     req.authContext = authContext
+
+    // Track activity for live demo sessions
+    const liveDemoSessionId = req.cookies?.liveDemoSessionId
+    if (liveDemoSessionId) {
+      // Non-blocking activity update (fire and forget)
+      liveDemoService.updateLiveDemoActivity(liveDemoSessionId).catch(err => {
+        // Silently fail - don't block the request
+      })
+    }
+
     next()
   } catch (error) {
     // Limpiar cookie si existe

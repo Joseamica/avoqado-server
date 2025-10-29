@@ -8,6 +8,7 @@ import posSyncRoutes from './pos-sync.routes'
 import invitationRoutes from './invitations.routes'
 import onboardingRoutes from './onboarding.routes'
 import superadminRoutes from './superadmin.routes'
+import liveDemoRoutes from './liveDemo.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -19,5 +20,6 @@ router.use('/pos-sync', posSyncRoutes) // All posSync routes under /api/posSync
 router.use('/invitations', invitationRoutes) // All invitation routes under /api/v1/invitations
 router.use('/onboarding', onboardingRoutes) // All onboarding routes under /api/v1/onboarding
 router.use('/superadmin', superadminRoutes) // All superadmin routes under /api/v1/superadmin
+router.use('/live-demo', liveDemoRoutes) // Live demo routes for demo.dashboard.avoqado.io
 
 export default router
