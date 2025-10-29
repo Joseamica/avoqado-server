@@ -38,6 +38,7 @@ import {
   Unit,
   UnitType,
   VenueType,
+  EntityType,
 } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 import { getUnitType } from '../src/services/dashboard/rawMaterial.service'
@@ -871,8 +872,10 @@ async function main() {
           name: venueName,
           slug: venueSlug,
           type: VenueType.RESTAURANT,
+          entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA, // First venue is company, second is individual
           address: faker.location.streetAddress(),
           city: faker.location.city(),
+          kycStatus: 'REJECTED',
           state: faker.location.state(),
           zipCode: faker.location.zipCode(),
           country: 'MX',
