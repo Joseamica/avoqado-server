@@ -146,6 +146,10 @@ async function createLiveDemoSession(sessionId: string): Promise<LiveDemoSession
       // Active by default
       active: true,
       operationalSince: new Date(),
+
+      // ✅ Auto-verify KYC for Live Demo
+      kycStatus: 'VERIFIED',
+      kycCompletedAt: new Date(),
     },
   })
 
