@@ -3,7 +3,7 @@ import prisma from '@/utils/prismaClient'
 
 // ===== PRODUCTION VENUE FILTER =====
 // Excludes demo venues from analytics to prevent skewed metrics
-const PRODUCTION_VENUE_FILTER = { isDemo: false }
+const PRODUCTION_VENUE_FILTER = { isOnboardingDemo: false }
 
 export interface SuperadminDashboardData {
   kpis: {

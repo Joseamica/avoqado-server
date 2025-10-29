@@ -494,7 +494,7 @@ router.put('/organizations/:organizationId/step/7', validateRequest(UpdateStep7S
  *                     id: { type: string }
  *                     slug: { type: string }
  *                     name: { type: string }
- *                     isDemo: { type: boolean }
+ *                     isOnboardingDemo: { type: boolean }
  *                 summary:
  *                   type: object
  *                   properties:

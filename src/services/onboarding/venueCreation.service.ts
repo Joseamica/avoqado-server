@@ -73,7 +73,7 @@ export interface CreateVenueResult {
     id: string
     slug: string
     name: string
-    isDemo: boolean
+    isOnboardingDemo: boolean
   }
   categoriesCreated?: number
   productsCreated?: number
@@ -103,8 +103,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
   const baseSlug = slugify(businessInfo.name)
   const slug = await generateUniqueSlug(baseSlug)
 
-  // Determine if demo
-  const isDemo = onboardingType === 'DEMO'
+  // Determine if onboarding demo
+  const isOnboardingDemo = onboardingType === 'DEMO'
 
   // Create venue
   const venue = await prisma.venue.create({
@@ -141,9 +141,9 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       // KYC Status (default PENDING_REVIEW from schema)
       // kycStatus will default to PENDING_REVIEW
 
-      // Demo tracking
-      isDemo,
-      demoExpiresAt: isDemo ? addDays(new Date(), 30) : null, // 30 days trial
+      // Onboarding Demo tracking
+      isOnboardingDemo,
+      demoExpiresAt: isOnboardingDemo ? addDays(new Date(), 30) : null, // 30 days trial
       onboardingCompletedAt: new Date(),
 
       // Active by default
@@ -178,12 +178,12 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       id: venue.id,
       slug: venue.slug,
       name: venue.name,
-      isDemo,
+      isOnboardingDemo,
     },
   }
 
-  // Handle demo venue
-  if (isDemo) {
+  // Handle onboarding demo venue
+  if (isOnboardingDemo) {
     const seedResult = await seedDemoVenue(venue.id)
     result.demoDataSeeded = true
     result.categoriesCreated = seedResult.categoriesCreated
@@ -203,8 +203,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     // For now, just store it as venue metadata
   }
 
-  // Notify superadmins if KYC documents were submitted (real venue, not demo)
-  if (!isDemo && paymentInfo) {
+  // Notify superadmins if KYC documents were submitted (real venue, not onboarding demo)
+  if (!isOnboardingDemo && paymentInfo) {
     // Check if any KYC documents were provided
     const hasKycDocuments =
       paymentInfo.ineUrl ||

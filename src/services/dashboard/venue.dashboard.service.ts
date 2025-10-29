@@ -770,7 +770,7 @@ export async function convertDemoVenue(
   }
 
   // Verify that the venue is actually in demo mode
-  if (!existingVenue.isDemo) {
+  if (!existingVenue.isOnboardingDemo) {
     logger.error('Attempted to convert non-demo venue', { venueId })
     throw new BadRequestError('This venue is not in demo mode')
   }
@@ -834,7 +834,7 @@ export async function convertDemoVenue(
   const updatedVenue = await prisma.venue.update({
     where: { id: venueId },
     data: {
-      isDemo: false,
+      isOnboardingDemo: false,
       demoExpiresAt: null,
       // Store tax information in venue fields
       // Note: You may want to create a separate VenueTaxInfo model if you need more fields

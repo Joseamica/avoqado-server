@@ -53,7 +53,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 name: true,
                 slug: true,
                 logo: true,
-                isDemo: true,
+                isOnboardingDemo: true,
                 kycStatus: true, // Include KYC status for access control
                 features: {
                   select: {
@@ -88,7 +88,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: string
       logo: string | null
       role?: any
-      isDemo?: boolean
+      isOnboardingDemo?: boolean
       kycStatus?: string | null // Include KYC verification status
       features?: any[]
     }
@@ -103,7 +103,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       role: sv.role,
-      isDemo: sv.venue.isDemo,
+      isOnboardingDemo: sv.venue.isOnboardingDemo,
       kycStatus: sv.venue.kycStatus, // Include KYC status
       features: sv.venue.features, // Incluir las features
     }))
@@ -133,7 +133,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
-          isDemo: true,
+          isOnboardingDemo: true,
           kycStatus: true, // Include KYC status
           features: {
             select: {
@@ -154,7 +154,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
-        isDemo: venue.isDemo,
+        isOnboardingDemo: venue.isOnboardingDemo,
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
       }))
@@ -181,7 +181,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
-          isDemo: true,
+          isOnboardingDemo: true,
           kycStatus: true, // Include KYC status
           features: {
             select: {
@@ -202,7 +202,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
-        isDemo: venue.isDemo,
+        isOnboardingDemo: venue.isOnboardingDemo,
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
       }))
