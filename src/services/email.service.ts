@@ -56,6 +56,11 @@ interface SubscriptionCanceledEmailData {
   suspendedAt: Date
 }
 
+interface EmailVerificationData {
+  firstName: string
+  verificationCode: string
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -754,6 +759,84 @@ class EmailService {
       Contáctanos si necesitas ayuda.
 
       Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.
+
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendEmailVerification(email: string, data: EmailVerificationData): Promise<boolean> {
+    const subject = `Código de verificación - Avoqado`
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Código de verificación</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">✉️ Verifica tu correo</h1>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola ${data.firstName},</p>
+
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electrónico usando el siguiente código:
+              </p>
+
+              <div style="background: #f8f9ff; border: 2px solid #667eea; border-radius: 10px; padding: 30px; margin: 30px 0; text-align: center;">
+                <p style="font-size: 14px; margin-bottom: 15px; color: #666; text-transform: uppercase; letter-spacing: 1px;">Tu código de verificación</p>
+                <div style="font-size: 48px; font-weight: bold; color: #667eea; letter-spacing: 8px; font-family: 'Courier New', monospace;">
+                  ${data.verificationCode}
+                </div>
+              </div>
+
+              <div style="background: #fff8e1; border-left: 4px solid #ffc107; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  ⏱️ <strong>Este código expirará en 10 minutos</strong>
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  Si no solicitaste este código, puedes ignorar este correo.
+                </p>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                ¿Necesitas ayuda? Contáctanos en cualquier momento.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Hola ${data.firstName},
+
+      Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electrónico usando el siguiente código:
+
+      Código de verificación: ${data.verificationCode}
+
+      ⏱️ Este código expirará en 10 minutos.
+
+      Si no solicitaste este código, puedes ignorar este correo.
+
+      ¿Necesitas ayuda? Contáctanos en cualquier momento.
 
       Equipo de Avoqado
     `

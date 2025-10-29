@@ -246,7 +246,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       firstName: staff.firstName,
       lastName: staff.lastName,
       email: staff.email,
-      isVerified: staff.emailVerified,
+      emailVerified: staff.emailVerified, // Changed from isVerified to emailVerified for frontend compatibility
       photoUrl: staff.photoUrl,
       phone: staff.phone,
       organizationId: staff.organizationId,
