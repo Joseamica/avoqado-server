@@ -38,6 +38,12 @@ setupSwaggerUI(app)
 app.use('/api/v1/venues/:venueId/public-menu', publicMenuRoutes)
 app.use('/api/v1/secure', orderRoutes) // Consider renaming '/secure' if it's for orders specifically
 
+// --- Legacy QR Code Redirects ---
+// Redirects for obsolete merchandise QR codes (https://api.demo.avoqado.io/v1/demo/generate)
+app.get('/v1/demo/generate', (req: ExpressRequest, res: ExpressResponse) => {
+  res.redirect(301, 'https://links.avoqado.io/')
+})
+
 // --- Montaje de Rutas de la API ---
 const API_PREFIX = process.env.API_PREFIX || '/api/v1' // Define un prefijo base para tu API
 app.use(API_PREFIX, mainApiRouter)
