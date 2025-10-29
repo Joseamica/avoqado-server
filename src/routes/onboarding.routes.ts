@@ -74,6 +74,39 @@ const router = express.Router()
  */
 router.post('/signup', validateRequest(SignupSchema), onboardingController.signup)
 
+/**
+ * @openapi
+ * /api/v1/onboarding/verify-email:
+ *   post:
+ *     tags: [Onboarding]
+ *     summary: Verify user email with PIN code
+ *     description: Verifies user email using 4-digit PIN code sent during signup
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, verificationCode]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               verificationCode: { type: string, pattern: '^\\d{4}$' }
+ *     responses:
+ *       200:
+ *         description: Email verified successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *                 emailVerified: { type: boolean }
+ *       400:
+ *         description: Invalid or expired verification code
+ */
+router.post('/verify-email', onboardingController.verifyEmail)
+
 // Configure multer for CSV uploads (memory storage, max 5MB)
 const upload = multer({
   storage: multer.memoryStorage(),

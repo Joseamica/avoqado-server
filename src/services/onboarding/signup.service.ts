@@ -10,6 +10,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
 import * as jwtService from '@/jwt.service'
 import { StaffRole } from '@prisma/client'
+import emailService from '@/services/email.service'
 
 export interface SignupInput {
   email: string
@@ -34,6 +35,10 @@ export interface SignupResult {
     id: string
     name: string
   }
+}
+
+export interface VerifyEmailResult {
+  emailVerified: boolean
 }
 
 /**
@@ -90,7 +95,29 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
     return { organization, staff }
   })
 
-  // 5. Generate JWT tokens (no venue yet, will be added during onboarding)
+  // 5. Generate 4-digit verification code and send email
+  const verificationCode = Math.floor(1000 + Math.random() * 9000).toString()
+
+  // Set expiration to 10 minutes from now
+  const expirationTime = new Date()
+  expirationTime.setMinutes(expirationTime.getMinutes() + 10)
+
+  // Update staff record with verification code
+  await prisma.staff.update({
+    where: { id: result.staff.id },
+    data: {
+      emailVerificationCode: verificationCode,
+      emailVerificationExpires: expirationTime,
+    },
+  })
+
+  // Send verification email
+  await emailService.sendEmailVerification(result.staff.email, {
+    firstName: result.staff.firstName,
+    verificationCode,
+  })
+
+  // 6. Generate JWT tokens (no venue yet, will be added during onboarding)
   // We'll use a temporary venue-less token for the onboarding process
   const accessToken = jwtService.generateAccessToken(
     result.staff.id,
@@ -118,4 +145,54 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
       name: result.organization.name,
     },
   }
+}
+
+/**
+ * Verifies user email with 4-digit PIN code
+ *
+ * @param email - User's email address
+ * @param verificationCode - 4-digit PIN code
+ * @returns Verification result
+ */
+export async function verifyEmailCode(email: string, verificationCode: string): Promise<VerifyEmailResult> {
+  // 1. Find staff by email
+  const staff = await prisma.staff.findUnique({
+    where: { email: email.toLowerCase() },
+  })
+
+  if (!staff) {
+    throw new BadRequestError('Invalid email or verification code')
+  }
+
+  // 2. Check if already verified
+  if (staff.emailVerified) {
+    return { emailVerified: true }
+  }
+
+  // 3. Check if verification code exists
+  if (!staff.emailVerificationCode || !staff.emailVerificationExpires) {
+    throw new BadRequestError('No verification code found. Please request a new one.')
+  }
+
+  // 4. Check if code has expired
+  if (new Date() > staff.emailVerificationExpires) {
+    throw new BadRequestError('Verification code has expired. Please request a new one.')
+  }
+
+  // 5. Check if code matches
+  if (staff.emailVerificationCode !== verificationCode) {
+    throw new BadRequestError('Invalid verification code')
+  }
+
+  // 6. Mark email as verified and clear verification fields
+  await prisma.staff.update({
+    where: { id: staff.id },
+    data: {
+      emailVerified: true,
+      emailVerificationCode: null,
+      emailVerificationExpires: null,
+    },
+  })
+
+  return { emailVerified: true }
 }

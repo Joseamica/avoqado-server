@@ -57,6 +57,34 @@ export async function signup(req: Request, res: Response, next: NextFunction): P
 }
 
 /**
+ * POST /api/v1/onboarding/verify-email
+ *
+ * Verifies user email with 4-digit PIN code
+ */
+export async function verifyEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { email, verificationCode } = req.body
+
+    if (!email || !verificationCode) {
+      throw new BadRequestError('Email and verification code are required')
+    }
+
+    const result = await signupService.verifyEmailCode(email, verificationCode)
+
+    logger.info(`Email verified successfully for: ${email}`)
+
+    res.status(200).json({
+      success: true,
+      message: 'Email verified successfully',
+      emailVerified: result.emailVerified,
+    })
+  } catch (error) {
+    logger.error('Error during email verification:', error)
+    next(error)
+  }
+}
+
+/**
  * POST /api/v1/onboarding/organizations/:organizationId/start
  *
  * Initializes onboarding progress for an organization
@@ -443,6 +471,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       paymentInfo: progress.step7_paymentInfo as any,
       selectedFeatures: progress.step6_selectedFeatures || [],
       stripePaymentMethodId, // Pass payment method for trial setup
+      teamInvites: progress.step5_teamInvites as any, // Pass team invites for processing
     }
 
     // Create venue and assign to user

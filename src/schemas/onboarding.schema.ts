@@ -137,12 +137,17 @@ export const UpdateStep5Schema = z.object({
     organizationId: z.string().cuid('Invalid organization ID format'),
   }),
   body: z.object({
-    teamInvites: z.array(
-      z.object({
-        email: z.string().email('Invalid email format'),
-        role: z.string().min(1, 'Role is required'),
-      }),
-    ),
+    teamInvites: z
+      .array(
+        z.object({
+          email: z.string().email('Invalid email format'),
+          firstName: z.string().min(1, 'First name is required'),
+          lastName: z.string().min(1, 'Last name is required'),
+          role: z.string().min(1, 'Role is required'),
+        }),
+      )
+      .optional()
+      .default([]), // Default to empty array if not provided
   }),
 })
 
