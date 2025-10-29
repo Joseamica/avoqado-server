@@ -9,8 +9,7 @@ primary_region = 'dfw'
 [build]
 
 [deploy]
-  # Regenerate Prisma Client and apply migrations on every deploy
-  release_command = 'npx prisma generate && npx prisma migrate deploy'
+  release_command = 'npx prisma migrate deploy'
 
 [http_service]
   internal_port = 3000

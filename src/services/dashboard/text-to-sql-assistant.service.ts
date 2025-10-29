@@ -137,11 +137,11 @@ class TextToSqlAssistantService {
 
 ## Date Filtering Examples:
 - Last 7 days: "createdAt" >= NOW() - INTERVAL '7 days'
-- Last 30 days: "createdAt" >= NOW() - INTERVAL '30 days'  
+- Last 30 days: "createdAt" >= NOW() - INTERVAL '30 days'
 - Last 49 days: "createdAt" >= NOW() - INTERVAL '49 days'
 - Today: "createdAt" >= CURRENT_DATE
-- This week: "createdAt" >= date_trunc('week', NOW())
-- This month: "createdAt" >= date_trunc('month', NOW())
+- This week (últimos 7 días): "createdAt" >= NOW() - INTERVAL '7 days'
+- This month (últimos 30 días): "createdAt" >= NOW() - INTERVAL '30 days'
 
 ## Common Query Patterns:
 - Reviews by rating: SELECT COUNT(*) FROM "Review" WHERE "venueId" = '{venueId}' AND "overallRating" = 5
