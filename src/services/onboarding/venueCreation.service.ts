@@ -5,13 +5,14 @@
  * Supports both demo venues (pre-populated) and real business venues.
  */
 
-import { BusinessType, OnboardingType, VenueType } from '@prisma/client'
+import { BusinessType, OnboardingType, VenueType, InvitationType, InvitationStatus, StaffRole } from '@prisma/client'
 import { addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
 import { seedDemoVenue } from './demoSeed.service'
 import * as stripeService from '@/services/stripe.service'
 import * as kycReviewService from '@/services/superadmin/kycReview.service'
+import emailService from '@/services/email.service'
 import logger from '@/config/logger'
 
 // Types
@@ -59,6 +60,12 @@ export interface CreateVenueInput {
   }
   selectedFeatures?: string[]
   stripePaymentMethodId?: string // Payment method collected via Stripe Elements
+  teamInvites?: Array<{
+    email: string
+    firstName: string
+    lastName: string
+    role: string
+  }>
 }
 
 export interface CreateVenueResult {
@@ -80,7 +87,17 @@ export interface CreateVenueResult {
  * @returns Created venue and metadata
  */
 export async function createVenueFromOnboarding(input: CreateVenueInput): Promise<CreateVenueResult> {
-  const { organizationId, userId, onboardingType, businessInfo, menuData, paymentInfo, selectedFeatures, stripePaymentMethodId } = input
+  const {
+    organizationId,
+    userId,
+    onboardingType,
+    businessInfo,
+    menuData,
+    paymentInfo,
+    selectedFeatures,
+    stripePaymentMethodId,
+    teamInvites,
+  } = input
 
   // Generate unique slug
   const baseSlug = slugify(businessInfo.name)
@@ -167,8 +184,10 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
 
   // Handle demo venue
   if (isDemo) {
-    await seedDemoVenue(venue.id)
+    const seedResult = await seedDemoVenue(venue.id)
     result.demoDataSeeded = true
+    result.categoriesCreated = seedResult.categoriesCreated
+    result.productsCreated = seedResult.productsCreated
   }
   // Handle real venue with menu data
   else if (menuData && menuData.categories && menuData.products) {
@@ -222,6 +241,21 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     )
   } else {
     logger.warn(`⚠️ No premium features to enable for venue ${venue.id} (selectedFeatures is empty or null)`)
+  }
+
+  // Process team invitations (create invitations and send emails)
+  if (teamInvites && teamInvites.length > 0) {
+    // Get organization info for email
+    const organization = await prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { name: true },
+    })
+
+    if (organization) {
+      await processTeamInvites(venue.id, organizationId, userId, teamInvites, venue.name, organization.name)
+    } else {
+      logger.warn(`⚠️  Organization ${organizationId} not found, skipping team invites`)
+    }
   }
 
   return result
@@ -393,4 +427,147 @@ async function enablePremiumFeatures(
       })
     }
   }
+}
+
+/**
+ * Processes team invites from onboarding by creating invitation records and sending emails
+ *
+ * @param venueId - Venue ID
+ * @param organizationId - Organization ID
+ * @param inviterStaffId - Staff ID of the user who created the venue (owner)
+ * @param teamInvites - Array of team member invitations
+ * @param venueName - Venue name for email
+ * @param organizationName - Organization name for email
+ */
+async function processTeamInvites(
+  venueId: string,
+  organizationId: string,
+  inviterStaffId: string,
+  teamInvites: Array<{ email: string; firstName: string; lastName: string; role: string }>,
+  venueName: string,
+  organizationName: string,
+): Promise<void> {
+  if (!teamInvites || teamInvites.length === 0) {
+    logger.info(`No team invites to process for venue ${venueId}`)
+    return
+  }
+
+  logger.info(`📧 Processing ${teamInvites.length} team invites for venue ${venueId}`)
+
+  // Get inviter info for email personalization
+  const inviter = await prisma.staff.findUnique({
+    where: { id: inviterStaffId },
+    select: {
+      firstName: true,
+      lastName: true,
+    },
+  })
+
+  if (!inviter) {
+    logger.error(`❌ Inviter ${inviterStaffId} not found, cannot process team invites`)
+    return
+  }
+
+  const inviterName = `${inviter.firstName} ${inviter.lastName}`
+
+  for (const invite of teamInvites) {
+    try {
+      // Validate role
+      if (!Object.values(StaffRole).includes(invite.role as StaffRole)) {
+        logger.warn(`⚠️  Invalid role ${invite.role} for ${invite.email}, skipping`)
+        continue
+      }
+
+      // Check if user already exists
+      let staff = await prisma.staff.findUnique({
+        where: { email: invite.email },
+      })
+
+      // Check if already assigned to this venue
+      if (staff) {
+        const existingStaffVenue = await prisma.staffVenue.findUnique({
+          where: {
+            staffId_venueId: {
+              staffId: staff.id,
+              venueId,
+            },
+          },
+        })
+
+        if (existingStaffVenue && existingStaffVenue.active) {
+          logger.warn(`⚠️  ${invite.email} is already a team member of venue ${venueId}, skipping`)
+          continue
+        }
+      }
+
+      // Check for existing pending invitations
+      const existingInvitation = await prisma.invitation.findFirst({
+        where: {
+          email: invite.email,
+          venueId,
+          status: InvitationStatus.PENDING,
+          expiresAt: {
+            gt: new Date(),
+          },
+        },
+      })
+
+      if (existingInvitation) {
+        logger.warn(`⚠️  Pending invitation already exists for ${invite.email} to venue ${venueId}, skipping`)
+        continue
+      }
+
+      // Create invitation
+      const expiresAt = new Date()
+      expiresAt.setDate(expiresAt.getDate() + 7) // 7 days expiry
+
+      const invitation = await prisma.invitation.create({
+        data: {
+          email: invite.email,
+          role: invite.role as StaffRole,
+          type: InvitationType.VENUE_STAFF,
+          organizationId,
+          venueId,
+          expiresAt,
+          invitedById: inviterStaffId,
+        },
+      })
+
+      // If user doesn't exist, create them
+      if (!staff) {
+        staff = await prisma.staff.create({
+          data: {
+            email: invite.email,
+            firstName: invite.firstName,
+            lastName: invite.lastName,
+            organizationId,
+            active: false, // Will be activated when they accept invitation
+            emailVerified: false,
+          },
+        })
+      }
+
+      // Send invitation email
+      const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`
+
+      const emailSent = await emailService.sendTeamInvitation(invite.email, {
+        inviterName,
+        organizationName,
+        venueName,
+        role: invite.role as StaffRole,
+        inviteLink,
+      })
+
+      if (emailSent) {
+        logger.info(`✅ Team invitation sent to ${invite.email} for venue ${venueId}`)
+      } else {
+        logger.warn(`⚠️  Team invitation created but email not sent to ${invite.email}`)
+      }
+    } catch (error) {
+      logger.error(`❌ Failed to process team invite for ${invite.email}:`, error)
+      // Continue processing other invites even if one fails
+    }
+  }
+
+  logger.info(`✅ Finished processing team invites for venue ${venueId}`)
 }

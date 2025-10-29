@@ -42,6 +42,8 @@ export interface OnboardingStepData {
   }
   step5_teamInvites?: Array<{
     email: string
+    firstName: string
+    lastName: string
     role: string
   }>
   step6_selectedFeatures?: string[]

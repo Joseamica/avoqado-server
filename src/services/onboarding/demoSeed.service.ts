@@ -32,8 +32,9 @@ import logger from '@/config/logger'
  * Seeds a venue with demo data
  *
  * @param venueId - Venue ID to seed
+ * @returns Object with categoriesCreated and productsCreated counts
  */
-export async function seedDemoVenue(venueId: string): Promise<void> {
+export async function seedDemoVenue(venueId: string): Promise<{ categoriesCreated: number; productsCreated: number }> {
   logger.info(`🎬 Seeding demo data for venue: ${venueId}`)
 
   // 1. Create main menu
@@ -78,6 +79,11 @@ export async function seedDemoVenue(venueId: string): Promise<void> {
   logger.info(`✅ Created ${orders.length} sample orders with ${reviews.length} reviews`)
 
   logger.info(`🎉 Demo venue seeded successfully!`)
+
+  return {
+    categoriesCreated: categories.length,
+    productsCreated: products.length,
+  }
 }
 
 /**

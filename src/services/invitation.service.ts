@@ -65,6 +65,15 @@ export async function getInvitationByToken(token: string) {
     throw new AppError('La invitación ha expirado', 410)
   }
 
+  // Get the staff record if it exists (created during invitation)
+  const staff = await prisma.staff.findUnique({
+    where: { email: invitation.email },
+    select: {
+      firstName: true,
+      lastName: true,
+    },
+  })
+
   // Return invitation details for the frontend
   return {
     id: invitation.id,
@@ -75,6 +84,9 @@ export async function getInvitationByToken(token: string) {
     inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,
     expiresAt: invitation.expiresAt.toISOString(),
     status: invitation.status,
+    // Include firstName/lastName if staff record exists
+    firstName: staff?.firstName || null,
+    lastName: staff?.lastName || null,
   }
 }
 
