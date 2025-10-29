@@ -229,12 +229,57 @@ async function sendEmailNotification(notification: any): Promise<boolean> {
       const venueId = notification.entityId || notification.metadata?.venueId || ''
       const actionUrl = notification.actionUrl || ''
 
-      logger.info(`📧 Sending KYC notification email for venue: ${venueName}`)
+      logger.info(`📧 Preparing KYC notification email for venue: ${venueName}`)
+
+      // Get all SUPERADMINs (role is stored in StaffVenue, not Staff)
+      const superadminAssignments = await prisma.staffVenue.findMany({
+        where: {
+          role: 'SUPERADMIN',
+        },
+        include: {
+          staff: {
+            select: { email: true },
+          },
+        },
+      })
+
+      // Get the OWNER of the venue
+      const venueOwner = await prisma.staffVenue.findFirst({
+        where: {
+          venueId,
+          role: 'OWNER',
+        },
+        include: {
+          staff: {
+            select: { email: true },
+          },
+        },
+      })
+
+      // Collect all recipient emails
+      const recipients: string[] = []
+
+      // Add all superadmin emails (extract unique emails from assignments)
+      const superadminEmails = [...new Set(superadminAssignments.map(sv => sv.staff.email))]
+      recipients.push(...superadminEmails)
+
+      // Add venue owner email (if exists)
+      if (venueOwner?.staff?.email) {
+        recipients.push(venueOwner.staff.email)
+      }
+
+      // Remove duplicates (in case a superadmin is also the owner)
+      const uniqueRecipients = [...new Set(recipients)]
+
+      logger.info(`📧 Found ${uniqueRecipients.length} recipients for KYC notification:`)
+      logger.info(`   - ${superadminEmails.length} SUPERADMIN(s)`)
+      logger.info(`   - ${venueOwner ? '1 OWNER' : '0 OWNER'}`)
 
       return await resendService.sendKycSubmissionNotification({
         venueName,
         venueId,
         actionUrl,
+        recipients: uniqueRecipients,
       })
     }
 

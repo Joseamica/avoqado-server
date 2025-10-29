@@ -53,15 +53,23 @@ interface KycNotificationData {
   venueId: string
   actionUrl: string
   dashboardBaseUrl?: string
+  recipients: string[] // Array of email addresses (superadmins + owner)
 }
 
 /**
  * Send KYC submission notification to admin team
+ * Now sends to multiple recipients: all SUPERADMINs + venue OWNER
  */
 export async function sendKycSubmissionNotification(data: KycNotificationData): Promise<boolean> {
   try {
     const dashboardUrl = data.dashboardBaseUrl || process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
     const fullActionUrl = `${dashboardUrl}${data.actionUrl}`
+
+    // Validate recipients
+    if (!data.recipients || data.recipients.length === 0) {
+      logger.warn('No recipients provided for KYC notification. Falling back to admin email.')
+      data.recipients = [ADMIN_EMAIL]
+    }
 
     const html = `
       <!DOCTYPE html>
@@ -175,23 +183,39 @@ Notificación automática de Avoqado Platform
 Venue ID: ${data.venueId}
     `
 
-    logger.info(`📧 Sending KYC notification email to ${ADMIN_EMAIL} for venue: ${data.venueName}`)
+    logger.info(`📧 Sending KYC notification email to ${data.recipients.length} recipients for venue: ${data.venueName}`)
+    logger.info(`📧 Recipients: ${data.recipients.join(', ')}`)
 
-    const result = await resend.emails.send({
-      from: FROM_EMAIL,
-      to: ADMIN_EMAIL,
-      subject: `🆕 Nueva solicitud KYC: ${data.venueName}`,
-      html,
-      text,
-    })
+    // Send email to all recipients
+    const results = await Promise.allSettled(
+      data.recipients.map(email =>
+        resend.emails.send({
+          from: FROM_EMAIL,
+          to: email,
+          subject: `🆕 Nueva solicitud KYC: ${data.venueName}`,
+          html,
+          text,
+        }),
+      ),
+    )
 
-    if (result.error) {
-      logger.error('Failed to send KYC notification email:', result.error)
-      return false
+    // Check if all emails were sent successfully
+    const successCount = results.filter(r => r.status === 'fulfilled' && !(r.value as any).error).length
+    const failureCount = results.length - successCount
+
+    if (failureCount > 0) {
+      logger.warn(`⚠️ KYC notification: ${successCount} sent, ${failureCount} failed`)
+      results.forEach((result, index) => {
+        if (result.status === 'rejected' || (result.status === 'fulfilled' && (result.value as any).error)) {
+          const email = data.recipients[index]
+          const error = result.status === 'rejected' ? result.reason : (result.value as any).error
+          logger.error(`Failed to send KYC notification to ${email}:`, error)
+        }
+      })
     }
 
-    logger.info(`✅ KYC notification email sent successfully (ID: ${result.data?.id})`)
-    return true
+    logger.info(`✅ KYC notification email sent to ${successCount}/${results.length} recipients`)
+    return successCount > 0 // Return true if at least one email was sent successfully
   } catch (error) {
     logger.error('Error sending KYC notification email:', error)
     return false
