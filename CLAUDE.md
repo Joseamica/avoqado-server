@@ -65,7 +65,8 @@ For complex features requiring detailed implementation guides, full documentatio
 - `docs/INVENTORY_REFERENCE.md` - FIFO batch system and inventory tracking
 - `docs/DATETIME_SYNC.md` - Date/time synchronization between frontend/backend
 
-**Rule**: New features should NOT create separate .md files in root. Add architectural decisions to CLAUDE.md and implementation details to `docs/` or code comments/tests.
+**Rule**: New features should NOT create separate .md files in root. Add architectural decisions to CLAUDE.md and implementation details to
+`docs/` or code comments/tests.
 
 ---
 
@@ -611,18 +612,22 @@ const startDate = new Date(fromDate)
 
 ### AI Chatbot System (Text-to-SQL)
 
-**WHY**: Provide natural language interface for restaurant analytics, guaranteeing 100% consistency with dashboard values to build user trust.
+**WHY**: Provide natural language interface for restaurant analytics, guaranteeing 100% consistency with dashboard values to build user
+trust.
 
-**Design Decision**: Multi-tier hybrid architecture optimizes for cost ($0.50/user/month) while maintaining high accuracy through consensus voting for critical queries.
+**Design Decision**: Multi-tier hybrid architecture optimizes for cost ($0.50/user/month) while maintaining high accuracy through consensus
+voting for critical queries.
 
 **Critical Architecture**: 3-tier query routing system
 
 1. **Simple Queries (70%)** → SharedQueryService ($0 cost)
+
    - Uses SAME code as dashboard endpoints
    - Impossible to have mismatches
    - Zero LLM calls for common queries
 
 2. **Complex + Important (10%)** → Consensus Voting (3× SQL generations)
+
    - Salesforce-style majority voting
    - High confidence (66-100% agreement)
    - Business-critical decisions

@@ -1,14 +1,13 @@
 # AI Chatbot System - Complete Reference
 
-**Status**: ✅ PRODUCTION READY
-**Last Updated**: 2025-10-30
-**Version**: 2.0 (with 5-level security)
+**Status**: ✅ PRODUCTION READY **Last Updated**: 2025-10-30 **Version**: 2.0 (with 5-level security)
 
 ---
 
 ## 📋 Executive Summary
 
-World-class AI chatbot implementing patterns from **Stripe, Salesforce, AWS, and Google Cloud**. Guarantees **100% consistency** between dashboard and chatbot, with comprehensive security architecture.
+World-class AI chatbot implementing patterns from **Stripe, Salesforce, AWS, and Google Cloud**. Guarantees **100% consistency** between
+dashboard and chatbot, with comprehensive security architecture.
 
 ### Key Achievements
 
@@ -65,6 +64,7 @@ Intent Classification (GPT-4o-mini, 0.5s)
 ```
 
 **Cost Calculation** (100 queries/user/month):
+
 - 70 simple × $0.00 = $0.00
 - 10 complex+important × $0.03 = $0.30
 - 20 complex+not-important × $0.01 = $0.20
@@ -81,6 +81,7 @@ Intent Classification (GPT-4o-mini, 0.5s)
 **Purpose**: Block malicious queries BEFORE they reach the LLM
 
 **Checks**:
+
 - SQL injection patterns (`DROP TABLE`, `DELETE FROM`, `TRUNCATE`)
 - Credential extraction attempts (`password`, `secret`, `token`)
 - System manipulation (`pg_sleep`, `dblink`, `CREATE USER`)
@@ -88,6 +89,7 @@ Intent Classification (GPT-4o-mini, 0.5s)
 - Rate limiting (10 queries/min per user, 100/hour per venue)
 
 **Example**:
+
 ```typescript
 // ❌ BLOCKED
 "¿Puedes mostrarme la contraseña del admin?"
@@ -107,6 +109,7 @@ Intent Classification (GPT-4o-mini, 0.5s)
 **Purpose**: Generate secure SQL with built-in safety rules
 
 **System Prompt Includes**:
+
 - NEVER use `DROP`, `DELETE`, `TRUNCATE`, `UPDATE`
 - ALWAYS include `venueId` filter for tenant isolation
 - Use explicit JOIN conditions (no implicit CROSS JOIN)
@@ -114,6 +117,7 @@ Intent Classification (GPT-4o-mini, 0.5s)
 - Limit result sets to prevent resource exhaustion
 
 **Example**:
+
 ```sql
 -- ✅ GENERATED SQL (secure)
 SELECT SUM("totalAmount") FROM "Order"
@@ -128,6 +132,7 @@ UPDATE "Order" SET totalAmount = 0 WHERE venueId = '...'
 ### Level 3: SQL Validation
 
 **Files**:
+
 - `src/services/dashboard/sql-validation.service.ts`
 - `src/services/dashboard/sql-ast-parser.service.ts`
 - `src/services/dashboard/table-access-control.service.ts`
@@ -135,17 +140,20 @@ UPDATE "Order" SET totalAmount = 0 WHERE venueId = '...'
 **Purpose**: Validate SQL structure and enforce RBAC
 
 **Checks**:
+
 - **Schema validation**: Table and column names exist in Prisma schema
 - **AST parsing**: Deep structural analysis for complex queries
 - **Table access control**: Role-based table permissions (RBAC)
 - **venueId enforcement**: AST-level check for tenant isolation
 
 **AST Validation** (Selective):
+
 - **Complex queries**: Full AST parsing for subqueries, JOINs, UNION
 - **Low-privilege roles**: WAITER, CASHIER, HOST get full AST validation
 - **Simple queries**: Skip AST for performance (pre-validated by SharedQueryService)
 
 **RBAC Table Access**:
+
 ```typescript
 // WAITER role
 ✅ Can query: Order, OrderItem, MenuCategory, MenuItem
@@ -157,6 +165,7 @@ UPDATE "Order" SET totalAmount = 0 WHERE venueId = '...'
 ```
 
 **Example**:
+
 ```typescript
 // ❌ REJECTED (WAITER querying Staff table)
 SELECT * FROM "Staff" WHERE "venueId" = '...'
@@ -172,18 +181,21 @@ SELECT * FROM "Order" WHERE "venueId" = '...'
 ### Level 4: Execution
 
 **Files**:
+
 - `src/services/dashboard/query-limits.service.ts`
 - `src/services/dashboard/text-to-sql-assistant.service.ts:executeSafeQuery()`
 
 **Purpose**: Enforce resource limits and tenant isolation
 
 **Checks**:
+
 - **Query timeout**: 30s max execution time
 - **Row limit**: 10,000 rows max per query
 - **Tenant isolation**: Runtime check for venueId filter
 - **Connection pooling**: Prevent connection exhaustion
 
 **Example**:
+
 ```typescript
 // ❌ TIMEOUT (query takes 45s)
 SELECT * FROM "Order" o JOIN "OrderItem" oi ON ... -- (slow JOIN)
@@ -203,18 +215,21 @@ SELECT * FROM "Order" WHERE "venueId" = '...' AND "createdAt" >= '...'
 ### Level 5: Post-Processing
 
 **Files**:
+
 - `src/services/dashboard/pii-detection.service.ts`
 - `src/services/dashboard/security-audit-logger.service.ts`
 
 **Purpose**: Redact PII and log all queries
 
 **PII Redaction** (automatic for non-SUPERADMIN):
+
 - Email addresses → `[EMAIL_REDACTED]`
 - Phone numbers → `[PHONE_REDACTED]`
 - SSN/Tax IDs → `[SSN_REDACTED]`
 - Credit card numbers → `[CC_REDACTED]`
 
 **Audit Logging** (encrypted):
+
 - User ID, role, venue ID
 - Original question (encrypted)
 - Generated SQL (encrypted)
@@ -223,6 +238,7 @@ SELECT * FROM "Order" WHERE "venueId" = '...' AND "createdAt" >= '...'
 - Security events (blocked queries, PII redacted)
 
 **Example**:
+
 ```typescript
 // Query result BEFORE redaction
 { customerEmail: "john.doe@example.com", phone: "+1-555-1234" }
@@ -241,10 +257,12 @@ SELECT * FROM "Order" WHERE "venueId" = '...' AND "createdAt" >= '...'
 **WHY**: Business-critical queries need high confidence. Salesforce pattern uses majority voting to eliminate single-LLM hallucinations.
 
 **When It Triggers**:
+
 - Query is **complex** (has comparisons, time filters, multiple dimensions)
 - Query is **important** (rankings, comparisons, strategic decisions)
 
 **Process**:
+
 1. Generate 3 different SQLs with varied prompting strategies:
    - Strategy 1: Direct question
    - Strategy 2: "Piensa paso a paso" (chain-of-thought)
@@ -257,6 +275,7 @@ SELECT * FROM "Order" WHERE "venueId" = '...' AND "createdAt" >= '...'
    - 0/3 match = **33% agreement** → `low` confidence
 
 **Example**:
+
 ```typescript
 // User: "¿Cuánto vendí de hamburguesas vs pizzas este fin de semana?"
 
@@ -288,26 +307,31 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
 **Checks**:
 
 ### 1. Revenue Magnitude Check
+
 - Compares result vs. historical daily average (last 30 days)
 - Flags if current value > 10× historical average
 - **Warning**: "⚠️ Resultado inusualmente alto (10x promedio histórico)"
 
 ### 2. Percentage Range Validation
+
 - Detects fields containing "percent" or "porcentaje"
 - Ensures 0% ≤ value ≤ 100%
 - **Error**: "❌ Porcentaje fuera de rango: discount = 150%"
 
 ### 3. Future Date Detection
+
 - Scans all date fields in result
 - Flags dates > current date
 - **Error**: "❌ Fecha futura detectada: createdAt = 2026-01-15"
 
 ### 4. Sparse Data Warning
+
 - Checks result row count for comparison queries
 - Warns if < 3 rows for queries with "comparar" or "versus"
 - **Warning**: "⚠️ Pocos datos para comparación confiable (< 3 registros)"
 
 **Confidence Adjustments**:
+
 - Warnings: 10% reduction (min 0.5)
 - Errors: 30% reduction (min 0.4)
 
@@ -320,6 +344,7 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
 **File**: `tests/unit/services/dashboard/text-to-sql-assistant.test.ts`
 
 **Complexity Detection (6 tests)**:
+
 - ✅ Detects "vs", "versus", "compar" keywords
 - ✅ Detects time filters (horario, nocturno, después de las)
 - ✅ Detects day filters (fines de semana, lunes)
@@ -328,18 +353,21 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
 - ✅ Detects specific dates
 
 **Importance Detection (4 tests)**:
+
 - ✅ Detects rankings (mejor, peor, top)
 - ✅ Detects comparisons (vs, diferencia)
 - ✅ Detects strategic keywords (análisis, tendencia)
 - ✅ Does NOT flag simple queries as important
 
 **Consensus Logic (10 tests)**:
+
 - ✅ Deep equality with 1% numeric tolerance
 - ✅ 3/3 match → high confidence (100%)
 - ✅ 2/3 match → high confidence (66%)
 - ✅ 0/3 match → low confidence (33%)
 
 **Layer 6 Sanity Checks (6 tests)**:
+
 - ✅ Extracts totals from single-row results
 - ✅ Sums totals across multiple rows
 - ✅ Handles snake_case field names (total_sales)
@@ -353,22 +381,27 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
 **File**: `tests/integration/dashboard/consensus-voting.test.ts`
 
 **Query Routing (3 tests)**:
+
 - ✅ Complex + important → consensus voting
 - ✅ Simple → SharedQueryService (bypasses LLM)
 - ✅ Complex but not important → single SQL + Layer 6
 
 **Consensus Agreement (2 tests)**:
+
 - ✅ High confidence when 2+ results agree
 - ✅ Handles partial failures gracefully
 
 **Performance (2 tests)**:
+
 - ✅ Executes 3 SQLs in parallel
 - ✅ Completes in <30s (allows for LLM latency)
 
 **Metadata Validation (1 test)**:
+
 - ✅ Returns complete consensus metadata
 
 **Regression (2 tests)**:
+
 - ✅ Simple queries still work
 - ✅ Normal complex queries work
 
@@ -379,29 +412,34 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
 **File**: `tests/integration/security/chatbot-security-penetration.test.ts`
 
 **Prompt Injection (10 tests)**:
+
 - ✅ SQL injection blocked (`DROP TABLE`, `DELETE FROM`)
 - ✅ Credential extraction blocked (`password`, `secret`)
 - ✅ System manipulation blocked (`pg_sleep`, `dblink`)
 - ✅ Legitimate queries allowed
 
 **Table Access Control (15 tests)**:
+
 - ✅ WAITER blocked from Staff table
 - ✅ CASHIER blocked from RawMaterial
 - ✅ MANAGER allowed for all except Staff.salary
 - ✅ SUPERADMIN allowed for all
 
 **PII Redaction (10 tests)**:
+
 - ✅ Emails redacted for non-SUPERADMIN
 - ✅ Phone numbers redacted
 - ✅ SSNs redacted
 - ✅ SUPERADMIN sees unredacted data
 
 **Rate Limiting (5 tests)**:
+
 - ✅ 10 queries/min per user enforced
 - ✅ 100 queries/hour per venue enforced
 - ✅ Rate limit resets after window
 
 **AST Validation (10 tests)**:
+
 - ✅ Subqueries validated
 - ✅ JOINs validated
 - ✅ venueId filter enforced at AST level
@@ -413,8 +451,8 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
 
 ### Core Services
 
-1. **Main Service** (2,614 lines)
-   `src/services/dashboard/text-to-sql-assistant.service.ts`
+1. **Main Service** (2,614 lines) `src/services/dashboard/text-to-sql-assistant.service.ts`
+
    - Lines 1923-1939: Intent classification with complexity check
    - Lines 2130-2206: Complexity detection
    - Lines 2221-2266: Importance detection
@@ -422,56 +460,54 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
    - Lines 2395-2484: Consensus finding logic
    - Lines 2486-2574: Layer 6 sanity checks
 
-2. **Shared Query Service** (500 lines)
-   `src/services/dashboard/shared-query.service.ts`
+2. **Shared Query Service** (500 lines) `src/services/dashboard/shared-query.service.ts`
+
    - Single source of truth for dashboard metrics
    - Used by BOTH dashboard and chatbot
    - Functions: `getSalesForPeriod()`, `getTopProducts()`, `getAverageTicket()`
 
-3. **SQL Validation Service** (400 lines)
-   `src/services/dashboard/sql-validation.service.ts`
+3. **SQL Validation Service** (400 lines) `src/services/dashboard/sql-validation.service.ts`
    - Lines 63-127: Expanded VALID_TABLES to 40+ models
    - Line 176: Fixed table extraction regex for aliases
 
 ### Security Services
 
-4. **Security Response Service**
-   `src/services/dashboard/security-response.service.ts`
+4. **Security Response Service** `src/services/dashboard/security-response.service.ts`
+
    - Standardized security error responses
    - Vague messages to attackers, detailed logging
 
-5. **SQL AST Parser Service**
-   `src/services/dashboard/sql-ast-parser.service.ts`
+5. **SQL AST Parser Service** `src/services/dashboard/sql-ast-parser.service.ts`
+
    - Structural SQL analysis (subqueries, JOINs, UNION)
    - venueId filter enforcement at AST level
 
-6. **Table Access Control Service**
-   `src/services/dashboard/table-access-control.service.ts`
+6. **Table Access Control Service** `src/services/dashboard/table-access-control.service.ts`
+
    - RBAC for database tables
    - Role-based query permissions
 
-7. **PII Detection Service**
-   `src/services/dashboard/pii-detection.service.ts`
+7. **PII Detection Service** `src/services/dashboard/pii-detection.service.ts`
+
    - Regex-based PII detection and redaction
    - Email, phone, SSN, credit card masking
 
-8. **Prompt Injection Detector Service**
-   `src/services/dashboard/prompt-injection-detector.service.ts`
+8. **Prompt Injection Detector Service** `src/services/dashboard/prompt-injection-detector.service.ts`
+
    - SQL injection pattern detection
    - Credential extraction prevention
 
-9. **Query Limits Service**
-   `src/services/dashboard/query-limits.service.ts`
+9. **Query Limits Service** `src/services/dashboard/query-limits.service.ts`
+
    - Timeout enforcement (30s)
    - Row limit enforcement (10,000)
 
-10. **Security Audit Logger Service**
-    `src/services/dashboard/security-audit-logger.service.ts`
+10. **Security Audit Logger Service** `src/services/dashboard/security-audit-logger.service.ts`
+
     - Encrypted audit trail
     - Query logging with encryption
 
-11. **Rate Limit Middleware**
-    `src/middlewares/chatbot-rate-limit.middleware.ts`
+11. **Rate Limit Middleware** `src/middlewares/chatbot-rate-limit.middleware.ts`
     - 10 queries/min per user
     - 100 queries/hour per venue
 
@@ -484,6 +520,7 @@ Result3: [{ product: 'Hamburguesas', revenue: 5200 }, { product: 'Pizzas', reven
 **Purpose**: Guarantee dashboard-chatbot consistency
 
 **Pattern**:
+
 ```typescript
 // ❌ BEFORE (can diverge)
 Dashboard endpoint: Custom SQL query
@@ -495,6 +532,7 @@ Chatbot (simple queries): SharedQueryService.getSalesForPeriod()
 ```
 
 **Key Functions**:
+
 - `getSalesForPeriod(venueId, period)` → Total revenue
 - `getTopProducts(venueId, period, limit)` → Best sellers
 - `getAverageTicket(venueId, period)` → Average order value
@@ -507,6 +545,7 @@ Chatbot (simple queries): SharedQueryService.getSalesForPeriod()
 **Purpose**: Route queries to appropriate tier
 
 **Logic**:
+
 ```typescript
 // CRITICAL: Check complexity FIRST
 const isComplex = this.detectComplexity(message)
@@ -520,12 +559,13 @@ if (lowerMessage.includes('vendí') && dateRange) {
     isSimpleQuery: true,
     intent: 'sales',
     period: dateRange,
-    confidence: 0.95
+    confidence: 0.95,
   }
 }
 ```
 
 **Why This Order Matters**:
+
 - Without complexity check first, queries like "¿Hamburguesas vs pizzas hoy?" would route to SharedQueryService (wrong!)
 - With complexity check first, comparison queries correctly route to consensus voting
 
@@ -534,6 +574,7 @@ if (lowerMessage.includes('vendí') && dateRange) {
 **File**: `text-to-sql-assistant.service.ts:shouldUseConsensusVoting()`
 
 **Logic**:
+
 ```typescript
 const isComplex = this.detectComplexity(message)
 const isImportant = this.detectImportance(message)
@@ -545,6 +586,7 @@ return false // Use single SQL + Layer 6
 ```
 
 **Examples**:
+
 - "¿Hamburguesas vs pizzas?" → Complex + Important → Consensus
 - "¿Ventas después de 8pm?" → Complex + Not Important → Single SQL
 - "¿Cuánto vendí hoy?" → Simple → SharedQueryService
@@ -666,6 +708,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 **User**: "¿Cuánto vendí hoy?"
 
 **Flow**:
+
 1. Intent classification: `sales` + `today` → Simple
 2. Route to: SharedQueryService ✅
 3. Cost: $0.00
@@ -673,6 +716,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 5. Confidence: 0.95 (high)
 
 **Metadata**:
+
 ```json
 {
   "routedTo": "SharedQueryService",
@@ -688,6 +732,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 **User**: "¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?"
 
 **Flow**:
+
 1. Complexity detection: ✅ YES (has "vs", "horario nocturno", "fines de semana")
 2. Importance detection: ✅ YES (has comparison "vs")
 3. Route to: Consensus Voting (3× generation)
@@ -698,6 +743,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 8. Response time: ~6.5s
 
 **Metadata**:
+
 ```json
 {
   "consensusVoting": {
@@ -717,6 +763,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 **User**: "¿Cuántas órdenes tuve después de las 8pm?"
 
 **Flow**:
+
 1. Complexity detection: ✅ YES (has "después de las 8pm")
 2. Importance detection: ❌ NO (no ranking/comparison)
 3. Route to: Single SQL generation + Layer 6 validation
@@ -727,6 +774,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 8. Response time: ~3.2s
 
 **Metadata**:
+
 ```json
 {
   "layer6SanityChecks": {
@@ -757,21 +805,25 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 ## 🎓 World-Class Patterns Used
 
 1. **Salesforce Consensus Algorithm** (Layer 5)
+
    - Multiple SQL generations
    - Majority voting for accuracy
    - Confidence scoring
 
 2. **Stripe Consistency Guarantee** (SharedQueryService)
+
    - Dashboard cross-validation
    - 1% tolerance for numeric differences
    - Non-blocking warnings
 
 3. **AWS Cost Optimization** (Routing)
+
    - Intelligent query routing
    - Free tier for simple queries
    - Selective premium features
 
 4. **Shopify Concurrency Pattern** (Integration Tests)
+
    - Real database testing
    - Parallel execution verification
    - Race condition prevention
@@ -792,6 +844,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 **Root Cause**: Regex matched `FROM` inside `EXTRACT(DOW FROM o.createdAt)`
 
 **Fix**: Changed regex to require quoted table names
+
 ```typescript
 // Before (buggy)
 /(?:from|join)\s+"?(\w+)"?\s*(?:\w+)?/gi
@@ -811,6 +864,7 @@ Returned to client: { email: "john@example.com", phone: "+1-555-1234" } // Unred
 **Root Cause**: Intent classification ran BEFORE complexity detection
 
 **Fix**: Added complexity check at START of `classifyIntent()`
+
 ```typescript
 private classifyIntent(message: string) {
   // CRITICAL: Check complexity FIRST
@@ -861,6 +915,7 @@ private classifyIntent(message: string) {
 **Cause**: 3 SQL generations produce different results
 
 **Fix**:
+
 1. Check if question is ambiguous ("hamburguesas" could mean product name or category)
 2. Add more context to question
 3. Review generated SQLs in logs to see divergence
@@ -872,6 +927,7 @@ private classifyIntent(message: string) {
 **Cause**: Legitimate query contains suspicious keywords
 
 **Fix**: Add exception to whitelist in `prompt-injection-detector.service.ts`
+
 ```typescript
 // Add to SAFE_PATTERNS
 private readonly SAFE_PATTERNS = [
@@ -887,6 +943,7 @@ private readonly SAFE_PATTERNS = [
 **Cause**: RBAC misconfiguration
 
 **Fix**: Check `table-access-control.service.ts` role definitions
+
 ```typescript
 WAITER: {
   allowedTables: ['Order', 'OrderItem', 'MenuCategory', 'MenuItem'],
@@ -901,6 +958,7 @@ WAITER: {
 **Cause**: Intent classifier needs tuning
 
 **Fix**: Add more examples to intent classification prompt
+
 ```typescript
 // Add to system prompt
 Examples of SIMPLE queries:
@@ -915,11 +973,10 @@ Examples of SIMPLE queries:
 - **Salesforce Horizon Agent**: [Consensus voting, 80% accuracy](https://www.salesforce.com/news/stories/salesforce-agentforce-2-0/)
 - **AWS Text-to-SQL**: [Self-correcting pipeline](https://aws.amazon.com/blogs/machine-learning/build-a-robust-text-to-sql-solution/)
 - **Google Cloud Text-to-SQL**: [Dry run validation](https://cloud.google.com/blog/products/databases/techniques-for-improving-text-to-sql)
-- **OpenAI Cookbook**: [SQL evaluation best practices](https://cookbook.openai.com/examples/evaluation/how_to_evaluate_llms_for_sql_generation)
+- **OpenAI Cookbook**:
+  [SQL evaluation best practices](https://cookbook.openai.com/examples/evaluation/how_to_evaluate_llms_for_sql_generation)
 - **Stripe Sigma**: [Dashboard-query consistency](https://stripe.com/sigma)
 
 ---
 
-**Last Updated**: 2025-10-30
-**Author**: Claude Code
-**Status**: ✅ PRODUCTION READY
+**Last Updated**: 2025-10-30 **Author**: Claude Code **Status**: ✅ PRODUCTION READY
