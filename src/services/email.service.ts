@@ -772,7 +772,7 @@ class EmailService {
   }
 
   async sendEmailVerification(email: string, data: EmailVerificationData): Promise<boolean> {
-    const subject = `Código de verificación - Avoqado`
+    const subject = `Verifica tu correo electrónico`
 
     const html = `
       <!DOCTYPE html>
@@ -780,47 +780,123 @@ class EmailService {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Código de verificación</title>
+          <meta name="color-scheme" content="light dark">
+          <meta name="supported-color-schemes" content="light dark">
+          <title>Verifica tu correo</title>
+          <style>
+            @media (prefers-color-scheme: dark) {
+              .dark-mode-bg { background-color: #1a1a1a !important; }
+              .dark-mode-card { background-color: #2a2a2a !important; }
+              .dark-mode-text { color: #e0e0e0 !important; }
+              .dark-mode-muted { color: #a0a0a0 !important; }
+              .dark-mode-border { border-color: #404040 !important; }
+            }
+          </style>
         </head>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">✉️ Verifica tu correo</h1>
-            </div>
+        <body class="dark-mode-bg" style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif; background-color: #f6f8fa; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f6f8fa; padding: 40px 20px;">
+            <tr>
+              <td align="center">
+                <!-- Main Container -->
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width: 600px;">
 
-            <div style="padding: 40px 30px;">
-              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola ${data.firstName},</p>
+                  <!-- Logo/Header -->
+                  <tr>
+                    <td style="padding: 0 0 32px 0; text-align: center;">
+                      <svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+                        <rect width="48" height="48" rx="8" fill="#635BFF"/>
+                        <text x="24" y="33" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="24" font-weight="bold">A</text>
+                      </svg>
+                    </td>
+                  </tr>
 
-              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
-                Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electrónico usando el siguiente código:
-              </p>
+                  <!-- Main Card -->
+                  <tr>
+                    <td class="dark-mode-card" style="background-color: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08); overflow: hidden;">
+                      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
 
-              <div style="background: #f8f9ff; border: 2px solid #667eea; border-radius: 10px; padding: 30px; margin: 30px 0; text-align: center;">
-                <p style="font-size: 14px; margin-bottom: 15px; color: #666; text-transform: uppercase; letter-spacing: 1px;">Tu código de verificación</p>
-                <div style="font-size: 48px; font-weight: bold; color: #667eea; letter-spacing: 8px; font-family: 'Courier New', monospace;">
-                  ${data.verificationCode}
-                </div>
-              </div>
+                        <!-- Content -->
+                        <tr>
+                          <td style="padding: 48px 40px;">
+                            <h1 class="dark-mode-text" style="margin: 0 0 16px 0; font-size: 24px; font-weight: 600; color: #0a0a0a; line-height: 1.3;">
+                              Verifica tu correo
+                            </h1>
 
-              <div style="background: #fff8e1; border-left: 4px solid #ffc107; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
-                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
-                  ⏱️ <strong>Este código expirará en 10 minutos</strong>
-                </p>
-                <p style="font-size: 14px; margin: 0; color: #666;">
-                  Si no solicitaste este código, puedes ignorar este correo.
-                </p>
-              </div>
+                            <p class="dark-mode-text" style="margin: 0 0 24px 0; font-size: 16px; color: #3c4149; line-height: 1.5;">
+                              Hola ${data.firstName},
+                            </p>
 
-              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+                            <p class="dark-mode-muted" style="margin: 0 0 32px 0; font-size: 15px; color: #697386; line-height: 1.5;">
+                              Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electrónico usando el siguiente código:
+                            </p>
 
-              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
-                ¿Necesitas ayuda? Contáctanos en cualquier momento.
-              </p>
-              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
-                Este correo fue enviado automáticamente por Avoqado.
-              </p>
-            </div>
-          </div>
+                            <!-- Verification Code Box -->
+                            <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 32px 0;">
+                              <tr>
+                                <td class="dark-mode-border" style="background-color: #f6f8fa; border: 1px solid #e3e8ee; border-radius: 8px; padding: 32px; text-align: center;">
+                                  <p style="margin: 0 0 12px 0; font-size: 13px; color: #697386; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;">
+                                    TU CÓDIGO DE VERIFICACIÓN
+                                  </p>
+                                  <div style="font-size: 40px; font-weight: 600; color: #0a0a0a; letter-spacing: 12px; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', 'Droid Sans Mono', 'Source Code Pro', monospace; line-height: 1.2;">
+                                    ${data.verificationCode}
+                                  </div>
+                                </td>
+                              </tr>
+                            </table>
+
+                            <!-- Warning Box -->
+                            <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 32px 0;">
+                              <tr>
+                                <td style="background-color: #fef7e0; border: 1px solid #f0e4c3; border-radius: 6px; padding: 16px;">
+                                  <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                                    <tr>
+                                      <td style="padding-right: 12px; vertical-align: top;">
+                                        <div style="width: 20px; height: 20px; background-color: #f59e0b; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
+                                          <span style="color: white; font-size: 12px; font-weight: bold;">⏱</span>
+                                        </div>
+                                      </td>
+                                      <td>
+                                        <p style="margin: 0 0 4px 0; font-size: 14px; color: #92400e; font-weight: 500;">
+                                          Este código expirará en 10 minutos
+                                        </p>
+                                        <p style="margin: 0; font-size: 13px; color: #b45309; line-height: 1.4;">
+                                          Si no solicitaste este código, puedes ignorar este correo.
+                                        </p>
+                                      </td>
+                                    </tr>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+
+                            <!-- Divider -->
+                            <hr class="dark-mode-border" style="border: none; border-top: 1px solid #e3e8ee; margin: 32px 0;">
+
+                            <!-- Footer Text -->
+                            <p style="margin: 0; font-size: 13px; color: #8898aa; line-height: 1.5; text-align: center;">
+                              ¿Necesitas ayuda? Contáctanos en cualquier momento.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+
+                  <!-- Email Footer -->
+                  <tr>
+                    <td style="padding: 32px 0 0 0; text-align: center;">
+                      <p style="margin: 0 0 8px 0; font-size: 12px; color: #8898aa; line-height: 1.5;">
+                        Este correo fue enviado automáticamente por Avoqado.
+                      </p>
+                      <p style="margin: 0; font-size: 12px; color: #aab7c4;">
+                        © ${new Date().getFullYear()} Avoqado. Todos los derechos reservados.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
         </body>
       </html>
     `
