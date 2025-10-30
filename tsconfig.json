@@ -1,7 +1,10 @@
 {
   "compilerOptions": {
     "baseUrl": ".", // Adding baseUrl can sometimes help with path resolution consistency
-    "paths": { "@/*": ["src/*"] },
+    "paths": {
+      "@/*": ["src/*"],
+      "@tests/*": ["tests/*"]
+    },
     "target": "es2020",
     "module": "commonjs",
     "rootDir": "./",

@@ -100,6 +100,20 @@ module.exports = {
       },
       // Workflow tests typically take longer. If so, use jest.setTimeout() in test files.
     },
+    {
+      displayName: 'integration',
+      testMatch: ['<rootDir>/tests/integration/**/*.test.ts'],
+      transform: {
+        '^.+\\.tsx?$': 'ts-jest',
+      },
+      setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/integration-setup.ts'],
+      moduleNameMapper: {
+        '^@/(.*)$': '<rootDir>/src/$1',
+        '^@tests/(.*)$': '<rootDir>/tests/$1',
+      },
+      // Integration tests use real database, may need longer timeout
+      testTimeout: 30000,
+    },
   ],
 
   // 🔥 NEW: Better error handling and reporting
