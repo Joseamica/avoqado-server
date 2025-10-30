@@ -8,7 +8,8 @@ import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
-import { deductInventoryForProduct } from '../dashboard/productInventoryIntegration.service'
+import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
+import { parseDateRange } from '@/utils/datetime'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -23,6 +24,171 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
   }
 
   return ratingMap[tpvRating.toUpperCase()] || null
+}
+
+/**
+ * ✅ WORLD-CLASS PATTERN: Pre-flight validation (Stripe, Shopify, Toast POS)
+ * Validate inventory availability BEFORE capturing payment
+ * @param venueId Venue ID
+ * @param orderItems Order items to validate
+ * @returns Validation result with issues if any
+ */
+async function validateOrderInventoryAvailability(
+  venueId: string,
+  orderItems: Array<{
+    productId: string
+    product: { name: string }
+    quantity: number
+  }>,
+): Promise<{
+  available: boolean
+  issues?: Array<{ productId: string; productName: string; requested: number; available: number | string; reason: string }>
+}> {
+  const issues: Array<{ productId: string; productName: string; requested: number; available: number | string; reason: string }> = []
+
+  // Validate each product
+  for (const item of orderItems) {
+    try {
+      const inventoryStatus = await getProductInventoryStatus(venueId, item.productId)
+
+      // No inventory tracking → always available
+      if (!inventoryStatus.inventoryMethod) {
+        continue
+      }
+
+      // QUANTITY method → check current stock
+      if (inventoryStatus.inventoryMethod === 'QUANTITY') {
+        const currentStock = inventoryStatus.currentStock || 0
+
+        if (currentStock < item.quantity) {
+          issues.push({
+            productId: item.productId,
+            productName: item.product.name,
+            requested: item.quantity,
+            available: currentStock,
+            reason: 'Insufficient stock for product',
+          })
+        }
+      }
+
+      // RECIPE method → check max portions
+      if (inventoryStatus.inventoryMethod === 'RECIPE') {
+        const maxPortions = inventoryStatus.maxPortions || 0
+
+        if (maxPortions < item.quantity) {
+          // Gather missing ingredient details
+          const missingIngredients =
+            inventoryStatus.insufficientIngredients
+              ?.map(ing => `${ing.name} (need ${ing.required} ${ing.unit}, have ${ing.available} ${ing.unit})`)
+              .join(', ') || 'Unknown ingredients'
+
+          issues.push({
+            productId: item.productId,
+            productName: item.product.name,
+            requested: item.quantity,
+            available: `${maxPortions} portions (missing: ${missingIngredients})`,
+            reason: 'Insufficient ingredients for recipe',
+          })
+        }
+      }
+    } catch (error: any) {
+      logger.error('⚠️ Failed to validate inventory for product', {
+        productId: item.productId,
+        productName: item.product.name,
+        error: error.message,
+      })
+
+      // If validation fails for any reason, mark as unavailable
+      issues.push({
+        productId: item.productId,
+        productName: item.product.name,
+        requested: item.quantity,
+        available: 'Unknown',
+        reason: `Validation error: ${error.message}`,
+      })
+    }
+  }
+
+  return {
+    available: issues.length === 0,
+    issues: issues.length > 0 ? issues : undefined,
+  }
+}
+
+/**
+ * ✅ WORLD-CLASS PATTERN: Pre-flight validation BEFORE payment capture (Stripe, Shopify, Toast POS)
+ * Validates inventory availability before creating payment record
+ * Prevents charging customers for orders that cannot be fulfilled
+ *
+ * @param order Order with items and existing payments
+ * @param paymentAmount Payment amount being processed (including tip)
+ * @throws BadRequestError if inventory validation fails for a full payment
+ */
+async function validatePreFlightInventory(
+  order: {
+    id: string
+    venueId: string
+    total: any
+    items: Array<{ productId: string; product: { name: string }; quantity: number }>
+    payments: Array<{ amount: any; tipAmount: any }>
+  },
+  paymentAmount: number,
+): Promise<void> {
+  // Calculate total payments (including this new one)
+  const previousPayments = order.payments.reduce(
+    (sum, payment) => sum + parseFloat(payment.amount.toString()) + parseFloat(payment.tipAmount.toString()),
+    0,
+  )
+  const totalPaid = previousPayments + paymentAmount
+  const originalTotal = parseFloat(order.total.toString())
+
+  // Check if this payment will fully pay the order
+  const remainingAmount = Math.max(0, originalTotal - totalPaid)
+  const willBeFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+
+  // Only validate inventory if this payment will complete the order
+  if (willBeFullyPaid) {
+    logger.info('🔍 PRE-FLIGHT: Checking inventory before creating payment', {
+      orderId: order.id,
+      venueId: order.venueId,
+      paymentAmount,
+      totalPaid,
+      originalTotal,
+      itemCount: order.items.length,
+    })
+
+    const validation = await validateOrderInventoryAvailability(order.venueId, order.items)
+
+    if (!validation.available) {
+      logger.error('❌ PRE-FLIGHT FAILED: Insufficient inventory - Payment rejected', {
+        orderId: order.id,
+        venueId: order.venueId,
+        issues: validation.issues,
+      })
+
+      // Format issues into error message
+      const issuesDescription = validation.issues
+        ?.map(issue => `${issue.productName}: requested ${issue.requested}, available ${issue.available} (${issue.reason})`)
+        .join('; ')
+
+      throw new BadRequestError(
+        `Cannot complete order - insufficient inventory. ${issuesDescription || 'Please check stock levels and try again.'}`,
+      )
+    }
+
+    logger.info('✅ PRE-FLIGHT PASSED: Inventory available, proceeding with payment', {
+      orderId: order.id,
+      venueId: order.venueId,
+    })
+  } else {
+    logger.info('⏭️ PRE-FLIGHT SKIPPED: Partial payment, inventory validation deferred', {
+      orderId: order.id,
+      paymentAmount,
+      totalPaid,
+      originalTotal,
+      remainingAfterPayment: remainingAmount,
+    })
+  }
 }
 
 /**
@@ -46,14 +212,23 @@ function mapPaymentSource(source?: string): PaymentSource {
  * @param orderId Order ID to update
  * @param paymentAmount Total payment amount (including tip)
  */
-async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmount: number): Promise<void> {
+async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmount: number, currentPaymentId?: string): Promise<void> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: {
       payments: {
-        where: { status: 'COMPLETED' },
+        where: {
+          status: 'COMPLETED',
+          // ✅ FIX: Exclude the current payment to avoid double-counting
+          ...(currentPaymentId && { id: { not: currentPaymentId } }),
+        },
         select: { amount: true, tipAmount: true },
+      },
+      items: {
+        include: {
+          product: true,
+        },
       },
     },
   })
@@ -73,6 +248,40 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
   // Calculate remaining amount
   const remainingAmount = Math.max(0, originalTotal - totalPaid)
   const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+
+  // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
+  // Validate inventory availability before marking order as complete
+  if (isFullyPaid) {
+    logger.info('🔍 Pre-flight validation: Checking inventory availability before completing order', {
+      orderId,
+      venueId: order.venueId,
+      itemCount: order.items.length,
+    })
+
+    const validation = await validateOrderInventoryAvailability(order.venueId, order.items)
+
+    if (!validation.available) {
+      logger.error('❌ Pre-flight validation failed: Insufficient inventory', {
+        orderId,
+        venueId: order.venueId,
+        issues: validation.issues,
+      })
+
+      // Format issues into error message
+      const issuesDescription = validation.issues
+        ?.map(issue => `${issue.productName}: requested ${issue.requested}, available ${issue.available} (${issue.reason})`)
+        .join('; ')
+
+      throw new BadRequestError(
+        `Cannot complete order - insufficient inventory. ${issuesDescription || 'Please check stock levels and try again.'}`,
+      )
+    }
+
+    logger.info('✅ Pre-flight validation passed: All inventory available', {
+      orderId,
+      venueId: order.venueId,
+    })
+  }
 
   // Determine new payment status
   let newPaymentStatus = order.paymentStatus
@@ -112,54 +321,89 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
   })
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
+  // ✅ WORLD-CLASS PATTERN: Fail payment if inventory deduction fails (Shopify, Square, Toast)
   if (isFullyPaid) {
-    try {
-      logger.info('🎯 Starting inventory deduction for completed order', {
-        orderId,
-        venueId: updatedOrder.venueId,
-        itemCount: updatedOrder.items.length,
-      })
+    const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
 
-      // Deduct stock for each product in the order
-      for (const item of updatedOrder.items) {
-        try {
-          await deductInventoryForProduct(updatedOrder.venueId, item.productId, item.quantity, orderId)
+    logger.info('🎯 Starting inventory deduction for completed order', {
+      orderId,
+      venueId: updatedOrder.venueId,
+      itemCount: updatedOrder.items.length,
+    })
 
-          logger.info('✅ Stock deducted successfully for product', {
-            orderId,
+    // Deduct stock for each product in the order
+    for (const item of updatedOrder.items) {
+      try {
+        await deductInventoryForProduct(updatedOrder.venueId, item.productId, item.quantity, orderId)
+
+        logger.info('✅ Stock deducted successfully for product', {
+          orderId,
+          productId: item.productId,
+          productName: item.product.name,
+          quantity: item.quantity,
+        })
+      } catch (deductionError: any) {
+        // Collect errors instead of swallowing them
+        const errorReason = deductionError.message.includes('does not have a recipe')
+          ? 'NO_RECIPE'
+          : deductionError.message.includes('Insufficient stock')
+            ? 'INSUFFICIENT_STOCK'
+            : deductionError.message.includes('could not obtain lock')
+              ? 'CONCURRENT_TRANSACTION'
+              : 'UNKNOWN'
+
+        logger.error('❌ Failed to deduct stock for product', {
+          orderId,
+          productId: item.productId,
+          productName: item.product.name,
+          quantity: item.quantity,
+          error: deductionError.message,
+          reason: errorReason,
+        })
+
+        // Only track critical errors (insufficient stock, concurrent access)
+        // Skip NO_RECIPE errors for products without inventory tracking
+        if (errorReason === 'INSUFFICIENT_STOCK' || errorReason === 'CONCURRENT_TRANSACTION') {
+          deductionErrors.push({
             productId: item.productId,
             productName: item.product.name,
-            quantity: item.quantity,
-          })
-        } catch (deductionError: any) {
-          // Log individual product deduction errors but continue with other products
-          logger.warn('⚠️ Failed to deduct stock for product - continuing with order', {
-            orderId,
-            productId: item.productId,
-            productName: item.product.name,
-            quantity: item.quantity,
             error: deductionError.message,
-            reason: deductionError.message.includes('does not have a recipe')
-              ? 'NO_RECIPE'
-              : deductionError.message.includes('Insufficient stock')
-                ? 'INSUFFICIENT_STOCK'
-                : 'UNKNOWN',
           })
         }
       }
-
-      logger.info('🎯 Inventory deduction completed for order', {
-        orderId,
-        totalItems: updatedOrder.items.length,
-      })
-    } catch (inventoryError) {
-      // Log overall inventory deduction errors but don't fail the payment
-      logger.error('❌ Failed to complete inventory deduction for order', {
-        orderId,
-        error: inventoryError,
-      })
-      // Payment is still successful - inventory deduction failure is logged but not critical
     }
+
+    // ✅ FIX: Rollback order if ANY critical inventory deduction failed
+    if (deductionErrors.length > 0) {
+      logger.error('❌ CRITICAL: Inventory deduction failed, rolling back order completion', {
+        orderId,
+        failedProducts: deductionErrors,
+      })
+
+      // Rollback the order to PENDING state
+      await prisma.order.update({
+        where: { id: orderId },
+        data: {
+          status: 'PENDING',
+          paymentStatus: 'PARTIAL',
+          completedAt: null,
+        },
+      })
+
+      // Build user-friendly error message
+      const productNames = deductionErrors.map(e => e.productName).join(', ')
+      const errorDetails = deductionErrors.map(e => `${e.productName}: ${e.error}`).join('; ')
+
+      throw new BadRequestError(
+        `Payment could not be completed due to insufficient inventory for: ${productNames}. ` +
+          `Please reduce quantity or remove items from your order. Details: ${errorDetails}`,
+      )
+    }
+
+    logger.info('🎯 Inventory deduction completed successfully for order', {
+      orderId,
+      totalItems: updatedOrder.items.length,
+    })
   }
 }
 
@@ -282,31 +526,17 @@ export async function getPayments(
     venueId: venueId,
   }
 
-  // Add date range filters if provided
+  // Add date range filters if provided using standardized datetime utility
   if (fromDate || toDate) {
-    whereClause.createdAt = {}
-
-    if (fromDate) {
-      const parsedFromDate = new Date(fromDate)
-      if (!isNaN(parsedFromDate.getTime())) {
-        whereClause.createdAt.gte = parsedFromDate
-      } else {
-        throw new BadRequestError(`Invalid fromDate: ${fromDate}`)
+    try {
+      // Use parseDateRange with no default (throws error if dates are invalid)
+      const dateRange = parseDateRange(fromDate, toDate, 0)
+      whereClause.createdAt = {
+        gte: dateRange.from,
+        lte: dateRange.to,
       }
-    }
-
-    if (toDate) {
-      const parsedToDate = new Date(toDate)
-      if (!isNaN(parsedToDate.getTime())) {
-        whereClause.createdAt.lte = parsedToDate
-      } else {
-        throw new BadRequestError(`Invalid toDate: ${toDate}`)
-      }
-    }
-
-    // If there are no valid date conditions, remove the empty createdAt object
-    if (Object.keys(whereClause.createdAt).length === 0) {
-      delete whereClause.createdAt
+    } catch (error) {
+      throw new BadRequestError(`Invalid date range: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
   }
 
@@ -494,15 +724,23 @@ export async function recordOrderPayment(
 ) {
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
 
-  // Find the order directly by ID
+  // Find the order directly by ID (include payments for pre-flight validation)
   const activeOrder = await prisma.order.findUnique({
     where: {
       id: orderId,
       venueId,
     },
     include: {
-      items: true,
+      items: {
+        include: {
+          product: true, // Need product.name for validation errors
+        },
+      },
       venue: true,
+      payments: {
+        where: { status: 'COMPLETED' }, // Only count completed payments
+        select: { amount: true, tipAmount: true },
+      },
     },
   })
 
@@ -532,6 +770,10 @@ export async function recordOrderPayment(
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
+
+  // ✅ WORLD-CLASS PATTERN: Pre-flight validation BEFORE creating payment record (Stripe, Shopify, Toast POS)
+  // Validate inventory availability to prevent charging customers for orders we can't fulfill
+  await validatePreFlightInventory(activeOrder, totalAmount + tipAmount)
 
   // Find current open shift for this venue
   const currentShift = await prisma.shift.findFirst({
@@ -798,20 +1040,34 @@ export async function recordOrderPayment(
   } else {
     // MODO AUTÓNOMO: Backend maneja los totales directamente
     try {
-      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount)
+      // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
+      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, payment.id)
 
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
         paymentId: payment.id,
         orderId: activeOrder.id,
         paymentAmount: totalAmount + tipAmount,
       })
-    } catch (updateError) {
+    } catch (updateError: any) {
+      // ✅ WORLD-CLASS PATTERN: Re-throw business validation errors (Stripe/Shopify/Toast pattern)
+      // Validation errors (insufficient inventory, etc.) should FAIL the payment
+      // Infrastructure errors (network, DB) can be logged but don't fail the payment
+      if (updateError instanceof BadRequestError || updateError instanceof NotFoundError) {
+        logger.error('❌ Payment rejected: Business validation failed', {
+          paymentId: payment.id,
+          orderId: activeOrder.id,
+          error: updateError.message,
+          reason: 'VALIDATION_ERROR',
+        })
+        throw updateError // Re-throw to fail the payment
+      }
+
       logger.error('Failed to update order totals in standalone mode', {
         paymentId: payment.id,
         orderId: activeOrder.id,
         error: updateError,
       })
-      // Continue execution - payment is still recorded even if total update fails
+      // Continue execution - payment is still recorded even if total update fails (infrastructure error only)
     }
   }
 
