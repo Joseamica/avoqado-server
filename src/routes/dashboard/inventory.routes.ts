@@ -147,6 +147,36 @@ router.delete(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/raw-materials/{rawMaterialId}/deactivate:
+ *   put:
+ *     tags: [Inventory - Raw Materials]
+ *     summary: Deactivate a raw material (soft disable)
+ *     description: Deactivates a raw material while preserving usage history in recipes
+ */
+router.put(
+  '/raw-materials/:rawMaterialId/deactivate',
+  checkPermission('inventory:update'),
+  validateRequest(RawMaterialIdParamsSchema),
+  rawMaterialController.deactivateRawMaterial,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/raw-materials/{rawMaterialId}/reactivate:
+ *   put:
+ *     tags: [Inventory - Raw Materials]
+ *     summary: Reactivate a raw material
+ *     description: Reactivates a previously deactivated raw material
+ */
+router.put(
+  '/raw-materials/:rawMaterialId/reactivate',
+  checkPermission('inventory:update'),
+  validateRequest(RawMaterialIdParamsSchema),
+  rawMaterialController.reactivateRawMaterial,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/inventory/raw-materials/{rawMaterialId}/adjust-stock:
  *   post:
  *     tags: [Inventory - Raw Materials]
