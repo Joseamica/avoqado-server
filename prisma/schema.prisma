@@ -325,6 +325,12 @@ model Staff {
   failedLoginAttempts Int       @default(0)
   lockedUntil         DateTime?
 
+  // Password reset fields (Stripe-style flow)
+  resetToken          String?   @unique
+  resetTokenExpiry    DateTime?
+  resetTokenUsedAt    DateTime?
+  lastPasswordReset   DateTime?
+
   @@index([email])
   // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
   @@index([organizationId])

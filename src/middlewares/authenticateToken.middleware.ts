@@ -41,6 +41,7 @@ export const authenticateTokenMiddleware = (req: Request, res: Response, next: N
     const liveDemoSessionId = req.cookies?.liveDemoSessionId
     if (liveDemoSessionId) {
       // Non-blocking activity update (fire and forget)
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       liveDemoService.updateLiveDemoActivity(liveDemoSessionId).catch(err => {
         // Silently fail - don't block the request
       })

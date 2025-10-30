@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { chatbotRateLimitMiddleware } from '../middlewares/chatbot-rate-limit.middleware'
+import { passwordResetRateLimiter } from '../middlewares/password-reset-rate-limit.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
 
 // Importa StaffRole desde @prisma/client si ahí es donde está definido tu enum de Prisma
@@ -32,7 +33,13 @@ import * as venueController from '../controllers/dashboard/venue.dashboard.contr
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
-import { loginSchema, switchVenueSchema, updateAccountSchema } from '../schemas/dashboard/auth.schema'
+import {
+  loginSchema,
+  requestPasswordResetSchema,
+  resetPasswordSchema,
+  switchVenueSchema,
+  updateAccountSchema,
+} from '../schemas/dashboard/auth.schema'
 import { enhancedCreateVenueSchema } from '../schemas/dashboard/cost-management.schema'
 import { GeneralStatsQuerySchema } from '../schemas/dashboard/generalStats.schema'
 import {
@@ -622,6 +629,126 @@ router.post('/auth/google/callback', googleOAuthController.googleOAuthCallback)
  *                   enum: [ADMIN, MANAGER, WAITER, CASHIER]
  */
 router.get('/auth/google/check-invitation', googleOAuthController.checkInvitation)
+
+// --- Password Reset Routes (PUBLIC - no auth required) ---
+
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/request-reset:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Request a password reset email
+ *     description: Sends a password reset email with a secure token. Always returns success to prevent user enumeration.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 example: user@example.com
+ *     responses:
+ *       200:
+ *         description: Success message (always returned, even if email doesn't exist)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       429:
+ *         description: Too many requests (rate limited)
+ */
+router.post(
+  '/auth/request-reset',
+  passwordResetRateLimiter,
+  validateRequest(requestPasswordResetSchema),
+  authDashboardController.requestPasswordReset,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/validate-reset-token/{token}:
+ *   get:
+ *     tags: [Authentication]
+ *     summary: Validate a password reset token
+ *     description: Checks if a password reset token is valid and not expired
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The password reset token from the email
+ *     responses:
+ *       200:
+ *         description: Token is valid
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 valid:
+ *                   type: boolean
+ *                 email:
+ *                   type: string
+ *                   description: Masked email address (e.g., j***n@example.com)
+ *       400:
+ *         description: Token is invalid or expired
+ */
+router.get('/auth/validate-reset-token/:token', authDashboardController.validateResetToken)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/reset-password:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Reset password with token
+ *     description: Sets a new password using a valid reset token
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - token
+ *               - newPassword
+ *             properties:
+ *               token:
+ *                 type: string
+ *                 description: The password reset token from the email
+ *               newPassword:
+ *                 type: string
+ *                 format: password
+ *                 minLength: 8
+ *                 description: New password (min 8 chars, must include uppercase, lowercase, number, and special char)
+ *     responses:
+ *       200:
+ *         description: Password reset successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: Invalid token or password does not meet requirements
+ */
+router.post('/auth/reset-password', validateRequest(resetPasswordSchema), authDashboardController.resetPassword)
 
 // --- Menu Category Routes ---
 

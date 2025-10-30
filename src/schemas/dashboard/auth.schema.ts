@@ -60,7 +60,30 @@ export const updateAccountSchema = z.object({
     ),
 })
 
+export const requestPasswordResetSchema = z.object({
+  body: z.object({
+    email: z.string({ required_error: 'El email es requerido.' }).email({ message: 'Email inválido.' }),
+  }),
+})
+
+export const resetPasswordSchema = z.object({
+  body: z.object({
+    token: z.string({ required_error: 'El token es requerido.' }).min(32, { message: 'Token inválido.' }),
+    newPassword: z
+      .string({ required_error: 'La nueva contraseña es requerida.' })
+      .min(8, { message: 'La contraseña debe tener al menos 8 caracteres.' })
+      .regex(/[A-Z]/, { message: 'La contraseña debe contener al menos una letra mayúscula.' })
+      .regex(/[a-z]/, { message: 'La contraseña debe contener al menos una letra minúscula.' })
+      .regex(/[0-9]/, { message: 'La contraseña debe contener al menos un número.' })
+      .regex(/[^A-Za-z0-9]/, {
+        message: 'La contraseña debe contener al menos un carácter especial.',
+      }),
+  }),
+})
+
 // Inferimos el tipo para usarlo en el controlador y servicio
 export type LoginDto = z.infer<typeof loginSchema.shape.body>
 export type SwitchVenueDto = z.infer<typeof switchVenueSchema.shape.body>
 export type UpdateAccountDto = z.infer<typeof updateAccountSchema.shape.body>
+export type RequestPasswordResetDto = z.infer<typeof requestPasswordResetSchema.shape.body>
+export type ResetPasswordDto = z.infer<typeof resetPasswordSchema.shape.body>

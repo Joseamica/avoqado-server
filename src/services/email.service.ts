@@ -61,6 +61,12 @@ interface EmailVerificationData {
   verificationCode: string
 }
 
+interface PasswordResetData {
+  firstName: string
+  resetLink: string
+  expiresInMinutes: number
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -913,6 +919,132 @@ class EmailService {
       Si no solicitaste este código, puedes ignorar este correo.
 
       ¿Necesitas ayuda? Contáctanos en cualquier momento.
+
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendPasswordResetEmail(email: string, data: PasswordResetData): Promise<boolean> {
+    const subject = `Restablece tu contraseña - Avoqado`
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <meta name="color-scheme" content="light dark">
+          <meta name="supported-color-schemes" content="light dark">
+          <title>Restablece tu contraseña</title>
+          <style>
+            @media (prefers-color-scheme: dark) {
+              .dark-mode-bg { background-color: #1a1a1a !important; }
+              .dark-mode-card { background-color: #2a2a2a !important; }
+              .dark-mode-text { color: #e0e0e0 !important; }
+              .dark-mode-muted { color: #a0a0a0 !important; }
+              .dark-mode-border { border-color: #404040 !important; }
+            }
+          </style>
+        </head>
+        <body class="dark-mode-bg" style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+            <!-- Logo -->
+            <div style="text-align: center; margin-bottom: 40px;">
+              <div style="width: 100px; height: 100px; margin: 0 auto; background: linear-gradient(135deg, #18181b 0%, #27272a 100%); border-radius: 16px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                <img src="https://firebasestorage.googleapis.com/v0/b/avoqado-d0a24.appspot.com/o/Avoqado-(white).png?alt=media&token=05008dee-fc4d-42fd-bbcd-390a3bf88d79"
+                     alt="Avoqado Logo"
+                     width="70"
+                     height="70"
+                     style="display: block;">
+              </div>
+              <h1 style="color: #333; margin: 16px 0 0 0; font-size: 28px; font-weight: 600; letter-spacing: -0.5px;" class="dark-mode-text">Avoqado</h1>
+            </div>
+
+            <!-- Main Card -->
+            <div class="dark-mode-card" style="background-color: white; border-radius: 12px; padding: 48px 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h2 style="color: #18181b; margin: 0 0 24px 0; font-size: 24px; font-weight: 600; text-align: center;" class="dark-mode-text">
+                Restablece tu contraseña
+              </h2>
+
+              <p style="color: #52525b; margin: 0 0 12px 0; font-size: 15px; line-height: 1.6;" class="dark-mode-muted">
+                Hola <strong>${data.firstName}</strong>,
+              </p>
+
+              <p style="color: #52525b; margin: 0 0 32px 0; font-size: 15px; line-height: 1.6;" class="dark-mode-muted">
+                Recibimos una solicitud para restablecer la contraseña de tu cuenta de Avoqado.
+                Haz clic en el botón de abajo para crear una nueva contraseña.
+              </p>
+
+              <!-- Reset Button -->
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="${data.resetLink}"
+                   style="display: inline-block; background: #18181b; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-size: 15px; font-weight: 500;">
+                  Restablecer Contraseña
+                </a>
+              </div>
+
+              <div style="background-color: #f4f4f5; padding: 16px; margin-top: 32px; border-radius: 8px; border: 1px solid #e4e4e7;">
+                <p style="color: #71717a; margin: 0 0 8px 0; font-size: 13px; font-weight: 500;" class="dark-mode-muted">
+                  O copia y pega este enlace:
+                </p>
+                <p style="color: #18181b; margin: 0; font-size: 13px; word-break: break-all; font-family: 'Courier New', monospace;" class="dark-mode-text">
+                  ${data.resetLink}
+                </p>
+              </div>
+
+              <!-- Security Info -->
+              <div style="margin-top: 32px; padding-top: 24px; border-top: 1px solid #e4e4e7;">
+                <div style="background-color: #fef3c7; border-left: 3px solid #f59e0b; padding: 14px 16px; margin-bottom: 16px; border-radius: 6px;">
+                  <p style="color: #92400e; margin: 0; font-size: 13px; line-height: 1.5;">
+                    <strong>⏰ Expira en ${data.expiresInMinutes} minutos</strong><br>
+                    Este enlace solo puede usarse una vez por seguridad.
+                  </p>
+                </div>
+
+                <div style="background-color: #f0fdf4; border-left: 3px solid #22c55e; padding: 14px 16px; border-radius: 6px;">
+                  <p style="color: #166534; margin: 0; font-size: 13px; line-height: 1.5;">
+                    <strong>🔒 ¿No solicitaste esto?</strong><br>
+                    Si no pediste restablecer tu contraseña, ignora este correo. Tu cuenta está segura.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Footer -->
+            <div style="text-align: center; margin-top: 40px; padding-top: 24px; border-top: 1px solid #e4e4e7;">
+              <p style="color: #a1a1aa; margin: 0 0 8px 0; font-size: 13px;" class="dark-mode-muted">
+                Este correo fue enviado por <strong style="color: #71717a;">Avoqado</strong>
+              </p>
+              <p style="color: #a1a1aa; margin: 0; font-size: 13px;" class="dark-mode-muted">
+                ¿Necesitas ayuda? Contáctanos en <a href="mailto:soporte@avoqado.com" style="color: #18181b; text-decoration: none;" class="dark-mode-text">soporte@avoqado.com</a>
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Restablece tu contraseña - Avoqado
+
+      Hola ${data.firstName},
+
+      Recibimos una solicitud para restablecer la contraseña de tu cuenta de Avoqado.
+
+      Para restablecer tu contraseña, visita el siguiente enlace:
+      ${data.resetLink}
+
+      Este enlace expirará en ${data.expiresInMinutes} minutos y solo puede usarse una vez.
+
+      ¿No solicitaste esto?
+      Si no pediste restablecer tu contraseña, ignora este correo. Tu cuenta está segura.
 
       Equipo de Avoqado
     `

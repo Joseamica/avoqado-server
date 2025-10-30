@@ -1,10 +1,13 @@
 import prisma from '../../utils/prismaClient'
 import bcrypt from 'bcryptjs'
-import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
-import { LoginDto } from '../../schemas/dashboard/auth.schema'
+import crypto from 'crypto'
+import { AuthenticationError, ForbiddenError, BadRequestError } from '../../errors/AppError'
+import { LoginDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
 import { StaffRole } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
+import emailService from '../email.service'
+import logger from '@/config/logger'
 
 export async function loginStaff(loginData: LoginDto) {
   const { email, password, venueId } = loginData
@@ -292,4 +295,226 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
   const refreshToken = jwtService.generateRefreshToken(staffId, orgId)
 
   return { accessToken, refreshToken }
+}
+
+/**
+ * Request password reset - generates token and sends email
+ * SECURITY: Always returns success (no user enumeration)
+ * @param data - Email address for reset
+ */
+export async function requestPasswordReset(data: RequestPasswordResetDto) {
+  const { email } = data
+  const normalizedEmail = email.toLowerCase()
+
+  try {
+    // 1. Find staff by email (case-insensitive)
+    const staff = await prisma.staff.findUnique({
+      where: { email: normalizedEmail },
+      select: {
+        id: true,
+        email: true,
+        emailVerified: true,
+        firstName: true,
+        active: true,
+      },
+    })
+
+    // SECURITY: If email doesn't exist, return success anyway (no user enumeration)
+    if (!staff) {
+      logger.info(`Password reset requested for non-existent email: ${normalizedEmail}`)
+      return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
+    }
+
+    // 2. Check if email is verified
+    if (!staff.emailVerified) {
+      logger.warn(`Password reset attempted for unverified email: ${normalizedEmail}`)
+      // SECURITY: Don't reveal that email is unverified
+      return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
+    }
+
+    // 3. Check if account is active
+    if (!staff.active) {
+      logger.warn(`Password reset attempted for inactive account: ${normalizedEmail}`)
+      // SECURITY: Don't reveal that account is inactive
+      return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
+    }
+
+    // 4. Generate secure random token (32 bytes = 64 hex characters)
+    const resetToken = crypto.randomBytes(32).toString('hex')
+
+    // 5. Hash the token before storing (bcrypt with 10 salt rounds)
+    const hashedToken = await bcrypt.hash(resetToken, 10)
+
+    // 6. Calculate expiry time (1 hour from now)
+    const expiryTime = new Date()
+    expiryTime.setHours(expiryTime.getHours() + 1)
+
+    // 7. Store hashed token in database (invalidate any previous tokens)
+    await prisma.staff.update({
+      where: { id: staff.id },
+      data: {
+        resetToken: hashedToken,
+        resetTokenExpiry: expiryTime,
+        resetTokenUsedAt: null, // Clear any previous usage
+      },
+    })
+
+    // 8. Generate reset link for email
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000'
+    const resetLink = `${frontendUrl}/auth/reset-password/${resetToken}`
+
+    // 9. Send reset email
+    const emailSent = await emailService.sendPasswordResetEmail(staff.email, {
+      firstName: staff.firstName,
+      resetLink,
+      expiresInMinutes: 60,
+    })
+
+    if (!emailSent) {
+      logger.error(`Failed to send password reset email to: ${normalizedEmail}`)
+      // Don't throw error - still return success for security
+    } else {
+      logger.info(`Password reset email sent successfully to: ${normalizedEmail}`)
+    }
+
+    // SECURITY: Always return same success message
+    return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
+  } catch (error) {
+    logger.error('Error in requestPasswordReset:', error)
+    // SECURITY: Don't reveal internal errors
+    return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
+  }
+}
+
+/**
+ * Validate reset token
+ * @param token - Plain reset token from URL
+ * @returns Staff email if valid
+ */
+export async function validateResetToken(token: string) {
+  // 1. Find all staff with non-null reset tokens
+  const staffWithTokens = await prisma.staff.findMany({
+    where: {
+      resetToken: { not: null },
+      resetTokenExpiry: { not: null },
+    },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      resetToken: true,
+      resetTokenExpiry: true,
+      resetTokenUsedAt: true,
+    },
+  })
+
+  // 2. Compare provided token against all hashed tokens
+  for (const staff of staffWithTokens) {
+    if (!staff.resetToken || !staff.resetTokenExpiry) continue
+
+    const isTokenValid = await bcrypt.compare(token, staff.resetToken)
+
+    if (isTokenValid) {
+      // 3. Check if token has expired (must be within 1 hour)
+      const now = new Date()
+      if (now > staff.resetTokenExpiry) {
+        throw new BadRequestError('Este enlace de restablecimiento ha expirado. Por favor solicita uno nuevo.')
+      }
+
+      // 4. Check if token has already been used
+      if (staff.resetTokenUsedAt) {
+        throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
+      }
+
+      // 5. Token is valid - return masked email for confirmation
+      const emailParts = staff.email.split('@')
+      const maskedEmail = `${emailParts[0][0]}***@${emailParts[1]}`
+
+      return {
+        valid: true,
+        email: maskedEmail,
+      }
+    }
+  }
+
+  // Token not found or invalid
+  throw new BadRequestError('Este enlace de restablecimiento es inválido. Por favor solicita uno nuevo.')
+}
+
+/**
+ * Reset password with token
+ * @param data - Token and new password
+ */
+export async function resetPassword(data: ResetPasswordDto) {
+  const { token, newPassword } = data
+
+  // 1. Find all staff with non-null reset tokens
+  const staffWithTokens = await prisma.staff.findMany({
+    where: {
+      resetToken: { not: null },
+      resetTokenExpiry: { not: null },
+    },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      resetToken: true,
+      resetTokenExpiry: true,
+      resetTokenUsedAt: true,
+    },
+  })
+
+  // 2. Compare provided token against all hashed tokens
+  let staffToUpdate: (typeof staffWithTokens)[0] | null = null
+
+  for (const staff of staffWithTokens) {
+    if (!staff.resetToken || !staff.resetTokenExpiry) continue
+
+    const isTokenValid = await bcrypt.compare(token, staff.resetToken)
+
+    if (isTokenValid) {
+      // Check expiry
+      const now = new Date()
+      if (now > staff.resetTokenExpiry) {
+        throw new BadRequestError('Este enlace de restablecimiento ha expirado. Por favor solicita uno nuevo.')
+      }
+
+      // Check if already used
+      if (staff.resetTokenUsedAt) {
+        throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
+      }
+
+      staffToUpdate = staff
+      break
+    }
+  }
+
+  if (!staffToUpdate) {
+    throw new BadRequestError('Este enlace de restablecimiento es inválido. Por favor solicita uno nuevo.')
+  }
+
+  // 3. Hash new password
+  const hashedPassword = await bcrypt.hash(newPassword, 10)
+
+  // 4. Update staff: set new password, mark token as used, clear reset fields
+  await prisma.staff.update({
+    where: { id: staffToUpdate.id },
+    data: {
+      password: hashedPassword,
+      resetToken: null, // Clear token
+      resetTokenExpiry: null,
+      resetTokenUsedAt: new Date(), // Mark as used
+      lastPasswordReset: new Date(),
+      // Reset failed login attempts (fresh start)
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+    },
+  })
+
+  // 5. TODO: Invalidate all refresh tokens (force re-login on all devices)
+  // This requires Redis session management implementation
+
+  logger.info(`Password reset successfully for staff: ${staffToUpdate.email}`)
+
+  return { message: 'Contraseña restablecida exitosamente. Ya puedes iniciar sesión con tu nueva contraseña.' }
 }

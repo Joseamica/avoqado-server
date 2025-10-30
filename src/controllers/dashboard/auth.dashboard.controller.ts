@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken'
 import prisma from '../../utils/prismaClient' // Corrected import path
 import { AuthenticationError } from '../../errors/AppError'
 import { StaffRole } from '@prisma/client'
-import { UpdateAccountDto } from '../../schemas/dashboard/auth.schema'
+import { UpdateAccountDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
 import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
@@ -495,6 +495,82 @@ export async function updateAccountController(req: Request, res: Response, next:
     })
   } catch (error) {
     logger.error('Error updating staff profile:', error)
+    next(error)
+  }
+}
+
+/**
+ * Request password reset
+ * PUBLIC endpoint - no authentication required
+ * @param req - Request with email in body
+ * @param res - Response
+ * @param next - Next function
+ */
+export const requestPasswordReset = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data: RequestPasswordResetDto = req.body
+
+    const result = await authService.requestPasswordReset(data)
+
+    res.status(200).json({
+      success: true,
+      ...result,
+    })
+  } catch (error) {
+    logger.error('Error in requestPasswordReset controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * Validate reset token
+ * PUBLIC endpoint - no authentication required
+ * @param req - Request with token in params
+ * @param res - Response
+ * @param next - Next function
+ */
+export const validateResetToken = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { token } = req.params
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token no proporcionado.',
+      })
+    }
+
+    const result = await authService.validateResetToken(token)
+
+    res.status(200).json({
+      success: true,
+      ...result,
+    })
+  } catch (error) {
+    logger.error('Error in validateResetToken controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * Reset password with token
+ * PUBLIC endpoint - no authentication required
+ * @param req - Request with token and newPassword in body
+ * @param res - Response
+ * @param next - Next function
+ */
+export const resetPassword = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data: ResetPasswordDto = req.body
+
+    const result = await authService.resetPassword(data)
+
+    res.status(200).json({
+      success: true,
+      ...result,
+    })
+  } catch (error) {
+    logger.error('Error in resetPassword controller:', error)
     next(error)
   }
 }
