@@ -77,6 +77,7 @@ implementation details (HOW), not architectural decisions (WHY).
 
 - `npm test` - Run all tests with Jest
 - `npm run test:unit` - Run only unit tests
+- `npm run test:integration` - Run integration tests with real PostgreSQL database ⭐ NEW
 - `npm run test:api` - Run API integration tests
 - `npm run test:workflows` - Run end-to-end workflow tests
 - `npm run test:coverage` - Generate test coverage report
@@ -329,14 +330,119 @@ correctly.
 - Inventory deduction: `src/services/dashboard/rawMaterial.service.ts:deductStockForRecipe()`
 - FIFO logic: `src/services/dashboard/rawMaterial.service.ts:deductStockFIFO()`
 
-**📖 Complete Documentation**: See `docs/INVENTORY_FLOW.md` for:
+**📖 Complete Documentation**:
+- **Technical Reference**: `docs/INVENTORY_REFERENCE.md` - FIFO batch system, manual SQL configuration, database schema, troubleshooting
+- **Testing & Bugs**: `docs/INVENTORY_TESTING.md` - Integration tests, critical bugs fixed, production readiness
 
-- Complete flow diagram with all steps
-- Real-world example (3 hamburgers order)
-- FIFO batch consumption logic
-- Edge cases and error handling
-- API endpoints and testing instructions
-- Debugging common issues
+### 🧪 Comprehensive Inventory Testing (Production-Ready)
+
+**WHY**: Critical business functionality that handles real money and inventory requires 100% confidence. Integration tests with real database prevent production bugs that unit tests (with mocks) cannot catch.
+
+**Design Decision**: Use THREE layers of testing for inventory system:
+1. **Unit Tests** - Fast, mocked, business logic validation
+2. **Integration Tests** - Real PostgreSQL, complete flow validation, concurrency testing
+3. **Regression Tests** - Ensure fixes don't break existing functionality
+
+**Critical Bugs Caught by Integration Tests**:
+- SQL syntax error: `FOR UPDATE NOWAIT` placed before `ORDER BY` (PostgreSQL error code 42601)
+- Payment double-counting: First 50% payment marked order as COMPLETED (would charge customers 50% for 100% service)
+- Payment succeeded despite insufficient inventory (would charge customers for unfulfillable orders)
+
+**Test Coverage** (15 integration tests, 100% passing):
+
+**FIFO Concurrency Tests** (`tests/integration/inventory/fifo-batch-concurrency.test.ts`):
+- 2 simultaneous orders for same product (limited stock) - race condition prevention
+- Concurrent FIFO deductions at low level - row-level locking validation
+- 5 concurrent orders stress test - no double deduction
+- FOR UPDATE NOWAIT behavior - fail fast, no deadlocks
+- Sequential orders regression - existing functionality still works
+
+**Order-Payment-Inventory Flow** (`tests/integration/inventory/order-payment-inventory-flow.test.ts`):
+- Full payment with sufficient stock (happy path)
+- Payment failure with insufficient stock + order rollback
+- Partial payments - inventory only deducted when fully paid
+- Mixed products (some tracked, some not) - skip non-tracked gracefully
+- Regression test - standard orders still work
+
+**Pre-Flight Validation** (`tests/integration/inventory/pre-flight-validation.test.ts`):
+- Validate inventory BEFORE capturing payment (Stripe pattern)
+- Reject payment if ANY product has insufficient stock
+- Allow payment when all items have sufficient stock
+- Partial payments - no validation until fully paid
+- Products without tracking - allow payment without validation
+
+**Key Implementation Patterns**:
+
+1. **Payment Rollback on Inventory Failure** (Shopify/Square/Toast pattern):
+   ```typescript
+   // ✅ CORRECT: Fail payment if inventory deduction fails
+   if (deductionErrors.length > 0) {
+     await prisma.order.update({
+       where: { id: orderId },
+       data: { status: 'PENDING', paymentStatus: 'PARTIAL' }
+     })
+     throw new BadRequestError('Payment could not be completed due to insufficient inventory')
+   }
+   ```
+
+2. **Avoid Payment Double-Counting**:
+   ```typescript
+   // ✅ CORRECT: Exclude current payment from previousPayments calculation
+   const order = await prisma.order.findUnique({
+     include: {
+       payments: {
+         where: {
+           status: 'COMPLETED',
+           id: { not: currentPaymentId } // ← Critical fix!
+         }
+       }
+     }
+   })
+   ```
+
+3. **Row-Level Locking for Concurrency**:
+   ```sql
+   SELECT * FROM "StockBatch"
+   WHERE "rawMaterialId" = $1
+     AND status = 'ACTIVE'
+     AND "remainingQuantity" > 0
+   ORDER BY "receivedDate" ASC  -- ← MUST come before FOR UPDATE
+   FOR UPDATE NOWAIT             -- ← Row-level lock, fail fast
+   ```
+
+**Test Infrastructure**:
+- Test helpers: `tests/helpers/inventory-test-helpers.ts` - Reusable test data setup
+- Integration setup: `tests/__helpers__/integration-setup.ts` - Real Prisma client (no mocks)
+- Database cleanup: `beforeEach` + `afterAll` hooks ensure tests don't pollute database
+
+**CI/CD Integration**:
+- Integration tests run in GitHub Actions BEFORE deployment
+- Uses separate `TEST_DATABASE_URL` secret (not production database)
+- Tests block deployment if any fail
+- See `docs/CI_CD_SETUP.md` for configuration
+
+**Local Testing**:
+```bash
+# Run all integration tests
+npm run test:integration
+
+# Run specific test file
+npx jest --testPathPattern="fifo-batch-concurrency"
+
+# Run with real database (requires DATABASE_URL in .env)
+DATABASE_URL="postgresql://..." npm run test:integration
+```
+
+**Production Safety**:
+- ✅ Tests use `DATABASE_URL` from `.env` locally (not hardcoded)
+- ✅ CI/CD uses separate `TEST_DATABASE_URL` secret
+- ✅ Production uses different `DATABASE_URL` configured in Render
+- ✅ `npm start` in production NEVER runs tests (only `npm run build` + `npm start`)
+- ✅ Tests automatically clean up after themselves (no data pollution)
+
+**📖 Additional Documentation**:
+- `docs/CI_CD_SETUP.md` - GitHub Actions integration, required secrets
+- `tests/integration/inventory/README.md` - Test architecture and patterns (if exists)
 
 ---
 
@@ -436,6 +542,40 @@ ls -t logs/development*.log | head -1 | xargs grep "🎯\|✅\|⚠️"
 - `development.log` → oldest logs (rotated out)
 - `development7.log` → **newest logs** (current active writes)
 - Always inspect the highest number to see the most recent application activity
+
+### Date/Time Synchronization
+
+**WHY**: Frontend dashboard and backend chatbot must return identical results for the same time periods, ensuring data consistency across
+all interfaces.
+
+**Design Decision**: All date ranges are transmitted in ISO 8601 format (UTC) between frontend/backend, then converted to venue timezone for
+database queries.
+
+**Critical Pattern**: Use `parseDateRange()` and `getVenueDateRange()` from `datetime.ts` for ALL date-based queries:
+
+```typescript
+// ✅ CORRECT - Timezone-aware date parsing
+import { parseDateRange } from '@/utils/datetime'
+const { startDate, endDate } = parseDateRange(fromDate, toDate)
+
+// ❌ WRONG - Direct date parsing loses timezone context
+const startDate = new Date(fromDate)
+```
+
+**Key Files**:
+
+- Date utilities: `src/utils/datetime.ts` - date-fns-tz functions for timezone conversion
+- Dashboard queries: Uses `parseDateRange()` for all analytics endpoints
+- Chatbot SQL generation: Uses `getVenueDateRange()` for text-to-SQL queries
+
+**📖 Complete Documentation**: See `docs/DATETIME_SYNC.md` for:
+
+- Complete architecture diagram (Dashboard → Server → Database flow)
+- Frontend/backend synchronization examples
+- FIFO batch tracking with timezone handling
+- API endpoint examples with date parameters
+- Debugging timezone-related issues
+- Before/After comparison of date handling
 
 ### Testing Strategy
 
