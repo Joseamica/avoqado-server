@@ -9,12 +9,14 @@
 ## 🎯 Testing Philosophy
 
 The inventory system handles **critical business functionality** involving real money and customer orders. A single bug could result in:
+
 - ❌ Charging customers for unfulfillable orders
 - ❌ Inventory double-deduction in concurrent scenarios
 - ❌ Payment calculation errors (charging 50% for 100% delivery)
 - ❌ Race conditions causing overselling
 
-**Solution**: Three-layer testing strategy combining unit tests, integration tests, and regression tests to achieve 95%+ confidence before production deployment.
+**Solution**: Three-layer testing strategy combining unit tests, integration tests, and regression tests to achieve 95%+ confidence before
+production deployment.
 
 ---
 
@@ -22,22 +24,22 @@ The inventory system handles **critical business functionality** involving real 
 
 ### Integration Tests (Real PostgreSQL Database)
 
-| Test Suite | Tests | Status | Purpose |
-|------------|-------|--------|---------|
-| **FIFO Concurrency** | 5/5 | ✅ PASSING | Race condition prevention, row-level locking |
-| **Order-Payment-Inventory Flow** | 5/5 | ✅ PASSING | End-to-end flow, payment rollback, partial payments |
-| **Pre-Flight Validation** | 5/5 | ✅ PASSING | Inventory validation before payment capture |
-| **Recipe Lifecycle** | 0/5 | ⏳ PENDING | Recipe creation, update, deletion with inventory |
-| **TOTAL** | **15/20** | **75% Complete** | Target: 20 tests for 95%+ confidence |
+| Test Suite                       | Tests     | Status           | Purpose                                             |
+| -------------------------------- | --------- | ---------------- | --------------------------------------------------- |
+| **FIFO Concurrency**             | 5/5       | ✅ PASSING       | Race condition prevention, row-level locking        |
+| **Order-Payment-Inventory Flow** | 5/5       | ✅ PASSING       | End-to-end flow, payment rollback, partial payments |
+| **Pre-Flight Validation**        | 5/5       | ✅ PASSING       | Inventory validation before payment capture         |
+| **Recipe Lifecycle**             | 0/5       | ⏳ PENDING       | Recipe creation, update, deletion with inventory    |
+| **TOTAL**                        | **15/20** | **75% Complete** | Target: 20 tests for 95%+ confidence                |
 
 ### Unit Tests (Mocked)
 
-| Test Suite | Tests | Status | Coverage |
-|------------|-------|--------|----------|
-| **fifoBatch.service** | 11/11 | ✅ PASSING | FIFO deduction logic |
-| **rawMaterial.service** | 0/10 | ⏳ PENDING | Raw material CRUD operations |
-| **productInventoryIntegration.service** | 0/8 | ⏳ PENDING | Product-inventory integration |
-| **TOTAL** | **11/29** | **38% Complete** | Target: Business logic coverage |
+| Test Suite                              | Tests     | Status           | Coverage                        |
+| --------------------------------------- | --------- | ---------------- | ------------------------------- |
+| **fifoBatch.service**                   | 11/11     | ✅ PASSING       | FIFO deduction logic            |
+| **rawMaterial.service**                 | 0/10      | ⏳ PENDING       | Raw material CRUD operations    |
+| **productInventoryIntegration.service** | 0/8       | ⏳ PENDING       | Product-inventory integration   |
+| **TOTAL**                               | **11/29** | **38% Complete** | Target: Business logic coverage |
 
 ---
 
@@ -48,11 +50,13 @@ The inventory system handles **critical business functionality** involving real 
 **Discovered By**: Integration test `fifo-batch-concurrency.test.ts`
 
 **Error**:
+
 ```
 Raw query failed. Code: `42601`. Message: `ERROR: syntax error at or near "ORDER"`
 ```
 
 **Root Cause**: `FOR UPDATE NOWAIT` was placed BEFORE `ORDER BY` in SQL query:
+
 ```sql
 -- ❌ WRONG (PostgreSQL syntax error)
 SELECT * FROM "StockBatch"
@@ -70,6 +74,7 @@ FOR UPDATE NOWAIT
 **Fix**: `src/services/dashboard/fifoBatch.service.ts:164-180` - Moved `ORDER BY` before `FOR UPDATE NOWAIT`
 
 **Files Changed**:
+
 - `src/services/dashboard/fifoBatch.service.ts`
 
 ---
@@ -81,23 +86,25 @@ FOR UPDATE NOWAIT
 **Symptom**: First 50% partial payment marked order as COMPLETED (should remain PENDING).
 
 **Root Cause**: Payment calculation included the current payment in `previousPayments`:
+
 ```typescript
 // ❌ WRONG: Double-counts current payment
 const order = await prisma.order.findUnique({
   include: {
     payments: {
-      where: { status: 'COMPLETED' }
+      where: { status: 'COMPLETED' },
       // ← Query runs AFTER payment creation, includes current payment!
-    }
-  }
+    },
+  },
 })
 
-const totalPaid = previousPayments + paymentAmount  // 290 + 290 = 580 (100%!)
+const totalPaid = previousPayments + paymentAmount // 290 + 290 = 580 (100%!)
 ```
 
 **Impact**: Customers could pay 50% but receive 100% of their order. Would lose 50% revenue per transaction.
 
 **Fix**: Exclude current payment from query:
+
 ```typescript
 // ✅ CORRECT: Exclude current payment
 payments: {
@@ -109,6 +116,7 @@ payments: {
 ```
 
 **Files Changed**:
+
 - `src/services/tpv/payment.tpv.service.ts:215-228, 1059`
 
 ---
@@ -120,6 +128,7 @@ payments: {
 **Symptom**: Payment succeeded even when inventory deduction failed.
 
 **Root Cause**: Inventory deduction errors were caught and logged, but payment still completed:
+
 ```typescript
 // ❌ WRONG: Swallow inventory errors
 try {
@@ -133,6 +142,7 @@ try {
 **Impact**: Customers charged for orders we can't fulfill. Revenue loss + customer complaints.
 
 **Fix**: Implement Shopify/Square/Toast pattern - rollback order if inventory fails:
+
 ```typescript
 // ✅ CORRECT: Fail payment if inventory fails
 const deductionErrors = []
@@ -157,6 +167,7 @@ if (deductionErrors.length > 0) {
 ```
 
 **Files Changed**:
+
 - `src/services/tpv/payment.tpv.service.ts:319-403`
 
 ---
@@ -215,12 +226,14 @@ describe('Test Suite', () => {
 ```
 
 **What Gets Cleaned**:
+
 - ✅ Raw materials, stock batches, movements
 - ✅ Recipes, products, menu categories
 - ✅ Orders, payments
 - ✅ Staff, venue, organization
 
 **Your Data is Safe**:
+
 - Tests use unique names with timestamps
 - Tests only delete what they created
 - Your development data is untouched
@@ -250,6 +263,7 @@ npm run test:watch
 ### CI/CD (GitHub Actions)
 
 Integration tests run automatically:
+
 - **When**: On push to `main` or `develop` branches
 - **Before**: Deployment to staging/production
 - **Uses**: Separate `TEST_DATABASE_URL` secret
@@ -300,7 +314,7 @@ it('should deduct inventory only when order is fully paid', async () => {
 
   // Partial payment 1 (50%)
   await recordOrderPayment(venueId, order.id, {
-    amount: orderTotal * 0.5 * 100,  // cents
+    amount: orderTotal * 0.5 * 100, // cents
     splitType: 'EQUALPARTS',
   })
 
@@ -311,7 +325,7 @@ it('should deduct inventory only when order is fully paid', async () => {
 
   // Verify: Inventory unchanged
   const stock = await prisma.rawMaterial.findFirst({ where: { venueId } })
-  expect(parseFloat(stock.currentStock.toString())).toBe(20)  // No deduction
+  expect(parseFloat(stock.currentStock.toString())).toBe(20) // No deduction
 
   // Partial payment 2 (remaining 50%)
   await recordOrderPayment(venueId, order.id, {
@@ -325,7 +339,7 @@ it('should deduct inventory only when order is fully paid', async () => {
   expect(completedOrder.paymentStatus).toBe('PAID')
 
   const finalStock = await prisma.rawMaterial.findFirst({ where: { venueId } })
-  expect(parseFloat(finalStock.currentStock.toString())).toBe(10)  // 20 - 10 = 10
+  expect(parseFloat(finalStock.currentStock.toString())).toBe(10) // 20 - 10 = 10
 })
 ```
 
@@ -345,13 +359,11 @@ it('should reject payment if inventory insufficient', async () => {
   const order = await createOrder(venueId, staffId, [{ productId, quantity: 10 }])
 
   // Try to process payment (should fail during pre-flight validation)
-  await expect(
-    recordOrderPayment(venueId, order.id, fullPaymentData)
-  ).rejects.toThrow(/insufficient inventory/i)
+  await expect(recordOrderPayment(venueId, order.id, fullPaymentData)).rejects.toThrow(/insufficient inventory/i)
 
   // Verify: No payment created
   const payments = await prisma.payment.findMany({
-    where: { orderId: order.id, status: 'COMPLETED' }
+    where: { orderId: order.id, status: 'COMPLETED' },
   })
   expect(payments.length).toBe(0)
 
@@ -368,19 +380,16 @@ it('should reject payment if inventory insufficient', async () => {
 
 ### Database Isolation
 
-| Environment | Database | Source |
-|-------------|----------|--------|
-| **Local Tests** | Your dev database | `.env` file (DATABASE_URL) |
+| Environment     | Database               | Source                            |
+| --------------- | ---------------------- | --------------------------------- |
+| **Local Tests** | Your dev database      | `.env` file (DATABASE_URL)        |
 | **CI/CD Tests** | Separate test database | GitHub secret (TEST_DATABASE_URL) |
-| **Production** | Production database | Render environment variable |
+| **Production**  | Production database    | Render environment variable       |
 
 ### Deployment Safety Checks
 
-✅ **Tests run in GitHub Actions** (not in production)
-✅ **Production uses `npm start`** (never `npm test`)
-✅ **Different DATABASE_URL per environment**
-✅ **Tests automatically clean up after themselves**
-✅ **No test code executed in production builds**
+✅ **Tests run in GitHub Actions** (not in production) ✅ **Production uses `npm start`** (never `npm test`) ✅ **Different DATABASE_URL per
+environment** ✅ **Tests automatically clean up after themselves** ✅ **No test code executed in production builds**
 
 ---
 
@@ -400,10 +409,12 @@ Remaining Work: ~4-6 hours
 ### Bug Prevention Rate
 
 **Before Integration Tests**:
+
 - 3 critical bugs would have reached production
 - Potential impact: Revenue loss, customer complaints, data corruption
 
 **After Integration Tests**:
+
 - ✅ All 3 critical bugs caught during development
 - ✅ 100% of concurrency scenarios tested
 - ✅ 100% of payment flow scenarios tested
@@ -416,6 +427,7 @@ Remaining Work: ~4-6 hours
 ### 1. Unit Tests Alone Are Not Enough
 
 **Lesson**: Mocked unit tests passed, but real database revealed:
+
 - SQL syntax errors
 - Payment double-counting
 - Concurrency race conditions
@@ -450,6 +462,7 @@ Remaining Work: ~4-6 hours
 ### Pending Tests (Target: 95%+ Confidence)
 
 1. **Recipe Lifecycle Integration Tests** (5 tests)
+
    - Recipe creation with inventory tracking
    - Recipe update with ingredient changes
    - Recipe deletion with active orders
@@ -457,6 +470,7 @@ Remaining Work: ~4-6 hours
    - Regression tests
 
 2. **Raw Material Service Unit Tests** (10 tests)
+
    - CRUD operations
    - Stock threshold calculations
    - Movement tracking
@@ -468,11 +482,8 @@ Remaining Work: ~4-6 hours
    - Cost calculation
    - Stock availability checks
 
-**Estimated Time**: 4-6 hours
-**Priority**: Medium (current 95% confidence with 15 tests)
+**Estimated Time**: 4-6 hours **Priority**: Medium (current 95% confidence with 15 tests)
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-01-29
-**Maintained By**: Development Team
+**Document Version**: 1.0 **Last Updated**: 2025-01-29 **Maintained By**: Development Team

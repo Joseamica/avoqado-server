@@ -1,6 +1,7 @@
 # Inventory System - Technical Reference
 
 **Quick Navigation:**
+
 - 📐 **Architecture & Flow**: See `CLAUDE.md` lines 190-250 (Order → Payment → Inventory)
 - 🧪 **Testing & Bugs**: See `INVENTORY_TESTING.md` (15 integration tests, 3 critical bugs fixed)
 - 💻 **Code Locations**: `src/services/dashboard/rawMaterial.service.ts`, `src/services/dashboard/fifoBatch.service.ts`
@@ -14,9 +15,11 @@
 ### Three Pillars of Inventory
 
 #### 1. Raw Materials (Materias Primas)
+
 Base ingredients purchased from suppliers.
 
 **Key Fields:**
+
 - `currentStock` - Available quantity in warehouse
 - `costPerUnit` - Cost per kg/liter/unit
 - `reorderPoint` - Threshold for low stock alerts
@@ -25,9 +28,11 @@ Base ingredients purchased from suppliers.
 **Example**: Beef (kg), Cheese (kg), Bread (kg), Lettuce (kg), Sauce (liters)
 
 #### 2. Recipes (Recetas)
+
 Defines ingredients and quantities needed to make ONE product.
 
 **Example - "Simple Burger" Recipe:**
+
 ```
 1 portion = 1 burger:
   - 200g Bread
@@ -39,13 +44,14 @@ Total cost = (0.2kg × $50/kg) + (0.3kg × $200/kg) + (0.05kg × $100/kg)
 ```
 
 #### 3. Products (Productos)
+
 Menu items customers can order. Three tracking modes:
 
-| Mode | `trackInventory` | `inventoryMethod` | Use Case |
-|------|-----------------|-------------------|----------|
-| **No tracking** | `false` | `null` | Unlimited items (e.g., coffee refills) |
-| **Quantity** | `true` | `QUANTITY` | Count-based (e.g., wine bottles) |
-| **Recipe-based** | `true` | `RECIPE` | Composed items (e.g., burgers) |
+| Mode             | `trackInventory` | `inventoryMethod` | Use Case                               |
+| ---------------- | ---------------- | ----------------- | -------------------------------------- |
+| **No tracking**  | `false`          | `null`            | Unlimited items (e.g., coffee refills) |
+| **Quantity**     | `true`           | `QUANTITY`        | Count-based (e.g., wine bottles)       |
+| **Recipe-based** | `true`           | `RECIPE`          | Composed items (e.g., burgers)         |
 
 ---
 
@@ -68,6 +74,7 @@ Step 3: Batch 3 untouched (still 150)
 ```
 
 **Key SQL:**
+
 ```sql
 SELECT * FROM "StockBatch"
 WHERE "rawMaterialId" = $1
@@ -210,13 +217,13 @@ Order → OrderItem → Product → Recipe → RecipeLine → RawMaterial → St
 
 ### Critical Relationships
 
-| Parent | Child | Relationship | Purpose |
-|--------|-------|--------------|---------|
-| `Product` | `Recipe` | 1:1 | One product = one recipe |
-| `Recipe` | `RecipeLine` | 1:N | Recipe has multiple ingredients |
-| `RecipeLine` | `RawMaterial` | N:1 | Multiple recipes use same ingredient |
-| `RawMaterial` | `StockBatch` | 1:N | FIFO batch tracking |
-| `Product` | `Inventory` | 1:1 | Quantity-based tracking |
+| Parent        | Child         | Relationship | Purpose                              |
+| ------------- | ------------- | ------------ | ------------------------------------ |
+| `Product`     | `Recipe`      | 1:1          | One product = one recipe             |
+| `Recipe`      | `RecipeLine`  | 1:N          | Recipe has multiple ingredients      |
+| `RecipeLine`  | `RawMaterial` | N:1          | Multiple recipes use same ingredient |
+| `RawMaterial` | `StockBatch`  | 1:N          | FIFO batch tracking                  |
+| `Product`     | `Inventory`   | 1:1          | Quantity-based tracking              |
 
 ---
 
@@ -225,6 +232,7 @@ Order → OrderItem → Product → Recipe → RecipeLine → RawMaterial → St
 ### What Changed
 
 **Before** (JSON field):
+
 ```sql
 UPDATE "Product"
 SET "externalData" = '{"inventoryType": "SIMPLE_STOCK"}'::jsonb
@@ -232,6 +240,7 @@ WHERE id = 'prod_123';
 ```
 
 **After** (dedicated column):
+
 ```sql
 UPDATE "Product"
 SET "trackInventory" = true,
@@ -240,6 +249,7 @@ WHERE id = 'prod_123';
 ```
 
 ### Benefits
+
 - ✅ **Performance**: Indexed column (not JSON)
 - ✅ **Type Safety**: PostgreSQL enum validation
 - ✅ **Faster Queries**: No JSON parsing
@@ -277,6 +287,7 @@ WHERE "externalData" ? 'inventoryType';
 ### Stock Not Deducting
 
 **Check 1: Is order fully paid?**
+
 ```sql
 SELECT id, total, "totalPaid", "paymentStatus"
 FROM "Order"
@@ -285,6 +296,7 @@ WHERE id = 'order_123';
 ```
 
 **Check 2: Does product have tracking enabled?**
+
 ```sql
 SELECT id, name, "trackInventory", "inventoryMethod"
 FROM "Product"
@@ -293,6 +305,7 @@ WHERE id = 'prod_123';
 ```
 
 **Check 3: For Quantity tracking - Inventory exists?**
+
 ```sql
 SELECT p.id, p.name, i."currentStock", i."minimumStock"
 FROM "Product" p
@@ -302,6 +315,7 @@ WHERE p.id = 'prod_123' AND p."inventoryMethod" = 'QUANTITY';
 ```
 
 **Check 4: For Recipe tracking - Recipe exists?**
+
 ```sql
 SELECT p.id, p.name, r.id as recipe_id, COUNT(rl.id) as ingredients
 FROM "Product" p
@@ -315,6 +329,7 @@ GROUP BY p.id, p.name, r.id;
 ### Insufficient Stock Error
 
 **For Quantity Tracking:**
+
 ```sql
 SELECT i."currentStock", i."minimumStock"
 FROM "Inventory" i
@@ -323,6 +338,7 @@ WHERE i."productId" = 'prod_123';
 ```
 
 **For Recipe-Based:**
+
 ```sql
 SELECT rm.name, rm."currentStock", rm."reorderPoint",
        SUM(sb."remainingQuantity") as available_in_batches
@@ -360,12 +376,14 @@ WHERE v.id = 'venue_123' AND f.code = 'INVENTORY_MANAGEMENT';
 ## 📋 Unit Types & Categories
 
 ### Supported Unit Types
+
 - `WEIGHT` → `GRAM`, `KILOGRAM`, `POUND`, `OUNCE`
 - `VOLUME` → `MILLILITER`, `LITER`, `GALLON`, `FLUID_OUNCE`
 - `COUNT` → `PIECE`, `UNIT`, `DOZEN`, `CASE`
 - `LENGTH` → `CENTIMETER`, `METER`, `INCH`, `FOOT`
 
 ### Raw Material Categories
+
 - Food: `MEAT`, `POULTRY`, `SEAFOOD`, `DAIRY`, `VEGETABLES`, `FRUITS`, `GRAINS`, `SPICES`, `OILS`
 - Beverages: `BEVERAGES`, `ALCOHOL`
 - Supplies: `CLEANING`, `PACKAGING`, `OTHER`
@@ -384,4 +402,5 @@ WHERE v.id = 'venue_123' AND f.code = 'INVENTORY_MANAGEMENT';
 
 ---
 
-**Document Purpose**: Technical reference for advanced inventory configuration, manual SQL setup, and troubleshooting. For high-level architecture, see `CLAUDE.md`. For testing details, see `INVENTORY_TESTING.md`.
+**Document Purpose**: Technical reference for advanced inventory configuration, manual SQL setup, and troubleshooting. For high-level
+architecture, see `CLAUDE.md`. For testing details, see `INVENTORY_TESTING.md`.

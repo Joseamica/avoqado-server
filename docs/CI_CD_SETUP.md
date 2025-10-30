@@ -9,6 +9,7 @@ To enable integration tests in CI/CD, you need to configure the following GitHub
 **Purpose**: PostgreSQL database connection string for running integration tests in GitHub Actions.
 
 **Format**:
+
 ```
 postgresql://username:password@host:port/database?sslmode=require
 ```
@@ -16,11 +17,13 @@ postgresql://username:password@host:port/database?sslmode=require
 **How to set up**:
 
 1. **Create a test database in Neon** (recommended) or any PostgreSQL provider:
+
    - Go to https://console.neon.tech/
    - Create a new database branch named `ci-test` or similar
    - Copy the connection string
 
 2. **Add secret to GitHub**:
+
    - Go to your repository → Settings → Secrets and variables → Actions
    - Click "New repository secret"
    - Name: `TEST_DATABASE_URL`
@@ -37,11 +40,13 @@ postgresql://username:password@host:port/database?sslmode=require
 The CI/CD pipeline runs three types of tests:
 
 1. **Unit Tests** (`npm run test:unit`)
+
    - Mocked tests for business logic
    - Fast execution (~2-5 seconds)
    - No database required
 
 2. **Integration Tests** (`npm run test:integration`) ⭐ NEW
+
    - Real PostgreSQL database
    - Tests complete flows (order → payment → inventory)
    - Concurrency and race condition tests
@@ -77,6 +82,7 @@ Push to develop/main
 ## What Integration Tests Validate
 
 ### FIFO Batch Concurrency (5 tests)
+
 - Concurrent order processing with limited stock
 - Row-level locking (FOR UPDATE NOWAIT)
 - Race condition prevention
@@ -84,6 +90,7 @@ Push to develop/main
 - Stress test with 5 simultaneous orders
 
 ### Order-Payment-Inventory Flow (5 tests)
+
 - Full payment with sufficient stock (happy path)
 - Payment failure with insufficient stock
 - Partial payments (inventory only deducted when fully paid)
@@ -93,15 +100,18 @@ Push to develop/main
 ## Troubleshooting
 
 ### Tests fail locally but pass in CI
+
 - Check your local `DATABASE_URL` in `.env`
 - Ensure local database has migrations applied: `npx prisma migrate dev`
 
 ### Tests pass locally but fail in CI
+
 - Check `TEST_DATABASE_URL` secret is set correctly
 - Verify test database has migrations applied
 - Check GitHub Actions logs for specific error
 
 ### Integration tests timeout
+
 - Increase timeout in `jest.config.js` (currently 30000ms)
 - Check database connection latency
 - Verify Neon database is not paused (cold start)
