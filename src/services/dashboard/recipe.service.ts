@@ -71,17 +71,29 @@ export async function createRecipe(venueId: string, productId: string, data: Cre
     throw new AppError(`Recipe already exists for product ${product.name}`, 400)
   }
 
-  // Verify all raw materials exist
+  // Verify all raw materials exist AND are active (prevent using inactive/deleted ingredients)
+  // ✅ WORLD-CLASS PATTERN: Toast POS, Square validate ingredients at recipe creation
   const rawMaterialIds = data.lines.map(line => line.rawMaterialId)
   const rawMaterials = await prisma.rawMaterial.findMany({
     where: {
       id: { in: rawMaterialIds },
       venueId,
+      active: true, // ← Only active ingredients
+      deletedAt: null, // ← Not soft-deleted
     },
   })
 
   if (rawMaterials.length !== rawMaterialIds.length) {
-    throw new AppError('Some raw materials not found', 404)
+    // Find which ingredients are missing/inactive
+    const foundIds = rawMaterials.map(rm => rm.id)
+    const missingIds = rawMaterialIds.filter(id => !foundIds.includes(id))
+
+    throw new AppError(
+      'Some ingredients are inactive, deleted, or not found. ' +
+        'Please reactivate them or choose alternatives. ' +
+        `Missing IDs: ${missingIds.join(', ')}`,
+      400,
+    )
   }
 
   // Calculate total cost
@@ -155,11 +167,21 @@ export async function updateRecipe(venueId: string, productId: string, data: Upd
       where: {
         id: { in: rawMaterialIds },
         venueId,
+        active: true, // ← Only active ingredients
+        deletedAt: null, // ← Not soft-deleted
       },
     })
 
     if (rawMaterials.length !== rawMaterialIds.length) {
-      throw new AppError('Some raw materials not found', 404)
+      const foundIds = rawMaterials.map(rm => rm.id)
+      const missingIds = rawMaterialIds.filter(id => !foundIds.includes(id))
+
+      throw new AppError(
+        'Some ingredients are inactive, deleted, or not found. ' +
+          'Please reactivate them or choose alternatives. ' +
+          `Missing IDs: ${missingIds.join(', ')}`,
+        400,
+      )
     }
 
     const portionYield = data.portionYield || existingRecipe.portionYield
@@ -290,16 +312,18 @@ export async function addRecipeLine(
     throw new AppError(`Recipe not found for product ${productId}`, 404)
   }
 
-  // Verify raw material exists
+  // Verify raw material exists AND is active
   const rawMaterial = await prisma.rawMaterial.findFirst({
     where: {
       id: data.rawMaterialId,
       venueId,
+      active: true, // ← Only active ingredients
+      deletedAt: null, // ← Not soft-deleted
     },
   })
 
   if (!rawMaterial) {
-    throw new AppError(`Raw material not found`, 404)
+    throw new AppError(`Ingredient is inactive, deleted, or not found. ` + `Please reactivate it or choose an alternative.`, 400)
   }
 
   // Calculate cost per serving
