@@ -49,6 +49,24 @@ The git hook checks these critical files:
 When you modify any of these, the hook reminds you to check if CLAUDE.md needs updating. You can skip the reminder if you only changed
 implementation details (HOW), not architectural decisions (WHY).
 
+**Documentation Structure:**
+
+- `CLAUDE.md` (root) - Architecture, WHY, WHERE (you are here)
+- `docs/*.md` - Detailed technical references (HOW) for complex features
+- `tests/**/*.test.ts` - Living examples and usage patterns
+
+**Comprehensive Technical References:**
+
+For complex features requiring detailed implementation guides, full documentation is available in `docs/`:
+
+- `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md` - Complete chatbot system reference (architecture, security, testing, troubleshooting)
+- `docs/PERMISSIONS_SYSTEM.md` - Permission system architecture and best practices
+- `docs/STRIPE_INTEGRATION.md` - Stripe integration and feature access control
+- `docs/INVENTORY_REFERENCE.md` - FIFO batch system and inventory tracking
+- `docs/DATETIME_SYNC.md` - Date/time synchronization between frontend/backend
+
+**Rule**: New features should NOT create separate .md files in root. Add architectural decisions to CLAUDE.md and implementation details to `docs/` or code comments/tests.
+
 ---
 
 ## Development Commands
@@ -331,19 +349,23 @@ correctly.
 - FIFO logic: `src/services/dashboard/rawMaterial.service.ts:deductStockFIFO()`
 
 **📖 Complete Documentation**:
+
 - **Technical Reference**: `docs/INVENTORY_REFERENCE.md` - FIFO batch system, manual SQL configuration, database schema, troubleshooting
 - **Testing & Bugs**: `docs/INVENTORY_TESTING.md` - Integration tests, critical bugs fixed, production readiness
 
 ### 🧪 Comprehensive Inventory Testing (Production-Ready)
 
-**WHY**: Critical business functionality that handles real money and inventory requires 100% confidence. Integration tests with real database prevent production bugs that unit tests (with mocks) cannot catch.
+**WHY**: Critical business functionality that handles real money and inventory requires 100% confidence. Integration tests with real
+database prevent production bugs that unit tests (with mocks) cannot catch.
 
 **Design Decision**: Use THREE layers of testing for inventory system:
+
 1. **Unit Tests** - Fast, mocked, business logic validation
 2. **Integration Tests** - Real PostgreSQL, complete flow validation, concurrency testing
 3. **Regression Tests** - Ensure fixes don't break existing functionality
 
 **Critical Bugs Caught by Integration Tests**:
+
 - SQL syntax error: `FOR UPDATE NOWAIT` placed before `ORDER BY` (PostgreSQL error code 42601)
 - Payment double-counting: First 50% payment marked order as COMPLETED (would charge customers 50% for 100% service)
 - Payment succeeded despite insufficient inventory (would charge customers for unfulfillable orders)
@@ -351,6 +373,7 @@ correctly.
 **Test Coverage** (15 integration tests, 100% passing):
 
 **FIFO Concurrency Tests** (`tests/integration/inventory/fifo-batch-concurrency.test.ts`):
+
 - 2 simultaneous orders for same product (limited stock) - race condition prevention
 - Concurrent FIFO deductions at low level - row-level locking validation
 - 5 concurrent orders stress test - no double deduction
@@ -358,6 +381,7 @@ correctly.
 - Sequential orders regression - existing functionality still works
 
 **Order-Payment-Inventory Flow** (`tests/integration/inventory/order-payment-inventory-flow.test.ts`):
+
 - Full payment with sufficient stock (happy path)
 - Payment failure with insufficient stock + order rollback
 - Partial payments - inventory only deducted when fully paid
@@ -365,6 +389,7 @@ correctly.
 - Regression test - standard orders still work
 
 **Pre-Flight Validation** (`tests/integration/inventory/pre-flight-validation.test.ts`):
+
 - Validate inventory BEFORE capturing payment (Stripe pattern)
 - Reject payment if ANY product has insufficient stock
 - Allow payment when all items have sufficient stock
@@ -374,18 +399,20 @@ correctly.
 **Key Implementation Patterns**:
 
 1. **Payment Rollback on Inventory Failure** (Shopify/Square/Toast pattern):
+
    ```typescript
    // ✅ CORRECT: Fail payment if inventory deduction fails
    if (deductionErrors.length > 0) {
      await prisma.order.update({
        where: { id: orderId },
-       data: { status: 'PENDING', paymentStatus: 'PARTIAL' }
+       data: { status: 'PENDING', paymentStatus: 'PARTIAL' },
      })
      throw new BadRequestError('Payment could not be completed due to insufficient inventory')
    }
    ```
 
 2. **Avoid Payment Double-Counting**:
+
    ```typescript
    // ✅ CORRECT: Exclude current payment from previousPayments calculation
    const order = await prisma.order.findUnique({
@@ -393,10 +420,10 @@ correctly.
        payments: {
          where: {
            status: 'COMPLETED',
-           id: { not: currentPaymentId } // ← Critical fix!
-         }
-       }
-     }
+           id: { not: currentPaymentId }, // ← Critical fix!
+         },
+       },
+     },
    })
    ```
 
@@ -411,17 +438,20 @@ correctly.
    ```
 
 **Test Infrastructure**:
+
 - Test helpers: `tests/helpers/inventory-test-helpers.ts` - Reusable test data setup
 - Integration setup: `tests/__helpers__/integration-setup.ts` - Real Prisma client (no mocks)
 - Database cleanup: `beforeEach` + `afterAll` hooks ensure tests don't pollute database
 
 **CI/CD Integration**:
+
 - Integration tests run in GitHub Actions BEFORE deployment
 - Uses separate `TEST_DATABASE_URL` secret (not production database)
 - Tests block deployment if any fail
 - See `docs/CI_CD_SETUP.md` for configuration
 
 **Local Testing**:
+
 ```bash
 # Run all integration tests
 npm run test:integration
@@ -434,6 +464,7 @@ DATABASE_URL="postgresql://..." npm run test:integration
 ```
 
 **Production Safety**:
+
 - ✅ Tests use `DATABASE_URL` from `.env` locally (not hardcoded)
 - ✅ CI/CD uses separate `TEST_DATABASE_URL` secret
 - ✅ Production uses different `DATABASE_URL` configured in Render
@@ -441,6 +472,7 @@ DATABASE_URL="postgresql://..." npm run test:integration
 - ✅ Tests automatically clean up after themselves (no data pollution)
 
 **📖 Additional Documentation**:
+
 - `docs/CI_CD_SETUP.md` - GitHub Actions integration, required secrets
 - `tests/integration/inventory/README.md` - Test architecture and patterns (if exists)
 
@@ -576,6 +608,72 @@ const startDate = new Date(fromDate)
 - API endpoint examples with date parameters
 - Debugging timezone-related issues
 - Before/After comparison of date handling
+
+### AI Chatbot System (Text-to-SQL)
+
+**WHY**: Provide natural language interface for restaurant analytics, guaranteeing 100% consistency with dashboard values to build user trust.
+
+**Design Decision**: Multi-tier hybrid architecture optimizes for cost ($0.50/user/month) while maintaining high accuracy through consensus voting for critical queries.
+
+**Critical Architecture**: 3-tier query routing system
+
+1. **Simple Queries (70%)** → SharedQueryService ($0 cost)
+   - Uses SAME code as dashboard endpoints
+   - Impossible to have mismatches
+   - Zero LLM calls for common queries
+
+2. **Complex + Important (10%)** → Consensus Voting (3× SQL generations)
+   - Salesforce-style majority voting
+   - High confidence (66-100% agreement)
+   - Business-critical decisions
+
+3. **Complex + Not Important (20%)** → Single SQL + Layer 6 Validation
+   - Statistical sanity checks
+   - Magnitude/percentage validation
+   - Cost-effective for non-critical queries
+
+**5-Level Security Architecture** (NEW - 2025-10-30):
+
+1. **Level 1: Pre-validation** - Prompt injection detection, rate limiting
+2. **Level 2: LLM Generation** - SQL generation with security rules
+3. **Level 3: SQL Validation** - Selective AST parsing, table access control (RBAC)
+4. **Level 4: Execution** - Query limits (timeout, row limits), tenant isolation
+5. **Level 5: Post-processing** - PII detection and redaction, audit logging
+
+**Critical Patterns**:
+
+- **SharedQueryService**: Use for ALL common metrics (sales, top products, reviews) to guarantee dashboard consistency
+- **AST Validation**: Deep validation only for complex queries or low-privilege roles (selective to avoid performance impact)
+- **PII Redaction**: Automatic for all roles except SUPERADMIN (emails, phones, SSNs, credit cards)
+- **Consensus Voting**: Only triggers for queries with comparisons ("vs", "versus") + rankings ("mejor", "top")
+
+**Key Files**:
+
+- Main service: `src/services/dashboard/text-to-sql-assistant.service.ts` (2600+ lines)
+- Shared queries: `src/services/dashboard/shared-query.service.ts` - Single source of truth
+- SQL validation: `src/services/dashboard/sql-validation.service.ts` - Multi-layer validation
+- Security services (8 files):
+  - `src/services/dashboard/security-response.service.ts` - Standardized responses
+  - `src/services/dashboard/sql-ast-parser.service.ts` - Structural SQL analysis
+  - `src/services/dashboard/table-access-control.service.ts` - RBAC for tables
+  - `src/services/dashboard/pii-detection.service.ts` - PII redaction
+  - `src/services/dashboard/prompt-injection-detector.service.ts` - Attack prevention
+  - `src/services/dashboard/query-limits.service.ts` - Resource limits
+  - `src/services/dashboard/security-audit-logger.service.ts` - Encrypted audit trail
+  - `src/middlewares/chatbot-rate-limit.middleware.ts` - Rate limiting (10/min, 100/hour)
+
+**Critical Gotchas**:
+
+- ⚠️ Always pass `userRole` to `executeSafeQuery()` for proper access control
+- ⚠️ Selective validation: Complex queries + low-privilege roles get deep AST validation, simple queries skip it
+- ⚠️ Never bypass venueId filter - enforced at AST level for tenant isolation
+- ⚠️ Rate limits: 10 queries/min per user, 100 queries/hour per venue
+- ⚠️ Consensus voting adds ~6s latency (3 parallel LLM calls) - only for important queries
+
+**📖 Complete Documentation**:
+
+- `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md` - Complete reference (architecture, security, consensus voting, testing, troubleshooting)
+- Security tests: 50+ penetration tests in `tests/integration/security/chatbot-security-penetration.test.ts`
 
 ### Testing Strategy
 
