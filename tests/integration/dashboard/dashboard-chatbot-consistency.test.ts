@@ -250,6 +250,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
 /**
  * Helper: Create test payments for consistency testing
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function createTestPayments(venueId: string, staffId: string) {
   const now = new Date()
 

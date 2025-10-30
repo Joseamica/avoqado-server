@@ -24,6 +24,7 @@ jest.mock('@/services/stripe.service', () => ({
   getInvoicePdfUrl: jest.fn(),
   syncFeaturesToStripe: jest.fn(),
   createCustomerPortalSession: jest.fn(),
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   handlePaymentFailure: jest.fn().mockImplementation(async (subscriptionId, attemptCount, context) => {
     // Mock implementation that updates venueFeature with payment failure tracking
     const prismaModule = require('@/utils/prismaClient')
