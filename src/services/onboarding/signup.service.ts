@@ -196,3 +196,80 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
 
   return { emailVerified: true }
 }
+
+/**
+ * Resends verification code to user's email
+ *
+ * @param email - User's email address
+ * @returns Success result
+ */
+export async function resendVerificationCode(email: string): Promise<{ success: boolean; message: string }> {
+  // 1. Find staff by email
+  const staff = await prisma.staff.findUnique({
+    where: { email: email.toLowerCase() },
+  })
+
+  if (!staff) {
+    throw new BadRequestError('Email not found. Please sign up first.')
+  }
+
+  // 2. Check if already verified
+  if (staff.emailVerified) {
+    throw new BadRequestError('Email is already verified')
+  }
+
+  // 3. Generate new 4-digit verification code
+  const verificationCode = Math.floor(1000 + Math.random() * 9000).toString()
+
+  // 4. Set expiration to 10 minutes from now
+  const expirationTime = new Date()
+  expirationTime.setMinutes(expirationTime.getMinutes() + 10)
+
+  // 5. Update staff record with new verification code
+  await prisma.staff.update({
+    where: { id: staff.id },
+    data: {
+      emailVerificationCode: verificationCode,
+      emailVerificationExpires: expirationTime,
+    },
+  })
+
+  // 6. Send verification email
+  await emailService.sendEmailVerification(staff.email, {
+    firstName: staff.firstName,
+    verificationCode,
+  })
+
+  return {
+    success: true,
+    message: 'Verification code sent successfully',
+  }
+}
+
+/**
+ * Checks if an email exists and is verified (public endpoint for UI)
+ *
+ * @param email - User's email address
+ * @returns Email status
+ */
+export async function checkEmailVerificationStatus(email: string): Promise<{ emailExists: boolean; emailVerified: boolean }> {
+  // Find staff by email
+  const staff = await prisma.staff.findUnique({
+    where: { email: email.toLowerCase() },
+    select: {
+      emailVerified: true,
+    },
+  })
+
+  if (!staff) {
+    return {
+      emailExists: false,
+      emailVerified: false,
+    }
+  }
+
+  return {
+    emailExists: true,
+    emailVerified: staff.emailVerified,
+  }
+}

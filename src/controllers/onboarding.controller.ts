@@ -85,6 +85,58 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
 }
 
 /**
+ * POST /api/v1/onboarding/resend-verification
+ *
+ * Resends verification code to user's email
+ */
+export async function resendVerification(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { email } = req.body
+
+    if (!email) {
+      throw new BadRequestError('Email is required')
+    }
+
+    const result = await signupService.resendVerificationCode(email)
+
+    logger.info(`Verification code resent successfully to: ${email}`)
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+    })
+  } catch (error) {
+    logger.error('Error resending verification code:', error)
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/onboarding/email-status
+ *
+ * Checks if an email exists and is verified (public endpoint)
+ */
+export async function getEmailStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { email } = req.query
+
+    if (!email || typeof email !== 'string') {
+      throw new BadRequestError('Email is required')
+    }
+
+    const result = await signupService.checkEmailVerificationStatus(email)
+
+    res.status(200).json({
+      emailExists: result.emailExists,
+      emailVerified: result.emailVerified,
+    })
+  } catch (error) {
+    logger.error('Error checking email status:', error)
+    next(error)
+  }
+}
+
+/**
  * POST /api/v1/onboarding/organizations/:organizationId/start
  *
  * Initializes onboarding progress for an organization

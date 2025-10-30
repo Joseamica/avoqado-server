@@ -107,6 +107,65 @@ router.post('/signup', validateRequest(SignupSchema), onboardingController.signu
  */
 router.post('/verify-email', onboardingController.verifyEmail)
 
+/**
+ * @openapi
+ * /api/v1/onboarding/resend-verification:
+ *   post:
+ *     tags: [Onboarding]
+ *     summary: Resend verification code
+ *     description: Resends a new 4-digit verification code to the user's email
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *     responses:
+ *       200:
+ *         description: Verification code resent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *       400:
+ *         description: Email not found or already verified
+ */
+router.post('/resend-verification', onboardingController.resendVerification)
+
+/**
+ * @openapi
+ * /api/v1/onboarding/email-status:
+ *   get:
+ *     tags: [Onboarding]
+ *     summary: Check email verification status
+ *     description: Checks if an email exists and is verified (public endpoint)
+ *     parameters:
+ *       - in: query
+ *         name: email
+ *         required: true
+ *         schema: { type: string, format: email }
+ *         description: Email address to check
+ *     responses:
+ *       200:
+ *         description: Email status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 emailExists: { type: boolean }
+ *                 emailVerified: { type: boolean }
+ *       400:
+ *         description: Email parameter is required
+ */
+router.get('/email-status', onboardingController.getEmailStatus)
+
 // Configure multer for CSV uploads (memory storage, max 5MB)
 const upload = multer({
   storage: multer.memoryStorage(),
