@@ -29,7 +29,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
   try {
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!) as any
 
-    // Buscar staff con venues
+    // Buscar staff con venues y organization (World-Class Pattern: Need org to detect OWNER during onboarding)
     const staff = await prisma.staff.findUnique({
       where: { id: decoded.sub },
       select: {
@@ -43,6 +43,12 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         organizationId: true,
         createdAt: true,
         lastLoginAt: true,
+        organization: {
+          select: {
+            email: true,
+            onboardingCompletedAt: true,
+          },
+        },
         venues: {
           where: { active: true },
           select: {
@@ -219,12 +225,20 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       }
     }
 
-    // Determine highest role
+    // Determine highest role (World-Class Pattern: Detect OWNER even without venues during onboarding)
     let highestRole = staff.venues.length > 0 ? staff.venues[0].role : null
     if (isSuperAdmin) {
       highestRole = StaffRole.SUPERADMIN
     } else if (staff.venues.some(sv => sv.role === StaffRole.OWNER)) {
       highestRole = StaffRole.OWNER
+    } else if (staff.venues.length === 0) {
+      // Check if staff is primary OWNER during onboarding (Stripe/Shopify pattern)
+      const isPrimaryOwner = staff.email === staff.organization.email
+      const onboardingIncomplete = !staff.organization.onboardingCompletedAt
+
+      if (isPrimaryOwner && onboardingIncomplete) {
+        highestRole = StaffRole.OWNER
+      }
     }
 
     // Enrich all venues with custom role permissions

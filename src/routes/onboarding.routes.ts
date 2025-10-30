@@ -6,6 +6,7 @@
 
 import express from 'express'
 import multer from 'multer'
+import rateLimit from 'express-rate-limit'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import * as onboardingController from '../controllers/onboarding.controller'
@@ -25,6 +26,46 @@ import {
 } from '../schemas/onboarding.schema'
 
 const router = express.Router()
+
+// Rate limiters for security (FAANG best practices)
+// More permissive in development for easier testing
+const isDevelopment = process.env.NODE_ENV !== 'production'
+
+const signupRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: isDevelopment ? 100 : 3, // Dev: 100/hour, Prod: 3/hour
+  message: 'Too many signup attempts from this IP. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => req.ip || 'unknown',
+})
+
+const verificationRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isDevelopment ? 50 : 5, // Dev: 50/15min, Prod: 5/15min
+  message: 'Too many verification attempts. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => req.body.email || req.ip || 'unknown',
+})
+
+const resendRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: isDevelopment ? 20 : 3, // Dev: 20/hour, Prod: 3/hour
+  message: 'Too many resend requests. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => req.body.email || req.ip || 'unknown',
+})
+
+const emailStatusRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: isDevelopment ? 100 : 5, // Dev: 100/min, Prod: 5/min
+  message: 'Too many email status checks. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => req.ip || 'unknown',
+})
 
 /**
  * @openapi
@@ -72,7 +113,7 @@ const router = express.Router()
  *       400:
  *         description: Validation error or email already exists
  */
-router.post('/signup', validateRequest(SignupSchema), onboardingController.signup)
+router.post('/signup', signupRateLimiter, validateRequest(SignupSchema), onboardingController.signup)
 
 /**
  * @openapi
@@ -105,7 +146,7 @@ router.post('/signup', validateRequest(SignupSchema), onboardingController.signu
  *       400:
  *         description: Invalid or expired verification code
  */
-router.post('/verify-email', onboardingController.verifyEmail)
+router.post('/verify-email', verificationRateLimiter, onboardingController.verifyEmail)
 
 /**
  * @openapi
@@ -136,7 +177,7 @@ router.post('/verify-email', onboardingController.verifyEmail)
  *       400:
  *         description: Email not found or already verified
  */
-router.post('/resend-verification', onboardingController.resendVerification)
+router.post('/resend-verification', resendRateLimiter, onboardingController.resendVerification)
 
 /**
  * @openapi
@@ -164,7 +205,7 @@ router.post('/resend-verification', onboardingController.resendVerification)
  *       400:
  *         description: Email parameter is required
  */
-router.get('/email-status', onboardingController.getEmailStatus)
+router.get('/email-status', emailStatusRateLimiter, onboardingController.getEmailStatus)
 
 // Configure multer for CSV uploads (memory storage, max 5MB)
 const upload = multer({

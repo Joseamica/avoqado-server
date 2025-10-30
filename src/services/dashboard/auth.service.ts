@@ -23,6 +23,8 @@ export async function loginStaff(loginData: LoginDto) {
       photoUrl: true,
       phone: true,
       organizationId: true,
+      lockedUntil: true,
+      failedLoginAttempts: true,
       createdAt: true,
       lastLoginAt: true,
       organization: true,
@@ -44,17 +46,43 @@ export async function loginStaff(loginData: LoginDto) {
   })
 
   if (!staff || !staff.password) {
-    throw new AuthenticationError('Credenciales inválidas')
+    throw new AuthenticationError('Correo electrónico o contraseña incorrectos.')
   }
 
   if (!staff.active) {
     throw new AuthenticationError('Tu cuenta está desactivada')
   }
 
-  // 2. Verificar contraseña
+  // 2. Check if account is locked (FAANG security pattern)
+  if (staff.lockedUntil && new Date() < staff.lockedUntil) {
+    const minutesLeft = Math.ceil((staff.lockedUntil.getTime() - Date.now()) / 60000)
+    throw new ForbiddenError(
+      `Account temporarily locked due to too many failed login attempts. Please try again in ${minutesLeft} minute${minutesLeft > 1 ? 's' : ''}.`,
+    )
+  }
+
+  // 3. Verificar contraseña
   const passwordMatch = await bcrypt.compare(password, staff.password)
   if (!passwordMatch) {
-    throw new AuthenticationError('Credenciales inválidas')
+    // Increment failed attempts
+    const newAttempts = staff.failedLoginAttempts + 1
+    const updates: any = { failedLoginAttempts: newAttempts }
+
+    // Lock account after 5 failed attempts (FAANG best practice)
+    if (newAttempts >= 5) {
+      updates.lockedUntil = new Date(Date.now() + 30 * 60 * 1000) // 30 minutes
+      await prisma.staff.update({
+        where: { id: staff.id },
+        data: updates,
+      })
+      throw new ForbiddenError('Account locked due to too many failed login attempts. Please try again in 30 minutes.')
+    }
+
+    await prisma.staff.update({
+      where: { id: staff.id },
+      data: updates,
+    })
+    throw new AuthenticationError('Correo electrónico o contraseña incorrectos.')
   }
 
   // 2.5. Verificar que el email esté verificado (FAANG pattern)
@@ -73,8 +101,51 @@ export async function loginStaff(loginData: LoginDto) {
     selectedVenue = venueAccess
   }
 
+  // 3.5. World-Class Pattern (Stripe/Shopify): Allow OWNER login without venues if onboarding incomplete
+  // This prevents chicken-and-egg problem: User needs to login to complete onboarding, but onboarding creates first venue
   if (!selectedVenue) {
-    throw new ForbiddenError('No tienes acceso a ningún establecimiento')
+    // Check if user has OWNER role in any venue (even if no active venues)
+    const organization = staff.organization
+    const hasOwnerRole = staff.email === organization.email // Primary owner (created during signup)
+
+    // If OWNER and onboarding not completed, allow login with placeholder venueId
+    if (hasOwnerRole && !organization.onboardingCompletedAt) {
+      // Generate token with placeholder venueId for onboarding flow
+      const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, 'pending', StaffRole.OWNER)
+      const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+
+      // Reset failed attempts
+      await prisma.staff.update({
+        where: { id: staff.id },
+        data: {
+          lastLoginAt: new Date(),
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      })
+
+      // Return with onboarding flag
+      return {
+        accessToken,
+        refreshToken,
+        staff: {
+          id: staff.id,
+          email: staff.email,
+          firstName: staff.firstName,
+          lastName: staff.lastName,
+          organizationId: staff.organizationId,
+          photoUrl: staff.photoUrl,
+          phone: staff.phone,
+          createdAt: staff.createdAt,
+          lastLogin: staff.lastLoginAt,
+          role: StaffRole.OWNER, // CRITICAL: Include role so frontend can detect OWNER status
+          venues: [], // Empty venues array (user needs to complete onboarding)
+        },
+      }
+    }
+
+    // Not OWNER or onboarding completed but no venue access → error
+    throw new ForbiddenError('No tienes acceso a ningún establecimiento', 'NO_VENUE_ACCESS')
   }
 
   // 4. Generar tokens con el venue seleccionado
@@ -82,10 +153,14 @@ export async function loginStaff(loginData: LoginDto) {
 
   const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
 
-  // 5. Actualizar último login
+  // 5. Actualizar último login y resetear intentos fallidos
   await prisma.staff.update({
     where: { id: staff.id },
-    data: { lastLoginAt: new Date() },
+    data: {
+      lastLoginAt: new Date(),
+      failedLoginAttempts: 0, // Reset failed attempts on successful login
+      lockedUntil: null, // Clear any lock
+    },
   })
 
   // 6. Fetch custom role permissions for all venues

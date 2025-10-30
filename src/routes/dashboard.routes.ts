@@ -1,6 +1,7 @@
 import express, { RequestHandler } from 'express'
 import { z } from 'zod'
 import multer from 'multer'
+import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { chatbotRateLimitMiddleware } from '../middlewares/chatbot-rate-limit.middleware'
@@ -89,6 +90,20 @@ import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 
 const router = express.Router({ mergeParams: true })
+
+// Rate limiters for security (FAANG best practices)
+// More permissive rate limits in development for easier testing
+const isDevelopment = process.env.NODE_ENV !== 'production'
+
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isDevelopment ? 100 : 10, // Dev: 100/15min, Prod: 10/15min
+  message: 'Too many login attempts from this account. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => req.body.email || req.ip || 'unknown',
+  skipSuccessfulRequests: true, // Don't count successful logins against the limit
+})
 
 // Configure multer for document uploads (memory storage, max 10MB)
 const documentUpload = multer({
@@ -333,6 +348,7 @@ router.get(
  */
 router.post(
   '/auth/login',
+  loginRateLimiter, // Rate limit login attempts
   validateRequest(loginSchema), // Validate login request body
   authDashboardController.dashboardLoginController,
 )

@@ -3,11 +3,13 @@ class AppError extends Error {
   public statusCode: number
   public isOperational: boolean
   public status: string // 'fail' or 'error'
+  public code?: string // Error code for frontend detection (Stripe/GitHub pattern)
 
-  constructor(message: string, statusCode: number, isOperational: boolean = true) {
+  constructor(message: string, statusCode: number, isOperational: boolean = true, code?: string) {
     super(message)
     this.statusCode = statusCode
     this.isOperational = isOperational
+    this.code = code
     // Adjusted status logic: 4xx is 'fail', 5xx is 'error'
     this.status = statusCode >= 400 && statusCode < 500 ? 'fail' : statusCode >= 500 && statusCode < 600 ? 'error' : 'error'
 
@@ -59,8 +61,8 @@ export class AuthenticationError extends AppError {
 }
 
 export class ForbiddenError extends AppError {
-  constructor(message: string = 'Acceso prohibido') {
-    super(message, 403)
+  constructor(message: string = 'Acceso prohibido', code?: string) {
+    super(message, 403, true, code)
   }
 }
 

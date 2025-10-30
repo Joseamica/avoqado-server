@@ -128,6 +128,7 @@ app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunct
     })
     return res.status(err.statusCode).json({
       message: err.message,
+      ...(err.code && { code: err.code }), // Include error code if present (Stripe/GitHub pattern)
       ...(NODE_ENV === 'development' && { errorName: err.name }),
     })
   }

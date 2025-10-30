@@ -25,7 +25,43 @@ export async function signup(req: Request, res: Response, next: NextFunction): P
 
     const result = await signupService.signupUser(signupData)
 
-    // Set cookies (same as login)
+    // FAANG Pattern (Approach B): Do NOT set cookies on signup
+    // User must verify email first before getting authenticated
+    // This prevents bot accounts and ensures email validity
+    // Cookies will be set after successful email verification
+
+    logger.info(`New user signup (pending verification): ${result.staff.email}, org: ${result.organization.name}`)
+
+    res.status(201).json({
+      success: true,
+      message: 'Account created successfully. Please verify your email to continue.',
+      staff: result.staff,
+      organization: result.organization,
+    })
+  } catch (error) {
+    logger.error('Error during signup:', error)
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/onboarding/verify-email
+ *
+ * Verifies user email with 6-digit PIN code and auto-login
+ * FAANG Pattern (Approach B): Tokens are generated ONLY after email verification
+ */
+export async function verifyEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { email, verificationCode } = req.body
+
+    if (!email || !verificationCode) {
+      throw new BadRequestError('Email and verification code are required')
+    }
+
+    // Verify email and get tokens for auto-login
+    const result = await signupService.verifyEmailCode(email, verificationCode)
+
+    // Set auth cookies after successful verification (auto-login)
     res.cookie('accessToken', result.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
@@ -42,40 +78,11 @@ export async function signup(req: Request, res: Response, next: NextFunction): P
       path: '/',
     })
 
-    logger.info(`New user signup: ${result.staff.email}, org: ${result.organization.name}`)
-
-    res.status(201).json({
-      success: true,
-      message: 'Account created successfully',
-      staff: result.staff,
-      organization: result.organization,
-    })
-  } catch (error) {
-    logger.error('Error during signup:', error)
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/onboarding/verify-email
- *
- * Verifies user email with 4-digit PIN code
- */
-export async function verifyEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { email, verificationCode } = req.body
-
-    if (!email || !verificationCode) {
-      throw new BadRequestError('Email and verification code are required')
-    }
-
-    const result = await signupService.verifyEmailCode(email, verificationCode)
-
-    logger.info(`Email verified successfully for: ${email}`)
+    logger.info(`Email verified and user auto-logged in: ${email}`)
 
     res.status(200).json({
       success: true,
-      message: 'Email verified successfully',
+      message: 'Email verified successfully. You are now logged in.',
       emailVerified: result.emailVerified,
     })
   } catch (error) {

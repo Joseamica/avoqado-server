@@ -6,6 +6,7 @@
  */
 
 import bcrypt from 'bcryptjs'
+import crypto from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
 import * as jwtService from '@/jwt.service'
@@ -21,8 +22,6 @@ export interface SignupInput {
 }
 
 export interface SignupResult {
-  accessToken: string
-  refreshToken: string
   staff: {
     id: string
     email: string
@@ -39,6 +38,8 @@ export interface SignupResult {
 
 export interface VerifyEmailResult {
   emailVerified: boolean
+  accessToken: string
+  refreshToken: string
 }
 
 /**
@@ -95,8 +96,8 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
     return { organization, staff }
   })
 
-  // 5. Generate 4-digit verification code and send email
-  const verificationCode = Math.floor(1000 + Math.random() * 9000).toString()
+  // 5. Generate 6-digit cryptographically secure verification code and send email
+  const verificationCode = crypto.randomInt(100000, 999999).toString()
 
   // Set expiration to 10 minutes from now
   const expirationTime = new Date()
@@ -117,21 +118,9 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
     verificationCode,
   })
 
-  // 6. Generate JWT tokens (no venue yet, will be added during onboarding)
-  // We'll use a temporary venue-less token for the onboarding process
-  const accessToken = jwtService.generateAccessToken(
-    result.staff.id,
-    result.organization.id,
-    'pending', // Temporary placeholder until venue is created
-    StaffRole.OWNER,
-  )
-
-  const refreshToken = jwtService.generateRefreshToken(result.staff.id, result.organization.id)
-
-  // 6. Return sanitized data
+  // 6. Return sanitized data (no tokens - user must verify email first)
+  // FAANG Pattern (Approach B): Tokens are generated only after email verification
   return {
-    accessToken,
-    refreshToken,
     staff: {
       id: result.staff.id,
       email: result.staff.email,
@@ -148,11 +137,12 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
 }
 
 /**
- * Verifies user email with 4-digit PIN code
+ * Verifies user email with 6-digit PIN code and generates auth tokens
+ * FAANG Pattern (Approach B): Tokens generated only after email verification
  *
  * @param email - User's email address
- * @param verificationCode - 4-digit PIN code
- * @returns Verification result
+ * @param verificationCode - 6-digit PIN code
+ * @returns Verification result with auth tokens for auto-login
  */
 export async function verifyEmailCode(email: string, verificationCode: string): Promise<VerifyEmailResult> {
   // 1. Find staff by email
@@ -166,7 +156,20 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
 
   // 2. Check if already verified
   if (staff.emailVerified) {
-    return { emailVerified: true }
+    // Already verified - generate tokens for auto-login
+    const accessToken = jwtService.generateAccessToken(
+      staff.id,
+      staff.organizationId,
+      'pending', // Temporary placeholder until venue is created
+      StaffRole.OWNER,
+    )
+    const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+
+    return {
+      emailVerified: true,
+      accessToken,
+      refreshToken,
+    }
   }
 
   // 3. Check if verification code exists
@@ -194,7 +197,20 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
     },
   })
 
-  return { emailVerified: true }
+  // 7. Generate JWT tokens for auto-login
+  const accessToken = jwtService.generateAccessToken(
+    staff.id,
+    staff.organizationId,
+    'pending', // Temporary placeholder until venue is created
+    StaffRole.OWNER,
+  )
+  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+
+  return {
+    emailVerified: true,
+    accessToken,
+    refreshToken,
+  }
 }
 
 /**
@@ -218,8 +234,8 @@ export async function resendVerificationCode(email: string): Promise<{ success: 
     throw new BadRequestError('Email is already verified')
   }
 
-  // 3. Generate new 4-digit verification code
-  const verificationCode = Math.floor(1000 + Math.random() * 9000).toString()
+  // 3. Generate new 6-digit cryptographically secure verification code
+  const verificationCode = crypto.randomInt(100000, 999999).toString()
 
   // 4. Set expiration to 10 minutes from now
   const expirationTime = new Date()
