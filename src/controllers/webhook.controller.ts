@@ -21,7 +21,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
  * IMPORTANT: This endpoint must receive raw body (not JSON parsed)
  * for signature verification to work correctly
  */
-export async function handleStripeWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
+export async function handleStripeWebhook(req: Request, res: Response, _next: NextFunction): Promise<void> {
   const signature = req.headers['stripe-signature'] as string
 
   if (!signature) {

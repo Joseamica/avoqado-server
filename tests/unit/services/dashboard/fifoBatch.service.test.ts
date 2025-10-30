@@ -81,14 +81,6 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
         },
       ]
 
-      const mockMovements = [
-        {
-          id: 'mov-1',
-          rawMaterialId: mockRawMaterialId,
-          quantity: new Decimal(-5),
-        },
-      ]
-
       // Mock transaction to execute callback
       ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
         // Create mock transaction client

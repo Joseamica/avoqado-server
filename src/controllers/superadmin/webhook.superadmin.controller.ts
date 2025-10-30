@@ -97,7 +97,7 @@ export async function getWebhookMetrics(req: Request, res: Response, next: NextF
  * Retry a failed webhook event
  * POST /api/v1/superadmin/webhooks/:eventId/retry
  */
-export async function retryWebhookEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+export async function retryWebhookEvent(req: Request, res: Response, _next: NextFunction): Promise<void> {
   try {
     const { eventId } = req.params
 
