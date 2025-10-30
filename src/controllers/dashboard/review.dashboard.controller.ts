@@ -2,6 +2,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as reviewsDashboardService from '../../services/dashboard/review.dashboard.service'
 import { DashboardWithDates } from '../../schemas/dashboard/home.schema'
+import { parseDateRange } from '@/utils/datetime'
 
 export async function getReviewsData(
   req: Request<DashboardWithDates['params'], any, any, DashboardWithDates['query']>,
@@ -12,11 +13,8 @@ export async function getReviewsData(
     const { venueId } = req.params
     const { fromDate, toDate } = req.query
 
-    // Configurar fechas por defecto (últimos 7 días)
-    const from = fromDate ? new Date(fromDate) : new Date(new Date().setDate(new Date().getDate() - 7))
-    const to = toDate ? new Date(toDate) : new Date()
-
-    const dateFilter = { from, to }
+    // Parse date range using standardized utility (defaults to last 7 days)
+    const dateFilter = parseDateRange(fromDate, toDate, 7)
 
     // Llamada al servicio
     const reviewsData = await reviewsDashboardService.getReviewsData(venueId, dateFilter)

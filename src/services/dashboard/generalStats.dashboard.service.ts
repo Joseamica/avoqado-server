@@ -2,6 +2,7 @@ import { PaymentMethod, ProductType, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
+import { SharedQueryService } from './shared-query.service'
 
 const normalizeDateString = (value?: string): Date | undefined => {
   if (!value) return undefined
@@ -224,55 +225,29 @@ async function generateTablePerformance(venueId: string, fromDate: Date, toDate:
   }))
 }
 
+/**
+ * **REFACTORED: Now uses SharedQueryService for 100% consistency with chatbot**
+ *
+ * Uses SharedQueryService.getStaffPerformance() as single source of truth.
+ * Transforms response to match legacy generalStats format.
+ */
 async function generateStaffPerformance(venueId: string, fromDate: Date, toDate: Date) {
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    },
-    include: {
-      servedBy: {
-        include: {
-          venues: {
-            where: {
-              venueId: venueId,
-            },
-          },
-        },
-      },
-    },
-  })
+  // Use SharedQueryService as single source of truth
+  const staffPerformance = await SharedQueryService.getStaffPerformance(
+    venueId,
+    { from: fromDate, to: toDate }, // Custom date range
+    undefined, // Use venue's configured timezone
+  )
 
-  const staffStatsMap = new Map<string, any>()
-
-  orders.forEach(order => {
-    if (order.servedBy) {
-      const staffKey = order.servedBy.id
-      const existing = staffStatsMap.get(staffKey)
-
-      if (existing) {
-        existing.totalSales += Number(order.total)
-        existing.orderCount += 1
-      } else {
-        staffStatsMap.set(staffKey, {
-          staffId: order.servedBy.id,
-          name: `${order.servedBy.firstName} ${order.servedBy.lastName}`,
-          role: order.servedBy.venues[0]?.role || 'WAITER',
-          totalSales: Number(order.total),
-          totalTips: 0, // Will be calculated from tips
-          orderCount: 1,
-          avgPrepTime: 0,
-        })
-      }
-    }
-  })
-
-  return Array.from(staffStatsMap.values()).map(staff => ({
-    ...staff,
-    avgPrepTime: Math.floor(Math.random() * 10) + 5 || 0, // Mock data, ensure never undefined
+  // Transform to match legacy generalStats format
+  return staffPerformance.map(staff => ({
+    staffId: staff.staffId,
+    name: staff.staffName, // SharedQueryService uses 'staffName', generalStats expects 'name'
+    role: staff.role,
+    totalSales: staff.totalRevenue, // SharedQueryService uses 'totalRevenue', generalStats expects 'totalSales'
+    totalTips: staff.totalTips,
+    orderCount: staff.totalOrders, // SharedQueryService uses 'totalOrders', generalStats expects 'orderCount'
+    avgPrepTime: Math.floor(Math.random() * 10) + 5, // Mock data (not tracked in DB yet)
   }))
 }
 

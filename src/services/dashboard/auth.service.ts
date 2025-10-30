@@ -15,6 +15,7 @@ export async function loginStaff(loginData: LoginDto) {
     select: {
       id: true,
       email: true,
+      emailVerified: true, // FAANG pattern: check email verification
       firstName: true,
       lastName: true,
       password: true,
@@ -54,6 +55,11 @@ export async function loginStaff(loginData: LoginDto) {
   const passwordMatch = await bcrypt.compare(password, staff.password)
   if (!passwordMatch) {
     throw new AuthenticationError('Credenciales inválidas')
+  }
+
+  // 2.5. Verificar que el email esté verificado (FAANG pattern)
+  if (!staff.emailVerified) {
+    throw new ForbiddenError('Please verify your email before logging in. Check your inbox for the verification code.')
   }
 
   // 3. Si se especificó un venue, verificar acceso
