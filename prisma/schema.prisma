@@ -321,6 +321,10 @@ model Staff {
   updatedAt   DateTime  @updatedAt
   lastLoginAt DateTime?
 
+  // Security: Account lockout after failed login attempts (FAANG best practice)
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+
   @@index([email])
   // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
   @@index([organizationId])
