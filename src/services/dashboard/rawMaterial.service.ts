@@ -1,6 +1,6 @@
 import { RawMaterial, RawMaterialMovementType, Prisma, Unit, UnitType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import AppError from '../../errors/AppError'
+import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateRawMaterialDto, UpdateRawMaterialDto, AdjustStockDto } from '../../schemas/dashboard/inventory.schema'
 import { createStockBatch, deductStockFIFO } from './fifoBatch.service'
 import { sendLowStockAlertNotification } from './notification.service'
@@ -201,21 +201,63 @@ export async function updateRawMaterial(venueId: string, rawMaterialId: string, 
 
 /**
  * Delete a raw material (soft delete)
+ * Throws BadRequestError with detailed recipe information if the material is in use
  */
 export async function deleteRawMaterial(venueId: string, rawMaterialId: string, staffId?: string): Promise<void> {
   const existing = await prisma.rawMaterial.findFirst({
     where: { id: rawMaterialId, venueId, deletedAt: null },
     include: {
-      recipeLines: true,
+      recipeLines: {
+        include: {
+          recipe: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+            },
+          },
+        },
+      },
     },
   })
 
   if (!existing) {
-    throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found`)
   }
 
+  // Check if material is used in any recipes
   if (existing.recipeLines.length > 0) {
-    throw new AppError(`Cannot delete raw material ${existing.name} - it is used in ${existing.recipeLines.length} recipe(s)`, 400)
+    // Build detailed recipe information for better UX
+    const recipesUsing = existing.recipeLines.map(line => ({
+      id: line.recipe.id,
+      productId: line.recipe.product.id,
+      productName: line.recipe.product.name,
+      productPrice: line.recipe.product.price,
+      quantity: line.quantity,
+      unit: line.unit,
+      isOptional: line.isOptional,
+    }))
+
+    // Throw BadRequestError with detailed data (following FAANG pattern)
+    const error = new BadRequestError(
+      `Cannot delete raw material "${existing.name}" - it is used in ${existing.recipeLines.length} recipe(s). ` +
+        `Please remove it from all recipes first, or deactivate it instead to preserve usage history.`,
+    )
+
+    // Attach structured data for frontend to display
+    ;(error as any).data = {
+      materialId: existing.id,
+      materialName: existing.name,
+      recipeCount: existing.recipeLines.length,
+      recipes: recipesUsing,
+      suggestion: 'deactivate', // Suggest alternative action
+    }
+
+    throw error
   }
 
   // Soft delete: set deletedAt timestamp instead of actually deleting
@@ -227,6 +269,62 @@ export async function deleteRawMaterial(venueId: string, rawMaterialId: string, 
       active: false, // Also mark as inactive
     },
   })
+}
+
+/**
+ * Deactivate a raw material (without deleting)
+ * Use this when a material is still referenced in recipes but you want to stop using it
+ * This preserves all historical data and relationships
+ */
+export async function deactivateRawMaterial(venueId: string, rawMaterialId: string): Promise<RawMaterial> {
+  const existing = await prisma.rawMaterial.findFirst({
+    where: { id: rawMaterialId, venueId, deletedAt: null },
+  })
+
+  if (!existing) {
+    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found`)
+  }
+
+  if (!existing.active) {
+    throw new BadRequestError(`Raw material "${existing.name}" is already deactivated`)
+  }
+
+  // Deactivate without deleting - preserves all usage history
+  const deactivated = await prisma.rawMaterial.update({
+    where: { id: rawMaterialId },
+    data: {
+      active: false,
+    },
+  })
+
+  return deactivated
+}
+
+/**
+ * Reactivate a previously deactivated raw material
+ */
+export async function reactivateRawMaterial(venueId: string, rawMaterialId: string): Promise<RawMaterial> {
+  const existing = await prisma.rawMaterial.findFirst({
+    where: { id: rawMaterialId, venueId, deletedAt: null },
+  })
+
+  if (!existing) {
+    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found`)
+  }
+
+  if (existing.active) {
+    throw new BadRequestError(`Raw material "${existing.name}" is already active`)
+  }
+
+  // Reactivate
+  const reactivated = await prisma.rawMaterial.update({
+    where: { id: rawMaterialId },
+    data: {
+      active: true,
+    },
+  })
+
+  return reactivated
 }
 
 /**

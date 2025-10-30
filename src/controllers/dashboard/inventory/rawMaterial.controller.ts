@@ -109,6 +109,44 @@ export async function deleteRawMaterial(req: Request, res: Response, next: NextF
 }
 
 /**
+ * Deactivate a raw material (soft disable)
+ */
+export async function deactivateRawMaterial(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, rawMaterialId } = req.params
+
+    const rawMaterial = await rawMaterialService.deactivateRawMaterial(venueId, rawMaterialId)
+
+    res.json({
+      success: true,
+      message: `Raw material "${rawMaterial.name}" has been deactivated`,
+      data: rawMaterial,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Reactivate a raw material
+ */
+export async function reactivateRawMaterial(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, rawMaterialId } = req.params
+
+    const rawMaterial = await rawMaterialService.reactivateRawMaterial(venueId, rawMaterialId)
+
+    res.json({
+      success: true,
+      message: `Raw material "${rawMaterial.name}" has been reactivated`,
+      data: rawMaterial,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * Adjust stock for a raw material
  */
 export async function adjustStock(req: Request, res: Response, next: NextFunction) {
