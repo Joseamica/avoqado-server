@@ -10,6 +10,9 @@
  * World-Class Pattern: Unit tests should be FAST (<100ms) and test pure logic
  */
 
+// Mock OPENAI_API_KEY before importing service
+process.env.OPENAI_API_KEY = 'test-api-key-for-unit-tests'
+
 import { describe, it, expect } from '@jest/globals'
 import textToSqlService from '@/services/dashboard/text-to-sql-assistant.service'
 
