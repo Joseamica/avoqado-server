@@ -4,6 +4,7 @@ import { AssistantQueryDto } from '../../schemas/dashboard/assistant.schema'
 import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { UserRole } from '../../services/dashboard/table-access-control.service'
 
 /**
  * Detecta si una consulta contiene información sensible que requiere rol SUPERADMIN
@@ -183,6 +184,8 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       venueId: req.authContext.venueId,
       userId: req.authContext.userId,
       venueSlug: currentVenueRecord?.slug,
+      userRole: req.authContext.role as UserRole, // Pass for security validation
+      ipAddress: req.ip || req.socket.remoteAddress || 'unknown', // Pass for audit logging
     })
 
     // Log del resultado

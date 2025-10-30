@@ -3,6 +3,7 @@ import { z } from 'zod'
 import multer from 'multer'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { chatbotRateLimitMiddleware } from '../middlewares/chatbot-rate-limit.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
 
 // Importa StaffRole desde @prisma/client si ahí es donde está definido tu enum de Prisma
@@ -4369,6 +4370,7 @@ router.post('/assistant/generate-title', authenticateTokenMiddleware, assistantC
 router.post(
   '/assistant/text-to-sql',
   authenticateTokenMiddleware,
+  chatbotRateLimitMiddleware, // Rate limit: 10 queries/min per user, 100/hour per venue
   validateRequest(assistantQuerySchema),
   textToSqlAssistantController.processTextToSqlQuery,
 )
