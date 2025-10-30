@@ -957,14 +957,13 @@ class EmailService {
           <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
             <!-- Logo -->
             <div style="text-align: center; margin-bottom: 40px;">
-              <div style="display: inline-block; background-color: #18181b; padding: 20px; border-radius: 12px;">
+              <div style="display: inline-block; background-color: #18181b; padding: 30px; border-radius: 16px;">
                 <img src="https://firebasestorage.googleapis.com/v0/b/avoqado-d0a24.appspot.com/o/Avoqado-(white).png?alt=media&token=05008dee-fc4d-42fd-bbcd-390a3bf88d79"
                      alt="Avoqado"
-                     width="80"
-                     height="80"
+                     width="140"
+                     height="140"
                      style="display: block;">
               </div>
-              <h1 style="color: #333; margin: 16px 0 0 0; font-size: 28px; font-weight: 600; letter-spacing: -0.5px;" class="dark-mode-text">Avoqado</h1>
             </div>
 
             <!-- Main Card -->
