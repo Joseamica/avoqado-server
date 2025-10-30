@@ -142,7 +142,8 @@ describe('FIFO Batch Concurrency - Race Condition Prevention', () => {
 
     it('should handle concurrent FIFO deductions at low level', async () => {
       // Direct test of deductStockFIFO with concurrency
-      const category = await prisma.menuCategory.create({
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _category = await prisma.menuCategory.create({
         data: {
           venueId: testData.venue.id,
           name: 'Low Level Test',
@@ -231,7 +232,7 @@ describe('FIFO Batch Concurrency - Race Condition Prevention', () => {
 
       // Create 5 orders (3 units each = 6 KG each, 30 KG total needed, only 20 available)
       const orders = await Promise.all(
-        Array.from({ length: 5 }).map((_, i) =>
+        Array.from({ length: 5 }).map(() =>
           createOrder(testData.venue.id, testData.staff[0].id, [{ productId: scenario.product.id, quantity: 3 }]),
         ),
       )
@@ -298,7 +299,8 @@ describe('FIFO Batch Concurrency - Race Condition Prevention', () => {
       // This test verifies that PostgreSQL row-level locking works
       // We can't directly test SQL commands, but we verify the behavior
 
-      const category = await prisma.menuCategory.create({
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _category = await prisma.menuCategory.create({
         data: {
           venueId: testData.venue.id,
           name: 'Locking Test',
@@ -341,7 +343,8 @@ describe('FIFO Batch Concurrency - Race Condition Prevention', () => {
 
       // Some succeed, some fail due to locking or insufficient stock
       const succeeded = results.filter(r => r.status === 'fulfilled')
-      const failed = results.filter(r => r.status === 'rejected')
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _failed = results.filter(r => r.status === 'rejected')
 
       // Cannot succeed more than 5 times (10 KG / 2 KG = 5)
       expect(succeeded.length).toBeLessThanOrEqual(5)
