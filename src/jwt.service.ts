@@ -45,9 +45,10 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
  * @param organizationId - ID de la Organización (Staff.organizationId)
  * @param venueId - ID del Venue para la sesión actual
  * @param role - Rol del Staff en el Venue actual
+ * @param rememberMe - Si true, extiende la duración del token a 30 días
  * @returns El token de acceso firmado.
  */
-export function generateAccessToken(staffId: string, organizationId: string, venueId: string, role: StaffRole): string {
+export function generateAccessToken(staffId: string, organizationId: string, venueId: string, role: StaffRole, rememberMe?: boolean): string {
   const payload: Omit<AccessTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
     orgId: organizationId,
@@ -57,7 +58,8 @@ export function generateAccessToken(staffId: string, organizationId: string, ven
   // Explicitly type the secret and options
   const secret: Secret = ACCESS_TOKEN_SECRET!
   const options: SignOptions = {
-    expiresIn: 86400, // 24 hours (1 day) in seconds
+    // rememberMe: 30 days (2592000 seconds), normal: 24 hours (86400 seconds)
+    expiresIn: rememberMe ? 2592000 : 86400,
   }
   return jwt.sign(payload, secret, options)
 }
@@ -66,9 +68,10 @@ export function generateAccessToken(staffId: string, organizationId: string, ven
  * Genera un token de refresco.
  * @param staffId - ID del Staff (Staff.id)
  * @param organizationId - (Opcional) ID de la Organización
+ * @param rememberMe - Si true, extiende la duración del token a 90 días
  * @returns El token de refresco firmado.
  */
-export function generateRefreshToken(staffId: string, organizationId?: string): string {
+export function generateRefreshToken(staffId: string, organizationId?: string, rememberMe?: boolean): string {
   const payload: Omit<RefreshTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
     tokenId: crypto.randomBytes(16).toString('hex'), // Genera un ID único para el token
@@ -79,7 +82,8 @@ export function generateRefreshToken(staffId: string, organizationId?: string): 
   // Explicitly type the secret and options
   const secret: Secret = REFRESH_TOKEN_SECRET!
   const options: SignOptions = {
-    expiresIn: 604800, // 7 days in seconds
+    // rememberMe: 90 days (7776000 seconds), normal: 7 days (604800 seconds)
+    expiresIn: rememberMe ? 7776000 : 604800,
   }
   return jwt.sign(payload, secret, options)
 }

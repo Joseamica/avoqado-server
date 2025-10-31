@@ -10,7 +10,7 @@ import emailService from '../email.service'
 import logger from '@/config/logger'
 
 export async function loginStaff(loginData: LoginDto) {
-  const { email, password, venueId } = loginData
+  const { email, password, venueId, rememberMe } = loginData
 
   // 1. Buscar staff con TODOS sus venues (no solo el solicitado)
   const staff = await prisma.staff.findUnique({
@@ -152,9 +152,9 @@ export async function loginStaff(loginData: LoginDto) {
   }
 
   // 4. Generar tokens con el venue seleccionado
-  const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role)
+  const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role, rememberMe)
 
-  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId, rememberMe)
 
   // 5. Actualizar último login y resetear intentos fallidos
   await prisma.staff.update({

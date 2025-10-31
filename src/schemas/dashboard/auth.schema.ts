@@ -12,6 +12,8 @@ export const loginSchema = z.object({
       .optional(),
     // fcmToken es opcional, lo manejaremos en el servicio si es necesario
     fcmToken: z.string().optional(),
+    // rememberMe extends token expiration time
+    rememberMe: z.boolean().optional(),
   }),
 })
 
