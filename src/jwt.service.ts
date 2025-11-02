@@ -48,7 +48,13 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
  * @param rememberMe - Si true, extiende la duración del token a 30 días
  * @returns El token de acceso firmado.
  */
-export function generateAccessToken(staffId: string, organizationId: string, venueId: string, role: StaffRole, rememberMe?: boolean): string {
+export function generateAccessToken(
+  staffId: string,
+  organizationId: string,
+  venueId: string,
+  role: StaffRole,
+  rememberMe?: boolean,
+): string {
   const payload: Omit<AccessTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
     orgId: organizationId,

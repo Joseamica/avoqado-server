@@ -338,7 +338,7 @@ export class SharedQueryService {
     const venueTimezone = timezone || venue.timezone
     const { from, to } = this.getDateRange(period, venueTimezone)
 
-    // Query staff performance
+    // Query staff performance using Prisma.sql for proper type handling
     const staffPerf = await prisma.$queryRaw<
       Array<{
         staffId: string
@@ -349,30 +349,32 @@ export class SharedQueryService {
         totalTips: Prisma.Decimal
         shiftsWorked: bigint
       }>
-    >`
-      SELECT
-        s."id" as "staffId",
-        CONCAT(s."firstName", ' ', s."lastName") as "staffName",
-        sv."role" as "role",
-        COUNT(DISTINCT o."id")::bigint as "totalOrders",
-        COALESCE(SUM(p."amount"), 0) as "totalRevenue",
-        COALESCE(SUM(p."tipAmount"), 0) as "totalTips",
-        COUNT(DISTINCT sh."id")::bigint as "shiftsWorked"
-      FROM "Staff" s
-      INNER JOIN "StaffVenue" sv ON s."id" = sv."staffId" AND sv."venueId" = ${venueId}::uuid
-      LEFT JOIN "Order" o ON o."staffId" = s."id"
-        AND o."createdAt" >= ${from}::timestamp
-        AND o."createdAt" <= ${to}::timestamp
-      LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
-      LEFT JOIN "Shift" sh ON sh."staffId" = s."id"
-        AND sh."startTime" >= ${from}::timestamp
-        AND sh."startTime" <= ${to}::timestamp
-      WHERE sv."venueId" = ${venueId}::uuid
-      GROUP BY s."id", s."firstName", s."lastName", sv."role"
-      HAVING COUNT(DISTINCT o."id") > 0
-      ORDER BY "totalRevenue" DESC
-      LIMIT ${limit}
-    `
+    >(
+      Prisma.sql`
+        SELECT
+          s."id" as "staffId",
+          CONCAT(s."firstName", ' ', s."lastName") as "staffName",
+          sv."role" as "role",
+          COUNT(DISTINCT o."id")::bigint as "totalOrders",
+          COALESCE(SUM(p."amount"), 0) as "totalRevenue",
+          COALESCE(SUM(p."tipAmount"), 0) as "totalTips",
+          COUNT(DISTINCT sh."id")::bigint as "shiftsWorked"
+        FROM "Staff" s
+        INNER JOIN "StaffVenue" sv ON s."id" = sv."staffId" AND sv."venueId" = ${venueId}
+        LEFT JOIN "Order" o ON (o."servedById" = s."id" OR o."createdById" = s."id")
+          AND o."createdAt" >= ${from}
+          AND o."createdAt" <= ${to}
+        LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
+        LEFT JOIN "Shift" sh ON sh."staffId" = s."id"
+          AND sh."startTime" >= ${from}
+          AND sh."startTime" <= ${to}
+        WHERE sv."venueId" = ${venueId}
+        GROUP BY s."id", s."firstName", s."lastName", sv."role"
+        HAVING COUNT(DISTINCT o."id") > 0
+        ORDER BY "totalRevenue" DESC
+        LIMIT ${limit}
+      `,
+    )
 
     // Convert BigInt to Number
     return staffPerf.map(staff => ({
