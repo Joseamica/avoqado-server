@@ -55,7 +55,6 @@ module.exports = {
   },
 
   // 🔥 NEW: Test configuration
-  testTimeout: 10000,
   verbose: true,
   detectOpenHandles: true,
   forceExit: true,
@@ -85,7 +84,6 @@ module.exports = {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
       },
-      // API tests might need longer timeout. If so, use jest.setTimeout() in test files.
     },
     {
       displayName: 'workflows',
@@ -98,7 +96,6 @@ module.exports = {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
       },
-      // Workflow tests typically take longer. If so, use jest.setTimeout() in test files.
     },
     {
       displayName: 'integration',
@@ -111,8 +108,6 @@ module.exports = {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
       },
-      // Integration tests use real database, may need longer timeout
-      testTimeout: 30000,
     },
   ],
 

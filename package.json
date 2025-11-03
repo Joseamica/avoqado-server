@@ -13,7 +13,7 @@
     "seed": "npx prisma db seed && npx ts-node -r tsconfig-paths/register scripts/sync-features-to-stripe.ts",
     "studio": "prisma studio",
     "test": "jest",
-    "test:unit": "jest tests/unit",
+    "test:unit": "NODE_OPTIONS='--max-old-space-size=4096' jest tests/unit --maxWorkers=2",
     "test:integration": "jest --selectProjects=integration",
     "test:api": "jest tests/api-tests",
     "test:workflows": "jest tests/workflows",

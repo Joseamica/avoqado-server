@@ -7,6 +7,9 @@
 import * as dotenv from 'dotenv'
 dotenv.config()
 
+// Set longer timeout for integration tests (real database operations)
+jest.setTimeout(60000)
+
 // Set required environment variables for tests
 process.env.NODE_ENV = 'test'
 process.env.ACCESS_TOKEN_SECRET = 'test-access-token-secret'
