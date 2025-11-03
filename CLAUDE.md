@@ -233,6 +233,61 @@ entire project to catch any inconsistencies
 
 **Expected output:** `✓ Files formatted` / `✓ Lint issues fixed` / `⚠ Minor warnings OK (unused vars, config options)`
 
+### Unused Code Detection
+
+- `npm run check:unused` - Detect unimported files (fast)
+- `npm run check:dead-code` - Comprehensive dead code analysis (slower)
+- `npm run check:all` - Run both checks
+- `npm run update:unused-ignore` - Auto-update ignore list for pending files
+
+**⚠️ PENDING IMPLEMENTATION MARKER SYSTEM:**
+
+When you create files that are fully implemented but not yet integrated into the application, mark them with the `@pending-implementation` marker at the top:
+
+```typescript
+/**
+ * @pending-implementation
+ * [Feature Name]
+ *
+ * STATUS: Implemented but not yet applied to [where it will be used].
+ * This [file type] is ready to use but hasn't been [integration action] yet.
+ * It will be gradually applied to [target locations].
+ *
+ * [Additional context or usage examples]
+ */
+```
+
+**Example:**
+```typescript
+/**
+ * @pending-implementation
+ * Feature Access Control Middleware
+ *
+ * STATUS: Implemented but not yet applied to routes.
+ * This middleware is ready to use but hasn't been added to route definitions yet.
+ * It will be gradually applied to premium/paid feature endpoints.
+ *
+ * Usage:
+ * router.get('/analytics', authenticateTokenMiddleware, checkFeatureAccess('ANALYTICS'), ...)
+ */
+```
+
+**When to use this marker:**
+- ✅ File is completely implemented and tested
+- ✅ File will be integrated soon but not immediately
+- ✅ File should be excluded from unused code detection
+- ✅ You want to document implementation status for future developers
+
+**How it works:**
+1. Add `@pending-implementation` marker in the first 500 characters of the file
+2. Run `npm run update:unused-ignore` to automatically add the file to `.unimportedrc.json`
+3. The file will be ignored by `npm run check:unused` until you remove the marker
+4. When you integrate the file, remove the marker and run `npm run update:unused-ignore` again
+
+**Auto-update script:** `scripts/update-unused-ignore.js` scans for files with this marker and updates `.unimportedrc.json` automatically.
+
+**⚠️ Important:** This marker is for files that are **READY to use** but not yet integrated. Don't use it for incomplete implementations or work-in-progress files.
+
 ## Architecture Overview
 
 This is a restaurant management platform backend with multi-tenant architecture supporting:

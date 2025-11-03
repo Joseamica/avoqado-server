@@ -18,6 +18,7 @@ import {
   OrderSource,
   OrderStatus,
   OrderType,
+  OriginSystem,
   PaymentMethod,
   PaymentSource,
   PaymentStatus,
@@ -28,8 +29,10 @@ import {
   RawMaterialMovementType,
   ReceiptStatus,
   ReviewSource,
+  SettlementDayType,
   SettlementStatus,
   StaffRole,
+  SyncStatus,
   TerminalStatus,
   TerminalType,
   TransactionCardType,
@@ -42,6 +45,7 @@ import {
 } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 import { getUnitType } from '../src/services/dashboard/rawMaterial.service'
+import { calculatePaymentSettlement } from '../src/services/payments/settlementCalculation.service'
 
 const prisma = new PrismaClient()
 
@@ -422,6 +426,13 @@ async function main() {
       category: FeatureCategory.OPERATIONS,
       monthlyPrice: 399.0, // MXN
     },
+    {
+      code: 'AVAILABLE_BALANCE',
+      name: 'Saldo Disponible',
+      description: 'Visualización de saldo disponible, liquidaciones pendientes, y proyecciones de flujo de efectivo.',
+      category: FeatureCategory.PAYMENTS,
+      monthlyPrice: 0.0, // MXN - Free feature
+    },
   ]
 
   // Usar upsert para crear o actualizar características
@@ -763,6 +774,75 @@ async function main() {
   })
 
   console.log(`  Created 3 provider cost structures.`)
+
+  // Create settlement configurations for each merchant account
+  console.log('Seeding settlement configurations...')
+
+  // Menta Primary Account - Standard settlement times
+  const settlementConfigTypes = [
+    { cardType: TransactionCardType.DEBIT, settlementDays: 1, notes: 'Tarjetas de débito - 1 día hábil' },
+    { cardType: TransactionCardType.CREDIT, settlementDays: 2, notes: 'Tarjetas de crédito - 2 días hábiles' },
+    { cardType: TransactionCardType.AMEX, settlementDays: 3, notes: 'American Express - 3 días hábiles' },
+    { cardType: TransactionCardType.INTERNATIONAL, settlementDays: 5, notes: 'Tarjetas internacionales - 5 días hábiles' },
+    { cardType: TransactionCardType.OTHER, settlementDays: 2, notes: 'Otras tarjetas - 2 días hábiles' },
+  ]
+
+  for (const config of settlementConfigTypes) {
+    await prisma.settlementConfiguration.create({
+      data: {
+        merchantAccountId: mentaMerchantPrimary.id,
+        cardType: config.cardType,
+        settlementDays: config.settlementDays,
+        settlementDayType: SettlementDayType.BUSINESS_DAYS,
+        cutoffTime: '23:00',
+        cutoffTimezone: 'America/Mexico_City',
+        effectiveFrom: new Date('2024-01-01'),
+        notes: config.notes,
+      },
+    })
+  }
+
+  // Menta Secondary Account - Same settlement times
+  for (const config of settlementConfigTypes) {
+    await prisma.settlementConfiguration.create({
+      data: {
+        merchantAccountId: mentaMerchantSecondary.id,
+        cardType: config.cardType,
+        settlementDays: config.settlementDays,
+        settlementDayType: SettlementDayType.BUSINESS_DAYS,
+        cutoffTime: '23:00',
+        cutoffTimezone: 'America/Mexico_City',
+        effectiveFrom: new Date('2024-01-01'),
+        notes: config.notes,
+      },
+    })
+  }
+
+  // Clip Merchant - Faster settlements (digital wallet)
+  const clipSettlementTypes = [
+    { cardType: TransactionCardType.DEBIT, settlementDays: 1, notes: 'Clip débito - 1 día calendario' },
+    { cardType: TransactionCardType.CREDIT, settlementDays: 1, notes: 'Clip crédito - 1 día calendario' },
+    { cardType: TransactionCardType.AMEX, settlementDays: 2, notes: 'Clip Amex - 2 días calendario' },
+    { cardType: TransactionCardType.INTERNATIONAL, settlementDays: 3, notes: 'Clip internacional - 3 días calendario' },
+    { cardType: TransactionCardType.OTHER, settlementDays: 1, notes: 'Clip otras - 1 día calendario' },
+  ]
+
+  for (const config of clipSettlementTypes) {
+    await prisma.settlementConfiguration.create({
+      data: {
+        merchantAccountId: clipMerchant.id,
+        cardType: config.cardType,
+        settlementDays: config.settlementDays,
+        settlementDayType: SettlementDayType.CALENDAR_DAYS,
+        cutoffTime: '18:00',
+        cutoffTimezone: 'America/Mexico_City',
+        effectiveFrom: new Date('2024-01-01'),
+        notes: config.notes,
+      },
+    })
+  }
+
+  console.log(`  Created ${settlementConfigTypes.length * 2 + clipSettlementTypes.length} settlement configurations.`)
 
   // --- 1. Organizaciones ---
   console.log('Seeding organizations...')
@@ -1308,7 +1388,7 @@ async function main() {
           const scenario = scenarios[t] || scenarios[0]
           const isPrimaryVenueTerminal = t === 0 && venue.name.includes('Avoqado Full')
 
-          const serialNumber = isPrimaryVenueTerminal ? '98282447347751' : faker.string.uuid()
+          const serialNumber = isPrimaryVenueTerminal ? '6d52cb5103bb42dc' : faker.string.uuid()
 
           return prisma.terminal.create({
             data: {
@@ -3269,6 +3349,28 @@ async function main() {
               new Date(Math.min(paymentCreatedAt.getTime() + 2 * 24 * 60 * 60 * 1000, Date.now())),
             )
 
+            // Calculate settlement information if transaction cost exists
+            let settlementInfo = null
+            if (paymentMethod !== PaymentMethod.CASH) {
+              try {
+                // Find the transaction cost that was just created
+                const transactionCost = await prisma.transactionCost.findUnique({
+                  where: { paymentId: payment.id },
+                })
+
+                if (transactionCost) {
+                  // Calculate settlement date and amount
+                  settlementInfo = await calculatePaymentSettlement(
+                    payment,
+                    transactionCost.merchantAccountId,
+                    transactionCost.transactionType,
+                  )
+                }
+              } catch (error) {
+                console.log(`    ⚠️  Warning: Could not calculate settlement for payment ${payment.id}`)
+              }
+            }
+
             await prisma.venueTransaction.create({
               data: {
                 venueId: venue.id,
@@ -3277,7 +3379,10 @@ async function main() {
                 grossAmount: total,
                 feeAmount,
                 netAmount,
-                status: SettlementStatus.PENDING,
+                status: settlementInfo ? SettlementStatus.PENDING : SettlementStatus.PENDING,
+                estimatedSettlementDate: settlementInfo?.estimatedSettlementDate,
+                netSettlementAmount: settlementInfo?.netSettlementAmount,
+                settlementConfigId: settlementInfo?.settlementConfigId,
                 createdAt: transactionCreatedAt,
               },
             })
@@ -3633,6 +3738,208 @@ async function main() {
 
         await prisma.notification.createMany({ data: notifications })
         console.log(`      - Created ${notifications.length} sample notifications for ${venue.name}.`)
+      }
+
+      // ========================================
+      // CREATE TEST TRANSACTIONS FOR SETTLEMENT INCIDENT TESTING
+      // ========================================
+      // Only create test incidents for the first full venue to keep data clean
+      if (isFullVenue && index === 0) {
+        console.log(`      - Creating test transactions with delayed settlements...`)
+
+        const testTransactions = []
+        const yesterday = new Date()
+        yesterday.setDate(yesterday.getDate() - 1)
+        yesterday.setHours(10, 0, 0, 0)
+
+        const twoDaysAgo = new Date()
+        twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
+        twoDaysAgo.setHours(14, 30, 0, 0)
+
+        // Get venue payment config to access merchant accounts
+        const venuePaymentConfig = await prisma.venuePaymentConfig.findUnique({
+          where: { venueId: venue.id },
+          include: {
+            primaryAccount: {
+              include: { provider: true },
+            },
+            secondaryAccount: {
+              include: { provider: true },
+            },
+          },
+        })
+
+        if (venuePaymentConfig?.primaryAccount) {
+          // Test Transaction 1: Primary account (usually Blumonpay) Debit - Expected yesterday, not arrived
+          const primaryAccount = venuePaymentConfig.primaryAccount
+
+          const testOrder1 = await prisma.order.create({
+            data: {
+              venueId: venue.id,
+              orderNumber: `TEST-INCIDENT-001`,
+              status: OrderStatus.COMPLETED,
+              subtotal: 5000,
+              taxAmount: 800,
+              discountAmount: 0,
+              tipAmount: 750,
+              total: 6550,
+              createdAt: yesterday,
+              updatedAt: yesterday,
+            },
+          })
+
+          const testPayment1 = await prisma.payment.create({
+            data: {
+              venueId: venue.id,
+              orderId: testOrder1.id,
+              amount: 6550,
+              tipAmount: 750,
+              method: PaymentMethod.DEBIT_CARD,
+              source: PaymentSource.WEB,
+              status: TransactionStatus.COMPLETED,
+              processor: primaryAccount.provider?.name || 'Blumonpay',
+              feePercentage: 0.03,
+              feeAmount: 196.5,
+              netAmount: 6353.5,
+              originSystem: OriginSystem.AVOQADO,
+              syncStatus: SyncStatus.SYNCED,
+              createdAt: yesterday,
+              updatedAt: yesterday,
+            },
+          })
+
+          // Create transaction cost
+          await prisma.transactionCost.create({
+            data: {
+              paymentId: testPayment1.id,
+              merchantAccountId: primaryAccount.id,
+              transactionType: TransactionCardType.DEBIT,
+              amount: 6550,
+              providerRate: 0.025,
+              providerCostAmount: 163.75,
+              providerFixedFee: 0,
+              venueRate: 0.03,
+              venueChargeAmount: 196.5,
+              venueFixedFee: 0,
+              grossProfit: 32.75,
+              profitMargin: 0.1667,
+            },
+          })
+
+          // Create VenueTransaction with estimated settlement date = yesterday (should trigger incident)
+          await prisma.venueTransaction.create({
+            data: {
+              venueId: venue.id,
+              paymentId: testPayment1.id,
+              type: TransactionType.PAYMENT,
+              grossAmount: 6550,
+              feeAmount: 196.5,
+              netAmount: 6353.5,
+              status: SettlementStatus.PENDING,
+              estimatedSettlementDate: yesterday, // Expected yesterday!
+              actualSettlementDate: null, // Not arrived yet!
+              netSettlementAmount: 6353.5,
+              createdAt: yesterday,
+            },
+          })
+
+          testTransactions.push({
+            amount: 6550,
+            processor: primaryAccount.provider?.name || 'Primary',
+            cardType: 'DEBIT',
+            expectedDate: yesterday,
+          })
+
+          // Test Transaction 2: Secondary account Credit - Expected 2 days ago, not arrived
+          const secondaryAccount = venuePaymentConfig.secondaryAccount || primaryAccount
+
+          const testOrder2 = await prisma.order.create({
+            data: {
+              venueId: venue.id,
+              orderNumber: `TEST-INCIDENT-002`,
+              status: OrderStatus.COMPLETED,
+              subtotal: 8500,
+              taxAmount: 1360,
+              discountAmount: 0,
+              tipAmount: 1275,
+              total: 11135,
+              createdAt: twoDaysAgo,
+              updatedAt: twoDaysAgo,
+            },
+          })
+
+          const testPayment2 = await prisma.payment.create({
+            data: {
+              venueId: venue.id,
+              orderId: testOrder2.id,
+              amount: 11135,
+              tipAmount: 1275,
+              method: PaymentMethod.CREDIT_CARD,
+              source: PaymentSource.WEB,
+              status: TransactionStatus.COMPLETED,
+              processor: secondaryAccount.provider?.name || 'Secondary',
+              feePercentage: 0.035,
+              feeAmount: 389.73,
+              netAmount: 10745.27,
+              originSystem: OriginSystem.AVOQADO,
+              syncStatus: SyncStatus.SYNCED,
+              createdAt: twoDaysAgo,
+              updatedAt: twoDaysAgo,
+            },
+          })
+
+          // Create transaction cost
+          await prisma.transactionCost.create({
+            data: {
+              paymentId: testPayment2.id,
+              merchantAccountId: secondaryAccount.id,
+              transactionType: TransactionCardType.CREDIT,
+              amount: 11135,
+              providerRate: 0.03,
+              providerCostAmount: 334.05,
+              providerFixedFee: 0,
+              venueRate: 0.035,
+              venueChargeAmount: 389.73,
+              venueFixedFee: 0,
+              grossProfit: 55.68,
+              profitMargin: 0.1429,
+            },
+          })
+
+          // Create VenueTransaction with estimated settlement date = 2 days ago
+          await prisma.venueTransaction.create({
+            data: {
+              venueId: venue.id,
+              paymentId: testPayment2.id,
+              type: TransactionType.PAYMENT,
+              grossAmount: 11135,
+              feeAmount: 389.73,
+              netAmount: 10745.27,
+              status: SettlementStatus.PENDING,
+              estimatedSettlementDate: twoDaysAgo, // Expected 2 days ago!
+              actualSettlementDate: null, // Not arrived yet!
+              netSettlementAmount: 10745.27,
+              createdAt: twoDaysAgo,
+            },
+          })
+
+          testTransactions.push({
+            amount: 11135,
+            processor: secondaryAccount.provider?.name || 'Secondary',
+            cardType: 'CREDIT',
+            expectedDate: twoDaysAgo,
+          })
+
+          console.log(`        ✅ Created ${testTransactions.length} test transactions with delayed settlements:`)
+          testTransactions.forEach(tx => {
+            console.log(
+              `          - $${tx.amount} (${tx.processor} ${tx.cardType}) - Expected: ${tx.expectedDate.toISOString().split('T')[0]}`,
+            )
+          })
+          console.log(
+            `        💡 Run the settlement detection job to create incidents: \`npx ts-node -e "import('./src/jobs/settlement-detection.job').then(m => m.settlementDetectionJob.runNow())"\``,
+          )
+        }
       }
     }
 

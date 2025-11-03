@@ -1,5 +1,10 @@
 /**
+ * @pending-implementation
  * Feature Access Control Middleware
+ *
+ * STATUS: Implemented but not yet applied to routes.
+ * This middleware is ready to use but hasn't been added to route definitions yet.
+ * It will be gradually applied to premium/paid feature endpoints.
  *
  * Validates if a venue has an active subscription for a specific feature.
  * This middleware enforces that only venues with paid/trial subscriptions

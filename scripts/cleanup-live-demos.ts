@@ -10,8 +10,8 @@
  *   npm run cleanup:live-demos -- --stats # Show statistics only
  */
 
-import * as liveDemoCleanupService from '@/services/cleanup/liveDemoCleanup.service'
-import logger from '@/config/logger'
+import * as liveDemoCleanupService from '../src/services/cleanup/liveDemoCleanup.service'
+import logger from '../src/config/logger'
 
 async function main() {
   const args = process.argv.slice(2)
