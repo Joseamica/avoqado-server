@@ -88,7 +88,7 @@ model Venue {
 
   // Legal Entity Type
   entityType     EntityType? // PERSONA_FISICA or PERSONA_MORAL
-  legalDocuments Json?       // Metadata for uploaded legal documents
+  legalDocuments Json? // Metadata for uploaded legal documents
 
   // Tax Information (for converting from demo to real)
   rfc             String? // RFC (Tax ID) for Mexico
@@ -105,11 +105,11 @@ model Venue {
   poderLegalUrl           String? // Power of attorney (Persona Moral only)
 
   // KYC Verification Status
-  kycStatus             VerificationStatus @default(PENDING_REVIEW)
-  kycCompletedAt        DateTime? // When KYC verification was completed
-  kycRejectionReason    String?   @db.Text // Reason for rejection (if REJECTED)
-  kycRejectedDocuments  String[]  @default([]) // Specific documents rejected (e.g., ["ineUrl", "rfcDocumentUrl"])
-  kycVerifiedBy         String? // Superadmin user ID who verified
+  kycStatus            VerificationStatus @default(PENDING_REVIEW)
+  kycCompletedAt       DateTime? // When KYC verification was completed
+  kycRejectionReason   String?            @db.Text // Reason for rejection (if REJECTED)
+  kycRejectedDocuments String[]           @default([]) // Specific documents rejected (e.g., ["ineUrl", "rfcDocumentUrl"])
+  kycVerifiedBy        String? // Superadmin user ID who verified
 
   // Stripe integration (for trial subscriptions)
   stripeCustomerId      String? @unique
@@ -119,6 +119,16 @@ model Venue {
   posType   PosType?
   posConfig Json? // Encrypted POS credentials
   posStatus PosStatus @default(NOT_INTEGRATED)
+
+  // Google Business Profile Integration
+  googleBusinessProfileConnected Boolean   @default(false)
+  googleBusinessProfileEmail     String?
+  googlePlaceId                  String?   // Internal Google location ID
+  googleLocationName             String?
+  googleAccessToken              String?   @db.Text
+  googleRefreshToken             String?   @db.Text
+  googleTokenExpiresAt           DateTime?
+  googleLastSyncAt               DateTime?
 
   // Avoqado Fees
   feeType       FeeType      @default(PERCENTAGE)
@@ -159,11 +169,14 @@ model Venue {
   chatTrainingData ChatTrainingData[] @relation("VenueChatTraining")
 
   // Payment Provider Integration
-  paymentConfig        VenuePaymentConfig?
-  webhookSubscriptions WebhookSubscription[]
-  providerEvents       ProviderEventLog[]
-  pricingStructures    VenuePricingStructure[]
-  monthlyProfits       MonthlyVenueProfit[]
+  paymentConfig           VenuePaymentConfig?
+  webhookSubscriptions    WebhookSubscription[]
+  providerEvents          ProviderEventLog[]
+  pricingStructures       VenuePricingStructure[]
+  monthlyProfits          MonthlyVenueProfit[]
+  settlementSimulations   SettlementSimulation[]
+  settlementIncidents     SettlementIncident[]
+  settlementConfirmations SettlementConfirmation[]
 
   // ✅ NEW: Inventory Management
   rawMaterials         RawMaterial[]
@@ -175,7 +188,7 @@ model Venue {
   stockBatches         StockBatch[] // FIFO batch tracking
 
   // ✅ NEW: Webhook event logging
-  webhookEvents        WebhookEvent[]
+  webhookEvents WebhookEvent[]
 
   // ✅ NEW: Live Demo Session
   liveDemoSession LiveDemoSession?
@@ -285,7 +298,7 @@ model Staff {
   invitations   Invitation[]
 
   // Email Verification
-  emailVerificationCode    String?   // 4-digit PIN code
+  emailVerificationCode    String? // 4-digit PIN code
   emailVerificationExpires DateTime? // Expiration time for verification code
 
   // Access
@@ -317,6 +330,9 @@ model Staff {
   // ✅ NEW: Live Demo Session
   liveDemoSession LiveDemoSession?
 
+  // ✅ NEW: Settlement simulations
+  settlementSimulations SettlementSimulation[]
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   lastLoginAt DateTime?
@@ -326,10 +342,10 @@ model Staff {
   lockedUntil         DateTime?
 
   // Password reset fields (Stripe-style flow)
-  resetToken          String?   @unique
-  resetTokenExpiry    DateTime?
-  resetTokenUsedAt    DateTime?
-  lastPasswordReset   DateTime?
+  resetToken        String?   @unique
+  resetTokenExpiry  DateTime?
+  resetTokenUsedAt  DateTime?
+  lastPasswordReset DateTime?
 
   @@index([email])
   // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
@@ -444,6 +460,19 @@ model Invitation {
   @@index([venueId])
   @@index([status]) // ✅ AGREGAR
   @@index([expiresAt]) // ✅ AGREGAR para queries de limpieza
+}
+
+// OAuth State Management (for Google Integration)
+model OAuthState {
+  id        String   @id @default(cuid())
+  state     String   @unique
+  venueId   String
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([state])
+  @@index([expiresAt])
 }
 
 // ==========================================
@@ -1609,16 +1638,30 @@ model VenueTransaction {
   feeAmount   Decimal @db.Decimal(10, 2)
   netAmount   Decimal @db.Decimal(12, 2)
 
-  // Settlement
+  // Settlement tracking
   status       SettlementStatus @default(PENDING)
-  settledAt    DateTime?
-  settlementId String?
+  settledAt    DateTime? // When funds were actually settled
+  settlementId String? // External settlement ID from processor
+
+  // NEW: Enhanced settlement tracking
+  estimatedSettlementDate DateTime? // Calculated settlement date based on rules
+  actualSettlementDate    DateTime? // Real settlement date (can differ from estimate)
+  netSettlementAmount     Decimal?            @db.Decimal(12, 2) // Net amount after ALL fees
+  settlementConfigId      String? // Reference to config used for calculation
+  settlementNotes         String? // Notes about settlement (delays, issues, etc.)
+  settlementVarianceDays  Int? // Days variance (actual - estimated)
+  confirmationMethod      ConfirmationMethod? // How settlement was confirmed
+
+  // Relations
+  incidents     SettlementIncident[]
+  confirmations SettlementConfirmation[]
 
   createdAt DateTime @default(now())
 
   @@index([venueId])
   @@index([status])
   @@index([createdAt])
+  @@index([estimatedSettlementDate])
 }
 
 // ==========================================
@@ -1677,21 +1720,21 @@ model VenueFeature {
 // ==========================================
 
 model WebhookEvent {
-  id              String   @id @default(cuid())
-  stripeEventId   String   @unique // Stripe's event ID (evt_xxx)
-  eventType       String   // e.g., "customer.subscription.updated"
-  payload         Json     // Full Stripe event payload
-  status          WebhookEventStatus @default(PENDING)
-  errorMessage    String?  @db.Text
-  processingTime  Int?     // Time in milliseconds
-  retryCount      Int      @default(0)
+  id             String             @id @default(cuid())
+  stripeEventId  String             @unique // Stripe's event ID (evt_xxx)
+  eventType      String // e.g., "customer.subscription.updated"
+  payload        Json // Full Stripe event payload
+  status         WebhookEventStatus @default(PENDING)
+  errorMessage   String?            @db.Text
+  processingTime Int? // Time in milliseconds
+  retryCount     Int                @default(0)
 
   // Related entities (optional)
-  venueId         String?
-  venue           Venue?   @relation(fields: [venueId], references: [id], onDelete: SetNull)
+  venueId String?
+  venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: SetNull)
 
-  createdAt       DateTime @default(now())
-  processedAt     DateTime? // When successfully processed
+  createdAt   DateTime  @default(now())
+  processedAt DateTime? // When successfully processed
 
   @@index([stripeEventId])
   @@index([eventType])
@@ -1804,6 +1847,7 @@ model Review {
 
   createdAt DateTime @default(now())
 
+  @@unique([venueId, externalId])
   @@index([venueId])
   @@index([overallRating])
   @@index([createdAt])
@@ -1920,11 +1964,12 @@ model MerchantAccount {
   providerConfig Json? // Flexible config per provider
 
   // Relations
-  venueConfigsPrimary   VenuePaymentConfig[]    @relation("PrimaryAccount")
-  venueConfigsSecondary VenuePaymentConfig[]    @relation("SecondaryAccount")
-  venueConfigsTertiary  VenuePaymentConfig[]    @relation("TertiaryAccount")
+  venueConfigsPrimary   VenuePaymentConfig[]      @relation("PrimaryAccount")
+  venueConfigsSecondary VenuePaymentConfig[]      @relation("SecondaryAccount")
+  venueConfigsTertiary  VenuePaymentConfig[]      @relation("TertiaryAccount")
   costStructures        ProviderCostStructure[]
   transactionCosts      TransactionCost[]
+  settlementConfigs     SettlementConfiguration[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2020,12 +2065,12 @@ model ProviderEventLog {
 model StripeWebhookEvent {
   id        String   @id @default(cuid())
   eventId   String   @unique // Stripe event.id
-  type      String   // Event type (e.g., "customer.subscription.updated")
+  type      String // Event type (e.g., "customer.subscription.updated")
   processed Boolean  @default(false) // Whether event processing completed successfully
   createdAt DateTime @default(now())
 
   // Failure tracking for observability
-  failureReason String?   // Error message if processing failed
+  failureReason String? // Error message if processing failed
   failedAt      DateTime? // When the processing failed
   retryCount    Int       @default(0) // Number of times Stripe retried this event
 
@@ -2181,6 +2226,232 @@ model TransactionCost {
   @@index([merchantAccountId])
   @@index([transactionType])
   @@index([createdAt])
+}
+
+// ==========================================
+// SETTLEMENT TRACKING & AVAILABLE BALANCE
+// ==========================================
+
+/// Settlement configuration per merchant account and card type
+/// Defines the rules for when funds will be available to the venue
+model SettlementConfiguration {
+  id String @id @default(cuid())
+
+  // Merchant account this config applies to
+  merchantAccountId String
+  merchantAccount   MerchantAccount @relation(fields: [merchantAccountId], references: [id], onDelete: Cascade)
+
+  // Card type this configuration applies to
+  cardType TransactionCardType
+
+  // Settlement timing rules
+  settlementDays    Int // Number of days until settlement (e.g., 1, 3, 7)
+  settlementDayType SettlementDayType // BUSINESS_DAYS or CALENDAR_DAYS
+  cutoffTime        String // Time of day cutoff (e.g., "23:00")
+  cutoffTimezone    String // Timezone for cutoff (e.g., "America/Mexico_City")
+
+  // Effective date range for this configuration
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  // Metadata
+  notes     String? // Admin notes about this configuration
+  createdBy String? // Staff ID who created this config
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([merchantAccountId, cardType, effectiveFrom])
+  @@index([merchantAccountId])
+  @@index([cardType])
+  @@index([effectiveFrom])
+}
+
+/// Settlement simulation records
+/// Stores user simulations for historical tracking and analytics
+model SettlementSimulation {
+  id String @id @default(cuid())
+
+  // User who ran the simulation
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  userId  String
+  user    Staff  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Simulation parameters
+  simulationType  SimulationType
+  simulatedAmount Decimal              @db.Decimal(12, 2)
+  cardType        TransactionCardType?
+  simulatedDate   DateTime // When the hypothetical transaction would occur
+  simulatedTime   String? // Time of day for the transaction (e.g., "14:30")
+
+  // Simulation results (stored as JSON for flexibility)
+  results Json // Contains: estimatedSettlementDate, netAmount, fees, etc.
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId])
+  @@index([userId])
+  @@index([simulationType])
+  @@index([createdAt])
+}
+
+/// Settlement Incident Tracking
+/// Tracks when expected settlements don't arrive on time
+model SettlementIncident {
+  id String @id @default(cuid())
+
+  // Transaction that didn't settle as expected
+  transactionId String?
+  transaction   VenueTransaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  // Venue affected
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Incident details
+  estimatedSettlementDate DateTime // When we expected settlement
+  actualSettlementDate    DateTime? // When it actually settled (if resolved)
+  delayDays               Int? // Days delayed (calculated)
+
+  // Processor information
+  processorName   String // e.g., "Blumonpay", "Menta", "Clip"
+  cardType        TransactionCardType
+  transactionDate DateTime
+  amount          Decimal             @db.Decimal(12, 2)
+
+  // Status tracking
+  status         IncidentStatus @default(PENDING_CONFIRMATION)
+  detectionDate  DateTime       @default(now()) // When we detected the issue
+  resolutionDate DateTime? // When incident was resolved
+
+  // Notes and follow-up
+  notes           String?   @db.Text
+  alertedSOFOM    Boolean   @default(false) // Did we alert SOFOM?
+  alertedAt       DateTime?
+  resolvedBy      String? // Staff ID who resolved
+  resolutionNotes String?   @db.Text
+
+  // Relations
+  confirmations SettlementConfirmation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([status])
+  @@index([estimatedSettlementDate])
+  @@index([detectionDate])
+  @@index([processorName])
+}
+
+/// Manual Settlement Confirmations
+/// Tracks when venues/admins manually confirm settlement arrival
+model SettlementConfirmation {
+  id String @id @default(cuid())
+
+  // Related incident (optional - can be standalone confirmation)
+  incidentId String?
+  incident   SettlementIncident? @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  // Transaction confirmed
+  transactionId String?
+  transaction   VenueTransaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  // Venue
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Confirmation details
+  confirmedBy       String // Staff ID who confirmed
+  confirmationDate  DateTime  @default(now())
+  settlementArrived Boolean // Did money actually arrive?
+  actualDate        DateTime? // When money arrived (if yes)
+
+  // Evidence (optional)
+  notes         String? @db.Text
+  evidenceUrl   String? // Photo/document of bank statement
+  bankReference String? // Bank transaction reference
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId])
+  @@index([incidentId])
+  @@index([transactionId])
+  @@index([confirmationDate])
+}
+
+/// Processor Reliability Metrics
+/// Tracks historical accuracy of settlement projections per processor
+model ProcessorReliabilityMetric {
+  id String @id @default(cuid())
+
+  // Processor identification
+  processorName String // e.g., "Blumonpay", "Menta", "Clip"
+  cardType      TransactionCardType
+
+  // Time period for this metric
+  periodStart DateTime
+  periodEnd   DateTime
+
+  // Volume metrics
+  totalTransactions Int
+  totalAmount       Decimal @db.Decimal(15, 2)
+
+  // Accuracy metrics
+  onTimeSettlements  Int // Settled on expected date
+  delayedSettlements Int // Settled late
+  failedSettlements  Int @default(0) // Never settled
+
+  // Delay statistics
+  averageDelayDays Decimal @default(0) @db.Decimal(5, 2) // Average days late
+  maxDelayDays     Int     @default(0) // Worst delay
+
+  // Reliability score (0-100)
+  reliabilityScore Decimal @db.Decimal(5, 2) // % of on-time settlements
+
+  // Confidence level
+  confidence ConfidenceLevel @default(LOW)
+
+  // Metadata
+  calculatedAt DateTime @default(now())
+  notes        String?  @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([processorName, cardType, periodStart])
+  @@index([processorName])
+  @@index([cardType])
+  @@index([periodStart])
+  @@index([reliabilityScore])
+}
+
+/// Holiday Calendar
+/// Mexican federal and banking holidays for settlement calculations
+model HolidayCalendar {
+  id String @id @default(cuid())
+
+  // Holiday details
+  name        String
+  date        DateTime    @db.Date
+  year        Int
+  holidayType HolidayType
+  isBanking   Boolean     @default(true) // Affects settlements?
+
+  // Metadata
+  description String?
+  createdBy   String? // Staff ID who added
+  notes       String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([date, holidayType])
+  @@index([date])
+  @@index([year])
+  @@index([holidayType])
+  @@index([isBanking])
 }
 
 // Monthly profit summary per venue
@@ -2435,15 +2706,15 @@ enum BusinessType {
 }
 
 enum EntityType {
-  PERSONA_FISICA  // Natural person / individual
-  PERSONA_MORAL   // Legal entity / company
+  PERSONA_FISICA // Natural person / individual
+  PERSONA_MORAL // Legal entity / company
 }
 
 enum VerificationStatus {
   PENDING_REVIEW // Awaiting Superadmin KYC review
-  IN_REVIEW      // Superadmin is currently reviewing
-  VERIFIED       // KYC approved, venue can operate
-  REJECTED       // KYC rejected, needs resubmission
+  IN_REVIEW // Superadmin is currently reviewing
+  VERIFIED // KYC approved, venue can operate
+  REJECTED // KYC rejected, needs resubmission
 }
 
 enum VenueType {
@@ -2628,10 +2899,10 @@ enum InvoiceStatus {
 }
 
 enum WebhookEventStatus {
-  PENDING    // Webhook received, not yet processed
-  SUCCESS    // Processed successfully
-  FAILED     // Processing failed
-  RETRYING   // Currently retrying after failure
+  PENDING // Webhook received, not yet processed
+  SUCCESS // Processed successfully
+  FAILED // Processing failed
+  RETRYING // Currently retrying after failure
 }
 
 enum ReviewSource {
@@ -2756,11 +3027,46 @@ enum TransactionCardType {
   OTHER
 }
 
+enum SettlementDayType {
+  BUSINESS_DAYS // Exclude weekends and holidays
+  CALENDAR_DAYS // Count all days including weekends
+}
+
+enum SimulationType {
+  MANUAL_TRANSACTION // Simulate a hypothetical transaction
+  HISTORICAL_PROJECTION // Project based on historical patterns
+}
+
 enum ProfitStatus {
   CALCULATED
   VERIFIED
   DISPUTED
   FINALIZED
+}
+
+enum IncidentStatus {
+  PENDING_CONFIRMATION // Detected but not confirmed
+  CONFIRMED_DELAY // Venue confirmed it's delayed
+  RESOLVED // Settlement arrived, incident closed
+  ESCALATED // Requires SuperAdmin attention
+}
+
+enum ConfidenceLevel {
+  HIGH // 95%+ reliability
+  MEDIUM // 85-95% reliability
+  LOW // <85% reliability
+}
+
+enum HolidayType {
+  FEDERAL // Federal holiday
+  BANKING // Banking holiday (affects settlements)
+  GENERAL // General observance
+}
+
+enum ConfirmationMethod {
+  AUTOMATIC // Detected via API/webhook
+  MANUAL // Venue/admin confirmed
+  BANK_INTEGRATION // Verified via bank API
 }
 
 enum SplitType {
@@ -2846,9 +3152,9 @@ enum NotificationType {
 
   // KYC notifications (Superadmin)
   NEW_KYC_SUBMISSION // New venue submitted KYC documents
-  KYC_APPROVED       // KYC was approved by superadmin
-  KYC_REJECTED       // KYC was rejected by superadmin
-  KYC_IN_REVIEW      // KYC marked as in review
+  KYC_APPROVED // KYC was approved by superadmin
+  KYC_REJECTED // KYC was rejected by superadmin
+  KYC_IN_REVIEW // KYC marked as in review
 
   // General
   ANNOUNCEMENT

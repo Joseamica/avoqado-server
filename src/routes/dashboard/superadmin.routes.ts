@@ -16,6 +16,7 @@ import venuePricingRoutes from '../superadmin/venuePricing.routes'
 import paymentAnalyticsRoutes from '../superadmin/paymentAnalytics.routes'
 import webhookRoutes from '../superadmin/webhook.routes'
 import kycReviewRoutes from '../superadmin/kycReview.routes'
+import settlementConfigRoutes from '../superadmin/settlementConfiguration.routes'
 
 // Import cost management validation schemas
 import {
@@ -141,5 +142,8 @@ router.use('/webhooks', webhookRoutes)
 
 // KYC Review & Approval Workflow
 router.use('/kyc', kycReviewRoutes)
+
+// Settlement Configuration Management
+router.use('/settlement-configurations', settlementConfigRoutes)
 
 export default router

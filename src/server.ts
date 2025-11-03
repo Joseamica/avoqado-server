@@ -17,6 +17,7 @@ import { startEventConsumer } from './communication/rabbitmq/consumer'
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
+import { settlementDetectionJob } from './jobs/settlement-detection.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -48,6 +49,10 @@ const gracefulShutdown = async (signal: string) => {
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
       subscriptionCancellationJob.stop()
+
+      // Stop settlement detection job
+      logger.info('Stopping settlement detection job...')
+      settlementDetectionJob.stop()
 
       // Shutdown Socket.io server
       logger.info('Shutting down Socket.io server...')
@@ -127,6 +132,9 @@ const startApplication = async (retries = 3) => {
 
     // Start subscription cancellation job
     subscriptionCancellationJob.start()
+
+    // Start settlement detection job
+    settlementDetectionJob.start()
 
     logger.info('✅ All communication and monitoring services started successfully.')
 

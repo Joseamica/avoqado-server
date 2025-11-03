@@ -14,9 +14,12 @@ import { validateRequest } from '../middlewares/validation' // Verifica esta rut
 // Importa el SCHEMA de Zod, no el tipo DTO, para el middleware de validación
 import * as assistantController from '../controllers/dashboard/assistant.dashboard.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
+import * as availableBalanceController from '../controllers/dashboard/availableBalance.dashboard.controller'
+import * as settlementIncidentController from '../controllers/dashboard/settlementIncident.dashboard.controller'
 import * as featureController from '../controllers/dashboard/feature.controller'
 import * as generalStatsController from '../controllers/dashboard/generalStats.dashboard.controller'
 import * as googleOAuthController from '../controllers/dashboard/googleOAuth.controller'
+import * as googleIntegrationController from '../controllers/dashboard/googleIntegration.dashboard.controller'
 import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
 import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
@@ -33,6 +36,13 @@ import * as venueController from '../controllers/dashboard/venue.dashboard.contr
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
+import {
+  dateRangeQuerySchema,
+  timelineQuerySchema,
+  simulateTransactionSchema,
+  balanceProjectionQuerySchema,
+} from '../schemas/dashboard/availableBalance.schema'
+import { incidentListQuerySchema, confirmIncidentSchema, escalateIncidentSchema } from '../schemas/dashboard/settlementIncident.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
@@ -1036,6 +1046,230 @@ router.delete(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
 router.get('/venues/:venueId/reviews', authenticateTokenMiddleware, checkPermission('reviews:read'), reviewController.getReviewsData)
+
+// Google Business Profile Integration Routes
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/integrations/google/init-oauth:
+ *   post:
+ *     tags: [Integrations]
+ *     summary: Initialize Google Business Profile OAuth flow
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: OAuth authorization URL generated
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/integrations/google/init-oauth',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  googleIntegrationController.initGoogleOAuth,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/integrations/google/callback:
+ *   get:
+ *     tags: [Integrations]
+ *     summary: Handle Google OAuth callback (no auth required, uses state parameter)
+ *     parameters:
+ *       - in: query
+ *         name: code
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: state
+ *         schema:
+ *           type: string
+ *         description: Contains stateToken:venueId for security and routing
+ *     responses:
+ *       302:
+ *         description: Redirect to dashboard with success/error status
+ */
+router.get('/integrations/google/callback', googleIntegrationController.handleGoogleCallback)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/integrations/google/status:
+ *   get:
+ *     tags: [Integrations]
+ *     summary: Get Google Business Profile integration status
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Integration status retrieved
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/integrations/google/status',
+  authenticateTokenMiddleware,
+  checkPermission('venues:read'),
+  googleIntegrationController.getGoogleIntegrationStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/integrations/google/sync:
+ *   post:
+ *     tags: [Integrations]
+ *     summary: Manually trigger Google reviews sync
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Reviews synced successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/integrations/google/sync',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  googleIntegrationController.syncGoogleReviews,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/integrations/google/disconnect:
+ *   delete:
+ *     tags: [Integrations]
+ *     summary: Disconnect Google Business Profile integration
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Integration disconnected
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.delete(
+  '/venues/:venueId/integrations/google/disconnect',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  googleIntegrationController.disconnectGoogleIntegration,
+)
+
+// Review Response Routes
+/**
+ * @openapi
+ * /api/v1/dashboard/reviews/{reviewId}/generate-response:
+ *   post:
+ *     tags: [Reviews]
+ *     summary: Generate AI-powered response draft for a review
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: reviewId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: AI response generated successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/reviews/:reviewId/generate-response',
+  authenticateTokenMiddleware,
+  checkPermission('reviews:respond'),
+  reviewController.generateReviewResponse,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/reviews/{reviewId}/submit-response:
+ *   post:
+ *     tags: [Reviews]
+ *     summary: Submit approved review response
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: reviewId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               responseText:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Response submitted successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/reviews/:reviewId/submit-response',
+  authenticateTokenMiddleware,
+  checkPermission('reviews:respond'),
+  reviewController.submitReviewResponse,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/reviews/{reviewId}/response-feedback:
+ *   post:
+ *     tags: [Reviews]
+ *     summary: Submit feedback on AI-generated response
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: reviewId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               trainingDataId:
+ *                 type: string
+ *               feedback:
+ *                 type: string
+ *                 enum: [positive, negative]
+ *               correctionText:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Feedback submitted successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/reviews/:reviewId/response-feedback',
+  authenticateTokenMiddleware,
+  checkPermission('reviews:respond'),
+  reviewController.submitResponseFeedback,
+)
 
 // Rutas de Venue para el Dashboard
 /**
@@ -2299,6 +2533,326 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   paymentController.getReceiptById,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/available-balance:
+ *   get:
+ *     tags: [Available Balance]
+ *     summary: Get available balance summary for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: from, in: query, schema: { type: string, format: date-time } }
+ *       - { name: to, in: query, schema: { type: string, format: date-time } }
+ *     responses:
+ *       200:
+ *         description: Available balance summary
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/available-balance',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(dateRangeQuerySchema),
+  availableBalanceController.getAvailableBalance,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/available-balance/by-card-type:
+ *   get:
+ *     tags: [Available Balance]
+ *     summary: Get balance breakdown by card type
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: from, in: query, schema: { type: string, format: date-time } }
+ *       - { name: to, in: query, schema: { type: string, format: date-time } }
+ *     responses:
+ *       200:
+ *         description: Balance breakdown by card type
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/available-balance/by-card-type',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(dateRangeQuerySchema),
+  availableBalanceController.getBalanceByCardType,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/available-balance/timeline:
+ *   get:
+ *     tags: [Available Balance]
+ *     summary: Get settlement timeline
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+ *       - { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+ *     responses:
+ *       200:
+ *         description: Settlement timeline
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/available-balance/timeline',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(timelineQuerySchema),
+  availableBalanceController.getSettlementTimeline,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/available-balance/settlement-calendar:
+ *   get:
+ *     tags: [Available Balance]
+ *     summary: Get settlement calendar - shows exactly how much will be deposited each day
+ *     description: Groups transactions by settlement date to show daily deposit amounts
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: from, in: query, required: false, schema: { type: string, format: date-time }, description: "Start date (defaults to today)" }
+ *       - { name: to, in: query, required: false, schema: { type: string, format: date-time }, description: "End date (defaults to 30 days from now)" }
+ *     responses:
+ *       200:
+ *         description: Settlement calendar entries
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/available-balance/settlement-calendar',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(dateRangeQuerySchema),
+  availableBalanceController.getSettlementCalendar,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/available-balance/simulate:
+ *   post:
+ *     tags: [Available Balance]
+ *     summary: Simulate a transaction to see estimated settlement
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               amount:
+ *                 type: number
+ *               cardType:
+ *                 type: string
+ *                 enum: [DEBIT, CREDIT, AMEX, INTERNATIONAL, OTHER]
+ *               transactionDate:
+ *                 type: string
+ *                 format: date-time
+ *               transactionTime:
+ *                 type: string
+ *                 pattern: '^([01]\\d|2[0-3]):([0-5]\\d)$'
+ *     responses:
+ *       200:
+ *         description: Simulation results
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/available-balance/simulate',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(simulateTransactionSchema),
+  availableBalanceController.simulateTransaction,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/available-balance/projection:
+ *   get:
+ *     tags: [Available Balance]
+ *     summary: Project future balance based on historical patterns
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 30, default: 7 } }
+ *     responses:
+ *       200:
+ *         description: Balance projection
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/available-balance/projection',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(balanceProjectionQuerySchema),
+  availableBalanceController.getBalanceProjection,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settlement-incidents:
+ *   get:
+ *     tags: [Settlement Incidents]
+ *     summary: Get settlement incidents for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: status, in: query, schema: { type: string, enum: [pending, active, all] } }
+ *     responses:
+ *       200:
+ *         description: List of settlement incidents
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/settlement-incidents',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(incidentListQuerySchema),
+  settlementIncidentController.getVenueIncidents,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settlement-incidents/stats:
+ *   get:
+ *     tags: [Settlement Incidents]
+ *     summary: Get incident statistics for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Incident statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/settlement-incidents/stats',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  settlementIncidentController.getVenueIncidentStats,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settlement-incidents/{incidentId}/confirm:
+ *   post:
+ *     tags: [Settlement Incidents]
+ *     summary: Confirm whether a settlement arrived or not
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: incidentId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [settlementArrived]
+ *             properties:
+ *               settlementArrived: { type: boolean }
+ *               actualDate: { type: string, format: date-time }
+ *               notes: { type: string, maxLength: 1000 }
+ *     responses:
+ *       200:
+ *         description: Settlement incident confirmed
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/settlement-incidents/:incidentId/confirm',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:write'),
+  validateRequest(confirmIncidentSchema),
+  settlementIncidentController.confirmIncident,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/superadmin/settlement-incidents:
+ *   get:
+ *     tags: [Settlement Incidents]
+ *     summary: Get all settlement incidents (SuperAdmin only)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: status, in: query, schema: { type: string, enum: [pending, active, all] } }
+ *     responses:
+ *       200:
+ *         description: List of all settlement incidents
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/superadmin/settlement-incidents',
+  authenticateTokenMiddleware,
+  checkPermission('system:admin'),
+  validateRequest(incidentListQuerySchema),
+  settlementIncidentController.getAllIncidents,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/superadmin/settlement-incidents/stats:
+ *   get:
+ *     tags: [Settlement Incidents]
+ *     summary: Get global incident statistics (SuperAdmin only)
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Global incident statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/superadmin/settlement-incidents/stats',
+  authenticateTokenMiddleware,
+  checkPermission('system:admin'),
+  settlementIncidentController.getGlobalIncidentStats,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/superadmin/settlement-incidents/{incidentId}/escalate:
+ *   post:
+ *     tags: [Settlement Incidents]
+ *     summary: Escalate an incident (SuperAdmin only)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: incidentId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notes: { type: string, maxLength: 1000 }
+ *     responses:
+ *       200:
+ *         description: Incident escalated
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/superadmin/settlement-incidents/:incidentId/escalate',
+  authenticateTokenMiddleware,
+  checkPermission('system:admin'),
+  validateRequest(escalateIncidentSchema),
+  settlementIncidentController.escalateIncident,
 )
 
 // Venue Payment Configuration routes (SUPERADMIN only)

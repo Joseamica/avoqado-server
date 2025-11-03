@@ -180,6 +180,16 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'analytics:export': ['analytics:read', 'analytics:export', 'orders:read', 'payments:read'],
 
   // ===========================
+  // SETTLEMENTS - Available Balance
+  // ===========================
+  'settlements:read': [
+    'settlements:read',
+    'payments:read', // Settlements show payment data
+    'analytics:read', // Settlements use analytics for projections
+  ],
+  'settlements:simulate': ['settlements:read', 'settlements:simulate'],
+
+  // ===========================
   // VENUES - Settings
   // ===========================
   'venues:read': ['venues:read'],
@@ -352,6 +362,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'home:read',
     'analytics:read',
     'analytics:export',
+    'settlements:read',
+    'settlements:simulate',
     'menu:read',
     'menu:create',
     'menu:update',
