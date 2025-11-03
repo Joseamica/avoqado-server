@@ -39,11 +39,7 @@ export async function getVenueIncidents(
  * GET /dashboard/superadmin/settlement-incidents
  * Get all incidents across all venues (SuperAdmin only)
  */
-export async function getAllIncidents(
-  req: Request<{}, {}, {}, { status?: string }>,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getAllIncidents(req: Request<{}, {}, {}, { status?: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { status } = req.query
 
@@ -138,11 +134,7 @@ export async function escalateIncident(
  * GET /dashboard/venues/:venueId/settlement-incidents/stats
  * Get incident statistics for a venue
  */
-export async function getVenueIncidentStats(
-  req: Request<{ venueId: string }>,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getVenueIncidentStats(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
 
@@ -159,11 +151,7 @@ export async function getVenueIncidentStats(
  * GET /dashboard/superadmin/settlement-incidents/stats
  * Get global incident statistics (SuperAdmin only)
  */
-export async function getGlobalIncidentStats(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
+export async function getGlobalIncidentStats(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const stats = await settlementIncidentService.getIncidentStats()
 
