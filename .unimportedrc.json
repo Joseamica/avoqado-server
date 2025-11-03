@@ -1,0 +1,63 @@
+{
+  "entry": [
+    "src/server.ts",
+    "src/app.ts",
+    "src/jobs/**/*.job.ts",
+    "src/scripts/**/*.ts",
+    "scripts/**/*.ts"
+  ],
+  "extensions": [
+    ".ts",
+    ".js"
+  ],
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/prisma/migrations/**",
+    "**/prisma/seed.ts"
+  ],
+  "ignoreUnresolved": [
+    "@prisma/client",
+    "express",
+    "prisma"
+  ],
+  "ignoreUnused": [
+    ".env",
+    ".env.example",
+    "@google-cloud/local-auth",
+    "@radix-ui/react-scroll-area",
+    "@types/handlebars",
+    "@types/multer",
+    "@types/node-cron",
+    "README.md",
+    "axios",
+    "detect-port",
+    "graphql-http",
+    "handlebars",
+    "package.json",
+    "pm2",
+    "prisma/schema.prisma",
+    "rate-limit-redis",
+    "src/config/ecosystem.config.js",
+    "src/types/**/*.d.ts",
+    "tsconfig-paths",
+    "tsconfig.json",
+    "vitest",
+    "yaml"
+  ],
+  "ignoreDependencies": [
+    "@types/*",
+    "tsconfig-paths",
+    "ts-node",
+    "nodemon",
+    "pm2"
+  ],
+  "ignoreUnimported": [
+    "src/config/ecosystem.config.js",
+    "src/types/**/*.d.ts",
+    "src/middlewares/checkFeatureAccess.middleware.ts"
+  ]
+}
