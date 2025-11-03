@@ -1,6 +1,7 @@
 // src/controllers/dashboard/review.dashboard.controller.ts
 import { NextFunction, Request, Response } from 'express'
 import * as reviewsDashboardService from '../../services/dashboard/review.dashboard.service'
+import * as reviewResponseService from '../../services/reviewResponse.service'
 import { DashboardWithDates } from '../../schemas/dashboard/home.schema'
 import { parseDateRange } from '@/utils/datetime'
 
@@ -20,6 +21,56 @@ export async function getReviewsData(
     const reviewsData = await reviewsDashboardService.getReviewsData(venueId, dateFilter)
 
     res.status(200).json(reviewsData)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Generate AI-powered response draft for a review
+ * POST /api/v1/dashboard/reviews/:reviewId/generate-response
+ */
+export async function generateReviewResponse(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { reviewId } = req.params
+
+    const result = await reviewResponseService.generateAIResponse(reviewId)
+
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Submit approved review response
+ * POST /api/v1/dashboard/reviews/:reviewId/submit-response
+ */
+export async function submitReviewResponse(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { reviewId } = req.params
+    const { responseText } = req.body
+
+    const result = await reviewResponseService.submitResponse(reviewId, responseText)
+
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Submit feedback on AI-generated response
+ * POST /api/v1/dashboard/reviews/:reviewId/response-feedback
+ */
+export async function submitResponseFeedback(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { reviewId } = req.params
+    const { trainingDataId, feedback, correctionText } = req.body
+
+    const result = await reviewResponseService.submitFeedback(reviewId, trainingDataId, feedback, correctionText)
+
+    res.status(200).json(result)
   } catch (error) {
     next(error)
   }
