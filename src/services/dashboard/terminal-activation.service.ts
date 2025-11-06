@@ -80,9 +80,15 @@ export async function generateActivationCode(terminalId: string, staffId: string
 export async function activateTerminal(serialNumber: string, activationCode: string) {
   logger.info(`Terminal activation attempt: serial=${serialNumber}, code=${activationCode}`)
 
-  // Find terminal by serial number
-  const terminal = await prisma.terminal.findUnique({
-    where: { serialNumber },
+  // Find terminal by serial number (case-insensitive)
+  // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
+  const terminal = await prisma.terminal.findFirst({
+    where: {
+      serialNumber: {
+        equals: serialNumber,
+        mode: 'insensitive', // Case-insensitive matching
+      },
+    },
     include: {
       venue: {
         select: { id: true, name: true, slug: true },

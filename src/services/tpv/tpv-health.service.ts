@@ -52,30 +52,50 @@ export class TpvHealthService {
     const { terminalId, timestamp, status, version, systemInfo } = heartbeatData
     try {
       // Try to find terminal by multiple identifiers for compatibility
-      // 1. Try internal database ID first
+      // ✅ CASE-INSENSITIVE MATCHING: Android may send lowercase, DB stores uppercase
+      //
+      // 1. Try internal database ID first (exact match)
       let terminal = await prisma.terminal.findUnique({
         where: { id: terminalId },
       })
 
       // 2. If not found by internal ID, try serialNumber (hardware serial)
       // Android removes "AVQD-" prefix, so try both with and without prefix
-      if (!terminal) {
-        terminal = await prisma.terminal.findUnique({
-          where: { serialNumber: terminalId },
-        })
-      }
-
-      // 2b. If still not found, try WITH AVQD- prefix
-      if (!terminal && !terminalId.startsWith('AVQD-')) {
-        terminal = await prisma.terminal.findUnique({
-          where: { serialNumber: `AVQD-${terminalId}` },
-        })
-      }
-
-      // 3. If not found by serial, try Menta terminal ID (cached from Menta API)
+      // ✅ CASE-INSENSITIVE: Use mode: 'insensitive'
       if (!terminal) {
         terminal = await prisma.terminal.findFirst({
-          where: { mentaTerminalId: terminalId },
+          where: {
+            serialNumber: {
+              equals: terminalId,
+              mode: 'insensitive', // Case-insensitive matching
+            },
+          },
+        })
+      }
+
+      // 2b. If still not found, try WITH AVQD- prefix (case-insensitive)
+      if (!terminal && !terminalId.toUpperCase().startsWith('AVQD-')) {
+        terminal = await prisma.terminal.findFirst({
+          where: {
+            serialNumber: {
+              equals: `AVQD-${terminalId}`,
+              mode: 'insensitive', // Case-insensitive matching
+            },
+          },
+        })
+      }
+
+      // 3. If not found by serial, try Menta terminal ID (case-insensitive)
+      // 🚫 NOTE: Menta integration is disabled, but keeping this for backwards compatibility
+      // with existing terminals that have mentaTerminalId stored in database
+      if (!terminal) {
+        terminal = await prisma.terminal.findFirst({
+          where: {
+            mentaTerminalId: {
+              equals: terminalId,
+              mode: 'insensitive', // Case-insensitive matching
+            },
+          },
         })
       }
 
@@ -156,14 +176,20 @@ export class TpvHealthService {
   async sendCommand(terminalId: string, command: TpvCommand): Promise<void> {
     try {
       // Try to find terminal by ID first, then by serialNumber (for Android devices using device serial)
+      // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
       let terminal = await prisma.terminal.findUnique({
         where: { id: terminalId },
       })
 
-      // If not found by ID, try to find by serialNumber (Android device compatibility)
+      // If not found by ID, try to find by serialNumber (case-insensitive)
       if (!terminal) {
-        terminal = await prisma.terminal.findUnique({
-          where: { serialNumber: terminalId },
+        terminal = await prisma.terminal.findFirst({
+          where: {
+            serialNumber: {
+              equals: terminalId,
+              mode: 'insensitive', // Case-insensitive matching
+            },
+          },
         })
       }
 
@@ -335,8 +361,14 @@ export class TpvHealthService {
   async getTerminalHealth(terminalId: string): Promise<any> {
     try {
       // Try to find terminal by serial number (with AVQD- prefix handling)
-      let terminal = await prisma.terminal.findUnique({
-        where: { serialNumber: terminalId },
+      // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
+      let terminal = await prisma.terminal.findFirst({
+        where: {
+          serialNumber: {
+            equals: terminalId,
+            mode: 'insensitive', // Case-insensitive matching
+          },
+        },
         select: {
           id: true,
           name: true,
@@ -350,11 +382,16 @@ export class TpvHealthService {
         },
       })
 
-      // If not found and doesn't start with AVQD-, try with prefix
+      // If not found and doesn't start with AVQD-, try with prefix (case-insensitive)
       // Android removes "AVQD-" prefix before sending, but database stores it with prefix
-      if (!terminal && !terminalId.startsWith('AVQD-')) {
-        terminal = await prisma.terminal.findUnique({
-          where: { serialNumber: `AVQD-${terminalId}` },
+      if (!terminal && !terminalId.toUpperCase().startsWith('AVQD-')) {
+        terminal = await prisma.terminal.findFirst({
+          where: {
+            serialNumber: {
+              equals: `AVQD-${terminalId}`,
+              mode: 'insensitive', // Case-insensitive matching
+            },
+          },
           select: {
             id: true,
             name: true,

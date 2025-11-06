@@ -2,7 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { Venue } from '@prisma/client'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '@/config/logger'
-import { mentaApiService } from './menta.api.service'
+// import { mentaApiService } from './menta.api.service' // 🚫 Disabled: Not using Menta integration
 
 /**
  * Get venue by ID for TPV usage
@@ -51,9 +51,13 @@ export async function getVenueById(venueId: string, _orgId?: string): Promise<Ve
 
 /**
  * Get terminal information including venue ID from terminal serial number
- * SMART CACHING: Automatically fetches and caches Menta terminal ID on first use
- * @param serialNumber Terminal serial number
- * @returns Object containing terminal information including Menta terminalId (UUID), venueId, and other terminal data
+ *
+ * **Terminal Identification:**
+ * - Uses serial number directly as terminalId (no Menta integration)
+ * - Validates terminal activation status before returning info
+ *
+ * @param serialNumber Terminal serial number (e.g., "AVQD-6D52CB5103BB42DC")
+ * @returns Object containing terminal information (venueId, terminalId = serialNumber, status, etc.)
  */
 export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<{
   venueId: string
@@ -66,9 +70,13 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
 }> {
   logger.info(`🔍 Getting terminal info for serial number: ${serialNumber}`)
 
-  const terminal = await prisma.terminal.findUnique({
+  // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
+  const terminal = await prisma.terminal.findFirst({
     where: {
-      serialNumber: serialNumber,
+      serialNumber: {
+        equals: serialNumber,
+        mode: 'insensitive', // Case-insensitive matching
+      },
     },
     select: {
       id: true,
@@ -79,8 +87,8 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
       status: true,
       version: true,
       config: true,
-      mentaTerminalId: true, // Cached Menta UUID
-      mentaLastSync: true, // Last sync timestamp
+      mentaTerminalId: true, // Cached Menta UUID (legacy, not used anymore)
+      mentaLastSync: true, // Last sync timestamp (legacy, not used anymore)
       activatedAt: true, // 🆕 Activation timestamp for validation
     },
   })
@@ -104,70 +112,72 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
     throw new UnauthorizedError('Terminal deactivated by administrator. Contact support.')
   }
 
-  // 🚀 SMART CACHING LOGIC: Fetch Menta terminal ID if not cached
-  if (!terminal.mentaTerminalId) {
-    logger.info(`🔄 No cached Menta terminal ID found, querying Menta API...`)
+  // 🚫 MENTA INTEGRATION DISABLED (2025-01-05)
+  // We are not using Menta payment gateway anymore.
+  // Keeping this code commented in case we integrate with Menta in the future.
+  //
+  // Original logic: Fetch Menta terminal UUID and cache it in terminal.mentaTerminalId
+  // Now: Use serial number as terminal identifier instead
+  //
+  // if (!terminal.mentaTerminalId) {
+  //   logger.info(`🔄 No cached Menta terminal ID found, querying Menta API...`)
+  //
+  //   try {
+  //     const mentaTerminal = await mentaApiService.findTerminalBySerialCode(serialNumber)
+  //
+  //     if (mentaTerminal) {
+  //       logger.info(`✅ Found Menta terminal: ${mentaTerminal.id}`)
+  //
+  //       // Cache the Menta terminal ID for future use
+  //       await prisma.terminal.update({
+  //         where: { id: terminal.id },
+  //         data: {
+  //           mentaTerminalId: mentaTerminal.id,
+  //           mentaLastSync: new Date(),
+  //         },
+  //       })
+  //
+  //       terminal.mentaTerminalId = mentaTerminal.id
+  //       terminal.mentaLastSync = new Date()
+  //
+  //       logger.info(`💾 Cached Menta terminal ID: ${mentaTerminal.id} for serial: ${serialNumber}`)
+  //     } else {
+  //       logger.error(`❌ Terminal not found in Menta system: ${serialNumber}`)
+  //       throw new NotFoundError(
+  //         `Terminal ${serialNumber} not found in Menta system. Please register the terminal in Menta dashboard first.`,
+  //       )
+  //     }
+  //   } catch (error) {
+  //     logger.error(`❌ Failed to fetch terminal from Menta:`, error)
+  //
+  //     if (error instanceof NotFoundError) {
+  //       throw error
+  //     }
+  //
+  //     // Fallback: Use serial number as terminal ID
+  //     const fallbackTerminalId = `fallback-${serialNumber}`
+  //
+  //     await prisma.terminal.update({
+  //       where: { id: terminal.id },
+  //       data: {
+  //         mentaTerminalId: fallbackTerminalId,
+  //         mentaLastSync: new Date(),
+  //       },
+  //     })
+  //
+  //     terminal.mentaTerminalId = fallbackTerminalId
+  //     terminal.mentaLastSync = new Date()
+  //
+  //     logger.info(`💾 Using fallback Menta terminal ID: ${fallbackTerminalId} for serial: ${serialNumber}`)
+  //   }
+  // } else {
+  //   logger.info(`✅ Using cached Menta terminal ID: ${terminal.mentaTerminalId}`)
+  //   logger.debug(`📅 Last synced: ${terminal.mentaLastSync}`)
+  // }
 
-    try {
-      const mentaTerminal = await mentaApiService.findTerminalBySerialCode(serialNumber)
-
-      if (mentaTerminal) {
-        logger.info(`✅ Found Menta terminal: ${mentaTerminal.id}`)
-
-        // Cache the Menta terminal ID for future use
-        await prisma.terminal.update({
-          where: { id: terminal.id },
-          data: {
-            mentaTerminalId: mentaTerminal.id,
-            mentaLastSync: new Date(),
-          },
-        })
-
-        // Update our local terminal object
-        terminal.mentaTerminalId = mentaTerminal.id
-        terminal.mentaLastSync = new Date()
-
-        logger.info(`💾 Cached Menta terminal ID: ${mentaTerminal.id} for serial: ${serialNumber}`)
-      } else {
-        logger.error(`❌ Terminal not found in Menta system: ${serialNumber}`)
-        throw new NotFoundError(
-          `Terminal ${serialNumber} not found in Menta system. Please register the terminal in Menta dashboard first.`,
-        )
-      }
-    } catch (error) {
-      logger.error(`❌ Failed to fetch terminal from Menta:`, error)
-
-      // If it's already a NotFoundError, re-throw it
-      if (error instanceof NotFoundError) {
-        throw error
-      }
-
-      // 🚨 TEMPORARY FALLBACK: Allow terminal to work without Menta lookup
-      // This is a temporary solution while we resolve Menta API access issues
-      logger.warn(`⚠️  Menta API lookup failed, using fallback terminal ID based on serial number`)
-
-      // Generate a fallback terminal ID based on the serial number
-      const fallbackTerminalId = `fallback-${serialNumber}`
-
-      // Update the database with the fallback ID to avoid repeated API calls
-      await prisma.terminal.update({
-        where: { id: terminal.id },
-        data: {
-          mentaTerminalId: fallbackTerminalId,
-          mentaLastSync: new Date(),
-        },
-      })
-
-      // Update our local terminal object
-      terminal.mentaTerminalId = fallbackTerminalId
-      terminal.mentaLastSync = new Date()
-
-      logger.info(`💾 Using fallback Menta terminal ID: ${fallbackTerminalId} for serial: ${serialNumber}`)
-    }
-  } else {
-    logger.info(`✅ Using cached Menta terminal ID: ${terminal.mentaTerminalId}`)
-    logger.debug(`📅 Last synced: ${terminal.mentaLastSync}`)
-  }
+  // ✅ NEW SIMPLIFIED LOGIC: Use serial number directly as terminal ID
+  // No Menta integration needed
+  logger.info(`✅ Using serial number as terminal ID: ${serialNumber}`)
 
   // Map terminal type and extract features from config if available
   const terminalTypeMapping: { [key: string]: string } = {
@@ -181,7 +191,7 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
 
   return {
     venueId: terminal.venueId,
-    terminalId: terminal.mentaTerminalId!, // 🎯 CRITICAL: Real Menta UUID for payments
+    terminalId: terminal.serialNumber, // ✅ CHANGED: Use serial number directly (no Menta)
     serialCode: terminal.serialNumber, // Hardware serial for identification
     status: terminal.status,
     model: terminalTypeMapping[terminal.type] || terminal.type,

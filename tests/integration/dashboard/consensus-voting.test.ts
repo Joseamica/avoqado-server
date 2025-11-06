@@ -23,7 +23,9 @@ import { cleanupInventoryTestData } from '@tests/helpers/inventory-test-helpers'
 // Increase timeout for integration tests (Neon cold start can be slow)
 jest.setTimeout(60000)
 
-describe('Consensus Voting Integration Tests', () => {
+// ⚠️ TEMPORARILY DISABLED: These tests consume ~1.5M OpenAI tokens ($2-3 USD per run)
+// Re-enable when you need to test chatbot consensus voting specifically
+describe.skip('Consensus Voting Integration Tests', () => {
   let testData: Awaited<ReturnType<typeof setupTestData>>
   const service = textToSqlService
 

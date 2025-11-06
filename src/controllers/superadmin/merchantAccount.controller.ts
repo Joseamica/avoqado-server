@@ -2,6 +2,8 @@ import { Request, Response, NextFunction } from 'express'
 import * as merchantAccountService from '../../services/superadmin/merchantAccount.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
+import { blumonApiService } from '../../services/blumon/blumonApi.service'
+import type { BlumonEnvironment } from '../../services/blumon/types'
 
 /**
  * MerchantAccount Controller
@@ -217,6 +219,173 @@ export async function deleteMerchantAccount(req: Request, res: Response, next: N
       message: 'Merchant account deleted successfully',
     })
   } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/blumon/register
+ * Register a new Blumon merchant account with auto-config from Blumon API
+ *
+ * **Workflow:**
+ * 1. Validate serial number with Blumon API
+ * 2. Fetch terminal config (posId, merchantId, credentials)
+ * 3. Create MerchantAccount with Blumon-specific fields
+ * 4. Create default pricing structures (provider cost + venue pricing)
+ * 5. Return merchant account with all config
+ *
+ * **Body:**
+ * ```json
+ * {
+ *   "venueId": "venue_xxx",
+ *   "serialNumber": "2841548417",
+ *   "environment": "SANDBOX",  // or "PRODUCTION"
+ *   "displayName": "Cuenta Principal"  // Optional
+ * }
+ * ```
+ *
+ * **Response:**
+ * ```json
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "merchantAccount": { ... },
+ *     "autoConfigured": true,
+ *     "blumonData": {
+ *       "posId": "376",
+ *       "merchantId": "blumon_merchant_xxx"
+ *     }
+ *   }
+ * }
+ * ```
+ */
+export async function registerBlumonMerchant(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, serialNumber, environment, displayName } = req.body
+
+    // Validate required fields
+    if (!venueId) {
+      throw new BadRequestError('venueId is required')
+    }
+
+    if (!serialNumber) {
+      throw new BadRequestError('serialNumber is required')
+    }
+
+    if (!environment || !['SANDBOX', 'PRODUCTION'].includes(environment)) {
+      throw new BadRequestError('environment must be SANDBOX or PRODUCTION')
+    }
+
+    const blumonEnv = environment as BlumonEnvironment
+
+    logger.info('[Blumon Registration] Starting registration', {
+      venueId,
+      serialNumber,
+      environment: blumonEnv,
+    })
+
+    // Step 1: Validate serial number with Blumon API
+    logger.info('[Blumon Registration] Step 1: Validating serial with Blumon API...')
+    const validation = await blumonApiService.validateSerial(serialNumber, blumonEnv)
+
+    if (!validation.valid) {
+      logger.warn('[Blumon Registration] Serial validation failed', {
+        serialNumber,
+        errors: validation.errors,
+      })
+
+      throw new BadRequestError(validation.message || 'Serial number is invalid or inactive')
+    }
+
+    // Step 2: Fetch terminal config from Blumon API
+    logger.info('[Blumon Registration] Step 2: Fetching terminal config from Blumon API...')
+    const terminalConfig = await blumonApiService.getTerminalConfig(serialNumber, blumonEnv)
+
+    logger.info('[Blumon Registration] Config fetched successfully', {
+      posId: terminalConfig.posId,
+      merchantId: terminalConfig.merchantId,
+      status: terminalConfig.status,
+    })
+
+    // Step 3: Fetch pricing structure from Blumon
+    logger.info('[Blumon Registration] Step 3: Fetching pricing structure...')
+    const blumonPricing = await blumonApiService.getPricingStructure(terminalConfig.merchantId, blumonEnv)
+
+    // Step 4: Create merchant account with auto-fetched config
+    logger.info('[Blumon Registration] Step 4: Creating merchant account in database...')
+
+    // TODO: Get or create Blumon PaymentProvider
+    // For now, assume BLUMON provider exists in database
+    // If not, this will fail - superadmin needs to create provider first
+
+    const merchantAccountData = {
+      providerId: 'BLUMON', // TODO: Fetch actual providerId from database
+      externalMerchantId: terminalConfig.merchantId,
+      displayName: displayName || `Blumon - ${serialNumber}`,
+      active: terminalConfig.status === 'ACTIVE',
+      displayOrder: 0,
+
+      // Blumon-specific fields
+      blumonSerialNumber: serialNumber,
+      blumonPosId: terminalConfig.posId,
+      blumonEnvironment: blumonEnv,
+      blumonMerchantId: terminalConfig.merchantId,
+
+      // Credentials (encrypted)
+      credentials: terminalConfig.credentials || {},
+
+      // Provider config
+      providerConfig: {
+        brand: terminalConfig.brand,
+        model: terminalConfig.model,
+        status: terminalConfig.status,
+      },
+
+      // Bank account info (optional, can be added later)
+      clabeNumber: null,
+      bankName: null,
+      accountHolder: null,
+    }
+
+    // Call existing service to create merchant account
+    // This handles encryption and validation
+    const merchantAccount = await merchantAccountService.createMerchantAccount(merchantAccountData)
+
+    // Step 5: Create provider cost structure
+    logger.info('[Blumon Registration] Step 5: Creating pricing structures...')
+
+    // TODO: Create ProviderCostStructure and VenuePricingStructure
+    // using blumonPricing data with Avoqado's margin
+
+    // For now, log the pricing data
+    logger.info('[Blumon Registration] Blumon pricing structure:', blumonPricing)
+
+    logger.info('[Blumon Registration] Registration completed successfully', {
+      merchantAccountId: merchantAccount.id,
+      serialNumber,
+      posId: terminalConfig.posId,
+    })
+
+    res.status(201).json({
+      success: true,
+      data: {
+        merchantAccount,
+        autoConfigured: true,
+        blumonData: {
+          posId: terminalConfig.posId,
+          merchantId: terminalConfig.merchantId,
+          serialNumber,
+          environment: blumonEnv,
+        },
+      },
+      message: 'Blumon merchant account registered successfully with auto-configuration',
+    })
+  } catch (error) {
+    logger.error('[Blumon Registration] Failed', {
+      error: error instanceof Error ? error.message : error,
+      stack: error instanceof Error ? error.stack : undefined,
+    })
+
     next(error)
   }
 }

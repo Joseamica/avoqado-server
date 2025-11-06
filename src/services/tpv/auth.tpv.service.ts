@@ -56,6 +56,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
           name: true,
           posType: true,
           posStatus: true,
+          logo: true,
         },
       },
     },

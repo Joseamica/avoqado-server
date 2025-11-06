@@ -955,7 +955,7 @@ async function main() {
           entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA, // First venue is company, second is individual
           address: faker.location.streetAddress(),
           city: faker.location.city(),
-          kycStatus: 'REJECTED',
+          kycStatus: index === 0 ? 'VERIFIED' : 'REJECTED', // Avoqado Full (index 0) is VERIFIED, others REJECTED
           state: faker.location.state(),
           zipCode: faker.location.zipCode(),
           country: 'MX',
@@ -1388,7 +1388,7 @@ async function main() {
           const scenario = scenarios[t] || scenarios[0]
           const isPrimaryVenueTerminal = t === 0 && venue.name.includes('Avoqado Full')
 
-          const serialNumber = isPrimaryVenueTerminal ? 'AVQD-6D52CB5103BB42DC' : faker.string.uuid()
+          const serialNumber = isPrimaryVenueTerminal ? 'AVQD-2841548417' : faker.string.uuid()
 
           return prisma.terminal.create({
             data: {
@@ -1402,13 +1402,6 @@ async function main() {
               version: scenario.version,
               systemInfo: scenario.systemInfo,
               ipAddress: scenario.ipAddress,
-              // 🆕 ACTIVATION SYSTEM (Hybrid: Serial Number + Activation Code)
-              activationCode: null, // Not activated yet in seed data
-              activationCodeExpiry: null,
-              activatedAt: null, // Fresh terminal for testing activation flow
-              activatedBy: null,
-              activationAttempts: 0,
-              lastActivationAttempt: null,
             },
           })
         }),

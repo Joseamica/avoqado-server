@@ -73,12 +73,21 @@ interface CreateMerchantAccountData {
   active?: boolean
   displayOrder?: number
   credentials: {
-    merchantId: string
-    apiKey: string
+    merchantId?: string // Optional - not all providers use this
+    apiKey?: string // Optional - not all providers use this
     customerId?: string
-    [key: string]: any // Allow provider-specific fields
+    [key: string]: any // Allow provider-specific fields (OAuth tokens, DUKPT keys, etc.)
   }
   providerConfig?: any
+  // Blumon-specific fields (optional for other providers)
+  blumonSerialNumber?: string
+  blumonPosId?: string
+  blumonEnvironment?: string
+  blumonMerchantId?: string
+  // Bank account fields (optional)
+  clabeNumber?: string | null
+  bankName?: string | null
+  accountHolder?: string | null
 }
 
 interface UpdateMerchantAccountData {
@@ -213,9 +222,12 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
     throw new NotFoundError(`Payment provider ${data.providerId} not found`)
   }
 
-  // Validate required credential fields
-  if (!data.credentials.merchantId || !data.credentials.apiKey) {
-    throw new BadRequestError('Credentials must include merchantId and apiKey')
+  // Validate required credential fields (provider-specific)
+  // Blumon uses OAuth tokens instead of merchantId/apiKey
+  if (data.providerId !== 'BLUMON') {
+    if (!data.credentials.merchantId || !data.credentials.apiKey) {
+      throw new BadRequestError('Credentials must include merchantId and apiKey')
+    }
   }
 
   // Encrypt credentials
@@ -232,6 +244,15 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
       displayOrder: data.displayOrder || 0,
       credentialsEncrypted: encryptedCredentials,
       providerConfig: data.providerConfig || null,
+      // Blumon-specific fields
+      blumonSerialNumber: data.blumonSerialNumber || null,
+      blumonPosId: data.blumonPosId || null,
+      blumonEnvironment: data.blumonEnvironment || null,
+      blumonMerchantId: data.blumonMerchantId || null,
+      // Bank account fields
+      clabeNumber: data.clabeNumber || null,
+      bankName: data.bankName || null,
+      accountHolder: data.accountHolder || null,
     },
     include: {
       provider: true,
@@ -243,6 +264,8 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
     providerId: account.providerId,
     providerCode: provider.code,
     externalMerchantId: account.externalMerchantId,
+    blumonSerialNumber: account.blumonSerialNumber,
+    blumonPosId: account.blumonPosId,
   })
 
   return {

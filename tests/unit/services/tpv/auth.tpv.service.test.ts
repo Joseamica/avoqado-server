@@ -10,8 +10,11 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     staffVenue: {
-      findUnique: jest.fn(),
+      findFirst: jest.fn(),
       update: jest.fn(),
+    },
+    terminal: {
+      findUnique: jest.fn(),
     },
   },
 }))
@@ -60,7 +63,16 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       name: 'Test Restaurant',
       posType: null,
       posStatus: null,
+      logo: null,
     },
+  }
+
+  const mockTerminal = {
+    id: 'terminal-1',
+    name: 'Test Terminal',
+    status: 'ACTIVE',
+    activatedAt: new Date('2024-01-01'),
+    venueId: 'venue-1',
   }
 
   beforeEach(() => {
@@ -73,6 +85,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
     ;(security.generateAccessToken as jest.Mock).mockReturnValue('mock-access-token')
     ;(security.generateRefreshToken as jest.Mock).mockReturnValue('mock-refresh-token')
     ;(prisma.staffVenue.update as jest.Mock).mockResolvedValue(mockStaffVenue)
+    ;(prisma.terminal.findUnique as jest.Mock).mockResolvedValue(mockTerminal)
   })
 
   afterEach(() => {
@@ -82,7 +95,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
   describe('staffSignIn', () => {
     it('should successfully sign in staff with valid PIN and venue', async () => {
       // Arrange
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
       const result = await staffSignIn('venue-1', '1234', 'SERIAL-001')
@@ -116,7 +129,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
 
     it('should generate JWT tokens with correct payload', async () => {
       // Arrange
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
       await staffSignIn('venue-1', '1234', 'SERIAL-001')
@@ -157,7 +170,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
 
     it('should throw NotFoundError when staff not found', async () => {
       // Arrange
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
 
       // Act & Assert
       await expect(staffSignIn('venue-1', '9999', 'SERIAL-001')).rejects.toThrow(NotFoundError)
@@ -166,18 +179,16 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
 
     it('should query database with correct venue-specific PIN parameters', async () => {
       // Arrange
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
       await staffSignIn('venue-1', '1234', 'SERIAL-001')
 
       // Assert
-      expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith({
+      expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith({
         where: {
-          venueId_pin: {
-            venueId: 'venue-1',
-            pin: '1234',
-          },
+          venueId: 'venue-1',
+          pin: '1234',
           active: true,
           staff: {
             active: true,
@@ -202,6 +213,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
               name: true,
               posType: true,
               posStatus: true,
+              logo: true,
             },
           },
         },
@@ -211,7 +223,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
     it('should handle database errors gracefully', async () => {
       // Arrange
       const dbError = new Error('Database connection failed')
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockRejectedValue(dbError)
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockRejectedValue(dbError)
 
       // Act & Assert
       await expect(staffSignIn('venue-1', '1234', 'SERIAL-001')).rejects.toThrow(dbError)
@@ -219,7 +231,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
 
     it('should include correlation ID in response', async () => {
       // Arrange
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
       const result = await staffSignIn('venue-1', '1234', 'SERIAL-001')
@@ -232,7 +244,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
 
     it('should include timestamp in response', async () => {
       // Arrange
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
       const result = await staffSignIn('venue-1', '1234', 'SERIAL-001')

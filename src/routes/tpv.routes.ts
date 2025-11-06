@@ -28,6 +28,7 @@ import * as authController from '../controllers/tpv/auth.tpv.controller'
 import * as activationController from '../controllers/tpv/activation.controller'
 import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
 import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
+import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
 
 const router = express.Router()
 
@@ -1527,6 +1528,118 @@ router.get(
  *         description: Internal server error
  */
 router.post('/activate', validateRequest(activateTerminalSchema), activationController.activateTerminal)
+
+/**
+ * @openapi
+ * /tpv/terminals/{serialNumber}/config:
+ *   get:
+ *     tags: [TPV - Terminal Configuration]
+ *     summary: Get terminal configuration with assigned merchant accounts
+ *     description: |
+ *       Fetch terminal configuration for Android TPV app on startup.
+ *       Returns terminal info + assigned merchant accounts for multi-merchant support.
+ *
+ *       **Use Case:**
+ *       - Android app calls this on startup to get dynamic config
+ *       - No authentication required (terminal needs config before login)
+ *       - Only returns active merchant accounts assigned to this terminal
+ *
+ *       **Multi-Merchant Flow:**
+ *       1. Android fetches config for serial "2841548417"
+ *       2. Backend returns terminal + 2 merchant accounts (Main + Ghost Kitchen)
+ *       3. Android stores in TerminalConfig object
+ *       4. User can switch between merchants in payment screen
+ *     parameters:
+ *       - in: path
+ *         name: serialNumber
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2841548417"
+ *         description: Terminal serial number (printed on hardware)
+ *     responses:
+ *       200:
+ *         description: Terminal config retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     terminal:
+ *                       type: object
+ *                       properties:
+ *                         id:
+ *                           type: string
+ *                           example: "term_xxxxx"
+ *                         serialNumber:
+ *                           type: string
+ *                           example: "2841548417"
+ *                         brand:
+ *                           type: string
+ *                           example: "PAX"
+ *                         model:
+ *                           type: string
+ *                           example: "A910S"
+ *                         status:
+ *                           type: string
+ *                           enum: [ACTIVE, INACTIVE, MAINTENANCE]
+ *                         venueId:
+ *                           type: string
+ *                         venue:
+ *                           type: object
+ *                           properties:
+ *                             id:
+ *                               type: string
+ *                             name:
+ *                               type: string
+ *                     merchantAccounts:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           id:
+ *                             type: string
+ *                             example: "ma_xxxxx"
+ *                           displayName:
+ *                             type: string
+ *                             example: "Main Account"
+ *                           serialNumber:
+ *                             type: string
+ *                             example: "2841548417"
+ *                           posId:
+ *                             type: string
+ *                             example: "376"
+ *                           environment:
+ *                             type: string
+ *                             enum: [SANDBOX, PRODUCTION]
+ *                           merchantId:
+ *                             type: string
+ *                           credentials:
+ *                             type: object
+ *                             description: Encrypted credentials (decrypted by Android)
+ *                           providerConfig:
+ *                             type: object
+ *       404:
+ *         description: Terminal not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: "Terminal not found with serial number: 2841548417"
+ */
+router.get('/terminals/:serialNumber/config', validateRequest(serialNumberParamSchema), terminalController.getTerminalConfig)
 
 router.post('/venues/:venueId/auth', pinLoginRateLimiter, validateRequest(pinLoginSchema), authController.staffSignIn)
 

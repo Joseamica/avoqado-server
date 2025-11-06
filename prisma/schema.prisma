@@ -1869,6 +1869,10 @@ model Terminal {
   name         String
   type         TerminalType
 
+  // Hardware information (for payment terminals)
+  brand String? // Hardware manufacturer (e.g., "PAX", "Ingenico", "Verifone")
+  model String? // Hardware model (e.g., "A910S", "D220", "VX520")
+
   // Status
   status        TerminalStatus @default(INACTIVE)
   lastHeartbeat DateTime?
@@ -1880,6 +1884,10 @@ model Terminal {
 
   // Configuration
   config Json?
+
+  // 🆕 Multi-Merchant Support (2025-11-05)
+  // Array of MerchantAccount IDs this terminal can use for payment processing
+  assignedMerchantIds String[] @default([])
 
   // Preferred processor for this TPV (LEGACY/MENTA/AUTO)
   preferredProcessor PaymentProcessor @default(AUTO)
@@ -1972,6 +1980,13 @@ model MerchantAccount {
   /// Per-account configuration values that comply with the provider's
   /// `configSchema`. Non-sensitive knobs live here; secrets stay encrypted.
   providerConfig Json? // Flexible config per provider
+
+  // 🆕 Blumon-specific fields (2025-11-05)
+  // Used for multi-merchant payment routing on PAX terminals
+  blumonSerialNumber String? // Blumon device serial (e.g., "2841548417")
+  blumonPosId        String? // Momentum API posId (e.g., "376")
+  blumonEnvironment  String? // "SANDBOX" or "PRODUCTION"
+  blumonMerchantId   String? // Blumon's merchant identifier
 
   // Relations
   venueConfigsPrimary   VenuePaymentConfig[]      @relation("PrimaryAccount")

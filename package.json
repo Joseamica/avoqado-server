@@ -40,7 +40,8 @@
     "check:unused": "unimported",
     "check:dead-code": "knip",
     "check:all": "npm run check:unused && npm run check:dead-code",
-    "update:unused-ignore": "node scripts/update-unused-ignore.js"
+    "update:unused-ignore": "node scripts/update-unused-ignore.js",
+    "pre-deploy": "bash scripts/pre-deploy-check.sh"
   },
   "keywords": [],
   "author": "",

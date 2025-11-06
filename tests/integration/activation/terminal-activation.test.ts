@@ -234,18 +234,24 @@ describe('Terminal Activation System Integration', () => {
       await expect(activateTerminal(testSerialNumber, activationCode)).rejects.toThrow('Activation code expired')
     })
 
-    it('should throw BadRequestError when terminal is already activated', async () => {
+    it('should return activation data when terminal is already activated (app reinstall handling)', async () => {
       // Pre-activate terminal
+      const activationDate = new Date()
       await prisma.terminal.update({
         where: { id: testTerminalId },
         data: {
-          activatedAt: new Date(),
+          activatedAt: activationDate,
           status: 'ACTIVE',
         },
       })
 
-      await expect(activateTerminal(testSerialNumber, activationCode)).rejects.toThrow(BadRequestError)
-      await expect(activateTerminal(testSerialNumber, activationCode)).rejects.toThrow('already activated')
+      // Should NOT throw error - returns activation data for app reinstalls
+      const result = await activateTerminal(testSerialNumber, activationCode)
+
+      expect(result).toHaveProperty('venueId', testVenueId)
+      expect(result).toHaveProperty('terminalId', testTerminalId)
+      expect(result).toHaveProperty('activatedAt')
+      expect(result).toHaveProperty('venueName', 'Test Venue for Activation')
     })
 
     it('should throw NotFoundError when terminal serial number does not exist', async () => {
@@ -276,9 +282,11 @@ describe('Terminal Activation System Integration', () => {
       await expect(generateActivationCode(testTerminalId, testStaffId)).rejects.toThrow(BadRequestError)
       await expect(generateActivationCode(testTerminalId, testStaffId)).rejects.toThrow('already activated')
 
-      // Step 5: Verify cannot activate again with same code
-      await expect(activateTerminal(testSerialNumber, generatedData.activationCode)).rejects.toThrow(BadRequestError)
-      await expect(activateTerminal(testSerialNumber, generatedData.activationCode)).rejects.toThrow('already activated')
+      // Step 5: Verify activation again returns success (app reinstall handling)
+      const reactivationResult = await activateTerminal(testSerialNumber, generatedData.activationCode)
+      expect(reactivationResult.venueId).toBe(testVenueId)
+      expect(reactivationResult.terminalId).toBe(testTerminalId)
+      expect(reactivationResult).toHaveProperty('activatedAt')
     })
 
     it('should generate unique codes for multiple terminals', async () => {

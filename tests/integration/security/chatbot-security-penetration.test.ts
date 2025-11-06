@@ -24,7 +24,9 @@ import { TableAccessControlService, UserRole } from '../../../src/services/dashb
 import { PIIDetectionService } from '../../../src/services/dashboard/pii-detection.service'
 import { SqlAstParserService } from '../../../src/services/dashboard/sql-ast-parser.service'
 
-describe('🔒 Chatbot Security Penetration Tests', () => {
+// ⚠️ TEMPORARILY DISABLED: These tests consume ~1.5M OpenAI tokens ($2-3 USD per run)
+// Re-enable when you need to test chatbot security specifically
+describe.skip('🔒 Chatbot Security Penetration Tests', () => {
   let testOrgId: string
   let testVenueId1: string
   let testVenueId2: string

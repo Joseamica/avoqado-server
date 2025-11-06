@@ -12,6 +12,7 @@ import paymentAnalyticsRoutes from './superadmin/paymentAnalytics.routes'
 import providerCostStructureRoutes from './superadmin/providerCostStructure.routes'
 import venuePricingRoutes from './superadmin/venuePricing.routes'
 import webhookRoutes from './superadmin/webhook.routes'
+import terminalRoutes from './superadmin/terminal.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -23,6 +24,7 @@ router.use(authorizeRole([StaffRole.SUPERADMIN]))
 router.use('/kyc', kycReviewRoutes)
 router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)
+router.use('/terminals', terminalRoutes)
 router.use('/payment-analytics', paymentAnalyticsRoutes)
 router.use('/cost-structures', providerCostStructureRoutes)
 router.use('/venue-pricing', venuePricingRoutes)

@@ -39,7 +39,9 @@ import TextToSqlAssistantService from '@/services/dashboard/text-to-sql-assistan
 import prisma from '@/utils/prismaClient'
 import { setupTestData, teardownTestData, TestVenue, TestUser } from '../helpers/test-data-setup'
 
-describe('Dashboard-Chatbot Consistency Tests', () => {
+// ⚠️ TEMPORARILY DISABLED: These tests consume ~1.5M OpenAI tokens ($2-3 USD per run)
+// Re-enable when you need to test chatbot specifically
+describe.skip('Dashboard-Chatbot Consistency Tests', () => {
   let testVenue: TestVenue
   let testUser: TestUser
 
