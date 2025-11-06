@@ -57,7 +57,7 @@ async function updateConfig() {
 
     // Get existing ignoreUnimported (excluding pending files to refresh the list)
     const existingIgnores = (config.ignoreUnimported || []).filter(
-      item => !item.includes('src/') || item.includes('.d.ts') || item.includes('ecosystem.config.js')
+      item => !item.includes('src/') || item.includes('.d.ts') || item.includes('ecosystem.config.js'),
     )
 
     // Add pending files

@@ -31,6 +31,22 @@ export interface TpvCommand {
 export class TpvHealthService {
   /**
    * Process heartbeat from a TPV terminal
+   *
+   * **Concurrency Safety (Square/Toast Pattern):**
+   * - ✅ Idempotent: Multiple simultaneous heartbeats are safe
+   * - ✅ Atomic: Database update is atomic (no partial updates)
+   * - ✅ No race conditions: Uses Prisma's atomic update operation
+   *
+   * **Race Condition Prevention:**
+   * - Terminal lookup is read-only (no locks needed)
+   * - Status calculation is deterministic (same inputs → same output)
+   * - Database update is atomic (PostgreSQL handles concurrency)
+   * - Multiple heartbeats arriving simultaneously will be serialized by DB
+   *
+   * **Edge Cases Handled:**
+   * - Terminal not found → 404 error (safe to retry)
+   * - Invalid timestamp → Uses current time (graceful fallback)
+   * - Concurrent updates → Last write wins (acceptable for heartbeats)
    */
   async processHeartbeat(heartbeatData: HeartbeatData, clientIp?: string): Promise<void> {
     const { terminalId, timestamp, status, version, systemInfo } = heartbeatData
@@ -42,9 +58,17 @@ export class TpvHealthService {
       })
 
       // 2. If not found by internal ID, try serialNumber (hardware serial)
+      // Android removes "AVQD-" prefix, so try both with and without prefix
       if (!terminal) {
         terminal = await prisma.terminal.findUnique({
           where: { serialNumber: terminalId },
+        })
+      }
+
+      // 2b. If still not found, try WITH AVQD- prefix
+      if (!terminal && !terminalId.startsWith('AVQD-')) {
+        terminal = await prisma.terminal.findUnique({
+          where: { serialNumber: `AVQD-${terminalId}` },
         })
       }
 
@@ -57,6 +81,12 @@ export class TpvHealthService {
 
       if (!terminal) {
         throw new NotFoundError(`Terminal with ID, serial number, or Menta terminal ID ${terminalId} not found`)
+      }
+
+      // ✅ Verify terminal is activated (Square/Toast pattern)
+      // Only allow heartbeats from activated terminals
+      if (!terminal.activatedAt) {
+        throw new NotFoundError(`Terminal ${terminalId} has not been activated yet`)
       }
 
       // Update terminal status and health data
@@ -304,7 +334,8 @@ export class TpvHealthService {
    */
   async getTerminalHealth(terminalId: string): Promise<any> {
     try {
-      const terminal = await prisma.terminal.findUnique({
+      // Try to find terminal by serial number (with AVQD- prefix handling)
+      let terminal = await prisma.terminal.findUnique({
         where: { serialNumber: terminalId },
         select: {
           id: true,
@@ -318,6 +349,25 @@ export class TpvHealthService {
           updatedAt: true,
         },
       })
+
+      // If not found and doesn't start with AVQD-, try with prefix
+      // Android removes "AVQD-" prefix before sending, but database stores it with prefix
+      if (!terminal && !terminalId.startsWith('AVQD-')) {
+        terminal = await prisma.terminal.findUnique({
+          where: { serialNumber: `AVQD-${terminalId}` },
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            lastHeartbeat: true,
+            version: true,
+            systemInfo: true,
+            ipAddress: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        })
+      }
 
       if (!terminal) {
         throw new NotFoundError(`Terminal with serial number ${terminalId} not found`)

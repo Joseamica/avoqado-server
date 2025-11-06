@@ -94,6 +94,7 @@ import {
   UpdateTeamMemberSchema,
 } from '../schemas/dashboard/team.schema'
 import { createTestPaymentSchema, getTestPaymentsSchema } from '../schemas/dashboard/testing.schema'
+import { generateActivationCodeSchema } from '../schemas/activation.schema'
 import {
   createVenueSchema,
   listVenuesQuerySchema,
@@ -3022,44 +3023,87 @@ router.put('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPerm
 
 /**
  * @openapi
- * /api/v1/tpv/heartbeat:
+ * /api/v1/dashboard/venues/{venueId}/tpv/{terminalId}/activation-code:
  *   post:
- *     tags: [TPV Health]
- *     summary: Process heartbeat from TPV terminal
- *     description: Endpoint for TPV terminals to send periodic heartbeat data
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               terminalId:
- *                 type: string
- *                 description: Unique terminal identifier
- *               timestamp:
- *                 type: string
- *                 format: date-time
- *                 description: Heartbeat timestamp
- *               status:
- *                 type: string
- *                 enum: [ACTIVE, MAINTENANCE]
- *                 description: Current terminal status
- *               version:
- *                 type: string
- *                 description: AvoqadoPOS version
- *               systemInfo:
- *                 type: object
- *                 description: System information (platform, memory, uptime, etc.)
+ *     tags: [TPV Activation]
+ *     summary: Generate activation code for terminal
+ *     description: |
+ *       Generates a 6-character alphanumeric activation code for terminal activation.
+ *       Similar to Square POS device activation flow.
+ *
+ *       **Process:**
+ *       1. Admin clicks "Generate Code" for a terminal in dashboard
+ *       2. System generates secure 6-char code (e.g., A3F9K2)
+ *       3. Code expires in 7 days
+ *       4. Admin shares code with staff
+ *       5. Staff enters code in Android app to activate terminal
+ *
+ *       **Security:**
+ *       - Requires 'tpv:update' permission
+ *       - Code expires after 7 days
+ *       - Single-use codes (cleared after activation)
+ *       - Cannot generate code for already activated terminal
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *       - in: path
+ *         name: terminalId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID
  *     responses:
  *       200:
- *         description: Heartbeat processed successfully
+ *         description: Activation code generated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 activationCode:
+ *                   type: string
+ *                   description: 6-character activation code
+ *                   example: "A3F9K2"
+ *                 expiresAt:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Code expiration timestamp
+ *                 expiresIn:
+ *                   type: number
+ *                   description: Seconds until expiration (604800 = 7 days)
+ *                 terminalId:
+ *                   type: string
+ *                   format: cuid
+ *                 serialNumber:
+ *                   type: string
+ *                   description: Terminal serial number
+ *                 venueName:
+ *                   type: string
+ *                   description: Venue name
  *       400:
- *         description: Invalid heartbeat data
+ *         description: Bad request (terminal already activated)
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden (missing tpv:update permission)
  *       404:
  *         description: Terminal not found
  */
-router.post('/tpv/heartbeat', tpvController.processHeartbeat)
+router.post(
+  '/venues/:venueId/tpv/:terminalId/activation-code',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(generateActivationCodeSchema),
+  tpvController.generateActivationCode,
+)
+
+// Heartbeat endpoint moved to tpv.routes.ts (unauthenticated endpoint for terminal health monitoring)
 
 /**
  * @openapi

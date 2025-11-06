@@ -1388,7 +1388,7 @@ async function main() {
           const scenario = scenarios[t] || scenarios[0]
           const isPrimaryVenueTerminal = t === 0 && venue.name.includes('Avoqado Full')
 
-          const serialNumber = isPrimaryVenueTerminal ? '6d52cb5103bb42dc' : faker.string.uuid()
+          const serialNumber = isPrimaryVenueTerminal ? 'AVQD-6D52CB5103BB42DC' : faker.string.uuid()
 
           return prisma.terminal.create({
             data: {
@@ -1402,6 +1402,13 @@ async function main() {
               version: scenario.version,
               systemInfo: scenario.systemInfo,
               ipAddress: scenario.ipAddress,
+              // 🆕 ACTIVATION SYSTEM (Hybrid: Serial Number + Activation Code)
+              activationCode: null, // Not activated yet in seed data
+              activationCodeExpiry: null,
+              activatedAt: null, // Fresh terminal for testing activation flow
+              activatedBy: null,
+              activationAttempts: 0,
+              lastActivationAttempt: null,
             },
           })
         }),

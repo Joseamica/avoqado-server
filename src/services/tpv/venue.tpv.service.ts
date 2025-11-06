@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { Venue } from '@prisma/client'
-import { NotFoundError } from '../../errors/AppError'
+import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '@/config/logger'
 import { mentaApiService } from './menta.api.service'
 
@@ -81,6 +81,7 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
       config: true,
       mentaTerminalId: true, // Cached Menta UUID
       mentaLastSync: true, // Last sync timestamp
+      activatedAt: true, // 🆕 Activation timestamp for validation
     },
   })
 
@@ -90,6 +91,17 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
 
   if (!terminal.venueId) {
     throw new NotFoundError('VenueId not found')
+  }
+
+  // 🆕 ACTIVATION VALIDATION: Terminal must be activated before use
+  if (!terminal.activatedAt) {
+    logger.warn(`Terminal ${serialNumber} not activated`)
+    throw new UnauthorizedError('Terminal not activated. Enter activation code to continue.')
+  }
+
+  if (terminal.status === 'INACTIVE') {
+    logger.warn(`Terminal ${serialNumber} is inactive`)
+    throw new UnauthorizedError('Terminal deactivated by administrator. Contact support.')
   }
 
   // 🚀 SMART CACHING LOGIC: Fetch Menta terminal ID if not cached
