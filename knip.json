@@ -1,31 +1,10 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "entry": [
-    "src/server.ts",
-    "src/app.ts",
-    "src/jobs/**/*.job.ts",
-    "src/scripts/**/*.ts"
-  ],
-  "project": [
-    "src/**/*.ts"
-  ],
-  "ignore": [
-    "src/**/*.test.ts",
-    "src/**/*.spec.ts",
-    "dist/**",
-    "build/**",
-    "prisma/migrations/**"
-  ],
-  "ignoreDependencies": [
-    "@types/*",
-    "typescript",
-    "ts-node",
-    "nodemon",
-    "prisma"
-  ],
-  "ignoreBinaries": [
-    "prisma"
-  ],
+  "entry": ["src/server.ts", "src/app.ts", "src/jobs/**/*.job.ts", "src/scripts/**/*.ts"],
+  "project": ["src/**/*.ts"],
+  "ignore": ["src/**/*.test.ts", "src/**/*.spec.ts", "dist/**", "build/**", "prisma/migrations/**"],
+  "ignoreDependencies": ["@types/*", "typescript", "ts-node", "nodemon", "prisma"],
+  "ignoreBinaries": ["prisma"],
   "ignoreExportsUsedInFile": true,
   "includeEntryExports": true,
   "typescript": {

@@ -5,11 +5,13 @@ Este proyecto incluye herramientas para detectar código no utilizado de manera 
 ## 📦 Herramientas Instaladas
 
 ### 1. **unimported**
+
 - Detecta archivos que no son importados por ningún otro archivo
 - Identifica dependencias npm no utilizadas
 - Rápido y simple
 
 ### 2. **knip**
+
 - Análisis profundo de "dead code"
 - Detecta exports no utilizados
 - Identifica tipos TypeScript no usados
@@ -39,6 +41,7 @@ npm run update:unused-ignore
 ### ¿Cuándo usarlo?
 
 Usa el marcador `@pending-implementation` cuando:
+
 - ✅ El archivo está completamente implementado y probado
 - ✅ Se integrará pronto pero no inmediatamente
 - ✅ Quieres excluirlo de la detección de código no utilizado
@@ -87,6 +90,7 @@ export function checkFeatureAccess(featureCode: string) {
    npm run update:unused-ignore
    ```
 3. **El script automáticamente**:
+
    - Escanea `src/` buscando archivos con `@pending-implementation`
    - Actualiza `.unimportedrc.json` agregándolos a `ignoreUnimported`
    - Preserva otros archivos ignorados (`.d.ts`, `ecosystem.config.js`, etc.)
@@ -119,9 +123,11 @@ npm run update:unused-ignore
 ## 📊 Qué Detectan
 
 ### Archivos No Utilizados
+
 Archivos `.ts` que no son importados por ningún otro archivo en el proyecto.
 
 **Ejemplo de output:**
+
 ```
 ─────┬────────────────────────────────────────────────────
      │ 9 unimported files
@@ -132,9 +138,11 @@ Archivos `.ts` que no son importados por ningún otro archivo en el proyecto.
 ```
 
 ### Dependencias No Utilizadas
+
 Paquetes npm instalados que no se usan en ningún archivo.
 
 **Ejemplo de output:**
+
 ```
 ─────┬────────────────────────────────────────────────────
      │ 10 unused dependencies
@@ -145,9 +153,11 @@ Paquetes npm instalados que no se usan en ningún archivo.
 ```
 
 ### Exports No Utilizados
+
 Funciones o tipos exportados que no son importados en ningún lugar.
 
 **Ejemplo de output:**
+
 ```
 Unused exports (86)
 getSocketManager           function  src/communication/sockets/index.ts:120:17
@@ -159,6 +169,7 @@ ConflictError              class     src/errors/AppError.ts:38:14
 Estas herramientas **NO ELIMINAN CÓDIGO AUTOMÁTICAMENTE**. Solo te muestran un reporte.
 
 Tú decides:
+
 - ✅ Qué archivos eliminar
 - ✅ Qué dependencias desinstalar
 - ✅ Qué exports limpiar
@@ -166,6 +177,7 @@ Tú decides:
 ## 🔄 Cuándo Ejecutar
 
 Se recomienda ejecutar periódicamente:
+
 - 📅 Mensualmente
 - 🚀 Antes de releases importantes
 - 🧹 Durante sesiones de limpieza de código
@@ -185,20 +197,25 @@ Algunos archivos marcados como "no usados" pueden ser:
 ## 🎯 Uso Recomendado
 
 ### Paso 1: Ejecutar análisis
+
 ```bash
 npm run check:all
 ```
 
 ### Paso 2: Revisar resultados
+
 Analiza la lista de archivos/dependencias marcados como no usados.
 
 ### Paso 3: Verificar manualmente
+
 - Busca referencias en comentarios
 - Verifica si son entry points
 - Comprueba si son features futuras
 
 ### Paso 4: Eliminar con confianza
+
 Una vez verificado, elimina:
+
 - Archivos: `git rm src/path/to/unused.ts`
 - Dependencias: `npm uninstall package-name`
 
@@ -227,24 +244,20 @@ git commit -m "chore: remove unused unitConversion utility"
 ### Ignorar archivos específicos
 
 Edita `.unimportedrc.json`:
+
 ```json
 {
-  "ignoreUnused": [
-    "src/scripts/**/*.ts",
-    "src/config/**/*.ts"
-  ]
+  "ignoreUnused": ["src/scripts/**/*.ts", "src/config/**/*.ts"]
 }
 ```
 
 ### Ignorar dependencias específicas
 
 Edita `knip.json`:
+
 ```json
 {
-  "ignoreDependencies": [
-    "@types/*",
-    "typescript"
-  ]
+  "ignoreDependencies": ["@types/*", "typescript"]
 }
 ```
 

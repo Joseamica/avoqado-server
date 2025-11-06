@@ -1,15 +1,6 @@
 {
-  "entry": [
-    "src/server.ts",
-    "src/app.ts",
-    "src/jobs/**/*.job.ts",
-    "src/scripts/**/*.ts",
-    "scripts/**/*.ts"
-  ],
-  "extensions": [
-    ".ts",
-    ".js"
-  ],
+  "entry": ["src/server.ts", "src/app.ts", "src/jobs/**/*.job.ts", "src/scripts/**/*.ts", "scripts/**/*.ts"],
+  "extensions": [".ts", ".js"],
   "ignorePatterns": [
     "**/node_modules/**",
     "**/dist/**",
@@ -19,11 +10,7 @@
     "**/prisma/migrations/**",
     "**/prisma/seed.ts"
   ],
-  "ignoreUnresolved": [
-    "@prisma/client",
-    "express",
-    "prisma"
-  ],
+  "ignoreUnresolved": ["@prisma/client", "express", "prisma"],
   "ignoreUnused": [
     ".env",
     ".env.example",
@@ -48,16 +35,6 @@
     "vitest",
     "yaml"
   ],
-  "ignoreDependencies": [
-    "@types/*",
-    "tsconfig-paths",
-    "ts-node",
-    "nodemon",
-    "pm2"
-  ],
-  "ignoreUnimported": [
-    "src/config/ecosystem.config.js",
-    "src/types/**/*.d.ts",
-    "src/middlewares/checkFeatureAccess.middleware.ts"
-  ]
+  "ignoreDependencies": ["@types/*", "tsconfig-paths", "ts-node", "nodemon", "pm2"],
+  "ignoreUnimported": ["src/config/ecosystem.config.js", "src/types/**/*.d.ts", "src/middlewares/checkFeatureAccess.middleware.ts"]
 }

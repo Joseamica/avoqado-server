@@ -3,6 +3,9 @@
 // This file is executed once per test file after the test framework is setup
 // but before the tests are run.
 
+// Set test timeout to 30 seconds to prevent timeout issues
+jest.setTimeout(30000)
+
 // Set required environment variables for tests
 process.env.NODE_ENV = 'test'
 process.env.ACCESS_TOKEN_SECRET = 'test-access-token-secret'

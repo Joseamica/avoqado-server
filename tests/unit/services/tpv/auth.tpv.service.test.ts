@@ -85,7 +85,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
-      const result = await staffSignIn('venue-1', '1234')
+      const result = await staffSignIn('venue-1', '1234', 'SERIAL-001')
 
       // Assert
       expect(result).toEqual({
@@ -119,7 +119,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
-      await staffSignIn('venue-1', '1234')
+      await staffSignIn('venue-1', '1234', 'SERIAL-001')
 
       // Assert
       expect(security.generateAccessToken).toHaveBeenCalledWith({
@@ -145,14 +145,14 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
 
     it('should throw BadRequestError when PIN is missing', async () => {
       // Act & Assert
-      await expect(staffSignIn('venue-1', '')).rejects.toThrow(BadRequestError)
-      await expect(staffSignIn('venue-1', '')).rejects.toThrow('PIN is required')
+      await expect(staffSignIn('venue-1', '', 'SERIAL-001')).rejects.toThrow(BadRequestError)
+      await expect(staffSignIn('venue-1', '', 'SERIAL-001')).rejects.toThrow('PIN is required')
     })
 
     it('should throw BadRequestError when venueId is missing', async () => {
       // Act & Assert
-      await expect(staffSignIn('', '1234')).rejects.toThrow(BadRequestError)
-      await expect(staffSignIn('', '1234')).rejects.toThrow('Venue ID is required')
+      await expect(staffSignIn('', '1234', 'SERIAL-001')).rejects.toThrow(BadRequestError)
+      await expect(staffSignIn('', '1234', 'SERIAL-001')).rejects.toThrow('Venue ID is required')
     })
 
     it('should throw NotFoundError when staff not found', async () => {
@@ -160,8 +160,8 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
 
       // Act & Assert
-      await expect(staffSignIn('venue-1', '9999')).rejects.toThrow(NotFoundError)
-      await expect(staffSignIn('venue-1', '9999')).rejects.toThrow('Staff member not found or not authorized for this venue')
+      await expect(staffSignIn('venue-1', '9999', 'SERIAL-001')).rejects.toThrow(NotFoundError)
+      await expect(staffSignIn('venue-1', '9999', 'SERIAL-001')).rejects.toThrow('Pin Incorrecto')
     })
 
     it('should query database with correct venue-specific PIN parameters', async () => {
@@ -169,7 +169,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
-      await staffSignIn('venue-1', '1234')
+      await staffSignIn('venue-1', '1234', 'SERIAL-001')
 
       // Assert
       expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith({
@@ -214,7 +214,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       ;(prisma.staffVenue.findUnique as jest.Mock).mockRejectedValue(dbError)
 
       // Act & Assert
-      await expect(staffSignIn('venue-1', '1234')).rejects.toThrow(dbError)
+      await expect(staffSignIn('venue-1', '1234', 'SERIAL-001')).rejects.toThrow(dbError)
     })
 
     it('should include correlation ID in response', async () => {
@@ -222,7 +222,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
-      const result = await staffSignIn('venue-1', '1234')
+      const result = await staffSignIn('venue-1', '1234', 'SERIAL-001')
 
       // Assert
       expect(result.correlationId).toBeDefined()
@@ -235,7 +235,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(mockStaffVenue)
 
       // Act
-      const result = await staffSignIn('venue-1', '1234')
+      const result = await staffSignIn('venue-1', '1234', 'SERIAL-001')
 
       // Assert
       expect(result.issuedAt).toBeDefined()

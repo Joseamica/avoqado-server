@@ -242,7 +242,8 @@ entire project to catch any inconsistencies
 
 **⚠️ PENDING IMPLEMENTATION MARKER SYSTEM:**
 
-When you create files that are fully implemented but not yet integrated into the application, mark them with the `@pending-implementation` marker at the top:
+When you create files that are fully implemented but not yet integrated into the application, mark them with the `@pending-implementation`
+marker at the top:
 
 ```typescript
 /**
@@ -258,6 +259,7 @@ When you create files that are fully implemented but not yet integrated into the
 ```
 
 **Example:**
+
 ```typescript
 /**
  * @pending-implementation
@@ -273,12 +275,14 @@ When you create files that are fully implemented but not yet integrated into the
 ```
 
 **When to use this marker:**
+
 - ✅ File is completely implemented and tested
 - ✅ File will be integrated soon but not immediately
 - ✅ File should be excluded from unused code detection
 - ✅ You want to document implementation status for future developers
 
 **How it works:**
+
 1. Add `@pending-implementation` marker in the first 500 characters of the file
 2. Run `npm run update:unused-ignore` to automatically add the file to `.unimportedrc.json`
 3. The file will be ignored by `npm run check:unused` until you remove the marker
@@ -286,7 +290,8 @@ When you create files that are fully implemented but not yet integrated into the
 
 **Auto-update script:** `scripts/update-unused-ignore.js` scans for files with this marker and updates `.unimportedrc.json` automatically.
 
-**⚠️ Important:** This marker is for files that are **READY to use** but not yet integrated. Don't use it for incomplete implementations or work-in-progress files.
+**⚠️ Important:** This marker is for files that are **READY to use** but not yet integrated. Don't use it for incomplete implementations or
+work-in-progress files.
 
 ## Architecture Overview
 

@@ -1888,6 +1888,15 @@ model Terminal {
   mentaTerminalId String? // Menta's UUID for payments (cached on first use)
   mentaLastSync   DateTime? // When we last synced with Menta API
 
+  // 🆕 ACTIVATION SYSTEM (Hybrid: Serial Number + Activation Code)
+  // Similar to Square POS device activation flow
+  activationCode       String?   @unique // 6-char alphanumeric code (e.g. A3F9K2)
+  activationCodeExpiry DateTime? // Code expires after 7 days
+  activatedAt          DateTime? // First successful activation timestamp
+  activatedBy          String? // StaffId who generated the activation code
+  activationAttempts   Int       @default(0) // Counter for failed attempts (max 5)
+  lastActivationAttempt DateTime? // Last activation attempt timestamp (anti-brute force)
+
   reviews Review[] // ✅ LÍNEA AGREGADA
 
   createdAt DateTime @default(now())
@@ -1895,6 +1904,7 @@ model Terminal {
 
   @@index([venueId])
   @@index([status])
+  @@index([activationCode]) // Fast lookup for activation code validation
 }
 
 // ==========================================

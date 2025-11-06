@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { GetTerminalsQuery, UpdateTpvBody, CreateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
+import { generateActivationCode as generateActivationCodeService } from '../../services/dashboard/terminal-activation.service'
 import { BadRequestError } from '../../errors/AppError'
 
 /**
@@ -183,6 +184,32 @@ export async function getTerminalHealth(
     const terminalHealth = await tpvHealthService.getTerminalHealth(tpvId)
 
     res.status(200).json(terminalHealth)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Generate activation code for terminal
+ * Similar to Square POS device activation flow
+ */
+export async function generateActivationCode(
+  req: Request<{ venueId: string; terminalId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { terminalId } = req.params
+    const authContext = (req as any).authContext
+    const staffId = authContext?.userId || authContext?.staffId
+
+    if (!staffId) {
+      throw new BadRequestError('Staff ID required to generate activation code')
+    }
+
+    const activationData = await generateActivationCodeService(terminalId, staffId)
+
+    res.status(200).json(activationData)
   } catch (error) {
     next(error)
   }
