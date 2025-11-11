@@ -4,11 +4,18 @@ import { v4 as uuidv4 } from 'uuid'
 import logger from '../../../config/logger'
 import {
   BroadcastOptions,
+  CardReaderStatusPayload,
+  InventoryEventPayload,
   NotificationEventPayload,
   OrderEventPayload,
   PaymentEventPayload,
+  PeripheralErrorPayload,
+  PrinterStatusPayload,
   SocketEventType,
   SystemAlertPayload,
+  TPVCommandPayload,
+  TPVCommandResponsePayload,
+  TPVStatusUpdatePayload,
 } from '../types'
 import { RoomManagerService } from './roomManager.service'
 
@@ -409,6 +416,223 @@ export class BroadcastingService {
       recipientId,
       venueId,
       wasUnread,
+    })
+  }
+
+  /**
+   * TPV Command Events - Admin commands sent to terminals
+   */
+  public broadcastTPVCommand(
+    venueId: string,
+    terminalId: string,
+    commandData: Omit<TPVCommandPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: TPVCommandPayload = {
+      ...commandData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Send command directly to specific terminal (via user ID or custom terminal room)
+    // For now, broadcast to venue - terminal will filter by terminalId
+    this.broadcastToVenue(venueId, SocketEventType.TPV_COMMAND, payload, options)
+
+    logger.info('TPV command broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      terminalId,
+      commandType: commandData.command.type,
+      requestedBy: commandData.command.requestedBy,
+    })
+  }
+
+  public broadcastTPVCommandResponse(
+    venueId: string,
+    responseData: Omit<TPVCommandResponsePayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: TPVCommandResponsePayload = {
+      ...responseData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue so dashboard can see command execution status
+    this.broadcastToVenue(venueId, SocketEventType.TPV_COMMAND_RESPONSE, payload, options)
+
+    // Also broadcast to admins/managers
+    this.broadcastToRole(StaffRole.ADMIN, SocketEventType.TPV_COMMAND_RESPONSE, payload, venueId, options)
+    this.broadcastToRole(StaffRole.MANAGER, SocketEventType.TPV_COMMAND_RESPONSE, payload, venueId, options)
+
+    logger.info('TPV command response broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      terminalId: responseData.terminalId,
+      commandType: responseData.commandType,
+      status: responseData.status,
+    })
+  }
+
+  public broadcastTPVStatusUpdate(
+    venueId: string,
+    statusData: Omit<TPVStatusUpdatePayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: TPVStatusUpdatePayload = {
+      ...statusData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue so dashboard can monitor terminal status
+    this.broadcastToVenue(venueId, SocketEventType.TPV_STATUS_UPDATE, payload, options)
+
+    logger.info('TPV status update broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      terminalId: statusData.terminalId,
+      status: statusData.status,
+      lastHeartbeat: statusData.lastHeartbeat,
+    })
+  }
+
+  /**
+   * Inventory Real-time Events
+   */
+  public broadcastInventoryEvent(
+    venueId: string,
+    eventType: 'low_stock' | 'out_of_stock' | 'updated',
+    inventoryData: Omit<InventoryEventPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const eventMap = {
+      low_stock: SocketEventType.INVENTORY_LOW_STOCK,
+      out_of_stock: SocketEventType.INVENTORY_OUT_OF_STOCK,
+      updated: SocketEventType.INVENTORY_UPDATED,
+    }
+
+    const payload: InventoryEventPayload = {
+      ...inventoryData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue
+    this.broadcastToVenue(venueId, eventMap[eventType], payload, options)
+
+    // Also broadcast to managers for critical stock alerts
+    if (eventType === 'low_stock' || eventType === 'out_of_stock') {
+      this.broadcastToRole(StaffRole.MANAGER, eventMap[eventType], payload, venueId, options)
+      this.broadcastToRole(StaffRole.ADMIN, eventMap[eventType], payload, venueId, options)
+    }
+
+    logger.info('Inventory event broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      eventType,
+      rawMaterialId: inventoryData.rawMaterialId,
+      rawMaterialName: inventoryData.rawMaterialName,
+      currentStock: inventoryData.currentStock,
+    })
+  }
+
+  /**
+   * Hardware Status Events - Printer, Card Reader, etc.
+   */
+  public broadcastPrinterStatus(
+    venueId: string,
+    printerData: Omit<PrinterStatusPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: PrinterStatusPayload = {
+      ...printerData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue
+    this.broadcastToVenue(venueId, SocketEventType.PRINTER_STATUS, payload, options)
+
+    // Alert admins/managers if printer has error
+    if (printerData.status === 'ERROR' || printerData.status === 'OFFLINE' || printerData.status === 'PAPER_OUT') {
+      this.broadcastToRole(StaffRole.ADMIN, SocketEventType.PRINTER_STATUS, payload, venueId, options)
+      this.broadcastToRole(StaffRole.MANAGER, SocketEventType.PRINTER_STATUS, payload, venueId, options)
+    }
+
+    logger.info('Printer status broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      terminalId: printerData.terminalId,
+      printerType: printerData.printerType,
+      status: printerData.status,
+    })
+  }
+
+  public broadcastCardReaderStatus(
+    venueId: string,
+    readerData: Omit<CardReaderStatusPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: CardReaderStatusPayload = {
+      ...readerData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue
+    this.broadcastToVenue(venueId, SocketEventType.CARD_READER_STATUS, payload, options)
+
+    // Alert admins/managers if reader has error
+    if (readerData.status === 'ERROR' || readerData.status === 'DISCONNECTED') {
+      this.broadcastToRole(StaffRole.ADMIN, SocketEventType.CARD_READER_STATUS, payload, venueId, options)
+      this.broadcastToRole(StaffRole.MANAGER, SocketEventType.CARD_READER_STATUS, payload, venueId, options)
+    }
+
+    logger.info('Card reader status broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      terminalId: readerData.terminalId,
+      readerType: readerData.readerType,
+      status: readerData.status,
+    })
+  }
+
+  public broadcastPeripheralError(
+    venueId: string,
+    errorData: Omit<PeripheralErrorPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: PeripheralErrorPayload = {
+      ...errorData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue
+    this.broadcastToVenue(venueId, SocketEventType.PERIPHERAL_ERROR, payload, options)
+
+    // Alert admins/managers for medium/high/critical errors
+    if (errorData.severity === 'medium' || errorData.severity === 'high' || errorData.severity === 'critical') {
+      this.broadcastToRole(StaffRole.ADMIN, SocketEventType.PERIPHERAL_ERROR, payload, venueId, options)
+      this.broadcastToRole(StaffRole.MANAGER, SocketEventType.PERIPHERAL_ERROR, payload, venueId, options)
+    }
+
+    logger.error('Peripheral error broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      terminalId: errorData.terminalId,
+      peripheralType: errorData.peripheralType,
+      errorCode: errorData.errorCode,
+      severity: errorData.severity,
+      recoverable: errorData.recoverable,
     })
   }
 

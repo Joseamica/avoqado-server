@@ -3,9 +3,11 @@ import { Order, Payment, Staff, MerchantAccount, PaymentProvider } from '@prisma
 export type PaymentWithRelations = Payment & {
   processedBy: Staff | null
   order: Order | null
-  merchantAccount: (MerchantAccount & {
-    provider: Pick<PaymentProvider, 'id' | 'code' | 'name'>
-  }) | null
+  merchantAccount:
+    | (MerchantAccount & {
+        provider: Pick<PaymentProvider, 'id' | 'code' | 'name'>
+      })
+    | null
 }
 
 export type PaginatedPaymentsResponse = {

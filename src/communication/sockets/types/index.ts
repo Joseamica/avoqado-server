@@ -82,6 +82,21 @@ export enum SocketEventType {
   NOTIFICATION_DELETED = 'notification_deleted',
   NOTIFICATION_COUNT_UPDATED = 'notification_count_updated',
 
+  // Business Events - TPV Admin Commands
+  TPV_COMMAND = 'tpv_command',
+  TPV_COMMAND_RESPONSE = 'tpv_command_response',
+  TPV_STATUS_UPDATE = 'tpv_status_update',
+
+  // Business Events - Inventory Real-time
+  INVENTORY_LOW_STOCK = 'inventory_low_stock',
+  INVENTORY_OUT_OF_STOCK = 'inventory_out_of_stock',
+  INVENTORY_UPDATED = 'inventory_updated',
+
+  // Business Events - Hardware
+  PRINTER_STATUS = 'printer_status',
+  CARD_READER_STATUS = 'card_reader_status',
+  PERIPHERAL_ERROR = 'peripheral_error',
+
   // Error Events
   ERROR = 'error',
   RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded',
@@ -146,6 +161,86 @@ export interface NotificationEventPayload extends BaseEventPayload {
   isRead: boolean
   actionUrl?: string
   actionLabel?: string
+  metadata?: Record<string, any>
+}
+
+/**
+ * TPV Command Payloads - Admin commands sent to TPV terminals
+ */
+export interface TPVCommandPayload extends BaseEventPayload {
+  terminalId: string
+  command: {
+    type: 'MAINTENANCE_MODE' | 'RELOAD' | 'DISABLE' | 'ENABLE' | 'SHUTDOWN' | 'RESTART'
+    payload?: Record<string, any>
+    requestedBy: string // userId who sent command
+  }
+  metadata?: Record<string, any>
+}
+
+export interface TPVCommandResponsePayload extends BaseEventPayload {
+  terminalId: string
+  commandType: string
+  status: 'success' | 'failed' | 'timeout'
+  message?: string
+  executedAt: Date
+  metadata?: Record<string, any>
+}
+
+export interface TPVStatusUpdatePayload extends BaseEventPayload {
+  terminalId: string
+  status: 'ONLINE' | 'OFFLINE' | 'MAINTENANCE' | 'DISABLED'
+  lastHeartbeat?: Date
+  version?: string
+  ipAddress?: string
+  systemInfo?: Record<string, any>
+  metadata?: Record<string, any>
+}
+
+/**
+ * Inventory Real-time Event Payloads
+ */
+export interface InventoryEventPayload extends BaseEventPayload {
+  rawMaterialId: string
+  rawMaterialName: string
+  currentStock: number
+  unit: string
+  threshold?: number // Low stock threshold
+  batchInfo?: {
+    batchId: string
+    expirationDate?: Date
+    remainingQuantity: number
+  }
+  metadata?: Record<string, any>
+}
+
+/**
+ * Hardware Event Payloads - Printer, Card Reader, etc.
+ */
+export interface PrinterStatusPayload extends BaseEventPayload {
+  terminalId: string
+  printerType: 'THERMAL' | 'RECEIPT' | 'KITCHEN'
+  status: 'ONLINE' | 'OFFLINE' | 'PAPER_LOW' | 'PAPER_OUT' | 'ERROR'
+  errorMessage?: string
+  lastPrintedAt?: Date
+  metadata?: Record<string, any>
+}
+
+export interface CardReaderStatusPayload extends BaseEventPayload {
+  terminalId: string
+  readerType: 'CONTACTLESS' | 'CHIP' | 'MAGNETIC'
+  status: 'READY' | 'READING' | 'ERROR' | 'DISCONNECTED'
+  errorMessage?: string
+  lastReadAt?: Date
+  metadata?: Record<string, any>
+}
+
+export interface PeripheralErrorPayload extends BaseEventPayload {
+  terminalId: string
+  peripheralType: 'PRINTER' | 'CARD_READER' | 'CASH_DRAWER' | 'SCANNER' | 'OTHER'
+  errorCode: string
+  errorMessage: string
+  severity: 'low' | 'medium' | 'high' | 'critical'
+  recoverable: boolean
   metadata?: Record<string, any>
 }
 
