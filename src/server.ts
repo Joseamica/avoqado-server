@@ -149,9 +149,7 @@ const startApplication = async (retries = 3) => {
       })
 
       // Initialize Socket.io server after HTTP server starts
-      logger.info('📡 Initializing Socket.io server...')
       initializeSocketServer(httpServer)
-      logger.info('✅ 📡 Socket.io server initialized successfully')
     }
   } catch (error) {
     if (retries > 0) {

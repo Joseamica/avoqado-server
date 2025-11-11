@@ -36,6 +36,7 @@ interface CreateProviderCostStructureData {
   amexRate: number
   internationalRate: number
   fixedCostPerTransaction?: number
+  monthlyFee?: number
   notes?: string
 }
 
@@ -47,6 +48,7 @@ interface UpdateProviderCostStructureData {
   amexRate?: number
   internationalRate?: number
   fixedCostPerTransaction?: number
+  monthlyFee?: number
   notes?: string
   active?: boolean
 }
@@ -242,6 +244,7 @@ export async function createProviderCostStructure(data: CreateProviderCostStruct
       amexRate: data.amexRate,
       internationalRate: data.internationalRate,
       fixedCostPerTransaction: data.fixedCostPerTransaction || null,
+      monthlyFee: data.monthlyFee || null,
       notes: data.notes || null,
       active: true,
     },
@@ -314,6 +317,7 @@ export async function updateProviderCostStructure(id: string, data: UpdateProvid
       ...(data.amexRate !== undefined && { amexRate: data.amexRate }),
       ...(data.internationalRate !== undefined && { internationalRate: data.internationalRate }),
       ...(data.fixedCostPerTransaction !== undefined && { fixedCostPerTransaction: data.fixedCostPerTransaction }),
+      ...(data.monthlyFee !== undefined && { monthlyFee: data.monthlyFee }),
       ...(data.notes !== undefined && { notes: data.notes }),
       ...(data.active !== undefined && { active: data.active }),
     },

@@ -56,14 +56,7 @@ export class SocketManager implements ISocketManager {
    * Initialize Socket.io server
    */
   public initialize(server: http.Server): Server {
-    logger.info('📡 Initializing Socket.io server', {
-      correlationId: uuidv4(),
-      config: {
-        corsOrigins: this.config.cors.origin.length,
-        authRequired: this.config.authentication.required,
-        redisEnabled: !!this.config.redis,
-      },
-    })
+    logger.info('📡 Socket.io server initializing...')
 
     // Create Socket.io server
     this.io = new Server(server, {
@@ -91,10 +84,7 @@ export class SocketManager implements ISocketManager {
     this.roomController.setBroadcastingService(this.broadcastingService)
     this.businessEventController.setBroadcastingService(this.broadcastingService)
 
-    logger.info('📡 Socket.io server initialized successfully', {
-      correlationId: uuidv4(),
-      serverVersion: '4.x',
-    })
+    logger.info('✅ Socket.io server ready')
 
     return this.io
   }
@@ -104,7 +94,6 @@ export class SocketManager implements ISocketManager {
    */
   private async setupRedisAdapter(): Promise<void> {
     if (!this.config.redis || !this.io || !createAdapter || !createClient) {
-      logger.info('Redis adapter not configured or modules not available, using memory adapter')
       return
     }
 
@@ -138,21 +127,14 @@ export class SocketManager implements ISocketManager {
       // Setup adapter
       this.io.adapter(createAdapter(this.redisClient, this.redisSubscriber))
 
-      logger.info('Redis adapter configured successfully', {
-        correlationId: uuidv4(),
-        redisConfigured: true,
-        connectionType: this.config.redis.url ? 'url' : 'individual-properties',
-        // Don't log sensitive connection details
-      })
+      logger.info('✅ Redis adapter configured')
     } catch (error) {
       logger.error('Failed to setup Redis adapter', {
         correlationId: uuidv4(),
         error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
       })
 
-      // Continue without Redis adapter
-      logger.warn('Continuing with memory adapter due to Redis setup failure')
+      logger.warn('⚠️  Using memory adapter instead')
     }
   }
   /**
@@ -176,12 +158,6 @@ export class SocketManager implements ISocketManager {
         socketAuthenticationMiddleware(socket as any, next as any)
       })
     }
-
-    logger.info('📡 Socket middleware configured', {
-      correlationId: uuidv4(),
-      authRequired: this.config.authentication.required,
-      rateLimitEnabled: true,
-    })
   }
 
   /**
@@ -194,19 +170,8 @@ export class SocketManager implements ISocketManager {
       const authenticatedSocket = socket as AuthenticatedSocket
       const correlationId = authenticatedSocket.correlationId || uuidv4()
 
-      logger.info('📡 New socket connection', {
-        correlationId,
-        socketId: socket.id,
-        ip: socket.handshake.address,
-        userAgent: socket.handshake.headers['user-agent'],
-        authContext: authenticatedSocket.authContext
-          ? {
-              userId: authenticatedSocket.authContext.userId,
-              venueId: authenticatedSocket.authContext.venueId,
-              role: authenticatedSocket.authContext.role,
-            }
-          : null,
-      })
+      const user = authenticatedSocket.authContext?.userId || 'unauthenticated'
+      logger.info(`📡 Socket connected: ${user} (${socket.id})`)
 
       // Register socket with room manager if authenticated
       if (authenticatedSocket.authContext) {
@@ -264,12 +229,8 @@ export class SocketManager implements ISocketManager {
       if (socket.authContext) {
         this.roomManager.unregisterSocket(socket)
       }
-      logger.info('📡 Socket disconnected', {
-        correlationId: socket.correlationId,
-        socketId: socket.id,
-        reason,
-        userId: socket.authContext?.userId,
-      })
+      const user = socket.authContext?.userId || 'unauthenticated'
+      logger.info(`📡 Socket disconnected: ${user} (${socket.id})`)
     })
 
     // Error handling
@@ -366,10 +327,6 @@ export class SocketManager implements ISocketManager {
    * Graceful shutdown
    */
   public async shutdown(): Promise<void> {
-    logger.info('📡 Shutting down Socket.io server', {
-      correlationId: uuidv4(),
-    })
-
     try {
       // Close all socket connections
       if (this.io) {
@@ -384,11 +341,9 @@ export class SocketManager implements ISocketManager {
         await this.redisSubscriber.disconnect()
       }
 
-      logger.info('📡 Socket.io server shutdown completed', {
-        correlationId: uuidv4(),
-      })
+      logger.info('✅ Socket.io server shutdown completed')
     } catch (error) {
-      logger.error('📡 Error during Socket.io shutdown', {
+      logger.error('Error during Socket.io shutdown', {
         correlationId: uuidv4(),
         error: error instanceof Error ? error.message : 'Unknown error',
         stack: error instanceof Error ? error.stack : undefined,

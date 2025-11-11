@@ -166,9 +166,28 @@ export const recordPaymentBodySchema = z.object({
     maskedPan: z.string().optional(),
     entryMode: z.enum(['CONTACTLESS', 'CONTACT', 'CHIP', 'SWIPE', 'MANUAL', 'FALLBACK', 'ONLINE', 'OTHER']).optional(),
 
+    // ⭐ Provider-agnostic merchant account tracking (2025-01-11)
+    // Allows TPV to specify which merchant account should process the payment
+    // ✅ CONDITIONAL VALIDATION: Required for card payments, null for cash
+    merchantAccountId: z.string().cuid({ message: 'El ID de la cuenta merchant debe ser un CUID válido.' }).nullable().optional(),
+    blumonSerialNumber: z.string().optional(), // Legacy: Backward compatibility for old Android clients
+
     // Split payment specific fields
     equalPartsPartySize: z.number().int().positive().optional(),
     equalPartsPayedFor: z.number().int().positive().optional(),
+  }).refine((data) => {
+    // ✅ Business rule: Card payments MUST have merchantAccountId
+    if (['CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'].includes(data.method)) {
+      return data.merchantAccountId != null && data.merchantAccountId !== ''
+    }
+    // ✅ Business rule: Cash payments SHOULD NOT have merchantAccountId (null = correct separation for reconciliation)
+    if (data.method === 'CASH') {
+      return data.merchantAccountId == null || data.merchantAccountId === ''
+    }
+    return true
+  }, {
+    message: 'Card payments require merchantAccountId. Cash payments should not have merchantAccountId (use null for proper reconciliation).',
+    path: ['merchantAccountId']
   }),
 })
 

@@ -10,7 +10,12 @@ import logger from '../../config/logger'
 
 // Ruta: GET /venues/:venueId/payments
 export async function getPaymentsData(
-  req: Request<{ venueId: string }, {}, {}, { page?: string; pageSize?: string }>,
+  req: Request<
+    { venueId: string },
+    {},
+    {},
+    { page?: string; pageSize?: string; merchantAccountId?: string; method?: string; source?: string; staffId?: string; search?: string }
+  >,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -20,8 +25,17 @@ export async function getPaymentsData(
     const page = parseInt(req.query.page || '1')
     const pageSize = parseInt(req.query.pageSize || '10')
 
+    // Extraer filtros opcionales
+    const filters: paymentDashboardService.PaymentFilters = {
+      merchantAccountId: req.query.merchantAccountId,
+      method: req.query.method as any,
+      source: req.query.source,
+      staffId: req.query.staffId,
+      search: req.query.search,
+    }
+
     // Llamada al servicio con los parámetros ya parseados
-    const paymentsData = await paymentDashboardService.getPaymentsData(venueId, page, pageSize)
+    const paymentsData = await paymentDashboardService.getPaymentsData(venueId, page, pageSize, filters)
 
     res.status(200).json(paymentsData)
   } catch (error) {

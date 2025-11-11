@@ -86,7 +86,7 @@ export async function getActiveCostStructure(req: Request, res: Response, next: 
  */
 export async function createProviderCostStructure(req: Request, res: Response, next: NextFunction) {
   try {
-    const { merchantAccountId, effectiveFrom, debitRate, creditRate, amexRate, internationalRate, fixedCostPerTransaction, notes } =
+    const { merchantAccountId, effectiveFrom, debitRate, creditRate, amexRate, internationalRate, fixedCostPerTransaction, monthlyFee, notes } =
       req.body
 
     // Validate required fields
@@ -110,6 +110,7 @@ export async function createProviderCostStructure(req: Request, res: Response, n
       amexRate,
       internationalRate,
       fixedCostPerTransaction,
+      monthlyFee,
       notes,
     })
 
@@ -178,7 +179,7 @@ export async function createFlatRateCostStructure(req: Request, res: Response, n
 export async function updateProviderCostStructure(req: Request, res: Response, next: NextFunction) {
   try {
     const { id } = req.params
-    const { effectiveFrom, effectiveTo, debitRate, creditRate, amexRate, internationalRate, fixedCostPerTransaction, notes, active } =
+    const { effectiveFrom, effectiveTo, debitRate, creditRate, amexRate, internationalRate, fixedCostPerTransaction, monthlyFee, notes, active } =
       req.body
 
     const costStructure = await providerCostStructureService.updateProviderCostStructure(id, {
@@ -189,6 +190,7 @@ export async function updateProviderCostStructure(req: Request, res: Response, n
       amexRate,
       internationalRate,
       fixedCostPerTransaction,
+      monthlyFee,
       notes,
       active,
     })

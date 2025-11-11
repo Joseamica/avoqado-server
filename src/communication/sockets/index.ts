@@ -87,25 +87,12 @@ import { v4 as uuidv4 } from 'uuid'
  * This function should be called from server.ts after creating the HTTP server
  */
 export function initializeSocketServer(server: http.Server): Server {
-  const correlationId = uuidv4()
-
-  logger.info('📡 Initializing Socket.io server from main module', {
-    correlationId,
-    timestamp: new Date().toISOString(),
-  })
-
   try {
     const io = socketManager.initialize(server)
-
-    logger.info('📡 Socket.io server initialization completed successfully', {
-      correlationId,
-      serverInitialized: true,
-    })
-
     return io
   } catch (error) {
     logger.error('Failed to initialize Socket.io server', {
-      correlationId,
+      correlationId: uuidv4(),
       error: error instanceof Error ? error.message : 'Unknown error',
       stack: error instanceof Error ? error.stack : undefined,
     })
@@ -126,22 +113,11 @@ export function getSocketManager(): typeof socketManager {
  * Should be called during application shutdown
  */
 export async function shutdownSocketServer(): Promise<void> {
-  const correlationId = uuidv4()
-
-  logger.info('📡 Shutting down Socket.io server', {
-    correlationId,
-    timestamp: new Date().toISOString(),
-  })
-
   try {
     await socketManager.shutdown()
-
-    logger.info('📡 Socket.io server shutdown completed', {
-      correlationId,
-    })
   } catch (error) {
     logger.error('Error during Socket.io server shutdown', {
-      correlationId,
+      correlationId: uuidv4(),
       error: error instanceof Error ? error.message : 'Unknown error',
       stack: error instanceof Error ? error.stack : undefined,
     })

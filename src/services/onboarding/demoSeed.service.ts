@@ -15,6 +15,7 @@ import {
   OrderType,
   PaymentMethod,
   PaymentStatus,
+  ProviderType,
   RawMaterialCategory,
   Unit,
   UnitType,
@@ -37,45 +38,49 @@ import logger from '@/config/logger'
 export async function seedDemoVenue(venueId: string): Promise<{ categoriesCreated: number; productsCreated: number }> {
   logger.info(`🎬 Seeding demo data for venue: ${venueId}`)
 
-  // 1. Create main menu
+  // 1. Create payment providers and merchant accounts (for multi-merchant support)
+  const merchantAccounts = await seedPaymentProvidersAndMerchants(venueId)
+  logger.info(`✅ Created ${merchantAccounts.length} merchant accounts`)
+
+  // 2. Create main menu
   const menu = await seedMenu(venueId)
   logger.info(`✅ Created menu: ${menu.name}`)
 
-  // 2. Create menu categories
+  // 3. Create menu categories
   const categories = await seedMenuCategories(venueId)
   logger.info(`✅ Created ${categories.length} menu categories`)
 
-  // 3. Link categories to menu
+  // 4. Link categories to menu
   await linkCategoriesToMenu(menu.id, categories)
   logger.info(`✅ Linked ${categories.length} categories to menu`)
 
-  // 4. Create products
+  // 5. Create products
   const products = await seedProducts(venueId, categories)
   logger.info(`✅ Created ${products.length} products`)
 
-  // 5. Create product inventory (QUANTITY type for some products)
+  // 6. Create product inventory (QUANTITY type for some products)
   const inventories = await seedProductInventory(venueId, products)
   logger.info(`✅ Created ${inventories.length} product inventories`)
 
-  // 6. Create modifier groups and modifiers
+  // 7. Create modifier groups and modifiers
   const modifierGroups = await seedModifierGroups(venueId, products)
   logger.info(`✅ Created ${modifierGroups.length} modifier groups`)
 
-  // 7. Create raw materials (ingredients)
+  // 8. Create raw materials (ingredients)
   const rawMaterials = await seedRawMaterials(venueId)
   logger.info(`✅ Created ${rawMaterials.length} raw materials`)
 
-  // 8. Create recipes (link products to ingredients)
+  // 9. Create recipes (link products to ingredients)
   const recipes = await seedRecipes(venueId, products, rawMaterials)
   logger.info(`✅ Created ${recipes.length} recipes`)
 
-  // 9. Create areas and tables
+  // 10. Create areas and tables
   const tables = await seedTablesAndAreas(venueId)
   logger.info(`✅ Created ${tables.length} tables`)
 
-  // 10. Create sample orders with tips and reviews (last 7 days)
+  // 11. Create sample orders with tips and reviews (last 7 days)
   const productsForOrders = products.map(p => ({ id: p.id, name: p.name, price: Number(p.price) }))
-  const { orders, reviews } = await seedOrders(venueId, productsForOrders, tables)
+  const { orders, reviews } = await seedOrders(venueId, productsForOrders, tables, merchantAccounts)
   logger.info(`✅ Created ${orders.length} sample orders with ${reviews.length} reviews`)
 
   logger.info(`🎉 Demo venue seeded successfully!`)
@@ -84,6 +89,119 @@ export async function seedDemoVenue(venueId: string): Promise<{ categoriesCreate
     categoriesCreated: categories.length,
     productsCreated: products.length,
   }
+}
+
+/**
+ * Seeds payment providers and merchant accounts for demo venue
+ * Creates merchant accounts to demonstrate multi-merchant support:
+ * - Stripe for online payments
+ * - Blumon for physical TPV
+ */
+async function seedPaymentProvidersAndMerchants(venueId: string) {
+  // Check if Menta provider exists (used as fallback for Stripe)
+  let mentaProvider = await prisma.paymentProvider.findFirst({
+    where: { code: 'MENTA' },
+  })
+
+  if (!mentaProvider) {
+    mentaProvider = await prisma.paymentProvider.create({
+      data: {
+        code: 'MENTA',
+        name: 'Menta Payment Solutions',
+        type: ProviderType.PAYMENT_PROCESSOR,
+        countryCode: ['MX'],
+        active: true,
+        configSchema: {
+          required: ['acquirerId', 'merchantId'],
+          properties: {
+            acquirerId: { type: 'string', description: 'Acquirer identifier' },
+            merchantId: { type: 'string', description: 'Merchant identifier' },
+          },
+        },
+      },
+    })
+  }
+
+  // Check if Blumon provider exists, if not create it
+  let blumonProvider = await prisma.paymentProvider.findFirst({
+    where: { code: 'BLUMON' },
+  })
+
+  if (!blumonProvider) {
+    blumonProvider = await prisma.paymentProvider.create({
+      data: {
+        code: 'BLUMON',
+        name: 'Blumon PAX Payment Solutions',
+        type: ProviderType.PAYMENT_PROCESSOR,
+        countryCode: ['MX'],
+        active: true,
+        configSchema: {
+          required: ['serialNumber', 'posId', 'environment'],
+          properties: {
+            serialNumber: { type: 'string', description: 'Terminal serial number' },
+            posId: { type: 'string', description: 'POS identifier' },
+            environment: { type: 'string', description: 'SANDBOX or PRODUCTION' },
+          },
+        },
+      },
+    })
+  }
+
+  // 1. Create Stripe merchant account (for online payments)
+  const stripeMerchant = await prisma.merchantAccount.create({
+    data: {
+      providerId: mentaProvider.id, // Using Menta provider as fallback
+      externalMerchantId: `acct_stripe_demo_${venueId.substring(0, 8)}`,
+      alias: 'Stripe Gateway Account',
+      displayName: 'Cuenta Stripe (Online)',
+      active: true,
+      displayOrder: 0,
+      bankName: 'Stripe Mexico',
+      clabeNumber: '646180157000000004', // STP CLABE for Stripe
+      accountHolder: 'Demo Restaurant Online S.A.',
+      credentialsEncrypted: {
+        publishableKey: `pk_test_demo_${venueId.substring(0, 8)}`,
+        secretKey: `sk_test_demo_${venueId.substring(0, 8)}`,
+        webhookSecret: `whsec_demo_${venueId.substring(0, 8)}`,
+      },
+      providerConfig: {
+        countryCode: 'MX',
+        currencyCode: 'MXN',
+        paymentMethods: ['card', 'oxxo', 'spei'],
+      },
+    },
+  })
+
+  // 2. Create Blumon merchant account (for physical TPV)
+  const blumonMerchant = await prisma.merchantAccount.create({
+    data: {
+      providerId: blumonProvider.id,
+      externalMerchantId: `blumon_demo_${venueId.substring(0, 8)}`,
+      alias: 'Blumon TPV Account',
+      displayName: 'Cuenta Blumon TPV',
+      active: true,
+      displayOrder: 1,
+      blumonSerialNumber: `DEMO${venueId.substring(0, 8)}`, // Demo serial number
+      blumonPosId: '999',
+      blumonEnvironment: 'SANDBOX',
+      blumonMerchantId: `blumon_demo_${venueId.substring(0, 8)}`,
+      credentialsEncrypted: {
+        clientId: `demo_client_id_${venueId.substring(0, 8)}`,
+        clientSecret: `demo_client_secret_${venueId.substring(0, 8)}`,
+        serialNumber: `DEMO${venueId.substring(0, 8)}`,
+        environment: 'SANDBOX',
+      },
+      providerConfig: {
+        serialNumber: `DEMO${venueId.substring(0, 8)}`,
+        posId: '999',
+        environment: 'SANDBOX',
+        brand: 'PAX',
+        model: 'A910S',
+      },
+    },
+  })
+
+  return [stripeMerchant, blumonMerchant]
 }
 
 /**
@@ -928,7 +1046,12 @@ async function seedTablesAndAreas(venueId: string) {
 /**
  * Seeds sample orders with tips and reviews (last 7 days)
  */
-async function seedOrders(venueId: string, products: Array<{ id: string; name: string; price: number }>, tables: Array<{ id: string }>) {
+async function seedOrders(
+  venueId: string,
+  products: Array<{ id: string; name: string; price: number }>,
+  tables: Array<{ id: string }>,
+  merchantAccounts: Array<{ id: string; displayName: string | null }>,
+) {
   const orders = []
   const reviews = []
   const now = new Date()
@@ -1009,14 +1132,34 @@ async function seedOrders(venueId: string, products: Array<{ id: string; name: s
       })
     }
 
-    // Create payment with tip
+    // Create payment with tip and merchant account
+    // Distribution: 50% Blumon (TPV), 20% Stripe (online), 30% Cash
+    const randomValue = Math.random()
+    let paymentMethod: PaymentMethod
+    let merchantAccountId: string | undefined
+
+    if (randomValue < 0.5) {
+      // 50% Blumon (physical TPV)
+      paymentMethod = PaymentMethod.CREDIT_CARD
+      merchantAccountId = merchantAccounts[1].id // Blumon merchant
+    } else if (randomValue < 0.7) {
+      // 20% Stripe (online payments)
+      paymentMethod = PaymentMethod.CREDIT_CARD
+      merchantAccountId = merchantAccounts[0].id // Stripe merchant
+    } else {
+      // 30% Cash (no merchant account)
+      paymentMethod = PaymentMethod.CASH
+      merchantAccountId = undefined
+    }
+
     await prisma.payment.create({
       data: {
         venueId,
         orderId: order.id,
         amount: total,
         tipAmount,
-        method: Math.random() > 0.5 ? PaymentMethod.CASH : PaymentMethod.CREDIT_CARD,
+        method: paymentMethod,
+        merchantAccountId, // 🆕 Link payment to merchant account
         status: 'COMPLETED',
         feePercentage: 0.025,
         feeAmount: (total + tipAmount) * 0.025,

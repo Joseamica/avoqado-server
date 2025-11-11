@@ -7,6 +7,7 @@
     "build": "tsc && tsc-alias",
     "start": "node -r tsconfig-paths/register dist/src/server.js",
     "dev": "nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts | pino-pretty",
+    "dev:simple-logging": "SIMPLE_LOGGING=true nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts",
     "kill-port": "bash scripts/kill-port.sh",
     "predeploy:backend": "npx prisma generate && npx prisma migrate deploy ",
     "migrate": "prisma migrate dev",

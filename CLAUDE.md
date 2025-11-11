@@ -71,6 +71,7 @@ For complex features requiring detailed implementation guides, full documentatio
 - `docs/STRIPE_INTEGRATION.md` - Stripe integration and feature access control
 - `docs/INVENTORY_REFERENCE.md` - FIFO batch system and inventory tracking
 - `docs/DATETIME_SYNC.md` - Date/time synchronization between frontend/backend
+- `docs/MERCHACCOUNTANALYSIS.md` - MerchantAccountId usage analysis across codebase (schema, services, validation, queries)
 
 **Blumon Multi-Merchant Payment System** (root-level documentation):
 - `BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide (start here)
@@ -82,6 +83,31 @@ For complex features requiring detailed implementation guides, full documentatio
 
 **Rule**: New features should NOT create separate .md files in root. Add architectural decisions to CLAUDE.md and implementation details to
 `docs/` or code comments/tests. Exception: Complex multi-file features like Blumon may have dedicated root-level documentation.
+
+**Managing Documentation Files:**
+
+When creating new documentation:
+
+1. **Location**: ALWAYS place new .md files in the `docs/` directory
+   - ✅ CORRECT: `docs/NEW_FEATURE.md`
+   - ❌ WRONG: `NEW_FEATURE.md` (root level)
+   - Exception: Multi-file systems like Blumon (4+ related docs) may use root level
+
+2. **Reference in CLAUDE.md**: ALWAYS add a reference to the new file in the "Comprehensive Technical References" section
+   - Format: `- docs/FEATURE_NAME.md - Brief description of what it covers`
+   - Example: `- docs/MERCHACCOUNTANALYSIS.md - MerchantAccountId usage analysis across codebase`
+
+3. **Keep Documentation Updated**: When making changes to code covered by documentation:
+   - If the change affects architecture/design decisions → Update the relevant .md file
+   - If the change only modifies implementation (HOW, not WHY) → Update code comments, no .md update needed
+   - Always check: Does this change invalidate any statements in the docs?
+
+**Examples of changes requiring doc updates:**
+- ✅ New database schema field → Update `docs/DATABASE_SCHEMA.md`
+- ✅ Changed cost calculation formula → Update `docs/COST_MANAGEMENT_IMPLEMENTATION.md`
+- ✅ New security layer → Update `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md`
+- ❌ Fixed typo in function → No doc update needed
+- ❌ Refactored variable names → No doc update needed
 
 ---
 

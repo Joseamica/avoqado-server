@@ -1517,6 +1517,12 @@ model Payment {
   processedById String?
   processedBy   Staff?  @relation(fields: [processedById], references: [id], onDelete: SetNull)
 
+  // ⭐ Provider-agnostic merchant account tracking (2025-01-10)
+  // Links payment to specific merchant account that processed it
+  // Enables multi-merchant support and accurate revenue attribution
+  merchantAccountId String?
+  merchantAccount   MerchantAccount? @relation(fields: [merchantAccountId], references: [id], onDelete: Restrict)
+
   // Amounts
   amount    Decimal @db.Decimal(12, 2)
   tipAmount Decimal @default(0) @db.Decimal(10, 2)
@@ -1569,6 +1575,7 @@ model Payment {
   @@index([authorizationNumber]) // ✅ NUEVO ÍNDICE
   @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
   @@index([cardBrand]) // ✅ NUEVO ÍNDICE
+  @@index([merchantAccountId]) // ⭐ NUEVO: Provider-agnostic merchant tracking
   @@index([venueId])
   @@index([orderId])
   @@index([shiftId])
@@ -1998,6 +2005,7 @@ model MerchantAccount {
   costStructures        ProviderCostStructure[]
   transactionCosts      TransactionCost[]
   settlementConfigs     SettlementConfiguration[]
+  payments              Payment[] // ⭐ NUEVO: Track all payments processed by this merchant account
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -1467,6 +1467,40 @@ async function main() {
       )
       console.log(`      - Created ${terminals.length} terminals.`)
 
+      // 🆕 Add secondary development terminal for Avoqado Full venue only
+      if (venue.name.includes('Avoqado Full')) {
+        const superAdmin = createdStaffList.find(s => s.assignedRole === StaffRole.SUPERADMIN)
+        const secondaryTerminal = await prisma.terminal.create({
+          data: {
+            id: 'f71607dc-cade-402f-8af8-798ce6d1dc66',
+            venueId: venue.id,
+            serialNumber: 'AVQD-6d52cb5103bb42dc',
+            name: 'Terminal 6d52cb',
+            type: TerminalType.TPV_ANDROID,
+            brand: 'PAX',
+            model: 'A920 Pro',
+            status: TerminalStatus.ACTIVE,
+            assignedMerchantIds: [blumonMerchantA.id, blumonMerchantB.id],
+            lastHeartbeat: new Date(Date.now() - 45 * 1000),
+            version: '2.1.4',
+            systemInfo: {
+              platform: 'Android 12',
+              memory: { total: 4096, free: 2560, used: 1536 },
+              uptime: 172800,
+              cpuUsage: 12.5,
+              diskSpace: { total: 128000, free: 96000, used: 32000 },
+              batteryLevel: 92,
+              wifiSignal: -38,
+              lastRestart: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+            },
+            ipAddress: faker.internet.ipv4(),
+            activatedAt: new Date('2025-11-10T22:36:26.335Z'),
+            activatedBy: superAdmin?.id,
+          },
+        })
+        console.log(`      - Created secondary terminal: ${secondaryTerminal.serialNumber}`)
+      }
+
       const categories = await Promise.all(
         ['Hamburguesas', 'Tacos Mexicanos', 'Pizzas', 'Entradas', 'Bebidas'].map((name, index) =>
           prisma.menuCategory.create({ data: { venueId: venue.id, name, slug: generateSlug(name), displayOrder: index } }),

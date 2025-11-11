@@ -13,10 +13,22 @@ import { parseDateRange } from '@/utils/datetime'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
- * @param tpvRating The rating string from TPV ("EXCELLENT", "GOOD", "POOR")
+ *
+ * **Supports:**
+ * - Numeric strings: "1", "2", "3", "4", "5" (new Android format - 2025-01-30)
+ * - Categorical strings: "EXCELLENT", "GOOD", "POOR" (legacy format - backward compatibility)
+ *
+ * @param tpvRating The rating string from TPV
  * @returns Numeric rating (1-5) or null if invalid
  */
 function mapTpvRatingToNumeric(tpvRating: string): number | null {
+  // ✅ NEW: First try to parse as numeric string (Android app sends "1"-"5")
+  const numericRating = parseInt(tpvRating, 10)
+  if (!isNaN(numericRating) && numericRating >= 1 && numericRating <= 5) {
+    return numericRating
+  }
+
+  // ⚠️ LEGACY: Fallback to categorical format for backward compatibility
   const ratingMap: Record<string, number> = {
     EXCELLENT: 5,
     GOOD: 3,
@@ -701,9 +713,61 @@ interface PaymentCreationData {
   maskedPan?: string
   entryMode?: string
 
+  // ⭐ Provider-agnostic merchant account tracking (2025-01-10)
+  merchantAccountId?: string // Primary: Structured merchant account ID
+  blumonSerialNumber?: string // Legacy: Blumon-specific serial number (deprecated)
+
   // Split payment specific fields
   equalPartsPartySize?: number
   equalPartsPayedFor?: number
+}
+
+/**
+ * ⭐ Helper: Resolve Blumon serial number to merchant account ID
+ *
+ * **Purpose:** Backward compatibility for old Android clients that send only `blumonSerialNumber`
+ *
+ * **Logic:**
+ * 1. Find MerchantAccount where blumonSerialNumber matches
+ * 2. Verify it's configured for the given venue
+ * 3. Return merchant account ID or undefined
+ *
+ * **Example:**
+ * ```typescript
+ * const merchantId = await resolveBlumonSerialToMerchantId('venue_123', '2841548417')
+ * // Returns: 'cuid_abc123' (MerchantAccount.id)
+ * ```
+ *
+ * @param venueId Venue ID to scope the search
+ * @param blumonSerialNumber Blumon serial number (e.g., "2841548417")
+ * @returns MerchantAccount ID or undefined if not found
+ */
+async function resolveBlumonSerialToMerchantId(venueId: string, blumonSerialNumber: string): Promise<string | undefined> {
+  try {
+    // Find merchant account with matching blumonSerialNumber
+    // that is configured for the given venue
+    const merchant = await prisma.merchantAccount.findFirst({
+      where: {
+        blumonSerialNumber,
+        OR: [
+          { venueConfigsPrimary: { some: { venueId } } },
+          { venueConfigsSecondary: { some: { venueId } } },
+          { venueConfigsTertiary: { some: { venueId } } },
+        ],
+      },
+    })
+
+    if (merchant) {
+      logger.info(`✅ Resolved blumonSerialNumber ${blumonSerialNumber} → merchantAccountId ${merchant.id}`)
+      return merchant.id
+    }
+
+    logger.warn(`⚠️ Could not resolve blumonSerialNumber ${blumonSerialNumber} for venue ${venueId}`)
+    return undefined
+  } catch (error) {
+    logger.error(`❌ Error resolving blumonSerialNumber ${blumonSerialNumber}:`, error)
+    return undefined
+  }
 }
 
 /**
@@ -820,6 +884,23 @@ export async function recordOrderPayment(
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
+  // ⭐ PROVIDER-AGNOSTIC MERCHANT TRACKING: Resolve merchantAccountId
+  // Priority 1: Use merchantAccountId if provided by modern Android client
+  // Priority 2: Resolve blumonSerialNumber → merchantAccountId for backward compatibility
+  // Priority 3: Leave undefined (legacy payments before this feature)
+  let merchantAccountId = paymentData.merchantAccountId
+
+  if (!merchantAccountId && paymentData.blumonSerialNumber) {
+    logger.info(`🔄 Resolving legacy blumonSerialNumber: ${paymentData.blumonSerialNumber}`)
+    merchantAccountId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
+  }
+
+  if (merchantAccountId) {
+    logger.info(`✅ Payment will be attributed to merchantAccountId: ${merchantAccountId}`)
+  } else {
+    logger.warn(`⚠️ No merchantAccountId - payment will have null merchant (legacy mode)`)
+  }
+
   // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const payment = await prisma.$transaction(async tx => {
@@ -852,6 +933,8 @@ export async function recordOrderPayment(
         maskedPan: paymentData.maskedPan,
         cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
         entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+        // ⭐ Provider-agnostic merchant account tracking
+        merchantAccountId,
         processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
         shiftId: currentShift?.id,
         feePercentage: 0, // TODO: Calculate based on payment processor
@@ -1191,6 +1274,23 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     return validSources.includes(source) ? (source as PaymentSource) : 'OTHER'
   }
 
+  // ⭐ PROVIDER-AGNOSTIC MERCHANT TRACKING: Resolve merchantAccountId
+  // Priority 1: Use merchantAccountId if provided by modern Android client
+  // Priority 2: Resolve blumonSerialNumber → merchantAccountId for backward compatibility
+  // Priority 3: Leave undefined (legacy payments before this feature)
+  let merchantAccountId = paymentData.merchantAccountId
+
+  if (!merchantAccountId && paymentData.blumonSerialNumber) {
+    logger.info(`🔄 Resolving legacy blumonSerialNumber: ${paymentData.blumonSerialNumber}`)
+    merchantAccountId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
+  }
+
+  if (merchantAccountId) {
+    logger.info(`✅ Payment will be attributed to merchantAccountId: ${merchantAccountId}`)
+  } else {
+    logger.warn(`⚠️ No merchantAccountId - payment will have null merchant (legacy mode)`)
+  }
+
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const { payment, fastOrder } = await prisma.$transaction(async tx => {
@@ -1240,6 +1340,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         maskedPan: paymentData.maskedPan,
         cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
         entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+        // ⭐ Provider-agnostic merchant account tracking
+        merchantAccountId,
         processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
         shiftId: currentShift?.id,
         feePercentage: 0, // TODO: Calculate based on payment processor

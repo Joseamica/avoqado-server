@@ -16,8 +16,6 @@ export async function getVenueFeatures(req: Request<{ venueId: string }>, res: R
   try {
     const { venueId } = req.params
 
-    logger.info('Getting venue feature status', { venueId })
-
     const featureStatus = await venueFeatureService.getVenueFeatureStatus(venueId)
 
     res.status(200).json({

@@ -242,8 +242,6 @@ export async function removeFeatureFromVenue(venueId: string, featureId: string)
  * @param venueId - Venue ID
  */
 export async function getVenueFeatureStatus(venueId: string) {
-  logger.info('Getting venue feature status', { venueId })
-
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
     select: {

@@ -641,6 +641,55 @@ router.post('/auth/google/callback', googleOAuthController.googleOAuthCallback)
  */
 router.get('/auth/google/check-invitation', googleOAuthController.checkInvitation)
 
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/google/one-tap:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Handle Google One Tap Sign-In
+ *     description: Process Google One Tap JWT credential to authenticate user
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - credential
+ *             properties:
+ *               credential:
+ *                 type: string
+ *                 description: Google One Tap JWT credential
+ *     responses:
+ *       200:
+ *         description: Successfully authenticated with Google One Tap
+ *         headers:
+ *           Set-Cookie:
+ *             schema:
+ *               type: string
+ *               example: accessToken=abc123; Path=/; HttpOnly; SameSite=Strict
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 user:
+ *                   type: object
+ *                 isNewUser:
+ *                   type: boolean
+ *       400:
+ *         description: Invalid request or missing credential
+ *       403:
+ *         description: No invitation found for this email
+ *       401:
+ *         description: Authentication failed
+ */
+router.post('/auth/google/one-tap', googleOAuthController.googleOneTapLogin)
+
 // --- Password Reset Routes (PUBLIC - no auth required) ---
 
 /**

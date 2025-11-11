@@ -351,3 +351,23 @@ export async function checkInvitationStatus(email: string): Promise<{
 
   return { hasInvitation: false }
 }
+
+/**
+ * Login or register staff using Google One Tap JWT credential
+ * This is specifically for Google One Tap Sign-In which provides a JWT token directly
+ */
+export async function loginWithGoogleOneTap(
+  credential: string,
+): Promise<{
+  accessToken: string
+  refreshToken: string
+  staff: any
+  isNewUser: boolean
+}> {
+  // Verify the Google One Tap JWT credential
+  const googleUser = await verifyGoogleToken(credential)
+
+  // Reuse the same logic as loginWithGoogle
+  // The rest of the logic is the same - checking for existing staff, invitations, etc.
+  return loginWithGoogle(credential, false)
+}

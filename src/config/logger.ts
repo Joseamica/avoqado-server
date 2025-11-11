@@ -5,6 +5,7 @@ const { combine, timestamp, printf, colorize, json, splat } = winston.format
 
 const LOG_DIR = process.env.LOG_DIR || 'logs'
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info'
+const SIMPLE_LOGGING = process.env.SIMPLE_LOGGING === 'true'
 
 // Asegurarse de que el directorio de logs exista (Winston lo crea si no existe para los transportes de archivo)
 
@@ -12,6 +13,11 @@ const baseFormat = combine(
   timestamp({ format: 'YYYY-MM-DDTHH:mm:ss.SSSZ' }),
   splat(), // Permite usar logger.info('mensaje %s', variable)
 )
+
+// Formato simple: nivel + mensaje
+const simpleFormat = printf(info => {
+  return `${info.level}: ${info.message}`
+})
 
 const consoleFormat = printf(info => {
   let msg = `${info.timestamp} ${info.level}: ${info.message}`
@@ -57,7 +63,7 @@ if (process.env.NODE_ENV !== 'production') {
   transports.push(
     new winston.transports.Console({
       level: LOG_LEVEL === 'debug' ? 'debug' : 'info', // Permite 'debug' en desarrollo si LOG_LEVEL lo indica
-      format: combine(colorize(), baseFormat, consoleFormat),
+      format: SIMPLE_LOGGING ? combine(colorize(), simpleFormat) : combine(colorize(), baseFormat, consoleFormat),
     }),
     // Log de desarrollo a archivo
     new winston.transports.File({
@@ -120,6 +126,10 @@ process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
   logger.error('Unhandled Rejection at:', { promiseDetails: promise, reason })
 })
 
-logger.info(`Logger initialized. Log level: ${LOG_LEVEL}. NODE_ENV: ${process.env.NODE_ENV}. Log directory: ${path.resolve(LOG_DIR)}`)
+if (!SIMPLE_LOGGING) {
+  logger.info(`Logger initialized. Log level: ${LOG_LEVEL}. NODE_ENV: ${process.env.NODE_ENV}. Log directory: ${path.resolve(LOG_DIR)}`)
+} else {
+  logger.info('Logger initialized (simple mode)')
+}
 
 export default logger

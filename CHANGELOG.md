@@ -20,6 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - **WHY**: Prevents unauthorized device access after admin manually deactivates a terminal
   - **BREAKING CHANGE**: Android app MUST now send `serialNumber` in login request
 
+### Fixed
+
+- payment.tpv.service.ts: Fix rating parsing for numeric strings from Android app (payment.tpv.service.ts:24-39)
+  - Updated `mapTpvRatingToNumeric()` to parse numeric strings ("1"-"5") from Android app
+  - Previous version only accepted categorical strings ("EXCELLENT", "GOOD", "POOR")
+  - Backend was receiving `reviewRating="4"` but returning null, preventing Review record creation
+  - Now correctly parses numeric strings and validates range 1-5
+  - Backward compatible with legacy categorical format
+  - Fix enables Review records to appear in dashboard after Android payment with rating
+
 ### Changed
 
 - auth.tpv.service.ts: Switch to plain text PIN authentication (src/services/tpv/auth.tpv.service.ts:26-58)
