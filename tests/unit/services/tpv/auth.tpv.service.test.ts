@@ -159,13 +159,13 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
     it('should throw BadRequestError when PIN is missing', async () => {
       // Act & Assert
       await expect(staffSignIn('venue-1', '', 'SERIAL-001')).rejects.toThrow(BadRequestError)
-      await expect(staffSignIn('venue-1', '', 'SERIAL-001')).rejects.toThrow('PIN is required')
+      await expect(staffSignIn('venue-1', '', 'SERIAL-001')).rejects.toThrow('PIN es requerido')
     })
 
     it('should throw BadRequestError when venueId is missing', async () => {
       // Act & Assert
       await expect(staffSignIn('', '1234', 'SERIAL-001')).rejects.toThrow(BadRequestError)
-      await expect(staffSignIn('', '1234', 'SERIAL-001')).rejects.toThrow('Venue ID is required')
+      await expect(staffSignIn('', '1234', 'SERIAL-001')).rejects.toThrow('ID del venue es requerido')
     })
 
     it('should throw NotFoundError when staff not found', async () => {

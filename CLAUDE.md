@@ -76,6 +76,7 @@ For complex features requiring detailed implementation guides, full documentatio
 - `docs/UNUSED_CODE_DETECTION.md` - Tools and commands for detecting unused code (unimported, knip)
 
 **Blumon Multi-Merchant Payment System** (comprehensive documentation in `docs/`):
+
 - `docs/BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide (start here)
 - `docs/BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
 - `docs/BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
@@ -91,11 +92,13 @@ For complex features requiring detailed implementation guides, full documentatio
 When creating new documentation:
 
 1. **Location**: ALWAYS place new .md files in the `docs/` directory
+
    - ✅ CORRECT: `docs/NEW_FEATURE.md`
    - ❌ WRONG: `NEW_FEATURE.md` (root level)
    - No exceptions: ALL documentation files belong in `docs/`
 
 2. **Reference in CLAUDE.md**: ALWAYS add a reference to the new file in the "Comprehensive Technical References" section
+
    - Format: `- docs/FEATURE_NAME.md - Brief description of what it covers`
    - Example: `- docs/MERCHACCOUNTANALYSIS.md - MerchantAccountId usage analysis across codebase`
 
@@ -105,6 +108,7 @@ When creating new documentation:
    - Always check: Does this change invalidate any statements in the docs?
 
 **Examples of changes requiring doc updates:**
+
 - ✅ New database schema field → Update `docs/DATABASE_SCHEMA.md`
 - ✅ Changed cost calculation formula → Update `docs/COST_MANAGEMENT_IMPLEMENTATION.md`
 - ✅ New security layer → Update `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md`
@@ -720,11 +724,14 @@ psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHear
 
 ### Blumon Multi-Merchant Payment System
 
-**WHY**: Enable one physical PAX device to process payments for multiple merchant accounts (e.g., main restaurant + ghost kitchen) with separate bank settlements and different processing fees.
+**WHY**: Enable one physical PAX device to process payments for multiple merchant accounts (e.g., main restaurant + ghost kitchen) with
+separate bank settlements and different processing fees.
 
-**Design Decision**: Multi-merchant architecture where physical terminals have virtual merchant identities, each with independent Blumon credentials, POS IDs, and cost structures.
+**Design Decision**: Multi-merchant architecture where physical terminals have virtual merchant identities, each with independent Blumon
+credentials, POS IDs, and cost structures.
 
 **Critical Concept**: 3 Types of Serial Numbers
+
 - **Physical Serial**: Built into device hardware (e.g., `AVQD-2841548417`)
 - **Virtual Serial 1**: First Blumon merchant registration (e.g., `2841548417`)
 - **Virtual Serial 2**: Second Blumon merchant registration (e.g., `2841548418`)
@@ -732,16 +739,19 @@ psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHear
 **📖 COMPLETE DOCUMENTATION**: When working with Blumon, multi-merchants, or payment routing, refer to these files:
 
 1. **docs/BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
+
    - Best for: Understanding system at a glance
    - Contains: Serial numbers explained, database hierarchy, payment flow, cost structure
    - Use when: Need quick context before diving into code
 
 2. **docs/BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
+
    - Best for: Finding file locations, field definitions, debugging
    - Contains: Critical file locations (backend + Android), field glossary, common issues
    - Use when: Implementing features, debugging merchant issues, need to find specific code
 
 3. **docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
+
    - Best for: Full system understanding, explaining to team members
    - Contains: Complete architecture, data flow with code examples, credential management
    - Use when: Need comprehensive understanding, implementing major features
@@ -752,6 +762,7 @@ psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHear
    - Use when: Don't know which document to read
 
 **Quick Topic Lookup**:
+
 - MerchantAccount model → See docs/BLUMON_QUICK_REFERENCE.md (Critical File Locations)
 - Credential switching → See docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 4)
 - Payment routing → See docs/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 5)
@@ -760,6 +771,7 @@ psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHear
 - Common debugging → See docs/BLUMON_QUICK_REFERENCE.md (Common Issues & Solutions)
 
 **Key Architecture**:
+
 ```
 One Physical Terminal (e.g., PAX A910S)
   ├── Physical Serial: AVQD-2841548417 (built-in)
@@ -778,6 +790,7 @@ One Physical Terminal (e.g., PAX A910S)
 ```
 
 **Payment Flow**:
+
 1. Cashier selects merchant before payment (Android UI)
 2. SDK reinitializes for selected merchant (3-5 seconds)
 3. Customer taps card
@@ -787,12 +800,14 @@ One Physical Terminal (e.g., PAX A910S)
 **Critical Gotcha**: Cost structure is PER MERCHANT ACCOUNT, not per terminal. Different merchants on same device can have different rates.
 
 **Key Files**:
+
 - MerchantAccount model: `prisma/schema.prisma:1958`
 - Blumon service: `src/services/tpv/blumon.service.ts`
 - Terminal config endpoint: `src/controllers/tpv/terminal.tpv.controller.ts:83`
 - Cost structure: `prisma/schema.prisma:2116` (ProviderCostStructure)
 
 **Testing Multi-Merchant Setup**:
+
 ```bash
 # Check merchant accounts for terminal
 psql -c "SELECT id, blumonSerialNumber, blumonPosId, name FROM MerchantAccount WHERE terminalId = 'xxx';"
@@ -801,7 +816,8 @@ psql -c "SELECT id, blumonSerialNumber, blumonPosId, name FROM MerchantAccount W
 psql -c "SELECT ma.name, pcs.fixedFee, pcs.percentageFee FROM ProviderCostStructure pcs JOIN MerchantAccount ma ON pcs.merchantAccountId = ma.id;"
 ```
 
-**⚠️ CRITICAL**: Always read the Blumon documentation files before modifying merchant-related code. They contain crucial context about credential management, payment routing, and cost calculation.
+**⚠️ CRITICAL**: Always read the Blumon documentation files before modifying merchant-related code. They contain crucial context about
+credential management, payment routing, and cost calculation.
 
 ### Authentication & Authorization
 

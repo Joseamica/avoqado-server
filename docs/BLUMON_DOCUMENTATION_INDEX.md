@@ -10,9 +10,11 @@ Status: Complete (Code review verified)
 ## Documents Overview
 
 ### 1. BLUMON_ARCHITECTURE_SUMMARY.txt
+
 **Best for**: Quick understanding at a glance
 
 **Contains**:
+
 - The 3 serial numbers explained (physical vs virtual)
 - Database hierarchy with examples
 - 5-step payment flow
@@ -26,9 +28,11 @@ Status: Complete (Code review verified)
 ---
 
 ### 2. BLUMON_QUICK_REFERENCE.md
+
 **Best for**: Developer reference while coding
 
 **Contains**:
+
 - Critical file locations (backend + Android)
 - Field definitions glossary
 - Common questions & answers
@@ -36,7 +40,8 @@ Status: Complete (Code review verified)
 - Common issues & solutions
 - Testing checklist
 
-**Use when**: 
+**Use when**:
+
 - You're implementing a feature and need to find the right file
 - You have a question about field meanings
 - You're debugging a merchant-related issue
@@ -47,9 +52,11 @@ Status: Complete (Code review verified)
 ---
 
 ### 3. BLUMON_MULTI_MERCHANT_ANALYSIS.md
+
 **Best for**: Complete technical understanding
 
 **Contains**:
+
 - Executive summary
 - Detailed architecture breakdown
 - Complete data flow with code examples
@@ -61,6 +68,7 @@ Status: Complete (Code review verified)
 - All answers to user's 5 key questions
 
 **Use when**:
+
 - You need to understand the complete system
 - You're explaining to a team member or stakeholder
 - You're implementing a new feature and need full context
@@ -74,55 +82,63 @@ Status: Complete (Code review verified)
 
 ### "I need to understand the system in..."
 
-| Time | Document | Section |
-|------|----------|---------|
-| **2 minutes** | ARCHITECTURE_SUMMARY.txt | Section 1-2 (Serial numbers + DB hierarchy) |
-| **5 minutes** | ARCHITECTURE_SUMMARY.txt | Read entire document |
-| **15 minutes** | QUICK_REFERENCE.md | Sections 1-5 (File locations + database) |
-| **30 minutes** | QUICK_REFERENCE.md | Full document (all sections) |
-| **60 minutes** | MULTI_MERCHANT_ANALYSIS.md | Full deep dive |
+| Time           | Document                   | Section                                     |
+| -------------- | -------------------------- | ------------------------------------------- |
+| **2 minutes**  | ARCHITECTURE_SUMMARY.txt   | Section 1-2 (Serial numbers + DB hierarchy) |
+| **5 minutes**  | ARCHITECTURE_SUMMARY.txt   | Read entire document                        |
+| **15 minutes** | QUICK_REFERENCE.md         | Sections 1-5 (File locations + database)    |
+| **30 minutes** | QUICK_REFERENCE.md         | Full document (all sections)                |
+| **60 minutes** | MULTI_MERCHANT_ANALYSIS.md | Full deep dive                              |
 
 ---
 
 ### "I need to find..."
 
-| Topic | Document | Section |
-|-------|----------|---------|
-| MerchantAccount model | QUICK_REFERENCE.md | Critical File Locations (Backend) |
-| How merchant switching works | ARCHITECTURE_SUMMARY.txt | Section 3 & 5 |
-| Credential encryption | MULTI_MERCHANT_ANALYSIS.md | Section 4 |
-| Android payment ViewModel | QUICK_REFERENCE.md | Critical File Locations (Android) |
-| Cost structure per merchant | ARCHITECTURE_SUMMARY.txt | Section 6 |
-| Payment flow diagram | MULTI_MERCHANT_ANALYSIS.md | Section 3 |
-| Real restaurant example | MULTI_MERCHANT_ANALYSIS.md | Section 9 |
-| Common issues | QUICK_REFERENCE.md | Common Issues & Solutions |
-| Field definitions | QUICK_REFERENCE.md | Field Definitions (Glossary) |
+| Topic                        | Document                   | Section                           |
+| ---------------------------- | -------------------------- | --------------------------------- |
+| MerchantAccount model        | QUICK_REFERENCE.md         | Critical File Locations (Backend) |
+| How merchant switching works | ARCHITECTURE_SUMMARY.txt   | Section 3 & 5                     |
+| Credential encryption        | MULTI_MERCHANT_ANALYSIS.md | Section 4                         |
+| Android payment ViewModel    | QUICK_REFERENCE.md         | Critical File Locations (Android) |
+| Cost structure per merchant  | ARCHITECTURE_SUMMARY.txt   | Section 6                         |
+| Payment flow diagram         | MULTI_MERCHANT_ANALYSIS.md | Section 3                         |
+| Real restaurant example      | MULTI_MERCHANT_ANALYSIS.md | Section 9                         |
+| Common issues                | QUICK_REFERENCE.md         | Common Issues & Solutions         |
+| Field definitions            | QUICK_REFERENCE.md         | Field Definitions (Glossary)      |
 
 ---
 
 ## Key Files to Understand (In Order)
 
 ### Backend
+
 1. **prisma/schema.prisma:1958** - MerchantAccount model
+
    - See: `blumonSerialNumber`, `blumonPosId`, `credentialsEncrypted`
 
 2. **prisma/schema.prisma:2116** - ProviderCostStructure model
+
    - See: `merchantAccountId` (costs are PER merchant)
 
 3. **src/controllers/tpv/terminal.tpv.controller.ts:83** - Terminal config endpoint
+
    - See: How config is fetched and returned to Android
 
 4. **src/services/tpv/blumon.service.ts** - Blumon OAuth + DUKPT
    - See: 3-step credential fetch process
 
 ### Android
+
 1. **features/payment/domain/model/MerchantAccount.kt** - Domain model
+
    - See: Basic merchant account structure
 
 2. **features/payment/presentation/PaymentViewModel.kt:113** - Merchant state
+
    - See: `currentMerchant`, `merchants`, `selectMerchant()`
 
 3. **features/payment/data/MultiMerchantSDKManager.kt** - SDK switching
+
    - See: How SDK reinitializes for new merchant
 
 4. **features/payment/presentation/MerchantSelectionContent.kt** - UI
@@ -133,26 +149,36 @@ Status: Complete (Code review verified)
 ## Answers to Key Questions
 
 ### Q1: Physical vs Virtual Serial Numbers?
+
 **Answer**: See ARCHITECTURE_SUMMARY.txt Section 1
+
 - Physical: AVQD-2841548417 (built-in to device)
 - Virtual: 2841548417, 2841548418 (Blumon registrations)
 
 ### Q2: What are blumonSerialNumber, blumonPosId, blumonMerchantId?
+
 **Answer**: See QUICK_REFERENCE.md Field Definitions
+
 - blumonSerialNumber: OAuth username + card crypto
 - blumonPosId: Payment routing (Momentum API position)
 - blumonMerchantId: Blumon's internal identifier
 
 ### Q3: Cost structure per merchant or per device?
+
 **Answer**: See ARCHITECTURE_SUMMARY.txt Section 6
+
 - **PER MERCHANT ACCOUNT** (different rates possible)
 
 ### Q4: How does credential switching work?
+
 **Answer**: See MULTI_MERCHANT_ANALYSIS.md Section 4
+
 - MultiMerchantSDKManager → Decrypt → OAuth fetch → DUKPT download → Ready
 
 ### Q5: How does payment know which merchant?
+
 **Answer**: See ARCHITECTURE_SUMMARY.txt Section 5
+
 - **PROBLEM**: Current payment recording doesn't include merchantAccountId
 - **SOLUTION**: Add merchantAccountId to payment request
 
@@ -161,6 +187,7 @@ Status: Complete (Code review verified)
 ## Implementation Checklist
 
 ### Already Complete
+
 - [x] Database models (Terminal, MerchantAccount, ProviderCostStructure)
 - [x] Backend config endpoint
 - [x] Android merchant selection UI
@@ -169,6 +196,7 @@ Status: Complete (Code review verified)
 - [x] Terminal config fetch
 
 ### Still Need to Do
+
 - [ ] Add merchantAccountId to payment recording (CRITICAL)
 - [ ] Add merchantAccountId to Android payment request
 - [ ] Handle merchant switch errors
@@ -180,10 +208,12 @@ Status: Complete (Code review verified)
 ## Real-World Example
 
 **Business**: Casa Maria Restaurant
+
 - Main Dining: Merchant A (Serial 2841548417, PosId 376, Rate 1.5%)
 - Ghost Kitchen: Merchant B (Serial 2841548418, PosId 378, Rate 1.8%)
 
 **Payment Scenario**:
+
 1. Cashier rings up $100 dine-in order
 2. Before payment, selects "Casa Maria Dine-In" (Merchant A)
 3. SDK reinitializes (3-5 seconds)
@@ -196,15 +226,19 @@ Status: Complete (Code review verified)
 ## Common Debugging Scenarios
 
 ### "Payment routed to wrong merchant"
+
 See: QUICK_REFERENCE.md → Common Issues & Solutions → "Payment routes to wrong merchant"
 
 ### "Can't identify which merchant processed payment"
+
 See: ARCHITECTURE_SUMMARY.txt → Section 9 (INCOMPLETE section)
 
 ### "Merchant switching takes too long"
+
 See: ARCHITECTURE_SUMMARY.txt → Section 3, Step 3 (3-5 second delay is normal)
 
 ### "Different merchants charged different fees"
+
 See: ARCHITECTURE_SUMMARY.txt → Section 6 (This is expected behavior)
 
 ---
@@ -216,6 +250,7 @@ See: ARCHITECTURE_SUMMARY.txt → Section 6 (This is expected behavior)
 **Coverage**: 95%+ of multi-merchant architecture
 
 ### To Update This Documentation
+
 1. Review the 3 main documents
 2. If architecture changes, update all 3 documents
 3. Keep them in sync (they refer to each other)
@@ -225,24 +260,24 @@ See: ARCHITECTURE_SUMMARY.txt → Section 6 (This is expected behavior)
 
 ## Technical Stack Reference
 
-| Component | Technology | Purpose |
-|---|---|---|
-| Backend | Node.js + Prisma | Database + REST API |
-| Database | PostgreSQL | Multi-merchant config storage |
-| Android | Kotlin + Hilt | TPV app with multi-merchant UI |
-| Payment SDK | Blumon PAX | EMV + contactless processing |
-| Encryption | AES-256-CBC | Credential storage in database |
+| Component   | Technology       | Purpose                        |
+| ----------- | ---------------- | ------------------------------ |
+| Backend     | Node.js + Prisma | Database + REST API            |
+| Database    | PostgreSQL       | Multi-merchant config storage  |
+| Android     | Kotlin + Hilt    | TPV app with multi-merchant UI |
+| Payment SDK | Blumon PAX       | EMV + contactless processing   |
+| Encryption  | AES-256-CBC      | Credential storage in database |
 
 ---
 
 ## File Sizes
 
-| Document | Size | Lines | Format |
-|----------|------|-------|--------|
-| BLUMON_ARCHITECTURE_SUMMARY.txt | 6.2 KB | ~270 | Text |
-| BLUMON_QUICK_REFERENCE.md | 12.3 KB | ~430 | Markdown |
-| BLUMON_MULTI_MERCHANT_ANALYSIS.md | 28.1 KB | ~805 | Markdown |
-| **TOTAL** | **46.6 KB** | **~1,505** | - |
+| Document                          | Size        | Lines      | Format   |
+| --------------------------------- | ----------- | ---------- | -------- |
+| BLUMON_ARCHITECTURE_SUMMARY.txt   | 6.2 KB      | ~270       | Text     |
+| BLUMON_QUICK_REFERENCE.md         | 12.3 KB     | ~430       | Markdown |
+| BLUMON_MULTI_MERCHANT_ANALYSIS.md | 28.1 KB     | ~805       | Markdown |
+| **TOTAL**                         | **46.6 KB** | **~1,505** | -        |
 
 ---
 
@@ -258,6 +293,7 @@ See: ARCHITECTURE_SUMMARY.txt → Section 6 (This is expected behavior)
 ## Contact & Questions
 
 If documentation is unclear or missing critical information:
+
 1. Check all 3 documents (use quick navigation table above)
 2. Search for keywords in QUICK_REFERENCE.md glossary
 3. Review the complete analysis in MULTI_MERCHANT_ANALYSIS.md

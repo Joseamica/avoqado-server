@@ -2,24 +2,28 @@
 
 ## Executive Summary
 
-Avoqado's multi-merchant system enables a **single physical PAX terminal** to process payments for **multiple merchant accounts** by leveraging Blumon's ability to assign different "virtual serial numbers" to a single device. This is a **clever workaround** that uses Blumon's credential model to route payments to different accounts within the Momentum API.
+Avoqado's multi-merchant system enables a **single physical PAX terminal** to process payments for **multiple merchant accounts** by
+leveraging Blumon's ability to assign different "virtual serial numbers" to a single device. This is a **clever workaround** that uses
+Blumon's credential model to route payments to different accounts within the Momentum API.
 
 ---
 
 ## 1. Physical vs Virtual Serial Numbers (The Workaround)
 
 ### Physical Device
+
 - **PAX A910S Terminal**: Serial number `AVQD-2841548417` (fixed, built-in)
 - **Asset**: Single hardware device sitting on the restaurant counter
 - **Represents**: One physical payment terminal
 
 ### Virtual Serial Numbers (Blumon Workaround)
+
 Blumon allows registering the same physical device **twice** with different credential sets:
 
-| Virtual Serial | Device ID | Purpose | Merchant | Momentum API posId |
-|---|---|---|---|---|
-| `2841548417` | First registration | Main restaurant | Merchant Account A | `376` |
-| `2841548418` | Second registration | Ghost kitchen | Merchant Account B | `378` |
+| Virtual Serial | Device ID           | Purpose         | Merchant           | Momentum API posId |
+| -------------- | ------------------- | --------------- | ------------------ | ------------------ |
+| `2841548417`   | First registration  | Main restaurant | Merchant Account A | `376`              |
+| `2841548418`   | Second registration | Ghost kitchen   | Merchant Account B | `378`              |
 
 **Key Insight**: These are NOT separate devices—they're the **same physical device registered twice with different credentials**.
 
@@ -30,19 +34,21 @@ Blumon allows registering the same physical device **twice** with different cred
 ### Core Models
 
 #### A. Terminal Model (Physical Device)
+
 ```prisma
 model Terminal {
   id              String @id
   serialNumber    String @unique          // Physical serial: "AVQD-2841548417"
   venueId         String
   assignedMerchantIds String[] @default([])  // Array of MerchantAccount IDs
-  
+
   // These merchants handle all payments for this venue
   // Routing logic in Android determines which merchant to use
 }
 ```
 
 **Example**:
+
 ```
 Terminal(serialNumber="AVQD-2841548417")
 ├── assignedMerchantIds = ["merchant_001", "merchant_002"]
@@ -53,30 +59,31 @@ Terminal(serialNumber="AVQD-2841548417")
 ---
 
 #### B. MerchantAccount Model (Virtual Routing)
+
 ```prisma
 model MerchantAccount {
   id                String @id
-  
+
   // Core routing fields
   providerId        String            // Always "BLUMON" for payment
   externalMerchantId String           // Blumon's merchant ID
-  
+
   // 🆕 Blumon-Specific Multi-Merchant Fields (NEW 2025-11-05)
   blumonSerialNumber String?          // VIRTUAL serial: "2841548417" or "2841548418"
   blumonPosId        String?          // Momentum API position ID: "376" or "378"
   blumonEnvironment  String?          // "SANDBOX" or "PRODUCTION"
   blumonMerchantId   String?          // Blumon's internal merchant identifier
-  
+
   // Encrypted credentials (per merchant account)
   credentialsEncrypted Json           // OAuth tokens + DUKPT keys (PER ACCOUNT)
   providerConfig     Json?            // Flexible provider config
-  
+
   // UI/Business
   displayName        String?          // "Main Account", "Ghost Kitchen", "Facturación"
   alias              String?
   active             Boolean @default(true)
   displayOrder       Int
-  
+
   // Relations
   costStructures     ProviderCostStructure[]
   venueConfigsPrimary   VenuePaymentConfig[] @relation("PrimaryAccount")
@@ -85,6 +92,7 @@ model MerchantAccount {
 ```
 
 **Critical Fields for Multi-Merchant**:
+
 - `blumonSerialNumber`: Acts as OAuth username (different per merchant)
 - `blumonPosId`: Routes payment to specific Momentum API position
 - `credentialsEncrypted`: Each account has SEPARATE OAuth tokens + DUKPT keys
@@ -92,31 +100,33 @@ model MerchantAccount {
 ---
 
 #### C. ProviderCostStructure Model (Cost Per Merchant)
+
 ```prisma
 model ProviderCostStructure {
   id                String @id
-  
+
   // ⭐ CRITICAL: Costs are PER MERCHANT ACCOUNT
   merchantAccountId String           // Links to specific MerchantAccount
   merchantAccount   MerchantAccount  @relation(fields: [merchantAccountId])
-  
+
   // Cost breakdown (what Blumon charges Avoqado)
   debitRate         Decimal          // e.g., 0.015 (1.5%)
   creditRate        Decimal          // e.g., 0.025 (2.5%)
   amexRate          Decimal          // e.g., 0.035 (3.5%)
   internationalRate Decimal          // e.g., 0.040 (4.0%)
   fixedCostPerTransaction Decimal?   // e.g., 0.50 MXN
-  
+
   // Period
   effectiveFrom     DateTime
   effectiveTo       DateTime?
   active            Boolean
-  
+
   @@unique([merchantAccountId, effectiveFrom])
 }
 ```
 
 **Cost Structure Answer**: ✅ **Costs are PER MERCHANT ACCOUNT**
+
 - Two merchant accounts = potentially different rates
 - Each merchant's `ProviderCostStructure` is independent
 - Blumon negotiates rates **per posId** (virtual serial), not per physical device
@@ -163,6 +173,7 @@ model ProviderCostStructure {
 **Endpoint**: `GET /api/v1/tpv/terminals/AVQD-2841548417/config`
 
 **Backend Logic** (terminal.tpv.controller.ts):
+
 ```typescript
 // 1. Find terminal by physical serial
 const terminal = await prisma.terminal.findFirst({
@@ -221,6 +232,7 @@ return {
 **File**: `MerchantSelectionContent.kt`
 
 User sees:
+
 - "Activa: Main Account" (currently selected)
 - Buttons: [Cuenta A] [Cuenta B]
 
@@ -241,13 +253,13 @@ fun selectMerchant(account: MerchantAccount) {
   viewModelScope.launch {
     try {
       _merchantSwitchingLoading.value = true
-      
+
       // Switch Blumon SDK to use different merchant's credentials
       multiMerchantSDKManager.switchMerchant(account)
-      
+
       // Update UI state
       _currentMerchant.value = account
-      
+
       _merchantSwitchMessage.value = "Switched to ${account.displayName}"
     } catch (e: Exception) {
       _merchantSwitchMessage.value = "Error: ${e.message}"
@@ -259,6 +271,7 @@ fun selectMerchant(account: MerchantAccount) {
 ```
 
 **MultiMerchantSDKManager** internally:
+
 1. Fetches credentials for new merchant (decrypts from app storage)
 2. Calls Blumon `InitializerUseCase` with **new posId** ("378" for Merchant B)
 3. Downloads new DUKPT keys for virtual serial "2841548418"
@@ -270,6 +283,7 @@ fun selectMerchant(account: MerchantAccount) {
 ### Step 4: Payment Processing (With Selected Merchant)
 
 **Payment Flow**:
+
 ```
 User inputs amount ($100)
     ↓
@@ -294,20 +308,22 @@ Transaction completes
 **Endpoint**: `POST /api/v1/tpv/venues/{venueId}/orders/{orderId}/payment`
 
 **Request Body** (from Android):
+
 ```json
 {
   "method": "CARD",
-  "amount": 10000,          // cents
+  "amount": 10000, // cents
   "tip": 1000,
   "status": "COMPLETED",
   "cardBrand": "VISA",
   "last4": "4242",
-  "mentaOperationId": "...",  // or Blumon transaction ID
+  "mentaOperationId": "...", // or Blumon transaction ID
   "staffId": "staff_123"
 }
 ```
 
-**Key Missing Field** ⚠️: The current payment recording does NOT include `merchantAccountId`. This needs to be added to track which merchant processed the payment.
+**Key Missing Field** ⚠️: The current payment recording does NOT include `merchantAccountId`. This needs to be added to track which merchant
+processed the payment.
 
 ---
 
@@ -377,6 +393,7 @@ const dukpt = await blumonService.getDUKPTKeys(
 ```
 
 **Critical**: Each virtual serial number gets its own:
+
 - OAuth tokens (tied to serial)
 - RSA keys (tied to posId)
 - DUKPT keys (tied to serial for card encryption)
@@ -388,6 +405,7 @@ const dukpt = await blumonService.getDUKPTKeys(
 ### Model Classes
 
 **MerchantAccount.kt** (Domain Model):
+
 ```kotlin
 data class MerchantAccount(
     val id: String,
@@ -399,6 +417,7 @@ data class MerchantAccount(
 ```
 
 **MerchantSelectionContent.kt** (UI):
+
 - Shows list of available merchants
 - User taps to select
 - Shows current active merchant highlighted
@@ -406,6 +425,7 @@ data class MerchantAccount(
 ### Payment ViewModel Flow
 
 **PaymentViewModel.kt**:
+
 ```kotlin
 // Multi-merchant state
 val merchants: StateFlow<List<MerchantAccount>>
@@ -474,6 +494,7 @@ fun startPayment() {
 ```
 
 **Answer**: Routing is determined by:
+
 1. **Virtual Serial Number** → OAuth username
 2. **PosId** → Momentum API position
 3. **Credentials** → Access token for that merchant
@@ -506,6 +527,7 @@ Terminal AVQD-2841548417
 ```
 
 **Why Different Costs?**
+
 - Merchant A: 100 transactions/month → 1.5% rate
 - Merchant B: 10,000 transactions/month → 1.8% rate (volume discount)
 - Blumon negotiates **per posId**, not per device
@@ -519,6 +541,7 @@ Terminal AVQD-2841548417
 **Endpoint**: `POST /api/v1/superadmin/merchantAccounts`
 
 **Step 1: Create Merchant Account A**
+
 ```json
 {
   "providerId": "provider_blumon",
@@ -539,6 +562,7 @@ Terminal AVQD-2841548417
 ```
 
 **Step 2: Create Merchant Account B**
+
 ```json
 {
   "providerId": "provider_blumon",
@@ -559,39 +583,41 @@ Terminal AVQD-2841548417
 ```
 
 **Step 3: Assign to Terminal**
+
 ```typescript
 // POST /api/v1/superadmin/terminals/:terminalId/merchants
 await prisma.terminal.update({
-  where: { id: "term_123" },
+  where: { id: 'term_123' },
   data: {
-    assignedMerchantIds: ["merchant_001", "merchant_002"]
-  }
-});
+    assignedMerchantIds: ['merchant_001', 'merchant_002'],
+  },
+})
 ```
 
 **Step 4: Set Cost Structures**
+
 ```typescript
 // Create cost structure for Merchant A
 await prisma.providerCostStructure.create({
   data: {
-    merchantAccountId: "merchant_001",
-    providerId: "provider_blumon",
+    merchantAccountId: 'merchant_001',
+    providerId: 'provider_blumon',
     debitRate: 0.015,
     creditRate: 0.025,
-    effectiveFrom: new Date()
-  }
-});
+    effectiveFrom: new Date(),
+  },
+})
 
 // Create different cost structure for Merchant B
 await prisma.providerCostStructure.create({
   data: {
-    merchantAccountId: "merchant_002",
-    providerId: "provider_blumon",
-    debitRate: 0.018,           // DIFFERENT!
-    creditRate: 0.028,           // DIFFERENT!
-    effectiveFrom: new Date()
-  }
-});
+    merchantAccountId: 'merchant_002',
+    providerId: 'provider_blumon',
+    debitRate: 0.018, // DIFFERENT!
+    creditRate: 0.028, // DIFFERENT!
+    effectiveFrom: new Date(),
+  },
+})
 ```
 
 ---
@@ -599,6 +625,7 @@ await prisma.providerCostStructure.create({
 ## 9. Real Example: Multi-Merchant Restaurant
 
 ### Business Setup
+
 - **Restaurant**: "Casa Maria"
 - **Main Location**: Main dining room (Merchant A)
 - **Ghost Kitchen**: Off-premises delivery kitchen (Merchant B)
@@ -628,6 +655,7 @@ await prisma.providerCostStructure.create({
 ### Payment Scenarios
 
 **Scenario 1: Dine-in Customer**
+
 1. Cashier enters amount: $500
 2. Shows rating/tip screens
 3. Before payment: "¿Cuál cuenta?" → Selects "Casa Maria Dine-In"
@@ -637,6 +665,7 @@ await prisma.providerCostStructure.create({
 7. Fee calculated: $500 × 1.5% + $0.50 = $8.00
 
 **Scenario 2: Delivery Order (Ghost Kitchen)**
+
 1. Cashier enters amount: $300
 2. Shows rating/tip screens
 3. Before payment: "¿Cuál cuenta?" → Selects "Casa Maria Delivery"
@@ -652,20 +681,22 @@ await prisma.providerCostStructure.create({
 ### Q1: Is there a distinction between physical vs virtual serial?
 
 ✅ **YES**
+
 - **Physical**: `AVQD-2841548417` (built-in PAX device serial)
 - **Virtual**: `2841548417`, `2841548418` (Blumon registrations for multi-merchant routing)
 
 ### Q2: What are blumonPosId vs blumonSerialNumber vs blumonMerchantId?
 
-| Field | Example | Purpose | Used By |
-|---|---|---|---|
-| `blumonSerialNumber` | `2841548417` | OAuth username + card encryption | Blumon SDK, Android app |
-| `blumonPosId` | `376` | Momentum API position ID | Payment routing, cost lookup |
-| `blumonMerchantId` | `merchant_blumon_a` | Blumon's internal identifier | Backend configuration |
+| Field                | Example             | Purpose                          | Used By                      |
+| -------------------- | ------------------- | -------------------------------- | ---------------------------- |
+| `blumonSerialNumber` | `2841548417`        | OAuth username + card encryption | Blumon SDK, Android app      |
+| `blumonPosId`        | `376`               | Momentum API position ID         | Payment routing, cost lookup |
+| `blumonMerchantId`   | `merchant_blumon_a` | Blumon's internal identifier     | Backend configuration        |
 
 ### Q3: Cost structure per merchant or per device?
 
 ✅ **PER MERCHANT ACCOUNT**
+
 - Merchant A: 1.5% rate
 - Merchant B: 1.8% rate (on same device)
 - Different `ProviderCostStructure` records linked to different `MerchantAccount` records
@@ -689,6 +720,7 @@ Ready for payment (3-5 seconds)
 **Current Issue**: Payment recording (`recordOrderPayment`) doesn't include `merchantAccountId`.
 
 **Should Add**:
+
 ```kotlin
 // Android: Include merchant ID with payment
 val paymentData = PaymentCreationData(
@@ -773,33 +805,35 @@ val paymentData = PaymentCreationData(
 
 ## 12. Technical Stack Summary
 
-| Component | Technology | Purpose |
-|---|---|---|
-| **Backend** | Node.js + Prisma | Database + API |
-| **Database** | PostgreSQL | Multi-merchant config storage |
-| **Android** | Kotlin + Hilt | TPV app |
-| **Payment SDK** | Blumon PAX | EMV + contactless processing |
-| **Encryption** | AES-256-CBC | Credential storage |
+| Component       | Technology       | Purpose                       |
+| --------------- | ---------------- | ----------------------------- |
+| **Backend**     | Node.js + Prisma | Database + API                |
+| **Database**    | PostgreSQL       | Multi-merchant config storage |
+| **Android**     | Kotlin + Hilt    | TPV app                       |
+| **Payment SDK** | Blumon PAX       | EMV + contactless processing  |
+| **Encryption**  | AES-256-CBC      | Credential storage            |
 
 ---
 
 ## 13. Remaining Work
 
 ### Backend
+
 - [ ] Verify Blumon API endpoints for terminal config
 - [ ] Implement credential auto-refresh logic
 - [ ] Add `merchantAccountId` to payment recording
 
 ### Android
+
 - [ ] Test multi-merchant switching (3-5 second lag)
 - [ ] Verify SDK state after merchant switch
 - [ ] Handle network errors during switch
 
 ### Database
+
 - [ ] Seed sample multi-merchant configuration
 - [ ] Document cost structure creation workflow
 
 ---
 
-**Document Version**: 2025-11-06
-**Status**: Complete (Blumon Multi-Merchant Architecture Explained)
+**Document Version**: 2025-11-06 **Status**: Complete (Blumon Multi-Merchant Architecture Explained)
