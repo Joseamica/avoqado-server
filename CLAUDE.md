@@ -64,7 +64,7 @@ implementation details (HOW), not architectural decisions (WHY).
 
 **Comprehensive Technical References:**
 
-For complex features requiring detailed implementation guides, full documentation is available in `docs/` and root-level documentation:
+For complex features requiring detailed implementation guides, full documentation is available in `docs/`:
 
 - `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md` - Complete chatbot system reference (architecture, security, testing, troubleshooting)
 - `docs/PERMISSIONS_SYSTEM.md` - Permission system architecture and best practices
@@ -72,17 +72,19 @@ For complex features requiring detailed implementation guides, full documentatio
 - `docs/INVENTORY_REFERENCE.md` - FIFO batch system and inventory tracking
 - `docs/DATETIME_SYNC.md` - Date/time synchronization between frontend/backend
 - `docs/MERCHACCOUNTANALYSIS.md` - MerchantAccountId usage analysis across codebase (schema, services, validation, queries)
+- `docs/PAYMENT_ARCHITECTURE.md` - Payment processing architecture (money flow, merchant accounts, profit calculation)
+- `docs/UNUSED_CODE_DETECTION.md` - Tools and commands for detecting unused code (unimported, knip)
 
-**Blumon Multi-Merchant Payment System** (root-level documentation):
-- `BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide (start here)
-- `BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
-- `BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
-- `BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
+**Blumon Multi-Merchant Payment System** (comprehensive documentation in `docs/`):
+- `docs/BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide (start here)
+- `docs/BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
+- `docs/BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
+- `docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
 
 **⚠️ CRITICAL**: When working on Blumon, multi-merchants, or payment routing, ALWAYS consult the Blumon documentation files first.
 
 **Rule**: New features should NOT create separate .md files in root. Add architectural decisions to CLAUDE.md and implementation details to
-`docs/` or code comments/tests. Exception: Complex multi-file features like Blumon may have dedicated root-level documentation.
+`docs/` or code comments/tests. ALL documentation files must be placed in `docs/` directory.
 
 **Managing Documentation Files:**
 
@@ -91,7 +93,7 @@ When creating new documentation:
 1. **Location**: ALWAYS place new .md files in the `docs/` directory
    - ✅ CORRECT: `docs/NEW_FEATURE.md`
    - ❌ WRONG: `NEW_FEATURE.md` (root level)
-   - Exception: Multi-file systems like Blumon (4+ related docs) may use root level
+   - No exceptions: ALL documentation files belong in `docs/`
 
 2. **Reference in CLAUDE.md**: ALWAYS add a reference to the new file in the "Comprehensive Technical References" section
    - Format: `- docs/FEATURE_NAME.md - Brief description of what it covers`
@@ -729,33 +731,33 @@ psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHear
 
 **📖 COMPLETE DOCUMENTATION**: When working with Blumon, multi-merchants, or payment routing, refer to these files:
 
-1. **BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
+1. **docs/BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
    - Best for: Understanding system at a glance
    - Contains: Serial numbers explained, database hierarchy, payment flow, cost structure
    - Use when: Need quick context before diving into code
 
-2. **BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
+2. **docs/BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
    - Best for: Finding file locations, field definitions, debugging
    - Contains: Critical file locations (backend + Android), field glossary, common issues
    - Use when: Implementing features, debugging merchant issues, need to find specific code
 
-3. **BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
+3. **docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
    - Best for: Full system understanding, explaining to team members
    - Contains: Complete architecture, data flow with code examples, credential management
    - Use when: Need comprehensive understanding, implementing major features
 
-4. **BLUMON_DOCUMENTATION_INDEX.md** - Navigation guide
+4. **docs/BLUMON_DOCUMENTATION_INDEX.md** - Navigation guide
    - Best for: Finding specific information quickly
    - Contains: Document comparison, quick navigation, topic-based lookup
    - Use when: Don't know which document to read
 
 **Quick Topic Lookup**:
-- MerchantAccount model → See QUICK_REFERENCE.md (Critical File Locations)
-- Credential switching → See MULTI_MERCHANT_ANALYSIS.md (Section 4)
-- Payment routing → See ARCHITECTURE_SUMMARY.txt (Section 5)
-- Cost structure per merchant → See ARCHITECTURE_SUMMARY.txt (Section 6)
-- Real restaurant example → See MULTI_MERCHANT_ANALYSIS.md (Section 9)
-- Common debugging → See QUICK_REFERENCE.md (Common Issues & Solutions)
+- MerchantAccount model → See docs/BLUMON_QUICK_REFERENCE.md (Critical File Locations)
+- Credential switching → See docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 4)
+- Payment routing → See docs/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 5)
+- Cost structure per merchant → See docs/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 6)
+- Real restaurant example → See docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 9)
+- Common debugging → See docs/BLUMON_QUICK_REFERENCE.md (Common Issues & Solutions)
 
 **Key Architecture**:
 ```

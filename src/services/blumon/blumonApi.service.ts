@@ -21,7 +21,6 @@
  */
 
 import axios, { AxiosInstance } from 'axios'
-import { PrismaClient } from '@prisma/client'
 import {
   BlumonTerminalConfig,
   BlumonPricingStructure,
@@ -29,11 +28,8 @@ import {
   BlumonKYCRequest,
   BlumonKYCResponse,
   BlumonEnvironment,
-  BlumonApiError,
 } from './types'
 import logger from '@/config/logger'
-
-const prisma = new PrismaClient()
 
 /**
  * Blumon API Configuration
@@ -141,11 +137,11 @@ export class BlumonApiService {
    * @param environment - SANDBOX or PRODUCTION
    * @returns Validation result with merchantId if valid
    */
-  async validateSerial(serialNumber: string, environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonMerchantValidation> {
+  async validateSerial(serialNumber: string, _environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonMerchantValidation> {
     logger.info(`[BlumonAPI] Validating serial: ${serialNumber}`)
 
     // TODO: Replace with real API call
-    // const client = this.getClient(environment);
+    // const client = this.getClient(_environment);
     // const response = await client.post('/terminals/validate', { serialNumber });
     // return response.data;
 
@@ -173,11 +169,11 @@ export class BlumonApiService {
    * @param environment - SANDBOX or PRODUCTION
    * @returns Pricing rates and fees
    */
-  async getPricingStructure(merchantId: string, environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonPricingStructure> {
+  async getPricingStructure(merchantId: string, _environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonPricingStructure> {
     logger.info(`[BlumonAPI] Fetching pricing for merchant: ${merchantId}`)
 
     // TODO: Replace with real API call
-    // const client = this.getClient(environment);
+    // const client = this.getClient(_environment);
     // const response = await client.get(`/merchants/${merchantId}/pricing`);
     // return response.data;
 
@@ -235,12 +231,12 @@ export class BlumonApiService {
    */
   async getOAuthToken(
     merchantId: string,
-    environment: BlumonEnvironment = 'SANDBOX',
+    _environment: BlumonEnvironment = 'SANDBOX',
   ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
     logger.info(`[BlumonAPI] Fetching OAuth token for: ${merchantId}`)
 
     // TODO: Replace with real OAuth flow
-    // const client = this.getClient(environment);
+    // const client = this.getClient(_environment);
     // const response = await client.post('/oauth/token', {
     //   grant_type: 'client_credentials',
     //   client_id: merchantId,
