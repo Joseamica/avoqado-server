@@ -214,3 +214,21 @@ export async function generateActivationCode(
     next(error)
   }
 }
+
+/**
+ * Delete terminal (only if not activated)
+ */
+export async function deleteTpv(req: Request<{ venueId: string; tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, tpvId } = req.params
+
+    await tpvDashboardService.deleteTpv(venueId, tpvId)
+
+    res.status(200).json({
+      success: true,
+      message: 'Terminal eliminada exitosamente',
+    })
+  } catch (error) {
+    next(error)
+  }
+}

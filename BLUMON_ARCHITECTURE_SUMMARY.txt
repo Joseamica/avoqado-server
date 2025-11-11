@@ -1,0 +1,212 @@
+================================================================================
+  BLUMON MULTI-MERCHANT SYSTEM - ARCHITECTURE SUMMARY
+================================================================================
+
+QUESTION CLARIFICATION:
+User was confused about how one physical PAX device (serial AVQD-2841548417)
+can serve 2 merchants. Answer: Blumon's WORKAROUND allows registering the
+SAME physical device TWICE with different "virtual serial numbers."
+
+================================================================================
+1. THE THREE SERIAL NUMBERS
+================================================================================
+
+PHYSICAL SERIAL (Hardware - Built-in)
+├─ AVQD-2841548417
+├─ One per device
+├─ Used for device identification
+└─ Visible on back of PAX terminal
+
+VIRTUAL SERIAL A (Blumon Registration 1)
+├─ 2841548417  (derived from physical)
+├─ OAuth username
+├─ DUKPT key identifier
+├─ Links to: Merchant Account A
+└─ Routes to: Momentum API posId 376
+
+VIRTUAL SERIAL B (Blumon Registration 2)
+├─ 2841548418  (derived from physical, +1)
+├─ Different OAuth username
+├─ DUKPT key identifier
+├─ Links to: Merchant Account B
+└─ Routes to: Momentum API posId 378
+
+================================================================================
+2. DATABASE HIERARCHY
+================================================================================
+
+TERMINAL (physical device)
+    serialNumber: "AVQD-2841548417"
+    assignedMerchantIds: ["merchant_001", "merchant_002"]
+    
+    ├─ MERCHANT ACCOUNT A
+    │   ├─ blumonSerialNumber: "2841548417"
+    │   ├─ blumonPosId: "376"
+    │   ├─ credentialsEncrypted: {...OAuth Token A + DUKPT A...}
+    │   └─ ProviderCostStructure
+    │       ├─ debitRate: 1.5%
+    │       ├─ creditRate: 2.5%
+    │       └─ fixedCostPerTransaction: 0.50 MXN
+    │
+    └─ MERCHANT ACCOUNT B
+        ├─ blumonSerialNumber: "2841548418"
+        ├─ blumonPosId: "378"
+        ├─ credentialsEncrypted: {...OAuth Token B + DUKPT B...}
+        └─ ProviderCostStructure
+            ├─ debitRate: 1.8% (DIFFERENT!)
+            ├─ creditRate: 2.8%
+            └─ fixedCostPerTransaction: 0.75 MXN
+
+KEY INSIGHT: ProviderCostStructure is linked to MerchantAccount, NOT Terminal.
+Different merchants = different rates, even on same physical device.
+
+================================================================================
+3. PAYMENT FLOW (5 STEPS)
+================================================================================
+
+STEP 1: App Startup
+   Android calls: GET /tpv/terminals/AVQD-2841548417/config
+   Backend returns: Terminal + both merchant accounts with encrypted credentials
+
+STEP 2: User Selects Merchant
+   Cashier taps: "Seleccionar Cuenta B"
+   ViewModel: selectMerchant(merchantB)
+
+STEP 3: SDK Reinitializes (3-5 seconds)
+   MultiMerchantSDKManager:
+   ├─ Decrypts merchant B credentials
+   ├─ Calls: BlumonService.getAccessToken(serial="2841548418")
+   ├─ Calls: BlumonService.getRSAKeys(posId="378")
+   ├─ Calls: BlumonService.getDUKPTKeys(serial="2841548418")
+   └─ SDK context updated for merchant B
+
+STEP 4: Card Processing
+   Customer: Taps card
+   SDK knows: "I'm merchant B, use serial 2841548418, route to posId 378"
+   SDK encrypts: Card data using merchant B's DUKPT keys
+   Send to Blumon: With OAuth token B + encrypted card data
+
+STEP 5: Backend Recording
+   Android sends: POST /payment
+   Body: { amount: 10000, cardBrand: "VISA", ... }
+   ⚠️ PROBLEM: Missing merchantAccountId in current implementation
+   Should include: { ..., merchantAccountId: "merchant_002" }
+
+================================================================================
+4. CREDENTIALS (THE TECHNICAL COMPLEXITY)
+================================================================================
+
+EACH MERCHANT HAS SEPARATE CREDENTIALS:
+
+Merchant A Credentials:
+├─ OAuth Access Token (for serial 2841548417)
+├─ OAuth Refresh Token
+├─ RSA ID: 123
+├─ RSA Public Key (for DUKPT request encryption)
+├─ DUKPT KSN: "key_serial_number_2841548417"
+└─ DUKPT Base Derivation Key (for card encryption)
+
+Merchant B Credentials:
+├─ OAuth Access Token (for serial 2841548418)  ← DIFFERENT
+├─ OAuth Refresh Token
+├─ RSA ID: 124  ← DIFFERENT
+├─ RSA Public Key  ← DIFFERENT
+├─ DUKPT KSN: "key_serial_number_2841548418"  ← DIFFERENT
+└─ DUKPT Base Derivation Key  ← DIFFERENT
+
+STORAGE: AES-256-CBC encrypted in MerchantAccount.credentialsEncrypted
+
+================================================================================
+5. ROUTING LOGIC (HOW BLUMON KNOWS WHICH MERCHANT)
+================================================================================
+
+Android SDK State:
+    currentMerchant = Merchant B
+    currentSerialNumber = 2841548418
+    currentPosId = 378
+    currentCredentials = {...}
+
+When payment is made:
+    1. Blumon SDK reads: posId = 378
+    2. Routes to: Momentum API account for posId 378
+    3. Which belongs to: Merchant B
+    4. Deposited to: Merchant B's CLABE bank account (Santander)
+
+If user switches to Merchant A:
+    1. SDK reinitializes with: serialNumber = 2841548417
+    2. Downloads new: OAuth token + RSA keys + DUKPT keys
+    3. Sets: posId = 376
+    4. Next payment routes to: Merchant A's bank account (BBVA)
+
+================================================================================
+6. COST STRUCTURE (ANSWER: PER MERCHANT)
+================================================================================
+
+Terminal with 2 merchants:
+
+Merchant A: 1.5% debit + 2.5% credit + 0.50 MXN fee per transaction
+Merchant B: 1.8% debit + 2.8% credit + 0.75 MXN fee per transaction
+
+Example $100 payment:
+Merchant A: $100 × 1.5% + $0.50 = $1.50 + $0.50 = $2.00 fee
+Merchant B: $100 × 1.8% + $0.75 = $1.80 + $0.75 = $2.55 fee
+
+Why different? Blumon negotiates per posId, not per physical device.
+Higher volume merchant = better rates.
+
+================================================================================
+7. KEY FILE LOCATIONS
+================================================================================
+
+BACKEND:
+  /prisma/schema.prisma:1958           → MerchantAccount model
+  /prisma/schema.prisma:2116           → ProviderCostStructure model
+  /src/controllers/tpv/terminal.tpv.controller.ts   → Config endpoint
+  /src/services/tpv/blumon.service.ts  → OAuth + DUKPT fetch
+
+ANDROID:
+  /features/payment/domain/model/MerchantAccount.kt  → Domain model
+  /features/payment/presentation/PaymentViewModel.kt → UI state
+  /features/payment/data/MultiMerchantSDKManager.kt → SDK switching
+  /features/payment/presentation/MerchantSelectionContent.kt → UI
+
+================================================================================
+8. CRITICAL FIELDS (GLOSSARY)
+================================================================================
+
+blumonSerialNumber    "2841548417"      Virtual serial for OAuth + card crypto
+blumonPosId           "376"             Momentum API position (payment routing)
+blumonEnvironment     "SANDBOX"         Test vs production
+blumonMerchantId      "merchant_a"      Blumon's internal ID
+credentialsEncrypted  {encrypted, iv}   AES-256 encrypted OAuth + DUKPT
+displayName           "Main Account"    UI label for merchant selection
+
+================================================================================
+9. IMPLEMENTATION STATUS
+================================================================================
+
+COMPLETED:
+  ✅ Database models (Terminal, MerchantAccount, ProviderCostStructure)
+  ✅ Backend config endpoint
+  ✅ Android merchant selection UI
+  ✅ SDK switching logic
+  ✅ Credential encryption
+  ✅ Terminal config fetch on startup
+
+INCOMPLETE:
+  ❌ Add merchantAccountId to payment recording (CRITICAL GAP)
+  ❌ Add merchantAccountId to Android payment request
+  ❌ Handle merchant switch errors gracefully
+  ❌ Document superadmin setup workflow
+
+================================================================================
+10. SINGLE SENTENCE SUMMARY
+================================================================================
+
+One physical PAX device registers with Blumon TWICE using different virtual
+serial numbers, enabling each registration to have separate OAuth credentials
+and route to different Momentum API positions (posId), allowing a single
+device to process payments for multiple merchants with independent cost
+structures.
+
+================================================================================

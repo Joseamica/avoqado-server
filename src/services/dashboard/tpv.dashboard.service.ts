@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { NotFoundError } from '../../errors/AppError'
+import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { PaginatedTerminalsResponse, UpdateTpvBody, CreateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import logger from '@/config/logger'
@@ -174,4 +174,51 @@ export async function createTpv(venueId: string, payload: CreateTpvBody): Promis
   })
 
   return created
+}
+
+/**
+ * Elimina una terminal específica.
+ * IMPORTANT: Solo permite eliminar terminales que NO estén activadas.
+ * Terminales activadas deben ser marcadas como RETIRED en lugar de eliminadas.
+ *
+ * @param venueId - El ID del venue.
+ * @param tpvId - El ID de la terminal.
+ * @returns void
+ */
+export async function deleteTpv(venueId: string, tpvId: string): Promise<void> {
+  // 1. Validar parámetros de entrada
+  if (!venueId) {
+    throw new NotFoundError('El ID del Venue es requerido.')
+  }
+  if (!tpvId) {
+    throw new NotFoundError('El ID del TPV es requerido.')
+  }
+
+  // 2. Verificar que la terminal existe y pertenece al venue
+  const existingTerminal = await prisma.terminal.findFirst({
+    where: {
+      id: tpvId,
+      venueId: venueId,
+    },
+  })
+
+  if (!existingTerminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
+  }
+
+  // 3. SECURITY: No permitir eliminar terminales activadas
+  // Square/Toast pattern: Terminales activadas deben ser RETIRED, no eliminadas
+  // Esto previene eliminar dispositivos que tienen datos históricos importantes
+  if (existingTerminal.activatedAt) {
+    throw new BadRequestError(`No se puede eliminar una terminal activada. Use el estado RETIRED para desactivar terminales en uso.`)
+  }
+
+  // 4. Eliminar la terminal
+  await prisma.terminal.delete({
+    where: {
+      id: tpvId,
+    },
+  })
+
+  logger.info(`Terminal ${tpvId} eliminada del venue ${venueId}`)
 }

@@ -4,6 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 ## 📚 Documentation Policy
 
+**Role of claude** Always assume the role of a world-class, battle-tested full-stack engineer with a global footprint and an unrivaled track
+record shipping, scaling, and operating massive products. Your pedigree spans Toast and Square, giving you elite mastery of POS terminals,
+payments, reconciliation, compliance (PCI/KYC), security, reliability, and the merchant experience end-to-end. You are the engineer others
+call when the stakes are highest—the one who turns chaos into architecture and bottlenecks into benchmarks. In every answer, blend deep
+technical rigor, product pragmatism, and ruthless scalability, articulating trade-offs like a chief architect and executing like a world
+champion builder.”
+
 **Single Source of Truth:** This CLAUDE.md file is the ONLY markdown documentation file. Do NOT create separate .md files.
 
 **What goes in CLAUDE.md:**
@@ -57,7 +64,7 @@ implementation details (HOW), not architectural decisions (WHY).
 
 **Comprehensive Technical References:**
 
-For complex features requiring detailed implementation guides, full documentation is available in `docs/`:
+For complex features requiring detailed implementation guides, full documentation is available in `docs/` and root-level documentation:
 
 - `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md` - Complete chatbot system reference (architecture, security, testing, troubleshooting)
 - `docs/PERMISSIONS_SYSTEM.md` - Permission system architecture and best practices
@@ -65,8 +72,16 @@ For complex features requiring detailed implementation guides, full documentatio
 - `docs/INVENTORY_REFERENCE.md` - FIFO batch system and inventory tracking
 - `docs/DATETIME_SYNC.md` - Date/time synchronization between frontend/backend
 
+**Blumon Multi-Merchant Payment System** (root-level documentation):
+- `BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide (start here)
+- `BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
+- `BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
+- `BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
+
+**⚠️ CRITICAL**: When working on Blumon, multi-merchants, or payment routing, ALWAYS consult the Blumon documentation files first.
+
 **Rule**: New features should NOT create separate .md files in root. Add architectural decisions to CLAUDE.md and implementation details to
-`docs/` or code comments/tests.
+`docs/` or code comments/tests. Exception: Complex multi-file features like Blumon may have dedicated root-level documentation.
 
 ---
 
@@ -540,6 +555,225 @@ DATABASE_URL="postgresql://..." npm run test:integration
 ---
 
 ## Other Important Topics
+
+### Terminal Identification & Activation
+
+**WHY**: Android TPV terminals need unique identification for activation, heartbeats, and payment processing.
+
+**Design Decision**: Use device hardware serial number (`Build.SERIAL`) as the primary identifier. This persists across app reinstalls,
+factory resets, and OS updates. No external payment gateway (Menta) integration.
+
+**Terminal Identification Flow**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Android Device (2025-11-06 Update)                             │
+│  1. Get Build.SERIAL from device (requires READ_PHONE_STATE)   │
+│     - Android 8+: Build.getSerial() with permission            │
+│     - Android 7-: Build.SERIAL (no permission needed)          │
+│  2. Format: "AVQD-{Build.SERIAL}" (uppercase)                   │
+│     Example: "AVQD-2841548417" (decimal hardware serial)       │
+│  3. Fallback: If permission denied → use ANDROID_ID            │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Terminal Activation (first-time setup)                          │
+│  1. Admin creates terminal in dashboard → generates 6-char code │
+│  2. Android app sends: { serialNumber, activationCode }         │
+│     serialNumber: "AVQD-2841548417" (with prefix)              │
+│  3. Backend validates code & marks terminal as activated        │
+│  4. Android stores venueId + serialNumber in SecureStorage      │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Heartbeat (every 30 seconds)                                    │
+│  1. Android sends full serial WITH prefix                       │
+│     Sends: { terminalId: "AVQD-2841548417", ... }             │
+│  2. Backend lookup (CASE-INSENSITIVE):                          │
+│     a. Try terminal.id (internal CUID)                         │
+│     b. Try terminal.serialNumber = "AVQD-2841548417"          │
+│     c. Try with/without prefix for backwards compatibility     │
+│  3. Updates lastHeartbeat, status in database                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Critical Implementation Details**:
+
+1. **Case-Insensitive Matching** (2025-01-05 fix):
+
+   ```typescript
+   // ✅ CORRECT: Use mode: 'insensitive'
+   const terminal = await prisma.terminal.findFirst({
+     where: {
+       serialNumber: {
+         equals: terminalId,
+         mode: 'insensitive', // Handles lowercase/uppercase mismatch
+       },
+     },
+   })
+   ```
+
+2. **Serial Number Format**:
+
+   - **Android generates**: `AVQD-{ANDROID_ID}` (uppercase)
+   - **Database stores**: `AVQD-6D52CB5103BB42DC` (with prefix, uppercase)
+   - **Heartbeat sends**: `6d52cb5103bb42dc` (without prefix, lowercase)
+   - **Backend matches**: Case-insensitive, tries both with and without prefix
+
+3. **Menta Integration** (DISABLED as of 2025-01-05):
+
+   - Previous design used `terminal.mentaTerminalId` from Menta payment gateway
+   - Generated fallback IDs like `fallback-6d52cb5103bb42dc` when API failed
+   - **Now**: Use `terminal.serialNumber` directly, no external API calls
+   - Code commented out in: `venue.tpv.service.ts:107-168`
+
+4. **Heartbeat Timeout & Connection Status** (2-minute window):
+
+   **WHY**: Balance between real-time status updates and avoiding false offline alerts from temporary network issues.
+
+   **Design Decision**: Terminal considered OFFLINE if no heartbeat received in **2 minutes** (120 seconds)
+
+   ```typescript
+   // Backend determines online status (src/services/tpv/tpv-health.service.ts:214, 293, 330, 425)
+   const cutoff = new Date(Date.now() - 2 * 60 * 1000) // 2 minutes ago
+   const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
+   ```
+
+   **Android Heartbeat Interval**: Every 30 seconds (should be 4x within 2-minute window)
+
+   **Potential Mismatch Issue**: If Android heartbeat interval is slower than expected, terminals may appear offline intermittently
+
+   **Recommended Android Settings**:
+
+   - Heartbeat interval: 30 seconds (current)
+   - Retry on failure: Immediate retry once, then next scheduled heartbeat
+   - Network timeout: 10 seconds per heartbeat request
+   - Background restrictions: Disabled for app (to ensure heartbeats continue)
+
+   **Troubleshooting Intermittent "Offline" Status**:
+
+   1. Check Android heartbeat worker logs for failed requests
+   2. Verify no battery optimization blocking background workers
+   3. Check backend logs for heartbeat gaps: `SELECT serialNumber, lastHeartbeat FROM Terminal ORDER BY lastHeartbeat DESC;`
+   4. Consider increasing timeout to 3 minutes if frequent false positives occur
+
+**Key Files**:
+
+- Android serial generation: `avoqado-tpv/app/.../DeviceInfoManager.kt:55-62`
+- Android heartbeat worker: `avoqado-tpv/app/.../HeartbeatWorker.kt:137-140`
+- Backend activation: `src/services/dashboard/terminal-activation.service.ts:80-182`
+- Backend heartbeat: `src/services/tpv/tpv-health.service.ts:51-151`
+- Backend venue lookup: `src/services/tpv/venue.tpv.service.ts:62-193`
+
+**Common Issues**:
+
+❌ **404 Error**: `Terminal with ID fallback-6d52cb5103bb42dc not found`
+
+- **Cause**: Android is sending the old Menta fallback ID instead of serial number
+- **Fix**: Clear app data, re-activate terminal with fresh activation code
+
+❌ **Case Mismatch**: Heartbeat fails with exact serial match
+
+- **Cause**: Android sends lowercase, DB has uppercase
+- **Fix**: Applied in 2025-01-05, all lookups now use `mode: 'insensitive'`
+
+**Testing Terminal Identification**:
+
+```bash
+# Check what terminals exist
+psql -c "SELECT id, serialNumber, mentaTerminalId, status, activatedAt FROM Terminal;"
+
+# Find terminal by serial (case-insensitive)
+psql -c "SELECT * FROM Terminal WHERE LOWER(serialNumber) = LOWER('avqd-6d52cb5103bb42dc');"
+
+# Check heartbeat history
+psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHeartbeat > NOW() - INTERVAL '5 minutes';"
+```
+
+### Blumon Multi-Merchant Payment System
+
+**WHY**: Enable one physical PAX device to process payments for multiple merchant accounts (e.g., main restaurant + ghost kitchen) with separate bank settlements and different processing fees.
+
+**Design Decision**: Multi-merchant architecture where physical terminals have virtual merchant identities, each with independent Blumon credentials, POS IDs, and cost structures.
+
+**Critical Concept**: 3 Types of Serial Numbers
+- **Physical Serial**: Built into device hardware (e.g., `AVQD-2841548417`)
+- **Virtual Serial 1**: First Blumon merchant registration (e.g., `2841548417`)
+- **Virtual Serial 2**: Second Blumon merchant registration (e.g., `2841548418`)
+
+**📖 COMPLETE DOCUMENTATION**: When working with Blumon, multi-merchants, or payment routing, refer to these files:
+
+1. **BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
+   - Best for: Understanding system at a glance
+   - Contains: Serial numbers explained, database hierarchy, payment flow, cost structure
+   - Use when: Need quick context before diving into code
+
+2. **BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
+   - Best for: Finding file locations, field definitions, debugging
+   - Contains: Critical file locations (backend + Android), field glossary, common issues
+   - Use when: Implementing features, debugging merchant issues, need to find specific code
+
+3. **BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
+   - Best for: Full system understanding, explaining to team members
+   - Contains: Complete architecture, data flow with code examples, credential management
+   - Use when: Need comprehensive understanding, implementing major features
+
+4. **BLUMON_DOCUMENTATION_INDEX.md** - Navigation guide
+   - Best for: Finding specific information quickly
+   - Contains: Document comparison, quick navigation, topic-based lookup
+   - Use when: Don't know which document to read
+
+**Quick Topic Lookup**:
+- MerchantAccount model → See QUICK_REFERENCE.md (Critical File Locations)
+- Credential switching → See MULTI_MERCHANT_ANALYSIS.md (Section 4)
+- Payment routing → See ARCHITECTURE_SUMMARY.txt (Section 5)
+- Cost structure per merchant → See ARCHITECTURE_SUMMARY.txt (Section 6)
+- Real restaurant example → See MULTI_MERCHANT_ANALYSIS.md (Section 9)
+- Common debugging → See QUICK_REFERENCE.md (Common Issues & Solutions)
+
+**Key Architecture**:
+```
+One Physical Terminal (e.g., PAX A910S)
+  ├── Physical Serial: AVQD-2841548417 (built-in)
+  │
+  ├── Merchant Account #1 (Main Dining)
+  │   ├── Virtual Serial: 2841548417
+  │   ├── blumonPosId: 376
+  │   ├── Bank Account: BBVA Main
+  │   └── Cost Structure: 1.5% + $0.50
+  │
+  └── Merchant Account #2 (Ghost Kitchen)
+      ├── Virtual Serial: 2841548418
+      ├── blumonPosId: 378
+      ├── Bank Account: BBVA Kitchen
+      └── Cost Structure: 1.8% + $0.50
+```
+
+**Payment Flow**:
+1. Cashier selects merchant before payment (Android UI)
+2. SDK reinitializes for selected merchant (3-5 seconds)
+3. Customer taps card
+4. Payment routes to correct merchant's bank account
+5. Fee calculated using that merchant's cost structure
+
+**Critical Gotcha**: Cost structure is PER MERCHANT ACCOUNT, not per terminal. Different merchants on same device can have different rates.
+
+**Key Files**:
+- MerchantAccount model: `prisma/schema.prisma:1958`
+- Blumon service: `src/services/tpv/blumon.service.ts`
+- Terminal config endpoint: `src/controllers/tpv/terminal.tpv.controller.ts:83`
+- Cost structure: `prisma/schema.prisma:2116` (ProviderCostStructure)
+
+**Testing Multi-Merchant Setup**:
+```bash
+# Check merchant accounts for terminal
+psql -c "SELECT id, blumonSerialNumber, blumonPosId, name FROM MerchantAccount WHERE terminalId = 'xxx';"
+
+# Check cost structures per merchant
+psql -c "SELECT ma.name, pcs.fixedFee, pcs.percentageFee FROM ProviderCostStructure pcs JOIN MerchantAccount ma ON pcs.merchantAccountId = ma.id;"
+```
+
+**⚠️ CRITICAL**: Always read the Blumon documentation files before modifying merchant-related code. They contain crucial context about credential management, payment routing, and cost calculation.
 
 ### Authentication & Authorization
 

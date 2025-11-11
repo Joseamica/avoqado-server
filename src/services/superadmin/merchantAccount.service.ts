@@ -16,7 +16,9 @@ import crypto from 'crypto'
  */
 
 // Encryption utilities
-const ENCRYPTION_KEY = process.env.MERCHANT_CREDENTIALS_ENCRYPTION_KEY || 'default-key-change-in-production-32b' // Must be 32 bytes
+const ENCRYPTION_KEY_RAW = process.env.MERCHANT_CREDENTIALS_ENCRYPTION_KEY || 'default-key-change-in-production-use-env-var'
+// Derive a 32-byte key using SHA-256 (always produces 32 bytes)
+const ENCRYPTION_KEY = crypto.createHash('sha256').update(ENCRYPTION_KEY_RAW).digest()
 const ALGORITHM = 'aes-256-cbc'
 
 /**
@@ -27,7 +29,7 @@ const ALGORITHM = 'aes-256-cbc'
 function encryptCredentials(credentials: any): any {
   try {
     const iv = crypto.randomBytes(16)
-    const cipher = crypto.createCipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY), iv)
+    const cipher = crypto.createCipheriv(ALGORITHM, ENCRYPTION_KEY, iv)
 
     let encrypted = cipher.update(JSON.stringify(credentials), 'utf8', 'hex')
     encrypted += cipher.final('hex')
@@ -53,7 +55,7 @@ function decryptCredentials(encryptedData: any): any {
       throw new Error('Invalid encrypted data format')
     }
 
-    const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY), Buffer.from(encryptedData.iv, 'hex'))
+    const decipher = crypto.createDecipheriv(ALGORITHM, ENCRYPTION_KEY, Buffer.from(encryptedData.iv, 'hex'))
 
     let decrypted = decipher.update(encryptedData.encrypted, 'hex', 'utf8')
     decrypted += decipher.final('utf8')
@@ -135,6 +137,9 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
       _count: {
         select: {
           costStructures: true,
+          venueConfigsPrimary: true,
+          venueConfigsSecondary: true,
+          venueConfigsTertiary: true,
         },
       },
     },
@@ -142,10 +147,15 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
   })
 
   // Remove encrypted credentials from response for security
+  // Also compute total venue configs count
   const sanitizedAccounts = accounts.map(account => ({
     ...account,
     credentialsEncrypted: undefined, // Don't expose encrypted data
     hasCredentials: !!(account.credentialsEncrypted as any)?.encrypted,
+    _count: {
+      costStructures: account._count.costStructures,
+      venueConfigs: account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary,
+    },
   }))
 
   logger.info('Retrieved merchant accounts', {
@@ -175,6 +185,9 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
       _count: {
         select: {
           costStructures: true,
+          venueConfigsPrimary: true,
+          venueConfigsSecondary: true,
+          venueConfigsTertiary: true,
         },
       },
     },
@@ -199,8 +212,15 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
     includeCredentials,
   })
 
+  // Compute total venue configs count
+  const venueConfigsCount = account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary
+
   return {
     ...account,
+    _count: {
+      costStructures: account._count.costStructures,
+      venueConfigs: venueConfigsCount,
+    },
     credentialsEncrypted: undefined, // Don't expose encrypted data
     credentials: decryptedCredentials, // Only if requested
     hasCredentials: !!(account.credentialsEncrypted as any)?.encrypted,
@@ -224,7 +244,7 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
 
   // Validate required credential fields (provider-specific)
   // Blumon uses OAuth tokens instead of merchantId/apiKey
-  if (data.providerId !== 'BLUMON') {
+  if (provider.code !== 'BLUMON') {
     if (!data.credentials.merchantId || !data.credentials.apiKey) {
       throw new BadRequestError('Credentials must include merchantId and apiKey')
     }
@@ -405,6 +425,26 @@ export async function deleteMerchantAccount(id: string) {
   if (account._count.costStructures > 0 || venueConfigs > 0) {
     throw new BadRequestError(
       `Cannot delete merchant account because it's in use (${account._count.costStructures} cost structures, ${venueConfigs} venue configs). Deactivate instead.`,
+    )
+  }
+
+  // Check if any terminals have this merchant assigned
+  const terminalsUsing = await prisma.terminal.count({
+    where: {
+      assignedMerchantIds: {
+        has: id, // Check if array contains this merchant ID
+      },
+    },
+  })
+
+  if (terminalsUsing > 0) {
+    const terminals = await prisma.terminal.findMany({
+      where: { assignedMerchantIds: { has: id } },
+      select: { name: true, serialNumber: true },
+    })
+
+    throw new BadRequestError(
+      `Cannot delete merchant account "${account.displayName}" because it's assigned to ${terminalsUsing} terminal(s): ${terminals.map(t => `${t.name} (${t.serialNumber})`).join(', ')}. Remove assignments first.`,
     )
   }
 

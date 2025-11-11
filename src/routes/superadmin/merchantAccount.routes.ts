@@ -29,6 +29,10 @@ router.post('/', merchantAccountController.createMerchantAccount)
 // Specialized endpoint for Blumon merchant registration with auto-config
 router.post('/blumon/register', merchantAccountController.registerBlumonMerchant)
 
+// POST /api/v1/superadmin/merchant-accounts/blumon/auto-fetch
+// Auto-fetch Blumon credentials via device OAuth flow (serial + brand + model)
+router.post('/blumon/auto-fetch', merchantAccountController.autoFetchBlumonCredentials)
+
 // PUT /api/v1/superadmin/merchant-accounts/:id
 router.put('/:id', merchantAccountController.updateMerchantAccount)
 

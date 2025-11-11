@@ -1531,6 +1531,82 @@ router.post('/activate', validateRequest(activateTerminalSchema), activationCont
 
 /**
  * @openapi
+ * /tpv/terminals/{serialNumber}/activation-status:
+ *   get:
+ *     tags: [TPV - Activation]
+ *     summary: Check terminal activation status
+ *     description: |
+ *       Checks if a terminal is activated by verifying backend activatedAt field.
+ *       Used by SplashScreen to prevent routing to LoginScreen when terminal is not activated.
+ *
+ *       **Square/Toast Pattern:**
+ *       - SplashScreen calls this BEFORE routing to Login
+ *       - If not activated → route to ActivationScreen
+ *       - If activated → route to LoginScreen (if no session) or HomeScreen (if session)
+ *       - If RETIRED → clear local data and force re-activation (will fail)
+ *
+ *       **Security:**
+ *       - No authentication required (terminal needs to check before login)
+ *       - Returns RETIRED status to force logout of stolen devices
+ *       - Returns Spanish error messages for user-friendly UX
+ *     parameters:
+ *       - in: path
+ *         name: serialNumber
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Device serial number (e.g., AVQD-1A2B3C4D5E6F)
+ *         example: "AVQD-2841548417"
+ *     responses:
+ *       200:
+ *         description: Activation status returned successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 isActivated:
+ *                   type: boolean
+ *                   description: Whether terminal is activated (activatedAt !== null)
+ *                 status:
+ *                   type: string
+ *                   enum: [ACTIVE, INACTIVE, MAINTENANCE, RETIRED]
+ *                   description: Current terminal status
+ *                 venueId:
+ *                   type: string
+ *                   format: cuid
+ *                   description: Venue ID (null if not activated)
+ *                   nullable: true
+ *                 venueName:
+ *                   type: string
+ *                   description: Venue name (only if activated)
+ *                 venueSlug:
+ *                   type: string
+ *                   description: Venue URL slug (only if activated)
+ *                 activatedAt:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Activation timestamp (only if activated)
+ *                 message:
+ *                   type: string
+ *                   description: Spanish user-friendly message
+ *       404:
+ *         description: Terminal not registered
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Terminal no registrado. Contacta a tu administrador."
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/terminals/:serialNumber/activation-status', activationController.checkActivationStatus)
+
+/**
+ * @openapi
  * /tpv/terminals/{serialNumber}/config:
  *   get:
  *     tags: [TPV - Terminal Configuration]

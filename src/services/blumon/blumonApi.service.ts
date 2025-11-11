@@ -31,6 +31,7 @@ import {
   BlumonEnvironment,
   BlumonApiError,
 } from './types'
+import logger from '@/config/logger'
 
 const prisma = new PrismaClient()
 
@@ -98,11 +99,11 @@ export class BlumonApiService {
    * @example
    * ```typescript
    * const config = await blumonApi.getTerminalConfig("2841548417", "SANDBOX");
-   * console.log(config.posId); // "376"
+   * logger.info(config.posId); // "376"
    * ```
    */
   async getTerminalConfig(serialNumber: string, environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonTerminalConfig> {
-    console.log(`[BlumonAPI] Fetching config for serial: ${serialNumber} (${environment})`)
+    logger.info(`[BlumonAPI] Fetching config for serial: ${serialNumber} (${environment})`)
 
     // TODO: Replace with real API call
     // const client = this.getClient(environment);
@@ -141,7 +142,7 @@ export class BlumonApiService {
    * @returns Validation result with merchantId if valid
    */
   async validateSerial(serialNumber: string, environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonMerchantValidation> {
-    console.log(`[BlumonAPI] Validating serial: ${serialNumber}`)
+    logger.info(`[BlumonAPI] Validating serial: ${serialNumber}`)
 
     // TODO: Replace with real API call
     // const client = this.getClient(environment);
@@ -173,7 +174,7 @@ export class BlumonApiService {
    * @returns Pricing rates and fees
    */
   async getPricingStructure(merchantId: string, environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonPricingStructure> {
-    console.log(`[BlumonAPI] Fetching pricing for merchant: ${merchantId}`)
+    logger.info(`[BlumonAPI] Fetching pricing for merchant: ${merchantId}`)
 
     // TODO: Replace with real API call
     // const client = this.getClient(environment);
@@ -205,7 +206,7 @@ export class BlumonApiService {
    * @returns KYC submission result
    */
   async submitKYC(kycData: BlumonKYCRequest, environment: BlumonEnvironment = 'SANDBOX'): Promise<BlumonKYCResponse> {
-    console.log(`[BlumonAPI] Submitting KYC for: ${kycData.legalName}`)
+    logger.info(`[BlumonAPI] Submitting KYC for: ${kycData.legalName}`)
 
     // TODO: Replace with real API call
     // const client = this.getClient(environment);
@@ -236,7 +237,7 @@ export class BlumonApiService {
     merchantId: string,
     environment: BlumonEnvironment = 'SANDBOX',
   ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
-    console.log(`[BlumonAPI] Fetching OAuth token for: ${merchantId}`)
+    logger.info(`[BlumonAPI] Fetching OAuth token for: ${merchantId}`)
 
     // TODO: Replace with real OAuth flow
     // const client = this.getClient(environment);

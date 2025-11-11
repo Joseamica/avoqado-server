@@ -17,6 +17,7 @@ import paymentAnalyticsRoutes from '../superadmin/paymentAnalytics.routes'
 import webhookRoutes from '../superadmin/webhook.routes'
 import kycReviewRoutes from '../superadmin/kycReview.routes'
 import settlementConfigRoutes from '../superadmin/settlementConfiguration.routes'
+import terminalRoutes from '../superadmin/terminal.routes'
 
 // Import cost management validation schemas
 import {
@@ -145,5 +146,8 @@ router.use('/kyc', kycReviewRoutes)
 
 // Settlement Configuration Management
 router.use('/settlement-configurations', settlementConfigRoutes)
+
+// Terminal Management (Create, Update, Assign Merchants)
+router.use('/terminals', terminalRoutes)
 
 export default router

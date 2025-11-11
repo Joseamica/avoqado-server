@@ -100,6 +100,13 @@ export async function activateTerminal(serialNumber: string, activationCode: str
     throw new NotFoundError('Terminal not registered. Contact your administrator.')
   }
 
+  // 🚨 SECURITY: Block activation of RETIRED terminals (stolen devices)
+  // RETIRED terminals must be manually un-retired by SUPERADMIN before activation
+  if (terminal.status === 'RETIRED') {
+    logger.error(`Activation attempt blocked for RETIRED terminal ${serialNumber} - possible stolen device`)
+    throw new UnauthorizedError('Terminal has been retired and cannot be activated. Contact support.')
+  }
+
   // Check if already activated
   if (terminal.activatedAt) {
     logger.warn(`Terminal ${serialNumber} already activated - returning activation data for re-sync`)
@@ -108,14 +115,15 @@ export async function activateTerminal(serialNumber: string, activationCode: str
     // This handles app reinstalls / data clears gracefully
     // Android needs venueId to proceed to login screen
 
-    // IMPORTANT: Reactivate terminal if status is INACTIVE
-    // This handles the case where admin deactivated but user is re-activating
-    if (terminal.status !== 'ACTIVE') {
+    // IMPORTANT: Reactivate terminal if status is INACTIVE (but NOT RETIRED)
+    // This handles the case where terminal went offline temporarily
+    // 🚨 SECURITY: Never auto-reactivate RETIRED terminals
+    if (terminal.status === 'INACTIVE' || terminal.status === 'MAINTENANCE') {
       await prisma.terminal.update({
         where: { id: terminal.id },
         data: { status: 'ACTIVE' },
       })
-      logger.info(`Terminal ${serialNumber} status updated to ACTIVE`)
+      logger.info(`Terminal ${serialNumber} status updated from ${terminal.status} to ACTIVE`)
     }
 
     return {
@@ -184,6 +192,83 @@ export async function activateTerminal(serialNumber: string, activationCode: str
     venueName: terminal.venue.name,
     venueSlug: terminal.venue.slug,
     activatedAt: new Date().toISOString(),
+  }
+}
+
+/**
+ * Check Terminal Activation Status
+ *
+ * Returns activation status for a terminal by serial number.
+ * Used by SplashScreen to verify backend activation before routing.
+ *
+ * @param serialNumber Device serial number (e.g., AVQD-1A2B3C4D5E6F)
+ * @returns Activation status, venueId if activated
+ */
+export async function checkTerminalActivationStatus(serialNumber: string) {
+  logger.info(`Checking activation status for terminal: ${serialNumber}`)
+
+  // Find terminal by serial number (case-insensitive)
+  const terminal = await prisma.terminal.findFirst({
+    where: {
+      serialNumber: {
+        equals: serialNumber,
+        mode: 'insensitive', // Case-insensitive matching
+      },
+    },
+    select: {
+      id: true,
+      serialNumber: true,
+      status: true,
+      activatedAt: true,
+      venueId: true,
+      venue: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+        },
+      },
+    },
+  })
+
+  if (!terminal) {
+    logger.warn(`Terminal not found for serial: ${serialNumber}`)
+    throw new NotFoundError('Terminal no registrado. Contacta a tu administrador.')
+  }
+
+  // Check if activated
+  const isActivated = terminal.activatedAt !== null
+
+  // 🚨 SECURITY: Return RETIRED status to force logout
+  if (terminal.status === 'RETIRED') {
+    logger.warn(`Activation check for RETIRED terminal ${serialNumber}`)
+    return {
+      isActivated: false, // Force re-activation (won't succeed due to RETIRED check)
+      status: terminal.status,
+      venueId: null,
+      message: 'Terminal ha sido desactivado. Contacta soporte.',
+    }
+  }
+
+  if (!isActivated) {
+    logger.info(`Terminal ${serialNumber} not activated (activatedAt is NULL)`)
+    return {
+      isActivated: false,
+      status: terminal.status,
+      venueId: null,
+      message: 'Terminal no activado. Por favor, ingresa el código de activación.',
+    }
+  }
+
+  // ✅ Terminal is activated
+  logger.info(`Terminal ${serialNumber} is activated (activatedAt: ${terminal.activatedAt})`)
+  return {
+    isActivated: true,
+    status: terminal.status,
+    venueId: terminal.venueId,
+    venueName: terminal.venue.name,
+    venueSlug: terminal.venue.slug,
+    activatedAt: terminal.activatedAt!.toISOString(), // Safe: checked isActivated above
   }
 }
 

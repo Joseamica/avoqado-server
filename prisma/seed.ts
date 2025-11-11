@@ -628,6 +628,38 @@ async function main() {
     },
   })
 
+  const blumonProvider = await prisma.paymentProvider.create({
+    data: {
+      code: 'BLUMON',
+      name: 'Blumon PAX Payment Solutions',
+      type: ProviderType.PAYMENT_PROCESSOR,
+      countryCode: ['MX'],
+      active: true,
+      configSchema: {
+        required: ['serialNumber', 'posId', 'environment'],
+        properties: {
+          serialNumber: {
+            type: 'string',
+            description: 'Blumon device serial number (e.g., 2841548417)',
+          },
+          posId: {
+            type: 'string',
+            description: 'Momentum API position ID (CRITICAL for payment routing)',
+          },
+          environment: {
+            type: 'string',
+            enum: ['SANDBOX', 'PRODUCTION'],
+            description: 'Blumon environment',
+          },
+          merchantId: {
+            type: 'string',
+            description: 'Blumon merchant identifier',
+          },
+        },
+      },
+    },
+  })
+
   await prisma.paymentProvider.create({
     data: {
       code: 'BANORTE_DIRECT',
@@ -646,140 +678,184 @@ async function main() {
     },
   })
 
-  console.log(`  Created 3 payment providers (Menta, Clip, Banorte).`)
+  console.log(`  Created 4 payment providers (Menta, Clip, Blumon, Banorte).`)
 
-  // Create merchant accounts for different scenarios with display names and ordering
-  const mentaMerchantPrimary = await prisma.merchantAccount.create({
+  // 🆕 Create Stripe merchant account (gateway for online payments)
+  const stripeMerchant = await prisma.merchantAccount.create({
     data: {
-      providerId: mentaProvider.id,
-      externalMerchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
-      alias: 'Menta Primary Account',
-      displayName: 'Cuenta Principal Menta',
+      providerId: mentaProvider.id, // Using Menta provider as fallback (could be a dedicated Stripe provider)
+      externalMerchantId: 'acct_stripe_demo_12345',
+      alias: 'Stripe Gateway Account',
+      displayName: 'Cuenta Stripe (Online)',
       displayOrder: 0,
       active: true,
+      bankName: 'Stripe Mexico',
+      clabeNumber: '646180157000000004', // STP CLABE for Stripe
+      accountHolder: 'Stripe Payments Mexico S. de R.L.',
       credentialsEncrypted: {
-        // Demo-only plaintext for readability. Replace with encrypted payloads in production.
-        apiKey: 'mentaMerchantApiKey',
-        merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
-        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
-        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
+        // Stripe API credentials (mock for seed)
+        publishableKey: 'pk_test_mock_stripe_publishable_key',
+        secretKey: 'sk_test_mock_stripe_secret_key',
+        webhookSecret: 'whsec_mock_stripe_webhook_secret',
       },
       providerConfig: {
-        acquirerId: 'BANORTE',
-        countryCode: '484',
-        currencyCode: 'MX',
-        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
-        invoiceCapable: false,
+        accountId: 'acct_stripe_demo_12345',
+        countryCode: 'MX',
+        currencyCode: 'MXN',
+        paymentMethods: ['card', 'oxxo', 'spei'],
+        webhookUrl: 'https://api.avoqado.com/webhooks/stripe',
       },
     },
   })
 
-  const mentaMerchantSecondary = await prisma.merchantAccount.create({
+  // 🆕 Blumon Merchant Accounts (Multi-Merchant Support - 2025-11-06)
+  // These match the actual Blumon sandbox devices registered with Edgardo
+  const blumonMerchantA = await prisma.merchantAccount.create({
     data: {
-      providerId: mentaProvider.id,
-      externalMerchantId: '', // Unique ID for secondary account
-      alias: 'Menta Secondary Account (Factura)',
-      displayName: 'Cuenta Secundaria Menta (Facturación)',
-      displayOrder: 1,
+      providerId: blumonProvider.id,
+      externalMerchantId: 'blumon_merchant_2841548417',
+      alias: 'Blumon Account A',
+      displayName: 'Cuenta Blumon A (Sandbox)',
+      displayOrder: 20,
       active: true,
+      // Blumon-specific fields (Phase 2 - Multi-Merchant)
+      blumonSerialNumber: '2841548417',
+      blumonPosId: '376',
+      blumonEnvironment: 'SANDBOX',
+      blumonMerchantId: 'blumon_merchant_2841548417',
       credentialsEncrypted: {
-        apiKey: 'mentasecondarymerchantid',
-        merchantId: '8e341c9a-0298-4aa1-ba6b-be11a526560f',
-        customerId: '4b9d4822-9c94-4056-b58f-b84c7d214ed4',
-        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
+        // OAuth tokens and DUKPT keys (mock for seed)
+        // Real credentials are fetched from Blumon API and encrypted
+        clientId: 'mock_client_id_2841548417',
+        clientSecret: 'mock_client_secret_2841548417',
+        serialNumber: '2841548417',
+        environment: 'SANDBOX',
       },
       providerConfig: {
-        acquirerId: 'BANORTE',
-        countryCode: '484',
-        currencyCode: 'MX',
-        terminalId: '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122',
-        invoiceCapable: true,
+        serialNumber: '2841548417',
+        posId: '376',
+        environment: 'SANDBOX',
+        brand: 'PAX',
+        model: 'A910S',
       },
     },
   })
 
-  // NOTE: Clip account is disabled by default unless you have real Clip/Menta credentials
-  const clipMerchant = await prisma.merchantAccount.create({
+  const blumonMerchantB = await prisma.merchantAccount.create({
     data: {
-      providerId: clipProvider.id,
-      externalMerchantId: 'clip_merchant_12345',
-      alias: 'Clip Digital Wallet',
-      displayName: 'Cuenta Principal Clip',
-      displayOrder: 10,
-      active: true, // Enabled with valid Menta credentials
+      providerId: blumonProvider.id,
+      externalMerchantId: 'blumon_merchant_2841548418',
+      alias: 'Blumon Account B',
+      displayName: 'Cuenta Blumon B (Sandbox)',
+      displayOrder: 21,
+      active: true,
+      // Blumon-specific fields (Phase 2 - Multi-Merchant)
+      blumonSerialNumber: '2841548418',
+      blumonPosId: '378',
+      blumonEnvironment: 'SANDBOX',
+      blumonMerchantId: 'blumon_merchant_2841548418',
       credentialsEncrypted: {
-        apiKey: 'clipmerchantapikey',
-        merchantId: 'clip_merchant_12345',
+        // OAuth tokens and DUKPT keys (mock for seed)
+        clientId: 'mock_client_id_2841548418',
+        clientSecret: 'mock_client_secret_2841548418',
+        serialNumber: '2841548418',
+        environment: 'SANDBOX',
       },
       providerConfig: {
-        countryCode: '484',
-        currencyCode: 'MX',
-        webhookUrl: 'https://api.avoqado.com/webhooks/clip',
+        serialNumber: '2841548418',
+        posId: '378',
+        environment: 'SANDBOX',
+        brand: 'PAX',
+        model: 'A910S',
       },
     },
   })
 
-  console.log(`  Created 3 merchant accounts.`)
+  console.log(`  Created 3 merchant accounts (Stripe, Blumon x2).`)
 
-  // Create provider cost structures (what Menta/providers charge Avoqado)
-  const mentaPrimaryCosts = await prisma.providerCostStructure.create({
+  // Create provider cost structures (what providers charge Avoqado)
+  const stripeCosts = await prisma.providerCostStructure.create({
     data: {
       providerId: mentaProvider.id,
-      merchantAccountId: mentaMerchantPrimary.id,
-      debitRate: 0.015, // 1.5% for debit cards
-      creditRate: 0.025, // 2.5% for credit cards
-      amexRate: 0.035, // 3.5% for Amex (higher cost)
-      internationalRate: 0.04, // 4.0% for international cards
-      fixedCostPerTransaction: 0.5, // 0.50 MXN per transaction
-      monthlyFee: 500.0, // 500 MXN monthly fee
-      effectiveFrom: new Date('2024-01-01'),
-      active: true,
-      proposalReference: 'MENTA-2024-PRIMARY-001',
-      notes: 'Standard rates for primary Menta account',
-    },
-  })
-
-  const mentaSecondaryCosts = await prisma.providerCostStructure.create({
-    data: {
-      providerId: mentaProvider.id,
-      merchantAccountId: mentaMerchantSecondary.id,
-      debitRate: 0.016, // Slightly higher for secondary account
-      creditRate: 0.027,
-      amexRate: 0.037,
-      internationalRate: 0.042,
-      fixedCostPerTransaction: 0.6,
-      monthlyFee: 600.0, // Higher monthly fee for invoice-capable account
-      effectiveFrom: new Date('2024-01-01'),
-      active: true,
-      proposalReference: 'MENTA-2024-SECONDARY-001',
-      notes: 'Rates for secondary account with invoice capabilities',
-    },
-  })
-
-  await prisma.providerCostStructure.create({
-    data: {
-      providerId: clipProvider.id,
-      merchantAccountId: clipMerchant.id,
-      debitRate: 0.028, // Clip rates (typically higher than traditional processors)
-      creditRate: 0.029,
-      amexRate: 0.035,
-      internationalRate: 0.04,
-      fixedCostPerTransaction: 0.0, // No fixed fee for Clip
+      merchantAccountId: stripeMerchant.id,
+      debitRate: 0.029, // 2.9% for all cards (Stripe standard rate)
+      creditRate: 0.029, // Same rate for all card types
+      amexRate: 0.029,
+      internationalRate: 0.044, // 4.4% for international cards (2.9% + 1.5%)
+      fixedCostPerTransaction: 3.0, // $3 MXN fixed fee
       monthlyFee: 0.0, // No monthly fee
       effectiveFrom: new Date('2024-01-01'),
       active: true,
-      proposalReference: 'CLIP-2024-001',
-      notes: 'Standard Clip wallet processing rates',
+      proposalReference: 'STRIPE-2024-001',
+      notes: 'Stripe standard rates for Mexico (2.9% + $3 MXN)',
     },
   })
 
-  console.log(`  Created 3 provider cost structures.`)
+  const blumonACosts = await prisma.providerCostStructure.create({
+    data: {
+      providerId: blumonProvider.id,
+      merchantAccountId: blumonMerchantA.id,
+      debitRate: 0.015, // 1.5% for all cards
+      creditRate: 0.015, // 1.5% for all cards
+      amexRate: 0.015, // 1.5% for all cards
+      internationalRate: 0.015, // 1.5% for all cards
+      fixedCostPerTransaction: null, // No fixed cost
+      monthlyFee: null, // No monthly fee
+      effectiveFrom: new Date('2024-01-01'),
+      active: true,
+      proposalReference: 'BLUMON-2024-A-001',
+      notes: 'Blumon Account A rates - Flat 1.5% for all cards',
+    },
+  })
+
+  const blumonBCosts = await prisma.providerCostStructure.create({
+    data: {
+      providerId: blumonProvider.id,
+      merchantAccountId: blumonMerchantB.id,
+      debitRate: 0.015, // 1.5% for all cards
+      creditRate: 0.015, // 1.5% for all cards
+      amexRate: 0.015, // 1.5% for all cards
+      internationalRate: 0.015, // 1.5% for all cards
+      fixedCostPerTransaction: null, // No fixed cost
+      monthlyFee: null, // No monthly fee
+      effectiveFrom: new Date('2024-01-01'),
+      active: true,
+      proposalReference: 'BLUMON-2024-B-001',
+      notes: 'Blumon Account B rates - Flat 1.5% for all cards',
+    },
+  })
+
+  console.log(`  Created 3 provider cost structures (Stripe, Blumon x2).`)
 
   // Create settlement configurations for each merchant account
   console.log('Seeding settlement configurations...')
 
-  // Menta Primary Account - Standard settlement times
-  const settlementConfigTypes = [
+  // Stripe Account - Fast settlements
+  const stripeSettlementTypes = [
+    { cardType: TransactionCardType.DEBIT, settlementDays: 2, notes: 'Stripe débito - 2 días hábiles' },
+    { cardType: TransactionCardType.CREDIT, settlementDays: 2, notes: 'Stripe crédito - 2 días hábiles' },
+    { cardType: TransactionCardType.AMEX, settlementDays: 2, notes: 'Stripe Amex - 2 días hábiles' },
+    { cardType: TransactionCardType.INTERNATIONAL, settlementDays: 3, notes: 'Stripe internacional - 3 días hábiles' },
+    { cardType: TransactionCardType.OTHER, settlementDays: 2, notes: 'Stripe otras - 2 días hábiles' },
+  ]
+
+  for (const config of stripeSettlementTypes) {
+    await prisma.settlementConfiguration.create({
+      data: {
+        merchantAccountId: stripeMerchant.id,
+        cardType: config.cardType,
+        settlementDays: config.settlementDays,
+        settlementDayType: SettlementDayType.BUSINESS_DAYS,
+        cutoffTime: '23:59',
+        cutoffTimezone: 'America/Mexico_City',
+        effectiveFrom: new Date('2024-01-01'),
+        notes: config.notes,
+      },
+    })
+  }
+
+  // Blumon Account A - Standard settlement times
+  const blumonSettlementTypes = [
     { cardType: TransactionCardType.DEBIT, settlementDays: 1, notes: 'Tarjetas de débito - 1 día hábil' },
     { cardType: TransactionCardType.CREDIT, settlementDays: 2, notes: 'Tarjetas de crédito - 2 días hábiles' },
     { cardType: TransactionCardType.AMEX, settlementDays: 3, notes: 'American Express - 3 días hábiles' },
@@ -787,10 +863,10 @@ async function main() {
     { cardType: TransactionCardType.OTHER, settlementDays: 2, notes: 'Otras tarjetas - 2 días hábiles' },
   ]
 
-  for (const config of settlementConfigTypes) {
+  for (const config of blumonSettlementTypes) {
     await prisma.settlementConfiguration.create({
       data: {
-        merchantAccountId: mentaMerchantPrimary.id,
+        merchantAccountId: blumonMerchantA.id,
         cardType: config.cardType,
         settlementDays: config.settlementDays,
         settlementDayType: SettlementDayType.BUSINESS_DAYS,
@@ -802,11 +878,11 @@ async function main() {
     })
   }
 
-  // Menta Secondary Account - Same settlement times
-  for (const config of settlementConfigTypes) {
+  // Blumon Account B - Same settlement times
+  for (const config of blumonSettlementTypes) {
     await prisma.settlementConfiguration.create({
       data: {
-        merchantAccountId: mentaMerchantSecondary.id,
+        merchantAccountId: blumonMerchantB.id,
         cardType: config.cardType,
         settlementDays: config.settlementDays,
         settlementDayType: SettlementDayType.BUSINESS_DAYS,
@@ -818,31 +894,9 @@ async function main() {
     })
   }
 
-  // Clip Merchant - Faster settlements (digital wallet)
-  const clipSettlementTypes = [
-    { cardType: TransactionCardType.DEBIT, settlementDays: 1, notes: 'Clip débito - 1 día calendario' },
-    { cardType: TransactionCardType.CREDIT, settlementDays: 1, notes: 'Clip crédito - 1 día calendario' },
-    { cardType: TransactionCardType.AMEX, settlementDays: 2, notes: 'Clip Amex - 2 días calendario' },
-    { cardType: TransactionCardType.INTERNATIONAL, settlementDays: 3, notes: 'Clip internacional - 3 días calendario' },
-    { cardType: TransactionCardType.OTHER, settlementDays: 1, notes: 'Clip otras - 1 día calendario' },
-  ]
-
-  for (const config of clipSettlementTypes) {
-    await prisma.settlementConfiguration.create({
-      data: {
-        merchantAccountId: clipMerchant.id,
-        cardType: config.cardType,
-        settlementDays: config.settlementDays,
-        settlementDayType: SettlementDayType.CALENDAR_DAYS,
-        cutoffTime: '18:00',
-        cutoffTimezone: 'America/Mexico_City',
-        effectiveFrom: new Date('2024-01-01'),
-        notes: config.notes,
-      },
-    })
-  }
-
-  console.log(`  Created ${settlementConfigTypes.length * 2 + clipSettlementTypes.length} settlement configurations.`)
+  console.log(
+    `  Created ${stripeSettlementTypes.length + blumonSettlementTypes.length * 2} settlement configurations (Stripe + Blumon x2).`,
+  )
 
   // --- 1. Organizaciones ---
   console.log('Seeding organizations...')
@@ -1238,9 +1292,9 @@ async function main() {
         await prisma.venuePaymentConfig.create({
           data: {
             venueId: venue.id,
-            primaryAccountId: mentaMerchantPrimary.id,
-            secondaryAccountId: mentaMerchantSecondary.id,
-            tertiaryAccountId: index === 0 ? clipMerchant.id : null,
+            primaryAccountId: blumonMerchantA.id,
+            secondaryAccountId: blumonMerchantB.id,
+            tertiaryAccountId: index === 0 ? stripeMerchant.id : null,
             routingRules: {
               factura: 'secondary',
               amount_over: 5000,
@@ -1269,12 +1323,12 @@ async function main() {
           data: {
             venueId: venue.id,
             accountType: AccountType.PRIMARY,
-            debitRate: Number(mentaPrimaryCosts.debitRate) + 0.004,
-            creditRate: Number(mentaPrimaryCosts.creditRate) + 0.005,
-            amexRate: Number(mentaPrimaryCosts.amexRate) + 0.006,
-            internationalRate: Number(mentaPrimaryCosts.internationalRate) + 0.007,
-            fixedFeePerTransaction: Number(mentaPrimaryCosts.fixedCostPerTransaction) + 0.4,
-            monthlyServiceFee: 799.0,
+            debitRate: 0.025, // 2.5% flat for all cards (Blumon A)
+            creditRate: 0.025, // 2.5% flat for all cards
+            amexRate: 0.025, // 2.5% flat for all cards
+            internationalRate: 0.025, // 2.5% flat for all cards
+            fixedFeePerTransaction: null, // No fixed fee
+            monthlyServiceFee: null, // No monthly service fee
             active: true,
             effectiveFrom: new Date('2024-01-01'),
             contractReference: 'MENTA-2024-PRIMARY-RT01',
@@ -1284,12 +1338,12 @@ async function main() {
           data: {
             venueId: venue.id,
             accountType: AccountType.SECONDARY,
-            debitRate: Number(mentaSecondaryCosts.debitRate) + 0.004,
-            creditRate: Number(mentaSecondaryCosts.creditRate) + 0.005,
-            amexRate: Number(mentaSecondaryCosts.amexRate) + 0.006,
-            internationalRate: Number(mentaSecondaryCosts.internationalRate) + 0.007,
-            fixedFeePerTransaction: Number(mentaSecondaryCosts.fixedCostPerTransaction) + 0.4,
-            monthlyServiceFee: 899.0,
+            debitRate: 0.06, // 6% flat for all cards (Blumon B)
+            creditRate: 0.06, // 6% flat for all cards
+            amexRate: 0.06, // 6% flat for all cards
+            internationalRate: 0.06, // 6% flat for all cards
+            fixedFeePerTransaction: 1.0, // 1 peso fixed fee per transaction
+            monthlyServiceFee: null, // No monthly service fee
             active: true,
             effectiveFrom: new Date('2024-01-01'),
             contractReference: 'MENTA-2024-SECONDARY-RT01',
@@ -1392,11 +1446,16 @@ async function main() {
 
           return prisma.terminal.create({
             data: {
-              id: isPrimaryVenueTerminal ? '7335c5cd-1d99-4eb7-abfb-9c43c5e9a122' : undefined,
+              id: isPrimaryVenueTerminal ? 'cmhtgsr3100gi9k1we6pyr777' : undefined,
               venueId: venue.id,
               serialNumber,
               name: isPrimaryVenueTerminal ? 'TPV Desarrollo (Android)' : `TPV ${t + 1}`,
               type: TerminalType.TPV_ANDROID,
+              // 🆕 Hardware information (Phase 2 - Multi-Merchant)
+              brand: isPrimaryVenueTerminal ? 'PAX' : null,
+              model: isPrimaryVenueTerminal ? 'A910S' : null,
+              // 🆕 Assign both Blumon merchant accounts to primary terminal
+              assignedMerchantIds: isPrimaryVenueTerminal ? [blumonMerchantA.id, blumonMerchantB.id] : [],
               status: scenario.status,
               lastHeartbeat: scenario.lastHeartbeat,
               version: scenario.version,
@@ -3188,6 +3247,16 @@ async function main() {
             const paymentCreatedAt =
               orderCompletedAt || new Date(orderCreatedAt.getTime() + faker.number.int({ min: 5, max: 30 }) * 60 * 1000)
 
+            // 🆕 Determine merchant account BEFORE creating payment (for both payment and transaction cost)
+            // Simulate routing logic: 70% PRIMARY, 30% SECONDARY
+            const accountType = Math.random() > 0.7 ? AccountType.SECONDARY : AccountType.PRIMARY
+            const merchantAccountId =
+              paymentMethod !== PaymentMethod.CASH
+                ? accountType === AccountType.SECONDARY
+                  ? blumonMerchantB.id
+                  : blumonMerchantA.id
+                : undefined // Cash payments don't have merchant accounts
+
             const payment = await prisma.payment.create({
               data: {
                 venueId: venue.id,
@@ -3202,6 +3271,7 @@ async function main() {
                 splitType: 'FULLPAYMENT',
                 processor: paymentMethod !== PaymentMethod.CASH ? 'stripe' : null,
                 processorId: paymentMethod !== PaymentMethod.CASH ? `pi_${faker.string.alphanumeric(24)}` : null,
+                merchantAccountId, // 🆕 Link payment to merchant account
                 feePercentage,
                 feeAmount,
                 netAmount,
@@ -3210,8 +3280,8 @@ async function main() {
               },
             })
 
-            // --- Add Transaction Cost Tracking (only for card payments) ---
-            if (paymentMethod !== PaymentMethod.CASH) {
+            // --- Add Transaction Cost Tracking (only for card payments with merchant account) ---
+            if (paymentMethod !== PaymentMethod.CASH && merchantAccountId) {
               // Simulate different card types based on payment method
               const cardType =
                 paymentMethod === PaymentMethod.DEBIT_CARD
@@ -3224,12 +3294,8 @@ async function main() {
                       TransactionCardType.INTERNATIONAL,
                     ])
 
-              // Determine which account was used (simulate routing logic)
-              const accountType = Math.random() > 0.7 ? AccountType.SECONDARY : AccountType.PRIMARY
-              const merchantAccountId = accountType === AccountType.SECONDARY ? mentaMerchantSecondary.id : mentaMerchantPrimary.id
-
               // Get the cost structures
-              const providerCost = accountType === AccountType.SECONDARY ? mentaSecondaryCosts : mentaPrimaryCosts
+              const providerCost = accountType === AccountType.SECONDARY ? blumonBCosts : blumonACosts
               const venuePricing = await prisma.venuePricingStructure.findFirst({
                 where: { venueId: venue.id, accountType, active: true },
               })

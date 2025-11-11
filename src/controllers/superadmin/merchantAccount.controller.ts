@@ -4,6 +4,8 @@ import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { blumonApiService } from '../../services/blumon/blumonApi.service'
 import type { BlumonEnvironment } from '../../services/blumon/types'
+import { createBlumonService } from '../../services/tpv/blumon.service'
+import prisma from '@/utils/prismaClient'
 
 /**
  * MerchantAccount Controller
@@ -382,6 +384,181 @@ export async function registerBlumonMerchant(req: Request, res: Response, next: 
     })
   } catch (error) {
     logger.error('[Blumon Registration] Failed', {
+      error: error instanceof Error ? error.message : error,
+      stack: error instanceof Error ? error.stack : undefined,
+    })
+
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/blumon/auto-fetch
+ * Auto-fetch Blumon merchant credentials using device OAuth flow
+ *
+ * **Workflow:**
+ * 1. Calculate OAuth password: SHA256(serial + brand + model)
+ * 2. Get OAuth token from Blumon Token Server
+ * 3. Extract posId from JWT userId field
+ * 4. Fetch RSA encryption keys
+ * 5. Try to fetch DUKPT keys (optional - may not be initialized yet)
+ * 6. Create MerchantAccount with encrypted credentials
+ *
+ * **Note:** DUKPT keys may not be available on first registration.
+ * The Blumon SDK will automatically initialize them on the first payment.
+ *
+ * **Body:**
+ * ```json
+ * {
+ *   "serialNumber": "2841548417",
+ *   "brand": "PAX",
+ *   "model": "A910S",
+ *   "environment": "SANDBOX",  // or "PRODUCTION"
+ *   "displayName": "Terminal Principal"  // Optional
+ * }
+ * ```
+ *
+ * **Response:**
+ * ```json
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "id": "ma_xxx",
+ *     "serialNumber": "2841548417",
+ *     "posId": "376",
+ *     "displayName": "Terminal Principal",
+ *     "blumonEnvironment": "SANDBOX",
+ *     "dukptKeysAvailable": false
+ *   },
+ *   "message": "Blumon merchant account created successfully. DUKPT keys will be initialized automatically on first payment."
+ * }
+ * ```
+ */
+export async function autoFetchBlumonCredentials(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { serialNumber, brand, model, displayName, environment = 'SANDBOX' } = req.body
+
+    // Validate required fields
+    if (!serialNumber || typeof serialNumber !== 'string') {
+      throw new BadRequestError('serialNumber is required and must be a string')
+    }
+
+    if (!brand || typeof brand !== 'string') {
+      throw new BadRequestError('brand is required and must be a string (e.g., "PAX", "Verifone")')
+    }
+
+    if (!model || typeof model !== 'string') {
+      throw new BadRequestError('model is required and must be a string (e.g., "A910S")')
+    }
+
+    if (environment !== 'SANDBOX' && environment !== 'PRODUCTION') {
+      throw new BadRequestError('environment must be either "SANDBOX" or "PRODUCTION"')
+    }
+
+    logger.info('[Blumon Auto-Fetch] Starting credential fetch', {
+      serialNumber,
+      brand,
+      model,
+      environment,
+    })
+
+    // Create Blumon service for specified environment
+    const blumonService = createBlumonService(environment as 'SANDBOX' | 'PRODUCTION')
+
+    // Auto-fetch credentials from Blumon API
+    logger.info('[Blumon Auto-Fetch] Step 1: Fetching credentials from Blumon API...')
+    const merchantInfo = await blumonService.fetchMerchantCredentials(serialNumber, brand, model)
+
+    logger.info('[Blumon Auto-Fetch] Step 2: Credentials fetched successfully', {
+      posId: merchantInfo.posId,
+      serialNumber: merchantInfo.serialNumber,
+      dukptKeysAvailable: merchantInfo.dukptKeysAvailable,
+    })
+
+    // Create merchant account with encrypted credentials
+    logger.info('[Blumon Auto-Fetch] Step 3: Creating merchant account in database...')
+
+    // Fetch Blumon provider ID from database
+    const blumonProvider = await prisma.paymentProvider.findUnique({
+      where: { code: 'BLUMON' },
+    })
+
+    if (!blumonProvider) {
+      throw new BadRequestError('Blumon payment provider not found in database. Please create it first.')
+    }
+
+    const merchantAccountData = {
+      providerId: blumonProvider.id,
+      externalMerchantId: `blumon_${serialNumber}`,
+      displayName: displayName || `Blumon ${brand} ${model} - ${serialNumber}`,
+      active: true,
+      displayOrder: 0,
+
+      // Blumon-specific fields
+      blumonSerialNumber: merchantInfo.serialNumber,
+      blumonPosId: merchantInfo.posId,
+      blumonEnvironment: environment,
+      blumonMerchantId: `blumon_${serialNumber}`, // Use serial as merchant ID
+
+      // Credentials (will be encrypted by service)
+      credentials: {
+        oauthAccessToken: merchantInfo.credentials.oauthAccessToken,
+        oauthRefreshToken: merchantInfo.credentials.oauthRefreshToken,
+        oauthExpiresAt: merchantInfo.credentials.oauthExpiresAt,
+        rsaId: merchantInfo.credentials.rsaId,
+        rsaKey: merchantInfo.credentials.rsaKey,
+        // DUKPT keys are optional - may not be initialized yet
+        ...(merchantInfo.dukptKeysAvailable && {
+          dukptKsn: merchantInfo.credentials.dukptKsn,
+          dukptKey: merchantInfo.credentials.dukptKey,
+          dukptKeyCrc32: merchantInfo.credentials.dukptKeyCrc32,
+          dukptKeyCheckValue: merchantInfo.credentials.dukptKeyCheckValue,
+        }),
+      },
+
+      // Provider config
+      providerConfig: {
+        brand,
+        model,
+        environment,
+        autoFetched: true,
+        autoFetchedAt: new Date().toISOString(),
+        dukptKeysAvailable: merchantInfo.dukptKeysAvailable,
+      },
+
+      // Bank account info (optional, can be added later)
+      clabeNumber: null,
+      bankName: null,
+      accountHolder: null,
+    }
+
+    const merchantAccount = await merchantAccountService.createMerchantAccount(merchantAccountData)
+
+    logger.info('[Blumon Auto-Fetch] Merchant account created successfully', {
+      merchantAccountId: merchantAccount.id,
+      serialNumber,
+      posId: merchantInfo.posId,
+      dukptKeysAvailable: merchantInfo.dukptKeysAvailable,
+    })
+
+    const message = merchantInfo.dukptKeysAvailable
+      ? 'Blumon credentials fetched and merchant account created successfully'
+      : 'Blumon merchant account created successfully. DUKPT keys will be initialized automatically on first payment.'
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id: merchantAccount.id,
+        serialNumber: merchantInfo.serialNumber,
+        posId: merchantInfo.posId,
+        displayName: merchantAccount.displayName,
+        blumonEnvironment: environment,
+        dukptKeysAvailable: merchantInfo.dukptKeysAvailable,
+      },
+      message,
+    })
+  } catch (error: any) {
+    logger.error('[Blumon Auto-Fetch] Failed', {
       error: error instanceof Error ? error.message : error,
       stack: error instanceof Error ? error.stack : undefined,
     })

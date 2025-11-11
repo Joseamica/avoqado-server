@@ -460,56 +460,68 @@ export async function createVenuePricingStructure(data: CreateVenuePricingStruct
     throw new BadRequestError('effectiveFrom cannot be in the past')
   }
 
-  // End any existing active pricing structure for this venue and account type
-  const existingActivePricingStructure = await prisma.venuePricingStructure.findFirst({
-    where: {
-      venueId: data.venueId,
-      accountType: data.accountType,
-      active: true,
-      OR: [{ effectiveTo: null }, { effectiveTo: { gte: data.effectiveFrom } }],
-    },
+  // Log incoming data for debugging
+  logger.info('Creating venue pricing structure', {
+    venueId: data.venueId,
+    accountType: data.accountType,
+    debitRate: data.debitRate,
+    creditRate: data.creditRate,
+    effectiveFrom: data.effectiveFrom,
   })
 
-  if (existingActivePricingStructure) {
-    // Set effectiveTo to one day before the new pricing structure's effectiveFrom
-    const previousEndDate = new Date(data.effectiveFrom)
-    previousEndDate.setDate(previousEndDate.getDate() - 1)
-
-    await prisma.venuePricingStructure.update({
-      where: { id: existingActivePricingStructure.id },
-      data: {
-        effectiveTo: previousEndDate,
+  // Wrap in transaction to prevent race conditions when creating multiple pricing structures simultaneously
+  const pricingStructure = await prisma.$transaction(async tx => {
+    // End any existing active pricing structure for this venue and account type
+    const existingActivePricingStructure = await tx.venuePricingStructure.findFirst({
+      where: {
+        venueId: data.venueId,
+        accountType: data.accountType,
+        active: true,
+        OR: [{ effectiveTo: null }, { effectiveTo: { gte: data.effectiveFrom } }],
       },
     })
 
-    logger.info('Ended previous venue pricing structure', {
-      previousPricingStructureId: existingActivePricingStructure.id,
-      endedOn: previousEndDate,
-    })
-  }
+    if (existingActivePricingStructure) {
+      // Set effectiveTo to one day before the new pricing structure's effectiveFrom
+      const previousEndDate = new Date(data.effectiveFrom)
+      previousEndDate.setDate(previousEndDate.getDate() - 1)
 
-  // Create new pricing structure
-  const pricingStructure = await prisma.venuePricingStructure.create({
-    data: {
-      venueId: data.venueId,
-      accountType: data.accountType,
-      effectiveFrom: data.effectiveFrom,
-      effectiveTo: null, // New pricing structure has no end date
-      debitRate: data.debitRate,
-      creditRate: data.creditRate,
-      amexRate: data.amexRate,
-      internationalRate: data.internationalRate,
-      fixedFeePerTransaction: data.fixedFeePerTransaction || null,
-      monthlyServiceFee: data.monthlyServiceFee || null,
-      minimumMonthlyVolume: data.minimumMonthlyVolume || null,
-      volumePenalty: data.volumePenalty || null,
-      contractReference: data.contractReference || null,
-      notes: data.notes || null,
-      active: true,
-    },
-    include: {
-      venue: true,
-    },
+      await tx.venuePricingStructure.update({
+        where: { id: existingActivePricingStructure.id },
+        data: {
+          effectiveTo: previousEndDate,
+        },
+      })
+
+      logger.info('Ended previous venue pricing structure', {
+        previousPricingStructureId: existingActivePricingStructure.id,
+        endedOn: previousEndDate,
+      })
+    }
+
+    // Create new pricing structure
+    return await tx.venuePricingStructure.create({
+      data: {
+        venueId: data.venueId,
+        accountType: data.accountType,
+        effectiveFrom: data.effectiveFrom,
+        effectiveTo: null, // New pricing structure has no end date
+        debitRate: data.debitRate,
+        creditRate: data.creditRate,
+        amexRate: data.amexRate,
+        internationalRate: data.internationalRate,
+        fixedFeePerTransaction: data.fixedFeePerTransaction || null,
+        monthlyServiceFee: data.monthlyServiceFee || null,
+        minimumMonthlyVolume: data.minimumMonthlyVolume || null,
+        volumePenalty: data.volumePenalty || null,
+        contractReference: data.contractReference || null,
+        notes: data.notes || null,
+        active: true,
+      },
+      include: {
+        venue: true,
+      },
+    })
   })
 
   logger.info('Venue pricing structure created', {
@@ -534,11 +546,26 @@ export async function updateVenuePricingStructure(id: string, data: UpdateVenueP
   // Check if pricing structure exists
   const existingPricingStructure = await prisma.venuePricingStructure.findUnique({
     where: { id },
+    include: { venue: true },
   })
 
   if (!existingPricingStructure) {
     throw new NotFoundError(`Venue pricing structure ${id} not found`)
   }
+
+  // Log incoming update data for debugging
+  logger.info('Updating venue pricing structure', {
+    pricingStructureId: id,
+    currentAccountType: existingPricingStructure.accountType,
+    venueId: existingPricingStructure.venueId,
+    venueName: existingPricingStructure.venue.name,
+    incomingData: {
+      debitRate: data.debitRate,
+      creditRate: data.creditRate,
+      amexRate: data.amexRate,
+      internationalRate: data.internationalRate,
+    },
+  })
 
   // Validate rates if provided
   if (data.debitRate !== undefined && (data.debitRate < 0 || data.debitRate > 1)) {

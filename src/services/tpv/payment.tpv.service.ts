@@ -724,6 +724,36 @@ export async function recordOrderPayment(
 ) {
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
 
+  // ⭐ IDEMPOTENCY CHECK: Prevent duplicate payments using Blumon referenceNumber
+  // This allows safe retries from offline queue without creating duplicate payments
+  if (paymentData.referenceNumber) {
+    const existingPayment = await prisma.payment.findFirst({
+      where: {
+        venueId,
+        referenceNumber: paymentData.referenceNumber,
+      },
+      include: {
+        receipts: true, // Include receipt data for idempotent response
+      },
+    })
+
+    if (existingPayment) {
+      logger.warn('🔄 Duplicate payment attempt detected (idempotency check)', {
+        venueId,
+        orderId,
+        referenceNumber: paymentData.referenceNumber,
+        existingPaymentId: existingPayment.id,
+        message: 'Returning existing payment (safe retry from offline queue)',
+      })
+
+      // Return existing payment with receipt (safe retry - client gets same response)
+      return {
+        ...existingPayment,
+        digitalReceipt: existingPayment.receipts[0] || null,
+      }
+    }
+  }
+
   // Find the order directly by ID (include payments for pre-flight validation)
   const activeOrder = await prisma.order.findUnique({
     where: {
@@ -790,72 +820,112 @@ export async function recordOrderPayment(
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
-  // Create the payment record
-  const payment = await prisma.payment.create({
-    data: {
-      venueId,
-      orderId: activeOrder.id,
-      amount: totalAmount,
-      tipAmount,
-      method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
-      status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
-      splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
-      source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-      processor: 'TBD',
-      processorId: paymentData.mentaOperationId,
-      processorData: {
-        cardBrand: paymentData.cardBrand,
-        last4: paymentData.last4,
-        typeOfCard: paymentData.typeOfCard,
-        bank: paymentData.bank,
-        currency: paymentData.currency,
-        mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
-        mentaTicketId: paymentData.mentaTicketId,
-        isInternational: paymentData.isInternational,
-      },
-      // New enhanced fields in the Payment table
-      authorizationNumber: paymentData.authorizationNumber,
-      referenceNumber: paymentData.referenceNumber,
-      maskedPan: paymentData.maskedPan,
-      cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
-      entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
-      processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-      shiftId: currentShift?.id,
-      feePercentage: 0, // TODO: Calculate based on payment processor
-      feeAmount: 0, // TODO: Calculate based on amount and percentage
-      netAmount: totalAmount + tipAmount, // For now, net amount = total
-      posRawData: {
-        splitType: paymentData.splitType,
-        staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+  // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
+  // This prevents orphaned records if any operation fails
+  const payment = await prisma.$transaction(async tx => {
+    // Create the payment record
+    const newPayment = await tx.payment.create({
+      data: {
+        venueId,
+        orderId: activeOrder.id,
+        amount: totalAmount,
+        tipAmount,
+        method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+        status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
+        splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
         source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-        paidProductsId: paymentData.paidProductsId || [],
-        ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
-        ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
-        ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
-      },
-    },
-    include: {
-      order: {
-        include: {
-          items: true,
-          venue: true,
+        processor: 'TBD',
+        processorId: paymentData.mentaOperationId,
+        processorData: {
+          cardBrand: paymentData.cardBrand,
+          last4: paymentData.last4,
+          typeOfCard: paymentData.typeOfCard,
+          bank: paymentData.bank,
+          currency: paymentData.currency,
+          mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
+          mentaTicketId: paymentData.mentaTicketId,
+          isInternational: paymentData.isInternational,
+        },
+        // New enhanced fields in the Payment table
+        authorizationNumber: paymentData.authorizationNumber,
+        referenceNumber: paymentData.referenceNumber,
+        maskedPan: paymentData.maskedPan,
+        cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+        entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+        processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
+        shiftId: currentShift?.id,
+        feePercentage: 0, // TODO: Calculate based on payment processor
+        feeAmount: 0, // TODO: Calculate based on amount and percentage
+        netAmount: totalAmount + tipAmount, // For now, net amount = total
+        posRawData: {
+          splitType: paymentData.splitType,
+          staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+          source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+          paidProductsId: paymentData.paidProductsId || [],
+          ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
+          ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
+          ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
         },
       },
-      processedBy: true,
-    },
-  })
+      include: {
+        order: {
+          include: {
+            items: true,
+            venue: true,
+          },
+        },
+        processedBy: true,
+      },
+    })
 
-  // Create VenueTransaction for financial tracking and settlement
-  await prisma.venueTransaction.create({
-    data: {
-      venueId,
-      paymentId: payment.id,
-      type: 'PAYMENT',
-      grossAmount: totalAmount + tipAmount,
-      feeAmount: payment.feeAmount,
-      netAmount: payment.netAmount,
-      status: 'PENDING', // Will be updated to SETTLED by settlement process
-    },
+    // Create VenueTransaction for financial tracking and settlement
+    await tx.venueTransaction.create({
+      data: {
+        venueId,
+        paymentId: newPayment.id,
+        type: 'PAYMENT',
+        grossAmount: totalAmount + tipAmount,
+        feeAmount: newPayment.feeAmount,
+        netAmount: newPayment.netAmount,
+        status: 'PENDING', // Will be updated to SETTLED by settlement process
+      },
+    })
+
+    // Update Order.splitType if this is the first payment
+    if (!activeOrder.splitType) {
+      await tx.order.update({
+        where: { id: activeOrder.id },
+        data: { splitType: paymentData.splitType as any },
+      })
+    }
+
+    // Handle split payment allocations based on splitType
+    if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
+      // Create allocations for specific products
+      const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
+
+      for (const item of orderItems) {
+        await tx.paymentAllocation.create({
+          data: {
+            paymentId: newPayment.id,
+            orderItemId: item.id,
+            orderId: activeOrder.id,
+            amount: item.total, // Allocate the full item amount
+          },
+        })
+      }
+    } else {
+      // For other split types, create a general allocation to the order
+      await tx.paymentAllocation.create({
+        data: {
+          paymentId: newPayment.id,
+          orderId: activeOrder.id,
+          amount: totalAmount,
+        },
+      })
+    }
+
+    return newPayment
   })
 
   logger.info('VenueTransaction created for payment', {
@@ -874,40 +944,6 @@ export async function recordOrderPayment(
       error: transactionCostError,
     })
     // Don't fail the payment if TransactionCost creation fails
-  }
-
-  // Update Order.splitType if this is the first payment
-  if (!activeOrder.splitType) {
-    await prisma.order.update({
-      where: { id: activeOrder.id },
-      data: { splitType: paymentData.splitType as any },
-    })
-  }
-
-  // Handle split payment allocations based on splitType
-  if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
-    // Create allocations for specific products
-    const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
-
-    for (const item of orderItems) {
-      await prisma.paymentAllocation.create({
-        data: {
-          paymentId: payment.id,
-          orderItemId: item.id,
-          orderId: activeOrder.id,
-          amount: item.total, // Allocate the full item amount
-        },
-      })
-    }
-  } else {
-    // For other split types, create a general allocation to the order
-    await prisma.paymentAllocation.create({
-      data: {
-        paymentId: payment.id,
-        orderId: activeOrder.id,
-        amount: totalAmount,
-      },
-    })
   }
 
   // Create Review record if reviewRating is provided
@@ -1096,20 +1132,35 @@ export async function recordOrderPayment(
  */
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
-  const fastOrder = await prisma.order.create({
-    data: {
-      venueId,
-      orderNumber: `FAST-${Date.now()}`,
-      type: 'DINE_IN',
-      source: 'TPV',
-      status: 'CONFIRMED',
-      subtotal: paymentData.amount / 100, // Convert to decimal
-      taxAmount: 0, // No tax for fast payments
-      total: paymentData.amount / 100, // Convert to decimal
-      paymentStatus: 'PAID',
-      splitType: paymentData.splitType as any, // Set splitType for fast orders
-    },
-  })
+
+  // ⭐ IDEMPOTENCY CHECK: Prevent duplicate payments using Blumon referenceNumber
+  // This allows safe retries from offline queue without creating duplicate payments
+  if (paymentData.referenceNumber) {
+    const existingPayment = await prisma.payment.findFirst({
+      where: {
+        venueId,
+        referenceNumber: paymentData.referenceNumber,
+      },
+      include: {
+        receipts: true, // Include receipt data for idempotent response
+      },
+    })
+
+    if (existingPayment) {
+      logger.warn('🔄 Duplicate payment attempt detected (idempotency check)', {
+        venueId,
+        referenceNumber: paymentData.referenceNumber,
+        existingPaymentId: existingPayment.id,
+        message: 'Returning existing payment (safe retry from offline queue)',
+      })
+
+      // Return existing payment with receipt (safe retry - client gets same response)
+      return {
+        ...existingPayment,
+        digitalReceipt: existingPayment.receipts[0] || null,
+      }
+    }
+  }
 
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
@@ -1140,65 +1191,96 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     return validSources.includes(source) ? (source as PaymentSource) : 'OTHER'
   }
 
-  // Create the fast payment record (no order association)
-  const payment = await prisma.payment.create({
-    data: {
-      venueId,
-      orderId: fastOrder.id, // Fast payment - no order association
-      amount: totalAmount,
-      tipAmount,
-      method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
-      status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
-      splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
-      source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-      processor: 'TBD',
-      type: 'FAST',
-      processorId: paymentData.mentaOperationId,
-      processorData: {
-        cardBrand: paymentData.cardBrand,
-        last4: paymentData.last4,
-        typeOfCard: paymentData.typeOfCard,
-        bank: paymentData.bank,
-        currency: paymentData.currency,
+  // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
+  // This prevents orphaned records if any operation fails
+  const { payment, fastOrder } = await prisma.$transaction(async tx => {
+    // Create fast order
+    const order = await tx.order.create({
+      data: {
+        venueId,
+        orderNumber: `FAST-${Date.now()}`,
+        type: 'DINE_IN',
+        source: 'TPV',
+        status: 'CONFIRMED',
+        subtotal: paymentData.amount / 100, // Convert to decimal
+        taxAmount: 0, // No tax for fast payments
+        total: paymentData.amount / 100, // Convert to decimal
+        paymentStatus: 'PAID',
+        splitType: paymentData.splitType as any, // Set splitType for fast orders
+      },
+    })
+
+    // Create the fast payment record
+    const newPayment = await tx.payment.create({
+      data: {
+        venueId,
+        orderId: order.id, // Fast payment - no order association
+        amount: totalAmount,
+        tipAmount,
+        method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+        status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
+        splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
+        source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+        processor: 'TBD',
+        type: 'FAST',
+        processorId: paymentData.mentaOperationId,
+        processorData: {
+          cardBrand: paymentData.cardBrand,
+          last4: paymentData.last4,
+          typeOfCard: paymentData.typeOfCard,
+          bank: paymentData.bank,
+          currency: paymentData.currency,
+          authorizationNumber: paymentData.authorizationNumber,
+          referenceNumber: paymentData.referenceNumber,
+          isInternational: paymentData.isInternational,
+        },
+        // New enhanced fields in the Payment table
         authorizationNumber: paymentData.authorizationNumber,
         referenceNumber: paymentData.referenceNumber,
-        isInternational: paymentData.isInternational,
+        maskedPan: paymentData.maskedPan,
+        cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+        entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+        processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
+        shiftId: currentShift?.id,
+        feePercentage: 0, // TODO: Calculate based on payment processor
+        feeAmount: 0, // TODO: Calculate based on amount and percentage
+        netAmount: totalAmount + tipAmount, // For now, net amount = total
+        posRawData: {
+          splitType: 'FULLPAYMENT',
+          staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+          source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+          paymentType: 'FAST',
+          ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
+        },
       },
-      // New enhanced fields in the Payment table
-      authorizationNumber: paymentData.authorizationNumber,
-      referenceNumber: paymentData.referenceNumber,
-      maskedPan: paymentData.maskedPan,
-      cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
-      entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
-      processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-      shiftId: currentShift?.id,
-      feePercentage: 0, // TODO: Calculate based on payment processor
-      feeAmount: 0, // TODO: Calculate based on amount and percentage
-      netAmount: totalAmount + tipAmount, // For now, net amount = total
-      posRawData: {
-        splitType: 'FULLPAYMENT',
-        staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
-        source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-        paymentType: 'FAST',
-        ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
+      include: {
+        processedBy: true,
       },
-    },
-    include: {
-      processedBy: true,
-    },
-  })
+    })
 
-  // Create VenueTransaction for financial tracking and settlement
-  await prisma.venueTransaction.create({
-    data: {
-      venueId,
-      paymentId: payment.id,
-      type: 'PAYMENT',
-      grossAmount: totalAmount + tipAmount,
-      feeAmount: payment.feeAmount,
-      netAmount: payment.netAmount,
-      status: 'PENDING', // Will be updated to SETTLED by settlement process
-    },
+    // Create VenueTransaction for financial tracking and settlement
+    await tx.venueTransaction.create({
+      data: {
+        venueId,
+        paymentId: newPayment.id,
+        type: 'PAYMENT',
+        grossAmount: totalAmount + tipAmount,
+        feeAmount: newPayment.feeAmount,
+        netAmount: newPayment.netAmount,
+        status: 'PENDING', // Will be updated to SETTLED by settlement process
+      },
+    })
+
+    // Create a general allocation for the fast payment
+    await tx.paymentAllocation.create({
+      data: {
+        paymentId: newPayment.id,
+        orderId: order.id,
+        amount: totalAmount,
+      },
+    })
+
+    return { payment: newPayment, fastOrder: order }
   })
 
   logger.info('VenueTransaction created for fast payment', {
@@ -1218,15 +1300,6 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     })
     // Don't fail the payment if TransactionCost creation fails
   }
-
-  // Create a general allocation for the fast payment (no specific order)
-  await prisma.paymentAllocation.create({
-    data: {
-      paymentId: payment.id,
-      orderId: fastOrder.id, // No order for fast payments
-      amount: totalAmount,
-    },
-  })
 
   // Create Review record if reviewRating is provided
   if (paymentData.reviewRating) {

@@ -25,6 +25,8 @@ export type UpdateTpvBody = {
   serialNumber?: string
   type?: TerminalType
   status?: TerminalStatus
+  brand?: string // Hardware manufacturer (PAX, Ingenico, etc.)
+  model?: string // Hardware model (A910S, D220, etc.)
   lastHeartbeat?: Date
   config?: any // JSON field in Prisma
 }

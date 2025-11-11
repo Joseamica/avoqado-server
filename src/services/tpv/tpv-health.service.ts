@@ -3,7 +3,7 @@
 import { TerminalStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { NotFoundError } from '../../errors/AppError'
+import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { broadcastTpvStatusUpdate } from '../../communication/sockets'
 
 export interface HeartbeatData {
@@ -103,10 +103,22 @@ export class TpvHealthService {
         throw new NotFoundError(`Terminal with ID, serial number, or Menta terminal ID ${terminalId} not found`)
       }
 
-      // ✅ Verify terminal is activated (Square/Toast pattern)
-      // Only allow heartbeats from activated terminals
+      // ✅ SECURITY: Block heartbeats from RETIRED terminals (Square/Toast pattern)
+      // RETIRED = Intentionally disabled (stolen device, fired employee, security breach)
+      // This prevents stolen/compromised terminals from appearing "online"
+      if (terminal.status === TerminalStatus.RETIRED) {
+        logger.error(`Heartbeat rejected from RETIRED terminal ${terminalId} - possible stolen device`)
+        throw new UnauthorizedError('Terminal has been retired and cannot be used')
+      }
+
+      // ✅ Allow heartbeats from unactivated terminals (monitoring before activation)
+      // Heartbeat = health check only (battery, network, status) - safe to allow
+      // This allows backend to monitor terminals before full activation
+      // and survives database resets without manual SQL updates
       if (!terminal.activatedAt) {
-        throw new NotFoundError(`Terminal ${terminalId} has not been activated yet`)
+        logger.warn(`Heartbeat from unactivated terminal ${terminalId}, allowing for monitoring purposes`)
+        // Don't throw error - just log and continue
+        // Login/Payment endpoints still require activation (security layer remains)
       }
 
       // Update terminal status and health data

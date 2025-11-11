@@ -16,15 +16,15 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
   logger.info(`Staff sign-in request for venue ${venueId}, terminal ${serialNumber}`)
   // Validate required fields
   if (!pin) {
-    throw new BadRequestError('PIN is required')
+    throw new BadRequestError('PIN es requerido')
   }
 
   if (!venueId) {
-    throw new BadRequestError('Venue ID is required')
+    throw new BadRequestError('ID del venue es requerido')
   }
 
   if (!serialNumber) {
-    throw new BadRequestError('Serial number is required')
+    throw new BadRequestError('Número de serie es requerido')
   }
 
   // Find staff member with matching PIN in this venue
@@ -82,24 +82,24 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
   })
 
   if (!terminal) {
-    throw new NotFoundError('Terminal not found')
+    throw new NotFoundError('Terminal no encontrado')
   }
 
   // Verify terminal belongs to the requested venue
   if (terminal.venueId !== venueId) {
-    throw new NotFoundError('Terminal not found for this venue')
+    throw new NotFoundError('Terminal no encontrado para este venue')
   }
 
   if (!terminal.activatedAt) {
     logger.warn(`Login attempt on non-activated terminal: ${serialNumber} for venue ${venueId}`)
-    throw new UnauthorizedError('TERMINAL_NOT_ACTIVATED')
+    throw new UnauthorizedError('Terminal no activado. Por favor, contacta al administrador para activar este terminal.')
   }
 
   // ✅ Square/Toast Pattern: Only block RETIRED terminals
   // INACTIVE is temporary (no heartbeats) and terminal can recover automatically
   // When user logs in → app starts → HeartbeatWorker runs → status becomes ACTIVE
   if (terminal.status === 'RETIRED') {
-    throw new UnauthorizedError('Terminal has been retired and cannot be used')
+    throw new UnauthorizedError('Terminal ha sido desactivado y no puede ser utilizado. Contacta soporte.')
   }
 
   // ⚠️ DO NOT block login for INACTIVE status - this creates a deadlock:

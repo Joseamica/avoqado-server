@@ -3023,6 +3023,64 @@ router.put('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPerm
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}:
+ *   delete:
+ *     tags: [TPV (Terminals)]
+ *     summary: Delete a terminal (only if not activated)
+ *     description: |
+ *       Deletes a terminal from the venue.
+ *
+ *       **IMPORTANT: Security Restrictions**
+ *       - Can ONLY delete terminals that have NOT been activated
+ *       - Activated terminals must be marked as RETIRED instead
+ *       - This prevents accidental deletion of terminals with historical data
+ *
+ *       **Use Cases:**
+ *       - Remove test/demo terminals before production
+ *       - Delete incorrectly created terminals
+ *       - Clean up terminals that were never deployed
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID to delete
+ *     responses:
+ *       200:
+ *         description: Terminal deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Terminal eliminada exitosamente"
+ *       400:
+ *         description: Cannot delete activated terminal
+ *       404:
+ *         description: Terminal not found
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+router.delete('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:delete'), tpvController.deleteTpv)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/tpv/{terminalId}/activation-code:
  *   post:
  *     tags: [TPV Activation]

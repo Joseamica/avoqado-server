@@ -1887,6 +1887,9 @@ model Terminal {
 
   // 🆕 Multi-Merchant Support (2025-11-05)
   // Array of MerchantAccount IDs this terminal can use for payment processing
+  // ⚠️ WARNING: String[] has no database-level foreign key constraint
+  // Protection relies on application layer (deleteMerchantAccount service)
+  // DO NOT delete merchants via direct SQL - always use API endpoints
   assignedMerchantIds String[] @default([])
 
   // Preferred processor for this TPV (LEGACY/MENTA/AUTO)
@@ -2015,13 +2018,13 @@ model VenuePaymentConfig {
 
   // Account hierarchy (flexible for any provider)
   primaryAccountId String
-  primaryAccount   MerchantAccount @relation("PrimaryAccount", fields: [primaryAccountId], references: [id])
+  primaryAccount   MerchantAccount @relation("PrimaryAccount", fields: [primaryAccountId], references: [id], onDelete: Restrict)
 
   secondaryAccountId String?
-  secondaryAccount   MerchantAccount? @relation("SecondaryAccount", fields: [secondaryAccountId], references: [id])
+  secondaryAccount   MerchantAccount? @relation("SecondaryAccount", fields: [secondaryAccountId], references: [id], onDelete: Restrict)
 
   tertiaryAccountId String?
-  tertiaryAccount   MerchantAccount? @relation("TertiaryAccount", fields: [tertiaryAccountId], references: [id])
+  tertiaryAccount   MerchantAccount? @relation("TertiaryAccount", fields: [tertiaryAccountId], references: [id], onDelete: Restrict)
 
   // Routing rules (JSON for flexibility)
   /// Optional dynamic rules (e.g. BIN routing, amount thresholds) that decide
