@@ -7,14 +7,15 @@ app = 'avoqado-server'
 primary_region = 'dfw'
 
 [build]
+  dockerfile = "Dockerfile"
 
 [deploy]
   release_command = 'npx prisma migrate deploy'
 
 [env]
   NODE_ENV = 'production'
-  # Limit Node.js memory to 400MB (leaving 112MB for OS)
-  NODE_OPTIONS = '--max-old-space-size=400'
+  # Limit Node.js memory to 200MB (leaving 56MB for OS + buffers)
+  NODE_OPTIONS = '--max-old-space-size=200'
 
 [http_service]
   internal_port = 3000

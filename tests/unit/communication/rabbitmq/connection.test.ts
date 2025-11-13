@@ -110,7 +110,7 @@ describe('RabbitMQ Connection', () => {
 
       // Logging
       expect(mockLogger.info).toHaveBeenCalledWith('🐰 Connecting to RabbitMQ...') // From connectToRabbitMQ
-      expect(mockLogger.info).toHaveBeenCalledWith('🐰 Conectando a RabbitMQ...') // From connectWithRetry
+      expect(mockLogger.info).toHaveBeenCalledWith('🐰 Conectando a RabbitMQ... (intento 1/5)') // From connectWithRetry with retry counter
       expect(mockLogger.info).toHaveBeenCalledWith('✅🐰 Conexión con RabbitMQ establecida.')
       expect(mockLogger.info).toHaveBeenCalledWith('🐰 Topología de RabbitMQ asegurada.')
 
@@ -221,7 +221,8 @@ describe('RabbitMQ Connection', () => {
       await Promise.resolve() // Ensures the catch block in connectWithRetry is entered
       await Promise.resolve() // Additional tick for safety
 
-      expect(mockLogger.error).toHaveBeenCalledWith('🔥 Falla al conectar con RabbitMQ, reintentando...', connectError)
+      expect(mockLogger.error).toHaveBeenCalledWith('🔥 Falla al conectar con RabbitMQ (intento 1/5)', connectError)
+      expect(mockLogger.warn).toHaveBeenCalledWith('⏰ Reintentando en 5 segundos...')
       expect(setTimeout).toHaveBeenCalledTimes(1)
       expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 5000)
     })
@@ -239,7 +240,8 @@ describe('RabbitMQ Connection', () => {
       await Promise.resolve()
 
       expect(mockAmqplibConnect).toHaveBeenCalledTimes(1)
-      expect(mockLogger.error).toHaveBeenCalledWith('🔥 Falla al conectar con RabbitMQ, reintentando...', connectError)
+      expect(mockLogger.error).toHaveBeenCalledWith('🔥 Falla al conectar con RabbitMQ (intento 1/5)', connectError)
+      expect(mockLogger.warn).toHaveBeenCalledWith('⏰ Reintentando en 5 segundos...')
       expect(setTimeout).toHaveBeenCalledTimes(1)
 
       // Advance timers to trigger the retry
@@ -265,7 +267,7 @@ describe('RabbitMQ Connection', () => {
       await Promise.resolve()
       await Promise.resolve()
       expect(mockAmqplibConnect).toHaveBeenCalledTimes(1)
-      expect(mockLogger.error).toHaveBeenLastCalledWith('🔥 Falla al conectar con RabbitMQ, reintentando...', error1)
+      expect(mockLogger.error).toHaveBeenLastCalledWith('🔥 Falla al conectar con RabbitMQ (intento 1/5)', error1)
       expect(setTimeout).toHaveBeenCalledTimes(1)
       jest.advanceTimersByTime(5000)
 
@@ -273,7 +275,7 @@ describe('RabbitMQ Connection', () => {
       await Promise.resolve()
       await Promise.resolve()
       expect(mockAmqplibConnect).toHaveBeenCalledTimes(2)
-      expect(mockLogger.error).toHaveBeenLastCalledWith('🔥 Falla al conectar con RabbitMQ, reintentando...', error2)
+      expect(mockLogger.error).toHaveBeenLastCalledWith('🔥 Falla al conectar con RabbitMQ (intento 2/5)', error2)
       expect(setTimeout).toHaveBeenCalledTimes(2)
       jest.advanceTimersByTime(5000)
 
@@ -340,7 +342,8 @@ describe('RabbitMQ Connection', () => {
         closeCallback()
       }
 
-      expect(mockLogger.warn).toHaveBeenCalledWith('🚪 Conexión con RabbitMQ cerrada. Reintentando...')
+      expect(mockLogger.warn).toHaveBeenCalledWith('🚪 Conexión con RabbitMQ cerrada.')
+      expect(mockLogger.info).toHaveBeenCalledWith('⏰ Reintentando reconexión...')
 
       // Verify state is reset (channel and connection should be null internally)
       // We can test this by trying to get them and expecting an error

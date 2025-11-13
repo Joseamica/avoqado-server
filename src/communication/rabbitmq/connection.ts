@@ -7,6 +7,9 @@ let channelModel: ChannelModel | null = null
 let connection: Connection | null = null
 let channel: ConfirmChannel | null = null
 let isConnecting = false // Una bandera para evitar múltiples intentos de reconexión simultáneos
+let retryCount = 0 // Contador de reintentos
+const MAX_RETRIES = 5 // Límite máximo de reintentos
+const RETRY_DELAY = 5000 // 5 segundos entre reintentos
 
 // --- Nombres de nuestra topología ---
 export const POS_EVENTS_EXCHANGE = 'pos_events_exchange'
@@ -21,8 +24,11 @@ const connectWithRetry = async (): Promise<void> => {
   isConnecting = true
 
   try {
-    logger.info('🐰 Conectando a RabbitMQ...')
-    channelModel = await connect(RABBITMQ_URL)
+    logger.info(`🐰 Conectando a RabbitMQ... (intento ${retryCount + 1}/${MAX_RETRIES})`)
+    channelModel = await connect(RABBITMQ_URL, {
+      timeout: 10000, // 10 segundos de timeout (en lugar de 30s default)
+      heartbeat: 30,
+    })
 
     // Get the actual connection from the channel model
     connection = channelModel.connection
@@ -35,6 +41,7 @@ const connectWithRetry = async (): Promise<void> => {
     }
 
     logger.info('✅🐰 Conexión con RabbitMQ establecida.')
+    retryCount = 0 // Reset contador en éxito
 
     // --- Configuración de la Topología ---
     await channel.assertExchange(DEAD_LETTER_EXCHANGE, 'direct', { durable: true })
@@ -59,19 +66,35 @@ const connectWithRetry = async (): Promise<void> => {
     })
 
     connection.on('close', () => {
-      logger.warn('🚪 Conexión con RabbitMQ cerrada. Reintentando...')
+      logger.warn('🚪 Conexión con RabbitMQ cerrada.')
       channelModel = null
       connection = null
       channel = null
       isConnecting = false
-      setTimeout(connectWithRetry, 5000) // Reintenta en 5 segundos
+
+      // Solo reintentar si no hemos excedido el límite
+      if (retryCount < MAX_RETRIES) {
+        logger.info('⏰ Reintentando reconexión...')
+        setTimeout(connectWithRetry, RETRY_DELAY)
+      } else {
+        logger.error('❌ No se reintentará más - límite de reintentos alcanzado')
+      }
     })
 
     isConnecting = false // La conexión fue exitosa, reseteamos la bandera
   } catch (error) {
-    logger.error('🔥 Falla al conectar con RabbitMQ, reintentando...', error)
+    retryCount++
+    logger.error(`🔥 Falla al conectar con RabbitMQ (intento ${retryCount}/${MAX_RETRIES})`, error)
     isConnecting = false
-    setTimeout(connectWithRetry, 5000)
+
+    if (retryCount < MAX_RETRIES) {
+      logger.warn(`⏰ Reintentando en ${RETRY_DELAY / 1000} segundos...`)
+      setTimeout(connectWithRetry, RETRY_DELAY)
+    } else {
+      logger.error(`❌ RabbitMQ no disponible después de ${MAX_RETRIES} intentos. Continuando sin RabbitMQ.`)
+      logger.warn('⚠️  Funcionalidad de sincronización POS estará limitada hasta que RabbitMQ esté disponible.')
+      // No hacer más retries - la app continúa sin RabbitMQ
+    }
   }
 }
 

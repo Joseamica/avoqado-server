@@ -12,6 +12,7 @@ const requiredEnvVars: string[] = [
   'SESSION_SECRET',
   'COOKIE_SECRET',
   'DATABASE_URL', // Assuming DATABASE_URL is primary for pgPool and Prisma
+  'RABBITMQ_URL', // Required for POS integration and event processing
 ]
 
 let missingVars = false

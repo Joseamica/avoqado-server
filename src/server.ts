@@ -112,14 +112,26 @@ const startApplication = async (retries = 3) => {
       // Continue startup even if Firebase is not configured
     }
 
-    // Connect to RabbitMQ and ensure topology
-    await connectToRabbitMQ()
+    // Connect to RabbitMQ in background (non-blocking)
+    // If RabbitMQ is unavailable, the app will continue without it
+    connectToRabbitMQ()
+      .then(() => {
+        // Start event consumer only if RabbitMQ connected successfully
+        try {
+          startEventConsumer()
+          logger.info('✅ Event consumer started')
+        } catch (err) {
+          logger.warn('⚠️  Event consumer could not start:', err)
+        }
 
-    // Start event consumer (listens to events from POS)
-    startEventConsumer()
-
-    // Start command listener (replaces polling worker)
-    await commandListener.start()
+        // Start command listener
+        commandListener.start().catch(err => {
+          logger.warn('⚠️  Command listener could not start:', err)
+        })
+      })
+      .catch(err => {
+        logger.warn('⚠️  RabbitMQ initialization failed, continuing without it:', err)
+      })
 
     // Start retry service for failed commands
     commandRetryService.start()
