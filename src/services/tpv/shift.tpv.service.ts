@@ -4,6 +4,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
+import socketManager from '../../communication/sockets'
 
 interface ShiftFilters {
   staffId?: string
@@ -55,10 +56,12 @@ interface ShiftSummaryResponse {
 
 /**
  * Get current active shift for a venue
+ * ✅ REAL-TIME TOTALS: Calculates payment totals dynamically from actual payments
+ * This ensures TPV always shows accurate shift totals even before closing
  * @param orgId Organization ID (for future authorization)
  * @param venueId Venue ID
  * @param posName POS name (optional)
- * @returns Current active shift or null
+ * @returns Current active shift with calculated totals or null
  */
 export async function getCurrentShift(venueId: string, _orgId?: string, _posName?: string): Promise<Shift | null> {
   // Look up shift in database
@@ -73,7 +76,100 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
     },
   })
 
-  return shift
+  if (!shift) {
+    return null
+  }
+
+  // ============================================================
+  // ✅ REAL-TIME CALCULATION: Calculate current shift totals from payments
+  // This ensures TPV displays accurate totals before shift is closed
+  // ============================================================
+  const shiftPayments = await prisma.payment.findMany({
+    where: {
+      shiftId: shift.id,
+      status: 'COMPLETED',
+    },
+    select: {
+      id: true,
+      amount: true,
+      tipAmount: true,
+      method: true,
+    },
+  })
+
+  let totalCashPayments = new Decimal(0)
+  let totalCardPayments = new Decimal(0)
+  let totalVoucherPayments = new Decimal(0)
+  let totalOtherPayments = new Decimal(0)
+  let totalSales = new Decimal(0)
+  let totalTips = new Decimal(0)
+
+  shiftPayments.forEach(payment => {
+    const amount = new Decimal(payment.amount || 0)
+    const tipAmount = new Decimal(payment.tipAmount || 0)
+
+    totalSales = totalSales.add(amount)
+    totalTips = totalTips.add(tipAmount)
+
+    // Group by payment method
+    switch (payment.method) {
+      case 'CASH':
+        totalCashPayments = totalCashPayments.add(amount)
+        break
+      case 'CREDIT_CARD':
+      case 'DEBIT_CARD':
+        totalCardPayments = totalCardPayments.add(amount)
+        break
+      case 'DIGITAL_WALLET':
+        totalVoucherPayments = totalVoucherPayments.add(amount)
+        break
+      case 'BANK_TRANSFER':
+      case 'OTHER':
+      default:
+        totalOtherPayments = totalOtherPayments.add(amount)
+        break
+    }
+  })
+
+  // Get order count
+  const orderCount = await prisma.order.count({
+    where: {
+      shiftId: shift.id,
+      status: {
+        in: ['CONFIRMED', 'COMPLETED'],
+      },
+    },
+  })
+
+  // Get products sold count
+  const orderItems = await prisma.orderItem.findMany({
+    where: {
+      order: {
+        shiftId: shift.id,
+        status: {
+          in: ['CONFIRMED', 'COMPLETED'],
+        },
+      },
+    },
+    select: {
+      quantity: true,
+    },
+  })
+
+  const totalProductsSold = orderItems.reduce((sum, item) => sum + item.quantity, 0)
+
+  // Return shift with calculated totals
+  return {
+    ...shift,
+    totalSales: totalSales,
+    totalTips: totalTips,
+    totalOrders: orderCount,
+    totalCashPayments: totalCashPayments,
+    totalCardPayments: totalCardPayments,
+    totalVoucherPayments: totalVoucherPayments,
+    totalOtherPayments: totalOtherPayments,
+    totalProductsSold: totalProductsSold,
+  }
 }
 
 /**
@@ -833,20 +929,52 @@ export async function openShiftForVenue(
     isIntegratedPOS,
   })
 
+  // Emit Socket.IO event for real-time dashboard updates
+  try {
+    const broadcastingService = socketManager.getBroadcastingService()
+    if (broadcastingService) {
+      broadcastingService.broadcastShiftEvent(venueId, 'opened', {
+        shiftId: shift.id,
+        staffId: shift.staffId,
+        staffName: `${staffWithVenue.staff.firstName} ${staffWithVenue.staff.lastName}`,
+        status: 'OPEN',
+        startTime: shift.startTime.toISOString(),
+        startingCash: shift.startingCash.toNumber(),
+        totalSales: shift.totalSales.toNumber(),
+        totalTips: shift.totalTips.toNumber(),
+        totalOrders: shift.totalOrders,
+        totalCashPayments: shift.totalCashPayments?.toNumber() || 0,
+        totalCardPayments: shift.totalCardPayments?.toNumber() || 0,
+        totalVoucherPayments: shift.totalVoucherPayments?.toNumber() || 0,
+        totalOtherPayments: shift.totalOtherPayments?.toNumber() || 0,
+        totalProductsSold: shift.totalProductsSold || 0,
+        venueId,
+      })
+      logger.info('✅ Broadcasted shift_opened event to dashboard', { shiftId: shift.id, venueId })
+    }
+  } catch (error) {
+    logger.error('❌ Failed to broadcast shift_opened event', {
+      shiftId: shift.id,
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+
   return shift
 }
 
 /**
  * Close an existing shift for a venue
+ * AUTOMATIC CALCULATION: Payment methods, products sold, inventory consumed
  * Works with both integrated POS (SOFTRESTAURANT) and standalone (NONE) mode
  * @param venueId Venue ID
  * @param shiftId Shift ID to close
- * @param closeData Cash reconciliation and closing data
+ * @param closeData Cash reconciliation and closing data (OPTIONAL for automatic mode)
  * @param orgId Organization ID for authorization
- * @returns Updated shift object
+ * @returns Updated shift object with automatic calculations
  */
-export async function closeShiftForVenue(venueId: string, shiftId: string, closeData: ShiftCloseData, _orgId?: string): Promise<Shift> {
-  logger.info('Closing shift for venue', {
+export async function closeShiftForVenue(venueId: string, shiftId: string, closeData?: ShiftCloseData, _orgId?: string): Promise<Shift> {
+  logger.info('🔄 Closing shift with AUTOMATIC calculation', {
     venueId,
     shiftId,
     closeData,
@@ -863,6 +991,7 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
         select: {
           posType: true,
           posStatus: true,
+          name: true,
         },
       },
     },
@@ -876,42 +1005,220 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
     throw new BadRequestError('Shift is already closed')
   }
 
-  // Calculate shift totals from orders
-  const shiftOrders = await prisma.order.findMany({
-    where: {
-      shiftId: shiftId,
-      status: {
-        in: ['COMPLETED'],
-      },
-    },
-  })
-
-  // Also get payments for shift totals
+  // ============================================================
+  // AUTOMATIC CALCULATION 1: Payment Method Breakdown
+  // ============================================================
   const shiftPayments = await prisma.payment.findMany({
     where: {
       shiftId: shiftId,
       status: 'COMPLETED',
     },
+    select: {
+      id: true,
+      amount: true,
+      tipAmount: true,
+      method: true,
+    },
   })
 
+  let totalCashPayments = new Decimal(0)
+  let totalCardPayments = new Decimal(0)
+  let totalVoucherPayments = new Decimal(0)
+  let totalOtherPayments = new Decimal(0)
   let totalSales = new Decimal(0)
   let totalTips = new Decimal(0)
 
-  shiftOrders.forEach(order => {
-    totalSales = totalSales.add(order.total)
-  })
-
   shiftPayments.forEach(payment => {
-    if (payment.tipAmount) {
-      totalTips = totalTips.add(payment.tipAmount)
+    const amount = new Decimal(payment.amount || 0)
+    const tipAmount = new Decimal(payment.tipAmount || 0)
+
+    totalSales = totalSales.add(amount)
+    totalTips = totalTips.add(tipAmount)
+
+    // Group by payment method
+    switch (payment.method) {
+      case 'CASH':
+        totalCashPayments = totalCashPayments.add(amount)
+        break
+      case 'CREDIT_CARD':
+      case 'DEBIT_CARD':
+        totalCardPayments = totalCardPayments.add(amount)
+        break
+      case 'DIGITAL_WALLET':
+        totalVoucherPayments = totalVoucherPayments.add(amount)
+        break
+      case 'BANK_TRANSFER':
+      case 'OTHER':
+      default:
+        totalOtherPayments = totalOtherPayments.add(amount)
+        break
     }
   })
 
-  // Determine if we should send command to POS
+  logger.info('💰 Payment breakdown calculated', {
+    cash: totalCashPayments.toNumber(),
+    card: totalCardPayments.toNumber(),
+    voucher: totalVoucherPayments.toNumber(),
+    other: totalOtherPayments.toNumber(),
+    totalSales: totalSales.toNumber(),
+  })
+
+  // ============================================================
+  // AUTOMATIC CALCULATION 2: Products Sold Count
+  // ============================================================
+  const orderItems = await prisma.orderItem.findMany({
+    where: {
+      order: {
+        shiftId: shiftId,
+        status: {
+          in: ['COMPLETED'],
+        },
+      },
+    },
+    select: {
+      id: true,
+      quantity: true,
+      product: {
+        select: {
+          name: true,
+        },
+      },
+    },
+  })
+
+  const totalProductsSold = orderItems.reduce((sum, item) => sum + item.quantity, 0)
+
+  logger.info('📦 Products sold calculated', {
+    totalProductsSold,
+    totalOrders: orderItems.length,
+  })
+
+  // ============================================================
+  // AUTOMATIC CALCULATION 3: Inventory Consumed (FIFO batches)
+  // ============================================================
+  const inventoryMovements = await prisma.rawMaterialMovement.findMany({
+    where: {
+      // Find all USAGE movements that happened during this shift
+      type: 'USAGE',
+      createdAt: {
+        gte: shift.startTime,
+        lte: new Date(), // Until now (shift close time)
+      },
+      rawMaterial: {
+        venueId: venueId,
+      },
+    },
+    include: {
+      rawMaterial: {
+        select: {
+          id: true,
+          name: true,
+          sku: true,
+          unit: true,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: 'asc',
+    },
+  })
+
+  // Group inventory consumed by raw material
+  const inventoryConsumedMap = new Map<
+    string,
+    {
+      rawMaterialId: string
+      name: string
+      sku: string | null
+      unit: string
+      quantityConsumed: number
+      movementsCount: number
+    }
+  >()
+
+  inventoryMovements.forEach(movement => {
+    const key = movement.rawMaterialId
+    const quantity = Math.abs(Number(movement.quantity || 0)) // OUT movements are negative, make positive
+
+    if (inventoryConsumedMap.has(key)) {
+      const existing = inventoryConsumedMap.get(key)!
+      existing.quantityConsumed += quantity
+      existing.movementsCount += 1
+    } else {
+      inventoryConsumedMap.set(key, {
+        rawMaterialId: movement.rawMaterialId,
+        name: movement.rawMaterial.name,
+        sku: movement.rawMaterial.sku,
+        unit: movement.rawMaterial.unit,
+        quantityConsumed: quantity,
+        movementsCount: 1,
+      })
+    }
+  })
+
+  const inventoryConsumed = Array.from(inventoryConsumedMap.values())
+
+  logger.info('📊 Inventory consumed calculated', {
+    uniqueRawMaterials: inventoryConsumed.length,
+    totalMovements: inventoryMovements.length,
+  })
+
+  // ============================================================
+  // AUTOMATIC CALCULATION 4: Report Data (Summary JSON)
+  // ============================================================
+  const endTime = new Date()
+  const shiftDuration = Math.floor((endTime.getTime() - shift.startTime.getTime()) / 1000 / 60) // minutes
+
+  const reportData = {
+    shift: {
+      id: shiftId,
+      startTime: shift.startTime,
+      endTime: endTime,
+      durationMinutes: shiftDuration,
+      venueName: shift.venue.name,
+    },
+    sales: {
+      total: totalSales.toNumber(),
+      totalTips: totalTips.toNumber(),
+      totalOrders: orderItems.length,
+      productsSold: totalProductsSold,
+    },
+    paymentMethods: {
+      cash: totalCashPayments.toNumber(),
+      card: totalCardPayments.toNumber(),
+      voucher: totalVoucherPayments.toNumber(),
+      other: totalOtherPayments.toNumber(),
+    },
+    inventory: {
+      uniqueRawMaterialsConsumed: inventoryConsumed.length,
+      totalMovements: inventoryMovements.length,
+      details: inventoryConsumed,
+    },
+    products: {
+      totalSold: totalProductsSold,
+      uniqueProducts: new Set(orderItems.map(item => item.product.name)).size,
+      items: orderItems.map(item => ({
+        name: item.product.name,
+        quantity: item.quantity,
+      })),
+    },
+  }
+
+  logger.info('📋 Report data generated', {
+    shiftDuration: `${shiftDuration} minutes`,
+    reportSummary: {
+      sales: reportData.sales.total,
+      products: reportData.products.totalSold,
+      inventory: reportData.inventory.uniqueRawMaterialsConsumed,
+    },
+  })
+
+  // ============================================================
+  // POS Integration (if enabled)
+  // ============================================================
   const isIntegratedPOS = shift.venue.posType === 'SOFTRESTAURANT' && shift.venue.posStatus === 'CONNECTED'
 
   if (isIntegratedPOS && shift.externalId) {
-    // INTEGRATED MODE: Send command to Windows service to close shift in POS
     try {
       logger.info('Sending shift close command to POS', {
         venueId,
@@ -924,46 +1231,108 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
         action: 'CLOSE',
         payload: {
           shiftId: shift.externalId,
-          cashDeclared: closeData.cashDeclared,
-          cardDeclared: closeData.cardDeclared,
-          vouchersDeclared: closeData.vouchersDeclared,
-          otherDeclared: closeData.otherDeclared,
+          cashDeclared: closeData?.cashDeclared || 0,
+          cardDeclared: closeData?.cardDeclared || 0,
+          vouchersDeclared: closeData?.vouchersDeclared || 0,
+          otherDeclared: closeData?.otherDeclared || 0,
         },
       })
-
-      // The Windows service will process this command and close the shift in POS
-      // Archival operations will happen in the POS database
     } catch (error) {
       logger.error('Failed to send shift close command to POS', error)
       // Continue with local shift close even if POS command fails
-      // The shift can be manually closed in POS if needed
     }
   }
 
-  // Update shift record in database
+  // ============================================================
+  // Update Shift Record with ALL Calculated Fields
+  // ============================================================
   const updatedShift = await prisma.shift.update({
     where: { id: shiftId },
     data: {
-      endTime: new Date(),
+      endTime: endTime,
       status: 'CLOSED' as ShiftStatus,
-      endingCash: new Decimal(shift.startingCash || 0).add(new Decimal(closeData.cashDeclared || 0)),
-      cashDeclared: closeData.cashDeclared,
-      cardDeclared: closeData.cardDeclared,
-      vouchersDeclared: closeData.vouchersDeclared,
-      otherDeclared: closeData.otherDeclared,
+      // Legacy fields (for backwards compatibility)
+      endingCash: closeData?.cashDeclared
+        ? new Decimal(shift.startingCash || 0).add(new Decimal(closeData.cashDeclared))
+        : totalCashPayments,
+      cashDeclared: closeData?.cashDeclared || null,
+      cardDeclared: closeData?.cardDeclared || null,
+      vouchersDeclared: closeData?.vouchersDeclared || null,
+      otherDeclared: closeData?.otherDeclared || null,
       totalSales: totalSales,
       totalTips: totalTips,
-      notes: closeData.notes,
+      totalOrders: orderItems.length,
+      notes: closeData?.notes || null,
+      // NEW AUTOMATIC FIELDS
+      totalCashPayments: totalCashPayments,
+      totalCardPayments: totalCardPayments,
+      totalVoucherPayments: totalVoucherPayments,
+      totalOtherPayments: totalOtherPayments,
+      totalProductsSold: totalProductsSold,
+      inventoryConsumed: inventoryConsumed as any,
+      reportData: reportData as any,
     },
   })
 
-  logger.info('Shift closed successfully', {
+  logger.info('✅ Shift closed successfully with automatic calculations', {
     shiftId,
     venueId,
-    totalSales,
-    totalTips,
-    isIntegratedPOS,
+    summary: {
+      totalSales: totalSales.toNumber(),
+      productsSold: totalProductsSold,
+      inventoryConsumed: inventoryConsumed.length,
+      duration: `${shiftDuration} minutes`,
+    },
   })
+
+  // Emit Socket.IO event for real-time dashboard updates
+  try {
+    // Get staff info for the event
+    const staffInfo = await prisma.staffVenue.findFirst({
+      where: {
+        staffId: updatedShift.staffId,
+        venueId: venueId,
+      },
+      include: {
+        staff: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+
+    const broadcastingService = socketManager.getBroadcastingService()
+    if (broadcastingService) {
+      broadcastingService.broadcastShiftEvent(venueId, 'closed', {
+        shiftId: updatedShift.id,
+        staffId: updatedShift.staffId,
+        staffName: staffInfo ? `${staffInfo.staff.firstName} ${staffInfo.staff.lastName}` : 'Unknown',
+        status: 'CLOSED',
+        startTime: updatedShift.startTime.toISOString(),
+        endTime: updatedShift.endTime?.toISOString(),
+        startingCash: updatedShift.startingCash.toNumber(),
+        endingCash: updatedShift.endingCash?.toNumber(),
+        totalSales: updatedShift.totalSales.toNumber(),
+        totalTips: updatedShift.totalTips.toNumber(),
+        totalOrders: updatedShift.totalOrders,
+        totalCashPayments: updatedShift.totalCashPayments?.toNumber() || 0,
+        totalCardPayments: updatedShift.totalCardPayments?.toNumber() || 0,
+        totalVoucherPayments: updatedShift.totalVoucherPayments?.toNumber() || 0,
+        totalOtherPayments: updatedShift.totalOtherPayments?.toNumber() || 0,
+        totalProductsSold: updatedShift.totalProductsSold || 0,
+        venueId,
+      })
+      logger.info('✅ Broadcasted shift_closed event to dashboard', { shiftId: updatedShift.id, venueId })
+    }
+  } catch (error) {
+    logger.error('❌ Failed to broadcast shift_closed event', {
+      shiftId,
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
 
   return updatedShift
 }

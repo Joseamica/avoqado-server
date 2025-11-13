@@ -1246,6 +1246,15 @@ model Shift {
   totalTips   Decimal @default(0) @db.Decimal(10, 2)
   totalOrders Int     @default(0)
 
+  // Automatic calculation fields (FASE 1 - Shift Management)
+  totalCashPayments    Decimal @default(0) @db.Decimal(12, 2)
+  totalCardPayments    Decimal @default(0) @db.Decimal(12, 2)
+  totalVoucherPayments Decimal @default(0) @db.Decimal(12, 2)
+  totalOtherPayments   Decimal @default(0) @db.Decimal(12, 2)
+  totalProductsSold    Int     @default(0)
+  inventoryConsumed    Json?   // FIFO batch data for consumed inventory
+  reportData           Json?   // Full breakdown for printing receipts
+
   status ShiftStatus @default(OPEN)
   notes  String?
 

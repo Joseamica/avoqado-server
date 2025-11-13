@@ -6,11 +6,17 @@ import {
   BroadcastOptions,
   CardReaderStatusPayload,
   InventoryEventPayload,
+  MenuCategoryPayload,
+  MenuItemAvailabilityChangedPayload,
+  MenuItemPayload,
+  MenuUpdatedPayload,
   NotificationEventPayload,
   OrderEventPayload,
   PaymentEventPayload,
   PeripheralErrorPayload,
   PrinterStatusPayload,
+  ProductPriceChangedPayload,
+  ShiftEventPayload,
   SocketEventType,
   SystemAlertPayload,
   TPVCommandPayload,
@@ -309,6 +315,37 @@ export class BroadcastingService {
       // Broadcast to entire venue if no specific roles
       this.broadcastToVenue(venueId, SocketEventType.SYSTEM_ALERT, payload, options)
     }
+  }
+
+  /**
+   * Shift Events
+   * Broadcasts shift lifecycle events (opened, closed, updated) to venue
+   * Used to update dashboard in real-time when TPV opens/closes shifts
+   */
+  public broadcastShiftEvent(
+    venueId: string,
+    eventType: 'opened' | 'closed' | 'updated',
+    shiftData: Omit<ShiftEventPayload, 'correlationId' | 'timestamp'>,
+    options?: BroadcastOptions,
+  ): void {
+    const eventMap = {
+      opened: SocketEventType.SHIFT_OPENED,
+      closed: SocketEventType.SHIFT_CLOSED,
+      updated: SocketEventType.SHIFT_UPDATED,
+    }
+
+    const payload: ShiftEventPayload = {
+      ...shiftData,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to entire venue (dashboard, admin panels, other TPVs)
+    this.broadcastToVenue(venueId, eventMap[eventType], payload, options)
+
+    // Also broadcast to managers and admins specifically for shift events
+    this.broadcastToRole(StaffRole.MANAGER, eventMap[eventType], payload, venueId, options)
+    this.broadcastToRole(StaffRole.ADMIN, eventMap[eventType], payload, venueId, options)
   }
 
   /**
@@ -633,6 +670,223 @@ export class BroadcastingService {
       errorCode: errorData.errorCode,
       severity: errorData.severity,
       recoverable: errorData.recoverable,
+    })
+  }
+
+  /**
+   * Menu & Product Real-time Events
+   */
+  public broadcastMenuUpdated(
+    venueId: string,
+    menuData: Omit<MenuUpdatedPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: MenuUpdatedPayload = {
+      ...menuData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to entire venue (all terminals + dashboard)
+    this.broadcastToVenue(venueId, SocketEventType.MENU_UPDATED, payload, options)
+
+    // Also notify managers/admins for significant changes
+    if (menuData.reason === 'PRICE_CHANGE' || menuData.reason === 'ITEM_REMOVED') {
+      this.broadcastToRole(StaffRole.ADMIN, SocketEventType.MENU_UPDATED, payload, venueId, options)
+      this.broadcastToRole(StaffRole.MANAGER, SocketEventType.MENU_UPDATED, payload, venueId, options)
+    }
+
+    logger.info('Menu updated broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      updateType: menuData.updateType,
+      reason: menuData.reason,
+      affectedProducts: menuData.productIds?.length || 0,
+      affectedCategories: menuData.categoryIds?.length || 0,
+      updatedBy: menuData.updatedBy,
+    })
+  }
+
+  public broadcastMenuItemCreated(
+    venueId: string,
+    itemData: Omit<MenuItemPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: MenuItemPayload = {
+      ...itemData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    this.broadcastToVenue(venueId, SocketEventType.MENU_ITEM_CREATED, payload, options)
+
+    logger.info('Menu item created broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      itemId: itemData.itemId,
+      itemName: itemData.itemName,
+      categoryId: itemData.categoryId,
+    })
+  }
+
+  public broadcastMenuItemUpdated(
+    venueId: string,
+    itemData: Omit<MenuItemPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: MenuItemPayload = {
+      ...itemData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    this.broadcastToVenue(venueId, SocketEventType.MENU_ITEM_UPDATED, payload, options)
+
+    logger.info('Menu item updated broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      itemId: itemData.itemId,
+      itemName: itemData.itemName,
+    })
+  }
+
+  public broadcastMenuItemDeleted(
+    venueId: string,
+    itemData: Omit<MenuItemPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: MenuItemPayload = {
+      ...itemData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    this.broadcastToVenue(venueId, SocketEventType.MENU_ITEM_DELETED, payload, options)
+
+    logger.info('Menu item deleted broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      itemId: itemData.itemId,
+      itemName: itemData.itemName,
+    })
+  }
+
+  public broadcastProductPriceChanged(
+    venueId: string,
+    priceData: Omit<ProductPriceChangedPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: ProductPriceChangedPayload = {
+      ...priceData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue (critical for pricing consistency)
+    this.broadcastToVenue(venueId, SocketEventType.PRODUCT_PRICE_CHANGED, payload, options)
+
+    // Notify managers/admins of price changes
+    this.broadcastToRole(StaffRole.ADMIN, SocketEventType.PRODUCT_PRICE_CHANGED, payload, venueId, options)
+    this.broadcastToRole(StaffRole.MANAGER, SocketEventType.PRODUCT_PRICE_CHANGED, payload, venueId, options)
+
+    logger.info('Product price changed broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      productId: priceData.productId,
+      productName: priceData.productName,
+      oldPrice: priceData.oldPrice,
+      newPrice: priceData.newPrice,
+      priceChange: priceData.priceChange,
+      priceChangePercent: priceData.priceChangePercent,
+      updatedBy: priceData.updatedBy,
+    })
+  }
+
+  public broadcastMenuItemAvailabilityChanged(
+    venueId: string,
+    availabilityData: Omit<MenuItemAvailabilityChangedPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: MenuItemAvailabilityChangedPayload = {
+      ...availabilityData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue (critical for order processing)
+    this.broadcastToVenue(venueId, SocketEventType.MENU_ITEM_AVAILABILITY_CHANGED, payload, options)
+
+    // Alert staff if item becomes unavailable
+    if (!availabilityData.available) {
+      this.broadcastToRole(StaffRole.WAITER, SocketEventType.MENU_ITEM_AVAILABILITY_CHANGED, payload, venueId, options)
+      this.broadcastToRole(StaffRole.CASHIER, SocketEventType.MENU_ITEM_AVAILABILITY_CHANGED, payload, venueId, options)
+    }
+
+    logger.info('Menu item availability changed broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      itemId: availabilityData.itemId,
+      itemName: availabilityData.itemName,
+      available: availabilityData.available,
+      previousAvailability: availabilityData.previousAvailability,
+      reason: availabilityData.reason,
+    })
+  }
+
+  public broadcastMenuCategoryUpdated(
+    venueId: string,
+    categoryData: Omit<MenuCategoryPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: MenuCategoryPayload = {
+      ...categoryData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    this.broadcastToVenue(venueId, SocketEventType.MENU_CATEGORY_UPDATED, payload, options)
+
+    logger.info('Menu category updated broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      categoryId: categoryData.categoryId,
+      categoryName: categoryData.categoryName,
+      action: categoryData.action,
+      affectedItemCount: categoryData.affectedItemCount,
+    })
+  }
+
+  public broadcastMenuCategoryDeleted(
+    venueId: string,
+    categoryData: Omit<MenuCategoryPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: MenuCategoryPayload = {
+      ...categoryData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    this.broadcastToVenue(venueId, SocketEventType.MENU_CATEGORY_DELETED, payload, options)
+
+    // Notify managers/admins of category deletion
+    this.broadcastToRole(StaffRole.ADMIN, SocketEventType.MENU_CATEGORY_DELETED, payload, venueId, options)
+    this.broadcastToRole(StaffRole.MANAGER, SocketEventType.MENU_CATEGORY_DELETED, payload, venueId, options)
+
+    logger.info('Menu category deleted broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      categoryId: categoryData.categoryId,
+      categoryName: categoryData.categoryName,
+      affectedItemCount: categoryData.affectedItemCount,
     })
   }
 

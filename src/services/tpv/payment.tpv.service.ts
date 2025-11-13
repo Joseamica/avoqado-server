@@ -869,10 +869,16 @@ export async function recordOrderPayment(
   // Validate inventory availability to prevent charging customers for orders we can't fulfill
   await validatePreFlightInventory(activeOrder, totalAmount + tipAmount)
 
-  // Find current open shift for this venue
+  // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
+  const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
+
+  // ✅ CORRECTED: Find current open shift for THIS STAFF MEMBER (not just any shift)
+  // CRITICAL: If multiple staff members have open shifts simultaneously,
+  // we must match the payment to the correct staff's shift
   const currentShift = await prisma.shift.findFirst({
     where: {
       venueId,
+      staffId: validatedStaffId, // ← FIX: Filter by staff member who made the payment
       status: 'OPEN',
       endTime: null,
     },
@@ -880,9 +886,6 @@ export async function recordOrderPayment(
       startTime: 'desc',
     },
   })
-
-  // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
-  const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
   // ⭐ PROVIDER-AGNOSTIC MERCHANT TRACKING: Resolve merchantAccountId
   // Priority 1: Use merchantAccountId if provided by modern Android client
@@ -1008,6 +1011,29 @@ export async function recordOrderPayment(
       })
     }
 
+    // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when payment is recorded
+    if (currentShift) {
+      await tx.shift.update({
+        where: { id: currentShift.id },
+        data: {
+          totalSales: {
+            increment: totalAmount,
+          },
+          totalTips: {
+            increment: tipAmount,
+          },
+          totalOrders: {
+            increment: 1,
+          },
+        },
+      })
+      logger.info('✅ Shift totals updated', {
+        shiftId: currentShift.id,
+        incrementedSales: totalAmount,
+        incrementedTips: tipAmount,
+      })
+    }
+
     return newPayment
   })
 
@@ -1067,10 +1093,9 @@ export async function recordOrderPayment(
     // Don't fail the payment if receipt generation fails
   }
 
-  // Emit socket events for real-time updates
+  // 🔌 REAL-TIME: Emit socket events based on payment status
   try {
-    // Emit payment completed event to venue room
-    socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_COMPLETED, {
+    const paymentPayload = {
       paymentId: payment.id,
       orderId: activeOrder.id,
       orderNumber: activeOrder.orderNumber,
@@ -1080,7 +1105,39 @@ export async function recordOrderPayment(
       method: payment.method,
       status: payment.status.toLowerCase(), // Convert to lowercase for Android compatibility
       timestamp: new Date().toISOString(),
-    })
+      tableId: activeOrder.tableId,
+      metadata: {
+        cardBrand: paymentData.cardBrand,
+        last4: paymentData.last4,
+      },
+    }
+
+    // Emit appropriate event based on payment status
+    if (payment.status === 'COMPLETED') {
+      socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_COMPLETED, paymentPayload)
+      logger.info('🔌 PAYMENT_COMPLETED event emitted', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        amount: payment.amount,
+      })
+    } else if (payment.status === 'PROCESSING') {
+      socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_PROCESSING, paymentPayload)
+      logger.info('🔌 PAYMENT_PROCESSING event emitted', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        amount: payment.amount,
+      })
+    } else if (payment.status === 'FAILED') {
+      socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_FAILED, {
+        ...paymentPayload,
+        errorMessage: 'Payment failed during processing',
+      })
+      logger.warn('🔌 PAYMENT_FAILED event emitted', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        amount: payment.amount,
+      })
+    }
 
     // Emit order updated event to venue room
     socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.ORDER_UPDATED, {
@@ -1097,7 +1154,7 @@ export async function recordOrderPayment(
       orderId: activeOrder.id,
       orderNumber: activeOrder.orderNumber,
       venueId: activeOrder.venueId,
-      events: ['PAYMENT_COMPLETED', 'ORDER_UPDATED'],
+      paymentStatus: payment.status,
     })
   } catch (error) {
     logger.error('Failed to emit socket events', {
@@ -1249,10 +1306,16 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
 
-  // Find current open shift for this venue
+  // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
+  const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
+
+  // ✅ CORRECTED: Find current open shift for THIS STAFF MEMBER (not just any shift)
+  // CRITICAL: If multiple staff members have open shifts simultaneously,
+  // we must match the payment to the correct staff's shift
   const currentShift = await prisma.shift.findFirst({
     where: {
       venueId,
+      staffId: validatedStaffId, // ← FIX: Filter by staff member who made the payment
       status: 'OPEN',
       endTime: null,
     },
@@ -1260,9 +1323,6 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       startTime: 'desc',
     },
   })
-
-  // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
-  const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
   // Map source from Android app format to PaymentSource enum
   const mapPaymentSource = (source?: string): PaymentSource => {
@@ -1382,6 +1442,29 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       },
     })
 
+    // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when fast payment is recorded
+    if (currentShift) {
+      await tx.shift.update({
+        where: { id: currentShift.id },
+        data: {
+          totalSales: {
+            increment: totalAmount,
+          },
+          totalTips: {
+            increment: tipAmount,
+          },
+          totalOrders: {
+            increment: 1,
+          },
+        },
+      })
+      logger.info('✅ Shift totals updated (fast payment)', {
+        shiftId: currentShift.id,
+        incrementedSales: totalAmount,
+        incrementedTips: tipAmount,
+      })
+    }
+
     return { payment: newPayment, fastOrder: order }
   })
 
@@ -1445,10 +1528,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // Don't fail the payment if receipt generation fails
   }
 
-  // Emit socket events for real-time updates
+  // 🔌 REAL-TIME: Emit socket events based on payment status (fast payment)
   try {
-    // Emit payment completed event to venue room
-    socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_COMPLETED, {
+    const paymentPayload = {
       paymentId: payment.id,
       orderId: fastOrder.id,
       orderNumber: fastOrder.orderNumber,
@@ -1459,7 +1541,38 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       status: payment.status.toLowerCase(), // Convert to lowercase for Android compatibility
       type: 'FAST',
       timestamp: new Date().toISOString(),
-    })
+      metadata: {
+        cardBrand: paymentData.cardBrand,
+        last4: paymentData.last4,
+      },
+    }
+
+    // Emit appropriate event based on payment status
+    if (payment.status === 'COMPLETED') {
+      socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_COMPLETED, paymentPayload)
+      logger.info('🔌 PAYMENT_COMPLETED event emitted (fast payment)', {
+        paymentId: payment.id,
+        orderId: fastOrder.id,
+        amount: payment.amount,
+      })
+    } else if (payment.status === 'PROCESSING') {
+      socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_PROCESSING, paymentPayload)
+      logger.info('🔌 PAYMENT_PROCESSING event emitted (fast payment)', {
+        paymentId: payment.id,
+        orderId: fastOrder.id,
+        amount: payment.amount,
+      })
+    } else if (payment.status === 'FAILED') {
+      socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_FAILED, {
+        ...paymentPayload,
+        errorMessage: 'Fast payment failed during processing',
+      })
+      logger.warn('🔌 PAYMENT_FAILED event emitted (fast payment)', {
+        paymentId: payment.id,
+        orderId: fastOrder.id,
+        amount: payment.amount,
+      })
+    }
 
     // Emit order updated event to venue room for the fast order
     socketManager.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
@@ -1477,7 +1590,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       orderId: fastOrder.id,
       orderNumber: fastOrder.orderNumber,
       venueId: venueId,
-      events: ['PAYMENT_COMPLETED', 'ORDER_UPDATED'],
+      paymentStatus: payment.status,
     })
   } catch (error) {
     logger.error('Failed to emit socket events for fast payment', {

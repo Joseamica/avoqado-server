@@ -22,6 +22,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- shift.tpv.service.ts: Add real-time calculation of shift totals in getCurrentShift (shift.tpv.service.ts:66-173)
+  - **CRITICAL FIX**: Shift totals now update in real-time when payments are recorded
+  - Previous behavior: `totalSales`, `totalCardPayments`, etc., only updated when shift was closed
+  - TPV was showing "$0" for active shifts even after successful payments
+  - Now dynamically calculates totals from all `COMPLETED` payments associated with shift
+  - Also calculates `totalOrders` and `totalProductsSold` in real-time
+  - Payment method breakdown (cash/card/voucher/other) updated immediately
+  - Fix ensures TPV shift screen always displays accurate current totals
+  - Impact: Critical user-facing bug - staff could not see their sales during active shift
+
 - payment.tpv.service.ts: Fix rating parsing for numeric strings from Android app (payment.tpv.service.ts:24-39)
   - Updated `mapTpvRatingToNumeric()` to parse numeric strings ("1"-"5") from Android app
   - Previous version only accepted categorical strings ("EXCELLENT", "GOOD", "POOR")

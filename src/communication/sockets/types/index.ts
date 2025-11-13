@@ -76,6 +76,11 @@ export enum SocketEventType {
   VENUE_UPDATE = 'venue_update',
   TABLE_STATUS_CHANGE = 'table_status_change',
 
+  // Business Events - Shifts
+  SHIFT_OPENED = 'shift_opened',
+  SHIFT_CLOSED = 'shift_closed',
+  SHIFT_UPDATED = 'shift_updated',
+
   // Business Events - Notifications
   NOTIFICATION_NEW = 'notification_new',
   NOTIFICATION_READ = 'notification_read',
@@ -96,6 +101,16 @@ export enum SocketEventType {
   PRINTER_STATUS = 'printer_status',
   CARD_READER_STATUS = 'card_reader_status',
   PERIPHERAL_ERROR = 'peripheral_error',
+
+  // Business Events - Menu & Products (Real-time)
+  MENU_UPDATED = 'menu_updated',
+  MENU_ITEM_CREATED = 'menu_item_created',
+  MENU_ITEM_UPDATED = 'menu_item_updated',
+  MENU_ITEM_DELETED = 'menu_item_deleted',
+  MENU_ITEM_AVAILABILITY_CHANGED = 'menu_item_availability_changed',
+  MENU_CATEGORY_UPDATED = 'menu_category_updated',
+  MENU_CATEGORY_DELETED = 'menu_category_deleted',
+  PRODUCT_PRICE_CHANGED = 'product_price_changed',
 
   // Error Events
   ERROR = 'error',
@@ -241,6 +256,90 @@ export interface PeripheralErrorPayload extends BaseEventPayload {
   errorMessage: string
   severity: 'low' | 'medium' | 'high' | 'critical'
   recoverable: boolean
+  metadata?: Record<string, any>
+}
+
+/**
+ * Menu & Product Real-time Event Payloads
+ */
+export interface MenuUpdatedPayload extends BaseEventPayload {
+  updateType: 'FULL_REFRESH' | 'PARTIAL_UPDATE'
+  categoryIds?: string[] // Categories affected (if partial)
+  productIds?: string[] // Products affected (if partial)
+  reason: 'PRICE_CHANGE' | 'AVAILABILITY_CHANGE' | 'ITEM_ADDED' | 'ITEM_REMOVED' | 'CATEGORY_UPDATED'
+  updatedBy?: string // User ID who made the change
+  metadata?: Record<string, any>
+}
+
+export interface MenuItemPayload extends BaseEventPayload {
+  itemId: string
+  itemName: string
+  sku?: string
+  categoryId?: string
+  categoryName?: string
+  price?: number
+  available?: boolean
+  imageUrl?: string | null
+  description?: string | null
+  modifierGroupIds?: string[]
+  metadata?: Record<string, any>
+}
+
+export interface MenuCategoryPayload extends BaseEventPayload {
+  categoryId: string
+  categoryName: string
+  action: 'CREATED' | 'UPDATED' | 'DELETED' | 'ENABLED' | 'DISABLED' | 'REORDERED'
+  displayOrder?: number
+  active?: boolean
+  parentId?: string | null
+  affectedItemCount?: number // Number of products in category
+  metadata?: Record<string, any>
+}
+
+export interface ProductPriceChangedPayload extends BaseEventPayload {
+  productId: string
+  productName: string
+  sku: string
+  oldPrice: number
+  newPrice: number
+  priceChange: number // Absolute difference
+  priceChangePercent: number // Percentage change
+  categoryId: string
+  categoryName: string
+  updatedBy?: string // User ID who made the change
+  metadata?: Record<string, any>
+}
+
+export interface MenuItemAvailabilityChangedPayload extends BaseEventPayload {
+  itemId: string
+  itemName: string
+  available: boolean
+  previousAvailability: boolean
+  reason?: 'OUT_OF_STOCK' | 'MANUAL' | 'TIME_BASED' | 'INVENTORY_DEPLETION'
+  affectedOrders?: string[] // Order IDs that might be affected
+  metadata?: Record<string, any>
+}
+
+/**
+ * Shift Event Payloads - Real-time shift management
+ */
+export interface ShiftEventPayload extends BaseEventPayload {
+  shiftId: string
+  staffId: string
+  staffName: string
+  status: 'OPEN' | 'CLOSED'
+  startTime: string
+  endTime?: string
+  startingCash?: number
+  endingCash?: number
+  totalSales?: number
+  totalTips?: number
+  totalOrders?: number
+  totalCashPayments?: number
+  totalCardPayments?: number
+  totalVoucherPayments?: number
+  totalOtherPayments?: number
+  totalProductsSold?: number
   metadata?: Record<string, any>
 }
 

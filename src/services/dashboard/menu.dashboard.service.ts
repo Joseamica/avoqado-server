@@ -18,6 +18,7 @@ import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
+import socketManager from '../../communication/sockets'
 
 export async function getMenus(venueId: string): Promise<Menu[]> {
   return prisma.menu.findMany({
@@ -118,6 +119,29 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
       data: {
         categoryId: category.id,
       },
+    })
+  }
+
+  // 🔌 REAL-TIME: Broadcast category creation via Socket.IO
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    const affectedItemCount = data.avoqadoProducts?.length || 0
+
+    broadcastingService.broadcastMenuCategoryUpdated(venueId, {
+      categoryId: category.id,
+      categoryName: category.name,
+      action: 'CREATED',
+      displayOrder: category.displayOrder,
+      active: category.active,
+      parentId: category.parentId,
+      affectedItemCount,
+    })
+
+    logger.info('🔌 Menu category created event broadcasted', {
+      venueId,
+      categoryId: category.id,
+      categoryName: category.name,
+      affectedItemCount,
     })
   }
 
@@ -229,10 +253,42 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     // Prisma treats undefined as 'do not update'.
   }
 
-  return prisma.menuCategory.update({
+  const updatedCategory = await prisma.menuCategory.update({
     where: { id: categoryId, venueId }, // Ensure update is on the correct venue's category
     data: updateData,
   })
+
+  // 🔌 REAL-TIME: Broadcast category update via Socket.IO
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    // Count products in this category
+    const productCount = await prisma.product.count({
+      where: { categoryId, deletedAt: null },
+    })
+
+    // Determine action based on what changed
+    const action = data.active !== undefined && data.active !== category.active ? (data.active ? 'ENABLED' : 'DISABLED') : 'UPDATED'
+
+    broadcastingService.broadcastMenuCategoryUpdated(venueId, {
+      categoryId: updatedCategory.id,
+      categoryName: updatedCategory.name,
+      action,
+      displayOrder: updatedCategory.displayOrder,
+      active: updatedCategory.active,
+      parentId: updatedCategory.parentId,
+      affectedItemCount: productCount,
+    })
+
+    logger.info('🔌 Menu category updated event broadcasted', {
+      venueId,
+      categoryId: updatedCategory.id,
+      categoryName: updatedCategory.name,
+      action,
+      affectedItemCount: productCount,
+    })
+  }
+
+  return updatedCategory
 }
 
 export async function deleteMenuCategory(venueId: string, categoryId: string): Promise<MenuCategory> {
@@ -264,7 +320,29 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
     })
   }
 
-  return prisma.menuCategory.delete({ where: { id: categoryId } })
+  const deletedCategory = await prisma.menuCategory.delete({ where: { id: categoryId } })
+
+  // 🔌 REAL-TIME: Broadcast category deletion via Socket.IO
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastMenuCategoryDeleted(venueId, {
+      categoryId: deletedCategory.id,
+      categoryName: deletedCategory.name,
+      action: 'DELETED',
+      displayOrder: deletedCategory.displayOrder,
+      active: deletedCategory.active,
+      parentId: deletedCategory.parentId,
+      affectedItemCount: 0, // No products since we validate empty before delete
+    })
+
+    logger.info('🔌 Menu category deleted event broadcasted', {
+      venueId,
+      categoryId: deletedCategory.id,
+      categoryName: deletedCategory.name,
+    })
+  }
+
+  return deletedCategory
 }
 
 export async function reorderMenuCategories(venueId: string, reorderData: ReorderMenuCategoriesDto): Promise<Prisma.BatchPayload[]> {

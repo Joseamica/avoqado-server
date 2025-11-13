@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
+import socketManager from '../../communication/sockets'
 
 export interface CreateProductDto {
   name: string
@@ -152,6 +153,39 @@ export async function createProduct(venueId: string, productData: CreateProductD
     },
   })
 
+  // 🔌 REAL-TIME: Broadcast product creation via Socket.IO
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    // Broadcast menu item created event
+    broadcastingService.broadcastMenuItemCreated(venueId, {
+      itemId: product.id,
+      itemName: product.name,
+      sku: product.sku,
+      categoryId: product.categoryId,
+      categoryName: product.category.name,
+      price: Number(product.price),
+      available: product.active,
+      imageUrl: product.imageUrl,
+      description: product.description,
+      modifierGroupIds: product.modifierGroups.map(mg => mg.groupId),
+    })
+
+    // Broadcast menu_updated event for full refresh
+    broadcastingService.broadcastMenuUpdated(venueId, {
+      updateType: 'PARTIAL_UPDATE',
+      productIds: [product.id],
+      categoryIds: [product.categoryId],
+      reason: 'ITEM_ADDED',
+    })
+
+    logger.info('🔌 Menu item created event broadcasted', {
+      venueId,
+      productId: product.id,
+      productName: product.name,
+      categoryId: product.categoryId,
+    })
+  }
+
   return product
 }
 
@@ -224,6 +258,91 @@ export async function updateProduct(venueId: string, productId: string, productD
     },
   })
 
+  // 🔌 REAL-TIME: Broadcast product update via Socket.IO
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    // Detect what changed
+    const priceChanged = productData.price !== undefined && productData.price !== Number(existingProduct.price)
+    const availabilityChanged = productData.active !== undefined && productData.active !== existingProduct.active
+
+    // Broadcast specific price change event
+    if (priceChanged) {
+      const oldPrice = Number(existingProduct.price)
+      const newPrice = productData.price!
+      const priceChange = newPrice - oldPrice
+      const priceChangePercent = (priceChange / oldPrice) * 100
+
+      broadcastingService.broadcastProductPriceChanged(venueId, {
+        productId: product.id,
+        productName: product.name,
+        sku: product.sku,
+        oldPrice,
+        newPrice,
+        priceChange,
+        priceChangePercent,
+        categoryId: product.categoryId,
+        categoryName: product.category.name,
+      })
+
+      logger.info('🔌 Product price changed event broadcasted', {
+        venueId,
+        productId: product.id,
+        productName: product.name,
+        oldPrice,
+        newPrice,
+        priceChange: `${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}`,
+        priceChangePercent: `${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%`,
+      })
+    }
+
+    // Broadcast specific availability change event
+    if (availabilityChanged) {
+      broadcastingService.broadcastMenuItemAvailabilityChanged(venueId, {
+        itemId: product.id,
+        itemName: product.name,
+        available: product.active,
+        previousAvailability: existingProduct.active,
+        reason: 'MANUAL',
+      })
+
+      logger.info('🔌 Menu item availability changed event broadcasted', {
+        venueId,
+        itemId: product.id,
+        itemName: product.name,
+        available: product.active,
+        previousAvailability: existingProduct.active,
+      })
+    }
+
+    // Broadcast general menu item updated event
+    broadcastingService.broadcastMenuItemUpdated(venueId, {
+      itemId: product.id,
+      itemName: product.name,
+      sku: product.sku,
+      categoryId: product.categoryId,
+      categoryName: product.category.name,
+      price: Number(product.price),
+      available: product.active,
+      imageUrl: product.imageUrl,
+      description: product.description,
+      modifierGroupIds: product.modifierGroups.map(mg => mg.groupId),
+    })
+
+    // Broadcast menu_updated event for full refresh
+    broadcastingService.broadcastMenuUpdated(venueId, {
+      updateType: 'PARTIAL_UPDATE',
+      productIds: [product.id],
+      categoryIds: [product.categoryId],
+      reason: priceChanged ? 'PRICE_CHANGE' : availabilityChanged ? 'AVAILABILITY_CHANGE' : 'ITEM_ADDED',
+    })
+
+    logger.info('🔌 Menu updated event broadcasted', {
+      venueId,
+      productId: product.id,
+      updateReason: priceChanged ? 'PRICE_CHANGE' : availabilityChanged ? 'AVAILABILITY_CHANGE' : 'GENERAL_UPDATE',
+    })
+  }
+
   return product
 }
 
@@ -262,6 +381,33 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
       deletedBy: userId,
     },
   })
+
+  // 🔌 REAL-TIME: Broadcast product deletion via Socket.IO
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    // Broadcast menu item deleted event
+    broadcastingService.broadcastMenuItemDeleted(venueId, {
+      itemId: productId,
+      itemName: existingProduct.name,
+      sku: existingProduct.sku,
+      categoryId: existingProduct.categoryId,
+    })
+
+    // Broadcast menu_updated event for full refresh
+    broadcastingService.broadcastMenuUpdated(venueId, {
+      updateType: 'PARTIAL_UPDATE',
+      productIds: [productId],
+      categoryIds: [existingProduct.categoryId],
+      reason: 'ITEM_REMOVED',
+    })
+
+    logger.info('🔌 Menu item deleted event broadcasted', {
+      venueId,
+      productId,
+      productName: existingProduct.name,
+      categoryId: existingProduct.categoryId,
+    })
+  }
 }
 
 /**
