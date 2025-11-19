@@ -123,7 +123,7 @@ model Venue {
   // Google Business Profile Integration
   googleBusinessProfileConnected Boolean   @default(false)
   googleBusinessProfileEmail     String?
-  googlePlaceId                  String?   // Internal Google location ID
+  googlePlaceId                  String? // Internal Google location ID
   googleLocationName             String?
   googleAccessToken              String?   @db.Text
   googleRefreshToken             String?   @db.Text
@@ -153,6 +153,7 @@ model Venue {
   inventories         Inventory[]
   tables              Table[]
   areas               Area[]
+  floorElements       FloorElement[]
   shifts              Shift[]
   timeEntries         TimeEntry[]
   orders              Order[]
@@ -177,6 +178,7 @@ model Venue {
   settlementSimulations   SettlementSimulation[]
   settlementIncidents     SettlementIncident[]
   settlementConfirmations SettlementConfirmation[]
+  ecommerceMerchants      EcommerceMerchant[] @relation("VenueEcommerceMerchants") // ⭐ E-commerce sales channels for this venue
 
   // ✅ NEW: Inventory Management
   rawMaterials         RawMaterial[]
@@ -246,10 +248,12 @@ model VenueSettings {
   allowDelivery     Boolean @default(false)
 
   // Payment
-  acceptCash          Boolean @default(true)
-  acceptCard          Boolean @default(true)
-  acceptDigitalWallet Boolean @default(true)
+  acceptCash          Boolean            @default(true)
+  acceptCard          Boolean            @default(true)
+  acceptDigitalWallet Boolean            @default(true)
   tipSuggestions      Json? // [15, 18, 20, 25]
+  paymentTiming       PaymentTiming      @default(PAY_AFTER) // When to collect payment
+  inventoryDeduction  InventoryDeduction @default(ON_ORDER_CREATE) // When to deduct inventory
 
   updatedAt DateTime @updatedAt
 }
@@ -309,6 +313,7 @@ model Staff {
   paymentsProcessed Payment[]
   activities        ActivityLog[]
   reviewsReceived   Review[]
+  orderActions      OrderAction[] // Order modifications performed by this staff member
 
   // Notifications
   notifications           Notification[]
@@ -332,6 +337,9 @@ model Staff {
 
   // ✅ NEW: Settlement simulations
   settlementSimulations SettlementSimulation[]
+
+  // ✅ NEW: E-commerce Merchant (SDK client) dashboard access
+  ecommerceMerchant EcommerceMerchant?
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -1187,7 +1195,8 @@ model Area {
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
 
-  tables Table[] // Un área tiene muchas mesas
+  tables        Table[]        // Un área tiene muchas mesas
+  floorElements FloorElement[] // Elementos decorativos del área (paredes, barras, etc.)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1208,16 +1217,74 @@ model Table {
   area     Area?   @relation(fields: [areaId], references: [id])
   active   Boolean @default(true)
 
-  orders Order[]
+  // Floor plan positioning (normalized 0-1 coordinates)
+  positionX Float?
+  positionY Float?
+  shape     TableShape @default(SQUARE)
+  rotation  Int        @default(0) // 0, 90, 180, 270 degrees
+
+  // Table status for availability tracking
+  status TableStatus @default(AVAILABLE)
+
+  // Current order link (1-to-1 relationship for occupied tables)
+  currentOrderId String? @unique
+  currentOrder   Order?  @relation("TableCurrentOrder", fields: [currentOrderId], references: [id], onDelete: SetNull)
+
+  // Order history (all orders ever assigned to this table)
+  orders Order[] @relation("TableOrderHistory")
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
   externalId   String?
 
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
   @@unique([venueId, externalId])
   @@unique([venueId, number])
   @@index([venueId])
+  @@index([venueId, status])
+}
+
+// Floor plan decorative elements (walls, bars, service areas, labels)
+// IMPORTANT: Coordinates are GLOBAL to venue (0-1) just like Table coordinates
+model FloorElement {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Optional area relationship (for visual filtering)
+  areaId String?
+  area   Area?   @relation(fields: [areaId], references: [id], onDelete: SetNull)
+
+  type FloorElementType
+
+  // GLOBAL coordinates (0.0 - 1.0, relative to entire venue)
+  // Same coordinate system as Table.positionX/Y
+  positionX Float
+  positionY Float
+
+  // For rectangular elements (BAR_COUNTER, SERVICE_AREA)
+  width    Float? // Width (0.0 - 1.0)
+  height   Float? // Height (0.0 - 1.0)
+  rotation Int    @default(0) // 0, 90, 180, 270 degrees
+
+  // For WALL (line from positionX/Y to endX/endY)
+  endX Float? // End point X coordinate
+  endY Float? // End point Y coordinate
+
+  // Metadata
+  label  String?  // "Cocina", "Baño", "Entrada", "Barra"
+  color  String?  // Hex color (e.g., "#424242")
+  active Boolean @default(true) // Visibility toggle
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([venueId, areaId])
+  @@index([venueId, type])
 }
 
 model Shift {
@@ -1252,8 +1319,8 @@ model Shift {
   totalVoucherPayments Decimal @default(0) @db.Decimal(12, 2)
   totalOtherPayments   Decimal @default(0) @db.Decimal(12, 2)
   totalProductsSold    Int     @default(0)
-  inventoryConsumed    Json?   // FIFO batch data for consumed inventory
-  reportData           Json?   // Full breakdown for printing receipts
+  inventoryConsumed    Json? // FIFO batch data for consumed inventory
+  reportData           Json? // Full breakdown for printing receipts
 
   status ShiftStatus @default(OPEN)
   notes  String?
@@ -1343,10 +1410,14 @@ model Order {
   source      OrderSource @default(TPV)
 
   // Relations
-  tableId String?
-  table   Table?  @relation(fields: [tableId], references: [id], onDelete: SetNull)
-  shiftId String?
-  shift   Shift?  @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  tableId      String?
+  table        Table?  @relation("TableOrderHistory", fields: [tableId], references: [id], onDelete: SetNull)
+  currentTable Table?  @relation("TableCurrentOrder")
+  shiftId      String?
+  shift        Shift?  @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  // Table service info
+  covers Int? // Number of people at table
 
   // Staff
   createdById String?
@@ -1354,10 +1425,12 @@ model Order {
   servedById  String?
   servedBy    Staff?  @relation("OrderServedBy", fields: [servedById], references: [id], onDelete: SetNull)
 
-  // Customer info (for guest checkout)
-  customerName  String?
-  customerPhone String?
-  customerEmail String?
+  // Customer info (for guest checkout or quick orders without table)
+  customerName       String?
+  customerPhone      String?
+  customerEmail      String?
+  customerIdentifier String? // For quick orders: "BAR-042", "QUICK-123"
+  specialRequests    String? @db.Text // Allergies, dietary restrictions, special occasions
 
   // Amounts
   subtotal       Decimal @db.Decimal(12, 2)
@@ -1374,6 +1447,9 @@ model Order {
   // Payment split type (set on first payment, enforces UI consistency)
   splitType SplitType?
 
+  // Optimistic concurrency control (prevent concurrent updates)
+  version Int @default(1)
+
   // POS sync
   externalId   String? // POS order ID
   originSystem OriginSystem @default(AVOQADO)
@@ -1385,6 +1461,7 @@ model Order {
   items              OrderItem[]
   payments           Payment[]
   paymentAllocations PaymentAllocation[]
+  actions            OrderAction[] // Audit trail for order modifications
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -1395,6 +1472,8 @@ model Order {
   @@index([shiftId])
   @@index([status])
   @@index([createdAt])
+  @@index([venueId, tableId, paymentStatus])
+  @@index([venueId, customerIdentifier, paymentStatus])
 }
 
 model OrderItem {
@@ -1510,6 +1589,37 @@ model OrderItemModifier {
   price    Decimal @db.Decimal(10, 2)
 }
 
+// Order Action Audit Trail
+// Tracks all actions performed on orders (comp, void, discount, split, etc.)
+model OrderAction {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  actionType ActionType // COMP, VOID, DISCOUNT, SPLIT, MERGE, TRANSFER
+
+  performedById String
+  performedBy   Staff  @relation(fields: [performedById], references: [id], onDelete: Restrict)
+
+  reason   String? // Required for comp/void
+  metadata Json? // Additional action-specific data
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([actionType])
+  @@index([createdAt])
+}
+
+enum ActionType {
+  COMP
+  VOID
+  DISCOUNT
+  SPLIT
+  MERGE
+  TRANSFER
+}
+
 // ==========================================
 // NOTE: PAYMENTS & FEES
 // ==========================================
@@ -1563,6 +1673,9 @@ model Payment {
 
   // Receipt
   receipts DigitalReceipt[]
+
+  // ⭐ SDK Checkout Sessions (external merchant payments)
+  checkoutSessions CheckoutSession[]
 
   // POS sync
   externalId   String?
@@ -1917,11 +2030,11 @@ model Terminal {
 
   // 🆕 ACTIVATION SYSTEM (Hybrid: Serial Number + Activation Code)
   // Similar to Square POS device activation flow
-  activationCode       String?   @unique // 6-char alphanumeric code (e.g. A3F9K2)
-  activationCodeExpiry DateTime? // Code expires after 7 days
-  activatedAt          DateTime? // First successful activation timestamp
-  activatedBy          String? // StaffId who generated the activation code
-  activationAttempts   Int       @default(0) // Counter for failed attempts (max 5)
+  activationCode        String?   @unique // 6-char alphanumeric code (e.g. A3F9K2)
+  activationCodeExpiry  DateTime? // Code expires after 7 days
+  activatedAt           DateTime? // First successful activation timestamp
+  activatedBy           String? // StaffId who generated the activation code
+  activationAttempts    Int       @default(0) // Counter for failed attempts (max 5)
   lastActivationAttempt DateTime? // Last activation attempt timestamp (anti-brute force)
 
   reviews Review[] // ✅ LÍNEA AGREGADA
@@ -1956,10 +2069,11 @@ model PaymentProvider {
   configSchema Json? // JSON schema for validation
 
   // Relations
-  merchants      MerchantAccount[]
-  webhooks       WebhookSubscription[]
-  eventLogs      ProviderEventLog[]
-  costStructures ProviderCostStructure[]
+  merchants          MerchantAccount[]
+  webhooks           WebhookSubscription[]
+  eventLogs          ProviderEventLog[]
+  costStructures     ProviderCostStructure[]
+  ecommerceMerchants EcommerceMerchant[] // ⭐ E-commerce channels using this provider
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1968,9 +2082,20 @@ model PaymentProvider {
   @@index([type])
 }
 
-/// Concrete merchant account issued by a provider for one of our venues.
-/// Holds the secure credentials and per-account configuration while keeping
-/// a reference to the reusable provider template above.
+/// Terminal-based merchant accounts for card-present payments (PAX devices)
+/// Used by Avoqado venues (restaurants) with physical payment terminals
+///
+/// **Blumon Product**: PAX Terminal SDK (OAuth + DUKPT encryption)
+/// **Integration**: Android TPV app with Blumon SDK
+/// **Credentials**: OAuth tokens, RSA keys, DUKPT encryption keys
+/// **Relationship**: Belongs to Venue via VenuePaymentConfig
+///
+/// **Key Fields**:
+/// - credentialsEncrypted: OAuth token + RSA keys + DUKPT keys (AES-256-CBC encrypted)
+/// - blumonSerialNumber: Virtual serial for OAuth (e.g., "2841548417")
+/// - blumonPosId: Momentum API position ID for payment routing (e.g., "376")
+///
+/// ⚠️ See docs/MERCHANT_MODELS_ARCHITECTURE.md for why this is separate from EcommerceMerchant
 model MerchantAccount {
   id String @id @default(cuid())
 
@@ -2014,7 +2139,7 @@ model MerchantAccount {
   costStructures        ProviderCostStructure[]
   transactionCosts      TransactionCost[]
   settlementConfigs     SettlementConfiguration[]
-  payments              Payment[] // ⭐ NUEVO: Track all payments processed by this merchant account
+  payments              Payment[] // ⭐ Track all payments processed by this merchant account
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2023,6 +2148,161 @@ model MerchantAccount {
   @@index([providerId])
   @@index([active])
   @@index([displayOrder])
+}
+
+// ==========================================
+// NOTE: ECOMMERCE MERCHANTS (CARD-NOT-PRESENT)
+// ==========================================
+
+/// E-commerce merchant accounts for card-not-present payments (online/web/mobile)
+/// Used by Avoqado venues with online sales channels (websites, mobile apps, delivery platforms)
+///
+/// **Blumon Product**: Hosted Checkout API (redirect flow + webhooks)
+/// **Integration**: JavaScript SDK (avoqado-v1.js) with redirect to Blumon hosted page
+/// **Credentials**: API Key + Merchant ID + POS ID (stored in providerCredentials JSON)
+/// **Relationship**: Belongs to Venue (same business, different sales channel)
+///
+/// **Key Fields**:
+/// - venueId: Links to the venue (restaurant/business) that owns this e-commerce channel
+/// - publicKey: "pk_live_xxx" or "pk_test_xxx" (for frontend API calls)
+/// - secretKeyEncrypted: "sk_live_xxx" (for backend API calls, AES-256-CBC encrypted)
+/// - providerCredentials: { blumonMerchantId, blumonApiKey, blumonPosId, webhookSecret }
+///
+/// **Example**: "Tacos El Güero" restaurant has:
+/// - MerchantAccount (terminal físico en restaurante)
+/// - EcommerceMerchant (sitio web de delivery)
+///
+/// ⭐ ARCHITECTURE DECISION (2025-01-13):
+/// Follows industry standard (Square, Toast, Stripe, Clover) - separate models for:
+/// - Card-Present (MerchantAccount) - Physical terminals with OAuth + DUKPT encryption
+/// - Card-Not-Present (EcommerceMerchant) - Online checkout with API keys + hosted flow
+///
+/// ⚠️ See docs/MERCHANT_MODELS_ARCHITECTURE.md for complete architecture analysis
+model EcommerceMerchant {
+  id String @id @default(cuid())
+
+  // Venue relationship (REQUIRED - same business, different sales channel)
+  venueId String
+  venue   Venue  @relation("VenueEcommerceMerchants", fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Channel identifier (allows multiple e-commerce channels per venue)
+  channelName String @default("Web Principal") // "Web", "App Móvil", "Uber Eats"
+
+  // Basic info (can be inherited from Venue or customized per channel)
+  businessName String // "Mi Tienda Online SA"
+  rfc          String? // Tax ID (optional initially)
+  contactEmail String  @unique
+  contactPhone String?
+  website      String?
+
+  // API Credentials (Avoqado SDK)
+  publicKey     String @unique // "pk_live_abc123xyz" or "pk_test_abc123xyz"
+  secretKeyHash String @unique // SHA-256 hash of secret key for O(1) lookup (never store plaintext)
+
+  // Provider Integration (Multi-provider ready)
+  providerId String
+  provider   PaymentProvider @relation(fields: [providerId], references: [id], onDelete: Restrict)
+
+  // Provider-specific credentials (encrypted JSON)
+  // For Blumon Hosted Checkout: { blumonMerchantId, blumonApiKey, blumonPosId, webhookSecret }
+  // For Stripe: { stripeAccountId, stripeSecretKey }
+  // For Square: { squareApplicationId, squareAccessToken }
+  providerCredentials Json
+
+  // Cost Structure (what provider charges Avoqado)
+  costStructureId String?
+  costStructure   ProviderCostStructure? @relation(fields: [costStructureId], references: [id])
+
+  // Pricing (what we charge this client)
+  pricingStructureId String?
+  pricingStructure   VenuePricingStructure? @relation(fields: [pricingStructureId], references: [id])
+
+  // Webhook configuration (optional - to notify the client)
+  webhookUrl    String?  // "https://cliente.com/webhooks/avoqado"
+  webhookSecret String?  // HMAC secret for signature (stored as hash, not encrypted)
+  webhookEvents String[] @default(["payment.completed", "payment.failed"])
+
+  // Dashboard access
+  dashboardUserId String? @unique
+  dashboardUser   Staff?  @relation(fields: [dashboardUserId], references: [id])
+
+  // Status & mode
+  active      Boolean @default(true)
+  sandboxMode Boolean @default(true) // Start in sandbox
+
+  // Audit
+  createdById String? // Staff ID who onboarded this merchant
+
+  // Relations
+  checkoutSessions CheckoutSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, channelName]) // One venue can have multiple e-commerce channels with unique names
+  @@index([venueId])
+  @@index([publicKey])
+  @@index([contactEmail])
+  @@index([active])
+  @@index([sandboxMode])
+  @@index([providerId])
+}
+
+/// Temporary checkout sessions for SDK payments
+/// Acts as a payment intent before the customer completes the payment
+model CheckoutSession {
+  id        String @id @default(cuid())
+  sessionId String @unique // "cs_avoqado_abc123xyz" or "cs_test_abc123xyz"
+
+  // E-commerce merchant
+  ecommerceMerchantId String
+  ecommerceMerchant   EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Cascade)
+
+  // Payment details
+  amount      Decimal @db.Decimal(12, 2)
+  currency    String  @default("MXN")
+  description String? // Description of the payment
+
+  // Customer info (optional)
+  customerEmail String?
+  customerPhone String?
+  customerName  String?
+
+  // External reference (merchant's order ID)
+  externalOrderId String? // "order_12345" from client's system
+  metadata        Json? // Custom data from merchant: { userId: "123", productId: "456" }
+
+  // Blumon checkout
+  blumonCheckoutId  String? // ID returned by Blumon
+  blumonCheckoutUrl String? // URL where we redirect the customer
+
+  // Payment result
+  paymentId String?  @unique
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+
+  // Tracking & analytics
+  ipAddress String? // Customer IP (fraud detection)
+  userAgent String? // Browser info
+  referrer  String? // Where customer came from
+
+  // Status
+  status       CheckoutStatus @default(PENDING)
+  expiresAt    DateTime // 24 hours by default
+  completedAt  DateTime?
+  cancelledAt  DateTime?
+  failedAt     DateTime?
+  errorMessage String? // If failed, why
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ecommerceMerchantId])
+  @@index([sessionId])
+  @@index([status])
+  @@index([externalOrderId])
+  @@index([createdAt])
+  @@index([expiresAt]) // For cleanup of expired sessions
+  @@index([paymentId])
 }
 
 /// Mapping between a venue and the merchant accounts it should use.
@@ -2167,7 +2447,8 @@ model ProviderCostStructure {
   notes             String?
 
   // Relations
-  transactionCosts TransactionCost[]
+  transactionCosts   TransactionCost[]
+  ecommerceMerchants EcommerceMerchant[] // ⭐ E-commerce channels using this cost structure
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2215,7 +2496,8 @@ model VenuePricingStructure {
   notes             String?
 
   // Relations
-  transactionCosts TransactionCost[]
+  transactionCosts   TransactionCost[]
+  ecommerceMerchants EcommerceMerchant[] // ⭐ E-commerce channels using this pricing structure
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2738,6 +3020,7 @@ enum PaymentSource {
   APP // Mobile app
   PHONE // Phone order
   POS // Direct from POS
+  SDK // External merchant using Avoqado SDK
   OTHER
 }
 
@@ -2858,6 +3141,37 @@ enum OrderSource {
   POS // Direct from POS
 }
 
+enum TableShape {
+  SQUARE // 2-4 person square table
+  ROUND // Round table
+  RECTANGLE // Long table (6+ people)
+}
+
+enum TableStatus {
+  AVAILABLE // Free, can be assigned
+  OCCUPIED // Has active order
+  RESERVED // Reserved for future
+  CLEANING // Being cleaned/prepared
+}
+
+enum FloorElementType {
+  WALL // Decorative/dividing wall
+  BAR_COUNTER // Bar counter
+  SERVICE_AREA // Kitchen, bathroom, storage
+  LABEL // Decorative text label (e.g., "Terraza", "VIP")
+  DOOR // Door/entrance
+}
+
+enum PaymentTiming {
+  PAY_BEFORE // Retail, QSR: Pay before receiving product
+  PAY_AFTER // Restaurant: Pay after consuming
+}
+
+enum InventoryDeduction {
+  ON_ORDER_CREATE // Restaurant: Deduct when order created/updated (kitchen starts)
+  ON_PAYMENT // Retail: Deduct when payment processed (handed over)
+}
+
 enum OrderStatus {
   PENDING
   CONFIRMED
@@ -2890,6 +3204,15 @@ enum PaymentMethod {
   DIGITAL_WALLET
   BANK_TRANSFER
   OTHER
+}
+
+enum CheckoutStatus {
+  PENDING // Session created, waiting for customer
+  PROCESSING // Customer redirected to Blumon, payment in progress
+  COMPLETED // Payment successful
+  EXPIRED // Session expired (24 hours)
+  CANCELLED // Customer cancelled or merchant cancelled
+  FAILED // Payment failed
 }
 
 enum TransactionStatus {

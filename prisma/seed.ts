@@ -44,12 +44,38 @@ import {
   EntityType,
 } from '@prisma/client'
 import bcrypt from 'bcryptjs'
+import crypto from 'crypto'
 import { getUnitType } from '../src/services/dashboard/rawMaterial.service'
 import { calculatePaymentSettlement } from '../src/services/payments/settlementCalculation.service'
 
 const prisma = new PrismaClient()
 
 const HASH_ROUNDS = 10
+
+// ==========================================
+// API KEY GENERATION & HASHING HELPERS
+// ==========================================
+// These are duplicated from sdk-auth.middleware.ts to avoid import issues with path aliases in seed
+
+/**
+ * Generate public and secret API keys for EcommerceMerchant
+ * Also generates SHA-256 hash of secret key for O(1) database lookup
+ */
+function generateAPIKeys(sandboxMode: boolean): { publicKey: string; secretKey: string; secretKeyHash: string } {
+  const prefix = sandboxMode ? 'test' : 'live'
+  const publicKey = `pk_${prefix}_${crypto.randomBytes(32).toString('hex')}`
+  const secretKey = `sk_${prefix}_${crypto.randomBytes(32).toString('hex')}`
+  const secretKeyHash = hashSecretKey(secretKey)
+  return { publicKey, secretKey, secretKeyHash }
+}
+
+/**
+ * Hash secret key using SHA-256 (one-way, non-reversible)
+ * Used for O(1) authentication lookup without storing plaintext
+ */
+function hashSecretKey(secretKey: string): string {
+  return crypto.createHash('sha256').update(secretKey).digest('hex')
+}
 
 // ==========================================
 // SEED CONFIGURATION FROM ENVIRONMENT
@@ -337,8 +363,65 @@ async function resetDatabase() {
     ['VenuePricingStructures', () => prisma.venuePricingStructure.deleteMany()],
     ['ProviderCostStructures', () => prisma.providerCostStructure.deleteMany()],
     ['VenuePaymentConfigs', () => prisma.venuePaymentConfig.deleteMany()],
+    // ⚠️ DON'T delete EcommerceMerchants with Blumon OAuth credentials
+    // Delete only Menta merchants (no OAuth), preserve Blumon merchants with OAuth tokens
+    [
+      'EcommerceMerchants',
+      async () => {
+        // Delete Menta merchants (demo credentials, safe to recreate)
+        const mentaProvider = await prisma.paymentProvider.findFirst({ where: { code: 'MENTA' } })
+        if (mentaProvider) {
+          await prisma.ecommerceMerchant.deleteMany({ where: { providerId: mentaProvider.id } })
+        }
+
+        // Delete Blumon merchants WITHOUT OAuth credentials (incomplete setup)
+        const blumonProvider = await prisma.paymentProvider.findFirst({ where: { code: 'BLUMON' } })
+        if (blumonProvider) {
+          const blumonMerchants = await prisma.ecommerceMerchant.findMany({
+            where: { providerId: blumonProvider.id },
+          })
+
+          for (const merchant of blumonMerchants) {
+            const credentials = merchant.providerCredentials as any
+            // Delete if no OAuth tokens (incomplete setup)
+            if (!credentials?.accessToken || !credentials?.refreshToken) {
+              await prisma.ecommerceMerchant.delete({ where: { id: merchant.id } })
+              console.log(`      🗑️ Deleted Blumon merchant "${merchant.channelName}" (no OAuth credentials)`)
+            } else {
+              console.log(`      ✅ Preserved Blumon merchant "${merchant.channelName}" (has OAuth credentials)`)
+            }
+          }
+        }
+      },
+    ],
     ['MerchantAccounts', () => prisma.merchantAccount.deleteMany()],
-    ['PaymentProviders', () => prisma.paymentProvider.deleteMany()],
+    // ⚠️ DON'T delete PaymentProviders if any EcommerceMerchants are preserved
+    // Delete only providers that aren't referenced by preserved merchants
+    [
+      'PaymentProviders',
+      async () => {
+        // Get all preserved EcommerceMerchants
+        const preservedMerchants = await prisma.ecommerceMerchant.findMany({
+          select: { providerId: true },
+        })
+        const preservedProviderIds = [...new Set(preservedMerchants.map(m => m.providerId))]
+
+        if (preservedProviderIds.length > 0) {
+          // Delete only providers NOT referenced by preserved merchants
+          await prisma.paymentProvider.deleteMany({
+            where: {
+              id: {
+                notIn: preservedProviderIds,
+              },
+            },
+          })
+          console.log(`      ✅ Preserved ${preservedProviderIds.length} payment providers (referenced by preserved merchants)`)
+        } else {
+          // No preserved merchants, delete all providers
+          await prisma.paymentProvider.deleteMany()
+        }
+      },
+    ],
     ['Tables', () => prisma.table.deleteMany()],
     ['Areas', () => prisma.area.deleteMany()],
     ['Terminals', () => prisma.terminal.deleteMany()],
@@ -578,9 +661,11 @@ async function main() {
   // developers (and any validation layer you wire up later).
   // Secrets (API keys, tokens, etc.) are *not* described here—they live in
   // `credentialsEncrypted` in the accounts seeded below.
-  // Create payment providers
-  const mentaProvider = await prisma.paymentProvider.create({
-    data: {
+  // Create or update payment providers (upsert to handle preserved providers)
+  const mentaProvider = await prisma.paymentProvider.upsert({
+    where: { code: 'BANORTE' },
+    update: {},
+    create: {
       code: 'BANORTE',
       name: 'Menta Payment Solutions - Banorte',
       type: ProviderType.PAYMENT_PROCESSOR,
@@ -610,8 +695,10 @@ async function main() {
     },
   })
 
-  const clipProvider = await prisma.paymentProvider.create({
-    data: {
+  const clipProvider = await prisma.paymentProvider.upsert({
+    where: { code: 'CLIP' },
+    update: {},
+    create: {
       code: 'CLIP',
       name: 'Clip Digital Wallet',
       type: ProviderType.WALLET,
@@ -628,8 +715,10 @@ async function main() {
     },
   })
 
-  const blumonProvider = await prisma.paymentProvider.create({
-    data: {
+  const blumonProvider = await prisma.paymentProvider.upsert({
+    where: { code: 'BLUMON' },
+    update: {},
+    create: {
       code: 'BLUMON',
       name: 'Blumon PAX Payment Solutions',
       type: ProviderType.PAYMENT_PROCESSOR,
@@ -660,8 +749,10 @@ async function main() {
     },
   })
 
-  await prisma.paymentProvider.create({
-    data: {
+  await prisma.paymentProvider.upsert({
+    where: { code: 'BANORTE_DIRECT' },
+    update: {},
+    create: {
       code: 'BANORTE_DIRECT',
       name: 'Banorte Direct Integration',
       type: ProviderType.BANK_DIRECT,
@@ -1056,6 +1147,27 @@ async function main() {
             lastName: `Venue ${index + 1}`,
           },
           {
+            email: `waiter2${suffix}@waiter${suffix}.com`,
+            password: suffix ? `waiter2${suffix}` : 'waiter2',
+            role: StaffRole.WAITER,
+            firstName: 'María',
+            lastName: 'González',
+          },
+          {
+            email: `waiter3${suffix}@waiter${suffix}.com`,
+            password: suffix ? `waiter3${suffix}` : 'waiter3',
+            role: StaffRole.WAITER,
+            firstName: 'Carlos',
+            lastName: 'Rodríguez',
+          },
+          {
+            email: `waiter4${suffix}@waiter${suffix}.com`,
+            password: suffix ? `waiter4${suffix}` : 'waiter4',
+            role: StaffRole.WAITER,
+            firstName: 'Ana',
+            lastName: 'Martínez',
+          },
+          {
             email: `kitchen${suffix}@kitchen${suffix}.com`,
             password: suffix ? `kitchen${suffix}` : 'kitchen',
             role: StaffRole.KITCHEN,
@@ -1352,6 +1464,248 @@ async function main() {
         console.log(`      - Created venue pricing structures.`)
       }
 
+      // --- E-commerce Merchants (card-not-present channels) ---
+      if (isFullVenue) {
+        const ecommerceMerchantsData = [
+          {
+            channelName: 'Tienda Web (Menta)',
+            businessName: `${venue.name} E-commerce`,
+            rfc: 'XEXX010101000',
+            contactEmail: `ecommerce@${venueSlug}.com`,
+            contactPhone: '+52 55 1234 5678',
+            website: `https://${venueSlug}.com`,
+            providerId: mentaProvider.id,
+            providerCredentials: {
+              merchantId: 'demo-web-merchant-001',
+              apiKey: 'demo_web_api_key_12345',
+              apiSecret: 'demo_web_secret_67890',
+              webhookSecret: 'demo_webhook_secret_abcde',
+            },
+            sandboxMode: true,
+            active: true,
+          },
+          {
+            channelName: 'App Móvil (Menta)',
+            businessName: `${venue.name} Mobile App`,
+            rfc: 'XEXX010101000',
+            contactEmail: `app@${venueSlug}.com`,
+            contactPhone: '+52 55 1234 5679',
+            website: `https://app.${venueSlug}.com`,
+            providerId: mentaProvider.id,
+            providerCredentials: {
+              merchantId: 'demo-app-merchant-002',
+              apiKey: 'demo_app_api_key_54321',
+              apiSecret: 'demo_app_secret_09876',
+              webhookSecret: 'demo_webhook_secret_fghij',
+            },
+            sandboxMode: true,
+            active: true,
+          },
+          {
+            channelName: 'Tienda Web (Blumon)',
+            businessName: `${venue.name} Blumon E-commerce`,
+            rfc: 'XEXX010101000',
+            contactEmail: `blumon@${venueSlug}.com`,
+            contactPhone: '+52 55 1234 5680',
+            website: `https://blumon.${venueSlug}.com`,
+            providerId: blumonProvider.id,
+            providerCredentials: {
+              // OAuth tokens will be populated by blumon-authenticate-master.ts script
+              merchantEmail: 'jose@avoqado.io',
+              environment: 'SANDBOX',
+              // accessToken, refreshToken, expiresAt will be added by auth script
+            },
+            sandboxMode: true,
+            active: true,
+          },
+        ]
+
+        let createdCount = 0
+        let skippedCount = 0
+
+        for (const merchantData of ecommerceMerchantsData) {
+          // Check if Blumon merchant already exists with OAuth credentials (preserve it)
+          const isBlumonMerchant = merchantData.providerId === blumonProvider.id
+          if (isBlumonMerchant) {
+            const existingBlumonMerchant = await prisma.ecommerceMerchant.findFirst({
+              where: {
+                venueId: venue.id,
+                providerId: blumonProvider.id,
+                channelName: merchantData.channelName,
+              },
+            })
+
+            if (existingBlumonMerchant) {
+              const credentials = existingBlumonMerchant.providerCredentials as any
+              // Skip if it has OAuth tokens (already authenticated)
+              if (credentials?.accessToken && credentials?.refreshToken) {
+                console.log(`      ✅ Skipped "${merchantData.channelName}" (has OAuth credentials)`)
+                skippedCount++
+                continue
+              }
+            }
+          }
+
+          // Generate API keys for this merchant
+          const { publicKey, secretKey, secretKeyHash } = generateAPIKeys(merchantData.sandboxMode)
+
+          await prisma.ecommerceMerchant.create({
+            data: {
+              venueId: venue.id,
+              channelName: merchantData.channelName,
+              businessName: merchantData.businessName,
+              rfc: merchantData.rfc,
+              contactEmail: merchantData.contactEmail,
+              contactPhone: merchantData.contactPhone,
+              website: merchantData.website,
+              providerId: merchantData.providerId,
+              providerCredentials: merchantData.providerCredentials,
+              publicKey,
+              secretKeyHash,
+              sandboxMode: merchantData.sandboxMode,
+              active: merchantData.active,
+            },
+          })
+          createdCount++
+        }
+        console.log(
+          `      - Created ${createdCount} e-commerce merchants${skippedCount > 0 ? `, skipped ${skippedCount} (OAuth preserved)` : ''}.`,
+        )
+
+        // --- Sample Checkout Sessions (for testing SDK integration) ---
+        // Get Blumon merchant for this venue
+        const blumonMerchant = await prisma.ecommerceMerchant.findFirst({
+          where: {
+            venueId: venue.id,
+            providerId: blumonProvider.id,
+          },
+        })
+
+        if (blumonMerchant) {
+          const now = new Date()
+          const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+          const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000)
+
+          const checkoutSessionsData = [
+            {
+              sessionId: `cs_test_pending_${Date.now()}_001`,
+              amount: 299.0,
+              description: 'Orden en línea #12345 - 2x Tacos al Pastor',
+              customerEmail: 'cliente@example.com',
+              customerName: 'María González',
+              customerPhone: '+52 55 1234 5678',
+              externalOrderId: 'order_12345',
+              status: 'PENDING' as const,
+              expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000), // 24 hours from now
+              createdAt: now,
+              metadata: {
+                items: [{ name: 'Tacos al Pastor', quantity: 2, price: 149.5 }],
+                source: 'web_store',
+              },
+            },
+            {
+              sessionId: `cs_test_completed_${Date.now()}_002`,
+              amount: 450.0,
+              description: 'Orden en línea #12344 - Combo Familiar',
+              customerEmail: 'juan@example.com',
+              customerName: 'Juan Pérez',
+              customerPhone: '+52 55 9876 5432',
+              externalOrderId: 'order_12344',
+              status: 'COMPLETED' as const,
+              blumonCheckoutId: `checkout_${Date.now()}_blumon`,
+              blumonCheckoutUrl: 'https://sandbox-ecommerce.blumonpay.com/checkout/xxx',
+              expiresAt: yesterday,
+              completedAt: yesterday,
+              createdAt: twoDaysAgo,
+              metadata: {
+                items: [{ name: 'Combo Familiar', quantity: 1, price: 450.0 }],
+                source: 'mobile_app',
+              },
+            },
+            {
+              sessionId: `cs_test_failed_${Date.now()}_003`,
+              amount: 199.0,
+              description: 'Orden en línea #12343 - Burrito California',
+              customerEmail: 'ana@example.com',
+              customerName: 'Ana Martínez',
+              externalOrderId: 'order_12343',
+              status: 'FAILED' as const,
+              blumonCheckoutId: `checkout_${Date.now()}_failed`,
+              blumonCheckoutUrl: 'https://sandbox-ecommerce.blumonpay.com/checkout/yyy',
+              errorMessage: 'La tarjeta fue rechazada',
+              expiresAt: yesterday,
+              failedAt: yesterday,
+              createdAt: twoDaysAgo,
+              metadata: {
+                items: [{ name: 'Burrito California', quantity: 1, price: 199.0 }],
+                source: 'web_store',
+              },
+            },
+            {
+              sessionId: `cs_test_expired_${Date.now()}_004`,
+              amount: 350.0,
+              description: 'Orden en línea #12342 - Quesadillas + Bebidas',
+              customerEmail: 'carlos@example.com',
+              externalOrderId: 'order_12342',
+              status: 'EXPIRED' as const,
+              expiresAt: twoDaysAgo,
+              createdAt: new Date(twoDaysAgo.getTime() - 24 * 60 * 60 * 1000),
+              metadata: {
+                items: [
+                  { name: 'Quesadillas', quantity: 3, price: 120.0 },
+                  { name: 'Bebidas', quantity: 3, price: 30.0 },
+                ],
+                source: 'web_store',
+              },
+            },
+            {
+              sessionId: `cs_test_processing_${Date.now()}_005`,
+              amount: 599.0,
+              description: 'Orden en línea #12346 - Pedido Grande',
+              customerEmail: 'sofia@example.com',
+              customerName: 'Sofia Ramírez',
+              customerPhone: '+52 55 2468 1357',
+              externalOrderId: 'order_12346',
+              status: 'PROCESSING' as const,
+              blumonCheckoutId: `checkout_${Date.now()}_processing`,
+              blumonCheckoutUrl: 'https://sandbox-ecommerce.blumonpay.com/checkout/zzz',
+              expiresAt: new Date(now.getTime() + 12 * 60 * 60 * 1000), // 12 hours from now
+              createdAt: new Date(now.getTime() - 30 * 60 * 1000), // 30 minutes ago
+              metadata: {
+                items: [{ name: 'Pedido Grande', quantity: 1, price: 599.0 }],
+                source: 'mobile_app',
+              },
+            },
+          ]
+
+          for (const sessionData of checkoutSessionsData) {
+            await prisma.checkoutSession.create({
+              data: {
+                ecommerceMerchantId: blumonMerchant.id,
+                sessionId: sessionData.sessionId,
+                amount: sessionData.amount,
+                currency: 'MXN',
+                description: sessionData.description,
+                customerEmail: sessionData.customerEmail,
+                customerName: sessionData.customerName,
+                customerPhone: sessionData.customerPhone,
+                externalOrderId: sessionData.externalOrderId,
+                metadata: sessionData.metadata,
+                blumonCheckoutId: sessionData.blumonCheckoutId,
+                blumonCheckoutUrl: sessionData.blumonCheckoutUrl,
+                status: sessionData.status,
+                expiresAt: sessionData.expiresAt,
+                completedAt: sessionData.completedAt,
+                failedAt: sessionData.failedAt,
+                errorMessage: sessionData.errorMessage,
+                createdAt: sessionData.createdAt,
+              },
+            })
+          }
+          console.log(`      - Created ${checkoutSessionsData.length} sample checkout sessions.`)
+        }
+      }
+
       if (!isFullVenue) {
         console.log(`      - Skipping detailed seeding for ${venue.name} (empty sandbox).`)
         continue
@@ -1371,20 +1725,49 @@ async function main() {
       )
       console.log(`      - Created ${createdAreas.length} areas.`)
 
+      // Create 13 tables with floor plan coordinates
+      const tablesData = [
+        // Area 1: Small tables (2-4 person)
+        { number: 'M1', capacity: 2, positionX: 0.1, positionY: 0.2, shape: 'SQUARE', rotation: 0, status: 'AVAILABLE' },
+        { number: 'M2', capacity: 2, positionX: 0.3, positionY: 0.2, shape: 'SQUARE', rotation: 0, status: 'AVAILABLE' },
+        { number: 'M3', capacity: 4, positionX: 0.5, positionY: 0.2, shape: 'SQUARE', rotation: 0, status: 'AVAILABLE' },
+        { number: 'M4', capacity: 4, positionX: 0.7, positionY: 0.2, shape: 'ROUND', rotation: 0, status: 'AVAILABLE' },
+
+        // Area 2: Medium tables (4 person)
+        { number: 'M5', capacity: 4, positionX: 0.1, positionY: 0.5, shape: 'SQUARE', rotation: 0, status: 'AVAILABLE' },
+        { number: 'M6', capacity: 4, positionX: 0.3, positionY: 0.5, shape: 'ROUND', rotation: 0, status: 'AVAILABLE' },
+        { number: 'M7', capacity: 4, positionX: 0.5, positionY: 0.5, shape: 'SQUARE', rotation: 0, status: 'AVAILABLE' },
+
+        // Area 3: Large tables (6+ person)
+        { number: 'M8', capacity: 6, positionX: 0.1, positionY: 0.8, shape: 'RECTANGLE', rotation: 0, status: 'AVAILABLE' },
+        { number: 'M9', capacity: 6, positionX: 0.4, positionY: 0.8, shape: 'RECTANGLE', rotation: 90, status: 'AVAILABLE' },
+        { number: 'M10', capacity: 8, positionX: 0.7, positionY: 0.8, shape: 'RECTANGLE', rotation: 0, status: 'AVAILABLE' },
+
+        // Special/VIP area
+        { number: 'M11', capacity: 4, positionX: 0.85, positionY: 0.5, shape: 'ROUND', rotation: 0, status: 'AVAILABLE' },
+        { number: 'M12', capacity: 6, positionX: 0.85, positionY: 0.7, shape: 'RECTANGLE', rotation: 90, status: 'AVAILABLE' },
+        { number: 'M13', capacity: 8, positionX: 0.85, positionY: 0.3, shape: 'RECTANGLE', rotation: 0, status: 'AVAILABLE' },
+      ]
+
       const tables = await Promise.all(
-        Array.from({ length: 5 }).map((_, t) =>
+        tablesData.map(tableData =>
           prisma.table.create({
             data: {
               venueId: venue.id,
-              number: `M${t + 1}`,
+              number: tableData.number,
               areaId: getRandomItem(createdAreas).id,
-              capacity: getRandomItem([2, 4, 6]),
+              capacity: tableData.capacity,
               qrCode: faker.string.uuid(),
+              positionX: tableData.positionX,
+              positionY: tableData.positionY,
+              shape: tableData.shape as any,
+              rotation: tableData.rotation,
+              status: tableData.status as any,
             },
           }),
         ),
       )
-      console.log(`      - Created ${tables.length} tables.`)
+      console.log(`      - Created ${tables.length} tables with floor plan coordinates.`)
 
       const terminals = await Promise.all(
         Array.from({ length: 3 }).map((_, t) => {
@@ -1502,7 +1885,7 @@ async function main() {
       }
 
       const categories = await Promise.all(
-        ['Hamburguesas', 'Tacos Mexicanos', 'Pizzas', 'Entradas', 'Bebidas'].map((name, index) =>
+        ['Hamburguesas', 'Tacos Mexicanos', 'Pizzas', 'Entradas', 'Bebidas', 'Postres'].map((name, index) =>
           prisma.menuCategory.create({ data: { venueId: venue.id, name, slug: generateSlug(name), displayOrder: index } }),
         ),
       )
@@ -1551,6 +1934,17 @@ async function main() {
           { name: 'Agua Mineral 1L', price: 20.0, description: 'Agua mineral natural' },
           { name: 'Cerveza Corona', price: 45.0, description: 'Cerveza clara mexicana' },
           { name: 'Limonada Natural', price: 35.0, description: 'Limonada fresca hecha en casa' },
+          { name: 'Jugo de Naranja', price: 40.0, description: 'Jugo de naranja recién exprimido' },
+          { name: 'Café Americano', price: 30.0, description: 'Café americano caliente' },
+          { name: 'Té Helado', price: 30.0, description: 'Té negro helado con limón' },
+        ],
+        Postres: [
+          { name: 'Pastel de Chocolate', price: 75.0, description: 'Pastel de chocolate con cobertura de ganache' },
+          { name: 'Helado de Vainilla', price: 50.0, description: 'Tres bolas de helado de vainilla' },
+          { name: 'Flan Napolitano', price: 65.0, description: 'Flan casero con caramelo' },
+          { name: 'Churros con Chocolate', price: 70.0, description: 'Churros crujientes con chocolate caliente' },
+          { name: 'Tarta de Queso', price: 80.0, description: 'Cheesecake clásico con fresas' },
+          { name: 'Pay de Limón', price: 70.0, description: 'Pay de limón con merengue' },
         ],
       }
 
@@ -1624,6 +2018,104 @@ async function main() {
       console.log(`        * ${noTrackingCount} without inventory tracking`)
       console.log(`        * ${quantityCount} with QUANTITY tracking (Inventory table)`)
       console.log(`        * ${recipeCount} with RECIPE tracking (will have recipes created later)`)
+
+      // ==========================================
+      // CREATE PENDING ORDERS FOR OCCUPIED TABLES
+      // ==========================================
+      console.log(`      - Creating pending orders for occupied tables...`)
+
+      // Get waiters for serving
+      const staffVenues = await prisma.staffVenue.findMany({
+        where: { venueId: venue.id, role: StaffRole.WAITER },
+        include: { staff: true },
+        take: 4,
+      })
+
+      // Create 3 pending orders on tables M1, M2, M3
+      const tablesToOccupy = tables.slice(0, 3)
+      const pendingOrdersData = [
+        {
+          table: tablesToOccupy[0],
+          covers: 2,
+          staffVenue: staffVenues[0],
+          productNames: ['Hamburguesa Clásica', 'Coca-Cola 600ml', 'Papas a la Francesa'],
+        },
+        {
+          table: tablesToOccupy[1],
+          covers: 4,
+          staffVenue: staffVenues[1],
+          productNames: ['Pizza Pepperoni', 'Agua Mineral 1L', 'Agua Mineral 1L'],
+        },
+        {
+          table: tablesToOccupy[2],
+          covers: 3,
+          staffVenue: staffVenues[2],
+          productNames: ['Tacos al Pastor', 'Cerveza Corona', 'Nachos con Queso'],
+        },
+      ]
+
+      for (const orderData of pendingOrdersData) {
+        // Create order
+        const order = await prisma.order.create({
+          data: {
+            venueId: venue.id,
+            tableId: orderData.table.id,
+            covers: orderData.covers,
+            orderNumber: `ORD-${Math.floor(Math.random() * 10000)}`,
+            servedById: orderData.staffVenue?.staffId,
+            status: OrderStatus.PENDING,
+            paymentStatus: PaymentStatus.PENDING,
+            kitchenStatus: KitchenStatus.PENDING,
+            subtotal: 0,
+            discountAmount: 0,
+            taxAmount: 0,
+            total: 0,
+            version: 1,
+            createdAt: new Date(),
+          },
+        })
+
+        // Add order items
+        let orderTotal = 0
+        for (const productName of orderData.productNames) {
+          const product = products.find(p => p.name === productName)
+          if (product) {
+            const itemPrice = Number(product.price)
+            await prisma.orderItem.create({
+              data: {
+                orderId: order.id,
+                productId: product.id,
+                quantity: 1,
+                unitPrice: product.price,
+                taxAmount: 0,
+                total: product.price,
+                notes: null,
+              },
+            })
+            orderTotal += itemPrice
+          }
+        }
+
+        // Update order totals
+        await prisma.order.update({
+          where: { id: order.id },
+          data: {
+            subtotal: orderTotal,
+            total: orderTotal,
+          },
+        })
+
+        // Update table status and link to order
+        await prisma.table.update({
+          where: { id: orderData.table.id },
+          data: {
+            status: 'OCCUPIED' as any,
+            currentOrderId: order.id,
+          },
+        })
+
+        console.log(`        * Table ${orderData.table.number}: Order ${order.orderNumber} - ${orderData.covers} covers - $${orderTotal}`)
+      }
 
       // ==========================================
       // INVENTORY MANAGEMENT SEEDING (Avoqado Full ONLY)
