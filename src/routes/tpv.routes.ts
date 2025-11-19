@@ -18,6 +18,15 @@ import {
   recordFastPaymentParamsSchema,
   recordPaymentBodySchema,
   paymentRouteSchema,
+  tableParamsSchema,
+  assignTableSchema,
+  clearTableSchema,
+  addOrderItemsSchema,
+  removeOrderItemSchema,
+  updateGuestInfoSchema,
+  compItemsSchema,
+  voidItemsSchema,
+  applyDiscountSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
@@ -29,6 +38,8 @@ import * as activationController from '../controllers/tpv/activation.controller'
 import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
 import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
 import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
+import * as tableController from '../controllers/tpv/table.tpv.controller'
+import * as floorElementController from '../controllers/tpv/floor-element.tpv.controller'
 
 const router = express.Router()
 
@@ -459,6 +470,57 @@ router.get(
 
 /**
  * @openapi
+ * /tpv/venues/{venueId}/orders:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Create a new order
+ *     description: Create a new order for quick orders, counter service, delivery, etc. Generates CUID orderId and sequential orderNumber.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tableId:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Table ID (null for counter/quick orders)
+ *               covers:
+ *                 type: integer
+ *                 default: 1
+ *                 description: Number of people
+ *               waiterId:
+ *                 type: string
+ *                 description: Staff member ID
+ *               orderType:
+ *                 type: string
+ *                 enum: [DINE_IN, TAKEOUT, DELIVERY, PICKUP]
+ *                 default: DINE_IN
+ *     responses:
+ *       201:
+ *         description: Order created successfully
+ *       400:
+ *         description: Invalid request
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermission('orders:create'), orderController.createOrder)
+
+/**
+ * @openapi
  * /tpv/venues/{venueId}/orders/{orderId}:
  *   get:
  *     tags:
@@ -773,7 +835,7 @@ router.get(
  *                       displayOrder:
  *                         type: integer
  *                         description: Display order for UI
- *                       externalMerchantId:
+ *                       ecommerceMerchantId:
  *                         type: string
  *                         description: External merchant ID from provider
  *                 message:
@@ -2102,6 +2164,493 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('shifts:manage'),
   timeEntryController.getCurrentlyClockedInStaff,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/tables:
+ *   get:
+ *     summary: Get all tables with current status for floor plan display
+ *     tags: [Tables]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     responses:
+ *       200:
+ *         description: List of tables with their current status and orders
+ */
+router.get('/venues/:venueId/tables', authenticateTokenMiddleware, validateRequest(tableParamsSchema), tableController.getTables)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/tables/assign:
+ *   post:
+ *     summary: Assign a table to create or return existing order
+ *     tags: [Tables]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tableId:
+ *                 type: string
+ *               staffId:
+ *                 type: string
+ *               covers:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Existing order returned
+ *       201:
+ *         description: New order created
+ */
+router.post('/venues/:venueId/tables/assign', authenticateTokenMiddleware, validateRequest(assignTableSchema), tableController.assignTable)
+
+// POST /venues/:venueId/tables - Create a new table
+router.post('/venues/:venueId/tables', authenticateTokenMiddleware, tableController.createTable)
+
+// PUT /venues/:venueId/tables/:tableId/position - Update table position on floor plan
+router.put('/venues/:venueId/tables/:tableId/position', authenticateTokenMiddleware, tableController.updateTablePosition)
+
+// PUT /venues/:venueId/tables/:tableId - Update table properties (number, capacity, shape, rotation, areaId)
+router.put('/venues/:venueId/tables/:tableId', authenticateTokenMiddleware, tableController.updateTable)
+
+// DELETE /venues/:venueId/tables/:tableId - Delete a table (soft delete)
+router.delete('/venues/:venueId/tables/:tableId', authenticateTokenMiddleware, tableController.deleteTable)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/tables/{tableId}/clear:
+ *   post:
+ *     summary: Clear table after payment is completed
+ *     tags: [Tables]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: tableId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Table cleared successfully
+ */
+router.post(
+  '/venues/:venueId/tables/:tableId/clear',
+  authenticateTokenMiddleware,
+  validateRequest(clearTableSchema),
+  tableController.clearTable,
+)
+
+// ============================================
+// FLOOR ELEMENTS (Walls, Bars, Service Areas, Labels)
+// ============================================
+
+/**
+ * GET /tpv/venues/:venueId/floor-elements
+ * Get all floor elements for floor plan display
+ */
+router.get('/venues/:venueId/floor-elements', authenticateTokenMiddleware, floorElementController.getFloorElements)
+
+/**
+ * POST /tpv/venues/:venueId/floor-elements
+ * Create a new floor element
+ */
+router.post('/venues/:venueId/floor-elements', authenticateTokenMiddleware, floorElementController.createFloorElement)
+
+/**
+ * PUT /tpv/venues/:venueId/floor-elements/:elementId
+ * Update a floor element
+ */
+router.put('/venues/:venueId/floor-elements/:elementId', authenticateTokenMiddleware, floorElementController.updateFloorElement)
+
+/**
+ * DELETE /tpv/venues/:venueId/floor-elements/:elementId
+ * Delete a floor element (soft delete)
+ */
+router.delete('/venues/:venueId/floor-elements/:elementId', authenticateTokenMiddleware, floorElementController.deleteFloorElement)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/items:
+ *   patch:
+ *     summary: Add items to an existing order with version control
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     productId:
+ *                       type: string
+ *                     quantity:
+ *                       type: integer
+ *                     notes:
+ *                       type: string
+ *               version:
+ *                 type: integer
+ *                 description: Current version number for optimistic locking
+ *     responses:
+ *       200:
+ *         description: Items added successfully
+ *       400:
+ *         description: Version mismatch (concurrent update detected)
+ */
+router.patch(
+  '/venues/:venueId/orders/:orderId/items',
+  authenticateTokenMiddleware,
+  validateRequest(addOrderItemsSchema),
+  orderController.addItemsToOrder,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/items/{itemId}:
+ *   delete:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Remove an item from an order
+ *     description: Delete a specific item from an order with optimistic locking
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: itemId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: version
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Current version number for optimistic locking
+ *     responses:
+ *       200:
+ *         description: Item removed successfully
+ *       400:
+ *         description: Version mismatch or order already paid
+ *       404:
+ *         description: Order or item not found
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/items/:itemId',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(removeOrderItemSchema),
+  orderController.removeOrderItem,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/guest:
+ *   patch:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Update guest information for an order
+ *     description: Update covers, customer name, phone, and special requests
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               covers:
+ *                 type: integer
+ *                 minimum: 1
+ *               customerName:
+ *                 type: string
+ *                 nullable: true
+ *               customerPhone:
+ *                 type: string
+ *                 nullable: true
+ *               specialRequests:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Allergies, dietary restrictions, special occasions
+ *     responses:
+ *       200:
+ *         description: Guest information updated successfully
+ *       404:
+ *         description: Order not found
+ */
+router.patch(
+  '/venues/:venueId/orders/:orderId/guest',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(updateGuestInfoSchema),
+  orderController.updateGuestInfo,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/comp:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Comp items or entire order
+ *     description: Comp specific items or the entire order (for service recovery, food quality issues, etc.)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - reason
+ *               - staffId
+ *             properties:
+ *               itemIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: cuid
+ *                 default: []
+ *                 description: Empty array = comp entire order
+ *               reason:
+ *                 type: string
+ *                 description: Required reason for comp
+ *               staffId:
+ *                 type: string
+ *                 format: cuid
+ *               notes:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Items comped successfully
+ *       400:
+ *         description: Order already paid
+ *       404:
+ *         description: Order not found
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/comp',
+  authenticateTokenMiddleware,
+  checkPermission('orders:comp'),
+  validateRequest(compItemsSchema),
+  orderController.compItems,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/void:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Void items from an order
+ *     description: Void specific items (for incorrectly entered items, customer cancellation, etc.)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - itemIds
+ *               - reason
+ *               - staffId
+ *               - expectedVersion
+ *             properties:
+ *               itemIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: cuid
+ *                 minItems: 1
+ *               reason:
+ *                 type: string
+ *               staffId:
+ *                 type: string
+ *                 format: cuid
+ *               expectedVersion:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Items voided successfully
+ *       400:
+ *         description: Version mismatch or order already paid
+ *       404:
+ *         description: Order not found
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/void',
+  authenticateTokenMiddleware,
+  checkPermission('orders:void'),
+  validateRequest(voidItemsSchema),
+  orderController.voidItems,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discount:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Apply discount to order or specific items
+ *     description: Apply percentage or fixed amount discount
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - type
+ *               - value
+ *               - staffId
+ *               - expectedVersion
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [PERCENTAGE, FIXED_AMOUNT]
+ *               value:
+ *                 type: number
+ *                 description: 1-100 for percentage, dollar amount for fixed
+ *               reason:
+ *                 type: string
+ *               staffId:
+ *                 type: string
+ *                 format: cuid
+ *               itemIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: cuid
+ *                 nullable: true
+ *                 description: Null = order-level discount
+ *               expectedVersion:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Discount applied successfully
+ *       400:
+ *         description: Invalid discount value or version mismatch
+ *       404:
+ *         description: Order not found
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/discount',
+  authenticateTokenMiddleware,
+  checkPermission('orders:discount'),
+  validateRequest(applyDiscountSchema),
+  orderController.applyDiscount,
 )
 
 export default router

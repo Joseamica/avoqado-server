@@ -209,3 +209,141 @@ export const paymentRouteSchema = z.object({
     bin: z.string().optional(),
   }),
 })
+
+// Table management schemas
+export const tableParamsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+})
+
+export const assignTableSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    tableId: z.string().cuid({ message: 'El ID de la mesa debe ser un CUID válido.' }),
+    staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+    covers: z.number().int().positive({ message: 'El número de comensales debe ser un entero positivo.' }),
+  }),
+})
+
+export const clearTableSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    tableId: z.string().cuid({ message: 'El ID de la mesa debe ser un CUID válido.' }),
+  }),
+})
+
+// Order item management schemas
+export const addOrderItemsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    items: z
+      .array(
+        z.object({
+          productId: z.string().cuid({ message: 'El ID del producto debe ser un CUID válido.' }),
+          quantity: z.number().int().positive({ message: 'La cantidad debe ser un entero positivo.' }),
+          notes: z.string().optional().nullable(),
+        }),
+      )
+      .min(1, { message: 'Debe proporcionar al menos un ítem.' }),
+    version: z.number().int().nonnegative({ message: 'La versión debe ser un entero no negativo.' }),
+  }),
+})
+
+export const removeOrderItemSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+    itemId: z.string().cuid({ message: 'El ID del ítem debe ser un CUID válido.' }),
+  }),
+  query: z.object({
+    version: z.string().regex(/^\d+$/, { message: 'La versión debe ser un número entero.' }).transform(Number),
+  }),
+})
+
+// Guest information management schemas
+export const updateGuestInfoSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    covers: z.number().int().positive({ message: 'El número de comensales debe ser un entero positivo.' }).optional(),
+    customerName: z.string().min(1, { message: 'El nombre del cliente no puede estar vacío.' }).optional().nullable(),
+    customerPhone: z
+      .string()
+      .regex(/^[0-9+\-() ]+$/, { message: 'El teléfono debe contener solo números y símbolos válidos.' })
+      .optional()
+      .nullable(),
+    specialRequests: z.string().optional().nullable(),
+  }),
+})
+
+// Order action schemas (comp, void, discount)
+export const compItemsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    itemIds: z
+      .array(z.string().cuid({ message: 'Los IDs de ítems deben ser CUIDs válidos.' }))
+      .default([])
+      .describe('Array vacío = comp entire order'),
+    reason: z.string().min(1, { message: 'La razón es requerida.' }),
+    staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+    notes: z.string().optional(),
+  }),
+})
+
+export const voidItemsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    itemIds: z
+      .array(z.string().cuid({ message: 'Los IDs de ítems deben ser CUIDs válidos.' }))
+      .min(1, { message: 'Debe proporcionar al menos un ítem para anular.' }),
+    reason: z.string().min(1, { message: 'La razón es requerida.' }),
+    staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+    expectedVersion: z.number().int().nonnegative({ message: 'La versión debe ser un entero no negativo.' }),
+  }),
+})
+
+export const applyDiscountSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z
+    .object({
+      type: z.enum(['PERCENTAGE', 'FIXED_AMOUNT'], { message: 'Tipo de descuento inválido.' }),
+      value: z.number().positive({ message: 'El valor debe ser un número positivo.' }),
+      reason: z.string().optional(),
+      staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+      itemIds: z
+        .array(z.string().cuid({ message: 'Los IDs de ítems deben ser CUIDs válidos.' }))
+        .optional()
+        .nullable(),
+      expectedVersion: z.number().int().nonnegative({ message: 'La versión debe ser un entero no negativo.' }),
+    })
+    .refine(
+      data => {
+        // Validate percentage is between 0-100
+        if (data.type === 'PERCENTAGE') {
+          return data.value > 0 && data.value <= 100
+        }
+        return true
+      },
+      {
+        message: 'El porcentaje de descuento debe estar entre 1 y 100.',
+        path: ['value'],
+      },
+    ),
+})
