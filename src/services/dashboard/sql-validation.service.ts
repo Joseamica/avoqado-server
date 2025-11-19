@@ -488,7 +488,8 @@ export class SqlValidationService {
       const differencePercent = dashboardValue > 0 ? difference / dashboardValue : 0
 
       if (differencePercent > tolerance) {
-        errors.push(
+        // Layer 4 is non-blocking: use warnings instead of errors
+        warnings.push(
           `Dashboard-Chatbot mismatch detected: Dashboard=${dashboardValue.toFixed(2)}, Chatbot=${chatbotValue.toFixed(2)} (${(differencePercent * 100).toFixed(2)}% difference)`,
         )
         suggestions.push(`Use SharedQueryService directly instead of text-to-SQL for this query type to guarantee consistency`)
