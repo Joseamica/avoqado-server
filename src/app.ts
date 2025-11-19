@@ -31,6 +31,9 @@ app.use(
 // Configure core middlewares (helmet, cors, compression, body-parsers, cookie-parser, session, request-logger)
 configureCoreMiddlewares(app)
 
+// Serve static files from public directory (SDK, checkout pages)
+app.use(express.static('public'))
+
 // Setup Swagger UI
 setupSwaggerUI(app)
 

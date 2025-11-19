@@ -10,6 +10,7 @@ import onboardingRoutes from './onboarding.routes'
 import superadminRoutes from './superadmin.routes'
 import liveDemoRoutes from './liveDemo.routes'
 import demoRoutes from './demo.routes'
+import sdkRoutes from './sdk.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -23,5 +24,6 @@ router.use('/onboarding', onboardingRoutes) // All onboarding routes under /api/
 router.use('/superadmin', superadminRoutes) // All superadmin routes under /api/v1/superadmin
 router.use('/live-demo', liveDemoRoutes) // Live demo routes for demo.dashboard.avoqado.io
 router.use('/demo', demoRoutes) // Legacy demo redirects for obsolete QR codes
+router.use('/sdk', sdkRoutes) // Avoqado Payment SDK routes under /api/v1/sdk
 
 export default router

@@ -6,7 +6,7 @@ export type Environment = 'development' | 'staging' | 'production'
 export const getCorsConfig = (env: Environment): CorsOptions => {
   // Define allowed origins based on environment
   const dashboardOrigins = {
-    development: ['http://localhost:3000', 'http://localhost:8080'],
+    development: ['http://localhost:3000', 'http://localhost:8080', 'http://localhost:12344'], // ← Backend port for SDK
     staging: [
       'https://develop.avoqado-web-dashboard.pages.dev',
       'https://demo-avoqado-web-dashboard.pages.dev',
