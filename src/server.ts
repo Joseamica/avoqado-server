@@ -67,6 +67,12 @@ const gracefulShutdown = async (signal: string) => {
         logger.info('Stopping abandoned orders cleanup job...')
         abandonedOrdersCleanupJob.stop()
 
+        // Stop live demo cleanup job
+        if (liveDemoCleanupJob) {
+          logger.info('Stopping live demo cleanup job...')
+          liveDemoCleanupJob.stop()
+        }
+
         // Shutdown Socket.io server
         logger.info('Shutting down Socket.io server...')
         await shutdownSocketServer()
@@ -201,7 +207,26 @@ const startApplication = async (retries = 3) => {
       // Start abandoned orders cleanup job
       abandonedOrdersCleanupJob.start()
 
+      // Start live demo cleanup job (runs every hour to delete expired sessions)
+      liveDemoCleanupJob = new CronJob(
+        '0 * * * *', // Every hour at :00 minutes
+        async () => {
+          try {
+            const cleanedCount = await cleanupExpiredLiveDemos()
+            if (cleanedCount > 0) {
+              logger.info(`🧹 Live Demo Cleanup: Deleted ${cleanedCount} expired/inactive sessions`)
+            }
+          } catch (error) {
+            logger.error('❌ Error in Live Demo Cleanup:', error)
+          }
+        },
+        null,
+        true, // Start immediately
+        'America/Mexico_City',
+      )
+
       logger.info('✅ All communication and monitoring services started successfully.')
+      logger.info('🧹 Live Demo Cleanup Job started - running every hour')
     }
 
     // Start HTTP server
