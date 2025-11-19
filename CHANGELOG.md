@@ -9,6 +9,79 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Order Guest Information & Actions System** (2025-01-19)
+
+  - `prisma/schema.prisma`: Added `specialRequests` field to Order model for dietary restrictions, allergies, special occasions
+  - `prisma/schema.prisma`: Created `OrderAction` audit table with ActionType enum (COMP, VOID, DISCOUNT, SPLIT, MERGE, TRANSFER)
+  - `order.tpv.service.ts:556-701`: Implemented `removeOrderItem()` with optimistic concurrency control
+    - Delete specific items from orders with version checking
+    - Automatic total recalculation and Socket.IO event broadcasting
+    - Prevents removal from paid orders
+  - `order.tpv.service.ts:703-815`: Implemented `updateGuestInfo()` for guest management
+    - Update covers, customerName, customerPhone, specialRequests
+    - Real-time Socket.IO event broadcasting
+    - Supports DINE_IN guest tracking and TAKEOUT customer info
+  - `order.tpv.service.ts` (appended): Implemented `compItems()` for service recovery
+    - Comp specific items or entire order
+    - Required reason field for audit trail
+    - Creates OrderAction record with COMP type
+    - Use cases: food quality issues, long wait times, service recovery
+  - `order.tpv.service.ts` (appended): Implemented `voidItems()` for order corrections
+    - Void specific items with optimistic locking
+    - Required reason field for audit trail
+    - Creates OrderAction record with VOID type
+    - Use cases: incorrect entry, customer cancellation
+  - `order.tpv.service.ts` (appended): Implemented `applyDiscount()` for flexible discounts
+    - Supports PERCENTAGE (1-100%) and FIXED_AMOUNT discounts
+    - Item-level or order-level discount application
+    - Creates OrderAction record with DISCOUNT type
+    - Optimistic concurrency control with version field
+  - `order.tpv.controller.ts:90-111`: Added `removeOrderItem()` controller
+  - `order.tpv.controller.ts:113-138`: Added `updateGuestInfo()` controller
+  - `order.tpv.controller.ts:140-165`: Added `compItems()` controller
+  - `order.tpv.controller.ts:167-192`: Added `voidItems()` controller
+  - `order.tpv.controller.ts:194-221`: Added `applyDiscount()` controller
+  - `tpv.schema.ts:258-270`: Added `removeOrderItemSchema` validation
+  - `tpv.schema.ts:273-288`: Added `updateGuestInfoSchema` validation with phone regex
+  - `tpv.schema.ts:291-305`: Added `compItemsSchema` validation (empty itemIds = comp entire order)
+  - `tpv.schema.ts:307-320`: Added `voidItemsSchema` validation with required reason
+  - `tpv.schema.ts:322-349`: Added `applyDiscountSchema` validation with percentage range check (1-100)
+  - `tpv.routes.ts:2392-2398`: Added DELETE `/venues/:venueId/orders/:orderId/items/:itemId` route
+  - `tpv.routes.ts:2449-2455`: Added PATCH `/venues/:venueId/orders/:orderId/guest` route
+  - `tpv.routes.ts:2513-2519`: Added POST `/venues/:venueId/orders/:orderId/comp` route with `orders:comp` permission
+  - `tpv.routes.ts:2577-2583`: Added POST `/venues/:venueId/orders/:orderId/void` route with `orders:void` permission
+  - `tpv.routes.ts:2648-2654`: Added POST `/venues/:venueId/orders/:orderId/discount` route with `orders:discount` permission
+  - **WHY**: Enables Square POS-style MenuScreen redesign with 4 tabs (Menu, Check, Actions, Guest)
+  - **IMPACT**: Android app can now manage order lifecycle with full audit trail for compliance and reporting
+
+- **abandoned-orders-cleanup.job.ts: Auto-cleanup for abandoned "Pedido rápido" orders** (abandoned-orders-cleanup.job.ts,
+  server.ts:21,60,157)
+
+  - **Problem**: When users click "Pedido rápido" then press Back, empty PENDING orders accumulate in the system
+  - **Solution**: Cron job that auto-deletes abandoned orders every 15 minutes
+  - **Deletion Criteria**:
+    - ✅ Order has 0 items (never added anything)
+    - ✅ Status = PENDING (not paid)
+    - ✅ Created > 30 minutes ago
+    - ✅ Type = TAKEOUT (don't delete table orders)
+  - **Frequency**: Runs every 15 minutes
+  - **Inspiration**: Toast POS uses similar auto-cleanup for "draft orders"
+  - **Impact**: Prevents cluttering "Pedidos abiertos" list with abandoned orders
+  - **Safety**: Only deletes empty TAKEOUT orders, never deletes table orders or orders with items
+  - **Logging**: Logs each deleted order with age and order number
+  - **Testing**: Call `abandonedOrdersCleanupJob.cleanupNow()` to manually trigger
+
+- **order.tpv.service.ts: Modifiers support for order items** (order.tpv.service.ts:260-392)
+
+  - Added `modifierIds?: string[]` to `AddOrderItemInput` interface
+  - Backend now accepts modifier IDs when adding items to orders
+  - Automatically calculates modifier pricing and adds to item total
+  - Creates `OrderItemModifier` records linking modifiers to order items
+  - Includes modifiers in order responses (`getOrder`, `getOrders`, `addItemsToOrder`)
+  - Calculates item total as: `(product price + sum of modifier prices) * quantity`
+  - **WHY**: Android app can now persist selected modifiers (BBQ, Chipotle Mayo, Ranch) to database
+  - **IMPACT**: Selected modifiers now appear in order panel and receipts
+
 - **Terminal Activation Validation on Login** (2025-01-03)
   - `src/schemas/tpv.schema.ts` (lines 17-22): Added `serialNumber` field to `pinLoginSchema`
   - `src/services/tpv/auth.tpv.service.ts` (lines 69-100): Validate terminal activation status on login
@@ -22,7 +95,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **product.dashboard.service.ts: CRITICAL - getProducts() not including nested modifiers in response**
+  (product.dashboard.service.ts:95-106)
+
+  - **Problem**: Android ProductSelectorBottomSheet showed ModifierGroup name ("Aderezos") but no individual modifiers (BBQ, Chipotle Mayo,
+    Ranch) because backend was not including them in API response
+  - **Root Cause**: `getProducts()` function had `group: true` instead of nested `group: { include: { modifiers: true } }`
+  - **Inconsistency**: `getProduct()` (singular) correctly included modifiers, but `getProducts()` (plural - used by Android) did not
+  - **Solution**: Updated Prisma query to match `getProduct()` pattern:
+    ```typescript
+    modifierGroups: {
+      include: {
+        group: {
+          include: {
+            modifiers: {
+              orderBy: { displayOrder: 'asc' }
+            }
+          }
+        }
+      },
+      orderBy: { displayOrder: 'asc' }
+    }
+    ```
+  - **Impact**: Android now receives full modifier data, ProductSelectorBottomSheet displays checkboxes for BBQ, Chipotle Mayo, Ranch when
+    clicking "Alitas Buffalo"
+  - **Testing**:
+    - Click "Alitas Buffalo" on Android → Modal shows "Aderezos" with 3 modifiers
+    - API response now includes `modifiers: [{ id, name, priceAdjustment, displayOrder }]` inside each ModifierGroup
+
 - shift.tpv.service.ts: Add real-time calculation of shift totals in getCurrentShift (shift.tpv.service.ts:66-173)
+
   - **CRITICAL FIX**: Shift totals now update in real-time when payments are recorded
   - Previous behavior: `totalSales`, `totalCardPayments`, etc., only updated when shift was closed
   - TPV was showing "$0" for active shifts even after successful payments
