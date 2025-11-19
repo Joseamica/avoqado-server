@@ -1681,7 +1681,7 @@ export async function getVenueMerchantAccounts(venueId: string, _orgId?: string)
       active: account.active,
       hasValidCredentials,
       displayOrder: account.displayOrder,
-      externalMerchantId: account.externalMerchantId,
+      ecommerceMerchantId: account.ecommerceMerchantId,
       // 🚀 OPTIMIZATION: Include decrypted credentials for POS terminals
       // This eliminates the need for getMentaRoute API calls during payment
       credentials: hasValidCredentials
@@ -1847,7 +1847,7 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
     routingMetadata: {
       accountType,
       providerCode: selectedAccount.provider.code,
-      externalMerchantId: selectedAccount.externalMerchantId,
+      ecommerceMerchantId: selectedAccount.ecommerceMerchantId,
       userSelected: true, // This routing was based on user selection, not automatic rules
       timestamp: new Date().toISOString(),
     },

@@ -184,7 +184,7 @@ export async function getProviderCostStructures(req: Request, res: Response, nex
           select: { id: true, name: true, code: true },
         },
         merchantAccount: {
-          select: { id: true, alias: true, externalMerchantId: true },
+          select: { id: true, alias: true, ecommerceMerchantId: true },
         },
       },
       orderBy: [{ active: 'desc' }, { effectiveFrom: 'desc' }],
@@ -254,7 +254,7 @@ export async function upsertProviderCostStructure(req: Request, res: Response, n
           select: { id: true, name: true, code: true },
         },
         merchantAccount: {
-          select: { id: true, alias: true, externalMerchantId: true },
+          select: { id: true, alias: true, ecommerceMerchantId: true },
         },
       },
     })

@@ -106,6 +106,7 @@ import {
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
+import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -2907,6 +2908,9 @@ router.post(
 
 // Venue Payment Configuration routes (SUPERADMIN only)
 router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, checkPermission('system:config'), venuePaymentConfigRoutes)
+
+// E-commerce Merchant Management routes (OWNER, ADMIN)
+router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, ecommerceMerchantRoutes)
 
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
