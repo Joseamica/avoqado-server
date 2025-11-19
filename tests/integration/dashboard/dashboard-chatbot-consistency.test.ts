@@ -262,10 +262,30 @@ async function createTestPayments(venueId: string, staffId: string) {
     { amount: 550.0, tipAmount: 55.0, createdAt: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000) }, // 2 days ago
   ]
 
-  for (const payment of testPayments) {
+  for (let i = 0; i < testPayments.length; i++) {
+    const payment = testPayments[i]
+
+    // Create order first (required for payment)
+    const order = await prisma.order.create({
+      data: {
+        venue: { connect: { id: venueId } },
+        orderNumber: `TEST-${Date.now()}-${i}`,
+        subtotal: new Prisma.Decimal(payment.amount),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(payment.amount),
+        paymentStatus: 'PAID',
+        status: 'COMPLETED',
+        source: 'TPV',
+        createdAt: payment.createdAt,
+        updatedAt: payment.createdAt,
+      },
+    })
+
+    // Create payment linked to order
     await prisma.payment.create({
       data: {
         venue: { connect: { id: venueId } },
+        order: { connect: { id: order.id } },
         amount: new Prisma.Decimal(payment.amount),
         tipAmount: new Prisma.Decimal(payment.tipAmount),
         feePercentage: new Prisma.Decimal(0), // No fees for test data
@@ -276,7 +296,7 @@ async function createTestPayments(venueId: string, staffId: string) {
         source: 'TPV',
         createdAt: payment.createdAt,
         updatedAt: payment.createdAt,
-      } as any, // Cast to avoid Prisma type complexity
+      },
     })
   }
 }

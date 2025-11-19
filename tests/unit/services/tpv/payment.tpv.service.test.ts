@@ -30,6 +30,7 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     shift: {
       findFirst: jest.fn(),
+      update: jest.fn(),
     },
     staffVenue: {
       findFirst: jest.fn(),
@@ -97,6 +98,9 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
         },
         order: {
           update: prisma.order.update,
+        },
+        shift: {
+          update: prisma.shift.update,
         },
       }
       return callback(tx)
