@@ -32,7 +32,7 @@ export const AssignProcessorSchema = z.object({
   body: z.object({
     // Payment provider assignment
     providerId: z.string().cuid('Invalid provider ID format'),
-    externalMerchantId: z.string().min(1, 'External merchant ID is required'),
+    ecommerceMerchantId: z.string().min(1, 'External merchant ID is required'),
     displayName: z.string().min(1, 'Display name is required'),
     credentials: z.record(z.any()).refine(obj => Object.keys(obj).length > 0, {
       message: 'Credentials object cannot be empty',
