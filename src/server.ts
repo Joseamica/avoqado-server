@@ -23,12 +23,18 @@ import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
 import { initializeFirebase } from './config/firebase'
+// Import live demo cleanup service (DEMO MODE only)
+import { CronJob } from 'cron'
+import { cleanupExpiredLiveDemos } from './services/cleanup/liveDemoCleanup.service'
 
 const httpServer = http.createServer(app)
 
 // Initialize services
 const commandListener = new CommandListener(DATABASE_URL)
 const commandRetryService = new CommandRetryService()
+
+// Live demo cleanup job (initialized only in DEMO_MODE)
+let liveDemoCleanupJob: CronJob | null = null
 
 const gracefulShutdown = async (signal: string) => {
   logger.info(`Received ${signal}. Starting graceful shutdown...`)
@@ -68,6 +74,12 @@ const gracefulShutdown = async (signal: string) => {
         // Close RabbitMQ connections
         logger.info('Closing RabbitMQ connections...')
         await closeRabbitMQConnection()
+      } else {
+        // In DEMO_MODE, stop the live demo cleanup job
+        if (liveDemoCleanupJob) {
+          logger.info('Stopping live demo cleanup job...')
+          liveDemoCleanupJob.stop()
+        }
       }
 
       // Close database connections
@@ -149,6 +161,27 @@ const startApplication = async (retries = 3) => {
     // DEMO MODE: Skip background jobs to save memory on free tier deployments
     if (process.env.DEMO_MODE === 'true') {
       logger.info('⏭️  Background jobs disabled (DEMO_MODE=true)')
+
+      // Start live demo cleanup job (ONLY in DEMO_MODE)
+      // Runs every hour to clean up expired/inactive demo sessions
+      liveDemoCleanupJob = new CronJob(
+        '0 * * * *', // Every hour at :00 minutes
+        async () => {
+          try {
+            const cleanedCount = await cleanupExpiredLiveDemos()
+            if (cleanedCount > 0) {
+              logger.info(`🧹 Live Demo Cleanup: Deleted ${cleanedCount} expired/inactive sessions`)
+            }
+          } catch (error) {
+            logger.error('❌ Error in Live Demo Cleanup:', error)
+          }
+        },
+        null,
+        true, // Start immediately
+        'America/Mexico_City',
+      )
+
+      logger.info('🧹 Live Demo Cleanup Job started - running every hour (DEMO_MODE=true)')
     } else {
       // Start retry service for failed commands
       commandRetryService.start()
