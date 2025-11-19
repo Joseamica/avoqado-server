@@ -262,8 +262,8 @@ export class SharedQueryService {
       FROM "OrderItem" oi
       INNER JOIN "Product" p ON oi."productId" = p."id"
       INNER JOIN "Order" o ON oi."orderId" = o."id"
-      LEFT JOIN "Category" c ON p."categoryId" = c."id"
-      WHERE o."venueId" = ${venueId}::uuid
+      LEFT JOIN "MenuCategory" c ON p."categoryId" = c."id"
+      WHERE o."venueId"::text = ${venueId}
         AND o."createdAt" >= ${from}::timestamp
         AND o."createdAt" <= ${to}::timestamp
       GROUP BY p."id", p."name", c."name"
