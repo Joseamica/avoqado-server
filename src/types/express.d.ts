@@ -1,5 +1,6 @@
 // src/types/express.d.ts
 import { AuthContext } from '../security'
+import { SDKContext } from '../middlewares/sdk-auth.middleware'
 
 declare global {
   namespace Express {
@@ -7,6 +8,7 @@ declare global {
       authContext?: AuthContext
       correlationId?: string
       authenticated?: boolean
+      sdkContext?: SDKContext
     }
   }
 }
