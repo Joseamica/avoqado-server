@@ -14,10 +14,8 @@ primary_region = 'dfw'
 
 [env]
   NODE_ENV = 'production'
-  # Limit Node.js heap to 180MB (leaves ~76MB for stack, buffers, and request handling)
-  NODE_OPTIONS = '--max-old-space-size=180'
-  # Demo mode: Disable RabbitMQ and Socket.IO to save memory (only for Fly.io free tier)
-  DEMO_MODE = 'true'
+  # Limit Node.js heap to 400MB (leaves ~112MB for stack, buffers, and request handling)
+  NODE_OPTIONS = '--max-old-space-size=400'
 
 [http_service]
   internal_port = 3000
@@ -28,6 +26,6 @@ primary_region = 'dfw'
   processes = ['app']
 
 [[vm]]
-  memory = '256mb'
+  memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
