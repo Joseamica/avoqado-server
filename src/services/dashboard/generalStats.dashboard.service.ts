@@ -1,4 +1,4 @@
-import { PaymentMethod, ProductType, TransactionStatus } from '@prisma/client'
+import { PaymentMethod, ProductType, TransactionStatus, OrderStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
@@ -64,10 +64,11 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
     },
   })
 
-  // Fetch products data from orders
+  // Fetch products data from orders (exclude PENDING - draft/cart orders)
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       ...dateFilter,
     },
     include: {
@@ -181,6 +182,7 @@ async function generateTablePerformance(venueId: string, fromDate: Date, toDate:
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -255,6 +257,7 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -315,6 +318,7 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -585,6 +589,7 @@ async function getBestSellingProductsData(venueId: string, dateFilter: any) {
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       ...dateFilter,
     },
     include: {
@@ -688,6 +693,7 @@ async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Dat
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -727,6 +733,7 @@ async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -772,6 +779,7 @@ async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Da
   const orders = await prisma.order.findMany({
     where: {
       venueId,
+      status: { not: OrderStatus.PENDING },
       createdAt: {
         gte: fromDate,
         lte: toDate,

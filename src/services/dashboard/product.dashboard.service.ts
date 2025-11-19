@@ -37,16 +37,52 @@ export interface ReorderProductsDto {
 }
 
 /**
+ * Calculate available portions from recipe (Toast POS pattern)
+ *
+ * Logic: For each ingredient, calculate how many complete portions can be made.
+ * Return the MINIMUM (bottleneck ingredient determines max portions).
+ *
+ * Example:
+ *   Burger recipe:
+ *     - Beef: 3750g stock ÷ 250g per burger = 15 portions
+ *     - Bun: 40 buns ÷ 2 per burger = 20 portions
+ *     - Lettuce: 1500g ÷ 50g per burger = 30 portions
+ *   Result: Math.min(15, 20, 30) = 15 burgers available
+ */
+function calculateAvailablePortions(recipe: any): number {
+  if (!recipe?.lines || recipe.lines.length === 0) {
+    return 0 // No ingredients = can't make any
+  }
+
+  const portionsPerIngredient = recipe.lines.map((line: any) => {
+    const stock = Number(line.rawMaterial?.currentStock ?? 0)
+    const needed = Number(line.quantity ?? 0)
+
+    if (needed === 0) {
+      return Infinity // Optional ingredient (skip)
+    }
+
+    return Math.floor(stock / needed)
+  })
+
+  // Return minimum (bottleneck ingredient)
+  return Math.min(...portionsPerIngredient)
+}
+
+/**
  * Get all products for a venue (excluding soft-deleted)
+ *
+ * ✅ WORLD-CLASS: Calculates availableQuantity for both QUANTITY and RECIPE tracking
+ * (Toast POS pattern - unified field for frontend display)
  */
 export async function getProducts(
   venueId: string,
   options?: {
     includeRecipe?: boolean
     categoryId?: string
-    orderBy?: 'displayOrder' | 'name' // ✅ WORLD-CLASS: Allow sorting by name or displayOrder
+    orderBy?: 'displayOrder' | 'name'
   },
-): Promise<Product[]> {
+): Promise<any[]> {
   const products = await prisma.product.findMany({
     where: {
       venueId,
@@ -55,42 +91,7 @@ export async function getProducts(
     },
     include: {
       category: true,
-      inventory: true, // ✅ Include simple stock inventory
-      modifierGroups: {
-        include: {
-          group: true,
-        },
-      },
-      ...(options?.includeRecipe && {
-        recipe: {
-          include: {
-            lines: {
-              include: {
-                rawMaterial: true,
-              },
-            },
-          },
-        },
-      }),
-    },
-    orderBy: options?.orderBy === 'name' ? { name: 'asc' } : { displayOrder: 'asc' },
-  })
-
-  return products
-}
-
-/**
- * Get a single product by ID (excluding soft-deleted)
- */
-export async function getProduct(venueId: string, productId: string): Promise<Product | null> {
-  const product = await prisma.product.findFirst({
-    where: {
-      id: productId,
-      venueId,
-      deletedAt: null, // Exclude soft-deleted products
-    },
-    include: {
-      category: true,
+      inventory: true, // ✅ For QUANTITY tracking
       modifierGroups: {
         include: {
           group: {
@@ -101,10 +102,111 @@ export async function getProduct(venueId: string, productId: string): Promise<Pr
         },
         orderBy: { displayOrder: 'asc' },
       },
+      // ✅ ALWAYS include recipe for availableQuantity calculation
+      recipe: {
+        include: {
+          lines: {
+            include: {
+              rawMaterial: {
+                select: {
+                  id: true,
+                  currentStock: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    orderBy: options?.orderBy === 'name' ? { name: 'asc' } : { displayOrder: 'asc' },
+  })
+
+  // ✅ Calculate availableQuantity for each product (Toast POS pattern)
+  return products.map(product => {
+    let availableQuantity = null
+
+    if (product.trackInventory) {
+      if (product.inventoryMethod === 'QUANTITY') {
+        // ✅ Simple count (wine bottles, beer cans)
+        availableQuantity = Math.floor(Number(product.inventory?.currentStock ?? 0))
+      } else if (product.inventoryMethod === 'RECIPE' && product.recipe) {
+        // ✅ Calculate from recipe ingredients (burgers, pizzas)
+        availableQuantity = calculateAvailablePortions(product.recipe)
+      }
+    }
+
+    return {
+      ...product,
+      availableQuantity, // ✅ Unified field for frontend (both QUANTITY and RECIPE)
+    }
+  })
+}
+
+/**
+ * Get a single product by ID (excluding soft-deleted)
+ *
+ * ✅ WORLD-CLASS: Calculates availableQuantity for both QUANTITY and RECIPE tracking
+ * (Toast POS pattern - unified field for frontend display)
+ */
+export async function getProduct(venueId: string, productId: string): Promise<any> {
+  const product = await prisma.product.findFirst({
+    where: {
+      id: productId,
+      venueId,
+      deletedAt: null, // Exclude soft-deleted products
+    },
+    include: {
+      category: true,
+      inventory: true, // ✅ For QUANTITY tracking
+      modifierGroups: {
+        include: {
+          group: {
+            include: {
+              modifiers: true,
+            },
+          },
+        },
+        orderBy: { displayOrder: 'asc' },
+      },
+      // ✅ Include recipe for availableQuantity calculation
+      recipe: {
+        include: {
+          lines: {
+            include: {
+              rawMaterial: {
+                select: {
+                  id: true,
+                  currentStock: true,
+                },
+              },
+            },
+          },
+        },
+      },
     },
   })
 
-  return product
+  if (!product) {
+    return null
+  }
+
+  // ✅ Calculate availableQuantity (Toast POS pattern)
+  let availableQuantity = null
+
+  if (product.trackInventory) {
+    if (product.inventoryMethod === 'QUANTITY') {
+      // ✅ Simple count (wine bottles, beer cans)
+      availableQuantity = Math.floor(Number(product.inventory?.currentStock ?? 0))
+    } else if (product.inventoryMethod === 'RECIPE' && product.recipe) {
+      // ✅ Calculate from recipe ingredients (burgers, pizzas)
+      availableQuantity = calculateAvailablePortions(product.recipe)
+    }
+  }
+
+  return {
+    ...product,
+    availableQuantity, // ✅ Unified field for frontend (both QUANTITY and RECIPE)
+  }
 }
 
 /**

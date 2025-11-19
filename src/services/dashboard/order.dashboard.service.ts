@@ -4,7 +4,7 @@ import { NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { Order } from '@prisma/client'
+import { Order, OrderStatus } from '@prisma/client'
 import { deductStockForRecipe } from './rawMaterial.service'
 
 export async function getOrders(venueId: string, page: number, pageSize: number): Promise<PaginatedOrdersResponse> {
@@ -15,7 +15,11 @@ export async function getOrders(venueId: string, page: number, pageSize: number)
   const skip = (page - 1) * pageSize
   const take = pageSize
 
-  const whereClause = { venueId }
+  // Exclude PENDING orders - they're drafts/carts still being built
+  const whereClause = {
+    venueId,
+    status: { not: OrderStatus.PENDING },
+  }
 
   const [orders, total] = await prisma.$transaction([
     prisma.order.findMany({
