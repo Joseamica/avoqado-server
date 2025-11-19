@@ -38,34 +38,37 @@ const gracefulShutdown = async (signal: string) => {
     logger.info('Http server closed.')
 
     try {
-      // Stop command processing services
-      logger.info('Stopping command services...')
-      await commandListener.stop()
-      commandRetryService.stop()
+      // Only stop services that were started (skip in demo mode)
+      if (process.env.DEMO_MODE !== 'true') {
+        // Stop command processing services
+        logger.info('Stopping command services...')
+        await commandListener.stop()
+        commandRetryService.stop()
 
-      // Stop TPV health monitor
-      logger.info('Stopping TPV health monitor...')
-      tpvHealthMonitorJob.stop()
+        // Stop TPV health monitor
+        logger.info('Stopping TPV health monitor...')
+        tpvHealthMonitorJob.stop()
 
-      // Stop subscription cancellation job
-      logger.info('Stopping subscription cancellation job...')
-      subscriptionCancellationJob.stop()
+        // Stop subscription cancellation job
+        logger.info('Stopping subscription cancellation job...')
+        subscriptionCancellationJob.stop()
 
-      // Stop settlement detection job
-      logger.info('Stopping settlement detection job...')
-      settlementDetectionJob.stop()
+        // Stop settlement detection job
+        logger.info('Stopping settlement detection job...')
+        settlementDetectionJob.stop()
 
-      // Stop abandoned orders cleanup job
-      logger.info('Stopping abandoned orders cleanup job...')
-      abandonedOrdersCleanupJob.stop()
+        // Stop abandoned orders cleanup job
+        logger.info('Stopping abandoned orders cleanup job...')
+        abandonedOrdersCleanupJob.stop()
 
-      // Shutdown Socket.io server
-      logger.info('Shutting down Socket.io server...')
-      await shutdownSocketServer()
+        // Shutdown Socket.io server
+        logger.info('Shutting down Socket.io server...')
+        await shutdownSocketServer()
 
-      // Close RabbitMQ connections
-      logger.info('Closing RabbitMQ connections...')
-      await closeRabbitMQConnection()
+        // Close RabbitMQ connections
+        logger.info('Closing RabbitMQ connections...')
+        await closeRabbitMQConnection()
+      }
 
       // Close database connections
       logger.info('Closing database connections...')
@@ -143,25 +146,30 @@ const startApplication = async (retries = 3) => {
         })
     }
 
-    // Start retry service for failed commands
-    commandRetryService.start()
+    // DEMO MODE: Skip background jobs to save memory on free tier deployments
+    if (process.env.DEMO_MODE === 'true') {
+      logger.info('⏭️  Background jobs disabled (DEMO_MODE=true)')
+    } else {
+      // Start retry service for failed commands
+      commandRetryService.start()
 
-    // Start POS connection monitor
-    startPosConnectionMonitor()
+      // Start POS connection monitor
+      startPosConnectionMonitor()
 
-    // Start TPV health monitor
-    tpvHealthMonitorJob.start()
+      // Start TPV health monitor
+      tpvHealthMonitorJob.start()
 
-    // Start subscription cancellation job
-    subscriptionCancellationJob.start()
+      // Start subscription cancellation job
+      subscriptionCancellationJob.start()
 
-    // Start settlement detection job
-    settlementDetectionJob.start()
+      // Start settlement detection job
+      settlementDetectionJob.start()
 
-    // Start abandoned orders cleanup job
-    abandonedOrdersCleanupJob.start()
+      // Start abandoned orders cleanup job
+      abandonedOrdersCleanupJob.start()
 
-    logger.info('✅ All communication and monitoring services started successfully.')
+      logger.info('✅ All communication and monitoring services started successfully.')
+    }
 
     // Start HTTP server
     if (require.main === module || NODE_ENV !== 'test') {
