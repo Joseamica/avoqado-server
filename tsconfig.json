@@ -16,7 +16,7 @@
     "moduleResolution": "node",
     "typeRoots": ["./node_modules/@types", "../node_modules/@types"]
   },
-  "include": ["src/**/*.ts", "prisma/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/**/*.ts", "prisma/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "dist"],
   "ts-node": {
     "files": true,
