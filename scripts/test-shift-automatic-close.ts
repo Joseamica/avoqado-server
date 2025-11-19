@@ -112,20 +112,22 @@ async function testShiftAutomaticClose() {
     const order = await prisma.order.create({
       data: {
         venueId: VENUE_ID,
+        orderNumber: `TEST-${Date.now()}`,
         shiftId: shiftId,
-        staffId: staffId,
+        createdById: staffId,
         total: new Decimal(product.price).mul(2), // 2 items
         subtotal: new Decimal(product.price).mul(2),
+        taxAmount: new Decimal(0),
         status: 'COMPLETED',
         paymentStatus: 'PAID',
         items: {
           create: [
             {
               productId: product.id,
-              productName: product.name,
               quantity: 2,
               unitPrice: product.price,
-              subtotal: new Decimal(product.price).mul(2),
+              taxAmount: new Decimal(0),
+              total: new Decimal(product.price).mul(2),
             },
           ],
         },
@@ -155,6 +157,9 @@ async function testShiftAutomaticClose() {
         venueId: VENUE_ID,
         amount: cashPayment,
         tipAmount: new Decimal(10), // $10 tip
+        feePercentage: new Decimal(0),
+        feeAmount: new Decimal(0),
+        netAmount: cashPayment,
         method: 'CASH',
         status: 'COMPLETED',
         processedById: staffId,
@@ -169,7 +174,10 @@ async function testShiftAutomaticClose() {
         venueId: VENUE_ID,
         amount: cardPayment,
         tipAmount: new Decimal(5), // $5 tip
-        method: 'CARD',
+        feePercentage: new Decimal(0),
+        feeAmount: new Decimal(0),
+        netAmount: cardPayment,
+        method: 'CREDIT_CARD',
         status: 'COMPLETED',
         processedById: staffId,
       },
