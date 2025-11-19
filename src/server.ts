@@ -18,6 +18,7 @@ import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
+import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -53,6 +54,10 @@ const gracefulShutdown = async (signal: string) => {
       // Stop settlement detection job
       logger.info('Stopping settlement detection job...')
       settlementDetectionJob.stop()
+
+      // Stop abandoned orders cleanup job
+      logger.info('Stopping abandoned orders cleanup job...')
+      abandonedOrdersCleanupJob.stop()
 
       // Shutdown Socket.io server
       logger.info('Shutting down Socket.io server...')
@@ -114,24 +119,29 @@ const startApplication = async (retries = 3) => {
 
     // Connect to RabbitMQ in background (non-blocking)
     // If RabbitMQ is unavailable, the app will continue without it
-    connectToRabbitMQ()
-      .then(() => {
-        // Start event consumer only if RabbitMQ connected successfully
-        try {
-          startEventConsumer()
-          logger.info('✅ Event consumer started')
-        } catch (err) {
-          logger.warn('⚠️  Event consumer could not start:', err)
-        }
+    // DEMO MODE: Skip RabbitMQ to save memory on free tier deployments
+    if (process.env.DEMO_MODE === 'true') {
+      logger.info('⏭️  RabbitMQ disabled (DEMO_MODE=true)')
+    } else {
+      connectToRabbitMQ()
+        .then(() => {
+          // Start event consumer only if RabbitMQ connected successfully
+          try {
+            startEventConsumer()
+            logger.info('✅ Event consumer started')
+          } catch (err) {
+            logger.warn('⚠️  Event consumer could not start:', err)
+          }
 
-        // Start command listener
-        commandListener.start().catch(err => {
-          logger.warn('⚠️  Command listener could not start:', err)
+          // Start command listener
+          commandListener.start().catch(err => {
+            logger.warn('⚠️  Command listener could not start:', err)
+          })
         })
-      })
-      .catch(err => {
-        logger.warn('⚠️  RabbitMQ initialization failed, continuing without it:', err)
-      })
+        .catch(err => {
+          logger.warn('⚠️  RabbitMQ initialization failed, continuing without it:', err)
+        })
+    }
 
     // Start retry service for failed commands
     commandRetryService.start()
@@ -148,6 +158,9 @@ const startApplication = async (retries = 3) => {
     // Start settlement detection job
     settlementDetectionJob.start()
 
+    // Start abandoned orders cleanup job
+    abandonedOrdersCleanupJob.start()
+
     logger.info('✅ All communication and monitoring services started successfully.')
 
     // Start HTTP server
@@ -161,7 +174,13 @@ const startApplication = async (retries = 3) => {
       })
 
       // Initialize Socket.io server after HTTP server starts
-      initializeSocketServer(httpServer)
+      // DEMO MODE: Skip Socket.IO to save memory on free tier deployments
+      if (process.env.DEMO_MODE === 'true') {
+        logger.info('⏭️  Socket.IO disabled (DEMO_MODE=true)')
+      } else {
+        initializeSocketServer(httpServer)
+        logger.info('✅ Socket.IO server initialized')
+      }
     }
   } catch (error) {
     if (retries > 0) {
