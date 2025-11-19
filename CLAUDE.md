@@ -74,15 +74,43 @@ For complex features requiring detailed implementation guides, full documentatio
 - `docs/MERCHACCOUNTANALYSIS.md` - MerchantAccountId usage analysis across codebase (schema, services, validation, queries)
 - `docs/PAYMENT_ARCHITECTURE.md` - Payment processing architecture (money flow, merchant accounts, profit calculation)
 - `docs/UNUSED_CODE_DETECTION.md` - Tools and commands for detecting unused code (unimported, knip)
+- `docs/MERCHANT_MODELS_ARCHITECTURE.md` - Why MerchantAccount and ExternalMerchant are separate models (Blumon PAX Terminal SDK vs Hosted
+  Checkout API)
 
-**Blumon Multi-Merchant Payment System** (comprehensive documentation in `docs/`):
+**Blumon Payment Integrations** (⚠️ TWO separate integrations - comprehensive documentation in `docs/`):
 
-- `docs/BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide (start here)
-- `docs/BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
-- `docs/BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
-- `docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
+- `docs/BLUMON_TWO_INTEGRATIONS.md` - **⚠️ READ FIRST**: Critical distinction between e-commerce and Android SDK integrations
 
-**⚠️ CRITICAL**: When working on Blumon, multi-merchants, or payment routing, ALWAYS consult the Blumon documentation files first.
+**Blumon E-commerce Integration** (Web direct charge - synchronous payment flow):
+
+- `docs/blumon-ecommerce/REFACTORING_COMPLETE.md` - **✅ READ FIRST**: Refactoring completion summary (hosted checkout → direct charge)
+- `docs/blumon-ecommerce/DIRECT_CHARGE_REFACTORING_PLAN.md` - **📋 PLAN**: Complete refactoring plan and architecture
+- `docs/blumon-ecommerce/BLUMON_SDK_INTEGRATION_STATUS.md` - E-commerce SDK implementation status (tokenize + authorize working)
+- `docs/blumon-ecommerce/BLUMON_MOCK_TEST_CARDS.md` - Mock service test card numbers for unlimited dev testing
+- `docs/blumon-ecommerce/SDK_SAQ_A_COMPLIANCE.md` - PCI SAQ-A compliance guide
+- `docs/blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` - E-commerce OAuth 2.0 implementation
+- `docs/blumon-ecommerce/SDK_INTEGRATION_GUIDE.md` - Quick integration guide (⚠️ needs update for direct charge)
+
+**DEPRECATED** (Hosted checkout - removed 2025-01-17):
+
+- `docs/blumon-ecommerce/BLUMON_CORRECTED_ANALYSIS.md` - Analysis of hosted checkout vs direct charge
+- `docs/blumon-ecommerce/BLUMON_SECURITY_AUDIT.md` - Security audit (vulnerability fixed by deletion)
+- `docs/blumon-ecommerce/BLUMON_INTEGRATION_REALITY_CHECK.md` - Reality check (led to refactoring decision)
+
+**Blumon Android SDK** (Physical PAX terminals):
+
+- `docs/blumon-android-sdk/BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide for Android SDK docs (start here)
+- `docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
+- `docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
+- `docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
+
+**General Production Readiness**:
+
+- `docs/PRODUCTION_READINESS_CHECKLIST.md` - Complete production deployment checklist (webhooks, OAuth refresh, security, etc.)
+- `docs/DEV_ENVIRONMENT_PERFECTION_CHECKLIST.md` - Development environment perfection guide (mocking, error handling, dev tools)
+
+**⚠️ CRITICAL**: When working on Blumon payments, ALWAYS identify which integration you're working on (e-commerce vs Android SDK) and
+consult the appropriate documentation files first.
 
 **Rule**: New features should NOT create separate .md files in root. Add architectural decisions to CLAUDE.md and implementation details to
 `docs/` or code comments/tests. ALL documentation files must be placed in `docs/` directory.
@@ -342,12 +370,12 @@ work-in-progress files.
 
 ## Architecture Overview
 
-This is a restaurant management platform backend with multi-tenant architecture supporting:
+This is a multi business management platform backend with multi-tenant architecture supporting:
 
 ### Core Business Domains
 
 - **Organizations** - Multi-tenant root entities
-- **Venues** - Individual restaurant locations
+- **Venues** - Individual business locations
 - **Staff Management** - Role-based access control with hierarchical permission system
 - **Menu & Product Management** - Menu categories, products, and pricing
 - **Order Processing** - Order lifecycle management
@@ -722,7 +750,24 @@ psql -c "SELECT * FROM Terminal WHERE LOWER(serialNumber) = LOWER('avqd-6d52cb51
 psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHeartbeat > NOW() - INTERVAL '5 minutes';"
 ```
 
-### Blumon Multi-Merchant Payment System
+### Blumon Payment Integrations
+
+**⚠️ CRITICAL DISTINCTION**: This codebase has **TWO completely different Blumon integrations**. **DO NOT confuse them!**
+
+**📖 READ FIRST**: `docs/BLUMON_TWO_INTEGRATIONS.md` - Complete comparison and distinction guide
+
+| Aspect       | Blumon E-commerce                                     | Blumon Android SDK (TPV)                               |
+| ------------ | ----------------------------------------------------- | ------------------------------------------------------ |
+| **Use Case** | Online payments (web)                                 | In-person payments (terminals)                         |
+| **Model**    | `EcommerceMerchant` + `CheckoutSession`               | `MerchantAccount` + `Terminal`                         |
+| **Auth**     | OAuth 2.0 tokens                                      | Terminal credentials                                   |
+| **Flow**     | Hosted checkout → Webhook                             | Card reader → Real-time                                |
+| **Service**  | `blumon-ecommerce.service.ts`                         | `blumon.service.ts`                                    |
+| **Docs**     | `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | `blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md` |
+
+---
+
+#### Blumon Android SDK (Multi-Merchant TPV)
 
 **WHY**: Enable one physical PAX device to process payments for multiple merchant accounts (e.g., main restaurant + ghost kitchen) with
 separate bank settlements and different processing fees.
@@ -736,39 +781,39 @@ credentials, POS IDs, and cost structures.
 - **Virtual Serial 1**: First Blumon merchant registration (e.g., `2841548417`)
 - **Virtual Serial 2**: Second Blumon merchant registration (e.g., `2841548418`)
 
-**📖 COMPLETE DOCUMENTATION**: When working with Blumon, multi-merchants, or payment routing, refer to these files:
+**📖 COMPLETE DOCUMENTATION**: When working with Blumon Android SDK, multi-merchants, or payment routing, refer to these files:
 
-1. **docs/BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
+1. **docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
 
    - Best for: Understanding system at a glance
    - Contains: Serial numbers explained, database hierarchy, payment flow, cost structure
    - Use when: Need quick context before diving into code
 
-2. **docs/BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
+2. **docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
 
    - Best for: Finding file locations, field definitions, debugging
    - Contains: Critical file locations (backend + Android), field glossary, common issues
    - Use when: Implementing features, debugging merchant issues, need to find specific code
 
-3. **docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
+3. **docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
 
    - Best for: Full system understanding, explaining to team members
    - Contains: Complete architecture, data flow with code examples, credential management
    - Use when: Need comprehensive understanding, implementing major features
 
-4. **docs/BLUMON_DOCUMENTATION_INDEX.md** - Navigation guide
+4. **docs/blumon-android-sdk/BLUMON_DOCUMENTATION_INDEX.md** - Navigation guide
    - Best for: Finding specific information quickly
    - Contains: Document comparison, quick navigation, topic-based lookup
    - Use when: Don't know which document to read
 
 **Quick Topic Lookup**:
 
-- MerchantAccount model → See docs/BLUMON_QUICK_REFERENCE.md (Critical File Locations)
-- Credential switching → See docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 4)
-- Payment routing → See docs/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 5)
-- Cost structure per merchant → See docs/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 6)
-- Real restaurant example → See docs/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 9)
-- Common debugging → See docs/BLUMON_QUICK_REFERENCE.md (Common Issues & Solutions)
+- MerchantAccount model → See docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md (Critical File Locations)
+- Credential switching → See docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 4)
+- Payment routing → See docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 5)
+- Cost structure per merchant → See docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 6)
+- Real restaurant example → See docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 9)
+- Common debugging → See docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md (Common Issues & Solutions)
 
 **Key Architecture**:
 

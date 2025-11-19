@@ -1,9 +1,71 @@
-# Blumon Multi-Merchant Documentation Index
+# Blumon Multi-Merchant Documentation Index (Android SDK Only)
 
 > **Complete analysis of how one physical PAX device processes payments for multiple merchants**
 
-Generated: 2025-11-06  
-Status: Complete (Code review verified)
+Generated: 2025-11-06 | Status: Complete (Code review verified)
+
+---
+
+## 🚨 STOP! Which Blumon Integration Do You Need?
+
+### ⚠️ CRITICAL: Two Completely Different Blumon Integrations
+
+This codebase has **TWO separate Blumon integrations** for different use cases. **READ THIS FIRST** to avoid confusion!
+
+| Question           | E-commerce Integration                                | Android SDK Integration                  |
+| ------------------ | ----------------------------------------------------- | ---------------------------------------- |
+| **What is it?**    | Web checkout for online payments                      | Physical terminal for in-person payments |
+| **Platform**       | Web browsers, mobile web                              | Android TPV app (PAX terminals)          |
+| **Models**         | `EcommerceMerchant` + `CheckoutSession`               | `MerchantAccount` + `Terminal`           |
+| **Authentication** | OAuth 2.0 Bearer tokens                               | Terminal credentials (POS ID)            |
+| **Payment Flow**   | Hosted page → Webhook                                 | Card reader → Real-time response         |
+| **Documentation**  | `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | **THIS FILE** ← You are here             |
+
+### 🎯 Quick Decision
+
+**Which integration do you need?**
+
+✅ **Use Android SDK (THIS DOCUMENTATION)** if:
+
+- Customer is paying **in-person** at a restaurant
+- You have a **PAX Android terminal** (physical hardware)
+- Payment via **card reader** (tap/swipe/chip)
+- Payment is **synchronous** (immediate response)
+- One device can process payments for **multiple merchant accounts**
+
+✅ **Use E-commerce Integration (NOT THIS)** if:
+
+- Customer is paying **online** (web/mobile browser)
+- You're building a **web store** checkout
+- Customer **enters card details** on a web page
+- Payment is **asynchronous** (webhooks)
+- → **Read `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` instead!**
+
+---
+
+## 📖 Complete Distinction Guide
+
+⚠️ **MUST READ**: `BLUMON_TWO_INTEGRATIONS.md` - Side-by-side comparison of both integrations:
+
+- Different APIs (`ecommerce.blumonpay.net` vs `api-sbx.blumonpay.net`)
+- Different database models
+- Different authentication methods
+- Different service files
+- Different payment flows
+- Different testing approaches
+
+**DO NOT confuse these two integrations!** Mixing them will cause critical errors.
+
+---
+
+## 📍 You Are Here: Android SDK Documentation
+
+**This documentation is ONLY for:**
+
+- **Blumon Android SDK (TPV/Physical Terminals)**
+- Models: `MerchantAccount` + `Terminal`
+- Service: `src/services/tpv/blumon.service.ts`
+- Multi-merchant support on one PAX device
 
 ---
 
@@ -283,9 +345,30 @@ See: ARCHITECTURE_SUMMARY.txt → Section 6 (This is expected behavior)
 
 ## Related Documentation
 
+### Core Distinction (READ FIRST!)
+
+- `BLUMON_TWO_INTEGRATIONS.md` - **CRITICAL**: Understand the two separate Blumon integrations
+
+### Android SDK (TPV) Documentation (This Section)
+
+- `BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
+- `BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
+- `BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
+- `app/BLUMON_INTEGRATION_COMPLETE.md` (Android) - Android implementation details
+
+### E-commerce Integration Documentation
+
+- `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` - E-commerce OAuth 2.0 implementation
+- `blumon-ecommerce/BLUMON_SDK_INTEGRATION_STATUS.md` - SDK implementation status
+- `blumon-ecommerce/SDK_INTEGRATION_GUIDE.md` - Quick integration guide
+- `blumon-ecommerce/SDK_SAQ_A_COMPLIANCE.md` - PCI SAQ-A compliance guide
+- `blumon-ecommerce/BLUMON_MOCK_TEST_CARDS.md` - Test card numbers for mock service
+- `blumon-ecommerce/WEBHOOK_SIMULATOR_GUIDE.md` - Webhook testing guide
+
+### General Documentation
+
 - `GREENFIELD_BLUEPRINT.md` - Overall architecture & 28-day plan
 - `CLAUDE.md` - Development standards & best practices
-- `app/BLUMON_INTEGRATION_COMPLETE.md` (Android) - Detailed Android implementation
 - Backend README - General backend setup
 
 ---
