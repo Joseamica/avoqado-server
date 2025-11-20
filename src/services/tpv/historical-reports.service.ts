@@ -1,0 +1,314 @@
+/**
+ * Historical Reports Service
+ *
+ * Provides aggregated sales data grouped by time periods (day/week/month/quarter/year)
+ * with period-over-period comparisons for trend analysis.
+ *
+ * **World-Class Pattern (Toast POS + Square + Stripe)**:
+ * - Efficient SQL aggregation with DATE_TRUNC
+ * - Automatic previous period calculation
+ * - Timezone-aware grouping
+ * - Cursor-based pagination
+ *
+ * @see /docs/DATETIME_SYNC.md - Date synchronization architecture
+ */
+
+import prisma from '@/utils/prismaClient'
+import { Prisma } from '@prisma/client'
+import { Decimal } from '@prisma/client/runtime/library'
+
+/**
+ * Time grouping options for historical data
+ */
+export enum HistoricalGrouping {
+  DAILY = 'DAILY',
+  WEEKLY = 'WEEKLY',
+  MONTHLY = 'MONTHLY',
+  QUARTERLY = 'QUARTERLY',
+  YEARLY = 'YEARLY',
+}
+
+/**
+ * Single historical period with metrics and comparison
+ */
+export interface HistoricalPeriod {
+  periodStart: Date
+  periodEnd: Date
+  grouping: HistoricalGrouping
+  label: string // "15 Enero 2025"
+  subtitle: string // "Martes" or "Semana 3"
+  totalSales: number
+  totalOrders: number
+  totalProducts: number
+  averageOrderValue: number
+  // Comparison vs previous period
+  salesChange: number | null // +12.5 (percentage)
+  ordersChange: number | null // -3.2 (percentage)
+}
+
+/**
+ * Paginated historical data response
+ */
+export interface PaginatedHistoricalData {
+  periods: HistoricalPeriod[]
+  pagination: {
+    nextCursor: string | null
+    hasMore: boolean
+  }
+}
+
+/**
+ * Get DATE_TRUNC expression based on grouping type
+ */
+function getTruncateExpression(grouping: HistoricalGrouping, timezone: string): string {
+  switch (grouping) {
+    case HistoricalGrouping.DAILY:
+      return `DATE_TRUNC('day', o."createdAt" AT TIME ZONE '${timezone}')`
+    case HistoricalGrouping.WEEKLY:
+      return `DATE_TRUNC('week', o."createdAt" AT TIME ZONE '${timezone}')`
+    case HistoricalGrouping.MONTHLY:
+      return `DATE_TRUNC('month', o."createdAt" AT TIME ZONE '${timezone}')`
+    case HistoricalGrouping.QUARTERLY:
+      return `DATE_TRUNC('quarter', o."createdAt" AT TIME ZONE '${timezone}')`
+    case HistoricalGrouping.YEARLY:
+      return `DATE_TRUNC('year', o."createdAt" AT TIME ZONE '${timezone}')`
+  }
+}
+
+/**
+ * Calculate period end based on period start and grouping
+ */
+function getPeriodEnd(periodStart: Date, grouping: HistoricalGrouping): Date {
+  const end = new Date(periodStart)
+
+  switch (grouping) {
+    case HistoricalGrouping.DAILY:
+      end.setDate(end.getDate() + 1)
+      break
+    case HistoricalGrouping.WEEKLY:
+      end.setDate(end.getDate() + 7)
+      break
+    case HistoricalGrouping.MONTHLY:
+      end.setMonth(end.getMonth() + 1)
+      break
+    case HistoricalGrouping.QUARTERLY:
+      end.setMonth(end.getMonth() + 3)
+      break
+    case HistoricalGrouping.YEARLY:
+      end.setFullYear(end.getFullYear() + 1)
+      break
+  }
+
+  end.setMilliseconds(-1) // End of period
+  return end
+}
+
+/**
+ * Format period label based on grouping (Spanish)
+ */
+function formatPeriodLabel(periodStart: Date, grouping: HistoricalGrouping, locale: string = 'es-ES'): string {
+  const options: Intl.DateTimeFormatOptions = { timeZone: 'UTC' }
+
+  switch (grouping) {
+    case HistoricalGrouping.DAILY:
+      return periodStart.toLocaleDateString(locale, { ...options, day: 'numeric', month: 'long', year: 'numeric' })
+    case HistoricalGrouping.WEEKLY:
+      const weekNumber = getWeekNumber(periodStart)
+      const monthName = periodStart.toLocaleDateString(locale, { ...options, month: 'long' })
+      return `Semana ${weekNumber}, ${monthName} ${periodStart.getFullYear()}`
+    case HistoricalGrouping.MONTHLY:
+      return periodStart.toLocaleDateString(locale, { ...options, month: 'long', year: 'numeric' })
+    case HistoricalGrouping.QUARTERLY:
+      const quarter = Math.floor(periodStart.getMonth() / 3) + 1
+      return `Q${quarter} ${periodStart.getFullYear()}`
+    case HistoricalGrouping.YEARLY:
+      return `${periodStart.getFullYear()}`
+  }
+}
+
+/**
+ * Format period subtitle (day of week or week number)
+ */
+function formatPeriodSubtitle(periodStart: Date, grouping: HistoricalGrouping, locale: string = 'es-ES'): string {
+  if (grouping === HistoricalGrouping.DAILY) {
+    return periodStart.toLocaleDateString(locale, { weekday: 'long', timeZone: 'UTC' })
+  }
+  return ''
+}
+
+/**
+ * Get ISO week number (1-53)
+ */
+function getWeekNumber(date: Date): number {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const dayNum = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  return Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
+}
+
+/**
+ * Calculate percentage change between current and previous values
+ */
+function calculatePercentageChange(current: number, previous: number): number | null {
+  if (previous === 0) return null
+  return ((current - previous) / previous) * 100
+}
+
+/**
+ * Calculate previous period metrics for comparison
+ */
+async function calculatePreviousPeriod(
+  venueId: string,
+  periodStart: Date,
+  grouping: HistoricalGrouping,
+): Promise<{ total_sales: number; total_orders: number }> {
+  const previousStart = new Date(periodStart)
+
+  // Calculate previous period start
+  switch (grouping) {
+    case HistoricalGrouping.DAILY:
+      previousStart.setDate(previousStart.getDate() - 1)
+      break
+    case HistoricalGrouping.WEEKLY:
+      previousStart.setDate(previousStart.getDate() - 7)
+      break
+    case HistoricalGrouping.MONTHLY:
+      previousStart.setMonth(previousStart.getMonth() - 1)
+      break
+    case HistoricalGrouping.QUARTERLY:
+      previousStart.setMonth(previousStart.getMonth() - 3)
+      break
+    case HistoricalGrouping.YEARLY:
+      previousStart.setFullYear(previousStart.getFullYear() - 1)
+      break
+  }
+
+  const previousEnd = getPeriodEnd(previousStart, grouping)
+
+  // Query previous period data
+  const result = await prisma.$queryRaw<Array<{ total_sales: Decimal; total_orders: bigint }>>`
+    SELECT
+      COALESCE(SUM(o.total), 0) as total_sales,
+      COALESCE(COUNT(DISTINCT o.id), 0) as total_orders
+    FROM "Order" o
+    WHERE o."venueId" = ${venueId}
+      AND o."createdAt" >= ${previousStart}
+      AND o."createdAt" < ${previousEnd}
+      AND o.status = 'COMPLETED'
+  `
+
+  if (result.length === 0) {
+    return { total_sales: 0, total_orders: 0 }
+  }
+
+  return {
+    total_sales: new Decimal(result[0].total_sales).toNumber(),
+    total_orders: Number(result[0].total_orders),
+  }
+}
+
+/**
+ * Get historical sales summaries grouped by time period
+ *
+ * @param venueId - Venue ID (tenant isolation)
+ * @param grouping - Time grouping (DAILY, WEEKLY, MONTHLY, QUARTERLY, YEARLY)
+ * @param startDate - Start of historical range
+ * @param endDate - End of historical range
+ * @param cursor - Pagination cursor (timestamp-based)
+ * @param limit - Number of periods to fetch (default 20)
+ * @returns Paginated list of historical summaries with comparisons
+ */
+export async function getHistoricalSummaries(
+  venueId: string,
+  grouping: HistoricalGrouping,
+  startDate: Date,
+  endDate: Date,
+  cursor?: string,
+  limit: number = 20,
+): Promise<PaginatedHistoricalData> {
+  // 1. Get venue timezone
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true },
+  })
+
+  if (!venue) {
+    throw new Error('Venue not found')
+  }
+
+  const timezone = venue.timezone || 'America/Mexico_City'
+
+  // 2. Build SQL query with DATE_TRUNC grouping
+  const truncateExpr = getTruncateExpression(grouping, timezone)
+
+  // Cursor condition (pagination)
+  const cursorCondition = cursor ? `AND ${truncateExpr} < ${`'${cursor}'`}::timestamp` : ''
+
+  // 3. Query aggregated data by period
+  const periodsRaw = await prisma.$queryRaw<
+    Array<{
+      period_start: Date
+      total_sales: Decimal
+      total_orders: bigint
+      total_products: bigint
+    }>
+  >`
+    SELECT
+      ${Prisma.raw(truncateExpr)} as period_start,
+      COALESCE(SUM(o.total), 0) as total_sales,
+      COALESCE(COUNT(DISTINCT o.id), 0) as total_orders,
+      COALESCE(SUM(oi.quantity), 0) as total_products
+    FROM "Order" o
+    LEFT JOIN "OrderItem" oi ON oi."orderId" = o.id
+    WHERE o."venueId" = ${venueId}
+      AND o."createdAt" >= ${startDate}
+      AND o."createdAt" <= ${endDate}
+      AND o.status = 'COMPLETED'
+      ${Prisma.raw(cursorCondition)}
+    GROUP BY period_start
+    ORDER BY period_start DESC
+    LIMIT ${limit + 1}
+  `
+
+  // Determine if there are more results
+  const hasMore = periodsRaw.length > limit
+  const periods = hasMore ? periodsRaw.slice(0, limit) : periodsRaw
+
+  // 4. For each period, calculate previous period for comparison
+  const periodsWithComparison = await Promise.all(
+    periods.map(async period => {
+      const previousPeriod = await calculatePreviousPeriod(venueId, period.period_start, grouping)
+
+      const totalSales = new Decimal(period.total_sales).toNumber()
+      const totalOrders = Number(period.total_orders)
+      const totalProducts = Number(period.total_products)
+      const averageOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0
+
+      return {
+        periodStart: period.period_start,
+        periodEnd: getPeriodEnd(period.period_start, grouping),
+        grouping,
+        label: formatPeriodLabel(period.period_start, grouping),
+        subtitle: formatPeriodSubtitle(period.period_start, grouping),
+        totalSales,
+        totalOrders,
+        totalProducts,
+        averageOrderValue,
+        salesChange: calculatePercentageChange(totalSales, previousPeriod.total_sales),
+        ordersChange: calculatePercentageChange(totalOrders, previousPeriod.total_orders),
+      }
+    }),
+  )
+
+  // 5. Build pagination cursor (last period start timestamp)
+  const nextCursor = hasMore && periods.length > 0 ? periods[periods.length - 1].period_start.toISOString() : null
+
+  return {
+    periods: periodsWithComparison,
+    pagination: {
+      nextCursor,
+      hasMore,
+    },
+  }
+}

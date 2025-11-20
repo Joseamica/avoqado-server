@@ -40,6 +40,7 @@ import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controll
 import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
 import * as tableController from '../controllers/tpv/table.tpv.controller'
 import * as floorElementController from '../controllers/tpv/floor-element.tpv.controller'
+import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 
 const router = express.Router()
 
@@ -1408,6 +1409,129 @@ router.get(
   checkPermission('shifts:read'),
   validateRequest(shiftsSummaryQuerySchema),
   shiftController.getShiftsSummary,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/reports/historical:
+ *   get:
+ *     tags:
+ *       - TPV Reports
+ *     summary: Get historical sales summaries grouped by time period
+ *     description: |
+ *       Retrieve aggregated sales data for multiple time periods with period-over-period comparisons.
+ *       Supports grouping by day, week, month, quarter, or year with automatic comparison calculations.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The ID of the venue
+ *       - in: query
+ *         name: grouping
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [DAILY, WEEKLY, MONTHLY, QUARTERLY, YEARLY]
+ *         description: Time grouping for aggregation
+ *       - in: query
+ *         name: startDate
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Start date for historical range (ISO 8601)
+ *       - in: query
+ *         name: endDate
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: End date for historical range (ISO 8601)
+ *       - in: query
+ *         name: cursor
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Pagination cursor (timestamp)
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of periods to return
+ *     responses:
+ *       200:
+ *         description: Historical summaries retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     periods:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           periodStart:
+ *                             type: string
+ *                             format: date-time
+ *                           periodEnd:
+ *                             type: string
+ *                             format: date-time
+ *                           grouping:
+ *                             type: string
+ *                             enum: [DAILY, WEEKLY, MONTHLY, QUARTERLY, YEARLY]
+ *                           label:
+ *                             type: string
+ *                             example: "15 Enero 2025"
+ *                           subtitle:
+ *                             type: string
+ *                             example: "Martes"
+ *                           totalSales:
+ *                             type: number
+ *                           totalOrders:
+ *                             type: integer
+ *                           totalProducts:
+ *                             type: integer
+ *                           averageOrderValue:
+ *                             type: number
+ *                           salesChange:
+ *                             type: number
+ *                             nullable: true
+ *                             description: Percentage change vs previous period
+ *                           ordersChange:
+ *                             type: number
+ *                             nullable: true
+ *                             description: Percentage change vs previous period
+ *                     pagination:
+ *                       type: object
+ *                       properties:
+ *                         nextCursor:
+ *                           type: string
+ *                           nullable: true
+ *                         hasMore:
+ *                           type: boolean
+ *       400:
+ *         description: Invalid parameters
+ *       404:
+ *         description: Venue not found
+ *       500:
+ *         description: Internal server error
+ */
+router.get(
+  '/venues/:venueId/reports/historical',
+  authenticateTokenMiddleware,
+  checkPermission('reports:read'),
+  reportsController.getHistoricalReports,
 )
 
 /**
