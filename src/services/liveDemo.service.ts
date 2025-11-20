@@ -80,11 +80,24 @@ export async function getOrCreateLiveDemo(sessionId: string): Promise<LiveDemoSe
 
     // If session expired or doesn't exist, create new one
     if (existingSession) {
-      logger.info(`⏰ Live demo session expired for ${sessionId}, creating new one`)
-      // Delete old session (cascade will clean up venue and staff)
-      await prisma.liveDemoSession.delete({
-        where: { id: existingSession.id },
-      })
+      logger.warn(`⏰ Live demo session expired for ${sessionId}`)
+      logger.warn(`   Old venue: ${existingSession.venue.name} (${existingSession.venueId})`)
+      logger.warn(`   Expired at: ${existingSession.expiresAt.toISOString()}`)
+
+      // Try to delete old session, but don't fail if it errors
+      // (cleanup script will handle stubborn sessions)
+      try {
+        logger.info(`🗑️ Attempting to delete expired session...`)
+        await prisma.liveDemoSession.delete({
+          where: { id: existingSession.id },
+        })
+        logger.info(`✅ Successfully deleted expired session`)
+      } catch (deleteError) {
+        logger.warn(`⚠️ Could not delete expired session (will be cleaned by cron job):`, deleteError)
+        // Continue anyway - we'll create a new session with the same sessionId
+        // This will cause a unique constraint error, so we need to handle it
+        throw new Error('EXPIRED_SESSION_CLEANUP_FAILED')
+      }
     }
 
     // Create new live demo session

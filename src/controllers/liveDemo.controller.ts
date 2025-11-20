@@ -19,6 +19,7 @@ export async function autoLoginController(req: Request, res: Response, next: Nex
   try {
     // Get or create session ID from cookie
     let sessionId = req.cookies?.liveDemoSessionId
+    let isRetry = false
 
     if (!sessionId) {
       sessionId = uuidv4()
@@ -28,7 +29,20 @@ export async function autoLoginController(req: Request, res: Response, next: Nex
     }
 
     // Get or create live demo session
-    const session = await liveDemoService.getOrCreateLiveDemo(sessionId)
+    let session
+    try {
+      session = await liveDemoService.getOrCreateLiveDemo(sessionId)
+    } catch (error: any) {
+      // If session cleanup failed, generate a new session ID and retry once
+      if (error.message === 'EXPIRED_SESSION_CLEANUP_FAILED' && !isRetry) {
+        logger.warn(`🔄 Session cleanup failed, generating new session ID`)
+        sessionId = uuidv4()
+        isRetry = true
+        session = await liveDemoService.getOrCreateLiveDemo(sessionId)
+      } else {
+        throw error
+      }
+    }
 
     // Set session cookie (HttpOnly, secure in production)
     res.cookie('liveDemoSessionId', sessionId, {
