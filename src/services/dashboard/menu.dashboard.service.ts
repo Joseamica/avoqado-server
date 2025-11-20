@@ -903,3 +903,249 @@ export async function reorderProducts(venueId: string, reorderData: ReorderProdu
 
   return prisma.$transaction(transactions)
 }
+
+interface ImportMenuData {
+  mode: 'merge' | 'replace'
+  categories: {
+    name: string
+    slug: string
+    products: {
+      name: string
+      sku: string
+      price: number
+      cost?: number
+      description?: string
+      type?: 'FOOD' | 'BEVERAGE' | 'ALCOHOL' | 'RETAIL' | 'SERVICE'
+      tags?: string[]
+      allergens?: string[]
+      trackInventory?: boolean
+      unit?: string
+      currentStock?: number
+      minStock?: number
+      modifierGroups?: {
+        name: string
+        required: boolean
+        allowMultiple: boolean
+        minSelections: number
+        maxSelections: number | null
+        modifiers: {
+          name: string
+          price: number
+        }[]
+      }[]
+    }[]
+  }[]
+}
+
+export async function importMenu(venueId: string, data: ImportMenuData) {
+  let categoriesCreated = 0
+  let productsCreated = 0
+  let productsUpdated = 0
+  let modifierGroupsCreated = 0
+  let modifiersCreated = 0
+
+  await prisma.$transaction(async tx => {
+    // REPLACE MODE: Delete all existing menu data
+    if (data.mode === 'replace') {
+      // Delete in correct order due to foreign keys
+      await tx.productModifierGroup.deleteMany({ where: { product: { venueId } } })
+      await tx.modifier.deleteMany({ where: { group: { venueId } } })
+      await tx.modifierGroup.deleteMany({ where: { venueId } })
+      await tx.product.deleteMany({ where: { venueId } })
+      await tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
+      await tx.menuCategory.deleteMany({ where: { venueId } })
+      await tx.menu.deleteMany({ where: { venueId } })
+    }
+
+    // Get or create default menu for imported items
+    let defaultMenu = await tx.menu.findFirst({
+      where: { venueId, name: 'Main Menu' },
+    })
+
+    if (!defaultMenu) {
+      defaultMenu = await tx.menu.create({
+        data: {
+          venueId,
+          name: 'Main Menu',
+          description: 'Imported menu',
+          active: true,
+          displayOrder: 0,
+        },
+      })
+    }
+
+    // Process categories and products
+    for (const [catIndex, categoryData] of data.categories.entries()) {
+      // Check if category exists by name
+      let category = await tx.menuCategory.findFirst({
+        where: { venueId, name: categoryData.name },
+      })
+
+      if (!category) {
+        // Create new category
+        category = await tx.menuCategory.create({
+          data: {
+            venueId,
+            name: categoryData.name,
+            slug: categoryData.slug,
+            displayOrder: catIndex,
+          },
+        })
+        categoriesCreated++
+
+        // Assign category to default menu
+        await tx.menuCategoryAssignment.create({
+          data: {
+            menuId: defaultMenu.id,
+            categoryId: category.id,
+            displayOrder: catIndex,
+          },
+        })
+      }
+
+      // Process products in this category
+      for (const [prodIndex, productData] of categoryData.products.entries()) {
+        // Check if product exists by SKU (merge mode)
+        const existingProduct = await tx.product.findFirst({
+          where: { venueId, sku: productData.sku },
+        })
+
+        let product
+        if (existingProduct) {
+          // Update existing product
+          product = await tx.product.update({
+            where: { id: existingProduct.id },
+            data: {
+              name: productData.name,
+              price: Math.round(productData.price * 100), // Convert to cents
+              cost: productData.cost ? Math.round(productData.cost * 100) : null,
+              description: productData.description || null,
+              type: productData.type || 'FOOD',
+              categoryId: category.id,
+              displayOrder: prodIndex,
+              tags: productData.tags || [],
+              allergens: productData.allergens || [],
+            },
+          })
+          productsUpdated++
+        } else {
+          // Create new product
+          product = await tx.product.create({
+            data: {
+              venueId,
+              name: productData.name,
+              sku: productData.sku,
+              price: Math.round(productData.price * 100), // Convert to cents
+              cost: productData.cost ? Math.round(productData.cost * 100) : null,
+              description: productData.description || null,
+              type: productData.type || 'FOOD',
+              categoryId: category.id,
+              displayOrder: prodIndex,
+              tags: productData.tags || [],
+              allergens: productData.allergens || [],
+            },
+          })
+          productsCreated++
+        }
+
+        // Handle inventory tracking if specified
+        if (productData.trackInventory) {
+          const existingInventory = await tx.inventory.findFirst({
+            where: { productId: product.id },
+          })
+
+          if (existingInventory) {
+            // Update existing inventory
+            await tx.inventory.update({
+              where: { id: existingInventory.id },
+              data: {
+                currentStock: productData.currentStock || 0,
+                minimumStock: productData.minStock || 0,
+              },
+            })
+          } else {
+            // Create new inventory entry
+            await tx.inventory.create({
+              data: {
+                productId: product.id,
+                venueId,
+                currentStock: productData.currentStock || 0,
+                minimumStock: productData.minStock || 0,
+              },
+            })
+          }
+        }
+
+        // Handle modifier groups
+        if (productData.modifierGroups && productData.modifierGroups.length > 0) {
+          // Remove existing modifier group assignments for this product
+          await tx.productModifierGroup.deleteMany({
+            where: { productId: product.id },
+          })
+
+          for (const [groupIndex, groupData] of productData.modifierGroups.entries()) {
+            // Check if modifier group exists by name
+            let modifierGroup = await tx.modifierGroup.findFirst({
+              where: { venueId, name: groupData.name },
+            })
+
+            if (!modifierGroup) {
+              // Create new modifier group
+              modifierGroup = await tx.modifierGroup.create({
+                data: {
+                  venueId,
+                  name: groupData.name,
+                  required: groupData.required,
+                  allowMultiple: groupData.allowMultiple,
+                  minSelections: groupData.minSelections,
+                  maxSelections: groupData.maxSelections,
+                },
+              })
+              modifierGroupsCreated++
+            }
+
+            // Assign modifier group to product
+            await tx.productModifierGroup.create({
+              data: {
+                productId: product.id,
+                groupId: modifierGroup.id,
+                displayOrder: groupIndex,
+              },
+            })
+
+            // Handle modifiers
+            for (const modifierData of groupData.modifiers) {
+              // Check if modifier exists by name in this group
+              const existingModifier = await tx.modifier.findFirst({
+                where: { groupId: modifierGroup.id, name: modifierData.name },
+              })
+
+              if (!existingModifier) {
+                // Create new modifier
+                await tx.modifier.create({
+                  data: {
+                    groupId: modifierGroup.id,
+                    name: modifierData.name,
+                    price: Math.round(modifierData.price * 100), // Convert to cents
+                  },
+                })
+                modifiersCreated++
+              }
+            }
+          }
+        }
+      }
+    }
+  })
+
+  return {
+    success: true,
+    message: 'Menu imported successfully',
+    stats: {
+      categories: categoriesCreated,
+      products: productsCreated + productsUpdated,
+      modifierGroups: modifierGroupsCreated,
+      modifiers: modifiersCreated,
+    },
+  }
+}

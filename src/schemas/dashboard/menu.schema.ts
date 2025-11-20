@@ -494,6 +494,59 @@ export const BulkUpdateProductsSchema = z.object({
 export type BulkUpdateProductsDto = z.infer<typeof BulkUpdateProductsSchema>['body']
 
 // ==========================================
+// MENU IMPORT SCHEMA
+// ==========================================
+
+export const ImportMenuSchema = z.object({
+  body: z.object({
+    mode: z.enum(['merge', 'replace']).default('merge'),
+    categories: z.array(
+      z.object({
+        name: z.string().min(1),
+        slug: z.string().min(1),
+        products: z.array(
+          z.object({
+            name: z.string().min(1),
+            sku: z.string().min(1),
+            price: z.number().nonnegative(),
+            cost: z.number().nonnegative().optional(),
+            description: z.string().optional(),
+            type: z.enum(['FOOD', 'BEVERAGE', 'ALCOHOL', 'RETAIL', 'SERVICE']).default('FOOD'),
+            tags: z.array(z.string()).optional(),
+            allergens: z.array(z.string()).optional(),
+            trackInventory: z.boolean().optional(),
+            unit: z.string().optional(),
+            currentStock: z.number().nonnegative().optional(),
+            minStock: z.number().nonnegative().optional(),
+            modifierGroups: z
+              .array(
+                z.object({
+                  name: z.string().min(1),
+                  required: z.boolean(),
+                  allowMultiple: z.boolean(),
+                  minSelections: z.number().nonnegative(),
+                  maxSelections: z.number().nonnegative().nullable(),
+                  modifiers: z.array(
+                    z.object({
+                      name: z.string().min(1),
+                      price: z.number().nonnegative(),
+                    }),
+                  ),
+                }),
+              )
+              .optional(),
+          }),
+        ),
+      }),
+    ),
+  }),
+  params: z.object({
+    venueId: z.string().cuid('Invalid venue ID format'),
+  }),
+})
+export type ImportMenuDto = z.infer<typeof ImportMenuSchema>['body']
+
+// ==========================================
 // COMMON PARAMETER SCHEMAS
 // ==========================================
 

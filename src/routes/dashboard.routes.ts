@@ -59,6 +59,7 @@ import {
   CloneMenuSchema,
   // Menu schemas
   CreateMenuSchema,
+  ImportMenuSchema,
   // Modifier schemas
   CreateModifierGroupSchema,
   CreateModifierSchema,
@@ -3642,6 +3643,14 @@ router.put(
   checkPermission('menu:update'),
   validateRequest(ReorderProductsSchema),
   menuController.reorderProductsHandler,
+)
+
+router.post(
+  '/venues/:venueId/menu/import',
+  authenticateTokenMiddleware,
+  checkPermission('menu:import'),
+  validateRequest(ImportMenuSchema),
+  menuController.importMenuHandler,
 )
 
 // Menu-Category assignments

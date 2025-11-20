@@ -9,6 +9,7 @@ import {
   ReorderMenusDto,
   ReorderProductsDto,
   AssignCategoryToMenuDto,
+  ImportMenuDto,
   // Modifier DTOs
   CreateModifierGroupDto,
   UpdateModifierGroupDto,
@@ -581,6 +582,26 @@ export async function reorderProductsHandler(
 
     await menuCategoryService.reorderProducts(venueId, req.body)
     res.status(200).json({ message: 'Products reordered successfully.' })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function importMenuHandler(
+  req: Request<{ venueId: string }, {}, ImportMenuDto>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Authentication context not found. Organization ID is missing.'))
+    }
+    await checkVenueAccess(orgId, venueId, req.authContext?.role || '')
+
+    const result = await menuCategoryService.importMenu(venueId, req.body)
+    res.status(200).json(result)
   } catch (error) {
     next(error)
   }
