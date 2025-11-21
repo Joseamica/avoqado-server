@@ -18,7 +18,7 @@ REQUIRED_SECRETS=(
 )
 
 # Obtener lista de secrets
-SECRETS_LIST=$(fly secrets list -a avoqado-server 2>&1)
+SECRETS_LIST=$(flyctl secrets list -a avoqado-server 2>&1)
 
 # Verificar cada secret
 MISSING_SECRETS=()
