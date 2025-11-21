@@ -7,6 +7,28 @@ import logger from '../../config/logger'
 import { Order, OrderStatus } from '@prisma/client'
 import { deductStockForRecipe } from './rawMaterial.service'
 
+/**
+ * Flatten order modifiers from nested structure to flat array
+ * Converts: { modifier: { id, name, price } } → { id, name, price }
+ */
+function flattenOrderModifiers(order: any): any {
+  if (!order) return order
+
+  return {
+    ...order,
+    items:
+      order.items?.map((item: any) => ({
+        ...item,
+        modifiers:
+          item.modifiers?.map((om: any) => ({
+            id: om.modifier?.id || om.id,
+            name: om.modifier?.name || om.name,
+            price: om.modifier?.price || om.price,
+          })) || [],
+      })) || [],
+  }
+}
+
 export async function getOrders(venueId: string, page: number, pageSize: number): Promise<PaginatedOrdersResponse> {
   if (!venueId) {
     throw new NotFoundError('Venue ID es requerido')
@@ -71,6 +93,11 @@ export async function getOrderById(orderId: string) {
         // Incluimos los productos de la orden
         include: {
           product: true,
+          modifiers: {
+            include: {
+              modifier: true,
+            },
+          },
         },
       },
     },
@@ -79,7 +106,7 @@ export async function getOrderById(orderId: string) {
   if (!order) {
     throw new NotFoundError(`Order with ID ${orderId} not found`)
   }
-  return order
+  return flattenOrderModifiers(order)
 }
 
 /**

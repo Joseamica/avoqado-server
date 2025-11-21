@@ -184,6 +184,19 @@ export async function getOrder(
     throw new NotFoundError('Order not found')
   }
 
+  // 🐛 DEBUG: Log raw Prisma response to see if modifiers are included
+  logger.info(`🔍 [GET ORDER] Order ${orderId} - Items count: ${order.items.length}`)
+  order.items.forEach((item, idx) => {
+    logger.info(`   Item ${idx + 1}: ${item.product.name}`)
+    logger.info(`      Modifiers count: ${item.modifiers?.length || 0}`)
+    if (item.modifiers && item.modifiers.length > 0) {
+      item.modifiers.forEach((om: any) => {
+        logger.info(`         - OrderItemModifier ID: ${om.id}`)
+        logger.info(`         - Modifier: ${om.modifier?.name || 'NULL'} (${om.modifier?.price || 'NULL'})`)
+      })
+    }
+  })
+
   // Calculate amount left to pay
   const orderTotal = Number(order.total || 0)
   const totalPayments = order.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
@@ -192,8 +205,22 @@ export async function getOrder(
   // Construct table name for display in Android app
   const tableName = order.table ? `Mesa ${order.table.number}` : null
 
+  const flattenedOrder = flattenOrderModifiers(order)
+
+  // 🐛 DEBUG: Log flattened response to verify flattening worked
+  logger.info(`🔍 [GET ORDER] After flattening - Items count: ${flattenedOrder.items.length}`)
+  flattenedOrder.items.forEach((item: any, idx: number) => {
+    logger.info(`   Item ${idx + 1}: ${item.product.name}`)
+    logger.info(`      Flattened modifiers count: ${item.modifiers?.length || 0}`)
+    if (item.modifiers && item.modifiers.length > 0) {
+      item.modifiers.forEach((mod: any) => {
+        logger.info(`         - ${mod.name} (${mod.price})`)
+      })
+    }
+  })
+
   return {
-    ...flattenOrderModifiers(order),
+    ...flattenedOrder,
     amount_left,
     tableName, // 🆕 Add computed tableName for Android MenuScreen title
   }

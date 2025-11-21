@@ -222,3 +222,53 @@ export async function deleteTpv(venueId: string, tpvId: string): Promise<void> {
 
   logger.info(`Terminal ${tpvId} eliminada del venue ${venueId}`)
 }
+
+/**
+ * Desactiva una terminal (limpia activatedAt para permitir reactivación).
+ * SUPERADMIN only: Permite regenerar código de activación para terminales activadas.
+ *
+ * @param venueId - El ID del venue.
+ * @param tpvId - El ID de la terminal.
+ * @returns La terminal desactivada.
+ */
+export async function deactivateTpv(venueId: string, tpvId: string): Promise<Terminal> {
+  // 1. Validar parámetros de entrada
+  if (!venueId) {
+    throw new NotFoundError('El ID del Venue es requerido.')
+  }
+  if (!tpvId) {
+    throw new NotFoundError('El ID del TPV es requerido.')
+  }
+
+  // 2. Verificar que la terminal existe y pertenece al venue
+  const existingTerminal = await prisma.terminal.findFirst({
+    where: {
+      id: tpvId,
+      venueId: venueId,
+    },
+  })
+
+  if (!existingTerminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
+  }
+
+  // 3. Verificar que la terminal está activada
+  if (!existingTerminal.activatedAt) {
+    throw new BadRequestError(`La terminal no está activada. No se puede desactivar una terminal que no está activada.`)
+  }
+
+  // 4. Limpiar activatedAt para permitir reactivación
+  const deactivatedTerminal = await prisma.terminal.update({
+    where: {
+      id: tpvId,
+    },
+    data: {
+      activatedAt: null,
+      updatedAt: new Date(),
+    },
+  })
+
+  logger.info(`Terminal ${tpvId} desactivada en venue ${venueId}. Se puede generar nuevo código de activación.`)
+
+  return deactivatedTerminal
+}

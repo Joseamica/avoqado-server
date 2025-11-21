@@ -248,6 +248,7 @@ export const addOrderItemsSchema = z.object({
           productId: z.string().cuid({ message: 'El ID del producto debe ser un CUID válido.' }),
           quantity: z.number().int().positive({ message: 'La cantidad debe ser un entero positivo.' }),
           notes: z.string().optional().nullable(),
+          modifierIds: z.array(z.string().cuid()).optional(), // ✅ FIX: Allow modifier IDs to be sent from Android
         }),
       )
       .min(1, { message: 'Debe proporcionar al menos un ítem.' }),

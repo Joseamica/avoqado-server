@@ -232,3 +232,23 @@ export async function deleteTpv(req: Request<{ venueId: string; tpvId: string }>
     next(error)
   }
 }
+
+/**
+ * Deactivate terminal (clear activatedAt to allow reactivation)
+ * SUPERADMIN only: Allows regenerating activation code for activated terminals
+ */
+export async function deactivateTpv(req: Request<{ venueId: string; tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, tpvId } = req.params
+
+    const deactivatedTerminal = await tpvDashboardService.deactivateTpv(venueId, tpvId)
+
+    res.status(200).json({
+      success: true,
+      message: 'Terminal desactivada exitosamente',
+      data: deactivatedTerminal,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

@@ -4,9 +4,11 @@ import multer from 'multer'
 import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { authorizeRole } from '../middlewares/authorizeRole.middleware'
 import { chatbotRateLimitMiddleware } from '../middlewares/chatbot-rate-limit.middleware'
 import { passwordResetRateLimiter } from '../middlewares/password-reset-rate-limit.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
+import { StaffRole } from '../security'
 
 // Importa StaffRole desde @prisma/client si ahí es donde está definido tu enum de Prisma
 // o desde donde lo hayas exportado como enum de TS (si es una copia manual)
@@ -3132,6 +3134,73 @@ router.put('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPerm
  *         description: Forbidden
  */
 router.delete('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:delete'), tpvController.deleteTpv)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}/deactivate:
+ *   patch:
+ *     tags: [TPV]
+ *     summary: Deactivate terminal (SUPERADMIN only)
+ *     description: |
+ *       Clears the activatedAt field to deactivate a terminal.
+ *       This allows generating a new activation code for the terminal.
+ *
+ *       **SUPERADMIN ONLY**: Only users with SUPERADMIN role can deactivate terminals.
+ *
+ *       **Use Cases:**
+ *       - Terminal needs to be reassigned to a different device
+ *       - Terminal activation was done incorrectly
+ *       - Device was lost/stolen and needs reactivation with new device
+ *
+ *       **Note:** This does NOT delete the terminal or its historical data.
+ *       After deactivation, a new activation code can be generated.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID to deactivate
+ *     responses:
+ *       200:
+ *         description: Terminal deactivated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Terminal desactivada exitosamente"
+ *                 data:
+ *                   type: object
+ *                   description: Updated terminal object with activatedAt set to null
+ *       400:
+ *         description: Terminal is not activated
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden - SUPERADMIN role required
+ *       404:
+ *         description: Terminal not found
+ */
+router.patch(
+  '/venues/:venueId/tpv/:tpvId/deactivate',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  tpvController.deactivateTpv,
+)
 
 /**
  * @openapi
