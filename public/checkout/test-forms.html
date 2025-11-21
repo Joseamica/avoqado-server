@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Blumon Test Forms - Pre-filled Scenarios</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 40px 20px;
+        min-height: 100vh;
+      }
+      .container {
+        max-width: 1400px;
+        margin: 0 auto;
+      }
+      h1 {
+        color: white;
+        text-align: center;
+        margin-bottom: 40px;
+        font-size: 32px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 30px;
+        margin-bottom: 40px;
+      }
+      .scenario-title {
+        grid-column: 1 / -1;
+        color: white;
+        font-size: 24px;
+        font-weight: 600;
+        padding: 15px;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        text-align: center;
+        margin-top: 20px;
+      }
+      .form-card {
+        background: white;
+        border-radius: 16px;
+        padding: 30px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      }
+      .form-header {
+        text-align: center;
+        margin-bottom: 25px;
+      }
+      .form-header h3 {
+        color: #333;
+        font-size: 20px;
+        margin-bottom: 5px;
+      }
+      .form-header .card-type {
+        color: #666;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .form-group {
+        margin-bottom: 20px;
+      }
+      .form-group label {
+        display: block;
+        color: #666;
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .input-wrap {
+        position: relative;
+      }
+      input {
+        width: 100%;
+        padding: 14px 16px;
+        border: 2px solid #e0e0e0;
+        border-radius: 8px;
+        font-size: 16px;
+        font-family: 'Courier New', monospace;
+        transition: all 0.2s;
+      }
+      input:focus {
+        outline: none;
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+      }
+      .brands {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        gap: 6px;
+      }
+      .brand {
+        font-size: 10px;
+        font-weight: bold;
+        padding: 4px 8px;
+        border-radius: 4px;
+        background: #f0f0f0;
+        color: #999;
+        opacity: 0.5;
+      }
+      .brand.active {
+        opacity: 1;
+        color: white;
+      }
+      #visa.active {
+        background: #1a1f71;
+      }
+      #mc.active {
+        background: #eb001b;
+      }
+      #amex.active {
+        background: #006fcf;
+      }
+      button {
+        width: 100%;
+        padding: 16px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          transform 0.2s,
+          box-shadow 0.2s;
+        margin-top: 10px;
+      }
+      button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+      }
+      button:active {
+        transform: translateY(0);
+      }
+      .test-info {
+        background: rgba(255, 255, 255, 0.15);
+        color: white;
+        padding: 12px;
+        border-radius: 8px;
+        font-size: 12px;
+        margin-top: 15px;
+        text-align: center;
+      }
+      .status {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: 600;
+        margin-top: 8px;
+      }
+      .status.success {
+        background: #10b981;
+        color: white;
+      }
+      .status.error {
+        background: #ef4444;
+        color: white;
+      }
+      .status.warning {
+        background: #f59e0b;
+        color: white;
+      }
+
+      @media (max-width: 1024px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🧪 Blumon Payment Test Forms</h1>
+      <p style="color: white; text-align: center; margin-bottom: 30px; font-size: 14px">
+        Pre-filled test cards for rapid scenario testing • Mock service enabled
+      </p>
+
+      <!-- SUCCESSFUL PAYMENTS -->
+      <div class="scenario-title">✅ Successful Payments</div>
+      <div class="grid">
+        <!-- AMEX Success -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Successful Payment</h3>
+            <div class="card-type">AMEX Test Card</div>
+            <div class="status success">APPROVED</div>
+          </div>
+          <form class="payment-form" data-card="378282246310005" data-exp="12/25" data-cvv="1234" data-name="John Doe">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="3782 822463 10005" />
+                <div class="brands">
+                  <div class="brand" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand active" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="12 / 25" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="1234" maxlength="4" value="1234" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="John Doe" />
+            </div>
+            <button type="submit">Pay Now - AMEX Success</button>
+            <div class="test-info">Card: 3782 822463 10005 • Expected: APPROVED</div>
+          </form>
+        </div>
+
+        <!-- VISA Success -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Successful Payment</h3>
+            <div class="card-type">VISA Test Card</div>
+            <div class="status success">APPROVED</div>
+          </div>
+          <form class="payment-form" data-card="4111111111111111" data-exp="12/25" data-cvv="123" data-name="Jane Smith">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="4111 1111 1111 1111" />
+                <div class="brands">
+                  <div class="brand active" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="12 / 25" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="123" maxlength="3" value="123" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="Jane Smith" />
+            </div>
+            <button type="submit">Pay Now - VISA Success</button>
+            <div class="test-info">Card: 4111 1111 1111 1111 • Expected: APPROVED</div>
+          </form>
+        </div>
+      </div>
+
+      <!-- DECLINED PAYMENTS -->
+      <div class="scenario-title">❌ Payment Declined</div>
+      <div class="grid">
+        <!-- AMEX Declined (using limit exceeded pattern) -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Payment Declined</h3>
+            <div class="card-type">AMEX Test Card</div>
+            <div class="status error">DECLINED</div>
+          </div>
+          <form class="payment-form" data-card="378282246310013" data-exp="12/25" data-cvv="1234" data-name="Test Declined">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="3782 822463 10013" />
+                <div class="brands">
+                  <div class="brand" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand active" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="12 / 25" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="1234" maxlength="4" value="1234" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="Test Declined" />
+            </div>
+            <button type="submit">Pay Now - AMEX Declined</button>
+            <div class="test-info">Card: 3782 822463 10013 • Expected: CARD_DECLINED</div>
+          </form>
+        </div>
+
+        <!-- VISA Declined -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Payment Declined</h3>
+            <div class="card-type">VISA Test Card</div>
+            <div class="status error">DECLINED</div>
+          </div>
+          <form class="payment-form" data-card="4000000000000002" data-exp="12/25" data-cvv="123" data-name="Declined Test">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="4000 0000 0000 0002" />
+                <div class="brands">
+                  <div class="brand active" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="12 / 25" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="123" maxlength="3" value="123" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="Declined Test" />
+            </div>
+            <button type="submit">Pay Now - VISA Declined</button>
+            <div class="test-info">Card: 4000 0000 0000 0002 • Expected: CARD_DECLINED</div>
+          </form>
+        </div>
+      </div>
+
+      <!-- INSUFFICIENT FUNDS -->
+      <div class="scenario-title">💸 Insufficient Funds</div>
+      <div class="grid">
+        <!-- AMEX Insufficient (using a variation) -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Insufficient Funds</h3>
+            <div class="card-type">AMEX Test Card</div>
+            <div class="status warning">INSUFFICIENT_FUNDS</div>
+          </div>
+          <form class="payment-form" data-card="378282246310021" data-exp="12/25" data-cvv="1234" data-name="Low Balance">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="3782 822463 10021" />
+                <div class="brands">
+                  <div class="brand" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand active" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="12 / 25" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="1234" maxlength="4" value="1234" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="Low Balance" />
+            </div>
+            <button type="submit">Pay Now - AMEX Insufficient</button>
+            <div class="test-info">Card: 3782 822463 10021 • Expected: INSUFFICIENT_FUNDS</div>
+          </form>
+        </div>
+
+        <!-- VISA Insufficient Funds -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Insufficient Funds</h3>
+            <div class="card-type">VISA Test Card</div>
+            <div class="status warning">INSUFFICIENT_FUNDS</div>
+          </div>
+          <form class="payment-form" data-card="4000000000009995" data-exp="12/25" data-cvv="123" data-name="No Funds">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="4000 0000 0000 9995" />
+                <div class="brands">
+                  <div class="brand active" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="12 / 25" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="123" maxlength="3" value="123" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="No Funds" />
+            </div>
+            <button type="submit">Pay Now - VISA Insufficient</button>
+            <div class="test-info">Card: 4000 0000 0000 9995 • Expected: INSUFFICIENT_FUNDS</div>
+          </form>
+        </div>
+      </div>
+
+      <!-- EXPIRED CARD -->
+      <div class="scenario-title">📅 Expired Card</div>
+      <div class="grid">
+        <!-- AMEX Expired (using past expiry) -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Expired Card</h3>
+            <div class="card-type">AMEX Test Card</div>
+            <div class="status error">EXPIRED_CARD</div>
+          </div>
+          <form class="payment-form" data-card="378282246310005" data-exp="01/20" data-cvv="1234" data-name="Expired Amex">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="3782 822463 10005" />
+                <div class="brands">
+                  <div class="brand" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand active" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="01 / 20" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="1234" maxlength="4" value="1234" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="Expired Amex" />
+            </div>
+            <button type="submit">Pay Now - AMEX Expired</button>
+            <div class="test-info">Card: 3782 822463 10005 • Exp: 01/20 • Expected: EXPIRED_CARD</div>
+          </form>
+        </div>
+
+        <!-- VISA Expired -->
+        <div class="form-card">
+          <div class="form-header">
+            <h3>Expired Card</h3>
+            <div class="card-type">VISA Test Card</div>
+            <div class="status error">EXPIRED_CARD</div>
+          </div>
+          <form class="payment-form" data-card="4000000000000069" data-exp="01/20" data-cvv="123" data-name="Expired Visa">
+            <div class="form-group">
+              <label>Card Number</label>
+              <div class="input-wrap">
+                <input type="text" class="card-number" placeholder="1234 5678 9012 3456" maxlength="19" value="4000 0000 0000 0069" />
+                <div class="brands">
+                  <div class="brand active" id="visa">VISA</div>
+                  <div class="brand" id="mc">MC</div>
+                  <div class="brand" id="amex">AMEX</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="form-group">
+                <label>Expiry Date</label>
+                <input type="text" class="expiry" placeholder="MM / YY" maxlength="9" value="01 / 20" />
+              </div>
+              <div class="form-group">
+                <label>CVV</label>
+                <input type="text" class="cvv" placeholder="123" maxlength="3" value="123" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Cardholder Name</label>
+              <input type="text" class="name" placeholder="John Doe" value="Expired Visa" />
+            </div>
+            <button type="submit">Pay Now - VISA Expired</button>
+            <div class="test-info">Card: 4000 0000 0000 0069 • Exp: 01/20 • Expected: EXPIRED_CARD</div>
+          </form>
+        </div>
+      </div>
+
+      <div
+        style="text-align: center; color: white; margin-top: 40px; padding: 20px; background: rgba(255, 255, 255, 0.1); border-radius: 12px"
+      >
+        <p style="font-size: 14px; margin-bottom: 10px">
+          <strong>Quick Testing:</strong> Click any "Pay Now" button to test pre-filled scenarios
+        </p>
+        <p style="font-size: 12px; opacity: 0.8">Forms submit to payment.html iframe • USE_BLUMON_MOCK=true must be enabled</p>
+      </div>
+    </div>
+
+    <!-- Test forms logic (extracted for CSP compliance) -->
+    <script src="/checkout/test-forms.js"></script>
+  </body>
+</html>

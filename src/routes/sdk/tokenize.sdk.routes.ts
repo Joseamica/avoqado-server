@@ -71,4 +71,85 @@ router.post('/tokenize', tokenizeLimiter, tokenizeCard)
  */
 router.post('/charge', tokenizeLimiter, chargeWithToken)
 
+/**
+ * POST /sdk/test-session
+ *
+ * Creates a test checkout session (NO AUTH REQUIRED - TESTING ONLY)
+ *
+ * Body:
+ * {
+ *   amount: number,
+ *   currency?: string (default: "MXN"),
+ *   description?: string
+ * }
+ *
+ * Response:
+ * {
+ *   success: true,
+ *   sessionId: string
+ * }
+ */
+router.post('/test-session', async (req, res, next) => {
+  try {
+    const { default: prisma } = await import('@/utils/prismaClient')
+    const { default: crypto } = await import('crypto')
+    const { CheckoutStatus } = await import('@prisma/client')
+
+    const { amount = 10.0, currency = 'MXN', description = 'Test payment' } = req.body
+
+    // Find merchant with real Blumon credentials
+    // Try "Tienda Web (Blumon)" first (doesn't have merchantId in credentials)
+    let merchant = await prisma.ecommerceMerchant.findFirst({
+      where: {
+        channelName: 'Tienda Web (Blumon)',
+        sandboxMode: true,
+        active: true,
+      },
+    })
+
+    // Fallback to "Web Test" if not found
+    if (!merchant) {
+      merchant = await prisma.ecommerceMerchant.findFirst({
+        where: {
+          channelName: 'Web Test',
+          sandboxMode: true,
+          active: true,
+        },
+      })
+    }
+
+    if (!merchant) {
+      throw new Error('No test merchant found. Run: npx ts-node -r tsconfig-paths/register scripts/blumon-authenticate-master.ts')
+    }
+
+    // Create checkout session
+    const sessionId = `cs_test_${crypto.randomBytes(16).toString('hex')}`
+    const expiresAt = new Date()
+    expiresAt.setHours(expiresAt.getHours() + 24)
+
+    const session = await prisma.checkoutSession.create({
+      data: {
+        sessionId,
+        ecommerceMerchantId: merchant.id,
+        amount,
+        currency,
+        description,
+        status: CheckoutStatus.PENDING,
+        expiresAt,
+        metadata: {
+          test: true,
+          createdBy: 'test-endpoint',
+        },
+      },
+    })
+
+    res.status(201).json({
+      success: true,
+      sessionId: session.sessionId,
+    })
+  } catch (error: any) {
+    next(error)
+  }
+})
+
 export default router

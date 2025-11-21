@@ -180,6 +180,8 @@ export class BlumonEcommerceMockService implements IBlumonEcommerceService {
       amount: request.amount,
       currency: request.currency,
       orderId: request.orderId,
+      merchantId: request.merchantId,
+      reference: request.reference,
       cardToken: request.cardToken.substring(0, 25) + '...',
     })
 

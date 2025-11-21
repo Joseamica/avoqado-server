@@ -198,48 +198,47 @@ export class BlumonEcommerceService implements IBlumonEcommerceService {
    */
   async authorizePayment(request: BlumonAuthorizeRequest): Promise<BlumonAuthorizeResponse> {
     try {
-      logger.info('💳 Authorizing payment with Blumon', {
+      logger.info('💳 Charging payment with Blumon', {
         environment: this.environment,
         amount: request.amount,
         currency: request.currency,
-        orderId: request.orderId,
       })
 
-      // Call Blumon authorization API
-      const response = await this.client.post(
-        '/ecommerce/authorization',
-        {
-          amount: request.amount.toFixed(2),
-          currency: request.currency,
-          noPresentCardData: {
-            cardToken: request.cardToken,
-            cvv: request.cvv,
-          },
-          orderId: request.orderId,
+      // Build charge request payload (Blumon official format)
+      // ⚠️ IMPORTANT: Only send fields documented in Blumon API
+      // orderId, reference, merchantId are NOT part of the official spec
+      const authPayload: any = {
+        amount: request.amount.toFixed(2),
+        currency: request.currency,
+        noPresentCardData: {
+          cardToken: request.cardToken,
+          cvv: request.cvv,
         },
-        {
-          headers: {
-            Authorization: `Bearer ${request.accessToken}`,
-          },
+      }
+
+      // Call Blumon charge API (official endpoint)
+      const response = await this.client.post('/ecommerce/charge', authPayload, {
+        headers: {
+          Authorization: `Bearer ${request.accessToken}`,
         },
-      )
+      })
 
       const data = response.data
 
       // Log the full Blumon response for debugging
-      logger.info('📥 Blumon authorization response', {
-        success: data.success,
+      logger.info('📥 Blumon charge response', {
         status: data.status,
-        authorizationId: data.authorizationId,
-        fullResponse: JSON.stringify(data),
+        transactionId: data.id,
+        authorization: data.dataResponse?.authorization,
+        description: data.dataResponse?.description,
       })
 
-      if (!data.success) {
+      // Blumon uses "status" field (not "success")
+      if (!data.status) {
         // Properly serialize error if it's an object
-        const errorMessage =
-          typeof data.error === 'object' ? JSON.stringify(data.error) : data.error || data.message || 'Authorization failed'
+        const errorMessage = typeof data.error === 'object' ? JSON.stringify(data.error) : data.error || data.message || 'Charge failed'
 
-        logger.error('❌ Blumon authorization failed', {
+        logger.error('❌ Blumon charge failed', {
           errorData: JSON.stringify(data.error || {}),
           message: data.message,
           fullResponse: JSON.stringify(data),
@@ -248,19 +247,20 @@ export class BlumonEcommerceService implements IBlumonEcommerceService {
         throw new BadRequestError(errorMessage)
       }
 
-      logger.info('✅ Payment authorized successfully', {
-        authorizationId: data.authorizationId,
-        transactionId: data.transactionId,
+      logger.info('✅ Payment charged successfully', {
+        transactionId: data.id,
+        authorizationCode: data.dataResponse?.authorization,
+        description: data.dataResponse?.description,
       })
 
       return {
-        authorizationId: data.authorizationId || data.id,
-        transactionId: data.transactionId,
-        status: data.status,
-        authorizationCode: data.authorizationCode,
+        authorizationId: data.id, // Blumon's transaction ID
+        transactionId: data.id,
+        status: 'APPROVED',
+        authorizationCode: data.dataResponse?.authorization,
       }
     } catch (error: any) {
-      logger.error('❌ Payment authorization failed', {
+      logger.error('❌ Payment charge failed', {
         error: error.message,
         statusCode: error.response?.status,
         responseData: JSON.stringify(error.response?.data || {}),
@@ -272,7 +272,7 @@ export class BlumonEcommerceService implements IBlumonEcommerceService {
         }),
       })
 
-      throw new BadRequestError(error.response?.data?.message || error.message || 'Failed to authorize payment')
+      throw new BadRequestError(error.response?.data?.message || error.message || 'Failed to charge payment')
     }
   }
 

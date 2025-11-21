@@ -30,6 +30,8 @@ export interface BlumonAuthorizeRequest {
   cardToken: string // Token from tokenization
   cvv: string // CVV still required by Blumon
   orderId: string // Unique order/session ID
+  merchantId?: string // Blumon merchant ID (routes payment to merchant's account)
+  reference?: string // Reference for reconciliation (shows in Blumon dashboard & webhook)
 }
 
 export interface BlumonAuthorizeResponse {

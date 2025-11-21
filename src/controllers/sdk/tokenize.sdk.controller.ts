@@ -311,6 +311,9 @@ export async function chargeWithToken(req: Request, res: Response) {
 
     const blumonService = getBlumonEcommerceService(session.ecommerceMerchant.sandboxMode)
 
+    // Extract merchantId from provider credentials (if available)
+    const blumonMerchantId = credentials.blumonMerchantId
+
     const authResult = await blumonService.authorizePayment({
       accessToken,
       amount: Number(session.amount), // Convert Decimal to number
@@ -318,6 +321,8 @@ export async function chargeWithToken(req: Request, res: Response) {
       cardToken,
       cvv, // Still required by Blumon
       orderId: sessionId,
+      merchantId: blumonMerchantId, // Routes payment to merchant's account
+      reference: `session_${sessionId}`, // Shows in Blumon dashboard & webhook
     })
 
     // 4. Update session

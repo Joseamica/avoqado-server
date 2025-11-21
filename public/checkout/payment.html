@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Pago Seguro v3.4 - Prefill Fixed</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #f6f9fc;
+        padding: 20px;
+      }
+      .container {
+        max-width: 550px;
+        margin: 0 auto;
+        background: white;
+        padding: 50px 60px;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      }
+      .amount {
+        text-align: center;
+        font-size: 48px;
+        font-weight: 600;
+        color: #1a1f36;
+        margin-bottom: 40px;
+        padding-bottom: 40px;
+        border-bottom: 1px solid #e6ebf1;
+      }
+      .field {
+        margin-bottom: 24px;
+      }
+      label {
+        display: block;
+        margin-bottom: 10px;
+        font-size: 14px;
+        font-weight: 500;
+        color: #8898aa;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .input-wrap {
+        position: relative;
+      }
+      input {
+        width: 100%;
+        padding: 16px;
+        border: 1px solid #e6ebf1;
+        border-radius: 6px;
+        font-size: 18px;
+        color: #1a1f36;
+        transition: all 0.15s;
+      }
+      input:focus {
+        outline: none;
+        border-color: #635bff;
+        box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.1);
+      }
+      input.valid {
+        border-color: #0fda6a;
+      }
+      input.invalid {
+        border-color: #fa755a;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .brands {
+        position: absolute;
+        right: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        gap: 6px;
+        pointer-events: none;
+      }
+      .brand {
+        width: 28px;
+        height: 18px;
+        background: #f6f9fc;
+        border: 1px solid #e6ebf1;
+        border-radius: 3px;
+        font-size: 8px;
+        font-weight: 700;
+        color: #aab7c4;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.5;
+      }
+      .brand.active {
+        opacity: 1;
+        border-color: #635bff;
+        color: #635bff;
+        background: white;
+      }
+      button {
+        width: 100%;
+        padding: 18px;
+        background: #635bff;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font-size: 18px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: 12px;
+      }
+      button:hover {
+        background: #5548e0;
+      }
+      button:disabled {
+        background: #aab7c4;
+        cursor: not-allowed;
+      }
+      .error {
+        background: #fff6f6;
+        border: 1px solid #ffcfcf;
+        color: #fa755a;
+        padding: 12px;
+        border-radius: 6px;
+        margin-bottom: 20px;
+        font-size: 14px;
+        display: none;
+      }
+      .error.show {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="amount" id="amount">$0.00 MXN</div>
+      <div class="error" id="error"></div>
+
+      <form id="form">
+        <div class="field">
+          <label>NÚMERO DE TARJETA</label>
+          <div class="input-wrap">
+            <input type="text" id="cardnum" placeholder="1234 5678 9012 3456" maxlength="19" autocomplete="off" inputmode="numeric" />
+            <div class="brands">
+              <div class="brand" id="visa">VISA</div>
+              <div class="brand" id="mc">MC</div>
+              <div class="brand" id="amex">AMEX</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label>VENCIMIENTO</label>
+            <input type="text" id="expiry" placeholder="MM / AA" maxlength="7" autocomplete="off" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label>CVV</label>
+            <input type="text" id="cvv" placeholder="123" maxlength="4" autocomplete="off" inputmode="numeric" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>NOMBRE DEL TITULAR</label>
+          <input type="text" id="name" placeholder="JOSÉ GARCÍA" autocomplete="off" />
+        </div>
+
+        <button type="submit" id="btn">Pagar <span id="btnamt">$0.00</span></button>
+      </form>
+    </div>
+
+    <!-- Payment form logic (extracted for CSP compliance) -->
+    <script src="/checkout/payment.js"></script>
+  </body>
+</html>
