@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as availableBalanceService from '../../services/dashboard/availableBalance.dashboard.service'
 import logger from '../../config/logger'
+import { AuthenticationError } from '../../errors/AppError'
 
 /**
  * Available Balance Dashboard Controller
@@ -133,7 +134,11 @@ export async function simulateTransaction(
 ): Promise<void> {
   try {
     const { venueId } = req.params
-    const userId = (req as any).user?.id || 'unknown' // Get user from auth middleware
+    const userId = req.authContext?.userId
+
+    if (!userId) {
+      throw new AuthenticationError('User not authenticated')
+    }
 
     const { amount, cardType, transactionDate, transactionTime } = req.body
 

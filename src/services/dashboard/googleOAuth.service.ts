@@ -272,7 +272,38 @@ export async function loginWithGoogle(
     throw new AuthenticationError('Account is inactive')
   }
 
+  // World-Class Pattern (Stripe/Shopify): Allow OWNER login without venues if onboarding incomplete
+  // This prevents chicken-and-egg problem: User needs to login to complete onboarding, but onboarding creates first venue
   if (staff.venues.length === 0) {
+    // Check if user has OWNER role (primary owner created during signup)
+    const organization = staff.organization
+    const hasOwnerRole = staff.email === organization.email
+
+    // If OWNER and onboarding not completed, allow login with placeholder venueId
+    if (hasOwnerRole && !organization.onboardingCompletedAt) {
+      // Generate token with placeholder venueId for onboarding flow
+      const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, 'pending', StaffRole.OWNER)
+      const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+
+      // Return with onboarding flag - same structure as normal login
+      return {
+        accessToken,
+        refreshToken,
+        staff: {
+          id: staff.id,
+          email: staff.email,
+          firstName: staff.firstName,
+          lastName: staff.lastName,
+          organizationId: staff.organizationId,
+          photoUrl: staff.photoUrl,
+          role: StaffRole.OWNER, // CRITICAL: Include role so frontend can detect OWNER status for onboarding redirect
+          venues: [], // Empty venues array (user needs to complete onboarding)
+        },
+        isNewUser,
+      }
+    }
+
+    // Not OWNER or onboarding completed but no venue access → error
     throw new ForbiddenError('No venue access assigned')
   }
 

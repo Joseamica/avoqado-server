@@ -6,7 +6,8 @@ services:
     region: oregon
     autoDeploy: false
     branch: develop
-    buildCommand: npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
+    buildCommand:
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
     startCommand: npm start
     healthCheckPath: /health
     envVars:

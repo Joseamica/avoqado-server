@@ -200,15 +200,19 @@ export class BlumonEcommerceService implements IBlumonEcommerceService {
     try {
       logger.info('💳 Charging payment with Blumon', {
         environment: this.environment,
-        amount: request.amount,
+        rawAmount: request.amount,
+        amountType: typeof request.amount,
+        formattedAmount: parseFloat(request.amount.toFixed(2)),
         currency: request.currency,
       })
 
       // Build charge request payload (Blumon official format)
       // ⚠️ IMPORTANT: Only send fields documented in Blumon API
       // orderId, reference, merchantId are NOT part of the official spec
+      // ⚠️ CRITICAL: Blumon expects amount as FLOAT (number), NOT string
+      // toFixed(2) returns string "10.00", we need number 10.00
       const authPayload: any = {
-        amount: request.amount.toFixed(2),
+        amount: parseFloat(request.amount.toFixed(2)),
         currency: request.currency,
         noPresentCardData: {
           cardToken: request.cardToken,
