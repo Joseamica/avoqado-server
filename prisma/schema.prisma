@@ -167,7 +167,8 @@ model Venue {
   notificationPreferences NotificationPreference[]
 
   // AI Training
-  chatTrainingData ChatTrainingData[] @relation("VenueChatTraining")
+  chatTrainingData   ChatTrainingData[]  @relation("VenueChatTraining")
+  chatbotTokenBudget ChatbotTokenBudget?
 
   // Payment Provider Integration
   paymentConfig           VenuePaymentConfig?
@@ -178,7 +179,7 @@ model Venue {
   settlementSimulations   SettlementSimulation[]
   settlementIncidents     SettlementIncident[]
   settlementConfirmations SettlementConfirmation[]
-  ecommerceMerchants      EcommerceMerchant[] @relation("VenueEcommerceMerchants") // ⭐ E-commerce sales channels for this venue
+  ecommerceMerchants      EcommerceMerchant[]      @relation("VenueEcommerceMerchants") // ⭐ E-commerce sales channels for this venue
 
   // ✅ NEW: Inventory Management
   rawMaterials         RawMaterial[]
@@ -1195,7 +1196,7 @@ model Area {
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
 
-  tables        Table[]        // Un área tiene muchas mesas
+  tables        Table[] // Un área tiene muchas mesas
   floorElements FloorElement[] // Elementos decorativos del área (paredes, barras, etc.)
 
   createdAt DateTime @default(now())
@@ -1275,8 +1276,8 @@ model FloorElement {
   endY Float? // End point Y coordinate
 
   // Metadata
-  label  String?  // "Cocina", "Baño", "Entrada", "Barra"
-  color  String?  // Hex color (e.g., "#424242")
+  label  String? // "Cocina", "Baño", "Entrada", "Barra"
+  color  String? // Hex color (e.g., "#424242")
   active Boolean @default(true) // Visibility toggle
 
   createdAt DateTime @default(now())
@@ -2218,8 +2219,8 @@ model EcommerceMerchant {
   pricingStructure   VenuePricingStructure? @relation(fields: [pricingStructureId], references: [id])
 
   // Webhook configuration (optional - to notify the client)
-  webhookUrl    String?  // "https://cliente.com/webhooks/avoqado"
-  webhookSecret String?  // HMAC secret for signature (stored as hash, not encrypted)
+  webhookUrl    String? // "https://cliente.com/webhooks/avoqado"
+  webhookSecret String? // HMAC secret for signature (stored as hash, not encrypted)
   webhookEvents String[] @default(["payment.completed", "payment.failed"])
 
   // Dashboard access
@@ -3624,6 +3625,134 @@ enum ChatProcessingStatus {
   PENDING
   PROCESSED
   APPLIED
+}
+
+// ==========================================
+// NOTE: CHATBOT TOKEN BUDGET SYSTEM
+// Tracks token usage per venue with soft limits,
+// overage tracking, and Stripe integration for purchases
+// ==========================================
+
+model ChatbotTokenBudget {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Monthly budget configuration
+  monthlyFreeTokens  Int      @default(10000) // Free tokens per month (10K default)
+  currentMonthUsed   Int      @default(0) // Tokens used this month
+  currentPeriodStart DateTime @default(now()) // Start of current billing period
+  currentPeriodEnd   DateTime // End of current billing period
+
+  // Extra tokens (purchased/recharged)
+  extraTokensBalance Int @default(0) // Purchased tokens available
+
+  // Overage tracking (soft limit - allows usage beyond free + extra)
+  overageTokensUsed   Int     @default(0) // Tokens used beyond free + extra
+  overageWarningShown Boolean @default(false) // Has user seen overage warning this period
+
+  // Auto-recharge settings
+  autoRechargeEnabled   Boolean @default(false) // Enable automatic token purchase
+  autoRechargeThreshold Int     @default(1000) // Recharge when below this many tokens
+  autoRechargeAmount    Int     @default(10000) // How many tokens to purchase
+
+  // Stripe integration for token purchases
+  stripeTokenProductId String? // Stripe product ID for token packs
+  stripePriceId        String? // Default price ID for token packs
+
+  // Lifetime statistics
+  totalTokensUsed      BigInt  @default(0) // Total tokens ever consumed
+  totalTokensPurchased BigInt  @default(0) // Total tokens ever purchased
+  totalAmountSpent     Decimal @default(0) @db.Decimal(12, 2) // Total USD spent on tokens
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  usageRecords TokenUsageRecord[]
+  purchases    TokenPurchase[]
+
+  @@index([venueId])
+  @@index([currentPeriodEnd])
+}
+
+model TokenUsageRecord {
+  id       String             @id @default(cuid())
+  budgetId String
+  budget   ChatbotTokenBudget @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+
+  // User who made the query
+  userId String
+
+  // Token consumption details
+  promptTokens     Int // Input tokens (question + context)
+  completionTokens Int // Output tokens (response)
+  totalTokens      Int // Sum of prompt + completion
+
+  // Query context
+  queryType      TokenQueryType // Type of query for analytics
+  trainingDataId String? // Link to ChatTrainingData for audit trail
+
+  // Cost tracking
+  estimatedCost Decimal @db.Decimal(8, 6) // Cost in USD (for analytics)
+
+  createdAt DateTime @default(now())
+
+  @@index([budgetId])
+  @@index([createdAt])
+  @@index([userId])
+  @@index([queryType])
+}
+
+model TokenPurchase {
+  id       String             @id @default(cuid())
+  budgetId String
+  budget   ChatbotTokenBudget @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+
+  // Purchase details
+  tokenAmount Int // Number of tokens purchased
+  amountPaid  Decimal @db.Decimal(10, 2) // Amount paid in venue currency
+
+  // Stripe tracking
+  stripePaymentIntentId String? @unique // Stripe payment intent ID
+  stripeInvoiceId       String? // Stripe invoice ID (for invoice-based purchases)
+  stripeReceiptUrl      String? // Stripe hosted invoice URL for viewing receipt
+  stripeInvoicePdfUrl   String? // Stripe invoice PDF URL for downloading
+
+  // Purchase metadata
+  purchaseType TokenPurchaseType // Manual, auto-recharge, or promotional
+  triggeredBy  String? // User ID who triggered (null for auto-recharge)
+  status       TokenPurchaseStatus @default(PENDING)
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime? // When payment was confirmed
+
+  @@index([budgetId])
+  @@index([status])
+  @@index([stripePaymentIntentId])
+  @@index([createdAt])
+}
+
+enum TokenQueryType {
+  SIMPLE_QUERY // SharedQueryService - 0 tokens (routed without LLM)
+  COMPLEX_SINGLE // Single SQL generation ~3,800 tokens
+  COMPLEX_CONSENSUS // 3x SQL generation ~9,100 tokens (consensus voting)
+  RESULT_INTERPRETATION // Interpreting SQL results ~1,100 tokens
+  INTENT_CLASSIFICATION // Intent detection ~700 tokens
+  CONVERSATION // General conversation ~300 tokens
+}
+
+enum TokenPurchaseType {
+  MANUAL // User-initiated purchase from dashboard
+  AUTO_RECHARGE // Automatic recharge when threshold reached
+  PROMOTIONAL // Free promotional tokens (marketing, support, etc.)
+}
+
+enum TokenPurchaseStatus {
+  PENDING // Payment initiated but not confirmed
+  COMPLETED // Payment successful, tokens added
+  FAILED // Payment failed
+  REFUNDED // Payment refunded
 }
 
 enum TimeEntryStatus {

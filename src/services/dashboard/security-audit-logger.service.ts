@@ -72,14 +72,36 @@ export interface AuditLogEntry {
 export class SecurityAuditLoggerService {
   private static readonly AUDIT_LOG_DIR = path.join(process.cwd(), 'logs')
   private static readonly AUDIT_LOG_FILE = path.join(this.AUDIT_LOG_DIR, 'security-audit.log')
-  private static readonly ENCRYPTION_KEY = process.env.AUDIT_LOG_ENCRYPTION_KEY || 'default-key-change-in-production'
   private static readonly ALGORITHM = 'aes-256-cbc'
+
+  // SECURITY FIX: No default key - must be set via environment variable
+  private static readonly ENCRYPTION_KEY = process.env.AUDIT_LOG_ENCRYPTION_KEY
+
+  /**
+   * Check if encryption key is properly configured
+   * @returns true if key is valid (32+ chars for AES-256)
+   */
+  private static isEncryptionKeyValid(): boolean {
+    return !!this.ENCRYPTION_KEY && this.ENCRYPTION_KEY.length >= 16
+  }
 
   /**
    * Initialize audit logger (create log directory if doesn't exist)
+   *
+   * SECURITY: Validates encryption key is set in production
    */
   public static initialize(): void {
     try {
+      // Check encryption key in production
+      if (process.env.NODE_ENV === 'production' && !this.isEncryptionKeyValid()) {
+        logger.error('🚨 CRITICAL: AUDIT_LOG_ENCRYPTION_KEY environment variable is not set or too short')
+        logger.error('🚨 Audit log encryption is disabled - this is a security risk')
+        // Don't throw in production to avoid crashing the app, but log critical warning
+      } else if (!this.isEncryptionKeyValid()) {
+        logger.warn('⚠️ AUDIT_LOG_ENCRYPTION_KEY not set - audit logs will not be encrypted')
+        logger.warn('⚠️ Set AUDIT_LOG_ENCRYPTION_KEY in .env for production use')
+      }
+
       if (!fs.existsSync(this.AUDIT_LOG_DIR)) {
         fs.mkdirSync(this.AUDIT_LOG_DIR, { recursive: true })
         logger.info('📁 Created security audit log directory', { path: this.AUDIT_LOG_DIR })
@@ -298,13 +320,22 @@ export class SecurityAuditLoggerService {
 
   /**
    * Encrypt sensitive SQL queries
+   *
+   * SECURITY: Only encrypts if AUDIT_LOG_ENCRYPTION_KEY is set
+   * Otherwise redacts sensitive SQL to prevent logging secrets in plain text
    */
   private static encryptSensitiveSQL(sql: string): string {
     try {
       // Only encrypt if SQL contains sensitive patterns
       if (this.containsSensitivePatterns(sql)) {
+        // SECURITY FIX: Check if encryption key is available
+        if (!this.isEncryptionKeyValid()) {
+          // No encryption key - redact sensitive SQL instead of logging plain text
+          return '[SENSITIVE_SQL_REDACTED - Set AUDIT_LOG_ENCRYPTION_KEY to enable encryption]'
+        }
+
         const iv = crypto.randomBytes(16)
-        const key = crypto.scryptSync(this.ENCRYPTION_KEY, 'salt', 32)
+        const key = crypto.scryptSync(this.ENCRYPTION_KEY!, 'salt', 32)
         const cipher = crypto.createCipheriv(this.ALGORITHM, key, iv)
 
         let encrypted = cipher.update(sql, 'utf-8', 'hex')

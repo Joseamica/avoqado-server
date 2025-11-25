@@ -18,6 +18,7 @@ import { PIIDetectionService } from './pii-detection.service'
 import { QueryLimitsService } from './query-limits.service'
 import { SecurityAuditLoggerService } from './security-audit-logger.service'
 import { SecurityResponseService, SecurityViolationType } from './security-response.service'
+import { tokenBudgetService, TokenQueryType } from './token-budget.service'
 
 interface TextToSqlQuery {
   message: string
@@ -27,12 +28,72 @@ interface TextToSqlQuery {
   venueSlug?: string
   userRole?: UserRole // For security validation
   ipAddress?: string // For audit logging
+  includeVisualization?: boolean // Include chart visualization in response
 }
 
 interface ConversationEntry {
   role: 'user' | 'assistant'
   content: string
   timestamp: Date
+}
+
+// Chart visualization interface for rich responses
+interface ChartVisualization {
+  type: 'bar' | 'line' | 'pie' | 'area'
+  title: string
+  description?: string
+  data: Array<Record<string, any>>
+  config: {
+    xAxis?: { key: string; label: string }
+    yAxis?: { key: string; label: string }
+    dataKeys: Array<{ key: string; label: string; color?: string }>
+  }
+}
+
+// When visualization is requested but cannot be generated
+interface VisualizationSkipped {
+  skipped: true
+  reason: string
+}
+
+// Union type for visualization result
+type VisualizationResult = ChartVisualization | VisualizationSkipped
+
+// Reasons why visualization was skipped (shown to user when toggle is ON)
+const VISUALIZATION_SKIP_REASONS = {
+  SCALAR_RESULT: 'Tu pregunta retorna un valor único que no requiere gráfica.',
+  NO_NUMERIC_DATA: 'Los resultados no contienen datos numéricos para graficar.',
+  INSUFFICIENT_DATA: 'No hay suficientes datos para generar una gráfica útil.',
+  INTENT_NOT_CHARTABLE: 'Este tipo de pregunta no requiere una representación visual.',
+  NO_DATA: 'No se encontraron datos para graficar.',
+  GENERATION_ERROR: 'No se pudo generar la gráfica.',
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DATE RANGE TRANSPARENCY (UX Enhancement - 2025-11)
+// When user doesn't specify a date, show what period was used + educate them
+// ══════════════════════════════════════════════════════════════════════════════
+
+const DATE_RANGE_TIP = {
+  es: '💡 Puedes especificar un período, por ejemplo: "{example}"',
+  en: '💡 You can specify a time period, e.g.: "{example}"',
+}
+
+const DATE_RANGE_EXAMPLES: Record<string, string> = {
+  sales: 'ventas de la semana pasada',
+  averageTicket: 'ticket promedio de ayer',
+  topProducts: 'productos más vendidos ayer',
+  staffPerformance: 'meseros que más vendieron la semana pasada',
+  reviews: 'reseñas de esta semana',
+  profitAnalysis: 'rentabilidad del mes pasado',
+  paymentMethodBreakdown: 'métodos de pago de ayer',
+  default: 'ventas de la semana pasada',
+}
+
+// Result type for extractDateRangeWithExplicit()
+interface DateRangeExtractionResult {
+  dateRange: RelativeDateRange | undefined
+  wasExplicit: boolean
 }
 
 interface TextToSqlResponse {
@@ -53,6 +114,12 @@ interface TextToSqlResponse {
   }
   suggestions?: string[]
   trainingDataId?: string
+  visualization?: VisualizationResult // Chart data or skip reason for frontend
+  tokenUsage?: {
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+  }
 }
 
 interface SqlGenerationResult {
@@ -61,14 +128,49 @@ interface SqlGenerationResult {
   confidence: number
   tables: string[]
   isReadOnly: boolean
+  // Token usage from OpenAI API call
+  tokenUsage?: {
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+  }
 }
 
 interface IntentClassificationResult {
   isSimpleQuery: boolean
-  intent?: 'sales' | 'averageTicket' | 'topProducts' | 'staffPerformance' | 'reviews'
+  intent?:
+    | 'sales'
+    | 'averageTicket'
+    | 'topProducts'
+    | 'staffPerformance'
+    | 'reviews'
+    // NEW: Operational intents (Phase 2 expansion)
+    | 'inventoryAlerts'
+    | 'pendingOrders'
+    | 'activeShifts'
+    | 'profitAnalysis'
+    | 'paymentMethodBreakdown'
   dateRange?: RelativeDateRange
   confidence: number
   reason: string
+  // NEW: Some intents don't require date range (inventory, pending orders, active shifts)
+  requiresDateRange?: boolean
+  // NEW: Whether the user explicitly specified a date range (for transparency in responses)
+  wasDateExplicit?: boolean
+}
+
+/**
+ * Conversation Context for Multi-Turn Conversations
+ *
+ * This interface captures context from previous conversation turns,
+ * enabling follow-up queries like "ahora para ayer" when the previous
+ * query was "ventas de hoy".
+ */
+interface ConversationContext {
+  previousIntent?: IntentClassificationResult['intent']
+  previousDateRange?: RelativeDateRange
+  previousQuery?: string
+  turnCount: number
 }
 
 class TextToSqlAssistantService {
@@ -85,6 +187,77 @@ class TextToSqlAssistantService {
     this.openai = new OpenAI({ apiKey })
     this.schemaContext = this.buildSchemaContext()
     this.learningService = new AILearningService()
+  }
+
+  // ============================
+  // DATA SANITIZATION (Security)
+  // ============================
+
+  /**
+   * Removes ID fields from data before sending to LLM
+   * This prevents the LLM from including internal IDs in responses
+   *
+   * Fields removed:
+   * - Any field ending in "Id" or "id" (venueId, categoryId, etc.)
+   * - Fields named exactly "id"
+   * - CUID patterns (c[a-z0-9]{24})
+   * - UUID patterns
+   */
+  private sanitizeDataForLLM(data: any): any {
+    if (data === null || data === undefined) {
+      return data
+    }
+
+    if (Array.isArray(data)) {
+      return data.map(item => this.sanitizeDataForLLM(item))
+    }
+
+    if (typeof data === 'object') {
+      const sanitized: Record<string, any> = {}
+      for (const [key, value] of Object.entries(data)) {
+        // Skip ID fields
+        if (key === 'id' || key.endsWith('Id') || key.endsWith('_id')) {
+          continue
+        }
+        // Recursively sanitize nested objects
+        sanitized[key] = this.sanitizeDataForLLM(value)
+      }
+      return sanitized
+    }
+
+    return data
+  }
+
+  /**
+   * Removes ID patterns from LLM response text
+   * This is a safety net in case IDs slip through or LLM generates fake IDs
+   *
+   * Patterns removed:
+   * - CUIDs: c[a-z0-9]{20,30}
+   * - UUIDs: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   * - MongoDB ObjectIds: [a-f0-9]{24}
+   * - References like "ID cmi6..." or "con ID ..."
+   */
+  private sanitizeResponseIds(response: string): string {
+    // Remove CUID patterns (Prisma default)
+    // Pattern: starts with 'c' followed by 20-30 alphanumeric chars
+    let sanitized = response.replace(/\bc[a-z0-9]{20,30}\b/gi, '[ID]')
+
+    // Remove UUID patterns
+    sanitized = sanitized.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '[ID]')
+
+    // Remove MongoDB ObjectId patterns (24 hex chars)
+    sanitized = sanitized.replace(/\b[a-f0-9]{24}\b/gi, '[ID]')
+
+    // Remove phrases like "con ID [ID]" or "ID: [ID]" that might look odd
+    sanitized = sanitized.replace(/\s*(?:con\s+)?ID[:\s]+\[ID\]/gi, '')
+    sanitized = sanitized.replace(/\s*\[ID\]\s*\./g, '.')
+
+    // Clean up any leftover [ID] references in context
+    sanitized = sanitized.replace(/categoría\s+(?:con\s+)?(?:ID\s+)?\[ID\]/gi, 'categoría')
+    sanitized = sanitized.replace(/pertenece\s+a\s+la\s+categoría\s+\[ID\]/gi, 'pertenece a su categoría')
+
+    return sanitized.trim()
   }
 
   // ============================
@@ -110,12 +283,15 @@ class TextToSqlAssistantService {
 - Use for: sales totals, payment analysis, revenue queries
 
 ### Orders Table
-- Table: Order  
-- Key fields: id, venueId, orderNumber, total, subtotal, taxAmount, tipAmount, status, createdAt
-- Relations: venue (Venue), items (OrderItem[]), payments (Payment[]), createdBy (Staff)
-- Use for: order analysis, sales breakdown
+- Table: Order
+- Key fields: id, venueId, orderNumber, total, subtotal, taxAmount, tipAmount, status, createdAt, createdById, servedById
+- createdById: Foreign key to Staff who created the order (waiter/mesero who took the order)
+- servedById: Foreign key to Staff who served the order
+- Relations: venue (Venue), items (OrderItem[]), payments (Payment[]), createdBy (Staff), servedBy (Staff)
+- Use for: order analysis, sales breakdown, waiter/staff performance (JOIN with Staff using createdById or servedById)
 - Status enum values: PENDING, CONFIRMED, PREPARING, READY, COMPLETED, CANCELLED, DELETED
 - Active/Open orders: PENDING, CONFIRMED, PREPARING, READY (not COMPLETED, CANCELLED, or DELETED)
+- STAFF SALES QUERY: To find which waiter sells more, use: SELECT s.*, SUM(o."total") FROM "Order" o JOIN "Staff" s ON o."createdById" = s.id WHERE o."venueId" = '{venueId}' GROUP BY s.id
 
 ### Staff Table
 - Table: Staff + StaffVenue (junction)
@@ -186,7 +362,8 @@ These match the dashboard filters: "Hoy", "Últimos 7 días", "Últimos 30 días
 ## Common Query Patterns:
 - Reviews by rating: SELECT COUNT(*) FROM "Review" WHERE "venueId" = '{venueId}' AND "overallRating" = 5
 - Sales totals: SELECT SUM("amount") FROM "Payment" WHERE "venueId" = '{venueId}' AND "status" = 'COMPLETED'
-- Staff performance: JOIN with Staff and Payment tables using "processedById"
+- Staff performance (payments): JOIN with Staff and Payment tables using "processedById"
+- Staff sales (waiter/mesero): SELECT s."firstName", s."lastName", SUM(o."total") as total_sales FROM "Order" o JOIN "Staff" s ON o."createdById" = s.id WHERE o."venueId" = '{venueId}' GROUP BY s.id, s."firstName", s."lastName" ORDER BY total_sales DESC
 - Open shifts: SELECT COUNT(*) FROM "Shift" WHERE "venueId" = '{venueId}' AND "status" = 'OPEN'
 - Active orders: SELECT COUNT(*) FROM "Order" WHERE "venueId" = '{venueId}' AND "status" IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY')
 
@@ -194,6 +371,41 @@ CRITICAL:
 - All table names in PostgreSQL must be quoted with double quotes: "Review", "Payment", etc.
 - All column names must be quoted and use exact camelCase: "venueId", "overallRating", "createdAt"
 `
+  }
+
+  // ============================
+  // CONVERSATION CONTEXT FOR LLM
+  // ============================
+
+  /**
+   * Builds conversation context for the LLM prompt.
+   * This enables Claude/ChatGPT-like conversation memory where the LLM
+   * understands context from previous exchanges.
+   *
+   * @param history - Array of previous conversation entries
+   * @returns Formatted string for inclusion in LLM prompt
+   */
+  private buildConversationContextForLLM(history?: ConversationEntry[]): string {
+    if (!history || history.length === 0) {
+      return 'Esta es la primera pregunta de la conversación.'
+    }
+
+    // Only use last 10 entries (5 exchanges) to avoid token overload
+    const recentHistory = history.slice(-10)
+
+    const formattedHistory = recentHistory
+      .map(entry => {
+        const role = entry.role === 'user' ? 'Usuario' : 'Asistente'
+        // Truncate long assistant responses to save tokens
+        let content = entry.content
+        if (entry.role === 'assistant' && content.length > 300) {
+          content = content.substring(0, 300) + '...'
+        }
+        return `${role}: ${content}`
+      })
+      .join('\n')
+
+    return formattedHistory
   }
 
   // ============================
@@ -205,7 +417,12 @@ CRITICAL:
     venueId: string,
     suggestedTemplate?: string,
     errorContext?: string,
+    includeVisualization?: boolean,
+    conversationHistory?: ConversationEntry[],
   ): Promise<SqlGenerationResult> {
+    // Build conversation context for multi-turn understanding (like Claude/ChatGPT)
+    const conversationContext = this.buildConversationContextForLLM(conversationHistory)
+
     const sqlPrompt = `
 You are a business data assistant with strict access controls to protect confidential information.
 
@@ -242,6 +459,21 @@ ${this.schemaContext}
 5. RESPONSE TO PROHIBITED REQUESTS:
    If user asks for prohibited information, respond ONLY with:
    "Por seguridad, no puedo proporcionar esa información ni ejecutar esa acción. Puedo ayudarte con [valid alternative]."
+
+═══════════════════════════════════════════════════════════
+📝 CONTEXTO DE CONVERSACIÓN (Multi-Turn Memory)
+═══════════════════════════════════════════════════════════
+
+El usuario está en una conversación continua. Aquí están los mensajes anteriores:
+${conversationContext}
+
+IMPORTANTE: Si el usuario hace referencia a algo mencionado anteriormente (fechas, temas, filtros,
+entidades como "meseros", "productos"), usa ese contexto para entender la pregunta actual.
+Por ejemplo:
+- Si antes preguntó "meseros que más vendieron la semana pasada" y ahora pregunta "dame una gráfica"
+  → entiende que se refiere a los meseros de la semana pasada
+- Si antes preguntó "ventas de hoy" y ahora pregunta "y los productos más vendidos?"
+  → entiende que quiere productos de hoy
 
 ═══════════════════════════════════════════════════════════
 
@@ -314,6 +546,22 @@ CRITICAL ENUM VALUES:
 - For "open" or "active" orders use: status IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY')
 - For "closed" or "completed" orders use: status IN ('COMPLETED', 'CANCELLED', 'DELETED')
 - NEVER use 'OPEN' or 'CLOSED' as these are not valid enum values
+${
+  includeVisualization
+    ? `
+📊 VISUALIZATION MODE ENABLED:
+The user wants to see a chart visualization. To generate meaningful charts:
+- For ranking queries (top, best, most, least, worst), return TOP 5-10 results, NOT just 1
+- For comparison queries (vs, compare, difference), return all compared items
+- For time-series queries (trend, over time, by day/week/month), return data points for each period
+- AVOID LIMIT 1 unless the user explicitly asks for "THE single best/top one"
+- Examples:
+  - "¿Qué mesero vendió más?" → Return TOP 5 waiters with sales (not just #1)
+  - "¿Cuáles son los productos más vendidos?" → Return TOP 10 products
+  - "¿Cómo fueron las ventas por día?" → Return sales for each day in the period
+`
+    : ''
+}
 `
 
     try {
@@ -339,6 +587,15 @@ CRITICAL ENUM VALUES:
         }
 
         result = JSON.parse(jsonString) as SqlGenerationResult
+
+        // Capture token usage from OpenAI response
+        if (completion.usage) {
+          result.tokenUsage = {
+            promptTokens: completion.usage.prompt_tokens,
+            completionTokens: completion.usage.completion_tokens,
+            totalTokens: completion.usage.total_tokens,
+          }
+        }
       } catch (parseError) {
         logger.error('Failed to parse OpenAI JSON response', { response, parseError })
         throw new Error('OpenAI returned invalid JSON response')
@@ -654,17 +911,20 @@ CRITICAL ENUM VALUES:
     sqlResult: any,
     sqlExplanation: string,
     venueSlug?: string,
-  ): Promise<string> {
+  ): Promise<{ response: string; tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
     const venueContext = venueSlug
       ? `\nCONTEXTO DEL VENUE ACTIVO: El usuario está autenticado en el venue con slug "${venueSlug}".\nSi la pregunta menciona otro venue distinto, deja claro que solo puedes responder con datos de "${venueSlug}" y aclara cualquier diferencia.`
       : ''
+
+    // SECURITY: Sanitize data to remove internal IDs before sending to LLM
+    const sanitizedResult = this.sanitizeDataForLLM(sqlResult)
 
     const interpretPrompt = `
 Eres un asistente de restaurante que interpreta resultados de bases de datos.
 
 PREGUNTA ORIGINAL: "${originalQuestion}"
 CONSULTA EJECUTADA: ${sqlExplanation}
-RESULTADO DE LA BASE DE DATOS: ${JSON.stringify(sqlResult, null, 2)}
+RESULTADO DE LA BASE DE DATOS: ${JSON.stringify(sanitizedResult, null, 2)}
 
 ${venueContext}
 
@@ -677,12 +937,13 @@ Reglas:
 4. Mantén un tono profesional y útil
 5. Sugiere acciones si es relevante
 6. Responde máximo en 3-4 oraciones
+7. NUNCA menciones IDs internos, códigos técnicos o identificadores de base de datos (los usuarios no necesitan verlos)
 
 CRÍTICO PARA CÁLCULOS MATEMÁTICOS:
-7. Para porcentajes, SIEMPRE muestra el cálculo completo: "X% (calculado de $Y tips ÷ $Z ventas)"
-8. Para cantidades de dinero, incluye formato con separadores: "$1,234.56"
-9. Para cálculos de órdenes, especifica qué órdenes se incluyen: "basado en X órdenes completadas"
-10. SIEMPRE incluye contexto de filtros aplicados para transparencia total
+8. Para porcentajes, SIEMPRE muestra el cálculo completo: "X% (calculado de $Y tips ÷ $Z ventas)"
+9. Para cantidades de dinero, incluye formato con separadores: "$1,234.56"
+10. Para cálculos de órdenes, especifica qué órdenes se incluyen: "basado en X órdenes completadas"
+11. SIEMPRE incluye contexto de filtros aplicados para transparencia total
 
 Ejemplos de respuestas CORRECTAS:
 - Simple: "En los últimos 49 días has recibido **12 reseñas de 5 estrellas** de un total de 28 reseñas."
@@ -697,10 +958,24 @@ Ejemplos de respuestas CORRECTAS:
         max_tokens: 300,
       })
 
-      return completion.choices[0]?.message?.content || 'Consulta ejecutada exitosamente.'
+      const rawResponse = completion.choices[0]?.message?.content || 'Consulta ejecutada exitosamente.'
+      // SECURITY: Sanitize response to remove any IDs that might have slipped through
+      const sanitizedResponse = this.sanitizeResponseIds(rawResponse)
+
+      // Capture token usage
+      const tokenUsage = completion.usage
+        ? {
+            promptTokens: completion.usage.prompt_tokens,
+            completionTokens: completion.usage.completion_tokens,
+            totalTokens: completion.usage.total_tokens,
+          }
+        : undefined
+
+      return { response: sanitizedResponse, tokenUsage }
     } catch (error) {
       logger.warn('Failed to interpret query result, using fallback', { error })
-      return `Consulta ejecutada. Resultado: ${JSON.stringify(sqlResult)}`
+      // SECURITY: Use sanitized result in fallback too
+      return { response: `Consulta ejecutada. Resultado: ${JSON.stringify(sanitizedResult)}` }
     }
   }
 
@@ -825,12 +1100,28 @@ Ejemplos de respuestas CORRECTAS:
       }
 
       // Step 0.5: Intent Classification → Route simple queries to SharedQueryService (ULTRATHINK: Bypass LLM for cost savings + 100% consistency)
-      const intentClassification = this.classifyIntent(query.message)
 
-      if (intentClassification.isSimpleQuery && intentClassification.intent && intentClassification.dateRange) {
+      // PHASE 3 UX: Extract conversation context for multi-turn support
+      const conversationContext = this.extractConversationContext(query.conversationHistory)
+
+      // Classify the current message
+      let intentClassification = this.classifyIntent(query.message)
+
+      // Apply conversation context for follow-up queries (e.g., "ahora para ayer")
+      if (conversationContext.turnCount > 0) {
+        intentClassification = this.applyConversationContext(intentClassification, conversationContext, query.message)
+      }
+
+      // UPDATED: Some intents don't require dateRange (inventory, pending orders, active shifts)
+      const canRoute =
+        intentClassification.isSimpleQuery &&
+        intentClassification.intent &&
+        (intentClassification.dateRange || intentClassification.requiresDateRange === false)
+
+      if (canRoute) {
         logger.info('🎯 Simple query detected → Routing to SharedQueryService (bypassing LLM)', {
           intent: intentClassification.intent,
-          dateRange: intentClassification.dateRange,
+          dateRange: intentClassification.dateRange || 'N/A (real-time)',
           confidence: intentClassification.confidence,
           reason: intentClassification.reason,
           costSaving: true,
@@ -840,64 +1131,206 @@ Ejemplos de respuestas CORRECTAS:
           let serviceResult: any
           let naturalResponse: string
 
+          // Note: dateRange is guaranteed to exist here because canRoute checks for it
+          // (intentClassification.dateRange || intentClassification.requiresDateRange === false)
+          const dateRange = intentClassification.dateRange!
+
           switch (intentClassification.intent) {
             case 'sales': {
-              const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, intentClassification.dateRange)
+              const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, dateRange)
               const formattedRevenue = new Intl.NumberFormat('es-MX', {
                 style: 'currency',
                 currency: salesData.currency,
               }).format(salesData.totalRevenue)
-              naturalResponse = `En ${this.formatDateRangeName(intentClassification.dateRange)} vendiste ${formattedRevenue} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: salesData.currency }).format(salesData.averageTicket)}.`
+
+              // PHASE 3 UX: Add automatic comparison with previous period
+              const trend = await this.getSalesComparison(query.venueId, dateRange, salesData.totalRevenue)
+
+              naturalResponse = `En ${this.formatDateRangeName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: salesData.currency }).format(salesData.averageTicket)}.`
               serviceResult = salesData
               break
             }
 
             case 'averageTicket': {
-              const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, intentClassification.dateRange)
+              const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, dateRange)
               const formattedAvg = new Intl.NumberFormat('es-MX', {
                 style: 'currency',
                 currency: salesData.currency,
               }).format(salesData.averageTicket)
-              naturalResponse = `El ticket promedio en ${this.formatDateRangeName(intentClassification.dateRange)} es de ${formattedAvg}, basado en ${salesData.orderCount} órdenes.`
+
+              // PHASE 3 UX: Add automatic comparison with previous period
+              const trend = await this.getAverageTicketComparison(query.venueId, dateRange, salesData.averageTicket)
+
+              naturalResponse = `El ticket promedio en ${this.formatDateRangeName(dateRange)} es de ${formattedAvg}${trend}, basado en ${salesData.orderCount} órdenes.`
               serviceResult = { averageTicket: salesData.averageTicket, orderCount: salesData.orderCount, currency: salesData.currency }
               break
             }
 
             case 'topProducts': {
-              const topProducts = await SharedQueryService.getTopProducts(query.venueId, intentClassification.dateRange, 5)
+              const topProducts = await SharedQueryService.getTopProducts(query.venueId, dateRange, 5)
               const productList = topProducts
                 .map(
                   (p, i) =>
                     `${i + 1}. ${p.productName} (${p.quantitySold} vendidos, ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(p.revenue)})`,
                 )
                 .join('\n')
-              naturalResponse = `Los productos más vendidos en ${this.formatDateRangeName(intentClassification.dateRange)} son:\n\n${productList}`
+              naturalResponse = `Los productos más vendidos en ${this.formatDateRangeName(dateRange)} son:\n\n${productList}`
               serviceResult = topProducts
               break
             }
 
             case 'staffPerformance': {
-              const staffPerf = await SharedQueryService.getStaffPerformance(query.venueId, intentClassification.dateRange, 5)
+              const staffPerf = await SharedQueryService.getStaffPerformance(query.venueId, dateRange, 5)
               const staffList = staffPerf
                 .map(
                   (s, i) =>
                     `${i + 1}. ${s.staffName} - ${s.totalOrders} órdenes, ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(s.totalTips)} en propinas`,
                 )
                 .join('\n')
-              naturalResponse = `El mejor staff en ${this.formatDateRangeName(intentClassification.dateRange)}:\n\n${staffList}`
+              naturalResponse = `El mejor staff en ${this.formatDateRangeName(dateRange)}:\n\n${staffList}`
               serviceResult = staffPerf
               break
             }
 
             case 'reviews': {
-              const reviewStats = await SharedQueryService.getReviewStats(query.venueId, intentClassification.dateRange)
-              naturalResponse = `En ${this.formatDateRangeName(intentClassification.dateRange)} tienes ${reviewStats.totalReviews} reseñas con un promedio de ${reviewStats.averageRating.toFixed(1)} estrellas. Distribución: ⭐⭐⭐⭐⭐ ${reviewStats.distribution.fiveStar}, ⭐⭐⭐⭐ ${reviewStats.distribution.fourStar}, ⭐⭐⭐ ${reviewStats.distribution.threeStar}.`
+              const reviewStats = await SharedQueryService.getReviewStats(query.venueId, dateRange)
+              naturalResponse = `En ${this.formatDateRangeName(dateRange)} tienes ${reviewStats.totalReviews} reseñas con un promedio de ${reviewStats.averageRating.toFixed(1)} estrellas. Distribución: ⭐⭐⭐⭐⭐ ${reviewStats.distribution.fiveStar}, ⭐⭐⭐⭐ ${reviewStats.distribution.fourStar}, ⭐⭐⭐ ${reviewStats.distribution.threeStar}.`
               serviceResult = reviewStats
+              break
+            }
+
+            // ══════════════════════════════════════════════════════════════════════════════
+            // NEW INTENTS: Phase 2 Operational/Financial Queries
+            // ══════════════════════════════════════════════════════════════════════════════
+
+            case 'inventoryAlerts': {
+              // Real-time query - no date range needed
+              const alerts = await SharedQueryService.getInventoryAlerts(query.venueId, 20) // 20% threshold
+              if (alerts.length === 0) {
+                naturalResponse = '✅ ¡Excelente! No hay alertas de inventario. Todos los ingredientes están en niveles adecuados.'
+              } else {
+                const alertList = alerts
+                  .map(
+                    (a, i) =>
+                      `${i + 1}. ⚠️ ${a.rawMaterialName}: ${a.currentStock.toFixed(1)} ${a.unit} (${a.stockPercentage.toFixed(0)}% del mínimo)${a.estimatedDaysRemaining ? ` - ~${a.estimatedDaysRemaining} días restantes` : ''}`,
+                  )
+                  .join('\n')
+                naturalResponse = `🚨 **${alerts.length} alertas de inventario bajo:**\n\n${alertList}\n\n_Recomendación: Revisa estos ingredientes y considera hacer un pedido._`
+              }
+              serviceResult = alerts
+              break
+            }
+
+            case 'pendingOrders': {
+              // Real-time query - no date range needed
+              const pendingStats = await SharedQueryService.getPendingOrders(query.venueId)
+              if (pendingStats.total === 0) {
+                naturalResponse = '✅ No hay órdenes pendientes en este momento. ¡Todo al día!'
+              } else {
+                const statusBreakdown = []
+                if (pendingStats.byStatus.pending > 0) statusBreakdown.push(`📋 ${pendingStats.byStatus.pending} pendientes`)
+                if (pendingStats.byStatus.confirmed > 0) statusBreakdown.push(`✓ ${pendingStats.byStatus.confirmed} confirmadas`)
+                if (pendingStats.byStatus.preparing > 0) statusBreakdown.push(`👨‍🍳 ${pendingStats.byStatus.preparing} preparándose`)
+                if (pendingStats.byStatus.ready > 0) statusBreakdown.push(`🔔 ${pendingStats.byStatus.ready} listas`)
+
+                naturalResponse = `📊 **${pendingStats.total} órdenes activas:**\n${statusBreakdown.join(' | ')}\n\n⏱️ Tiempo promedio de espera: ${pendingStats.averageWaitMinutes.toFixed(0)} minutos${pendingStats.oldestOrderMinutes ? `\n⚠️ Orden más antigua: ${pendingStats.oldestOrderMinutes.toFixed(0)} minutos` : ''}`
+              }
+              serviceResult = pendingStats
+              break
+            }
+
+            case 'activeShifts': {
+              // Real-time query - no date range needed
+              const shifts = await SharedQueryService.getActiveShifts(query.venueId)
+              if (shifts.length === 0) {
+                naturalResponse = '📭 No hay turnos activos en este momento.'
+              } else {
+                const shiftList = shifts
+                  .map(
+                    (s, i) =>
+                      `${i + 1}. ${s.staffName} (${s.role}) - ${s.durationMinutes} min | ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(s.salesTotal)} ventas | ${s.ordersCount} órdenes | ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(s.tipsTotal)} propinas`,
+                  )
+                  .join('\n')
+                const totalSales = shifts.reduce((sum, s) => sum + s.salesTotal, 0)
+                const totalOrders = shifts.reduce((sum, s) => sum + s.ordersCount, 0)
+                naturalResponse = `👥 **${shifts.length} turnos activos:**\n\n${shiftList}\n\n📈 **Totales:** ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(totalSales)} en ventas, ${totalOrders} órdenes`
+              }
+              serviceResult = shifts
+              break
+            }
+
+            case 'profitAnalysis': {
+              // Requires date range for period comparison
+              const profitData = await SharedQueryService.getProfitAnalysis(query.venueId, intentClassification.dateRange!, 5)
+              const formattedRevenue = new Intl.NumberFormat('es-MX', {
+                style: 'currency',
+                currency: profitData.currency,
+              }).format(profitData.totalRevenue)
+              const formattedCost = new Intl.NumberFormat('es-MX', {
+                style: 'currency',
+                currency: profitData.currency,
+              }).format(profitData.totalCost)
+              const formattedProfit = new Intl.NumberFormat('es-MX', {
+                style: 'currency',
+                currency: profitData.currency,
+              }).format(profitData.grossProfit)
+
+              let productList = ''
+              if (profitData.topProfitableProducts.length > 0) {
+                productList =
+                  '\n\n**Top productos por ganancia:**\n' +
+                  profitData.topProfitableProducts
+                    .map(
+                      (p, i) =>
+                        `${i + 1}. ${p.productName}: ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: profitData.currency }).format(p.profit)} ganancia (${p.marginPercent.toFixed(1)}% margen)`,
+                    )
+                    .join('\n')
+              }
+
+              naturalResponse = `💰 **Análisis de rentabilidad - ${this.formatDateRangeName(intentClassification.dateRange!)}:**\n\n📊 Ingresos: ${formattedRevenue}\n💵 Costos: ${formattedCost}\n✅ Ganancia bruta: ${formattedProfit}\n📈 Margen: ${profitData.grossMarginPercent.toFixed(1)}%${productList}`
+              serviceResult = profitData
+              break
+            }
+
+            case 'paymentMethodBreakdown': {
+              // Requires date range for period analysis
+              const paymentData = await SharedQueryService.getPaymentMethodBreakdown(query.venueId, intentClassification.dateRange!)
+              if (paymentData.total === 0) {
+                naturalResponse = `No hay datos de pagos para ${this.formatDateRangeName(intentClassification.dateRange!)}.`
+              } else {
+                const methodList = paymentData.methods
+                  .map(m => {
+                    const icon = m.method === 'CARD' ? '💳' : m.method === 'CASH' ? '💵' : m.method === 'TRANSFER' ? '📲' : '💰'
+                    return `${icon} ${m.method}: ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: paymentData.currency }).format(m.amount)} (${m.percentage.toFixed(1)}%) - ${m.count} transacciones${m.tipAmount > 0 ? ` + ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: paymentData.currency }).format(m.tipAmount)} propinas` : ''}`
+                  })
+                  .join('\n')
+                const formattedTotal = new Intl.NumberFormat('es-MX', {
+                  style: 'currency',
+                  currency: paymentData.currency,
+                }).format(paymentData.total)
+
+                naturalResponse = `💳 **Métodos de pago - ${this.formatDateRangeName(intentClassification.dateRange!)}:**\n\n${methodList}\n\n**Total:** ${formattedTotal}`
+              }
+              serviceResult = paymentData
               break
             }
 
             default:
               throw new Error('Unknown intent')
+          }
+
+          // ══════════════════════════════════════════════════════════════════════════════
+          // DATE TRANSPARENCY: Add tip when user didn't specify a date range
+          // This helps users understand they can specify custom periods
+          // ══════════════════════════════════════════════════════════════════════════════
+          if (!intentClassification.wasDateExplicit && intentClassification.intent) {
+            // Replace period name with full date range (e.g., "este mes" → "este mes (nov 1 - nov 25)")
+            const periodName = this.formatDateRangeName(dateRange)
+            const periodWithDates = this.formatDateRangeForResponse(dateRange)
+            naturalResponse = naturalResponse.replace(periodName, periodWithDates)
+
+            // Add helpful tip at the end
+            naturalResponse = this.addDateTransparencyTip(naturalResponse, intentClassification.intent)
           }
 
           // Record interaction for learning
@@ -917,6 +1350,14 @@ Ejemplos de respuestas CORRECTAS:
             logger.warn('🧠 Failed to record SharedQueryService interaction:', learningError)
           }
 
+          // Generate visualization if requested (returns skip reason if can't generate)
+          const visualization = this.generateVisualization(
+            intentClassification.intent,
+            serviceResult,
+            intentClassification.dateRange,
+            query.includeVisualization,
+          )
+
           return {
             response: naturalResponse,
             queryResult: serviceResult,
@@ -934,6 +1375,12 @@ Ejemplos de respuestas CORRECTAS:
             } as any,
             suggestions: this.generateSmartSuggestions(query.message),
             trainingDataId,
+            visualization,
+            tokenUsage: {
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+            },
           }
         } catch (sharedServiceError: any) {
           logger.warn('⚠️  SharedQueryService failed, falling back to text-to-SQL pipeline', {
@@ -964,6 +1411,8 @@ Ejemplos de respuestas CORRECTAS:
             userId: query.userId,
             sessionId,
             venueSlug: query.venueSlug,
+            includeVisualization: query.includeVisualization,
+            conversationHistory: query.conversationHistory,
           })
         } catch (consensusError: any) {
           logger.warn('⚠️  Consensus voting failed, falling back to single-generation pipeline', {
@@ -1010,8 +1459,15 @@ Ejemplos de respuestas CORRECTAS:
             sessionId,
           })
 
-          // Generate SQL (with error context on retry)
-          sqlGeneration = await this.generateSqlFromText(query.message, query.venueId, learnedGuidance.suggestedSqlTemplate, lastError)
+          // Generate SQL (with error context on retry + conversation history for context)
+          sqlGeneration = await this.generateSqlFromText(
+            query.message,
+            query.venueId,
+            learnedGuidance.suggestedSqlTemplate,
+            lastError,
+            query.includeVisualization,
+            query.conversationHistory,
+          )
 
           if (sqlGeneration.confidence < 0.7 && attemptCount === MAX_ATTEMPTS) {
             // Last attempt, low confidence - give up
@@ -1242,7 +1698,27 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       // Step 5: Interpret the results naturally (only if validation passed)
-      const naturalResponse = await this.interpretQueryResult(query.message, execution.result, sqlGeneration.explanation, query.venueSlug)
+      const interpretResult = await this.interpretQueryResult(query.message, execution.result, sqlGeneration.explanation, query.venueSlug)
+      const naturalResponse = interpretResult.response
+
+      // Calculate total token usage for this query
+      const totalTokensUsed = (sqlGeneration.tokenUsage?.totalTokens || 0) + (interpretResult.tokenUsage?.totalTokens || 0)
+
+      // Record token usage to budget
+      if (totalTokensUsed > 0) {
+        try {
+          await tokenBudgetService.recordTokenUsage({
+            venueId: query.venueId,
+            userId: query.userId,
+            promptTokens: (sqlGeneration.tokenUsage?.promptTokens || 0) + (interpretResult.tokenUsage?.promptTokens || 0),
+            completionTokens: (sqlGeneration.tokenUsage?.completionTokens || 0) + (interpretResult.tokenUsage?.completionTokens || 0),
+            queryType: TokenQueryType.COMPLEX_SINGLE,
+            trainingDataId: undefined, // Will be set after recording
+          })
+        } catch (tokenError) {
+          logger.warn('Failed to record token usage', { error: tokenError })
+        }
+      }
 
       logger.info('✅ Text-to-SQL query completed successfully', {
         venueId: query.venueId,
@@ -1254,12 +1730,21 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         rowsReturned: execution.metadata.rowsReturned,
       })
 
+      // Generate visualization if requested (returns skip reason if can't generate)
+      const visualization = this.generateVisualizationFromSqlResult(execution.result, query.message, query.includeVisualization)
+
       // 🧠 STEP: Record interaction for continuous learning
       const response = {
         response: naturalResponse,
         sqlQuery: sqlGeneration.sql,
         queryResult: execution.result,
         confidence: finalConfidence, // Use validated confidence
+        visualization,
+        tokenUsage: {
+          promptTokens: (sqlGeneration.tokenUsage?.promptTokens || 0) + (interpretResult.tokenUsage?.promptTokens || 0),
+          completionTokens: (sqlGeneration.tokenUsage?.completionTokens || 0) + (interpretResult.tokenUsage?.completionTokens || 0),
+          totalTokens: totalTokensUsed,
+        },
         metadata: {
           queryGenerated: true,
           queryExecuted: true,
@@ -1365,6 +1850,285 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         trainingDataId: errorTrainingDataId,
       }
     }
+  }
+
+  /**
+   * Generate chart visualization data based on intent and query results
+   * Used when includeVisualization flag is enabled in the request
+   */
+  private generateVisualization(
+    intent: IntentClassificationResult['intent'],
+    data: any,
+    dateRange?: RelativeDateRange,
+    includeVisualization?: boolean,
+  ): VisualizationResult | undefined {
+    // If visualization not requested, return undefined (skip silently)
+    if (!includeVisualization) return undefined
+
+    // If visualization requested but no data/intent, return skip reason
+    if (!data || !intent) {
+      return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.NO_DATA }
+    }
+
+    // Map intents to chart configurations
+    const chartConfigs: Record<string, Partial<ChartVisualization> & { type: ChartVisualization['type'] }> = {
+      topProducts: {
+        type: 'bar',
+        title: 'Productos Más Vendidos',
+      },
+      staffPerformance: {
+        type: 'bar',
+        title: 'Rendimiento del Personal',
+      },
+      paymentMethodBreakdown: {
+        type: 'pie',
+        title: 'Métodos de Pago',
+      },
+      reviews: {
+        type: 'bar',
+        title: 'Distribución de Reseñas',
+      },
+      sales: {
+        type: 'area',
+        title: 'Ventas',
+      },
+      profitAnalysis: {
+        type: 'bar',
+        title: 'Análisis de Rentabilidad',
+      },
+    }
+
+    const config = chartConfigs[intent]
+    if (!config) {
+      return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INTENT_NOT_CHARTABLE }
+    }
+
+    // Transform data based on intent
+    try {
+      switch (intent) {
+        case 'topProducts': {
+          if (!Array.isArray(data) || data.length === 0) {
+            return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INSUFFICIENT_DATA }
+          }
+          return {
+            type: 'bar',
+            title: config.title!,
+            description: dateRange ? `Período: ${this.formatDateRangeName(dateRange)}` : undefined,
+            data: data.slice(0, 10).map(p => ({
+              name: p.productName || p.name,
+              quantity: p.quantitySold || p.quantity,
+              revenue: p.revenue || 0,
+            })),
+            config: {
+              xAxis: { key: 'name', label: 'Producto' },
+              yAxis: { key: 'quantity', label: 'Cantidad Vendida' },
+              dataKeys: [
+                { key: 'quantity', label: 'Cantidad' },
+                { key: 'revenue', label: 'Ingresos' },
+              ],
+            },
+          }
+        }
+
+        case 'staffPerformance': {
+          if (!Array.isArray(data) || data.length === 0) {
+            return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INSUFFICIENT_DATA }
+          }
+          return {
+            type: 'bar',
+            title: config.title!,
+            description: dateRange ? `Período: ${this.formatDateRangeName(dateRange)}` : undefined,
+            data: data.slice(0, 10).map(s => ({
+              name: s.staffName || s.name,
+              revenue: s.totalRevenue || s.revenue || 0,
+              orders: s.totalOrders || s.ordersCount || 0,
+              tips: s.totalTips || s.tipsTotal || 0,
+            })),
+            config: {
+              xAxis: { key: 'name', label: 'Personal' },
+              yAxis: { key: 'revenue', label: 'Ventas ($)' },
+              dataKeys: [
+                { key: 'revenue', label: 'Ventas', color: '#10b981' },
+                { key: 'orders', label: 'Órdenes', color: '#3b82f6' },
+                { key: 'tips', label: 'Propinas', color: '#f59e0b' },
+              ],
+            },
+          }
+        }
+
+        case 'paymentMethodBreakdown': {
+          if (!data.methods || !Array.isArray(data.methods) || data.methods.length === 0) {
+            return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INSUFFICIENT_DATA }
+          }
+          return {
+            type: 'pie',
+            title: config.title!,
+            description: dateRange ? `Período: ${this.formatDateRangeName(dateRange)}` : undefined,
+            data: data.methods.map((m: any) => ({
+              name: m.method,
+              value: m.amount,
+              percentage: m.percentage,
+            })),
+            config: {
+              xAxis: { key: 'name', label: 'Método' },
+              dataKeys: [{ key: 'value', label: 'Monto' }],
+            },
+          }
+        }
+
+        case 'reviews': {
+          if (!data.distribution) {
+            return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INSUFFICIENT_DATA }
+          }
+          return {
+            type: 'bar',
+            title: config.title!,
+            description: dateRange ? `Período: ${this.formatDateRangeName(dateRange)}` : undefined,
+            data: [
+              { name: '5 ⭐', count: data.distribution.fiveStar },
+              { name: '4 ⭐', count: data.distribution.fourStar },
+              { name: '3 ⭐', count: data.distribution.threeStar },
+              { name: '2 ⭐', count: data.distribution.twoStar || 0 },
+              { name: '1 ⭐', count: data.distribution.oneStar || 0 },
+            ],
+            config: {
+              xAxis: { key: 'name', label: 'Calificación' },
+              yAxis: { key: 'count', label: 'Cantidad' },
+              dataKeys: [{ key: 'count', label: 'Reseñas' }],
+            },
+          }
+        }
+
+        case 'profitAnalysis': {
+          if (!data.topProfitableProducts || !Array.isArray(data.topProfitableProducts) || data.topProfitableProducts.length === 0) {
+            return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INSUFFICIENT_DATA }
+          }
+          return {
+            type: 'bar',
+            title: 'Productos Más Rentables',
+            description: dateRange ? `Período: ${this.formatDateRangeName(dateRange)}` : undefined,
+            data: data.topProfitableProducts.slice(0, 10).map((p: any) => ({
+              name: p.productName,
+              profit: p.profit,
+              margin: p.marginPercent,
+            })),
+            config: {
+              xAxis: { key: 'name', label: 'Producto' },
+              yAxis: { key: 'profit', label: 'Ganancia' },
+              dataKeys: [
+                { key: 'profit', label: 'Ganancia' },
+                { key: 'margin', label: 'Margen %' },
+              ],
+            },
+          }
+        }
+
+        default:
+          return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INTENT_NOT_CHARTABLE }
+      }
+    } catch (error) {
+      logger.warn('Failed to generate visualization', { intent, error })
+      return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.GENERATION_ERROR }
+    }
+  }
+
+  /**
+   * Generate visualization from raw SQL result (for text-to-SQL and consensus paths)
+   * Uses heuristics to infer chart type from data structure
+   *
+   * @param result - Raw SQL query result
+   * @param question - Original user question for context
+   * @param includeVisualization - Whether to generate visualization (if false, returns undefined silently)
+   * @returns ChartVisualization, VisualizationSkipped, or undefined
+   */
+  private generateVisualizationFromSqlResult(
+    result: any,
+    question: string,
+    includeVisualization?: boolean,
+  ): VisualizationResult | undefined {
+    // If visualization not requested, return undefined (skip silently)
+    if (!includeVisualization) return undefined
+
+    // Validation with skip reasons
+    if (!result || !Array.isArray(result) || result.length === 0) {
+      return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.NO_DATA }
+    }
+
+    const firstRow = result[0]
+    const keys = Object.keys(firstRow)
+
+    // Skip if only 1 row with 1-2 values (single metric, not chartable)
+    if (result.length === 1 && keys.length <= 2) {
+      return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.SCALAR_RESULT }
+    }
+
+    // Heuristics for chart type
+    const hasDateField = keys.some(k => /date|fecha|time|hour|día|dia|mes|month|year|año|week|semana/i.test(k))
+    const hasPercentage = keys.some(k => /percent|porcentaje|%|ratio/i.test(k))
+
+    const chartType: ChartVisualization['type'] = hasDateField ? 'line' : hasPercentage && result.length <= 8 ? 'pie' : 'bar'
+
+    // Find label and numeric keys
+    const numericKeys = keys.filter(k => {
+      const val = firstRow[k]
+      return typeof val === 'number' || (typeof val === 'string' && !isNaN(parseFloat(val)))
+    })
+
+    const labelKey = keys.find(k => typeof firstRow[k] === 'string' && !numericKeys.includes(k)) || keys[0]
+
+    if (numericKeys.length === 0) {
+      return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.NO_NUMERIC_DATA }
+    }
+
+    // Color palette
+    const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+
+    return {
+      type: chartType,
+      title: this.inferChartTitle(question),
+      data: result.slice(0, 20).map(row => {
+        const mapped: Record<string, any> = {}
+        mapped[labelKey] = row[labelKey]
+        numericKeys.forEach(k => {
+          mapped[k] = typeof row[k] === 'string' ? parseFloat(row[k]) : row[k]
+        })
+        return mapped
+      }),
+      config: {
+        xAxis: { key: labelKey, label: this.humanizeKey(labelKey) },
+        yAxis: { key: numericKeys[0], label: this.humanizeKey(numericKeys[0]) },
+        dataKeys: numericKeys.slice(0, 4).map((k, i) => ({
+          key: k,
+          label: this.humanizeKey(k),
+          color: colors[i % colors.length],
+        })),
+      },
+    }
+  }
+
+  /**
+   * Infer chart title from user question
+   */
+  private inferChartTitle(question: string): string {
+    const lowerQ = question.toLowerCase()
+    if (lowerQ.includes('venta')) return 'Ventas'
+    if (lowerQ.includes('producto')) return 'Productos'
+    if (lowerQ.includes('mesero') || lowerQ.includes('staff')) return 'Personal'
+    if (lowerQ.includes('pago') || lowerQ.includes('método')) return 'Pagos'
+    if (lowerQ.includes('hora') || lowerQ.includes('horario')) return 'Patrones por Hora'
+    if (lowerQ.includes('día') || lowerQ.includes('dia')) return 'Patrones por Día'
+    return 'Resultados'
+  }
+
+  /**
+   * Convert camelCase/snake_case key to human-readable label
+   */
+  private humanizeKey(key: string): string {
+    return key
+      .replace(/([A-Z])/g, ' $1')
+      .replace(/_/g, ' ')
+      .replace(/^\w/, c => c.toUpperCase())
+      .trim()
   }
 
   private generateSmartSuggestions(originalMessage: string): string[] {
@@ -2135,8 +2899,8 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
   private classifyIntent(message: string): IntentClassificationResult {
     const lowerMessage = message.toLowerCase().trim()
 
-    // Extract date range first (used by all intents)
-    const dateRange = this.extractDateRange(lowerMessage)
+    // Extract date range with explicit flag (for transparency in responses)
+    const { dateRange, wasExplicit } = this.extractDateRangeWithExplicit(lowerMessage)
 
     // CRITICAL: Check if query is complex (has comparisons, filters, etc.)
     // Complex queries should NOT be classified as "simple" even if they match intent patterns
@@ -2150,50 +2914,12 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
     }
 
-    // Intent 1: Sales queries
-    const salesKeywords = ['vendí', 'vendi', 'ventas', 'venta', 'vendido', 'ingresos', 'revenue', 'sales', 'facturado']
-    if (salesKeywords.some(kw => lowerMessage.includes(kw)) && dateRange) {
-      return {
-        isSimpleQuery: true,
-        intent: 'sales',
-        dateRange,
-        confidence: 0.95,
-        reason: `Detected sales query with date range: ${dateRange}`,
-      }
-    }
+    // ══════════════════════════════════════════════════════════════════════════════
+    // INTENT PRIORITY: Staff performance MUST be checked BEFORE sales
+    // because "meseros que vendieron mas" contains both staff and sales keywords
+    // ══════════════════════════════════════════════════════════════════════════════
 
-    // Intent 2: Average ticket queries
-    const avgTicketKeywords = ['ticket promedio', 'promedio', 'ticket medio', 'average ticket', 'valor promedio']
-    if (avgTicketKeywords.some(kw => lowerMessage.includes(kw)) && dateRange) {
-      return {
-        isSimpleQuery: true,
-        intent: 'averageTicket',
-        dateRange,
-        confidence: 0.95,
-        reason: `Detected average ticket query with date range: ${dateRange}`,
-      }
-    }
-
-    // Intent 3: Top products queries
-    const topProductsKeywords = [
-      'productos más vendidos',
-      'productos mas vendidos',
-      'top productos',
-      'mejores productos',
-      'best sellers',
-      'top products',
-    ]
-    if (topProductsKeywords.some(kw => lowerMessage.includes(kw)) && dateRange) {
-      return {
-        isSimpleQuery: true,
-        intent: 'topProducts',
-        dateRange,
-        confidence: 0.95,
-        reason: `Detected top products query with date range: ${dateRange}`,
-      }
-    }
-
-    // Intent 4: Staff performance queries
+    // Intent 1: Staff performance queries - CHECK FIRST (has overlap with sales keywords)
     const staffKeywords = [
       'mesero',
       'mesera',
@@ -2207,27 +2933,245 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       'waiter',
       'waitress',
     ]
-    const performanceKeywords = ['más propinas', 'mas propinas', 'mejor', 'top', 'más vendió', 'mas vendio']
-    if (staffKeywords.some(kw => lowerMessage.includes(kw)) && performanceKeywords.some(kw => lowerMessage.includes(kw)) && dateRange) {
+    const performanceKeywords = [
+      'más propinas',
+      'mas propinas',
+      'mejor',
+      'top',
+      'más vendió',
+      'mas vendio',
+      'vende más',
+      'vende mas',
+      'más vende',
+      'mas vende',
+      'mayores ventas',
+      'mayor venta',
+      // Common variations for "vendieron mas"
+      'vendieron más',
+      'vendieron mas',
+      'que más vend',
+      'que mas vend',
+    ]
+    if (staffKeywords.some(kw => lowerMessage.includes(kw)) && performanceKeywords.some(kw => lowerMessage.includes(kw))) {
+      const effectiveDateRange = dateRange || 'thisMonth'
       return {
         isSimpleQuery: true,
         intent: 'staffPerformance',
-        dateRange,
+        dateRange: effectiveDateRange,
         confidence: 0.9,
-        reason: `Detected staff performance query with date range: ${dateRange}`,
+        reason: `Detected staff performance query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
       }
     }
 
-    // Intent 5: Reviews queries
+    // Intent 2: Sales queries - default to thisMonth if no date specified
+    const salesKeywords = ['vendí', 'vendi', 'ventas', 'venta', 'vendido', 'ingresos', 'revenue', 'sales', 'facturado']
+    if (salesKeywords.some(kw => lowerMessage.includes(kw))) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'sales',
+        dateRange: effectiveDateRange,
+        confidence: 0.95,
+        reason: `Detected sales query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
+    // Intent 3: Average ticket queries - default to thisMonth if no date specified
+    const avgTicketKeywords = ['ticket promedio', 'promedio', 'ticket medio', 'average ticket', 'valor promedio']
+    if (avgTicketKeywords.some(kw => lowerMessage.includes(kw))) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'averageTicket',
+        dateRange: effectiveDateRange,
+        confidence: 0.95,
+        reason: `Detected average ticket query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
+    // Intent 4: Top products queries - default to thisMonth if no date specified
+    const topProductsKeywords = [
+      'productos más vendidos',
+      'productos mas vendidos',
+      'top productos',
+      'mejores productos',
+      'best sellers',
+      'top products',
+    ]
+    if (topProductsKeywords.some(kw => lowerMessage.includes(kw))) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'topProducts',
+        dateRange: effectiveDateRange,
+        confidence: 0.95,
+        reason: `Detected top products query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
+    // Intent 5: Reviews queries - default to thisMonth if no date specified
     const reviewKeywords = ['reseñas', 'resenas', 'reviews', 'calificaciones', 'rating', 'estrellas', 'stars']
     const reviewMetrics = ['promedio', 'average', 'cuántas', 'cuantas', 'total']
-    if (reviewKeywords.some(kw => lowerMessage.includes(kw)) && reviewMetrics.some(kw => lowerMessage.includes(kw)) && dateRange) {
+    if (reviewKeywords.some(kw => lowerMessage.includes(kw)) && reviewMetrics.some(kw => lowerMessage.includes(kw))) {
+      const effectiveDateRange = dateRange || 'thisMonth'
       return {
         isSimpleQuery: true,
         intent: 'reviews',
-        dateRange,
+        dateRange: effectiveDateRange,
         confidence: 0.9,
-        reason: `Detected reviews query with date range: ${dateRange}`,
+        reason: `Detected reviews query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════
+    // NEW INTENTS: Phase 2 Operational/Financial Queries
+    // ══════════════════════════════════════════════════════════════════════════════
+
+    // Intent 6: Inventory Alerts (REAL-TIME - no date range needed)
+    const inventoryKeywords = [
+      'inventario bajo',
+      'stock bajo',
+      'ingredientes faltantes',
+      'falta de',
+      'alertas inventario',
+      'alertas de inventario',
+      'low stock',
+      'inventory alerts',
+      'qué me falta',
+      'que me falta',
+      'que falta',
+      'qué falta',
+      'ingredientes bajos',
+      'materiales bajos',
+      'insumos bajos',
+    ]
+    if (inventoryKeywords.some(kw => lowerMessage.includes(kw))) {
+      return {
+        isSimpleQuery: true,
+        intent: 'inventoryAlerts',
+        confidence: 0.95,
+        reason: 'Detected inventory alerts query (real-time, no date range needed)',
+        requiresDateRange: false,
+      }
+    }
+
+    // Intent 7: Pending Orders (REAL-TIME - no date range needed)
+    const pendingOrdersKeywords = [
+      'órdenes pendientes',
+      'ordenes pendientes',
+      'pedidos pendientes',
+      'órdenes activas',
+      'ordenes activas',
+      'pending orders',
+      'en espera',
+      'órdenes en proceso',
+      'ordenes en proceso',
+      'cuántas órdenes hay',
+      'cuantas ordenes hay',
+      'órdenes ahora',
+      'ordenes ahora',
+      'pedidos activos',
+    ]
+    if (pendingOrdersKeywords.some(kw => lowerMessage.includes(kw))) {
+      return {
+        isSimpleQuery: true,
+        intent: 'pendingOrders',
+        confidence: 0.95,
+        reason: 'Detected pending orders query (real-time, no date range needed)',
+        requiresDateRange: false,
+      }
+    }
+
+    // Intent 8: Active Shifts (REAL-TIME - no date range needed)
+    const activeShiftsKeywords = [
+      'turnos activos',
+      'quién está trabajando',
+      'quien esta trabajando',
+      'quién trabaja',
+      'quien trabaja',
+      'personal activo',
+      'active shifts',
+      'working now',
+      'staff activo',
+      'empleados activos',
+      'quién está ahorita',
+      'quien esta ahorita',
+      'turnos abiertos',
+      'turnos de hoy',
+    ]
+    if (activeShiftsKeywords.some(kw => lowerMessage.includes(kw))) {
+      return {
+        isSimpleQuery: true,
+        intent: 'activeShifts',
+        confidence: 0.95,
+        reason: 'Detected active shifts query (real-time, no date range needed)',
+        requiresDateRange: false,
+      }
+    }
+
+    // Intent 9: Profit Analysis - default to thisMonth if no date specified
+    const profitKeywords = [
+      'rentabilidad',
+      'margen',
+      'ganancia',
+      'ganancias',
+      'profit',
+      'margin',
+      'utilidad',
+      'utilidades',
+      'cuánto gané',
+      'cuanto gane',
+      'cuánto ganamos',
+      'cuanto ganamos',
+      'costo vs venta',
+      'costo versus venta',
+    ]
+    if (profitKeywords.some(kw => lowerMessage.includes(kw))) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'profitAnalysis',
+        dateRange: effectiveDateRange,
+        confidence: 0.9,
+        reason: `Detected profit analysis query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        requiresDateRange: true,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
+    // Intent 10: Payment Method Breakdown - default to thisMonth if no date specified
+    const paymentMethodKeywords = [
+      'métodos de pago',
+      'metodos de pago',
+      'formas de pago',
+      'cómo pagaron',
+      'como pagaron',
+      'payment methods',
+      'tarjeta o efectivo',
+      'efectivo o tarjeta',
+      'cuánto en tarjeta',
+      'cuanto en tarjeta',
+      'cuánto en efectivo',
+      'cuanto en efectivo',
+      'desglose de pagos',
+      'distribución de pagos',
+      'distribucion de pagos',
+    ]
+    if (paymentMethodKeywords.some(kw => lowerMessage.includes(kw))) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'paymentMethodBreakdown',
+        dateRange: effectiveDateRange,
+        confidence: 0.9,
+        reason: `Detected payment method breakdown query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        requiresDateRange: true,
+        wasDateExplicit: wasExplicit,
       }
     }
 
@@ -2235,7 +3179,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return {
       isSimpleQuery: false,
       confidence: 0.0,
-      reason: 'Query is too complex or missing date range, needs text-to-SQL pipeline',
+      reason: 'Query does not match any known intent pattern, needs text-to-SQL pipeline',
     }
   }
 
@@ -2322,6 +3266,21 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
   }
 
   /**
+   * Extract date range WITH explicit flag
+   *
+   * Returns both the dateRange and whether the user explicitly specified it.
+   * When wasExplicit is false, we should show transparency in the response
+   * (e.g., "En este mes..." + tip suggesting user can specify dates)
+   */
+  private extractDateRangeWithExplicit(message: string): DateRangeExtractionResult {
+    const dateRange = this.extractDateRange(message)
+    return {
+      dateRange,
+      wasExplicit: dateRange !== undefined,
+    }
+  }
+
+  /**
    * Format date range name for natural language responses
    */
   private formatDateRangeName(dateRange: RelativeDateRange): string {
@@ -2336,6 +3295,355 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       lastMonth: 'el mes pasado',
     }
     return names[dateRange] || dateRange
+  }
+
+  /**
+   * Format date range with actual dates for transparent responses
+   *
+   * Example: "En este mes (nov 1 - nov 25)"
+   */
+  private formatDateRangeForResponse(dateRange: RelativeDateRange): string {
+    const periodName = this.formatDateRangeName(dateRange)
+
+    // Calculate actual dates for the period
+    const now = new Date()
+    let startDate: Date
+    let endDate: Date = now
+
+    switch (dateRange) {
+      case 'today':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+        endDate = startDate
+        break
+      case 'yesterday':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+        endDate = startDate
+        break
+      case 'thisWeek':
+        const dayOfWeek = now.getDay()
+        const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToMonday)
+        break
+      case 'lastWeek':
+        const lastWeekDayOfWeek = now.getDay()
+        const diffToLastMonday = (lastWeekDayOfWeek === 0 ? 6 : lastWeekDayOfWeek - 1) + 7
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToLastMonday)
+        endDate = new Date(startDate.getTime() + 6 * 24 * 60 * 60 * 1000)
+        break
+      case 'thisMonth':
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        break
+      case 'lastMonth':
+        startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+        endDate = new Date(now.getFullYear(), now.getMonth(), 0)
+        break
+      case 'last7days':
+        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+        break
+      case 'last30days':
+        startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+        break
+      default:
+        return periodName
+    }
+
+    // Format dates in Spanish
+    const formatDate = (d: Date) =>
+      d.toLocaleDateString('es-MX', {
+        month: 'short',
+        day: 'numeric',
+      })
+
+    // For single-day periods, don't show range
+    if (startDate.getTime() === endDate.getTime()) {
+      return `${periodName} (${formatDate(startDate)})`
+    }
+
+    return `${periodName} (${formatDate(startDate)} - ${formatDate(endDate)})`
+  }
+
+  /**
+   * Add date transparency tip to response when date wasn't explicit
+   */
+  private addDateTransparencyTip(response: string, intent: string): string {
+    const example = DATE_RANGE_EXAMPLES[intent] || DATE_RANGE_EXAMPLES.default
+    const tip = DATE_RANGE_TIP.es.replace('{example}', example)
+    return `${response}\n\n${tip}`
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // CONVERSATION MEMORY SUPPORT (Phase 3 UX Enhancement)
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Extract conversation context from history
+   *
+   * This method analyzes previous conversation turns to understand the context
+   * for follow-up queries. For example, if the user asked "ventas de hoy" and
+   * then says "ahora para ayer", we understand they want sales for yesterday.
+   *
+   * @param history - Array of conversation entries
+   * @returns ConversationContext with previous intent and date range
+   */
+  private extractConversationContext(history?: ConversationEntry[]): ConversationContext {
+    if (!history || history.length === 0) {
+      return { turnCount: 0 }
+    }
+
+    // Get the last user message (the one before the current)
+    const userMessages = history.filter(h => h.role === 'user')
+    const lastUserMessage = userMessages[userMessages.length - 1]
+
+    if (!lastUserMessage) {
+      return { turnCount: history.length }
+    }
+
+    // Classify the previous query to extract its intent
+    const previousClassification = this.classifyIntentWithoutContext(lastUserMessage.content)
+
+    return {
+      previousIntent: previousClassification.intent,
+      previousDateRange: previousClassification.dateRange,
+      previousQuery: lastUserMessage.content,
+      turnCount: history.length,
+    }
+  }
+
+  /**
+   * Detect if the current message is a follow-up query
+   *
+   * Follow-up queries are short messages that modify a previous query,
+   * typically changing the date range or asking for the same metric
+   * with different parameters.
+   *
+   * @param message - Current user message
+   * @returns true if this is likely a follow-up query
+   */
+  private detectFollowUpQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase().trim()
+
+    // Follow-up indicators - short phrases that reference previous context
+    const followUpIndicators = [
+      // Date change follow-ups
+      'ahora para',
+      'ahora de',
+      'y de',
+      'y para',
+      'qué hay de',
+      'que hay de',
+      'qué tal',
+      'que tal',
+      'el mismo para',
+      'lo mismo para',
+      'lo mismo de',
+      'el mismo de',
+      // Same intent, different date
+      'y ayer',
+      'y hoy',
+      'y esta semana',
+      'y este mes',
+      'y la semana pasada',
+      'y el mes pasado',
+      // Comparative follow-ups
+      'comparado con',
+      'versus ayer',
+      'vs ayer',
+    ]
+
+    // Check if message is short (typical for follow-ups) and contains indicators
+    const isShort = lowerMessage.split(' ').length <= 6
+
+    // Check for follow-up indicators
+    const hasIndicator = followUpIndicators.some(indicator => lowerMessage.includes(indicator))
+
+    // Also consider standalone date ranges as follow-ups
+    const isStandaloneDateRange = this.isStandaloneDateRange(lowerMessage)
+
+    return (isShort && hasIndicator) || isStandaloneDateRange
+  }
+
+  /**
+   * Check if message is just a standalone date range (follow-up to change date)
+   */
+  private isStandaloneDateRange(message: string): boolean {
+    const standaloneDatePatterns = [
+      /^(y\s+)?(ayer|hoy|mañana)(\?)?$/,
+      /^(y\s+)?(esta|la)\s+semana(\s+pasada)?(\?)?$/,
+      /^(y\s+)?(este|el)\s+mes(\s+pasado)?(\?)?$/,
+      /^(y\s+)?últimos?\s+\d+\s+días?(\?)?$/i,
+      /^(y\s+)?last\s+\d+\s+days?(\?)?$/i,
+    ]
+    return standaloneDatePatterns.some(pattern => pattern.test(message.trim()))
+  }
+
+  /**
+   * Apply conversation context to current query classification
+   *
+   * If the current query is detected as a follow-up, this method will
+   * inherit the intent from the previous query and only update the
+   * date range if a new one is specified.
+   *
+   * @param currentClassification - Classification of current message
+   * @param context - Context from previous conversation turns
+   * @param message - Current user message (for additional analysis)
+   * @returns Enhanced classification with inherited context
+   */
+  private applyConversationContext(
+    currentClassification: IntentClassificationResult,
+    context: ConversationContext,
+    message: string,
+  ): IntentClassificationResult {
+    // If current classification is already complete, don't override
+    if (currentClassification.isSimpleQuery && currentClassification.intent) {
+      return currentClassification
+    }
+
+    // Check if this is a follow-up query
+    if (!this.detectFollowUpQuery(message)) {
+      return currentClassification
+    }
+
+    // No previous context to apply
+    if (!context.previousIntent) {
+      return currentClassification
+    }
+
+    // Extract the new date range from current message (if any)
+    const newDateRange = this.extractDateRange(message.toLowerCase())
+
+    // Real-time intents don't need date ranges
+    const realTimeIntents = ['inventoryAlerts', 'pendingOrders', 'activeShifts']
+    const isPreviousRealTime = realTimeIntents.includes(context.previousIntent as string)
+
+    // If we have a new date range or previous was real-time, inherit the intent
+    if (newDateRange || isPreviousRealTime) {
+      logger.info('🔄 Applying conversation context (follow-up query detected)', {
+        previousIntent: context.previousIntent,
+        previousDateRange: context.previousDateRange,
+        newDateRange: newDateRange || 'inherited',
+        message,
+      })
+
+      return {
+        isSimpleQuery: true,
+        intent: context.previousIntent,
+        dateRange: newDateRange || context.previousDateRange,
+        confidence: 0.85, // Slightly lower confidence for inferred queries
+        reason: `Follow-up query detected. Inherited intent '${context.previousIntent}' from previous turn${newDateRange ? ` with new date range '${newDateRange}'` : ''}`,
+        requiresDateRange: !isPreviousRealTime,
+      }
+    }
+
+    // No date range in follow-up and previous intent requires date range
+    return currentClassification
+  }
+
+  /**
+   * Classify intent without applying conversation context
+   * (Used internally to classify previous messages in history)
+   */
+  private classifyIntentWithoutContext(message: string): IntentClassificationResult {
+    // Call the main classify logic but without recursively applying context
+    return this.classifyIntent(message)
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // AUTOMATIC COMPARISONS (Phase 3 UX Enhancement)
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Get the previous period for comparison
+   *
+   * Maps current period to the appropriate comparison period:
+   * - today → yesterday
+   * - yesterday → day before yesterday (not useful, skip)
+   * - thisWeek → lastWeek
+   * - thisMonth → lastMonth
+   * - last7days → previous 7 days (skip for simplicity)
+   * - last30days → previous 30 days (skip for simplicity)
+   *
+   * @param currentPeriod - The current date range
+   * @returns The previous period for comparison, or undefined if no comparison makes sense
+   */
+  private getComparisonPeriod(currentPeriod: RelativeDateRange): RelativeDateRange | undefined {
+    const comparisonMap: Partial<Record<RelativeDateRange, RelativeDateRange>> = {
+      today: 'yesterday',
+      thisWeek: 'lastWeek',
+      thisMonth: 'lastMonth',
+      // lastWeek and lastMonth don't have simple comparisons
+      // last7days and last30days would need custom date ranges
+    }
+    return comparisonMap[currentPeriod]
+  }
+
+  /**
+   * Calculate percentage change between two values
+   *
+   * @param current - Current value
+   * @param previous - Previous value
+   * @returns Percentage change with sign (e.g., 15.5 for 15.5% increase, -10.2 for 10.2% decrease)
+   */
+  private calculatePercentageChange(current: number, previous: number): number | null {
+    if (previous === 0) {
+      return current > 0 ? 100 : null // 100% increase from 0, or null if both are 0
+    }
+    return ((current - previous) / previous) * 100
+  }
+
+  /**
+   * Format trend indicator with arrow and percentage
+   *
+   * @param percentChange - Percentage change
+   * @param comparisonPeriod - Period being compared to
+   * @returns Formatted string like "↑ 15.2% vs ayer" or "↓ 5.3% vs semana pasada"
+   */
+  private formatTrendIndicator(percentChange: number | null, comparisonPeriod: RelativeDateRange): string {
+    if (percentChange === null) return ''
+
+    const arrow = percentChange >= 0 ? '↑' : '↓'
+    const absChange = Math.abs(percentChange).toFixed(1)
+    const periodName = this.formatDateRangeName(comparisonPeriod)
+
+    return ` (${arrow} ${absChange}% vs ${periodName})`
+  }
+
+  /**
+   * Fetch comparison data for sales and return formatted trend
+   *
+   * @param venueId - Venue ID
+   * @param currentPeriod - Current period being queried
+   * @param currentValue - Current value to compare
+   * @returns Formatted trend string or empty string if no comparison
+   */
+  private async getSalesComparison(venueId: string, currentPeriod: RelativeDateRange, currentValue: number): Promise<string> {
+    const comparisonPeriod = this.getComparisonPeriod(currentPeriod)
+    if (!comparisonPeriod) return ''
+
+    try {
+      const previousData = await SharedQueryService.getSalesForPeriod(venueId, comparisonPeriod)
+      const percentChange = this.calculatePercentageChange(currentValue, previousData.totalRevenue)
+      return this.formatTrendIndicator(percentChange, comparisonPeriod)
+    } catch (error) {
+      logger.warn('⚠️ Failed to fetch comparison data for sales', { error, venueId, currentPeriod })
+      return ''
+    }
+  }
+
+  /**
+   * Fetch comparison data for average ticket and return formatted trend
+   */
+  private async getAverageTicketComparison(venueId: string, currentPeriod: RelativeDateRange, currentValue: number): Promise<string> {
+    const comparisonPeriod = this.getComparisonPeriod(currentPeriod)
+    if (!comparisonPeriod) return ''
+
+    try {
+      const previousData = await SharedQueryService.getSalesForPeriod(venueId, comparisonPeriod)
+      const percentChange = this.calculatePercentageChange(currentValue, previousData.averageTicket)
+      return this.formatTrendIndicator(percentChange, comparisonPeriod)
+    } catch (error) {
+      logger.warn('⚠️ Failed to fetch comparison data for average ticket', { error, venueId, currentPeriod })
+      return ''
+    }
   }
 
   /**
@@ -2405,6 +3713,27 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       'pattern',
       'distribución',
       'distribution',
+
+      // GROUP BY / Breakdown queries (need text-to-SQL for aggregation)
+      'por categoría',
+      'por categoria',
+      'by category',
+      'por producto',
+      'por mesero',
+      'por método',
+      'por metodo',
+      'por hora',
+      'por día',
+      'por dia',
+      'desglose',
+      'breakdown',
+      'agrupado por',
+      'grouped by',
+      'cada día',
+      'cada dia',
+      'cada hora',
+      'cada semana',
+      'cada mes',
 
       // Rankings with constraints
       'mejor.*que',
@@ -2508,6 +3837,8 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     sessionId: string
     venueSlug?: string
     userRole?: UserRole
+    includeVisualization?: boolean
+    conversationHistory?: ConversationEntry[]
   }): Promise<any> {
     const startTime = Date.now()
 
@@ -2517,16 +3848,30 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     })
 
     try {
-      // Generate 3 different SQLs (parallel for speed)
+      // Generate 3 different SQLs (parallel for speed) - all with conversation context
       const sqlPromises = [
         // Conservative generation (low temperature)
-        this.generateSqlFromText(query.message, query.venueId, undefined, undefined),
+        this.generateSqlFromText(query.message, query.venueId, undefined, undefined, query.includeVisualization, query.conversationHistory),
 
         // Balanced generation (medium temperature, chain-of-thought)
-        this.generateSqlFromText(`${query.message}\n\nPor favor, piensa paso a paso.`, query.venueId, undefined, undefined),
+        this.generateSqlFromText(
+          `${query.message}\n\nPor favor, piensa paso a paso.`,
+          query.venueId,
+          undefined,
+          undefined,
+          query.includeVisualization,
+          query.conversationHistory,
+        ),
 
         // Alternative generation (different phrasing)
-        this.generateSqlFromText(`Analiza: ${query.message}`, query.venueId, undefined, undefined),
+        this.generateSqlFromText(
+          `Analiza: ${query.message}`,
+          query.venueId,
+          undefined,
+          undefined,
+          query.includeVisualization,
+          query.conversationHistory,
+        ),
       ]
 
       const [sql1Result, sql2Result, sql3Result] = await Promise.all(sqlPromises)
@@ -2564,12 +3909,40 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       const consensus = this.findConsensus(results)
 
       // Generate natural language response
-      const naturalResponse = await this.interpretQueryResult(
+      const interpretResult = await this.interpretQueryResult(
         query.message,
         consensus.result,
         sql1Result.explanation || 'Análisis basado en consenso de 3 generaciones SQL independientes.',
         query.venueSlug,
       )
+      const naturalResponse = interpretResult.response
+
+      // Calculate total token usage from 3 SQL generations + 1 interpretation
+      const sqlTokens = [sql1Result, sql2Result, sql3Result].reduce(
+        (acc, r) => ({
+          promptTokens: acc.promptTokens + (r.tokenUsage?.promptTokens || 0),
+          completionTokens: acc.completionTokens + (r.tokenUsage?.completionTokens || 0),
+          totalTokens: acc.totalTokens + (r.tokenUsage?.totalTokens || 0),
+        }),
+        { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      )
+
+      const totalTokensUsed = sqlTokens.totalTokens + (interpretResult.tokenUsage?.totalTokens || 0)
+
+      // Record token usage to budget (CONSENSUS = 3x SQL + interpretation)
+      if (totalTokensUsed > 0) {
+        try {
+          await tokenBudgetService.recordTokenUsage({
+            venueId: query.venueId,
+            userId: query.userId,
+            promptTokens: sqlTokens.promptTokens + (interpretResult.tokenUsage?.promptTokens || 0),
+            completionTokens: sqlTokens.completionTokens + (interpretResult.tokenUsage?.completionTokens || 0),
+            queryType: TokenQueryType.COMPLEX_CONSENSUS,
+          })
+        } catch (tokenError) {
+          logger.warn('Failed to record token usage for consensus voting', { error: tokenError })
+        }
+      }
 
       const totalTime = Date.now() - startTime
 
@@ -2578,12 +3951,22 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         confidence: consensus.confidence,
         totalTime,
         successfulQueries: results.length,
+        totalTokensUsed,
       })
+
+      // Generate visualization if requested (returns skip reason if can't generate)
+      const visualization = this.generateVisualizationFromSqlResult(consensus.result, query.message, query.includeVisualization)
 
       return {
         response: naturalResponse,
         queryResult: consensus.result,
         confidence: consensus.confidence,
+        visualization,
+        tokenUsage: {
+          promptTokens: sqlTokens.promptTokens + (interpretResult.tokenUsage?.promptTokens || 0),
+          completionTokens: sqlTokens.completionTokens + (interpretResult.tokenUsage?.completionTokens || 0),
+          totalTokens: totalTokensUsed,
+        },
         metadata: {
           queryGenerated: true,
           queryExecuted: true,

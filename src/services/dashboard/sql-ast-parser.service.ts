@@ -12,6 +12,7 @@
 import { Parser, AST } from 'node-sql-parser'
 import logger from '@/config/logger'
 import { SecurityViolationType } from './security-response.service'
+import { TableAccessControlService, UserRole } from './table-access-control.service'
 
 /**
  * Validation result structure
@@ -39,6 +40,7 @@ export interface ValidationOptions {
   allowedTables?: string[]
   maxDepth?: number // Max subquery depth
   strictMode?: boolean // Fail on warnings
+  userRole?: UserRole // User role for column-level access control
 }
 
 /**
@@ -113,15 +115,21 @@ export class SqlAstParserService {
       }
 
       // Step 6: Check for suspicious patterns in WHERE clause
+      // SECURITY FIX: OR conditions are ALWAYS errors because they can bypass venueId filter
+      // Example: WHERE venueId='correct' OR 1=1 would pass but is malicious
       if (whereAnalysis.hasSuspiciousPatterns) {
         whereAnalysis.suspiciousReasons.forEach(reason => {
-          if (options.strictMode) {
+          // OR conditions are CRITICAL security violations - always block
+          if (reason.includes('OR conditions') || reason.includes('Always-true condition')) {
+            errors.push(reason)
+            violationType = SecurityViolationType.SQL_INJECTION_ATTEMPT
+          } else if (options.strictMode) {
             errors.push(reason)
           } else {
             warnings.push(reason)
           }
         })
-        if (errors.length > 0) {
+        if (errors.length > 0 && !violationType) {
           violationType = SecurityViolationType.SQL_INJECTION_ATTEMPT
         }
       }
@@ -141,6 +149,19 @@ export class SqlAstParserService {
       if (dangerousFunctions.length > 0) {
         errors.push(`Dangerous SQL functions detected: ${dangerousFunctions.join(', ')}`)
         violationType = SecurityViolationType.SQL_INJECTION_ATTEMPT
+      }
+
+      // Step 10: SECURITY - Validate column-level access control
+      if (options.userRole && options.userRole !== UserRole.SUPERADMIN && options.userRole !== UserRole.ADMIN) {
+        const columnViolations = this.validateForbiddenColumns(ast, tables, options.userRole)
+        if (columnViolations.length > 0) {
+          columnViolations.forEach(violation => {
+            errors.push(
+              `Access denied: Column '${violation.column}' on table '${violation.table}' is restricted for role ${options.userRole}`,
+            )
+          })
+          violationType = SecurityViolationType.UNAUTHORIZED_TABLE
+        }
       }
 
       const hasSubqueries = this.hasSubqueries(ast)
@@ -196,6 +217,9 @@ export class SqlAstParserService {
 
   /**
    * Extract all table names from AST
+   *
+   * IMPORTANT: Only extracts actual table references from FROM clauses,
+   * NOT from column references inside functions like EXTRACT(HOUR FROM column).
    */
   private extractTables(ast: AST): string[] {
     const tables = new Set<string>()
@@ -203,29 +227,31 @@ export class SqlAstParserService {
     const extractFromNode = (node: any) => {
       if (!node) return
 
-      // Handle SELECT statements
-      if (node.type === 'select' && node.from) {
+      // Handle SELECT statements - only process actual FROM clause
+      if (node.type === 'select' && node.from && Array.isArray(node.from)) {
         node.from.forEach((fromItem: any) => {
-          if (fromItem.table) {
+          // Only add actual table references, not column references
+          // A table reference has `table` property and typically `db` and `as` properties
+          if (fromItem.table && typeof fromItem.table === 'string') {
             tables.add(fromItem.table)
           }
-          // Handle subqueries in FROM
+          // Handle subqueries in FROM clause
           if (fromItem.expr && fromItem.expr.type === 'select') {
             extractFromNode(fromItem.expr)
           }
         })
       }
 
-      // Handle JOINs
-      if (node.from) {
+      // Handle JOINs - only if it's a valid join structure
+      if (node.from && Array.isArray(node.from)) {
         node.from.forEach((fromItem: any) => {
-          if (fromItem.join) {
+          if (fromItem.join && typeof fromItem.join === 'string') {
             tables.add(fromItem.join)
           }
         })
       }
 
-      // Recursively check subqueries
+      // Recursively check subqueries in WHERE clause only
       if (node.where) {
         this.extractTablesFromExpression(node.where, tables)
       }
@@ -242,14 +268,30 @@ export class SqlAstParserService {
 
   /**
    * Extract tables from WHERE clause expressions
+   *
+   * IMPORTANT: Only extracts actual table references (type='select' subqueries),
+   * NOT column references inside functions like EXTRACT, DATE_TRUNC, etc.
    */
   private extractTablesFromExpression(expr: any, tables: Set<string>) {
     if (!expr) return
 
-    // Handle subqueries in WHERE clause
+    // Skip column references - they are NOT tables
+    // This handles cases like EXTRACT(HOUR FROM "createdAt") where createdAt is a column
+    if (expr.type === 'column_ref') {
+      return
+    }
+
+    // Skip function expressions - their arguments are columns, not tables
+    // Functions like EXTRACT, DATE_TRUNC, COALESCE, etc.
+    if (expr.type === 'function' || expr.type === 'aggr_func' || expr.type === 'extract') {
+      return
+    }
+
+    // Handle subqueries in WHERE clause - these DO contain table references
     if (expr.type === 'select') {
       const subTables = this.extractTables(expr)
       subTables.forEach(t => tables.add(t))
+      return
     }
 
     // Recursively check left and right sides of binary expressions
@@ -260,10 +302,11 @@ export class SqlAstParserService {
       this.extractTablesFromExpression(expr.right, tables)
     }
 
-    // Handle function arguments
+    // Handle function arguments - but only check for subqueries, not columns
     if (expr.args && Array.isArray(expr.args)) {
       expr.args.forEach((arg: any) => {
-        if (arg.expr) {
+        if (arg.expr && arg.expr.type === 'select') {
+          // Only process subqueries, ignore column references
           this.extractTablesFromExpression(arg.expr, tables)
         }
       })
@@ -318,6 +361,43 @@ export class SqlAstParserService {
   }
 
   /**
+   * Safely extract column name from AST node
+   * Handles different types returned by node-sql-parser
+   */
+  private extractColumnName(columnRef: any): string | null {
+    if (!columnRef) return null
+
+    if (typeof columnRef === 'string') {
+      // Simple case: column is already a string
+      return columnRef.toLowerCase()
+    } else if (Array.isArray(columnRef)) {
+      // Array case: ["Order", "venueId"] → take last element (column name)
+      const lastElement = columnRef[columnRef.length - 1]
+      return typeof lastElement === 'string' ? lastElement.toLowerCase() : null
+    } else if (typeof columnRef === 'object') {
+      // Object case: Try multiple nested structures
+
+      // Pattern 1: { expr: { type: "default", value: "venueId" } }
+      // This is the most common pattern returned by node-sql-parser
+      if (columnRef.expr?.value && typeof columnRef.expr.value === 'string') {
+        return columnRef.expr.value.toLowerCase()
+      }
+
+      // Pattern 2: { column: "venueId" } (direct string property)
+      if (columnRef.column && typeof columnRef.column === 'string') {
+        return columnRef.column.toLowerCase()
+      }
+
+      // Pattern 3: Recursively check if column is also an object
+      if (columnRef.column && typeof columnRef.column === 'object') {
+        return this.extractColumnName(columnRef.column)
+      }
+    }
+
+    return null
+  }
+
+  /**
    * Find venueId filter in WHERE clause
    */
   private findVenueFilter(whereExpr: any, requiredVenueId: string): { found: boolean; value: string | null; isValid: boolean } {
@@ -327,9 +407,9 @@ export class SqlAstParserService {
 
     // Check if this is a venueId = 'xxx' expression
     if (whereExpr.type === 'binary_expr' && whereExpr.operator === '=' && whereExpr.left && whereExpr.left.type === 'column_ref') {
-      const columnName = whereExpr.left.column?.toLowerCase() || whereExpr.left.column
+      const columnName = this.extractColumnName(whereExpr.left.column)
 
-      if (columnName === 'venueid' || columnName === 'venueId') {
+      if (columnName === 'venueid') {
         const value = whereExpr.right?.value || whereExpr.right?.toString()
         return {
           found: true,
@@ -413,6 +493,9 @@ export class SqlAstParserService {
 
   /**
    * Validate all subqueries recursively
+   *
+   * SECURITY: Subqueries are validated with strictMode=true to ensure
+   * they cannot bypass venueId filter through nested queries
    */
   private validateSubqueries(ast: AST, options: ValidationOptions, depth: number = 0): AstValidationResult {
     const errors: string[] = []
@@ -424,19 +507,25 @@ export class SqlAstParserService {
       return { valid: false, errors, warnings }
     }
 
+    // SECURITY FIX: Force strictMode on subqueries to prevent venueId bypass
+    const subqueryOptions: ValidationOptions = {
+      ...options,
+      strictMode: true, // Always strict for subqueries
+    }
+
     const checkNode = (node: any) => {
       if (!node) return
 
       // Check WHERE clause for subqueries
       if (node.where) {
-        this.checkExpressionForSubqueries(node.where, options, depth, errors, warnings)
+        this.checkExpressionForSubqueries(node.where, subqueryOptions, depth, errors, warnings)
       }
 
       // Check FROM clause for subqueries
       if (node.from && Array.isArray(node.from)) {
         node.from.forEach((fromItem: any) => {
           if (fromItem.expr && fromItem.expr.type === 'select') {
-            const subResult = this.validateQuery(this.astToSQL(fromItem.expr), options)
+            const subResult = this.validateQuery(this.astToSQL(fromItem.expr), subqueryOptions)
             errors.push(...subResult.errors)
             warnings.push(...subResult.warnings)
           }
@@ -447,7 +536,7 @@ export class SqlAstParserService {
       if (node.columns && Array.isArray(node.columns)) {
         node.columns.forEach((col: any) => {
           if (col.expr && col.expr.type === 'select') {
-            const subResult = this.validateQuery(this.astToSQL(col.expr), options)
+            const subResult = this.validateQuery(this.astToSQL(col.expr), subqueryOptions)
             errors.push(...subResult.errors)
             warnings.push(...subResult.warnings)
           }
@@ -466,11 +555,14 @@ export class SqlAstParserService {
 
   /**
    * Check expression for subqueries
+   *
+   * SECURITY: Uses strict options passed from validateSubqueries
    */
   private checkExpressionForSubqueries(expr: any, options: ValidationOptions, depth: number, errors: string[], warnings: string[]) {
     if (!expr) return
 
     if (expr.type === 'select') {
+      // SECURITY: Subqueries must have venueId filter (strict mode enforced by caller)
       const subResult = this.validateQuery(this.astToSQL(expr), options)
       errors.push(...subResult.errors)
       warnings.push(...subResult.warnings)
@@ -582,6 +674,120 @@ export class SqlAstParserService {
     })
 
     return dangerous
+  }
+
+  /**
+   * SECURITY: Validate that no forbidden columns are accessed
+   *
+   * Checks SELECT columns against TableAccessControlService.isColumnForbidden()
+   * to prevent access to sensitive data like costs, passwords, API keys, etc.
+   *
+   * @param ast - Parsed AST
+   * @param tables - Tables being accessed
+   * @param userRole - User's role
+   * @returns Array of column violations
+   */
+  private validateForbiddenColumns(ast: AST, tables: string[], userRole: UserRole): Array<{ table: string; column: string }> {
+    const violations: Array<{ table: string; column: string }> = []
+
+    const extractColumns = (node: any): Array<{ table: string | null; column: string }> => {
+      const columns: Array<{ table: string | null; column: string }> = []
+      if (!node) return columns
+
+      // Handle SELECT columns
+      if (node.type === 'select' && node.columns) {
+        if (node.columns === '*') {
+          // SELECT * - check all forbidden columns for all tables
+          tables.forEach(table => {
+            const forbidden = TableAccessControlService.getForbiddenColumns(table)
+            forbidden.forEach(col => {
+              violations.push({ table, column: col })
+            })
+          })
+        } else if (Array.isArray(node.columns)) {
+          node.columns.forEach((col: any) => {
+            if (col.expr && col.expr.type === 'column_ref') {
+              const columnName = this.extractColumnNameFromRef(col.expr)
+              const tableName = col.expr.table || null
+              if (columnName) {
+                columns.push({ table: tableName, column: columnName })
+              }
+            }
+            // Handle aggregate functions like SUM(column), COUNT(column)
+            if (col.expr && col.expr.type === 'aggr_func' && col.expr.args) {
+              const args = col.expr.args
+              if (args.expr && args.expr.type === 'column_ref') {
+                const columnName = this.extractColumnNameFromRef(args.expr)
+                const tableName = args.expr.table || null
+                if (columnName) {
+                  columns.push({ table: tableName, column: columnName })
+                }
+              }
+            }
+          })
+        }
+      }
+
+      return columns
+    }
+
+    // Extract columns from main query
+    let allColumns: Array<{ table: string | null; column: string }> = []
+    if (Array.isArray(ast)) {
+      ast.forEach(statement => {
+        allColumns = allColumns.concat(extractColumns(statement))
+      })
+    } else {
+      allColumns = extractColumns(ast)
+    }
+
+    // Check each column against forbidden columns for each table
+    allColumns.forEach(({ table: colTable, column }) => {
+      // If column has explicit table reference, check that table
+      if (colTable) {
+        if (TableAccessControlService.isColumnForbidden(colTable, column)) {
+          violations.push({ table: colTable, column })
+        }
+      } else {
+        // Column without table reference - check against all accessed tables
+        tables.forEach(table => {
+          if (TableAccessControlService.isColumnForbidden(table, column)) {
+            violations.push({ table, column })
+          }
+        })
+      }
+    })
+
+    // Log if violations found
+    if (violations.length > 0) {
+      logger.warn('🚫 Forbidden column access attempted', {
+        userRole,
+        violations,
+        tables,
+      })
+    }
+
+    return violations
+  }
+
+  /**
+   * Extract column name from column_ref AST node
+   */
+  private extractColumnNameFromRef(columnRef: any): string | null {
+    if (!columnRef) return null
+
+    // Handle column property
+    if (columnRef.column) {
+      if (typeof columnRef.column === 'string') {
+        return columnRef.column.toLowerCase()
+      }
+      // Handle nested structure
+      if (columnRef.column.expr?.value) {
+        return columnRef.column.expr.value.toLowerCase()
+      }
+    }
+
+    return null
   }
 
   /**

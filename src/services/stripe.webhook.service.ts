@@ -13,6 +13,7 @@ import { createNotification } from './dashboard/notification.dashboard.service'
 import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
 import { handlePaymentFailure, generateBillingPortalUrl } from './stripe.service'
 import socketManager from '../communication/sockets'
+import { tokenBudgetService } from './dashboard/token-budget.service'
 
 /**
  * Handle subscription updated event
@@ -184,26 +185,69 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
 
 /**
  * Handle invoice payment succeeded event
- * Triggered when subscription payment is successful
+ * Triggered when subscription payment OR token purchase payment is successful
  *
  * @param invoice - Stripe Invoice object
  */
 export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
-  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
-  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
-  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+  const metadata = invoice.metadata
   const amountPaid = invoice.amount_paid / 100 // Convert cents to dollars
   const currency = invoice.currency.toUpperCase()
 
   logger.info('📥 Webhook: Invoice payment succeeded', {
     invoiceId: invoice.id,
-    subscriptionId: subscriptionIdStr,
     amountPaid,
     currency,
+    metadataType: metadata?.type,
   })
 
+  // Check if this is a token purchase invoice
+  if (metadata?.type === 'chatbot_tokens_purchase') {
+    logger.info('📥 Webhook: Token purchase invoice payment succeeded', {
+      invoiceId: invoice.id,
+      venueId: metadata.venueId,
+      tokenAmount: metadata.tokenAmount,
+    })
+
+    try {
+      await tokenBudgetService.completeInvoicePurchase(invoice.id, {
+        invoicePdfUrl: invoice.invoice_pdf || undefined,
+        hostedInvoiceUrl: invoice.hosted_invoice_url || undefined,
+      })
+
+      logger.info('✅ Webhook: Token purchase completed via invoice', {
+        invoiceId: invoice.id,
+        venueId: metadata.venueId,
+        tokenAmount: metadata.tokenAmount,
+        hasInvoicePdf: !!invoice.invoice_pdf,
+      })
+
+      // Emit socket event for real-time UI update
+      if (metadata.venueId && socketManager.getServer()) {
+        socketManager.broadcastToVenue(metadata.venueId, 'tokens.purchased' as any, {
+          invoiceId: invoice.id,
+          tokenAmount: parseInt(metadata.tokenAmount || '0'),
+          invoicePdfUrl: invoice.invoice_pdf,
+          timestamp: new Date(),
+        })
+      }
+    } catch (error) {
+      logger.error('❌ Webhook: Failed to complete token purchase via invoice', {
+        invoiceId: invoice.id,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      throw error
+    }
+    return
+  }
+
+  // Handle subscription invoices (original logic)
+  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
+  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
+  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+
   if (!subscriptionIdStr) {
-    logger.warn('⚠️ Webhook: Invoice has no subscription', { invoiceId: invoice.id })
+    logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
     return
   }
 
@@ -359,28 +403,61 @@ async function sendPaymentFailedNotifications(
 
 /**
  * Handle invoice payment failed event
- * Triggered when subscription payment fails
+ * Triggered when subscription payment OR token purchase payment fails
  *
  * @param invoice - Stripe Invoice object
  */
 export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
-  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
-  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
-  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+  const metadata = invoice.metadata
   const attemptCount = invoice.attempt_count || 1
   const amountDue = invoice.amount_due
   const currency = invoice.currency
 
   logger.warn('📥 Webhook: Invoice payment failed', {
     invoiceId: invoice.id,
-    subscriptionId: subscriptionIdStr,
     attemptCount,
     amountDue,
     currency,
+    metadataType: metadata?.type,
   })
 
+  // Check if this is a token purchase invoice
+  if (metadata?.type === 'chatbot_tokens_purchase') {
+    logger.warn('⚠️ Webhook: Token purchase invoice payment failed', {
+      invoiceId: invoice.id,
+      venueId: metadata.venueId,
+      tokenAmount: metadata.tokenAmount,
+    })
+
+    try {
+      await tokenBudgetService.failInvoicePurchase(invoice.id)
+
+      // Notify venue about failed payment
+      if (metadata.venueId && socketManager.getServer()) {
+        socketManager.broadcastToVenue(metadata.venueId, 'tokens.purchase_failed' as any, {
+          invoiceId: invoice.id,
+          tokenAmount: parseInt(metadata.tokenAmount || '0'),
+          failureMessage: 'Payment failed',
+          timestamp: new Date(),
+        })
+      }
+    } catch (error) {
+      logger.error('❌ Webhook: Failed to mark token purchase invoice as failed', {
+        invoiceId: invoice.id,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      throw error
+    }
+    return
+  }
+
+  // Handle subscription invoices (original logic)
+  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
+  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
+  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+
   if (!subscriptionIdStr) {
-    logger.warn('⚠️ Webhook: Invoice has no subscription', { invoiceId: invoice.id })
+    logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
     return
   }
 
@@ -779,6 +856,108 @@ export async function handlePaymentMethodAttached(paymentMethod: Stripe.PaymentM
 }
 
 /**
+ * Handle successful payment intent for token purchases
+ *
+ * @param paymentIntent - Stripe PaymentIntent object
+ */
+export async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent) {
+  const paymentIntentId = paymentIntent.id
+  const metadata = paymentIntent.metadata
+
+  // Only process chatbot token purchases
+  if (metadata?.type !== 'chatbot_tokens') {
+    logger.info('ℹ️ Webhook: PaymentIntent not for chatbot tokens, skipping', {
+      paymentIntentId,
+      type: metadata?.type,
+    })
+    return
+  }
+
+  logger.info('📥 Webhook: Token purchase payment succeeded', {
+    paymentIntentId,
+    amount: paymentIntent.amount,
+    venueId: metadata?.venueId,
+    tokenAmount: metadata?.tokenAmount,
+  })
+
+  try {
+    await tokenBudgetService.completePurchase(paymentIntentId)
+
+    logger.info('✅ Webhook: Token purchase completed', {
+      paymentIntentId,
+      venueId: metadata?.venueId,
+      tokenAmount: metadata?.tokenAmount,
+    })
+
+    // Emit socket event for real-time UI update
+    if (metadata?.venueId && socketManager.getServer()) {
+      socketManager.broadcastToVenue(metadata.venueId, 'tokens.purchased' as any, {
+        paymentIntentId,
+        tokenAmount: parseInt(metadata?.tokenAmount || '0'),
+        timestamp: new Date(),
+      })
+    }
+  } catch (error) {
+    logger.error('❌ Webhook: Failed to complete token purchase', {
+      paymentIntentId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    throw error
+  }
+}
+
+/**
+ * Handle failed payment intent for token purchases
+ *
+ * @param paymentIntent - Stripe PaymentIntent object
+ */
+export async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentIntent) {
+  const paymentIntentId = paymentIntent.id
+  const metadata = paymentIntent.metadata
+
+  // Only process chatbot token purchases
+  if (metadata?.type !== 'chatbot_tokens') {
+    logger.info('ℹ️ Webhook: PaymentIntent not for chatbot tokens, skipping', {
+      paymentIntentId,
+      type: metadata?.type,
+    })
+    return
+  }
+
+  logger.warn('⚠️ Webhook: Token purchase payment failed', {
+    paymentIntentId,
+    venueId: metadata?.venueId,
+    tokenAmount: metadata?.tokenAmount,
+    failureCode: paymentIntent.last_payment_error?.code,
+    failureMessage: paymentIntent.last_payment_error?.message,
+  })
+
+  try {
+    await tokenBudgetService.failPurchase(paymentIntentId)
+
+    logger.info('✅ Webhook: Token purchase marked as failed', {
+      paymentIntentId,
+    })
+
+    // Notify venue about failed payment
+    if (metadata?.venueId && socketManager.getServer()) {
+      socketManager.broadcastToVenue(metadata.venueId, 'tokens.purchase_failed' as any, {
+        paymentIntentId,
+        tokenAmount: parseInt(metadata?.tokenAmount || '0'),
+        failureMessage: paymentIntent.last_payment_error?.message || 'Payment failed',
+        timestamp: new Date(),
+      })
+    }
+  } catch (error) {
+    logger.error('❌ Webhook: Failed to mark token purchase as failed', {
+      paymentIntentId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    throw error
+  }
+}
+
+/**
  * Main webhook event dispatcher
  * Routes events to appropriate handlers
  *
@@ -849,6 +1028,11 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
 
     // Process event based on type
     switch (event.type) {
+      case 'customer.subscription.created':
+        // Handle new subscription created (immediate payment, no trial)
+        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
+        break
+
       case 'customer.subscription.updated':
         await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
         break
@@ -875,6 +1059,14 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
 
       case 'payment_method.attached':
         await handlePaymentMethodAttached(event.data.object as Stripe.PaymentMethod)
+        break
+
+      case 'payment_intent.succeeded':
+        await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent)
+        break
+
+      case 'payment_intent.payment_failed':
+        await handlePaymentIntentFailed(event.data.object as Stripe.PaymentIntent)
         break
 
       default:

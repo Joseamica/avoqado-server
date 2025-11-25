@@ -1082,6 +1082,7 @@ export async function listVenuePaymentMethods(orgId: string, venueId: string, op
     select: {
       id: true,
       stripeCustomerId: true,
+      stripePaymentMethodId: true,
     },
   })
 
@@ -1095,6 +1096,30 @@ export async function listVenuePaymentMethods(orgId: string, venueId: string, op
   }
 
   const paymentMethods = await listPaymentMethods(venue.stripeCustomerId)
+
+  // Auto-set first payment method as default if none is set
+  if (paymentMethods.length > 0 && !venue.stripePaymentMethodId) {
+    const firstPaymentMethod = paymentMethods[0]
+    logger.info('🔄 Auto-setting first payment method as default', {
+      venueId,
+      paymentMethodId: firstPaymentMethod.id,
+    })
+
+    // Set as default in Stripe
+    await setDefaultPaymentMethod(venue.stripeCustomerId, firstPaymentMethod.id)
+
+    // Update venue record
+    await prisma.venue.update({
+      where: { id: venueId },
+      data: { stripePaymentMethodId: firstPaymentMethod.id },
+    })
+
+    logger.info('✅ First payment method auto-set as default', {
+      venueId,
+      paymentMethodId: firstPaymentMethod.id,
+    })
+  }
+
   return paymentMethods
 }
 

@@ -1105,6 +1105,28 @@ Middleware Validates Access
 - Production migration guide
 - Common issues and debugging
 
+### 🚧 Pending Features / TODOs
+
+**Chatbot Token Pricing - Superadmin Configuration** (Requested 2025-01-25)
+
+Currently, token pricing is hardcoded in:
+
+- `src/services/dashboard/token-budget.service.ts` (CONFIG object)
+- `src/controllers/dashboard/token-budget.dashboard.controller.ts` (TOKEN_PRICING_BY_CURRENCY)
+
+Current hardcoded values:
+
+- OpenAI cost: ~$0.01 USD per 1K tokens
+- Merchant price: $0.03 USD / $0.60 MXN per 1K tokens (200% margin)
+- Free tokens: 10,000 per month
+
+**TODO**: Create a superadmin-configurable pricing system:
+
+1. Create `ChatbotPricingConfig` model in Prisma (prices per currency, free tokens, margins)
+2. Create superadmin CRUD endpoints for pricing configuration
+3. Update token-budget service to read from database instead of hardcoded values
+4. Add UI in superadmin dashboard for price management
+
 ---
 
 When working on this codebase, always consider the full impact of changes. Database schema changes affect all layers. Inventory logic

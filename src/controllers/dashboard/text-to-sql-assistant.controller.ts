@@ -112,7 +112,7 @@ const hasPermissionForSensitiveQuery = (userRole: string): boolean => {
  */
 export const processTextToSqlQuery = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { message, conversationHistory, venueSlug, userId }: AssistantQueryDto = req.body
+    const { message, conversationHistory, venueSlug, userId, includeVisualization }: AssistantQueryDto = req.body
 
     // Verificar que el usuario esté autenticado
     if (!req.authContext?.userId || !req.authContext?.venueId || !req.authContext?.role) {
@@ -186,6 +186,7 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       venueSlug: currentVenueRecord?.slug,
       userRole: req.authContext.role as UserRole, // Pass for security validation
       ipAddress: req.ip || req.socket.remoteAddress || 'unknown', // Pass for audit logging
+      includeVisualization, // Pass flag for chart generation
     })
 
     // Log del resultado
@@ -239,6 +240,8 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
         suggestions: assistantPayload.suggestions || [],
         trainingDataId: assistantPayload.trainingDataId, // Include for feedback functionality
         metadata: sanitizedMetadata,
+        visualization: assistantPayload.visualization, // Include chart data when requested
+        tokenUsage: assistantPayload.tokenUsage, // Include token usage for display
       },
     })
   } catch (error) {

@@ -6,6 +6,7 @@ import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.mi
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { authorizeRole } from '../middlewares/authorizeRole.middleware'
 import { chatbotRateLimitMiddleware } from '../middlewares/chatbot-rate-limit.middleware'
+import { tokenBudgetMiddleware } from '../middlewares/token-budget.middleware'
 import { passwordResetRateLimiter } from '../middlewares/password-reset-rate-limit.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
 import { StaffRole } from '../security'
@@ -33,6 +34,7 @@ import * as shiftController from '../controllers/dashboard/shift.dashboard.contr
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
+import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
@@ -5301,6 +5303,7 @@ router.post(
   '/assistant/text-to-sql',
   authenticateTokenMiddleware,
   chatbotRateLimitMiddleware, // Rate limit: 10 queries/min per user, 100/hour per venue
+  tokenBudgetMiddleware, // Track token budget and add headers
   validateRequest(assistantQuerySchema),
   textToSqlAssistantController.processTextToSqlQuery,
 )
@@ -5729,6 +5732,183 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('settings:manage'),
   rolePermissionController.getRoleHierarchyInfo,
+)
+
+// ============================================================================
+// TOKEN BUDGET ROUTES
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tokens/status:
+ *   get:
+ *     tags: [Token Budget]
+ *     summary: Get token budget status
+ *     description: Returns current token budget status including free tokens remaining, extra balance, and usage percentage
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Token budget status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     freeTokensRemaining: { type: number }
+ *                     extraTokensBalance: { type: number }
+ *                     totalAvailable: { type: number }
+ *                     percentageUsed: { type: number }
+ *                     isInOverage: { type: boolean }
+ *                     overageTokensUsed: { type: number }
+ *                     overageCost: { type: number }
+ *                     periodEndsAt: { type: string, format: date-time }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/tokens/status', authenticateTokenMiddleware, tokenBudgetController.getStatus)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tokens/purchase:
+ *   post:
+ *     tags: [Token Budget]
+ *     summary: Purchase additional tokens
+ *     description: Purchase extra tokens using Stripe. Requires OWNER or ADMIN role.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [tokenAmount]
+ *             properties:
+ *               tokenAmount:
+ *                 type: number
+ *                 minimum: 1000
+ *                 description: Number of tokens to purchase
+ *               paymentMethodId:
+ *                 type: string
+ *                 description: Optional Stripe payment method ID
+ *     responses:
+ *       200:
+ *         description: Purchase initiated
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/tokens/purchase',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  tokenBudgetController.purchase,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tokens/auto-recharge:
+ *   put:
+ *     tags: [Token Budget]
+ *     summary: Configure auto-recharge settings
+ *     description: Enable/disable automatic token recharge when balance is low. Requires OWNER or ADMIN role.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled]
+ *             properties:
+ *               enabled:
+ *                 type: boolean
+ *                 description: Enable or disable auto-recharge
+ *               threshold:
+ *                 type: number
+ *                 minimum: 100
+ *                 description: Token balance that triggers auto-recharge
+ *               amount:
+ *                 type: number
+ *                 minimum: 1000
+ *                 description: Number of tokens to purchase when triggered
+ *     responses:
+ *       200:
+ *         description: Auto-recharge settings updated
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.put(
+  '/tokens/auto-recharge',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  tokenBudgetController.updateAutoRecharge,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tokens/history:
+ *   get:
+ *     tags: [Token Budget]
+ *     summary: Get token usage and purchase history
+ *     description: Returns paginated list of token usage records and purchases. Requires OWNER or ADMIN role.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: page
+ *         in: query
+ *         schema: { type: number, default: 1 }
+ *       - name: limit
+ *         in: query
+ *         schema: { type: number, default: 20, maximum: 100 }
+ *       - name: startDate
+ *         in: query
+ *         schema: { type: string, format: date-time }
+ *       - name: endDate
+ *         in: query
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Token history
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/tokens/history',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  tokenBudgetController.getHistory,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tokens/analytics:
+ *   get:
+ *     tags: [Token Budget]
+ *     summary: Get token usage analytics
+ *     description: Returns usage analytics including daily breakdown, query type distribution, and top users. Requires OWNER or ADMIN role.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: days
+ *         in: query
+ *         schema: { type: number, default: 30 }
+ *         description: Number of days to analyze
+ *     responses:
+ *       200:
+ *         description: Token analytics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/tokens/analytics',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
+  tokenBudgetController.getAnalytics,
 )
 
 export default router

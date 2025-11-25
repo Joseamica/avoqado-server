@@ -59,6 +59,10 @@ const prismaMock: any = {
   feature: createMockModel(),
   venueFeature: createMockModel(),
   webhookEvent: createMockModel(),
+  // Token budget models
+  chatbotTokenBudget: createMockModel(),
+  tokenUsageRecord: createMockModel(),
+  tokenPurchase: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

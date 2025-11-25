@@ -171,10 +171,19 @@ export class SqlValidationService {
 
     // Extract table names from SQL (handles aliases correctly)
     // Pattern: FROM "TableName" or JOIN "TableName"
-    // IMPORTANT: Must match quoted table names to avoid matching EXTRACT(DOW FROM ...)
-    // Fixed: Was matching "FROM" inside EXTRACT() functions
+    // IMPORTANT: Must NOT match "FROM" inside EXTRACT(), DATE_TRUNC(), or similar functions
+    // Example: EXTRACT(HOUR FROM "createdAt") - "createdAt" is a column, NOT a table
+    //
+    // Solution: Remove function calls that use FROM keyword before extracting tables
+    // This prevents false positives like EXTRACT(DOW FROM "column") being treated as FROM "column"
+    const sqlWithoutFunctions = sql
+      // Remove EXTRACT(...) patterns - e.g., EXTRACT(HOUR FROM "createdAt")
+      .replace(/\bextract\s*\([^)]+\)/gi, 'EXTRACT_REMOVED')
+      // Remove DATE_PART(...) patterns - e.g., DATE_PART('hour', "createdAt")
+      .replace(/\bdate_part\s*\([^)]+\)/gi, 'DATE_PART_REMOVED')
+
     const tablePattern = /\b(?:from|join)\s+"(\w+)"/gi
-    const matches = Array.from(sql.matchAll(tablePattern))
+    const matches = Array.from(sqlWithoutFunctions.matchAll(tablePattern))
 
     const referencedTables = matches
       .map(match => {

@@ -29,14 +29,51 @@ export const assistantQuerySchema = z.object({
     conversationHistory: z.array(conversationEntrySchema).max(50, 'El historial no puede exceder 50 entradas.').optional(),
     venueSlug: z.string().trim().min(1, 'El identificador del venue no puede estar vacío.').optional(),
     userId: z.string().trim().min(1, 'El identificador del usuario no puede estar vacío.').optional(),
+    includeVisualization: z.boolean().optional().default(false),
   }),
 })
+
+// Schema for chart visualization data
+export const chartVisualizationSchema = z.object({
+  type: z.enum(['bar', 'line', 'pie', 'area']),
+  title: z.string(),
+  description: z.string().optional(),
+  data: z.array(z.record(z.any())),
+  config: z.object({
+    xAxis: z.object({ key: z.string(), label: z.string() }).optional(),
+    yAxis: z.object({ key: z.string(), label: z.string() }).optional(),
+    dataKeys: z.array(
+      z.object({
+        key: z.string(),
+        label: z.string(),
+        color: z.string().optional(),
+      }),
+    ),
+  }),
+})
+
+// Schema for when visualization was requested but couldn't be generated
+export const visualizationSkippedSchema = z.object({
+  skipped: z.literal(true),
+  reason: z.string(),
+})
+
+// Union type: either a chart or a skip reason
+export const visualizationResultSchema = z.union([chartVisualizationSchema, visualizationSkippedSchema])
 
 export const assistantResponseSchema = z.object({
   response: z.string(),
   suggestions: z.array(z.string()).optional(),
   conversationId: z.string().optional(),
   trainingDataId: z.string().optional(),
+  visualization: visualizationResultSchema.optional(),
+  tokenUsage: z
+    .object({
+      promptTokens: z.number(),
+      completionTokens: z.number(),
+      totalTokens: z.number(),
+    })
+    .optional(),
 })
 
 export const feedbackSubmissionSchema = z.object({
@@ -61,3 +98,6 @@ export type ConversationEntryDto = z.infer<typeof conversationEntrySchema>
 export type AssistantQueryDto = z.infer<typeof assistantQuerySchema.shape.body>
 export type AssistantResponseDto = z.infer<typeof assistantResponseSchema>
 export type FeedbackSubmissionDto = z.infer<typeof feedbackSubmissionSchema.shape.body>
+export type ChartVisualization = z.infer<typeof chartVisualizationSchema>
+export type VisualizationSkipped = z.infer<typeof visualizationSkippedSchema>
+export type VisualizationResult = z.infer<typeof visualizationResultSchema>

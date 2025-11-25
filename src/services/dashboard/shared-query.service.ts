@@ -117,6 +117,85 @@ export interface ReviewStats {
 }
 
 /**
+ * Inventory alert for low stock items
+ */
+export interface InventoryAlert {
+  rawMaterialId: string
+  rawMaterialName: string
+  currentStock: number
+  minimumStock: number
+  unit: string
+  stockPercentage: number
+  estimatedDaysRemaining: number | null
+  lastPurchaseDate: Date | null
+}
+
+/**
+ * Pending orders statistics by status
+ */
+export interface PendingOrdersStats {
+  total: number
+  byStatus: {
+    pending: number
+    confirmed: number
+    preparing: number
+    ready: number
+  }
+  oldestOrderMinutes: number | null
+  averageWaitMinutes: number
+}
+
+/**
+ * Active shift information
+ */
+export interface ActiveShiftInfo {
+  shiftId: string
+  staffId: string
+  staffName: string
+  role: string
+  startTime: Date
+  durationMinutes: number
+  salesTotal: number
+  ordersCount: number
+  tipsTotal: number
+}
+
+/**
+ * Profit analysis for a period
+ */
+export interface ProfitAnalysis {
+  totalRevenue: number
+  totalCost: number
+  grossProfit: number
+  grossMarginPercent: number
+  currency: string
+  topProfitableProducts: Array<{
+    productId: string
+    productName: string
+    revenue: number
+    cost: number
+    profit: number
+    marginPercent: number
+    quantitySold: number
+  }>
+}
+
+/**
+ * Payment method breakdown
+ */
+export interface PaymentMethodBreakdown {
+  total: number
+  methods: Array<{
+    method: string
+    amount: number
+    count: number
+    percentage: number
+    tipAmount: number
+  }>
+  currency: string
+}
+
+/**
  * Shared Query Service
  *
  * All dashboard metrics MUST use this service to ensure consistency.
@@ -463,6 +542,350 @@ export class SharedQueryService {
       distribution,
       recentReviews,
       unansweredNegative,
+    }
+  }
+
+  /**
+   * Get inventory alerts for low stock items
+   *
+   * Used by:
+   * - Dashboard /api/v1/dashboard/inventory/alerts endpoint
+   * - AI Chatbot for "¿hay stock bajo?" or "¿qué ingredientes necesito?" queries
+   *
+   * @param venueId - Venue ID
+   * @param threshold - Percentage threshold for low stock (default: 50 = 50%)
+   * @returns Array of inventory alerts sorted by stock percentage ascending
+   *
+   * @example
+   * const alerts = await SharedQueryService.getInventoryAlerts(venueId, 25)
+   * console.log(alerts[0].rawMaterialName) // "Tortillas"
+   */
+  static async getInventoryAlerts(venueId: string, threshold: number = 50): Promise<InventoryAlert[]> {
+    // Get raw materials with current stock
+    const rawMaterials = await prisma.rawMaterial.findMany({
+      where: { venueId },
+      select: {
+        id: true,
+        name: true,
+        currentStock: true,
+        minimumStock: true,
+        unit: true,
+        updatedAt: true,
+      },
+    })
+
+    // Calculate stock percentage and filter low stock items
+    const alerts: InventoryAlert[] = rawMaterials
+      .map(rm => {
+        const currentStock = rm.currentStock?.toNumber() || 0
+        const minimumStock = rm.minimumStock?.toNumber() || 1
+        const stockPercentage = minimumStock > 0 ? (currentStock / minimumStock) * 100 : 100
+
+        return {
+          rawMaterialId: rm.id,
+          rawMaterialName: rm.name,
+          currentStock,
+          minimumStock,
+          unit: rm.unit,
+          stockPercentage,
+          estimatedDaysRemaining: null, // TODO: Calculate based on usage history
+          lastPurchaseDate: null, // TODO: Get from purchase orders
+        }
+      })
+      .filter(alert => alert.stockPercentage < threshold)
+      .sort((a, b) => a.stockPercentage - b.stockPercentage)
+
+    return alerts
+  }
+
+  /**
+   * Get pending orders statistics
+   *
+   * Used by:
+   * - Dashboard /api/v1/dashboard/orders/pending endpoint
+   * - AI Chatbot for "¿cuántas órdenes pendientes hay?" queries
+   *
+   * @param venueId - Venue ID
+   * @returns Pending orders statistics by status
+   *
+   * @example
+   * const pending = await SharedQueryService.getPendingOrders(venueId)
+   * console.log(`${pending.total} órdenes pendientes`) // "15 órdenes pendientes"
+   */
+  static async getPendingOrders(venueId: string): Promise<PendingOrdersStats> {
+    // Use typed enum values for Prisma query
+    const openStatuses: Prisma.Enumerable<'PENDING' | 'CONFIRMED' | 'PREPARING' | 'READY'> = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY']
+
+    // Get orders with open status
+    const orders = await prisma.order.findMany({
+      where: {
+        venueId,
+        status: { in: openStatuses },
+      },
+      select: {
+        id: true,
+        status: true,
+        createdAt: true,
+      },
+    })
+
+    const now = new Date()
+
+    // Calculate wait times
+    const waitTimes = orders.map(o => Math.floor((now.getTime() - o.createdAt.getTime()) / (1000 * 60)))
+    const oldestOrderMinutes = waitTimes.length > 0 ? Math.max(...waitTimes) : null
+    const averageWaitMinutes = waitTimes.length > 0 ? waitTimes.reduce((a, b) => a + b, 0) / waitTimes.length : 0
+
+    return {
+      total: orders.length,
+      byStatus: {
+        pending: orders.filter(o => o.status === 'PENDING').length,
+        confirmed: orders.filter(o => o.status === 'CONFIRMED').length,
+        preparing: orders.filter(o => o.status === 'PREPARING').length,
+        ready: orders.filter(o => o.status === 'READY').length,
+      },
+      oldestOrderMinutes,
+      averageWaitMinutes: Math.round(averageWaitMinutes),
+    }
+  }
+
+  /**
+   * Get active (open) shifts
+   *
+   * Used by:
+   * - Dashboard /api/v1/dashboard/shifts/active endpoint
+   * - AI Chatbot for "¿quién está trabajando?" or "¿turnos abiertos?" queries
+   *
+   * @param venueId - Venue ID
+   * @returns Array of active shifts with staff and sales info
+   *
+   * @example
+   * const shifts = await SharedQueryService.getActiveShifts(venueId)
+   * console.log(`${shifts.length} turnos abiertos`) // "3 turnos abiertos"
+   */
+  static async getActiveShifts(venueId: string): Promise<ActiveShiftInfo[]> {
+    const now = new Date()
+
+    // Get open shifts with staff info
+    const shifts = await prisma.shift.findMany({
+      where: {
+        venueId,
+        status: 'OPEN',
+      },
+      select: {
+        id: true,
+        staffId: true,
+        startTime: true,
+        totalCashPayments: true,
+        totalCardPayments: true,
+        totalTips: true,
+        staff: {
+          select: {
+            firstName: true,
+            lastName: true,
+            venues: {
+              where: { venueId },
+              select: { role: true },
+            },
+          },
+        },
+      },
+    })
+
+    // Get order counts for each shift
+    const shiftInfos: ActiveShiftInfo[] = await Promise.all(
+      shifts.map(async shift => {
+        const ordersCount = await prisma.order.count({
+          where: {
+            venueId,
+            createdById: shift.staffId,
+            createdAt: { gte: shift.startTime },
+          },
+        })
+
+        const salesTotal = (shift.totalCashPayments?.toNumber() || 0) + (shift.totalCardPayments?.toNumber() || 0)
+        const durationMinutes = Math.floor((now.getTime() - shift.startTime.getTime()) / (1000 * 60))
+
+        return {
+          shiftId: shift.id,
+          staffId: shift.staffId,
+          staffName: `${shift.staff.firstName} ${shift.staff.lastName}`.trim(),
+          role: shift.staff.venues[0]?.role || 'STAFF',
+          startTime: shift.startTime,
+          durationMinutes,
+          salesTotal,
+          ordersCount,
+          tipsTotal: shift.totalTips?.toNumber() || 0,
+        }
+      }),
+    )
+
+    return shiftInfos.sort((a, b) => b.salesTotal - a.salesTotal)
+  }
+
+  /**
+   * Get profit analysis for a period
+   *
+   * Used by:
+   * - Dashboard /api/v1/dashboard/analytics/profit endpoint
+   * - AI Chatbot for "¿cuál es mi margen?" or "¿productos más rentables?" queries
+   *
+   * @param venueId - Venue ID
+   * @param period - Date range (RelativeDateRange OR custom { from, to } object)
+   * @param limit - Maximum number of top products to return (default: 5)
+   * @param timezone - Venue timezone
+   * @returns Profit analysis with margins and top profitable products
+   *
+   * @example
+   * const profit = await SharedQueryService.getProfitAnalysis(venueId, 'last30days')
+   * console.log(`Margen bruto: ${profit.grossMarginPercent.toFixed(1)}%`) // "Margen bruto: 35.2%"
+   */
+  static async getProfitAnalysis(venueId: string, period: DateRangeSpec, limit: number = 5, timezone?: string): Promise<ProfitAnalysis> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true, currency: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const venueTimezone = timezone || venue.timezone
+    const { from, to } = this.getDateRange(period, venueTimezone)
+
+    // Get revenue from payments
+    const paymentsAgg = await prisma.payment.aggregate({
+      where: {
+        venueId,
+        createdAt: { gte: from, lte: to },
+        status: 'COMPLETED',
+      },
+      _sum: { amount: true },
+    })
+
+    const totalRevenue = paymentsAgg._sum.amount?.toNumber() || 0
+
+    // Get products with their costs (via recipes)
+    const productProfits = await prisma.$queryRaw<
+      Array<{
+        productId: string
+        productName: string
+        revenue: Prisma.Decimal
+        cost: Prisma.Decimal
+        quantitySold: bigint
+      }>
+    >`
+      SELECT
+        p."id" as "productId",
+        p."name" as "productName",
+        SUM(oi."quantity" * oi."unitPrice") as "revenue",
+        COALESCE(SUM(oi."quantity" * r."totalCost"), 0) as "cost",
+        SUM(oi."quantity")::bigint as "quantitySold"
+      FROM "OrderItem" oi
+      INNER JOIN "Product" p ON oi."productId" = p."id"
+      INNER JOIN "Order" o ON oi."orderId" = o."id"
+      LEFT JOIN "Recipe" r ON p."recipeId" = r."id"
+      WHERE o."venueId"::text = ${venueId}
+        AND o."createdAt" >= ${from}::timestamp
+        AND o."createdAt" <= ${to}::timestamp
+      GROUP BY p."id", p."name"
+      ORDER BY (SUM(oi."quantity" * oi."unitPrice") - COALESCE(SUM(oi."quantity" * r."totalCost"), 0)) DESC
+      LIMIT ${limit}
+    `
+
+    // Calculate totals
+    const totalCost = productProfits.reduce((sum, p) => sum + (p.cost?.toNumber() || 0), 0)
+    const grossProfit = totalRevenue - totalCost
+    const grossMarginPercent = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0
+
+    const topProfitableProducts = productProfits.map(p => {
+      const revenue = p.revenue?.toNumber() || 0
+      const cost = p.cost?.toNumber() || 0
+      const profit = revenue - cost
+      const marginPercent = revenue > 0 ? (profit / revenue) * 100 : 0
+
+      return {
+        productId: p.productId,
+        productName: p.productName,
+        revenue,
+        cost,
+        profit,
+        marginPercent,
+        quantitySold: Number(p.quantitySold),
+      }
+    })
+
+    return {
+      totalRevenue,
+      totalCost,
+      grossProfit,
+      grossMarginPercent,
+      currency: venue.currency,
+      topProfitableProducts,
+    }
+  }
+
+  /**
+   * Get payment method breakdown
+   *
+   * Used by:
+   * - Dashboard /api/v1/dashboard/payments/breakdown endpoint
+   * - AI Chatbot for "¿cuántos pagos en efectivo vs tarjeta?" queries
+   *
+   * @param venueId - Venue ID
+   * @param period - Date range (RelativeDateRange OR custom { from, to } object)
+   * @param timezone - Venue timezone
+   * @returns Payment breakdown by method with percentages
+   *
+   * @example
+   * const breakdown = await SharedQueryService.getPaymentMethodBreakdown(venueId, 'today')
+   * console.log(`Efectivo: ${breakdown.methods[0].percentage}%`) // "Efectivo: 45.2%"
+   */
+  static async getPaymentMethodBreakdown(venueId: string, period: DateRangeSpec, timezone?: string): Promise<PaymentMethodBreakdown> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true, currency: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const venueTimezone = timezone || venue.timezone
+    const { from, to } = this.getDateRange(period, venueTimezone)
+
+    // Get payments grouped by method
+    const payments = await prisma.payment.groupBy({
+      by: ['method'],
+      where: {
+        venueId,
+        createdAt: { gte: from, lte: to },
+        status: 'COMPLETED',
+      },
+      _sum: {
+        amount: true,
+        tipAmount: true,
+      },
+      _count: true,
+    })
+
+    const total = payments.reduce((sum, p) => sum + (p._sum.amount?.toNumber() || 0), 0)
+
+    const methods = payments.map(p => ({
+      method: p.method,
+      amount: p._sum.amount?.toNumber() || 0,
+      count: p._count,
+      percentage: total > 0 ? ((p._sum.amount?.toNumber() || 0) / total) * 100 : 0,
+      tipAmount: p._sum.tipAmount?.toNumber() || 0,
+    }))
+
+    // Sort by amount descending
+    methods.sort((a, b) => b.amount - a.amount)
+
+    return {
+      total,
+      methods,
+      currency: venue.currency,
     }
   }
 

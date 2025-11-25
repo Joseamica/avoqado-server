@@ -659,11 +659,11 @@ router.get(
 /**
  * @openapi
  * /tpv/venues/{venueId}/payments:
- *   get:
+ *   post:
  *     tags:
  *       - TPV - Payments
  *     summary: Get payments for a venue
- *     description: Retrieve payments with pagination and filtering options
+ *     description: Retrieve payments with pagination and filtering options (uses POST for complex filters in body)
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -769,7 +769,7 @@ router.get(
  *       500:
  *         description: Internal server error
  */
-router.get(
+router.post(
   '/venues/:venueId/payments',
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
