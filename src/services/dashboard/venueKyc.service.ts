@@ -49,21 +49,26 @@ export async function resubmitKycDocuments(venueId: string, userId: string, file
       throw new ForbiddenError('Only venue owners can resubmit KYC documents')
     }
 
-    // Verify venue KYC is in REJECTED status
-    if (venue.kycStatus !== 'REJECTED') {
-      throw new BadRequestError(`Cannot resubmit documents. Current KYC status: ${venue.kycStatus}`)
+    // Verify venue KYC is in a status that allows document submission
+    // NOT_SUBMITTED: First time submission
+    // REJECTED: Resubmission after rejection
+    if (venue.kycStatus !== 'REJECTED' && venue.kycStatus !== 'NOT_SUBMITTED') {
+      throw new BadRequestError(`Cannot submit documents. Current KYC status: ${venue.kycStatus}`)
     }
 
-    logger.info(`🔄 Resubmitting KYC documents for venue: ${venue.name} (${venueId})`)
+    const isFirstSubmission = venue.kycStatus === 'NOT_SUBMITTED'
 
-    // Get list of rejected documents
+    logger.info(`🔄 ${isFirstSubmission ? 'Submitting' : 'Resubmitting'} KYC documents for venue: ${venue.name} (${venueId})`)
+
+    // Get list of rejected documents (only relevant for resubmission)
     const rejectedDocs = venue.kycRejectedDocuments || []
     const uploadedDocKeys = Object.keys(files)
 
-    // If specific documents were rejected, validate:
+    // For resubmission (REJECTED status), validate:
     // 1. Only rejected documents are being uploaded
     // 2. All rejected documents are being resubmitted
-    if (rejectedDocs.length > 0) {
+    // For first submission (NOT_SUBMITTED), allow any documents
+    if (!isFirstSubmission && rejectedDocs.length > 0) {
       // Check for documents that weren't rejected but are being uploaded
       const invalidDocs = uploadedDocKeys.filter(docKey => !rejectedDocs.includes(docKey))
       if (invalidDocs.length > 0) {
@@ -156,8 +161,8 @@ export async function resubmitKycDocuments(venueId: string, userId: string, file
       },
     })
 
-    logger.info(`✅ KYC documents resubmitted for venue: ${venue.name}`)
-    logger.info(`   Status changed: REJECTED → PENDING_REVIEW`)
+    logger.info(`✅ KYC documents ${isFirstSubmission ? 'submitted' : 'resubmitted'} for venue: ${venue.name}`)
+    logger.info(`   Status changed: ${venue.kycStatus} → PENDING_REVIEW`)
 
     // Notify superadmins about the resubmission
     await notifySuperadminsNewKycSubmission(venueId, venue.name)

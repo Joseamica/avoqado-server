@@ -106,6 +106,21 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
   // Determine if onboarding demo
   const isOnboardingDemo = onboardingType === 'DEMO'
 
+  // Check if any KYC documents were provided (for real venues)
+  const hasKycDocuments =
+    paymentInfo?.ineUrl ||
+    paymentInfo?.rfcDocumentUrl ||
+    paymentInfo?.comprobanteDomicilioUrl ||
+    paymentInfo?.caratulaBancariaUrl ||
+    paymentInfo?.actaConstitutivaUrl ||
+    paymentInfo?.poderLegalUrl
+
+  // Determine KYC status:
+  // - DEMO venues: NOT_SUBMITTED (KYC not required, frontend bypasses via isOnboardingDemo)
+  // - REAL venues with documents: PENDING_REVIEW (awaiting admin review)
+  // - REAL venues without documents: NOT_SUBMITTED (needs to upload documents first)
+  const kycStatus = hasKycDocuments ? 'PENDING_REVIEW' : 'NOT_SUBMITTED'
+
   // Create venue
   const venue = await prisma.venue.create({
     data: {
@@ -138,8 +153,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       actaDocumentUrl: paymentInfo?.actaConstitutivaUrl, // Acta Constitutiva
       poderLegalUrl: paymentInfo?.poderLegalUrl,
 
-      // KYC Status (default PENDING_REVIEW from schema)
-      // kycStatus will default to PENDING_REVIEW
+      // KYC Status based on onboarding type and documents
+      kycStatus,
 
       // Onboarding Demo tracking
       isOnboardingDemo,
@@ -204,20 +219,9 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
   }
 
   // Notify superadmins if KYC documents were submitted (real venue, not onboarding demo)
-  if (!isOnboardingDemo && paymentInfo) {
-    // Check if any KYC documents were provided
-    const hasKycDocuments =
-      paymentInfo.ineUrl ||
-      paymentInfo.rfcDocumentUrl ||
-      paymentInfo.comprobanteDomicilioUrl ||
-      paymentInfo.caratulaBancariaUrl ||
-      paymentInfo.actaConstitutivaUrl ||
-      paymentInfo.poderLegalUrl
-
-    if (hasKycDocuments) {
-      logger.info(`📤 Notifying superadmins about new KYC submission from ${venue.name}`)
-      await kycReviewService.notifySuperadminsNewKycSubmission(venue.id, venue.name)
-    }
+  if (!isOnboardingDemo && hasKycDocuments) {
+    logger.info(`📤 Notifying superadmins about new KYC submission from ${venue.name}`)
+    await kycReviewService.notifySuperadminsNewKycSubmission(venue.id, venue.name)
   }
 
   // Enable selected premium features with Stripe trial

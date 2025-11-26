@@ -105,7 +105,7 @@ model Venue {
   poderLegalUrl           String? // Power of attorney (Persona Moral only)
 
   // KYC Verification Status
-  kycStatus            VerificationStatus @default(PENDING_REVIEW)
+  kycStatus            VerificationStatus @default(NOT_SUBMITTED)
   kycCompletedAt       DateTime? // When KYC verification was completed
   kycRejectionReason   String?            @db.Text // Reason for rejection (if REJECTED)
   kycRejectedDocuments String[]           @default([]) // Specific documents rejected (e.g., ["ineUrl", "rfcDocumentUrl"])
@@ -3040,6 +3040,7 @@ enum EntityType {
 }
 
 enum VerificationStatus {
+  NOT_SUBMITTED // Documents not yet uploaded
   PENDING_REVIEW // Awaiting Superadmin KYC review
   IN_REVIEW // Superadmin is currently reviewing
   VERIFIED // KYC approved, venue can operate
