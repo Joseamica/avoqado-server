@@ -41,8 +41,8 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 
-// Initialize Resend
-const resend = new Resend(process.env.RESEND_API_KEY)
+// Initialize Resend only if API key is available (skip in tests/dev without email)
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
 
 // Email configuration
 const FROM_EMAIL = process.env.EMAIL_FROM || 'Avoqado <noreply@avoqado.io>'
@@ -61,6 +61,11 @@ interface KycNotificationData {
  * Now sends to multiple recipients: all SUPERADMINs + venue OWNER
  */
 export async function sendKycSubmissionNotification(data: KycNotificationData): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping KYC notification email')
+    return false
+  }
+
   try {
     const dashboardUrl = data.dashboardBaseUrl || process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
     const fullActionUrl = `${dashboardUrl}${data.actionUrl}`
@@ -233,6 +238,11 @@ export async function sendNotificationEmail(
   actionUrl?: string,
   actionLabel?: string,
 ): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping notification email')
+    return false
+  }
+
   try {
     const html = `
       <!DOCTYPE html>
