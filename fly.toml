@@ -1,7 +1,14 @@
-# fly.toml app configuration file generated for avoqado-server on 2025-10-15T11:31:38-06:00
+# fly.toml - Fly.io Configuration for DEMO Environment
+# =====================================================
+# This is the DEMO environment (avoqado-server.fly.dev).
+# Used for client demos where instant cold starts are important.
 #
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+# Environment mapping:
+#   - Fly.io (this)  → Demo (instant start)
+#   - Render staging → Internal testing (50s cold start OK)
+#   - Render prod    → Production
 #
+# See https://fly.io/docs/reference/configuration/
 
 app = 'avoqado-server'
 primary_region = 'dfw'
@@ -29,9 +36,11 @@ primary_region = 'dfw'
 [http_service]
   internal_port = 3000
   force_https = true
-  auto_stop_machines = 'stop'
+  # DEMO CONFIG: Keep at least 1 machine running for instant demos
+  # Set to 'stop' if you want to save money when not demoing
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
 
 # App VM config (main server)

@@ -1,4 +1,19 @@
+# render.yaml - Infrastructure as Code for Render Services
+# ========================================================
+# Environment mapping:
+#   - avoqado-server-staging → develop branch (free tier, 50s cold start)
+#   - avoqado-server         → main branch (starter $7/mo, always on)
+#   - Fly.io (see fly.toml)  → develop branch (demo, instant start)
+#
+# Deployment triggers:
+#   - Staging: GitHub Actions on push to develop
+#   - Production: GitHub Actions on push to main
+#   - Both have autoDeploy: false (controlled by CI/CD)
+
 services:
+  # ============================================
+  # STAGING - Internal testing (develop branch)
+  # ============================================
   - type: web
     name: avoqado-server-staging
     env: node
@@ -6,7 +21,7 @@ services:
     region: oregon
     autoDeploy: false
     branch: develop
-    buildCommand:
+    buildCommand: >-
       npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
     startCommand: npm start
     healthCheckPath: /health
@@ -41,3 +56,53 @@ services:
         sync: false
       - key: FRONTEND_URL
         value: https://develop.avoqado-web-dashboard.pages.dev
+
+  # ============================================
+  # PRODUCTION - Live service (main branch)
+  # ============================================
+  - type: web
+    name: avoqado-server
+    env: node
+    plan: starter
+    region: oregon
+    autoDeploy: false
+    branch: main
+    buildCommand: >-
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npx prisma migrate deploy
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: ACCESS_TOKEN_SECRET
+        sync: false
+      - key: REFRESH_TOKEN_SECRET
+        sync: false
+      - key: COOKIE_SECRET
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: RABBITMQ_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        value: https://avoqado-web-dashboard.pages.dev

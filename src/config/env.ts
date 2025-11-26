@@ -1,51 +1,186 @@
+import { z } from 'zod'
 import dotenv from 'dotenv'
-import logger from './logger' // Assuming logger is already in src/config
+import logger from './logger'
 
-dotenv.config() // Load .env file at the very beginning
+// Load .env file FIRST (before any validation)
+dotenv.config()
 
-export const NODE_ENV = process.env.NODE_ENV || 'development'
-export const PORT = process.env.PORT || 12344
+// ============================================================================
+// Environment Variable Schema (Zod)
+// ============================================================================
+// This schema validates ALL environment variables at startup.
+// If any required variable is missing or invalid, the app will NOT start.
+//
+// Pattern: "Fail Fast" - catch configuration errors immediately, not at runtime
+// ============================================================================
 
-// Critical environment variables check
-const requiredEnvVars: string[] = [
-  'ACCESS_TOKEN_SECRET',
-  'SESSION_SECRET',
-  'COOKIE_SECRET',
-  'DATABASE_URL', // Assuming DATABASE_URL is primary for pgPool and Prisma
-  'RABBITMQ_URL', // Required for POS integration and event processing
-]
+const envSchema = z.object({
+  // ─────────────────────────────────────────────────────────────────────────
+  // CORE APPLICATION
+  // ─────────────────────────────────────────────────────────────────────────
+  NODE_ENV: z.enum(['development', 'staging', 'production', 'demo', 'test']).default('development'),
+  PORT: z.coerce.number().default(12344),
+  BASE_URL: z.string().url().optional(),
+  FRONTEND_URL: z.string().url().default('http://localhost:3000'),
 
-let missingVars = false
-requiredEnvVars.forEach(varName => {
-  if (!process.env[varName]) {
-    logger.error(`FATAL ERROR: Environment variable ${varName} is not defined.`)
-    missingVars = true
-  }
+  // ─────────────────────────────────────────────────────────────────────────
+  // DATABASE (REQUIRED)
+  // ─────────────────────────────────────────────────────────────────────────
+  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  TEST_DATABASE_URL: z.string().optional(),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // AUTHENTICATION (REQUIRED)
+  // ─────────────────────────────────────────────────────────────────────────
+  ACCESS_TOKEN_SECRET: z.string().min(16, 'ACCESS_TOKEN_SECRET must be at least 16 characters'),
+  REFRESH_TOKEN_SECRET: z.string().optional(),
+  SESSION_SECRET: z.string().min(16, 'SESSION_SECRET must be at least 16 characters'),
+  COOKIE_SECRET: z.string().min(16, 'COOKIE_SECRET must be at least 16 characters'),
+  JWT_SECRET: z.string().optional(), // Legacy alias for ACCESS_TOKEN_SECRET
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // INFRASTRUCTURE
+  // ─────────────────────────────────────────────────────────────────────────
+  RABBITMQ_URL: z.string().min(1, 'RABBITMQ_URL is required for POS integration'),
+  REDIS_URL: z.string().optional(),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // SESSION CONFIGURATION
+  // ─────────────────────────────────────────────────────────────────────────
+  SESSION_TABLE_NAME: z.string().default('user_sessions'),
+  SESSION_COOKIE_NAME: z.string().default('avoqado.sid'),
+  SESSION_MAX_AGE_MS: z.coerce.number().default(24 * 60 * 60 * 1000), // 1 day
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // REQUEST LIMITS
+  // ─────────────────────────────────────────────────────────────────────────
+  BODY_JSON_LIMIT: z.string().default('1mb'),
+  BODY_URLENCODED_LIMIT: z.string().default('5mb'),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // THIRD-PARTY SERVICES (Optional - validated if present)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Stripe
+  STRIPE_SECRET_KEY: z.string().startsWith('sk_').optional(),
+  STRIPE_PUBLISHABLE_KEY: z.string().startsWith('pk_').optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().startsWith('whsec_').optional(),
+
+  // OpenAI
+  OPENAI_API_KEY: z.string().optional(),
+
+  // Resend (Email)
+  RESEND_API_KEY: z.string().optional(),
+  EMAIL_FROM: z.string().optional(),
+
+  // Blumon Payment SDK
+  USE_BLUMON_MOCK: z
+    .string()
+    .transform(val => val === 'true')
+    .default('true'),
+  BLUMON_MASTER_USERNAME: z.string().optional(),
+  BLUMON_MASTER_PASSWORD: z.string().optional(),
+  BLUMON_CHECKOUT_SUCCESS_URL: z.string().url().optional(),
+  BLUMON_CHECKOUT_CANCEL_URL: z.string().url().optional(),
+
+  // Google OAuth
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_REDIRECT_URI: z.string().url().optional(),
+  GOOGLE_API_KEY: z.string().optional(),
+  GOOGLE_BP_REDIRECT_URI: z.string().url().optional(),
+
+  // Firebase
+  FIREBASE_SERVICE_ACCOUNT_BASE64: z.string().optional(),
+  FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
+  FIREBASE_STORAGE_BUCKET: z.string().optional(),
+
+  // Legacy SMTP (deprecated, use Resend)
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MONITORING & LOGGING
+  // ─────────────────────────────────────────────────────────────────────────
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  LOG_DIR: z.string().default('logs/'),
+  SIMPLE_LOGGING: z
+    .string()
+    .transform(val => val === 'true')
+    .optional(),
+  SENTRY_DSN: z.string().url().optional(),
+  POSTHOG_API_KEY: z.string().optional(),
+  POSTHOG_HOST: z.string().url().optional(),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // DEVELOPMENT TOOLS
+  // ─────────────────────────────────────────────────────────────────────────
+  ENABLE_DEV_TOOLS: z
+    .string()
+    .transform(val => val === 'true')
+    .default('false'),
+  API_PREFIX: z.string().default('/api/v1'),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // DEPLOYMENT (Auto-set by hosting providers)
+  // ─────────────────────────────────────────────────────────────────────────
+  FLY_APP_NAME: z.string().optional(),
+  FLY_REGION: z.string().optional(),
+  RENDER_INSTANCE_ID: z.string().optional(),
+  RENDER_SERVICE_NAME: z.string().optional(),
 })
 
-if (missingVars) {
+// ============================================================================
+// Parse and Validate
+// ============================================================================
+
+const parsed = envSchema.safeParse(process.env)
+
+if (!parsed.success) {
+  logger.error('\n❌ ═══════════════════════════════════════════════════════════')
+  logger.error('   INVALID ENVIRONMENT VARIABLES - Application cannot start')
+  logger.error('═══════════════════════════════════════════════════════════════\n')
+
+  const errors = parsed.error.flatten().fieldErrors
+  for (const [field, messages] of Object.entries(errors)) {
+    logger.error(`   • ${field}: ${messages?.join(', ')}`)
+  }
+
+  logger.error('\n📋 Check your .env file or environment configuration.')
+  logger.error('   See .env.example for required variables.\n')
   process.exit(1)
 }
 
-// Export other environment variables as needed, or access them via process.env directly
-export const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET!
-export const SESSION_SECRET = process.env.SESSION_SECRET!
-export const COOKIE_SECRET = process.env.COOKIE_SECRET!
-export const DATABASE_URL = process.env.DATABASE_URL!
+// ============================================================================
+// Export validated environment
+// ============================================================================
 
-export const BODY_JSON_LIMIT = process.env.BODY_JSON_LIMIT || '1mb'
-export const BODY_URLENCODED_LIMIT = process.env.BODY_URLENCODED_LIMIT || '5mb'
-export const SESSION_TABLE_NAME = process.env.SESSION_TABLE_NAME || 'user_sessions'
-export const SESSION_MAX_AGE_MS = process.env.SESSION_MAX_AGE_MS ? parseInt(process.env.SESSION_MAX_AGE_MS, 10) : 24 * 60 * 60 * 1000 // Default: 1 day
-export const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'avoqado.sid'
-export const RABBITMQ_URL = process.env.RABBITMQ_URL!
+export const env = parsed.data
 
-// Menta API credentials (optional with fallbacks)
-export const MENTA_USERNAME = process.env.MENTA_USERNAME
-export const MENTA_PASSWORD = process.env.MENTA_PASSWORD
-export const MENTA_MERCHANT_API_KEY = process.env.MENTA_MERCHANT_API_KEY
+// Named exports for backward compatibility
+export const {
+  NODE_ENV,
+  PORT,
+  BASE_URL,
+  FRONTEND_URL,
+  DATABASE_URL,
+  ACCESS_TOKEN_SECRET,
+  SESSION_SECRET,
+  COOKIE_SECRET,
+  RABBITMQ_URL,
+  REDIS_URL,
+  SESSION_TABLE_NAME,
+  SESSION_COOKIE_NAME,
+  SESSION_MAX_AGE_MS,
+  BODY_JSON_LIMIT,
+  BODY_URLENCODED_LIMIT,
+  LOG_LEVEL,
+  ENABLE_DEV_TOOLS,
+} = env
 
-// Frontend URL for deep links in emails (e.g., dashboard.avoqado.app)
-export const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'
-
-logger.info('Environment variables loaded and checked.')
+// Log success (only in development to avoid log noise in production)
+if (NODE_ENV === 'development') {
+  logger.info('✅ Environment variables validated successfully')
+}

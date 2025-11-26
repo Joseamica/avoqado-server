@@ -1,3 +1,26 @@
+# Avoqado Server CI/CD Pipeline
+# ==============================
+# This workflow handles testing and deployment to Render (staging + production).
+#
+# ENVIRONMENT MAPPING:
+# ┌─────────────────────────────────────────────────────────────────┐
+# │ Push to develop                                                 │
+# │ ↓                                                               │
+# │ This workflow: test → deploy-staging (Render free tier)        │
+# │ fly-deploy.yml: deploy-demo (Fly.io - instant start)           │
+# └─────────────────────────────────────────────────────────────────┘
+# ┌─────────────────────────────────────────────────────────────────┐
+# │ Push to main                                                    │
+# │ ↓                                                               │
+# │ This workflow: test → deploy-production (Render $7/mo)         │
+# │ release.yml: create GitHub release (if version changed)        │
+# └─────────────────────────────────────────────────────────────────┘
+#
+# SERVICE URLS:
+#   - Production: https://avoqado-server.onrender.com (Render)
+#   - Staging:    https://avoqado-server-staging-cm35.onrender.com (Render)
+#   - Demo:       https://avoqado-server.fly.dev (Fly.io) - see fly-deploy.yml
+
 name: 🚀 Avoqado Server CI/CD Pipeline
 
 on:

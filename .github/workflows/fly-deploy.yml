@@ -1,19 +1,74 @@
-# See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
+# Fly.io Demo Environment Deployment
+# ====================================
+# This workflow deploys to Fly.io for DEMO purposes (instant startup for client demos).
+# Fly.io is used instead of Render for demos because it has instant cold starts.
+#
+# Environment mapping:
+#   - develop branch → Fly.io (demo) + Render (staging)
+#   - main branch    → Render (production) only
+#
+# See: https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
 
-name: Fly Deploy
+name: 🎪 Fly.io Demo Deploy
 on:
   push:
     branches:
-      - main
-jobs:
-  deploy:
-    name: Deploy app
-    runs-on: ubuntu-latest
-    concurrency: deploy-group # optional: ensure only one action runs at a time
-    steps:
-      - uses: actions/checkout@v4
+      - develop
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests (emergency deploy)'
+        required: false
+        default: false
+        type: boolean
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+concurrency:
+  group: fly-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Quick validation before deploy
+  validate:
+    name: 🧪 Quick Validation
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔍 TypeScript check
+        run: npx tsc --noEmit
+
+      - name: 🗄️ Generate Prisma Client
+        run: npx prisma generate
+
+      - name: 🏗️ Build application
+        run: npm run build
+
+  deploy:
+    name: 🚀 Deploy to Fly.io (Demo)
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: always() && (needs.validate.result == 'success' || needs.validate.result == 'skipped')
+    environment:
+      name: staging
+      url: https://avoqado-server.fly.dev
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🪰 Setup Fly CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: 🔍 Verify Fly.io secrets
         run: |
@@ -26,3 +81,27 @@ jobs:
         run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: 🏥 Health check
+        run: |
+          echo "⏳ Waiting for deployment to stabilize..."
+          sleep 30
+          for i in {1..5}; do
+            if curl -f -s https://avoqado-server.fly.dev/health; then
+              echo "✅ Demo environment is healthy!"
+              exit 0
+            fi
+            echo "⏳ Health check attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "⚠️ Health check failed but deployment completed"
+
+      - name: 📢 Deployment summary
+        if: always()
+        run: |
+          echo "🎪 Demo Deployment Summary"
+          echo "=========================="
+          echo "📍 URL: https://avoqado-server.fly.dev"
+          echo "🌿 Branch: ${{ github.ref_name }}"
+          echo "🔄 Commit: ${{ github.sha }}"
+          echo "📅 Time: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"

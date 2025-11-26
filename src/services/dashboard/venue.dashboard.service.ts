@@ -27,7 +27,7 @@
 import prisma from '../../utils/prismaClient'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
-import { Venue, AccountType } from '@prisma/client'
+import { Venue, AccountType, EntityType, VerificationStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
@@ -43,6 +43,7 @@ import {
   setDefaultPaymentMethod,
   createTrialSetupIntent,
 } from '../stripe.service'
+import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -741,12 +742,23 @@ export async function convertDemoVenue(
   orgId: string,
   venueId: string,
   conversionData: {
+    // Entity type (PERSONA_FISICA or PERSONA_MORAL)
+    entityType: EntityType
+    // Basic business info
     rfc: string
     legalName: string
     fiscalRegime: string
-    taxDocumentUrl?: string | null
-    idDocumentUrl?: string | null
+    // Documents - Required for all entity types (Blumonpay requirements)
+    idDocumentUrl: string
+    rfcDocumentUrl: string
+    comprobanteDomicilioUrl: string
+    caratulaBancariaUrl: string
+    // Documents - PERSONA_MORAL only
     actaDocumentUrl?: string | null
+    poderLegalUrl?: string | null
+    // Legacy field (backwards compatibility)
+    taxDocumentUrl?: string | null
+    // Stripe integration
     selectedFeatures?: string[]
     paymentMethodId?: string
   },
@@ -836,14 +848,25 @@ export async function convertDemoVenue(
     data: {
       isOnboardingDemo: false,
       demoExpiresAt: null,
-      // Store tax information in venue fields
-      // Note: You may want to create a separate VenueTaxInfo model if you need more fields
+      // Entity type (PERSONA_FISICA or PERSONA_MORAL)
+      entityType: conversionData.entityType,
+      // Store tax/business information
       rfc: conversionData.rfc,
       legalName: conversionData.legalName,
       fiscalRegime: conversionData.fiscalRegime,
-      taxDocumentUrl: conversionData.taxDocumentUrl,
+      // Store all KYC documents (Blumonpay requirements)
       idDocumentUrl: conversionData.idDocumentUrl,
+      rfcDocumentUrl: conversionData.rfcDocumentUrl,
+      comprobanteDomicilioUrl: conversionData.comprobanteDomicilioUrl,
+      caratulaBancariaUrl: conversionData.caratulaBancariaUrl,
       actaDocumentUrl: conversionData.actaDocumentUrl,
+      poderLegalUrl: conversionData.poderLegalUrl,
+      // Legacy field (backwards compatibility - use rfcDocumentUrl if taxDocumentUrl not provided)
+      taxDocumentUrl: conversionData.taxDocumentUrl || conversionData.rfcDocumentUrl,
+      // Set KYC status to PENDING_REVIEW since all documents are uploaded
+      kycStatus: VerificationStatus.PENDING_REVIEW,
+      kycRejectionReason: null,
+      kycRejectedDocuments: [],
       // Store Stripe IDs if payment method was provided
       stripeCustomerId,
       stripePaymentMethodId,
@@ -853,11 +876,22 @@ export async function convertDemoVenue(
     },
   })
 
-  logger.info('Demo venue successfully converted to real', {
+  logger.info('Demo venue successfully converted to real with KYC documents', {
     venueId: updatedVenue.id,
     venueName: updatedVenue.name,
+    entityType: conversionData.entityType,
     rfc: conversionData.rfc,
+    kycStatus: updatedVenue.kycStatus,
   })
+
+  // Notify superadmins about new KYC submission
+  try {
+    await notifySuperadminsNewKycSubmission(venueId, updatedVenue.name)
+    logger.info('Superadmins notified about new KYC submission', { venueId })
+  } catch (notifyError) {
+    // Don't fail the conversion if notification fails - log and continue
+    logger.error('Failed to notify superadmins about new KYC submission', { error: notifyError, venueId })
+  }
 
   // 🎯 STRIPE INTEGRATION: Create trial subscriptions for selected features
   if (conversionData.selectedFeatures && conversionData.selectedFeatures.length > 0 && stripeCustomerId) {

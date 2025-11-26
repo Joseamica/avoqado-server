@@ -1,4 +1,4 @@
-import { VenueType } from '@prisma/client' // Importa enums directamente de Prisma
+import { EntityType, VenueType } from '@prisma/client' // Importa enums directamente de Prisma
 import { z } from 'zod'
 
 // Schema de Zod para la creación de Venues
@@ -91,25 +91,59 @@ export const listVenuesQuerySchema = z.object({
 export type ListVenuesQueryDto = z.infer<typeof listVenuesQuerySchema.shape.query>
 
 // Schema for converting demo venue to real venue
+// Follows Blumonpay requirements for KYC documentation
 export const convertDemoVenueSchema = z.object({
-  body: z.object({
-    rfc: z
-      .string({ required_error: 'RFC es requerido' })
-      .min(12, { message: 'RFC debe tener al menos 12 caracteres' })
-      .max(13, { message: 'RFC debe tener máximo 13 caracteres' })
-      .regex(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'Formato de RFC inválido' }),
-    legalName: z
-      .string({ required_error: 'Razón social es requerida' })
-      .min(3, { message: 'Razón social debe tener al menos 3 caracteres' }),
-    fiscalRegime: z.string({ required_error: 'Régimen fiscal es requerido' }).min(1, { message: 'Régimen fiscal es requerido' }),
-    // Document references will be handled separately via file upload endpoints
-    taxDocumentUrl: z.string().url().optional().nullable(),
-    idDocumentUrl: z.string().url().optional().nullable(),
-    actaDocumentUrl: z.string().url().optional().nullable(),
-    // Stripe integration fields (optional)
-    selectedFeatures: z.array(z.string()).optional(),
-    paymentMethodId: z.string().optional(),
-  }),
+  body: z
+    .object({
+      // Entity type (required) - determines required documents
+      entityType: z.nativeEnum(EntityType, {
+        errorMap: () => ({ message: 'Tipo de persona es requerido o inválido' }),
+      }),
+
+      // Basic business info (required for all)
+      rfc: z
+        .string({ required_error: 'RFC es requerido' })
+        .min(12, { message: 'RFC debe tener al menos 12 caracteres' })
+        .max(13, { message: 'RFC debe tener máximo 13 caracteres' })
+        .regex(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'Formato de RFC inválido' }),
+      legalName: z
+        .string({ required_error: 'Razón social es requerida' })
+        .min(3, { message: 'Razón social debe tener al menos 3 caracteres' }),
+      fiscalRegime: z.string({ required_error: 'Régimen fiscal es requerido' }).min(1, { message: 'Régimen fiscal es requerido' }),
+
+      // Documents - Required for ALL entity types (Blumonpay requirements)
+      idDocumentUrl: z.string({ required_error: 'Identificación oficial es requerida' }).url({ message: 'URL de identificación inválida' }),
+      rfcDocumentUrl: z
+        .string({ required_error: 'Constancia de situación fiscal es requerida' })
+        .url({ message: 'URL de constancia fiscal inválida' }),
+      comprobanteDomicilioUrl: z
+        .string({ required_error: 'Comprobante de domicilio es requerido' })
+        .url({ message: 'URL de comprobante de domicilio inválida' }),
+      caratulaBancariaUrl: z
+        .string({ required_error: 'Carátula bancaria es requerida' })
+        .url({ message: 'URL de carátula bancaria inválida' }),
+
+      // Documents - PERSONA_MORAL only
+      actaDocumentUrl: z.string().url({ message: 'URL de acta constitutiva inválida' }).optional().nullable(),
+      poderLegalUrl: z.string().url({ message: 'URL de poder legal inválida' }).optional().nullable(),
+
+      // Legacy field (keeping for backwards compatibility, maps to rfcDocumentUrl)
+      taxDocumentUrl: z.string().url().optional().nullable(),
+
+      // Stripe integration fields (optional)
+      selectedFeatures: z.array(z.string()).optional(),
+      paymentMethodId: z.string().optional(),
+    })
+    .refine(
+      data => {
+        // Acta Constitutiva is required for PERSONA_MORAL
+        if (data.entityType === EntityType.PERSONA_MORAL) {
+          return !!data.actaDocumentUrl
+        }
+        return true
+      },
+      { message: 'Acta Constitutiva es requerida para Persona Moral', path: ['actaDocumentUrl'] },
+    ),
 })
 
 export type ConvertDemoVenueDto = z.infer<typeof convertDemoVenueSchema.shape.body>
