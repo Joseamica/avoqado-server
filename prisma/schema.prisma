@@ -162,6 +162,11 @@ model Venue {
   reviews             Review[]
   terminals           Terminal[]
 
+  // Customer Management (Phase 1)
+  customers       Customer[]
+  customerGroups  CustomerGroup[]
+  loyaltyConfig   LoyaltyConfig?
+
   // Notifications
   notifications           Notification[]
   notificationPreferences NotificationPreference[]
@@ -384,6 +389,9 @@ model StaffVenue {
   active    Boolean   @default(true)
   startDate DateTime  @default(now())
   endDate   DateTime?
+
+  // Relations
+  loyaltyTransactionsCreated LoyaltyTransaction[] @relation("LoyaltyTransactionCreatedBy")
 
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
@@ -1417,6 +1425,10 @@ model Order {
   shiftId      String?
   shift        Shift?  @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
+  // Customer (registered customer vs guest)
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
   // Table service info
   covers Int? // Number of people at table
 
@@ -1459,10 +1471,11 @@ model Order {
   syncedAt     DateTime?
 
   // Relations
-  items              OrderItem[]
-  payments           Payment[]
-  paymentAllocations PaymentAllocation[]
-  actions            OrderAction[] // Audit trail for order modifications
+  items               OrderItem[]
+  payments            Payment[]
+  paymentAllocations  PaymentAllocation[]
+  actions             OrderAction[] // Audit trail for order modifications
+  loyaltyTransactions LoyaltyTransaction[]
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -1473,6 +1486,7 @@ model Order {
   @@index([shiftId])
   @@index([status])
   @@index([createdAt])
+  @@index([customerId])
   @@index([venueId, tableId, paymentStatus])
   @@index([venueId, customerIdentifier, paymentStatus])
 }
@@ -2874,6 +2888,26 @@ model Customer {
   provider   AuthProvider @default(EMAIL)
   providerId String?
 
+  // Multi-tenant
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Customer grouping
+  customerGroupId String?
+  customerGroup   CustomerGroup? @relation(fields: [customerGroupId], references: [id], onDelete: SetNull)
+
+  // Loyalty & tracking
+  loyaltyPoints      Int     @default(0)
+  totalVisits        Int     @default(0)
+  lastVisitAt        DateTime?
+  firstVisitAt       DateTime?
+  totalSpent         Decimal @default(0) @db.Decimal(12, 2)
+  averageOrderValue  Decimal @default(0) @db.Decimal(10, 2)
+
+  // Additional info
+  notes String? @db.Text
+  tags  String[] // ["VIP", "Allergic-Nuts", "Birthday-Dec"]
+
   // Preferences
   language         String  @default("es")
   marketingConsent Boolean @default(false)
@@ -2883,8 +2917,85 @@ model Customer {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Relations
+  orders              Order[]
+  loyaltyTransactions LoyaltyTransaction[]
+
   @@index([email])
   @@index([phone])
+  @@index([venueId])
+  @@index([customerGroupId])
+  @@index([venueId, email])
+  @@index([venueId, phone])
+}
+
+model CustomerGroup {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String? @db.Text
+  color       String? // For UI display (e.g., "#FF5733")
+
+  // Auto-assignment rules (future implementation)
+  autoAssignRules Json? // E.g., { "minSpent": 1000, "minVisits": 10 }
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  customers Customer[]
+
+  @@unique([venueId, name])
+  @@index([venueId])
+}
+
+model LoyaltyConfig {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Earning rules
+  pointsPerDollar  Decimal @default(1) @db.Decimal(5, 2) // 1 point per $1 spent
+  pointsPerVisit   Int     @default(0) // Bonus points per visit (e.g., 10)
+
+  // Redemption rules
+  redemptionRate   Decimal @default(0.01) @db.Decimal(5, 4) // $0.01 per point
+  minPointsRedeem  Int     @default(100) // Minimum points to redeem
+  pointsExpireDays Int? // Points expire after X days (null = never expire)
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model LoyaltyTransaction {
+  id         String                 @id @default(cuid())
+  customerId String
+  customer   Customer               @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  type   LoyaltyTransactionType // EARN, REDEEM, EXPIRE, ADJUST
+  points Int // Positive for EARN/ADJUST-add, negative for REDEEM/EXPIRE/ADJUST-subtract
+
+  // Context
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  // Metadata
+  reason String? @db.Text // E.g., "Birthday bonus", "Manual adjustment by manager"
+
+  // Audit
+  createdById String?
+  createdBy   StaffVenue? @relation("LoyaltyTransactionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([orderId])
 }
 
 // ==========================================
@@ -3326,6 +3437,13 @@ enum AuthProvider {
   GOOGLE
   FACEBOOK
   APPLE
+}
+
+enum LoyaltyTransactionType {
+  EARN   // Customer earns points (from purchase or visit)
+  REDEEM // Customer redeems points (discount applied)
+  EXPIRE // Points expire (automatic or manual)
+  ADJUST // Manual adjustment by staff (can be + or -)
 }
 
 enum ReceiptStatus {

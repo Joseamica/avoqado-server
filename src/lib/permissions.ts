@@ -294,6 +294,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'shifts:read',
     'reviews:read',
     'teams:read',
+    'customers:read', // Phase 1: Customer System
+    'loyalty:read', // Phase 1b: Loyalty System
     'features:read',
   ],
 
@@ -310,6 +312,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reservations:create',
     'reservations:update',
     'reservations:cancel',
+    'customers:read', // Phase 1: Customer System
+    'loyalty:read', // Phase 1b: Loyalty System
     'teams:read',
   ],
 
@@ -335,6 +339,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tables:read',
     'tables:update',
     'reviews:read',
+    'customers:read', // Phase 1: Customer System
+    'loyalty:read', // Phase 1b: Loyalty System
     'teams:read',
     'tpv:read', // Can view TPV terminals (but not create/edit/command)
   ],
@@ -352,6 +358,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:refund',
     'shifts:read',
     'reviews:read',
+    'customers:read', // Phase 1: Customer System
+    'loyalty:read', // Phase 1b: Loyalty System
     'teams:read',
   ],
 
@@ -397,6 +405,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'teams:update',
     'teams:delete',
     'teams:invite',
+    'customers:*', // Phase 1: Customer System
+    'customer-groups:*', // Phase 1: Customer System
+    'loyalty:*', // Phase 1b: Loyalty System
     'features:read',
     'features:write',
   ],
@@ -413,6 +424,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'shifts:*',
     'reviews:*',
     'teams:*',
+    'customers:*', // Phase 1: Customer System
+    'customer-groups:*', // Phase 1: Customer System
+    'loyalty:*', // Phase 1b: Loyalty System
     'features:*',
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
@@ -435,6 +449,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'shifts:*',
     'reviews:*',
     'teams:*',
+    'customers:*', // Phase 1: Customer System
+    'customer-groups:*', // Phase 1: Customer System
+    'loyalty:*', // Phase 1b: Loyalty System
     'features:*',
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',

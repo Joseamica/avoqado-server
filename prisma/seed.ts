@@ -550,33 +550,9 @@ async function main() {
   })
   console.log(`  Created 1 FeeSchedule with tiers.`)
 
-  // Create realistic customer cohorts
-  console.log(`  Creating ${SEED_CONFIG.CUSTOMERS} customers with cohort distribution...`)
-  const customersData = []
+  // ⚠️ MOVED: Customer creation moved to AFTER venue creation (needs venueId)
+  // See customer creation around line 1300+ inside venue loop
   const customerCohortMap = new Map<string, { type: string; joinedAt: Date }>() // Track cohort info separately
-
-  for (let i = 0; i < SEED_CONFIG.CUSTOMERS; i++) {
-    const cohort = generateCustomerCohort(i, SEED_CONFIG.CUSTOMERS)
-    const email = faker.internet.email()
-
-    customersData.push({
-      email,
-      phone: faker.phone.number(),
-      firstName: faker.person.firstName(),
-      lastName: faker.person.lastName(),
-      marketingConsent: Math.random() < 0.7, // 70% consent rate
-    })
-
-    // Store cohort info separately
-    customerCohortMap.set(email, {
-      type: cohort.type,
-      joinedAt: faker.date.past({ years: cohort.type === 'new' ? 0.25 : cohort.type === 'regular' ? 1 : 2 }),
-    })
-  }
-
-  await prisma.customer.createMany({ data: customersData })
-  const customers = await prisma.customer.findMany()
-  console.log(`  Created ${customers.length} customers across cohorts.`)
 
   // --- Notification Templates ---
   const notificationTemplates = [
@@ -1710,6 +1686,34 @@ async function main() {
         console.log(`      - Skipping detailed seeding for ${venue.name} (empty sandbox).`)
         continue
       }
+
+      // ✅ CREATE CUSTOMERS FOR THIS VENUE (Phase 1: Customer System)
+      console.log(`      - Creating ${SEED_CONFIG.CUSTOMERS} customers for ${venue.name}...`)
+      const customersData = []
+
+      for (let i = 0; i < SEED_CONFIG.CUSTOMERS; i++) {
+        const cohort = generateCustomerCohort(i, SEED_CONFIG.CUSTOMERS)
+        const email = faker.internet.email()
+
+        customersData.push({
+          email,
+          phone: faker.phone.number(),
+          firstName: faker.person.firstName(),
+          lastName: faker.person.lastName(),
+          marketingConsent: Math.random() < 0.7, // 70% consent rate
+          venueId: venue.id, // ✅ REQUIRED: Assign customer to this venue
+        })
+
+        // Store cohort info separately
+        customerCohortMap.set(email, {
+          type: cohort.type,
+          joinedAt: faker.date.past({ years: cohort.type === 'new' ? 0.25 : cohort.type === 'regular' ? 1 : 2 }),
+        })
+      }
+
+      await prisma.customer.createMany({ data: customersData })
+      const customers = await prisma.customer.findMany({ where: { venueId: venue.id } })
+      console.log(`      - Created ${customers.length} customers for ${venue.name}.`)
 
       const areaNames = ['Salon Principal', 'Terraza', 'Barra']
       const createdAreas = await Promise.all(

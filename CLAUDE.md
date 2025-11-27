@@ -143,6 +143,48 @@ When creating new documentation:
 - ❌ Fixed typo in function → No doc update needed
 - ❌ Refactored variable names → No doc update needed
 
+**📋 Implementation Plans (Multi-Phase Features):**
+
+When implementing large features that span multiple phases or sessions:
+
+1. **ALWAYS create a plan file** in `docs/` directory:
+
+   - Format: `docs/FEATURE_NAME_IMPLEMENTATION_PLAN.md`
+   - Example: `docs/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md`
+
+2. **Plan file structure**:
+
+   - Progress summary table (Phase, Status, %)
+   - Completed items with file paths
+   - Pending items with specifications
+   - Database schema changes
+   - API endpoints
+   - Timeline/milestones
+   - Changelog section
+
+3. **Keep the plan updated**:
+
+   - Mark items as ✅ when completed
+   - Update progress percentages
+   - Add new items if scope changes
+   - Log changes in Changelog section
+
+4. **DELETE the plan file** when implementation is 100% complete:
+
+   - All phases finished
+   - All tests passing
+   - Feature deployed to production
+
+5. **Why this matters**:
+   - Conversations can be compacted/summarized and lose context
+   - Plan files survive across sessions
+   - Team members can see progress
+   - Prevents re-doing completed work
+
+**Current Implementation Plans:**
+
+- `docs/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md` - Customer System + Discounts (Phase 1: 85%)
+
 ---
 
 ## Development Commands
@@ -166,6 +208,51 @@ When creating new documentation:
 - **If migration drift occurs**: Use `npx prisma migrate reset --force` to reset the database, then run your new migration
 - **Why this matters**: Migration history is the source of truth for production deployments. Using `db push` creates inconsistencies between
   dev and production schemas.
+
+**⚠️ CRITICAL SEED DATA POLICY:**
+
+When implementing NEW FEATURES or making SIGNIFICANT CHANGES, you MUST update seed data to ensure new users get a complete demo experience:
+
+- **ALWAYS update `prisma/seed.ts`** - Global seed data (features, payment providers, system defaults)
+- **ALWAYS update `src/services/onboarding/demoSeed.service.ts`** - Demo venue data (sample products, orders, tables, reviews)
+
+**Why this matters:**
+
+- New users onboarding see a fully populated demo venue with realistic data
+- Seed data acts as living documentation of the system's capabilities
+- Testing new features requires representative data
+- Missing seed data = broken demo experience = poor first impressions
+
+**Examples requiring seed updates:**
+
+```typescript
+// ✅ NEW FEATURE: Added "Loyalty Points" feature
+// 1. Update prisma/seed.ts - Add LOYALTY_PROGRAM to Feature table
+// 2. Update demoSeed.service.ts - Add sample loyalty members, point transactions
+
+// ✅ NEW FEATURE: Added "Table Reservations"
+// 1. Update prisma/seed.ts - Add RESERVATIONS to Feature table
+// 2. Update demoSeed.service.ts - Add sample reservations for demo venue
+
+// ✅ SCHEMA CHANGE: Added "allergens" field to Product
+// 1. Migration already created
+// 2. Update demoSeed.service.ts - Add allergen data to sample products
+
+// ✅ NEW PAYMENT PROVIDER: Integrated new gateway (e.g., Openpay)
+// 1. Update prisma/seed.ts - Add Openpay to PaymentProvider table
+// 2. Update demoSeed.service.ts - Create demo MerchantAccount for Openpay
+```
+
+**Quick verification:**
+
+```bash
+# Test seed data after your changes
+npm run migrate:reset  # Resets DB and runs seed
+npm run dev
+# 1. Create new demo venue via onboarding
+# 2. Verify your new feature appears with sample data
+# 3. Test feature works with seeded data
+```
 
 ### Testing
 

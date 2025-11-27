@@ -10,6 +10,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
 import { parseDateRange } from '@/utils/datetime'
+import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -223,8 +224,15 @@ function mapPaymentSource(source?: string): PaymentSource {
  * Update order totals directly in backend for standalone mode
  * @param orderId Order ID to update
  * @param paymentAmount Total payment amount (including tip)
+ * @param currentPaymentId Current payment ID to exclude from calculation
+ * @param staffId Optional staff ID who processed the payment (for loyalty points)
  */
-async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmount: number, currentPaymentId?: string): Promise<void> {
+async function updateOrderTotalsForStandalonePayment(
+  orderId: string,
+  paymentAmount: number,
+  currentPaymentId?: string,
+  staffId?: string,
+): Promise<void> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -242,6 +250,7 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
           product: true,
         },
       },
+      customer: true, // ⭐ LOYALTY: Need customer for points earning
     },
   })
 
@@ -416,6 +425,39 @@ async function updateOrderTotalsForStandalonePayment(orderId: string, paymentAmo
       orderId,
       totalItems: updatedOrder.items.length,
     })
+
+    // 🎁 LOYALTY POINTS: Automatically earn points when order is fully paid
+    // ✅ WORLD-CLASS PATTERN: Reward customers for completed purchases (Square, Toast, Shopify)
+    if (order.customerId && order.customer) {
+      try {
+        const orderTotal = parseFloat(updatedOrder.total.toString())
+        const loyaltyResult = await earnPoints(updatedOrder.venueId, order.customerId, orderTotal, orderId, staffId)
+
+        logger.info('🎁 Loyalty points earned successfully', {
+          orderId,
+          customerId: order.customerId,
+          customerName: `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim(),
+          orderTotal,
+          pointsEarned: loyaltyResult.pointsEarned,
+          newBalance: loyaltyResult.newBalance,
+        })
+      } catch (loyaltyError: any) {
+        // ⚠️ Don't fail the payment if loyalty points fail - just log the error
+        logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
+          orderId,
+          customerId: order.customerId,
+          error: loyaltyError.message,
+          reason: loyaltyError.message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
+        })
+        // Continue execution - payment is still successful
+      }
+    } else {
+      logger.info('⏭️ Loyalty points skipped: Order has no customer', {
+        orderId,
+        hasCustomerId: !!order.customerId,
+        isGuestOrder: !order.customerId,
+      })
+    }
   }
 }
 
@@ -1217,7 +1259,8 @@ export async function recordOrderPayment(
     // MODO AUTÓNOMO: Backend maneja los totales directamente
     try {
       // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
-      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, payment.id)
+      // ⭐ LOYALTY: Pass staffId for loyalty points attribution
+      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, payment.id, validatedStaffId)
 
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
         paymentId: payment.id,

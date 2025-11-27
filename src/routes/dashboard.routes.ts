@@ -30,6 +30,9 @@ import * as paymentController from '../controllers/dashboard/payment.dashboard.c
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
+import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
+import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
+import * as loyaltyController from '../controllers/dashboard/loyalty.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
@@ -91,6 +94,31 @@ import {
   VenueIdParamsSchema, // For listing all under a venue or POST to a venue
 } from '../schemas/dashboard/menuCategory.schema'
 import {
+  CreateCustomerSchema,
+  UpdateCustomerSchema,
+  CustomersQuerySchema,
+  CustomerParamsSchema,
+  VenueIdParamsSchema as CustomerVenueIdParamsSchema,
+} from '../schemas/dashboard/customer.schema'
+import {
+  CreateCustomerGroupSchema,
+  UpdateCustomerGroupSchema,
+  CustomerGroupsQuerySchema,
+  CustomerGroupParamsSchema,
+  AssignCustomersSchema,
+  RemoveCustomersSchema,
+} from '../schemas/dashboard/customerGroup.schema'
+import {
+  UpdateLoyaltyConfigSchema,
+  CalculatePointsSchema,
+  CalculateDiscountSchema,
+  RedeemPointsSchema,
+  AdjustPointsSchema,
+  LoyaltyTransactionsQuerySchema,
+  LoyaltyParamsSchema,
+  LoyaltyVenueParamsSchema,
+} from '../schemas/dashboard/loyalty.schema'
+import {
   InvitationParamsSchema,
   InviteTeamMemberSchema,
   TeamMemberParamsSchema,
@@ -135,7 +163,7 @@ const documentUpload = multer({
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB max
   },
-  fileFilter: (req, file, cb) => {
+  fileFilter: (_req, file, cb) => {
     // Accept PDF, JPG, JPEG, PNG files
     const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png']
     if (allowedMimeTypes.includes(file.mimetype)) {
@@ -5909,6 +5937,857 @@ router.get(
   authenticateTokenMiddleware,
   authorizeRole([StaffRole.OWNER, StaffRole.ADMIN]),
   tokenBudgetController.getAnalytics,
+)
+
+// ==========================================
+// CUSTOMER MANAGEMENT ROUTES (Phase 1)
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers:
+ *   get:
+ *     tags: [Customer Management]
+ *     summary: List all customers for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: page
+ *         in: query
+ *         schema: { type: number, default: 1 }
+ *       - name: pageSize
+ *         in: query
+ *         schema: { type: number, default: 20, maximum: 100 }
+ *       - name: search
+ *         in: query
+ *         schema: { type: string }
+ *         description: Search by name, email, or phone
+ *       - name: customerGroupId
+ *         in: query
+ *         schema: { type: string }
+ *       - name: tags
+ *         in: query
+ *         schema: { type: string }
+ *         description: Comma-separated tags
+ *     responses:
+ *       200:
+ *         description: A paginated list of customers
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('customers:read'),
+  validateRequest(z.object({ params: CustomerVenueIdParamsSchema.shape.params, query: CustomersQuerySchema.shape.query })),
+  customerController.getCustomers,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/stats:
+ *   get:
+ *     tags: [Customer Management]
+ *     summary: Get customer statistics for dashboard
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Customer statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customers/stats',
+  authenticateTokenMiddleware,
+  checkPermission('customers:read'),
+  validateRequest(CustomerVenueIdParamsSchema),
+  customerController.getCustomerStats,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}:
+ *   get:
+ *     tags: [Customer Management]
+ *     summary: Get a single customer by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Customer details
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('customers:read'),
+  validateRequest(CustomerParamsSchema),
+  customerController.getCustomerById,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers:
+ *   post:
+ *     tags: [Customer Management]
+ *     summary: Create a new customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *               phone: { type: string }
+ *               firstName: { type: string }
+ *               lastName: { type: string }
+ *               birthDate: { type: string, format: date }
+ *               gender: { type: string, enum: [MALE, FEMALE, OTHER, PREFER_NOT_TO_SAY] }
+ *               customerGroupId: { type: string }
+ *               notes: { type: string }
+ *               tags: { type: array, items: { type: string } }
+ *               marketingConsent: { type: boolean }
+ *     responses:
+ *       201:
+ *         description: Customer created successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('customers:create'),
+  validateRequest(CreateCustomerSchema),
+  customerController.createCustomer,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}:
+ *   put:
+ *     tags: [Customer Management]
+ *     summary: Update an existing customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string, format: email }
+ *               phone: { type: string }
+ *               firstName: { type: string }
+ *               lastName: { type: string }
+ *               birthDate: { type: string, format: date }
+ *               gender: { type: string, enum: [MALE, FEMALE, OTHER, PREFER_NOT_TO_SAY] }
+ *               customerGroupId: { type: string }
+ *               notes: { type: string }
+ *               tags: { type: array, items: { type: string } }
+ *               marketingConsent: { type: boolean }
+ *               active: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Customer updated successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.put(
+  '/venues/:venueId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('customers:update'),
+  validateRequest(UpdateCustomerSchema),
+  customerController.updateCustomer,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}:
+ *   delete:
+ *     tags: [Customer Management]
+ *     summary: Soft delete a customer (set active=false)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Customer deleted successfully
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.delete(
+  '/venues/:venueId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('customers:delete'),
+  validateRequest(CustomerParamsSchema),
+  customerController.deleteCustomer,
+)
+
+// ============================================================================
+// Customer Group Routes (Phase 1: Customer System)
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups:
+ *   get:
+ *     tags: [Customer Management]
+ *     summary: Get all customer groups with pagination and search
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: page
+ *         in: query
+ *         schema: { type: integer, minimum: 1 }
+ *       - name: pageSize
+ *         in: query
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - name: search
+ *         in: query
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: A paginated list of customer groups
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customer-groups',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:read'),
+  validateRequest(
+    z.object({ params: CustomerGroupParamsSchema.shape.params.pick({ venueId: true }), query: CustomerGroupsQuerySchema.shape.query }),
+  ),
+  customerGroupController.getCustomerGroups,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups/stats:
+ *   get:
+ *     tags: [Customer Management]
+ *     summary: Get customer group statistics
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Customer group statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customer-groups/stats',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:read'),
+  validateRequest(z.object({ params: CustomerGroupParamsSchema.shape.params.pick({ venueId: true }) })),
+  customerGroupController.getCustomerGroupStats,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups/{groupId}:
+ *   get:
+ *     tags: [Customer Management]
+ *     summary: Get a single customer group by ID with detailed stats
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: groupId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Customer group details with statistics
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customer-groups/:groupId',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:read'),
+  validateRequest(CustomerGroupParamsSchema),
+  customerGroupController.getCustomerGroupById,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups:
+ *   post:
+ *     tags: [Customer Management]
+ *     summary: Create a new customer group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string, minLength: 1, maxLength: 100 }
+ *               description: { type: string, maxLength: 500 }
+ *               color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+ *               autoAssignRules: { type: object }
+ *     responses:
+ *       201:
+ *         description: Customer group created successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customer-groups',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:create'),
+  validateRequest(CreateCustomerGroupSchema),
+  customerGroupController.createCustomerGroup,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups/{groupId}:
+ *   put:
+ *     tags: [Customer Management]
+ *     summary: Update an existing customer group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: groupId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string, minLength: 1, maxLength: 100 }
+ *               description: { type: string, maxLength: 500 }
+ *               color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+ *               autoAssignRules: { type: object }
+ *               active: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Customer group updated successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.put(
+  '/venues/:venueId/customer-groups/:groupId',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:update'),
+  validateRequest(UpdateCustomerGroupSchema),
+  customerGroupController.updateCustomerGroup,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups/{groupId}:
+ *   delete:
+ *     tags: [Customer Management]
+ *     summary: Soft delete a customer group (set active=false)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: groupId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Customer group deleted successfully
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.delete(
+  '/venues/:venueId/customer-groups/:groupId',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:delete'),
+  validateRequest(CustomerGroupParamsSchema),
+  customerGroupController.deleteCustomerGroup,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups/{groupId}/assign:
+ *   post:
+ *     tags: [Customer Management]
+ *     summary: Assign customers to a group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: groupId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [customerIds]
+ *             properties:
+ *               customerIds: { type: array, items: { type: string }, minItems: 1, maxItems: 100 }
+ *     responses:
+ *       200:
+ *         description: Customers assigned to group successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customer-groups/:groupId/assign',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:update'),
+  validateRequest(AssignCustomersSchema),
+  customerGroupController.assignCustomersToGroup,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customer-groups/{groupId}/remove:
+ *   post:
+ *     tags: [Customer Management]
+ *     summary: Remove customers from a group
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: groupId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [customerIds]
+ *             properties:
+ *               customerIds: { type: array, items: { type: string }, minItems: 1, maxItems: 100 }
+ *     responses:
+ *       200:
+ *         description: Customers removed from group successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customer-groups/:groupId/remove',
+  authenticateTokenMiddleware,
+  checkPermission('customer-groups:update'),
+  validateRequest(RemoveCustomersSchema),
+  customerGroupController.removeCustomersFromGroup,
+)
+
+// ============================================================================
+// Loyalty Program Routes (Phase 1b: Loyalty System)
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/config:
+ *   get:
+ *     tags: [Loyalty Program]
+ *     summary: Get loyalty program configuration for venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Loyalty configuration
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/loyalty/config',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  validateRequest(LoyaltyVenueParamsSchema),
+  loyaltyController.getLoyaltyConfig,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/config:
+ *   put:
+ *     tags: [Loyalty Program]
+ *     summary: Update loyalty program configuration
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               pointsPerDollar: { type: number, minimum: 0 }
+ *               minPurchaseAmount: { type: number, minimum: 0 }
+ *               redemptionRate: { type: number, minimum: 0 }
+ *               minRedemptionPoints: { type: integer, minimum: 0 }
+ *               maxRedemptionPercentage: { type: number, minimum: 0, maximum: 100 }
+ *               pointsExpirationDays: { type: integer, minimum: 0 }
+ *               enabled: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Loyalty configuration updated successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.put(
+  '/venues/:venueId/loyalty/config',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:update'),
+  validateRequest(UpdateLoyaltyConfigSchema),
+  loyaltyController.updateLoyaltyConfig,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/calculate-points:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Calculate points for a purchase amount
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [amount]
+ *             properties:
+ *               amount: { type: number, minimum: 0 }
+ *     responses:
+ *       200:
+ *         description: Points calculated successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/loyalty/calculate-points',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  validateRequest(CalculatePointsSchema),
+  loyaltyController.calculatePoints,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/calculate-discount:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Calculate discount value from points
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [points, orderTotal]
+ *             properties:
+ *               points: { type: integer, minimum: 1 }
+ *               orderTotal: { type: number, minimum: 0 }
+ *     responses:
+ *       200:
+ *         description: Discount calculated successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/loyalty/calculate-discount',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  validateRequest(CalculateDiscountSchema),
+  loyaltyController.calculateDiscount,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/loyalty/balance:
+ *   get:
+ *     tags: [Loyalty Program]
+ *     summary: Get customer's loyalty points balance
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Customer loyalty balance
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId/loyalty/balance',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  validateRequest(LoyaltyParamsSchema),
+  loyaltyController.getPointsBalance,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/loyalty/redeem:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Redeem loyalty points for discount
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [points, orderId]
+ *             properties:
+ *               points: { type: integer, minimum: 1 }
+ *               orderId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Points redeemed successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/loyalty/redeem',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:redeem'),
+  validateRequest(RedeemPointsSchema),
+  loyaltyController.redeemPoints,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/loyalty/adjust:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Manual point adjustment by staff (corrections, bonuses, penalties)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [points, reason]
+ *             properties:
+ *               points: { type: integer }
+ *               reason: { type: string, minLength: 5, maxLength: 500 }
+ *     responses:
+ *       200:
+ *         description: Points adjusted successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/loyalty/adjust',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:adjust'),
+  validateRequest(AdjustPointsSchema),
+  loyaltyController.adjustPoints,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/loyalty/transactions:
+ *   get:
+ *     tags: [Loyalty Program]
+ *     summary: Get loyalty transaction history for customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: page
+ *         in: query
+ *         schema: { type: integer, minimum: 1 }
+ *       - name: pageSize
+ *         in: query
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - name: type
+ *         in: query
+ *         schema: { type: string, enum: [EARN, REDEEM, EXPIRE, ADJUST] }
+ *     responses:
+ *       200:
+ *         description: A paginated list of loyalty transactions
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId/loyalty/transactions',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  validateRequest(
+    z.object({
+      params: LoyaltyParamsSchema.shape.params,
+      query: LoyaltyTransactionsQuerySchema.shape.query,
+    }),
+  ),
+  loyaltyController.getLoyaltyTransactions,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/loyalty/expire-old-points:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Expire old loyalty points (admin/cron job endpoint)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Old points expired successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/loyalty/expire-old-points',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:expire'),
+  validateRequest(LoyaltyVenueParamsSchema),
+  loyaltyController.expireOldPoints,
 )
 
 export default router

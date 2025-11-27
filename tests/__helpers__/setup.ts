@@ -63,6 +63,11 @@ const prismaMock: any = {
   chatbotTokenBudget: createMockModel(),
   tokenUsageRecord: createMockModel(),
   tokenPurchase: createMockModel(),
+  // Customer & Loyalty models
+  customer: createMockModel(),
+  customerGroup: createMockModel(),
+  loyaltyConfig: createMockModel(),
+  loyaltyTransaction: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
