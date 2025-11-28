@@ -986,7 +986,7 @@ router.get(
 
 ```bash
 # Test webhooks locally
-stripe listen --forward-to localhost:12344/api/v1/webhooks/stripe
+stripe listen --forward-to localhost:3000/api/v1/webhooks/stripe
 stripe trigger customer.subscription.updated
 stripe trigger invoice.payment_succeeded
 ```

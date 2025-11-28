@@ -165,7 +165,7 @@ For production testing with real cards:
 ### Configuration
 
 - `src/config/corsOptions.ts` - CORS settings
-  - Added `http://localhost:12344` to allowed origins
+  - Added `http://localhost:3000` to allowed origins
 
 ### Scripts
 
@@ -188,7 +188,7 @@ For production testing with real cards:
 2. **Open Payment Form**:
 
    ```
-   http://localhost:12344/sdk/example.html?sessionId=cs_test_xxx&amount=10&currency=MXN
+   http://localhost:3000/sdk/example.html?sessionId=cs_test_xxx&amount=10&currency=MXN
    ```
 
 3. **Submit Payment**:

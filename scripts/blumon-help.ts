@@ -113,7 +113,7 @@ console.log(`
   npm run dev:dashboard
     Open session dashboard in browser
 
-    URL: http://localhost:12344/sdk/sessions/dashboard
+    URL: http://localhost:3000/sdk/sessions/dashboard
 
   npm run dev:clean-sessions
     Delete old checkout sessions

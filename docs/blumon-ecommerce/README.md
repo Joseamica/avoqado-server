@@ -88,7 +88,7 @@ This directory contains all documentation for integrating **Blumon E-commerce Ho
 
 - Create Checkout: `POST /api/v1/sdk/checkout/create`
 - Webhook Receiver: `POST /api/v1/sdk/webhooks/blumon`
-- Session Dashboard: `http://localhost:12344/sdk/sessions/dashboard`
+- Session Dashboard: `http://localhost:3000/sdk/sessions/dashboard`
 
 ### Service Files
 

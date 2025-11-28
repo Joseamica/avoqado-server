@@ -19,9 +19,9 @@ const envSchema = z.object({
   // CORE APPLICATION
   // ─────────────────────────────────────────────────────────────────────────
   NODE_ENV: z.enum(['development', 'staging', 'production', 'demo', 'test']).default('development'),
-  PORT: z.coerce.number().default(12344),
+  PORT: z.coerce.number().default(3000),
   BASE_URL: z.string().url().optional(),
-  FRONTEND_URL: z.string().url().default('http://localhost:3000'),
+  FRONTEND_URL: z.string().url().default('http://localhost:5173'),
 
   // ─────────────────────────────────────────────────────────────────────────
   // DATABASE (REQUIRED)
@@ -80,8 +80,6 @@ const envSchema = z.object({
     .default('true'),
   BLUMON_MASTER_USERNAME: z.string().optional(),
   BLUMON_MASTER_PASSWORD: z.string().optional(),
-  BLUMON_CHECKOUT_SUCCESS_URL: z.string().url().optional(),
-  BLUMON_CHECKOUT_CANCEL_URL: z.string().url().optional(),
 
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string().optional(),

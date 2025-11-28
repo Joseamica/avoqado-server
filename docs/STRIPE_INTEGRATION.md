@@ -212,7 +212,7 @@ brew install stripe/stripe-cli/stripe
 stripe login
 
 # 3. Forward webhooks to local server
-stripe listen --forward-to localhost:12344/api/v1/webhooks/stripe
+stripe listen --forward-to localhost:3000/api/v1/webhooks/stripe
 
 # 4. Trigger test webhooks (in another terminal)
 stripe trigger customer.subscription.updated
@@ -251,7 +251,7 @@ npm run seed
 
 **Solution**:
 
-1. Check Stripe CLI is running: `stripe listen --forward-to localhost:12344/api/v1/webhooks/stripe`
+1. Check Stripe CLI is running: `stripe listen --forward-to localhost:3000/api/v1/webhooks/stripe`
 2. Check webhook secret in `.env` matches CLI output
 3. Check logs for webhook processing: `grep "payment_method.attached" logs/development*.log`
 

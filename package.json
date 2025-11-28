@@ -51,7 +51,7 @@
     "blumon:merchant": "npx ts-node -r tsconfig-paths/register scripts/check-blumon-merchant.ts",
     "blumon:mock": "npx ts-node -r tsconfig-paths/register scripts/test-blumon-mock.ts",
     "blumon:flow": "npx ts-node -r tsconfig-paths/register scripts/test-blumon-checkout-flow.ts",
-    "dev:dashboard": "echo '\n🎯 Session Dashboard: http://localhost:12344/sdk/sessions/dashboard\n' && open http://localhost:12344/sdk/sessions/dashboard",
+    "dev:dashboard": "echo '\n🎯 Session Dashboard: http://localhost:3000/sdk/sessions/dashboard\n' && open http://localhost:3000/sdk/sessions/dashboard",
     "dev:clean-sessions": "npx ts-node -r tsconfig-paths/register scripts/cleanup-old-sessions.ts",
     "dev:logs": "tail -f logs/$(ls -t logs/development*.log | head -1)",
     "sdk:test": "npx ts-node -r tsconfig-paths/register scripts/test-ecommerce-merchant-endpoints.ts",

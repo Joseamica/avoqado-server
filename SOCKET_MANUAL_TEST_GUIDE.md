@@ -13,7 +13,7 @@
 ```bash
 cd /Users/amieva/Documents/Programming/Avoqado/avoqado-server
 npm run dev
-# Server should be running on http://localhost:12344
+# Server should be running on http://localhost:3000
 ```
 
 **Test Venue:** `avoqado-full` (ID: `cmhtrvsvk00ad9krx8gb9jgbq`)
@@ -425,7 +425,7 @@ window.socket.connected // Should be true
 
 1. Check network connection
 2. Verify no firewall blocking WebSocket
-3. Check server uptime: `lsof -i :12344`
+3. Check server uptime: `lsof -i :3000`
 
 ---
 
@@ -437,7 +437,7 @@ Date: ___________
 Tester: __________
 
 ### Environment
-- [x] Server running on port 12344
+- [x] Server running on port 3000
 - [x] Android TPV connected (if applicable)
 - [x] Web dashboard open (if applicable)
 

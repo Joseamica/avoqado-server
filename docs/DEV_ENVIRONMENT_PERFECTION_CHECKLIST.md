@@ -217,12 +217,12 @@ if (process.env.NODE_ENV === 'development') {
 
 ```bash
 # Simular pago exitoso
-curl -X POST http://localhost:12344/api/v1/dev/simulate-webhook \
+curl -X POST http://localhost:3000/api/v1/dev/simulate-webhook \
   -H "Content-Type: application/json" \
   -d '{"sessionId":"cs_test_xxx","event":"payment.authorized","status":"APPROVED"}'
 
 # Simular pago fallido
-curl -X POST http://localhost:12344/api/v1/dev/simulate-webhook \
+curl -X POST http://localhost:3000/api/v1/dev/simulate-webhook \
   -H "Content-Type: application/json" \
   -d '{"sessionId":"cs_test_xxx","event":"payment.failed","status":"DECLINED"}'
 ```
@@ -370,7 +370,7 @@ export async function resetSessionStatus(req: Request, res: Response) {
 }
 ```
 
-**Acceso**: `http://localhost:12344/dev/sessions-dashboard.html`
+**Acceso**: `http://localhost:3000/dev/sessions-dashboard.html`
 
 **Tiempo estimado**: 2-3 horas
 
@@ -514,7 +514,7 @@ DATABASE_URL="postgresql://..."
 DIRECT_URL="postgresql://..."
 
 # Server
-PORT=12344
+PORT=3000
 NODE_ENV=development
 
 # Blumon Integration
@@ -591,7 +591,7 @@ ENABLE_EMAIL_NOTIFICATIONS=false  # true cuando implementes emails
 
 8. **Inicia el servidor**: \`\`\`bash npm run dev \`\`\`
 
-9. **Abre el dashboard de sesiones**: \`\`\` http://localhost:12344/dev/sessions-dashboard.html \`\`\`
+9. **Abre el dashboard de sesiones**: \`\`\` http://localhost:3000/dev/sessions-dashboard.html \`\`\`
 
 ## Testing Pagos
 
@@ -682,7 +682,7 @@ Blumon npm test # Ejecutar tests npm run lint:fix # Fix lint issues npm run form
     "blumon:list-merchants": "ts-node -r tsconfig-paths/register scripts/list-active-merchants.ts",
 
     // Dev tools
-    "dev:dashboard": "open http://localhost:12344/dev/sessions-dashboard.html",
+    "dev:dashboard": "open http://localhost:3000/dev/sessions-dashboard.html",
     "dev:clean-sessions": "ts-node -r tsconfig-paths/register scripts/cleanup-test-sessions.ts",
 
     // Database
@@ -838,7 +838,7 @@ logger.error('❌ [TOKENIZE] Tokenization failed', {
     {
       "name": "1. Create Checkout Session",
       "method": "POST",
-      "url": "http://localhost:12344/api/v1/sdk/sessions",
+      "url": "http://localhost:3000/api/v1/sdk/sessions",
       "body": {
         "amount": 10,
         "currency": "MXN",
@@ -848,7 +848,7 @@ logger.error('❌ [TOKENIZE] Tokenization failed', {
     {
       "name": "2. Tokenize Card",
       "method": "POST",
-      "url": "http://localhost:12344/api/v1/sdk/tokenize",
+      "url": "http://localhost:3000/api/v1/sdk/tokenize",
       "body": {
         "sessionId": "{{sessionId}}",
         "pan": "4111111111111111",
@@ -861,7 +861,7 @@ logger.error('❌ [TOKENIZE] Tokenization failed', {
     {
       "name": "3. Charge Payment",
       "method": "POST",
-      "url": "http://localhost:12344/api/v1/sdk/charge",
+      "url": "http://localhost:3000/api/v1/sdk/charge",
       "body": {
         "sessionId": "{{sessionId}}",
         "cvv": "123"

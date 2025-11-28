@@ -134,7 +134,7 @@ async function testCheckout() {
     console.log('🌐 TEST CHECKOUT URL')
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
     console.log(
-      `http://localhost:12344/sdk/example.html?sessionId=${session.sessionId}&amount=${session.amount}&currency=${session.currency}`,
+      `http://localhost:3000/sdk/example.html?sessionId=${session.sessionId}&amount=${session.amount}&currency=${session.currency}`,
     )
 
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')

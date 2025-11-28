@@ -12,7 +12,7 @@ const colors = require('colors')
 
 class LiveTrainingCollector {
   constructor() {
-    this.baseURL = 'http://localhost:12344/api'
+    this.baseURL = 'http://localhost:3000/api'
     this.collectedData = []
     this.token = null
     this.trainingMetrics = {

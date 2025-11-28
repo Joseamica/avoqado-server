@@ -6,7 +6,7 @@
 import axios from 'axios'
 import { io, Socket } from 'socket.io-client'
 
-const API_BASE = 'http://localhost:12344/api/v1'
+const API_BASE = 'http://localhost:3000/api/v1'
 const VENUE_ID = 'cmhtrvsvk00ad9krx8gb9jgbq' // avoqado-full
 const CATEGORY_ID = 'cmhtrvtdx00gk9krxcyo4zpah' // Tacos Mexicanos
 
@@ -71,7 +71,7 @@ async function testSocketEvents() {
   try {
     console.log('\n🔌 STEP 2: Connecting to Socket.IO...')
 
-    socket = io('http://localhost:12344', {
+    socket = io('http://localhost:3000', {
       auth: {
         token: authToken,
       },

@@ -87,12 +87,12 @@ npm run seed
 npm run dev
 ```
 
-🎉 **Server running at**: `http://localhost:12344`
+🎉 **Server running at**: `http://localhost:3000`
 
 **Test it**:
 
 ```bash
-curl http://localhost:12344/health
+curl http://localhost:3000/health
 # Response: {"status":"ok"}
 ```
 
@@ -205,8 +205,8 @@ npm run dev
 **Server logs**:
 
 ```
-🚀 Server is running on http://localhost:12344
-📊 Swagger docs available at http://localhost:12344/api-docs
+🚀 Server is running on http://localhost:3000
+📊 Swagger docs available at http://localhost:3000/api-docs
 🔌 Socket.IO server initialized
 ✅ PostgreSQL connected
 ✅ Redis connected
@@ -431,16 +431,16 @@ npm run migrate
 
 ### Port Already in Use
 
-**Error**: `Error: listen EADDRINUSE: address already in use :::12344`
+**Error**: `Error: listen EADDRINUSE: address already in use :::3000`
 
 **Solution**:
 
 ```bash
-# Find and kill process using port 12344
-lsof -ti:12344 | xargs kill -9
+# Find and kill process using port 3000
+lsof -ti:3000 | xargs kill -9
 
 # Or change PORT in .env
-PORT=12345
+PORT=3001
 ```
 
 ### Blumon Authentication Failed
@@ -515,7 +515,7 @@ npm run build
 - **Blumon CLI**: `npm run blumon:help`
 - **Check logs**: `npm run dev:logs`
 - **Open dashboard**: `npm run dev:dashboard`
-- **API docs**: http://localhost:12344/api-docs (when server running)
+- **API docs**: http://localhost:3000/api-docs (when server running)
 
 ---
 
@@ -525,7 +525,7 @@ After setup, verify everything works:
 
 - [ ] ✅ Server starts: `npm run dev`
 - [ ] ✅ Database connected: Check server logs for "PostgreSQL connected"
-- [ ] ✅ Health check: `curl http://localhost:12344/health`
+- [ ] ✅ Health check: `curl http://localhost:3000/health`
 - [ ] ✅ Migrations ran: `npx prisma migrate status`
 - [ ] ✅ Seed data loaded: Check for sample venues in database
 - [ ] ✅ Blumon authenticated: `npm run blumon:merchant`

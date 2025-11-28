@@ -2,8 +2,8 @@ const { io } = require('socket.io-client')
 const http = require('http')
 
 // Configuration - Try different ports
-const PORTS_TO_TEST = [12344, 3000, 8080, 5000]
-let SERVER_URL = 'http://localhost:12344'
+const PORTS_TO_TEST = [3000, 8080, 5000]
+let SERVER_URL = 'http://localhost:3000'
 
 // Test scenarios
 class SocketIOTester {
@@ -42,7 +42,7 @@ class SocketIOTester {
 
       const options = {
         hostname: 'localhost',
-        port: 12344,
+        port: 3000,
         path: '/api/dev/generate-token',
         method: 'POST',
         headers: {

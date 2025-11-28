@@ -35,7 +35,7 @@ async function createDirectSession() {
     console.log(`   Expires: ${session.expiresAt}`)
 
     console.log(`\n🔗 Test URL:`)
-    console.log(`   http://localhost:12344/sdk/example.html?sessionId=${session.sessionId}&amount=0.50&currency=MXN`)
+    console.log(`   http://localhost:3000/sdk/example.html?sessionId=${session.sessionId}&amount=0.50&currency=MXN`)
 
     console.log(`\n💳 Test Card (Pre-filled):`)
     console.log(`   Number: 3782 822463 10005 (AMEX)`)

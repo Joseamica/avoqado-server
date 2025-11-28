@@ -29,7 +29,7 @@ const getSocketConfig = (): SocketServerConfig => {
               'http://localhost:5000',
               'http://localhost:8080',
               'http://localhost:8081',
-              'http://localhost:12344',
+              'http://localhost:3000',
 
               // Local IP addresses
               'http://10.211.55.3:5173',

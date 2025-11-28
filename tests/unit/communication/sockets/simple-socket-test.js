@@ -1,9 +1,9 @@
 const { io } = require('socket.io-client')
 
-console.log('🔌 Testing Socket.IO connection to localhost:12344...\n')
+console.log('🔌 Testing Socket.IO connection to localhost:3000...\n')
 
 // Create a simple test token (this will fail auth but test connection)
-const socket = io('http://localhost:12344', {
+const socket = io('http://localhost:3000', {
   auth: { token: 'test-token' },
   timeout: 5000,
 })

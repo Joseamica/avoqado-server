@@ -44,7 +44,7 @@ async function listSessions() {
       console.log(`   Created: ${session.createdAt.toISOString()}`)
       console.log(`   Expires: ${session.expiresAt.toISOString()} ${isExpired ? '❌ EXPIRED' : '✅ Valid'}`)
       console.log(
-        `   Test URL: http://localhost:12344/sdk/example.html?sessionId=${session.sessionId}&amount=${session.amount}&currency=${session.currency}`,
+        `   Test URL: http://localhost:3000/sdk/example.html?sessionId=${session.sessionId}&amount=${session.amount}&currency=${session.currency}`,
       )
       console.log('')
     }

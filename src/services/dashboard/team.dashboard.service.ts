@@ -149,7 +149,7 @@ export async function getTeamMembers(
         totalTips: Number(stat._sum?.tipAmount ?? 0),
         totalOrders: stat._count ?? 0,
       },
-    ])
+    ]),
   )
 
   const teamMembers: TeamMember[] = staffVenues.map(sv => {
