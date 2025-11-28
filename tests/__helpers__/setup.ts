@@ -68,6 +68,12 @@ const prismaMock: any = {
   customerGroup: createMockModel(),
   loyaltyConfig: createMockModel(),
   loyaltyTransaction: createMockModel(),
+  // Discount & Coupon models
+  discount: createMockModel(),
+  couponCode: createMockModel(),
+  couponRedemption: createMockModel(),
+  customerDiscount: createMockModel(),
+  orderDiscount: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

@@ -163,9 +163,12 @@ model Venue {
   terminals           Terminal[]
 
   // Customer Management (Phase 1)
-  customers       Customer[]
-  customerGroups  CustomerGroup[]
-  loyaltyConfig   LoyaltyConfig?
+  customers      Customer[]
+  customerGroups CustomerGroup[]
+  loyaltyConfig  LoyaltyConfig?
+
+  // Discount System (Phase 2)
+  discounts Discount[]
 
   // Notifications
   notifications           Notification[]
@@ -392,6 +395,12 @@ model StaffVenue {
 
   // Relations
   loyaltyTransactionsCreated LoyaltyTransaction[] @relation("LoyaltyTransactionCreatedBy")
+
+  // Discount System (Phase 2)
+  discountsCreated          Discount[]         @relation("DiscountCreatedBy")
+  customerDiscountsAssigned CustomerDiscount[] @relation("CustomerDiscountAssignedBy")
+  orderDiscountsApplied     OrderDiscount[]    @relation("OrderDiscountAppliedBy")
+  orderDiscountsAuthorized  OrderDiscount[]    @relation("OrderDiscountAuthorizedBy")
 
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
@@ -1452,6 +1461,10 @@ model Order {
   tipAmount      Decimal @default(0) @db.Decimal(10, 2)
   total          Decimal @db.Decimal(12, 2)
 
+  // Partial payment tracking (for split payments)
+  paidAmount       Decimal @default(0) @db.Decimal(12, 2)
+  remainingBalance Decimal @default(0) @db.Decimal(12, 2)
+
   // Status
   status        OrderStatus   @default(PENDING)
   kitchenStatus KitchenStatus @default(PENDING)
@@ -1476,6 +1489,10 @@ model Order {
   paymentAllocations  PaymentAllocation[]
   actions             OrderAction[] // Audit trail for order modifications
   loyaltyTransactions LoyaltyTransaction[]
+
+  // Discount System (Phase 2)
+  orderDiscounts   OrderDiscount[]
+  couponRedemption CouponRedemption?
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -2897,15 +2914,15 @@ model Customer {
   customerGroup   CustomerGroup? @relation(fields: [customerGroupId], references: [id], onDelete: SetNull)
 
   // Loyalty & tracking
-  loyaltyPoints      Int     @default(0)
-  totalVisits        Int     @default(0)
-  lastVisitAt        DateTime?
-  firstVisitAt       DateTime?
-  totalSpent         Decimal @default(0) @db.Decimal(12, 2)
-  averageOrderValue  Decimal @default(0) @db.Decimal(10, 2)
+  loyaltyPoints     Int       @default(0)
+  totalVisits       Int       @default(0)
+  lastVisitAt       DateTime?
+  firstVisitAt      DateTime?
+  totalSpent        Decimal   @default(0) @db.Decimal(12, 2)
+  averageOrderValue Decimal   @default(0) @db.Decimal(10, 2)
 
   // Additional info
-  notes String? @db.Text
+  notes String?  @db.Text
   tags  String[] // ["VIP", "Allergic-Nuts", "Birthday-Dec"]
 
   // Preferences
@@ -2920,6 +2937,10 @@ model Customer {
   // Relations
   orders              Order[]
   loyaltyTransactions LoyaltyTransaction[]
+
+  // Discount System (Phase 2)
+  customerDiscounts CustomerDiscount[]
+  couponRedemptions CouponRedemption[]
 
   @@index([email])
   @@index([phone])
@@ -2949,6 +2970,9 @@ model CustomerGroup {
   // Relations
   customers Customer[]
 
+  // Discount System (Phase 2)
+  discounts Discount[]
+
   @@unique([venueId, name])
   @@index([venueId])
 }
@@ -2959,8 +2983,8 @@ model LoyaltyConfig {
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // Earning rules
-  pointsPerDollar  Decimal @default(1) @db.Decimal(5, 2) // 1 point per $1 spent
-  pointsPerVisit   Int     @default(0) // Bonus points per visit (e.g., 10)
+  pointsPerDollar Decimal @default(1) @db.Decimal(5, 2) // 1 point per $1 spent
+  pointsPerVisit  Int     @default(0) // Bonus points per visit (e.g., 10)
 
   // Redemption rules
   redemptionRate   Decimal @default(0.01) @db.Decimal(5, 4) // $0.01 per point
@@ -2974,9 +2998,9 @@ model LoyaltyConfig {
 }
 
 model LoyaltyTransaction {
-  id         String                 @id @default(cuid())
+  id         String   @id @default(cuid())
   customerId String
-  customer   Customer               @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   type   LoyaltyTransactionType // EARN, REDEEM, EXPIRE, ADJUST
   points Int // Positive for EARN/ADJUST-add, negative for REDEEM/EXPIRE/ADJUST-subtract
@@ -2996,6 +3020,236 @@ model LoyaltyTransaction {
 
   @@index([customerId, createdAt])
   @@index([orderId])
+}
+
+// ==========================================
+// NOTE: DISCOUNT SYSTEM
+// ==========================================
+
+model Discount {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Basic info
+  name        String
+  description String?      @db.Text
+  type        DiscountType // PERCENTAGE, FIXED_AMOUNT, COMP
+  value       Decimal      @db.Decimal(10, 4) // Percentage (0-100) or fixed amount
+
+  // Scope - what the discount applies to
+  scope DiscountScope @default(ORDER) // ORDER, ITEM, CATEGORY, CUSTOMER_GROUP
+
+  // Target IDs (based on scope)
+  targetItemIds          String[] // Product IDs when scope = ITEM
+  targetCategoryIds      String[] // Category IDs when scope = CATEGORY
+  targetModifierIds      String[] // Modifier IDs for modifier-level discounts
+  targetModifierGroupIds String[] // ModifierGroup IDs
+
+  // Customer Group targeting
+  customerGroupId String?
+  customerGroup   CustomerGroup? @relation(fields: [customerGroupId], references: [id], onDelete: SetNull)
+
+  // Automatic application
+  isAutomatic Boolean @default(false) // Apply automatically when conditions met
+  priority    Int     @default(0) // Higher priority = applied first
+
+  // Rules / Conditions
+  minPurchaseAmount Decimal? @db.Decimal(10, 2) // Minimum order total required
+  maxDiscountAmount Decimal? @db.Decimal(10, 2) // Cap on discount amount
+  minQuantity       Int? // Minimum item quantity required
+
+  // BOGO (Buy One Get One) configuration
+  buyQuantity        Int? // Buy X items...
+  getQuantity        Int? // ...get Y items
+  getDiscountPercent Decimal? @db.Decimal(5, 2) // ...at Z% off (e.g., 100 = free)
+  buyItemIds         String[] // Items that qualify for "buy"
+  getItemIds         String[] // Items that qualify for "get" (can be different)
+
+  // Time-based restrictions
+  validFrom  DateTime? // Start date
+  validUntil DateTime? // End date
+  daysOfWeek Int[] // 0-6 (Sunday-Saturday), empty = all days
+  timeFrom   String? // "09:00" - start time
+  timeUntil  String? // "17:00" - end time
+
+  // Usage limits
+  maxTotalUses       Int? // Total uses across all customers
+  maxUsesPerCustomer Int? // Uses per individual customer
+  currentUses        Int  @default(0) // Counter
+
+  // Comp-specific fields
+  requiresApproval Boolean @default(false) // Manager approval needed
+  compReason       String? @db.Text // Why comp was given
+
+  // Tax handling
+  applyBeforeTax Boolean @default(true) // Apply discount before calculating tax
+  modifyTaxBasis Boolean @default(true) // Reduce taxable amount
+
+  // Stacking rules
+  isStackable   Boolean @default(false) // Can combine with other discounts
+  stackPriority Int     @default(0) // Order when stacking
+
+  // Status
+  active Boolean @default(true)
+
+  // Audit
+  createdById String?
+  createdBy   StaffVenue? @relation("DiscountCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  couponCodes       CouponCode[]
+  customerDiscounts CustomerDiscount[]
+  orderDiscounts    OrderDiscount[]
+
+  @@index([venueId])
+  @@index([isAutomatic])
+  @@index([active])
+  @@index([customerGroupId])
+  @@index([validFrom, validUntil])
+}
+
+model CouponCode {
+  id         String   @id @default(cuid())
+  discountId String
+  discount   Discount @relation(fields: [discountId], references: [id], onDelete: Cascade)
+
+  code String @unique // The actual coupon code (e.g., "SAVE20")
+
+  // Override discount limits for this specific code
+  maxUses            Int? // Total uses for this code
+  maxUsesPerCustomer Int? // Uses per customer for this code
+  currentUses        Int  @default(0)
+
+  // Override discount validity for this specific code
+  minPurchaseAmount Decimal?  @db.Decimal(10, 2)
+  validFrom         DateTime?
+  validUntil        DateTime?
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  redemptions    CouponRedemption[]
+  orderDiscounts OrderDiscount[]
+
+  @@index([discountId])
+  @@index([code])
+  @@index([active])
+}
+
+model CouponRedemption {
+  id           String     @id @default(cuid())
+  couponCodeId String
+  couponCode   CouponCode @relation(fields: [couponCodeId], references: [id], onDelete: Cascade)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  amountSaved Decimal @db.Decimal(10, 2) // How much the customer saved
+
+  redeemedAt DateTime @default(now())
+
+  @@index([couponCodeId])
+  @@index([customerId])
+  @@index([orderId])
+}
+
+model CustomerDiscount {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  discountId String
+  discount   Discount @relation(fields: [discountId], references: [id], onDelete: Cascade)
+
+  // Status
+  active Boolean @default(true)
+
+  // Validity override for this customer
+  validFrom  DateTime?
+  validUntil DateTime?
+
+  // Usage tracking
+  usageCount Int  @default(0)
+  maxUses    Int? // Override discount maxUsesPerCustomer
+
+  // Audit
+  assignedById String?
+  assignedBy   StaffVenue? @relation("CustomerDiscountAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  assignedAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([customerId, discountId])
+  @@index([customerId])
+  @@index([discountId])
+  @@index([active])
+}
+
+model OrderDiscount {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Source of discount (one of these should be set)
+  discountId   String?
+  discount     Discount?   @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  couponCodeId String?
+  couponCode   CouponCode? @relation(fields: [couponCodeId], references: [id], onDelete: SetNull)
+
+  // Discount details (denormalized for historical accuracy)
+  type  DiscountType
+  name  String
+  value Decimal      @db.Decimal(10, 4) // Original value (% or fixed)
+
+  // Calculated amounts
+  amount       Decimal @db.Decimal(10, 2) // Actual discount amount applied
+  taxReduction Decimal @default(0) @db.Decimal(10, 2) // Tax saved due to discount
+
+  // Flags
+  isComp      Boolean @default(false) // Was this a comp?
+  isAutomatic Boolean @default(false) // Applied automatically?
+  isManual    Boolean @default(false) // Applied manually at checkout?
+
+  // Comp-specific
+  compReason String? @db.Text
+
+  // Audit
+  appliedById    String?
+  appliedBy      StaffVenue? @relation("OrderDiscountAppliedBy", fields: [appliedById], references: [id], onDelete: SetNull)
+  authorizedById String? // Manager who approved (if requiresApproval)
+  authorizedBy   StaffVenue? @relation("OrderDiscountAuthorizedBy", fields: [authorizedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([discountId])
+  @@index([couponCodeId])
+}
+
+enum DiscountType {
+  PERCENTAGE // E.g., 10% off
+  FIXED_AMOUNT // E.g., $5 off
+  COMP // Full comp (100% off)
+}
+
+enum DiscountScope {
+  ORDER // Applies to entire order
+  ITEM // Applies to specific items
+  CATEGORY // Applies to items in categories
+  MODIFIER // Applies to modifiers
+  MODIFIER_GROUP // Applies to modifier groups
+  CUSTOMER_GROUP // Auto-apply to customer group members
+  QUANTITY // Quantity-based (BOGO)
 }
 
 // ==========================================
@@ -3440,7 +3694,7 @@ enum AuthProvider {
 }
 
 enum LoyaltyTransactionType {
-  EARN   // Customer earns points (from purchase or visit)
+  EARN // Customer earns points (from purchase or visit)
   REDEEM // Customer redeems points (discount applied)
   EXPIRE // Points expire (automatic or manual)
   ADJUST // Manual adjustment by staff (can be + or -)

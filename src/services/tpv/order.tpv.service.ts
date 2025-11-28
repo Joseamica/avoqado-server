@@ -121,7 +121,7 @@ export async function getOrder(
   venueId: string,
   orderId: string,
   _orgId?: string,
-): Promise<Order & { amount_left: number; tableName: string | null }> {
+): Promise<Order & { amount_left: number; tableName: string | null; lastSplitType: string | null }> {
   const order = await prisma.order.findUnique({
     where: {
       id: orderId,
@@ -219,10 +219,15 @@ export async function getOrder(
     }
   })
 
+  // Compute lastSplitType from most recent payment or order's splitType
+  // Used by Android to restrict incompatible split options (prevents EQUALPARTS → PERPRODUCT)
+  const lastSplitType = order.payments?.[0]?.splitType || order.splitType || null
+
   return {
     ...flattenedOrder,
     amount_left,
     tableName, // 🆕 Add computed tableName for Android MenuScreen title
+    lastSplitType, // 🆕 For split type restriction in Android UI
   }
 }
 
@@ -383,17 +388,18 @@ export async function addItemsToOrder(
   }
 
   // Fetch products and validate
-  const productIds = items.map(item => item.productId)
+  // ✅ FIX: Use Set to deduplicate productIds (same product can be added multiple times)
+  const uniqueProductIds = [...new Set(items.map(item => item.productId))]
   const products = await prisma.product.findMany({
     where: {
-      id: { in: productIds },
+      id: { in: uniqueProductIds },
       venueId,
     },
   })
 
-  if (products.length !== productIds.length) {
+  if (products.length !== uniqueProductIds.length) {
     const foundIds = products.map(p => p.id)
-    const missingIds = productIds.filter(id => !foundIds.includes(id))
+    const missingIds = uniqueProductIds.filter(id => !foundIds.includes(id))
     throw new BadRequestError(`Products not found or do not belong to this venue: ${missingIds.join(', ')}`)
   }
 
@@ -480,12 +486,17 @@ export async function addItemsToOrder(
   const newSubtotal = allItems.reduce((sum, item) => sum + Number(item.total), 0)
   const newTotal = newSubtotal // Can add tax/discount logic here
 
+  // Calculate remaining balance (for partial payment tracking)
+  const currentPaidAmount = Number(order.paidAmount || 0)
+  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
   // Update order with new totals and increment version
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       subtotal: newSubtotal,
       total: newTotal,
+      remainingBalance: newRemainingBalance,
       version: {
         increment: 1,
       },
@@ -759,12 +770,17 @@ export async function removeOrderItem(
   const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
   const newTotal = newSubtotal // Can add tax/discount logic here
 
+  // Calculate remaining balance (for partial payment tracking)
+  const currentPaidAmount = Number(order.paidAmount || 0)
+  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
   // Update order with new totals and increment version
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       subtotal: newSubtotal,
       total: newTotal,
+      remainingBalance: newRemainingBalance,
       version: {
         increment: 1,
       },
@@ -908,11 +924,16 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
   const newDiscountAmount = Number(order.discountAmount) + compAmount
   const newTotal = Number(order.subtotal) - newDiscountAmount
 
+  // Calculate remaining balance (for partial payment tracking)
+  const currentPaidAmount = Number(order.paidAmount || 0)
+  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       discountAmount: newDiscountAmount,
       total: newTotal,
+      remainingBalance: newRemainingBalance,
       version: {
         increment: 1,
       },
@@ -1094,12 +1115,17 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
   const newTotal = newSubtotal - Number(order.discountAmount)
 
+  // Calculate remaining balance (for partial payment tracking)
+  const currentPaidAmount = Number(order.paidAmount || 0)
+  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
   // Update order with new totals and increment version
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       subtotal: newSubtotal,
       total: newTotal,
+      remainingBalance: newRemainingBalance,
       version: {
         increment: 1,
       },
@@ -1297,11 +1323,16 @@ export async function applyDiscount(
   const newDiscountAmount = Number(order.discountAmount) + discountAmount
   const newTotal = Number(order.subtotal) - newDiscountAmount
 
+  // Calculate remaining balance (for partial payment tracking)
+  const currentPaidAmount = Number(order.paidAmount || 0)
+  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       discountAmount: newDiscountAmount,
       total: newTotal,
+      remainingBalance: newRemainingBalance,
       version: {
         increment: 1,
       },

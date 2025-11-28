@@ -8,6 +8,7 @@ import {
   CRITICAL_PERMISSIONS,
   ROLE_HIERARCHY,
   validatePermissionFormat,
+  expandWildcards,
 } from '../../lib/permissions'
 import logger from '@/config/logger'
 
@@ -71,10 +72,14 @@ export async function getAllRolePermissions(venueId: string) {
   const roles = Object.values(StaffRole)
   return roles.map(role => {
     const custom = customPermissions.find(cp => cp.role === role)
+    const rawPermissions = custom ? custom.permissions : DEFAULT_PERMISSIONS[role]
+
+    // Expand wildcards to individual permissions for frontend display
+    const expandedPermissions = expandWildcards(rawPermissions)
 
     return {
       role,
-      permissions: custom ? custom.permissions : DEFAULT_PERMISSIONS[role],
+      permissions: expandedPermissions,
       isCustom: !!custom,
       modifiedBy: custom?.modifier || null,
       modifiedAt: custom?.updatedAt || null,
@@ -217,7 +222,7 @@ export async function updateRolePermissions(
 
     return {
       role,
-      permissions: defaultPermissions,
+      permissions: expandWildcards(defaultPermissions),
       isCustom: false,
     }
   }
@@ -292,7 +297,7 @@ export async function deleteRolePermissions(venueId: string, role: StaffRole, mo
 
   return {
     role,
-    permissions: DEFAULT_PERMISSIONS[role],
+    permissions: expandWildcards(DEFAULT_PERMISSIONS[role]),
     isCustom: false,
   }
 }

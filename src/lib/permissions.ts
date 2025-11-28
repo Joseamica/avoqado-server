@@ -240,6 +240,33 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'settings:read': ['settings:read'],
   'settings:manage': ['settings:read', 'settings:manage'],
+
+  // ===========================
+  // DISCOUNTS (Phase 2)
+  // ===========================
+  'discounts:read': [
+    'discounts:read',
+    'products:read', // Need to see products for item-level discounts
+    'customers:read', // Need to see customers for customer discounts
+  ],
+  'discounts:create': ['discounts:read', 'discounts:create', 'products:read', 'customers:read'],
+  'discounts:update': ['discounts:read', 'discounts:update'],
+  'discounts:delete': ['discounts:read', 'discounts:delete'],
+  'discounts:apply': [
+    'discounts:read', // TPV can read discounts to apply them
+    'discounts:apply', // TPV can apply discounts to orders
+    'orders:read',
+    'orders:update',
+  ],
+
+  // ===========================
+  // COUPONS (Phase 2)
+  // ===========================
+  'coupons:read': ['coupons:read', 'discounts:read'],
+  'coupons:create': ['coupons:read', 'coupons:create', 'discounts:read'],
+  'coupons:update': ['coupons:read', 'coupons:update'],
+  'coupons:delete': ['coupons:read', 'coupons:delete'],
+  'coupons:redeem': ['coupons:read', 'coupons:redeem', 'orders:read', 'orders:update'],
 }
 
 /**
@@ -296,6 +323,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'teams:read',
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
+    'discounts:read', // Phase 2: Discount System
+    'coupons:read', // Phase 2: Coupon System
     'features:read',
   ],
 
@@ -341,6 +370,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reviews:read',
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
+    'discounts:read', // Phase 2: Can view discounts
+    'discounts:apply', // Phase 2: Can apply discounts to orders
+    'coupons:read', // Phase 2: Can view coupons
+    'coupons:redeem', // Phase 2: Can redeem coupons at checkout
     'teams:read',
     'tpv:read', // Can view TPV terminals (but not create/edit/command)
   ],
@@ -360,6 +393,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reviews:read',
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
+    'discounts:read', // Phase 2: Can view discounts
+    'discounts:apply', // Phase 2: Can apply discounts to orders
+    'coupons:read', // Phase 2: Can view coupons
+    'coupons:redeem', // Phase 2: Can redeem coupons at checkout
     'teams:read',
   ],
 
@@ -408,6 +445,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customers:*', // Phase 1: Customer System
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
+    'discounts:*', // Phase 2: Full discount management
+    'coupons:*', // Phase 2: Full coupon management
     'features:read',
     'features:write',
   ],
@@ -427,6 +466,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customers:*', // Phase 1: Customer System
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
+    'discounts:*', // Phase 2: Full discount management
+    'coupons:*', // Phase 2: Full coupon management
     'features:*',
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
@@ -452,6 +493,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customers:*', // Phase 1: Customer System
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
+    'discounts:*', // Phase 2: Full discount management
+    'coupons:*', // Phase 2: Full coupon management
     'features:*',
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
@@ -737,4 +780,78 @@ export function validatePermissionFormat(permission: string): string | null {
   }
 
   return null
+}
+
+/**
+ * All individual permissions by resource
+ * Used to expand resource wildcards like "home:*" to ["home:read"]
+ *
+ * ⚠️ CRITICAL: This must match the frontend PERMISSION_CATEGORIES in:
+ * `avoqado-web-dashboard/src/lib/permissions/roleHierarchy.ts`
+ */
+const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
+  home: ['home:read'],
+  analytics: ['analytics:read', 'analytics:export'],
+  settlements: ['settlements:read', 'settlements:simulate'],
+  menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete'],
+  orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel'],
+  payments: ['payments:read', 'payments:create', 'payments:refund'],
+  shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
+  tpv: ['tpv:read', 'tpv:create', 'tpv:update', 'tpv:delete', 'tpv:command'],
+  inventory: ['inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete', 'inventory:adjust'],
+  reviews: ['reviews:read', 'reviews:respond'],
+  teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
+  tables: ['tables:read', 'tables:update'],
+  reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
+  settings: ['settings:read', 'settings:manage'],
+  venues: ['venues:read', 'venues:update'],
+  customers: ['customers:read', 'customers:create', 'customers:update', 'customers:delete'],
+  'customer-groups': ['customer-groups:read', 'customer-groups:create', 'customer-groups:update', 'customer-groups:delete'],
+  loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust'],
+  discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete'],
+  coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete'],
+  features: ['features:read', 'features:update'],
+  products: ['products:read', 'products:create', 'products:update', 'products:delete'],
+}
+
+/**
+ * Get all individual permissions (expanded from all resources)
+ */
+export function getAllIndividualPermissions(): string[] {
+  return Object.values(INDIVIDUAL_PERMISSIONS_BY_RESOURCE).flat()
+}
+
+/**
+ * Expand wildcards to individual permissions
+ * - "*:*" expands to ALL individual permissions
+ * - "resource:*" expands to all actions for that resource
+ * - Individual permissions pass through unchanged
+ *
+ * @param permissions Array of permissions (may contain wildcards)
+ * @returns Array of individual permissions (no wildcards)
+ */
+export function expandWildcards(permissions: string[]): string[] {
+  const expanded = new Set<string>()
+
+  for (const permission of permissions) {
+    if (permission === '*:*') {
+      // Global wildcard: add ALL permissions
+      getAllIndividualPermissions().forEach(p => expanded.add(p))
+    } else if (permission.endsWith(':*')) {
+      // Resource wildcard: expand to all actions for that resource
+      const resource = permission.replace(':*', '')
+      const resourcePermissions = INDIVIDUAL_PERMISSIONS_BY_RESOURCE[resource]
+      if (resourcePermissions) {
+        resourcePermissions.forEach(p => expanded.add(p))
+      } else {
+        // Unknown resource, keep the wildcard as-is (backend will handle)
+        expanded.add(permission)
+      }
+    } else {
+      // Individual permission: add as-is
+      expanded.add(permission)
+    }
+  }
+
+  return Array.from(expanded).sort()
 }

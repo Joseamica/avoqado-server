@@ -170,7 +170,7 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
           for (const staff of allStaffWithPins) {
             const pinMatches = await bcrypt.compare(userData.pin, staff.pin!)
             if (pinMatches) {
-              throw new AppError('Este PIN ya está siendo utilizado por otro miembro del equipo', 409)
+              throw new AppError('PIN no disponible. Por favor, elige otro diferente.', 409)
             }
           }
         }

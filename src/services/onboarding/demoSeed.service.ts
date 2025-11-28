@@ -78,9 +78,21 @@ export async function seedDemoVenue(venueId: string): Promise<{ categoriesCreate
   const tables = await seedTablesAndAreas(venueId)
   logger.info(`✅ Created ${tables.length} tables`)
 
-  // 11. Create sample orders with tips and reviews (last 7 days)
+  // 11. Create loyalty config for the venue
+  const loyaltyConfig = await seedLoyaltyConfig(venueId)
+  logger.info(`✅ Created loyalty config: ${loyaltyConfig.pointsPerDollar} points/dollar`)
+
+  // 12. Create customer groups
+  const customerGroups = await seedCustomerGroups(venueId)
+  logger.info(`✅ Created ${customerGroups.length} customer groups`)
+
+  // 13. Create sample customers
+  const customers = await seedCustomers(venueId, customerGroups)
+  logger.info(`✅ Created ${customers.length} sample customers`)
+
+  // 14. Create sample orders with tips and reviews (last 7 days)
   const productsForOrders = products.map(p => ({ id: p.id, name: p.name, price: Number(p.price) }))
-  const { orders, reviews } = await seedOrders(venueId, productsForOrders, tables, merchantAccounts)
+  const { orders, reviews } = await seedOrders(venueId, productsForOrders, tables, merchantAccounts, customers)
   logger.info(`✅ Created ${orders.length} sample orders with ${reviews.length} reviews`)
 
   logger.info(`🎉 Demo venue seeded successfully!`)
@@ -1045,18 +1057,20 @@ async function seedTablesAndAreas(venueId: string) {
 
 /**
  * Seeds sample orders with tips and reviews (last 7 days)
+ * Links some orders to existing customers
  */
 async function seedOrders(
   venueId: string,
   products: Array<{ id: string; name: string; price: number }>,
   tables: Array<{ id: string }>,
   merchantAccounts: Array<{ id: string; displayName: string | null }>,
+  customers: Array<{ id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }>,
 ) {
   const orders = []
   const reviews = []
   const now = new Date()
 
-  // Customer names for reviews
+  // Customer names for reviews (fallback for orders without linked customers)
   const customerNames = ['María González', 'Carlos Hernández', 'Ana López', 'Roberto Martínez', 'Laura Sánchez', 'José Ramírez']
 
   // Review comments
@@ -1101,11 +1115,19 @@ async function seedOrders(
     const hasTip = Math.random() < 0.4
     const tipAmount = hasTip ? Math.round(total * (0.1 + Math.random() * 0.1)) : 0 // 10-20% tip
 
+    // Link 60% of orders to customers
+    const hasCustomer = Math.random() < 0.6 && customers.length > 0
+    const customer = hasCustomer ? customers[Math.floor(Math.random() * customers.length)] : null
+
     // Create order
     const order = await prisma.order.create({
       data: {
         venueId,
         tableId: table.id,
+        customerId: customer?.id,
+        customerName: customer ? `${customer.firstName || ''} ${customer.lastName || ''}`.trim() : null,
+        customerEmail: customer?.email,
+        customerPhone: customer?.phone,
         orderNumber: `DEMO-${String(i + 1).padStart(4, '0')}`,
         type: OrderType.DINE_IN,
         status: OrderStatus.COMPLETED,
@@ -1175,6 +1197,9 @@ async function seedOrders(
       const isPositive = i < 3 // First 3 are positive, last 1 is neutral
       const overallRating = isPositive ? 4 + Math.floor(Math.random() * 2) : 3 // 4-5 stars or 3 stars
 
+      // Use linked customer name if available, otherwise fallback to preset names
+      const reviewerName = customer ? `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || customerNames[i] : customerNames[i]
+
       const review = await prisma.review.create({
         data: {
           venueId,
@@ -1183,7 +1208,7 @@ async function seedOrders(
           serviceRating: overallRating,
           ambienceRating: overallRating,
           comment: isPositive ? positiveComments[i] : neutralComments[0],
-          customerName: customerNames[i],
+          customerName: reviewerName,
           source: ReviewSource.AVOQADO,
           createdAt: subHours(orderDate, Math.floor(Math.random() * 2) + 1), // 1-3 hours after order
         },
@@ -1194,4 +1219,264 @@ async function seedOrders(
   }
 
   return { orders, reviews }
+}
+
+/**
+ * Seeds loyalty configuration for a venue
+ */
+async function seedLoyaltyConfig(venueId: string) {
+  const loyaltyConfig = await prisma.loyaltyConfig.create({
+    data: {
+      venueId,
+      pointsPerDollar: 1,
+      pointsPerVisit: 10,
+      redemptionRate: 0.01, // 100 points = $1
+      minPointsRedeem: 100,
+      pointsExpireDays: 365,
+      active: true,
+    },
+  })
+
+  return loyaltyConfig
+}
+
+/**
+ * Seeds customer groups for a venue
+ */
+async function seedCustomerGroups(venueId: string) {
+  const groups = [
+    {
+      name: 'VIP',
+      description: 'Clientes frecuentes con beneficios exclusivos',
+      color: '#FFD700', // Gold
+      discountPercentage: 10,
+      priority: 1,
+    },
+    {
+      name: 'Nuevos',
+      description: 'Clientes en su primera visita',
+      color: '#4CAF50', // Green
+      discountPercentage: 5,
+      priority: 3,
+    },
+    {
+      name: 'Cumpleañeros',
+      description: 'Clientes celebrando su cumpleaños este mes',
+      color: '#E91E63', // Pink
+      discountPercentage: 15,
+      priority: 2,
+    },
+    {
+      name: 'Empleados',
+      description: 'Empleados y colaboradores',
+      color: '#2196F3', // Blue
+      discountPercentage: 20,
+      priority: 4,
+    },
+  ]
+
+  const createdGroups = []
+  for (const group of groups) {
+    const created = await prisma.customerGroup.create({
+      data: {
+        venueId,
+        ...group,
+        active: true,
+      },
+    })
+    createdGroups.push(created)
+  }
+
+  return createdGroups
+}
+
+/**
+ * Seeds sample customers for a venue
+ * Creates diverse customers with different attributes
+ */
+async function seedCustomers(venueId: string, customerGroups: Array<{ id: string; name: string }>) {
+  const vipGroup = customerGroups.find(g => g.name === 'VIP')
+  const nuevosGroup = customerGroups.find(g => g.name === 'Nuevos')
+  const cumpleanosGroup = customerGroups.find(g => g.name === 'Cumpleañeros')
+
+  const now = new Date()
+  const thirtyDaysAgo = subDays(now, 30)
+  const sixtyDaysAgo = subDays(now, 60)
+  const ninetyDaysAgo = subDays(now, 90)
+
+  const customers = [
+    // VIP customers with high loyalty points and visits
+    {
+      firstName: 'María',
+      lastName: 'González',
+      email: 'maria.gonzalez@demo.com',
+      phone: '5551234567',
+      customerGroupId: vipGroup?.id,
+      loyaltyPoints: 850,
+      totalVisits: 25,
+      totalSpent: 4250.0,
+      averageOrderValue: 170.0,
+      firstVisitAt: ninetyDaysAgo,
+      lastVisitAt: subDays(now, 2),
+      tags: ['frecuente', 'café'],
+      marketingConsent: true,
+    },
+    {
+      firstName: 'Carlos',
+      lastName: 'Hernández',
+      email: 'carlos.hernandez@demo.com',
+      phone: '5552345678',
+      customerGroupId: vipGroup?.id,
+      loyaltyPoints: 620,
+      totalVisits: 18,
+      totalSpent: 3100.0,
+      averageOrderValue: 172.22,
+      firstVisitAt: sixtyDaysAgo,
+      lastVisitAt: subDays(now, 1),
+      tags: ['frecuente', 'almuerzo'],
+      marketingConsent: true,
+    },
+    // Birthday customer
+    {
+      firstName: 'Ana',
+      lastName: 'López',
+      email: 'ana.lopez@demo.com',
+      phone: '5553456789',
+      customerGroupId: cumpleanosGroup?.id,
+      loyaltyPoints: 320,
+      totalVisits: 8,
+      totalSpent: 1280.0,
+      averageOrderValue: 160.0,
+      birthDate: new Date(1990, now.getMonth(), 15), // Birthday this month
+      firstVisitAt: thirtyDaysAgo,
+      lastVisitAt: subDays(now, 5),
+      tags: ['cumpleaños'],
+      marketingConsent: true,
+    },
+    // New customers
+    {
+      firstName: 'Roberto',
+      lastName: 'Martínez',
+      email: 'roberto.martinez@demo.com',
+      phone: '5554567890',
+      customerGroupId: nuevosGroup?.id,
+      loyaltyPoints: 45,
+      totalVisits: 2,
+      totalSpent: 180.0,
+      averageOrderValue: 90.0,
+      firstVisitAt: subDays(now, 7),
+      lastVisitAt: subDays(now, 3),
+      tags: ['nuevo'],
+      marketingConsent: false,
+    },
+    {
+      firstName: 'Laura',
+      lastName: 'Sánchez',
+      email: 'laura.sanchez@demo.com',
+      phone: '5555678901',
+      customerGroupId: nuevosGroup?.id,
+      loyaltyPoints: 20,
+      totalVisits: 1,
+      totalSpent: 85.0,
+      averageOrderValue: 85.0,
+      firstVisitAt: subDays(now, 2),
+      lastVisitAt: subDays(now, 2),
+      tags: ['nuevo'],
+      marketingConsent: true,
+    },
+    // Regular customers without group
+    {
+      firstName: 'José',
+      lastName: 'Ramírez',
+      email: 'jose.ramirez@demo.com',
+      phone: '5556789012',
+      customerGroupId: null,
+      loyaltyPoints: 280,
+      totalVisits: 12,
+      totalSpent: 1400.0,
+      averageOrderValue: 116.67,
+      firstVisitAt: sixtyDaysAgo,
+      lastVisitAt: subDays(now, 10),
+      tags: ['regular'],
+      marketingConsent: true,
+    },
+    {
+      firstName: 'Patricia',
+      lastName: 'Fernández',
+      email: 'patricia.fernandez@demo.com',
+      phone: '5557890123',
+      customerGroupId: null,
+      loyaltyPoints: 150,
+      totalVisits: 6,
+      totalSpent: 750.0,
+      averageOrderValue: 125.0,
+      firstVisitAt: thirtyDaysAgo,
+      lastVisitAt: subDays(now, 8),
+      tags: ['regular', 'desayuno'],
+      marketingConsent: false,
+    },
+    // Customer with only phone (no email)
+    {
+      firstName: 'Miguel',
+      lastName: 'Torres',
+      email: null,
+      phone: '5558901234',
+      customerGroupId: null,
+      loyaltyPoints: 95,
+      totalVisits: 4,
+      totalSpent: 380.0,
+      averageOrderValue: 95.0,
+      firstVisitAt: subDays(now, 20),
+      lastVisitAt: subDays(now, 6),
+      tags: [],
+      marketingConsent: false,
+    },
+    // Customer with only email (no phone)
+    {
+      firstName: 'Gabriela',
+      lastName: 'Ruiz',
+      email: 'gabriela.ruiz@demo.com',
+      phone: null,
+      customerGroupId: null,
+      loyaltyPoints: 180,
+      totalVisits: 7,
+      totalSpent: 630.0,
+      averageOrderValue: 90.0,
+      firstVisitAt: thirtyDaysAgo,
+      lastVisitAt: subDays(now, 4),
+      tags: ['bebidas'],
+      marketingConsent: true,
+    },
+    // High spender VIP
+    {
+      firstName: 'Fernando',
+      lastName: 'Vega',
+      email: 'fernando.vega@demo.com',
+      phone: '5559012345',
+      customerGroupId: vipGroup?.id,
+      loyaltyPoints: 1200,
+      totalVisits: 35,
+      totalSpent: 7000.0,
+      averageOrderValue: 200.0,
+      firstVisitAt: ninetyDaysAgo,
+      lastVisitAt: now,
+      tags: ['frecuente', 'vip', 'eventos'],
+      marketingConsent: true,
+      notes: 'Cliente frecuente, prefiere mesa junto a la ventana',
+    },
+  ]
+
+  const createdCustomers = []
+  for (const customer of customers) {
+    const created = await prisma.customer.create({
+      data: {
+        venueId,
+        ...customer,
+        active: true,
+      },
+    })
+    createdCustomers.push(created)
+  }
+
+  return createdCustomers
 }

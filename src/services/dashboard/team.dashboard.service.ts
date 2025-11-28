@@ -3,7 +3,6 @@ import { StaffRole, InvitationType, InvitationStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import emailService from '../email.service'
-import bcrypt from 'bcryptjs'
 
 interface TeamMember {
   id: string
@@ -123,21 +122,54 @@ export async function getTeamMembers(
     }),
   ])
 
-  const teamMembers: TeamMember[] = staffVenues.map(sv => ({
-    id: sv.id,
-    firstName: sv.staff.firstName,
-    lastName: sv.staff.lastName,
-    email: sv.staff.email,
-    role: sv.role,
-    active: sv.active && sv.staff.active,
-    startDate: sv.startDate,
-    endDate: sv.endDate,
-    pin: sv.pin,
-    totalSales: Number(sv.totalSales),
-    totalTips: Number(sv.totalTips),
-    totalOrders: sv.totalOrders,
-    averageRating: Number(sv.averageRating),
-  }))
+  // Get all staff IDs for calculating real-time stats
+  const staffIds = staffVenues.map(sv => sv.staff.id)
+
+  // Calculate real-time stats from orders grouped by staff
+  const orderStats = await prisma.order.groupBy({
+    by: ['createdById'],
+    where: {
+      venueId,
+      createdById: { in: staffIds },
+      status: 'COMPLETED',
+    },
+    _sum: {
+      total: true,
+      tipAmount: true,
+    },
+    _count: true,
+  })
+
+  // Create a map for quick lookup
+  const statsMap = new Map(
+    orderStats.map(stat => [
+      stat.createdById,
+      {
+        totalSales: Number(stat._sum?.total ?? 0),
+        totalTips: Number(stat._sum?.tipAmount ?? 0),
+        totalOrders: stat._count ?? 0,
+      },
+    ])
+  )
+
+  const teamMembers: TeamMember[] = staffVenues.map(sv => {
+    const stats = statsMap.get(sv.staff.id) || { totalSales: 0, totalTips: 0, totalOrders: 0 }
+    return {
+      id: sv.id,
+      firstName: sv.staff.firstName,
+      lastName: sv.staff.lastName,
+      email: sv.staff.email,
+      role: sv.role,
+      active: sv.active && sv.staff.active,
+      startDate: sv.startDate,
+      endDate: sv.endDate,
+      pin: sv.pin,
+      totalSales: stats.totalSales,
+      totalTips: stats.totalTips,
+      totalOrders: stats.totalOrders,
+      averageRating: 0, // Rating requires more complex query, keeping as 0 for list view
+    }
+  })
 
   const totalPages = Math.ceil(totalCount / pageSize)
 
@@ -182,6 +214,40 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
     throw new NotFoundError('Team member not found')
   }
 
+  // Calculate real-time stats from orders
+  const orderStats = await prisma.order.aggregate({
+    where: {
+      venueId,
+      createdById: staffVenue.staffId,
+      status: 'COMPLETED',
+    },
+    _sum: {
+      total: true,
+      tipAmount: true,
+    },
+    _count: true,
+  })
+
+  // Calculate average rating from reviews linked through payments
+  const ratingStats = await prisma.review.aggregate({
+    where: {
+      venueId,
+      payment: {
+        order: {
+          createdById: staffVenue.staffId,
+        },
+      },
+    },
+    _avg: {
+      overallRating: true,
+    },
+  })
+
+  const totalSales = Number(orderStats._sum?.total ?? 0)
+  const totalTips = Number(orderStats._sum?.tipAmount ?? 0)
+  const totalOrders = orderStats._count ?? 0
+  const averageRating = Number(ratingStats._avg?.overallRating ?? 0)
+
   return {
     id: staffVenue.id,
     staffId: staffVenue.staffId,
@@ -193,10 +259,10 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
     startDate: staffVenue.startDate,
     endDate: staffVenue.endDate,
     pin: staffVenue.pin,
-    totalSales: Number(staffVenue.totalSales),
-    totalTips: Number(staffVenue.totalTips),
-    totalOrders: staffVenue.totalOrders,
-    averageRating: Number(staffVenue.averageRating),
+    totalSales,
+    totalTips,
+    totalOrders,
+    averageRating,
     venue: staffVenue.venue,
   }
 }
@@ -384,17 +450,32 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     }
   }
 
-  // Hash PIN if provided
-  let hashedPin = undefined
+  // Validate and set PIN if provided (stored as plain text for quick TPV access)
+  let pinToStore: string | null | undefined = undefined
   if (updates.pin !== undefined) {
     if (updates.pin === null || updates.pin === '') {
-      hashedPin = null
+      pinToStore = null
     } else {
-      // Validate PIN format (4-6 digits)
-      if (!/^\d{4,6}$/.test(updates.pin)) {
-        throw new BadRequestError('PIN must be 4-6 digits')
+      // Validate PIN format (4 digits)
+      if (!/^\d{4}$/.test(updates.pin)) {
+        throw new BadRequestError('PIN must be exactly 4 digits')
       }
-      hashedPin = await bcrypt.hash(updates.pin, 10)
+
+      // Check if PIN is already used by another team member in this venue
+      const existingPinMember = await prisma.staffVenue.findFirst({
+        where: {
+          venueId,
+          active: true,
+          pin: updates.pin,
+          id: { not: teamMemberId },
+        },
+      })
+
+      if (existingPinMember) {
+        throw new BadRequestError('PIN no disponible. Por favor, elige otro diferente.')
+      }
+
+      pinToStore = updates.pin
     }
   }
 
@@ -404,7 +485,7 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     data: {
       ...(updates.role && { role: updates.role }),
       ...(updates.active !== undefined && { active: updates.active }),
-      ...(hashedPin !== undefined && { pin: hashedPin }),
+      ...(pinToStore !== undefined && { pin: pinToStore }),
     },
     include: {
       staff: true,

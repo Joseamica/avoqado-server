@@ -89,7 +89,7 @@ describe('Customer Dashboard Service', () => {
     it('should filter by tags (hasSome)', async () => {
       prismaMock.$transaction.mockResolvedValue([[], 0] as any)
 
-      await getCustomers('venue-123', 1, 10, undefined, undefined, 'vip,regular')
+      await getCustomers('venue-123', 1, 10, undefined, undefined, undefined, 'vip,regular')
 
       // Verify $transaction was called (tag filter logic is tested by integration tests)
       expect(prismaMock.$transaction).toHaveBeenCalled()

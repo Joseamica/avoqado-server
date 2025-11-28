@@ -3579,7 +3579,13 @@ async function main() {
       })
       if (venueWaiters.length === 0) continue
 
-      const activeWaiter = getRandomItem(venueWaiters)
+      // Helper to get a rotating waiter for each order
+      let waiterIndex = 0
+      const getNextWaiter = () => {
+        const waiter = venueWaiters[waiterIndex % venueWaiters.length]
+        waiterIndex++
+        return waiter
+      }
 
       // ==========================================
       // INTELLIGENT TIME-SERIES ORDER GENERATION
@@ -3613,11 +3619,11 @@ async function main() {
 
         let shift: any = null
         if (actualVolume > 5) {
-          // Only create shift if significant volume
+          // Only create shift if significant volume (use first waiter for the day's shift)
           shift = await prisma.shift.create({
             data: {
               venueId: venue.id,
-              staffId: activeWaiter.staffId,
+              staffId: venueWaiters[0].staffId,
               startTime: shiftStart,
               endTime: shiftEnd,
             },
@@ -3626,6 +3632,9 @@ async function main() {
 
         // Generate orders for this day
         for (let orderIndex = 0; orderIndex < actualVolume; orderIndex++) {
+          // Get the waiter for this order (rotates through all waiters)
+          const currentWaiter = getNextWaiter()
+
           // Generate realistic order timing within business hours
           const orderCreatedAt = generateBusinessHourTimestamp(currentDate)
 
@@ -3655,8 +3664,8 @@ async function main() {
               customerEmail: shouldAddCustomer ? customer.email : null,
               customerName: shouldAddCustomer ? `${customer.firstName || ''} ${customer.lastName || ''}`.trim() : null,
               customerPhone: shouldAddCustomer ? customer.phone : null,
-              createdById: activeWaiter.staffId,
-              servedById: activeWaiter.staffId,
+              createdById: currentWaiter.staffId,
+              servedById: currentWaiter.staffId,
               subtotal: 0,
               taxAmount: 0,
               total: 0,
@@ -3792,7 +3801,7 @@ async function main() {
                 venueId: venue.id,
                 orderId: order.id,
                 shiftId: shift?.id,
-                processedById: activeWaiter.staffId,
+                processedById: currentWaiter.staffId,
                 amount: total,
                 tipAmount,
                 method: paymentMethod,
@@ -3925,7 +3934,7 @@ async function main() {
                   : undefined,
               },
               processedBy: {
-                name: `${activeWaiter.staff.firstName} ${activeWaiter.staff.lastName}`,
+                name: `${currentWaiter.staff.firstName} ${currentWaiter.staff.lastName}`,
               },
             }
 
@@ -4020,7 +4029,7 @@ async function main() {
                   venueId: venue.id,
                   paymentId: payment.id,
                   terminalId: getRandomItem(terminals).id,
-                  servedById: activeWaiter.staffId,
+                  servedById: currentWaiter.staffId,
                   overallRating: finalRating,
                   comment: selectedComment,
                   source: ReviewSource.AVOQADO,

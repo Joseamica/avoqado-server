@@ -348,3 +348,116 @@ export const applyDiscountSchema = z.object({
       },
     ),
 })
+
+// ==========================================
+// TPV DISCOUNT SYSTEM SCHEMAS (Phase 2)
+// ==========================================
+
+export const getAvailableDiscountsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  query: z.object({
+    customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }).optional(),
+  }),
+})
+
+export const applyAutomaticDiscountsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+})
+
+export const applyPredefinedDiscountSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    discountId: z.string().cuid({ message: 'El ID del descuento debe ser un CUID válido.' }),
+    authorizedById: z.string().cuid({ message: 'El ID del autorizador debe ser un CUID válido.' }).optional(),
+  }),
+})
+
+export const applyManualDiscountSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z
+    .object({
+      type: z.enum(['PERCENTAGE', 'FIXED_AMOUNT', 'COMP'], { message: 'Tipo de descuento inválido.' }),
+      value: z.number().nonnegative({ message: 'El valor debe ser un número no negativo.' }),
+      reason: z.string().min(1, { message: 'La razón del descuento es requerida.' }),
+      authorizedById: z.string().cuid({ message: 'El ID del autorizador debe ser un CUID válido.' }).optional(),
+    })
+    .refine(
+      data => {
+        if (data.type === 'PERCENTAGE') {
+          return data.value > 0 && data.value <= 100
+        }
+        return true
+      },
+      {
+        message: 'El porcentaje de descuento debe estar entre 1 y 100.',
+        path: ['value'],
+      },
+    )
+    .refine(
+      data => {
+        // COMP requires authorization
+        if (data.type === 'COMP' && !data.authorizedById) {
+          return false
+        }
+        return true
+      },
+      {
+        message: 'Los descuentos tipo COMP requieren autorización de un manager.',
+        path: ['authorizedById'],
+      },
+    ),
+})
+
+export const applyCouponCodeSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    couponCode: z
+      .string()
+      .min(3, { message: 'El código del cupón debe tener al menos 3 caracteres.' })
+      .max(30, { message: 'El código del cupón no puede tener más de 30 caracteres.' }),
+  }),
+})
+
+export const validateCouponSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    couponCode: z
+      .string()
+      .min(3, { message: 'El código del cupón debe tener al menos 3 caracteres.' })
+      .max(30, { message: 'El código del cupón no puede tener más de 30 caracteres.' }),
+    orderTotal: z.number().nonnegative({ message: 'El total del pedido debe ser un número no negativo.' }),
+    customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }).optional(),
+  }),
+})
+
+export const removeOrderDiscountSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+    discountId: z.string().cuid({ message: 'El ID del descuento debe ser un CUID válido.' }),
+  }),
+})
+
+export const getOrderDiscountsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+})

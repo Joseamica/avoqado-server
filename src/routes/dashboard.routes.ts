@@ -33,6 +33,8 @@ import * as rolePermissionController from '../controllers/dashboard/rolePermissi
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
 import * as loyaltyController from '../controllers/dashboard/loyalty.dashboard.controller'
+import * as discountController from '../controllers/dashboard/discount.dashboard.controller'
+import * as couponController from '../controllers/dashboard/coupon.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
@@ -118,6 +120,25 @@ import {
   LoyaltyParamsSchema,
   LoyaltyVenueParamsSchema,
 } from '../schemas/dashboard/loyalty.schema'
+import {
+  getDiscountsQuerySchema,
+  createDiscountBodySchema,
+  updateDiscountBodySchema,
+  assignDiscountToCustomerBodySchema,
+  discountParamsSchema,
+  venueParamsSchema as DiscountVenueParamsSchema,
+} from '../schemas/dashboard/discount.schema'
+import {
+  getCouponsQuerySchema,
+  getRedemptionsQuerySchema,
+  createCouponBodySchema,
+  updateCouponBodySchema,
+  bulkGenerateCouponsBodySchema,
+  validateCouponBodySchema,
+  recordRedemptionBodySchema,
+  couponParamsSchema,
+  venueParamsSchema as CouponVenueParamsSchema,
+} from '../schemas/dashboard/coupon.schema'
 import {
   InvitationParamsSchema,
   InviteTeamMemberSchema,
@@ -6788,6 +6809,810 @@ router.post(
   checkPermission('loyalty:expire'),
   validateRequest(LoyaltyVenueParamsSchema),
   loyaltyController.expireOldPoints,
+)
+
+// ============================================================================
+// Discount Routes (Phase 2: Discount System)
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts:
+ *   get:
+ *     tags: [Discounts]
+ *     summary: Get all discounts for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: page
+ *         in: query
+ *         schema: { type: integer, default: 1 }
+ *       - name: pageSize
+ *         in: query
+ *         schema: { type: integer, default: 20 }
+ *       - name: search
+ *         in: query
+ *         schema: { type: string }
+ *       - name: type
+ *         in: query
+ *         schema: { type: string, enum: [PERCENTAGE, FIXED_AMOUNT, COMP] }
+ *       - name: scope
+ *         in: query
+ *         schema: { type: string, enum: [ORDER, ITEM, CATEGORY, MODIFIER, MODIFIER_GROUP, CUSTOMER_GROUP, QUANTITY] }
+ *       - name: isAutomatic
+ *         in: query
+ *         schema: { type: boolean }
+ *       - name: active
+ *         in: query
+ *         schema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Paginated list of discounts
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/discounts',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:read'),
+  validateRequest(
+    z.object({
+      params: DiscountVenueParamsSchema,
+      query: getDiscountsQuerySchema,
+    }),
+  ),
+  discountController.getDiscounts,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/stats:
+ *   get:
+ *     tags: [Discounts]
+ *     summary: Get discount statistics for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Discount statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/discounts/stats',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:read'),
+  validateRequest(z.object({ params: DiscountVenueParamsSchema })),
+  discountController.getDiscountStats,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/automatic:
+ *   get:
+ *     tags: [Discounts]
+ *     summary: Get all active automatic discounts
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of active automatic discounts
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/discounts/automatic',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:read'),
+  validateRequest(z.object({ params: DiscountVenueParamsSchema })),
+  discountController.getActiveAutomaticDiscounts,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/{discountId}:
+ *   get:
+ *     tags: [Discounts]
+ *     summary: Get single discount by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: discountId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Discount details
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/discounts/:discountId',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:read'),
+  validateRequest(z.object({ params: discountParamsSchema })),
+  discountController.getDiscountById,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts:
+ *   post:
+ *     tags: [Discounts]
+ *     summary: Create a new discount
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/CreateDiscount' }
+ *     responses:
+ *       201:
+ *         description: Discount created successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/discounts',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:create'),
+  validateRequest(
+    z.object({
+      params: DiscountVenueParamsSchema,
+      body: createDiscountBodySchema,
+    }),
+  ),
+  discountController.createDiscount,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/{discountId}:
+ *   put:
+ *     tags: [Discounts]
+ *     summary: Update a discount
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: discountId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/UpdateDiscount' }
+ *     responses:
+ *       200:
+ *         description: Discount updated successfully
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.put(
+  '/venues/:venueId/discounts/:discountId',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:update'),
+  validateRequest(
+    z.object({
+      params: discountParamsSchema,
+      body: updateDiscountBodySchema,
+    }),
+  ),
+  discountController.updateDiscount,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/{discountId}:
+ *   delete:
+ *     tags: [Discounts]
+ *     summary: Delete a discount
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: discountId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Discount deleted successfully
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.delete(
+  '/venues/:venueId/discounts/:discountId',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:delete'),
+  validateRequest(z.object({ params: discountParamsSchema })),
+  discountController.deleteDiscount,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/{discountId}/clone:
+ *   post:
+ *     tags: [Discounts]
+ *     summary: Clone a discount
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: discountId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       201:
+ *         description: Discount cloned successfully
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/discounts/:discountId/clone',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:create'),
+  validateRequest(z.object({ params: discountParamsSchema })),
+  discountController.cloneDiscount,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/{discountId}/customers:
+ *   post:
+ *     tags: [Discounts]
+ *     summary: Assign a discount to a customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: discountId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [customerId]
+ *             properties:
+ *               customerId: { type: string }
+ *               validFrom: { type: string, format: date-time }
+ *               validUntil: { type: string, format: date-time }
+ *               maxUses: { type: integer }
+ *     responses:
+ *       201:
+ *         description: Discount assigned to customer
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/discounts/:discountId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:update'),
+  validateRequest(
+    z.object({
+      params: discountParamsSchema,
+      body: assignDiscountToCustomerBodySchema,
+    }),
+  ),
+  discountController.assignDiscountToCustomer,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/discounts/{discountId}/customers/{customerId}:
+ *   delete:
+ *     tags: [Discounts]
+ *     summary: Remove a discount from a customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: discountId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Discount removed from customer
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.delete(
+  '/venues/:venueId/discounts/:discountId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:update'),
+  validateRequest(
+    z.object({
+      params: z.object({
+        venueId: z.string().min(1),
+        discountId: z.string().min(1),
+        customerId: z.string().min(1),
+      }),
+    }),
+  ),
+  discountController.removeDiscountFromCustomer,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/discounts:
+ *   get:
+ *     tags: [Discounts]
+ *     summary: Get all discounts assigned to a customer
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of customer's assigned discounts
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId/discounts',
+  authenticateTokenMiddleware,
+  checkPermission('discounts:read'),
+  validateRequest(
+    z.object({
+      params: z.object({
+        venueId: z.string().min(1),
+        customerId: z.string().min(1),
+      }),
+    }),
+  ),
+  discountController.getCustomerDiscounts,
+)
+
+// ============================================================================
+// Coupon Routes (Phase 2: Coupon System)
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons:
+ *   get:
+ *     tags: [Coupons]
+ *     summary: Get all coupon codes for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: page
+ *         in: query
+ *         schema: { type: integer, default: 1 }
+ *       - name: pageSize
+ *         in: query
+ *         schema: { type: integer, default: 20 }
+ *       - name: search
+ *         in: query
+ *         schema: { type: string }
+ *       - name: discountId
+ *         in: query
+ *         schema: { type: string }
+ *       - name: active
+ *         in: query
+ *         schema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Paginated list of coupon codes
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/coupons',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:read'),
+  validateRequest(
+    z.object({
+      params: CouponVenueParamsSchema,
+      query: getCouponsQuerySchema,
+    }),
+  ),
+  couponController.getCouponCodes,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/stats:
+ *   get:
+ *     tags: [Coupons]
+ *     summary: Get coupon statistics for a venue
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Coupon statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/coupons/stats',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:read'),
+  validateRequest(z.object({ params: CouponVenueParamsSchema })),
+  couponController.getCouponStats,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/redemptions:
+ *   get:
+ *     tags: [Coupons]
+ *     summary: Get coupon redemption history
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: page
+ *         in: query
+ *         schema: { type: integer, default: 1 }
+ *       - name: pageSize
+ *         in: query
+ *         schema: { type: integer, default: 20 }
+ *       - name: couponId
+ *         in: query
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: query
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated list of redemptions
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/coupons/redemptions',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:read'),
+  validateRequest(
+    z.object({
+      params: CouponVenueParamsSchema,
+      query: getRedemptionsQuerySchema,
+    }),
+  ),
+  couponController.getCouponRedemptions,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/validate:
+ *   post:
+ *     tags: [Coupons]
+ *     summary: Validate a coupon code
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [code]
+ *             properties:
+ *               code: { type: string }
+ *               orderTotal: { type: number }
+ *               customerId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Coupon validation result
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/coupons/validate',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:read'),
+  validateRequest(
+    z.object({
+      params: CouponVenueParamsSchema,
+      body: validateCouponBodySchema,
+    }),
+  ),
+  couponController.validateCouponCode,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/bulk-generate:
+ *   post:
+ *     tags: [Coupons]
+ *     summary: Bulk generate coupon codes
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [discountId, quantity]
+ *             properties:
+ *               discountId: { type: string }
+ *               prefix: { type: string }
+ *               quantity: { type: integer, minimum: 1, maximum: 1000 }
+ *               codeLength: { type: integer, minimum: 4, maximum: 20 }
+ *               maxUsesPerCode: { type: integer }
+ *               maxUsesPerCustomer: { type: integer }
+ *               validFrom: { type: string, format: date-time }
+ *               validUntil: { type: string, format: date-time }
+ *     responses:
+ *       201:
+ *         description: Coupon codes generated successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/coupons/bulk-generate',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:create'),
+  validateRequest(
+    z.object({
+      params: CouponVenueParamsSchema,
+      body: bulkGenerateCouponsBodySchema,
+    }),
+  ),
+  couponController.bulkGenerateCoupons,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/{couponId}:
+ *   get:
+ *     tags: [Coupons]
+ *     summary: Get single coupon code by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: couponId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Coupon code details
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/coupons/:couponId',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:read'),
+  validateRequest(z.object({ params: couponParamsSchema })),
+  couponController.getCouponCodeById,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons:
+ *   post:
+ *     tags: [Coupons]
+ *     summary: Create a new coupon code
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [discountId, code]
+ *             properties:
+ *               discountId: { type: string }
+ *               code: { type: string }
+ *               maxUses: { type: integer }
+ *               maxUsesPerCustomer: { type: integer }
+ *               minPurchaseAmount: { type: number }
+ *               validFrom: { type: string, format: date-time }
+ *               validUntil: { type: string, format: date-time }
+ *               active: { type: boolean }
+ *     responses:
+ *       201:
+ *         description: Coupon code created successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/coupons',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:create'),
+  validateRequest(
+    z.object({
+      params: CouponVenueParamsSchema,
+      body: createCouponBodySchema,
+    }),
+  ),
+  couponController.createCouponCode,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/{couponId}:
+ *   put:
+ *     tags: [Coupons]
+ *     summary: Update a coupon code
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: couponId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               code: { type: string }
+ *               maxUses: { type: integer }
+ *               maxUsesPerCustomer: { type: integer }
+ *               minPurchaseAmount: { type: number }
+ *               validFrom: { type: string, format: date-time }
+ *               validUntil: { type: string, format: date-time }
+ *               active: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Coupon code updated successfully
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.put(
+  '/venues/:venueId/coupons/:couponId',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:update'),
+  validateRequest(
+    z.object({
+      params: couponParamsSchema,
+      body: updateCouponBodySchema,
+    }),
+  ),
+  couponController.updateCouponCode,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/{couponId}:
+ *   delete:
+ *     tags: [Coupons]
+ *     summary: Delete a coupon code
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: couponId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Coupon code deleted successfully
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.delete(
+  '/venues/:venueId/coupons/:couponId',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:delete'),
+  validateRequest(z.object({ params: couponParamsSchema })),
+  couponController.deleteCouponCode,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/coupons/{couponId}/redeem:
+ *   post:
+ *     tags: [Coupons]
+ *     summary: Record a coupon redemption
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: couponId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [orderId, amountSaved]
+ *             properties:
+ *               orderId: { type: string }
+ *               amountSaved: { type: number }
+ *               customerId: { type: string }
+ *     responses:
+ *       201:
+ *         description: Redemption recorded successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/coupons/:couponId/redeem',
+  authenticateTokenMiddleware,
+  checkPermission('coupons:redeem'),
+  validateRequest(
+    z.object({
+      params: couponParamsSchema,
+      body: recordRedemptionBodySchema,
+    }),
+  ),
+  couponController.recordRedemption,
 )
 
 export default router

@@ -27,6 +27,14 @@ import {
   compItemsSchema,
   voidItemsSchema,
   applyDiscountSchema,
+  getAvailableDiscountsSchema,
+  applyAutomaticDiscountsSchema,
+  applyPredefinedDiscountSchema,
+  applyManualDiscountSchema,
+  applyCouponCodeSchema,
+  validateCouponSchema,
+  removeOrderDiscountSchema,
+  getOrderDiscountsSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
@@ -41,6 +49,8 @@ import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
 import * as tableController from '../controllers/tpv/table.tpv.controller'
 import * as floorElementController from '../controllers/tpv/floor-element.tpv.controller'
 import * as reportsController from '../controllers/tpv/reports.tpv.controller'
+import * as customerController from '../controllers/tpv/customer.tpv.controller'
+import * as discountController from '../controllers/tpv/discount.tpv.controller'
 
 const router = express.Router()
 
@@ -2775,6 +2785,637 @@ router.post(
   checkPermission('orders:discount'),
   validateRequest(applyDiscountSchema),
   orderController.applyDiscount,
+)
+
+// ==========================================
+// CUSTOMER LOOKUP ROUTES (Phase 1: Customer System)
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/customers/search:
+ *   get:
+ *     tags:
+ *       - TPV - Customers
+ *     summary: Search customers for checkout
+ *     description: |
+ *       Search customers by phone, email, or general query.
+ *       Returns customers sorted by visit frequency.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: phone
+ *         schema:
+ *           type: string
+ *         description: Search by phone number (partial match)
+ *       - in: query
+ *         name: email
+ *         schema:
+ *           type: string
+ *         description: Search by email address (partial match)
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: General search (name, email, phone)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 10
+ *         description: Maximum results to return
+ *     responses:
+ *       200:
+ *         description: Search results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       firstName:
+ *                         type: string
+ *                       lastName:
+ *                         type: string
+ *                       email:
+ *                         type: string
+ *                       phone:
+ *                         type: string
+ *                       loyaltyPoints:
+ *                         type: integer
+ *                       totalVisits:
+ *                         type: integer
+ *                       totalSpent:
+ *                         type: number
+ *                       customerGroup:
+ *                         type: object
+ *                         nullable: true
+ *                 count:
+ *                   type: integer
+ */
+router.get(
+  '/venues/:venueId/customers/search',
+  authenticateTokenMiddleware,
+  checkPermission('customers:read'),
+  customerController.searchCustomers,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/customers/recent:
+ *   get:
+ *     tags:
+ *       - TPV - Customers
+ *     summary: Get recent customers for quick selection
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 10
+ *     responses:
+ *       200:
+ *         description: Recent customers list
+ */
+router.get(
+  '/venues/:venueId/customers/recent',
+  authenticateTokenMiddleware,
+  checkPermission('customers:read'),
+  customerController.getRecentCustomers,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/customers/{customerId}:
+ *   get:
+ *     tags:
+ *       - TPV - Customers
+ *     summary: Get customer by ID for checkout confirmation
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: customerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Customer details
+ *       404:
+ *         description: Customer not found
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('customers:read'),
+  customerController.getCustomer,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/customers:
+ *   post:
+ *     tags:
+ *       - TPV - Customers
+ *     summary: Quick create customer during checkout
+ *     description: |
+ *       Creates a new customer with minimal data.
+ *       If customer with same phone/email exists, returns existing customer (no error).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               firstName:
+ *                 type: string
+ *               lastName:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *                 format: email
+ *     responses:
+ *       201:
+ *         description: Customer created or existing customer returned
+ *       400:
+ *         description: At least phone or email is required
+ */
+router.post(
+  '/venues/:venueId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('customers:create'),
+  customerController.quickCreateCustomer,
+)
+
+// ==========================================
+// DISCOUNT SYSTEM ROUTES (Phase 2: Discount System)
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discounts:
+ *   get:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Get all discounts applied to an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: List of applied discounts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       name:
+ *                         type: string
+ *                       type:
+ *                         type: string
+ *                       amount:
+ *                         type: number
+ *                       isAutomatic:
+ *                         type: boolean
+ *                       isCoupon:
+ *                         type: boolean
+ *                       couponCode:
+ *                         type: string
+ *                 count:
+ *                   type: integer
+ *                 totalSavings:
+ *                   type: number
+ */
+router.get(
+  '/venues/:venueId/orders/:orderId/discounts',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  validateRequest(getOrderDiscountsSchema),
+  discountController.getOrderDiscounts,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discounts/available:
+ *   get:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Get available discounts for an order
+ *     description: Returns discounts that can be applied to the order based on eligibility rules
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: customerId
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: Customer ID for customer-specific discounts
+ *     responses:
+ *       200:
+ *         description: List of available discounts with estimated savings
+ */
+router.get(
+  '/venues/:venueId/orders/:orderId/discounts/available',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  validateRequest(getAvailableDiscountsSchema),
+  discountController.getAvailableDiscounts,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discounts/auto:
+ *   post:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Apply all eligible automatic discounts
+ *     description: Automatically applies all eligible discounts based on order context and customer
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Automatic discounts applied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     applied:
+ *                       type: integer
+ *                     totalSavings:
+ *                       type: number
+ *                     discounts:
+ *                       type: array
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/discounts/auto',
+  authenticateTokenMiddleware,
+  checkPermission('orders:discount'),
+  validateRequest(applyAutomaticDiscountsSchema),
+  discountController.applyAutomaticDiscounts,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discounts/apply:
+ *   post:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Apply a predefined discount to an order
+ *     description: Apply a discount from the venue's discount list
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - discountId
+ *             properties:
+ *               discountId:
+ *                 type: string
+ *                 format: cuid
+ *               authorizedById:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Required for discounts that require approval
+ *     responses:
+ *       200:
+ *         description: Discount applied successfully
+ *       400:
+ *         description: Discount cannot be applied
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/discounts/apply',
+  authenticateTokenMiddleware,
+  checkPermission('orders:discount'),
+  validateRequest(applyPredefinedDiscountSchema),
+  discountController.applyPredefinedDiscount,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discounts/manual:
+ *   post:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Apply a manual (on-the-fly) discount
+ *     description: Apply a custom discount not in the predefined list
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - type
+ *               - value
+ *               - reason
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [PERCENTAGE, FIXED_AMOUNT, COMP]
+ *               value:
+ *                 type: number
+ *               reason:
+ *                 type: string
+ *               authorizedById:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Required for COMP discounts
+ *     responses:
+ *       200:
+ *         description: Manual discount applied
+ *       400:
+ *         description: Invalid discount parameters
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/discounts/manual',
+  authenticateTokenMiddleware,
+  checkPermission('orders:discount'),
+  validateRequest(applyManualDiscountSchema),
+  discountController.applyManualDiscount,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discounts/coupon:
+ *   post:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Apply a coupon code to an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - couponCode
+ *             properties:
+ *               couponCode:
+ *                 type: string
+ *                 minLength: 3
+ *                 maxLength: 30
+ *     responses:
+ *       200:
+ *         description: Coupon applied successfully
+ *       400:
+ *         description: Invalid or expired coupon
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/discounts/coupon',
+  authenticateTokenMiddleware,
+  checkPermission('orders:discount'),
+  validateRequest(applyCouponCodeSchema),
+  discountController.applyCouponCode,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/coupons/validate:
+ *   post:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Validate a coupon code without applying
+ *     description: Check if a coupon is valid and preview the discount
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - couponCode
+ *               - orderTotal
+ *             properties:
+ *               couponCode:
+ *                 type: string
+ *               orderTotal:
+ *                 type: number
+ *               customerId:
+ *                 type: string
+ *                 format: cuid
+ *     responses:
+ *       200:
+ *         description: Coupon validation result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     valid:
+ *                       type: boolean
+ *                     message:
+ *                       type: string
+ *                     discountName:
+ *                       type: string
+ *                     estimatedSavings:
+ *                       type: number
+ */
+router.post(
+  '/venues/:venueId/coupons/validate',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  validateRequest(validateCouponSchema),
+  discountController.validateCoupon,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/discounts/{discountId}:
+ *   delete:
+ *     tags:
+ *       - TPV - Discounts
+ *     summary: Remove a discount from an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: discountId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The OrderDiscount ID to remove
+ *     responses:
+ *       200:
+ *         description: Discount removed successfully
+ *       404:
+ *         description: Discount not found on order
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/discounts/:discountId',
+  authenticateTokenMiddleware,
+  checkPermission('orders:discount'),
+  validateRequest(removeOrderDiscountSchema),
+  discountController.removeDiscount,
 )
 
 export default router

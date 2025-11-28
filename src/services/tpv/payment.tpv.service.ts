@@ -312,11 +312,14 @@ async function updateOrderTotalsForStandalonePayment(
     newPaymentStatus = 'PARTIAL'
   }
 
-  // Update order totals and status
+  // Update order totals and status (including partial payment tracking)
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       paymentStatus: newPaymentStatus,
+      // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
+      paidAmount: totalPaid,
+      remainingBalance: remainingAmount,
       ...(isFullyPaid && {
         status: 'COMPLETED',
         completedAt: new Date(),
