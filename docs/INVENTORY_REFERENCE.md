@@ -5,8 +5,9 @@
 - 📐 **Architecture & Flow**: See `CLAUDE.md` lines 190-250 (Order → Payment → Inventory)
 - 🧪 **Testing & Bugs**: See `INVENTORY_TESTING.md` (15 integration tests, 3 critical bugs fixed)
 - 💻 **Code Locations**: `src/services/dashboard/rawMaterial.service.ts`, `src/services/dashboard/fifoBatch.service.ts`
+- 🍳 **Modifier Inventory**: See section below (Toast/Square pattern for modifier stock tracking)
 
-**Last Updated**: 2025-01-29
+**Last Updated**: 2025-11-29
 
 ---
 
@@ -52,6 +53,80 @@ Menu items customers can order. Three tracking modes:
 | **No tracking**  | `false`          | `null`            | Unlimited items (e.g., coffee refills) |
 | **Quantity**     | `true`           | `QUANTITY`        | Count-based (e.g., wine bottles)       |
 | **Recipe-based** | `true`           | `RECIPE`          | Composed items (e.g., burgers)         |
+
+---
+
+## 🏗️ Dual-Inventory Architecture (Toast/Square Pattern)
+
+**WHY**: Different business models need different inventory tracking. Retail businesses need simple counting, restaurants need ingredient-level FIFO costing. This is why world-class systems like Toast and Square use separate tracking systems.
+
+### Two Inventory Systems
+
+| System | Tables | Use Case | Complexity |
+|--------|--------|----------|------------|
+| **QUANTITY** | `Inventory` → `InventoryMovement` | Retail (jewelry, wine, clothing) | Simple counting |
+| **RECIPE** | `RawMaterial` → `StockBatch` → `RawMaterialMovement` | Restaurants | FIFO batch tracking |
+
+### QUANTITY Method (Simple Counting)
+
+**Data Flow:**
+```
+Product Wizard → Creates Inventory record
+Status Check → Reads Inventory.currentStock
+Deduction → Updates Inventory.currentStock
+Audit Trail → Creates InventoryMovement (type: SALE)
+```
+
+**Key Files:**
+- Creation: `src/services/dashboard/productWizard.service.ts:setupSimpleStockStep3()`
+- Deduction: `src/services/dashboard/productInventoryIntegration.service.ts:deductSimpleStock()`
+- Status: `src/services/dashboard/productInventoryIntegration.service.ts:getProductInventoryStatus()`
+
+**Database Tables:**
+```sql
+-- Inventory record (one per QUANTITY product)
+SELECT * FROM "Inventory" WHERE "productId" = 'your-product-id';
+
+-- Movement audit trail
+SELECT * FROM "InventoryMovement" WHERE "inventoryId" = 'your-inventory-id'
+ORDER BY "createdAt" DESC;
+```
+
+### RECIPE Method (FIFO Batch Tracking)
+
+**Data Flow:**
+```
+Recipe Wizard → Creates Recipe + RecipeLine linking to RawMaterial
+Status Check → Calculates max portions from RawMaterial stock
+Deduction → Updates StockBatch.remainingQuantity (FIFO)
+Audit Trail → Creates RawMaterialMovement (one per batch)
+```
+
+**Key Files:**
+- Creation: `src/services/dashboard/recipe.service.ts:createRecipe()`
+- Deduction: `src/services/dashboard/fifoBatch.service.ts:deductStockFIFO()`
+- Status: `src/services/dashboard/productInventoryIntegration.service.ts:getProductInventoryStatus()`
+
+### ⚠️ Critical Design Rule
+
+**A product uses ONLY ONE inventory system.** The wizard enforces this:
+
+```typescript
+// If switching from RECIPE → QUANTITY: Deletes Recipe
+// If switching from QUANTITY → RECIPE: Deletes linked RawMaterial
+await switchInventoryMethod(venueId, productId, newMethod)
+```
+
+### Fix History (2025-11-29)
+
+**Bug**: QUANTITY products checked stock from `Inventory` table but deducted from `RawMaterial` table, causing out-of-sync data.
+
+**Fix**: `deductSimpleStock()` now uses `Inventory` table exclusively:
+- Queries `Inventory.findUnique({ where: { productId } })`
+- Updates `Inventory.currentStock`
+- Creates `InventoryMovement` with `type: SALE`
+
+**Unit Tests**: 15 tests in `tests/unit/services/dashboard/productInventoryIntegration.service.test.ts`
 
 ---
 
@@ -224,6 +299,173 @@ Order → OrderItem → Product → Recipe → RecipeLine → RawMaterial → St
 | `RecipeLine`  | `RawMaterial` | N:1          | Multiple recipes use same ingredient |
 | `RawMaterial` | `StockBatch`  | 1:N          | FIFO batch tracking                  |
 | `Product`     | `Inventory`   | 1:1          | Quantity-based tracking              |
+| `Modifier`    | `RawMaterial` | N:1          | Modifier inventory tracking          |
+
+---
+
+## 🍳 Modifier Inventory Tracking (Toast/Square Pattern)
+
+**WHY**: Modifiers like "Extra Bacon" or "Almond Milk instead of Whole Milk" affect inventory. This system tracks raw material consumption
+when modifiers are selected.
+
+### Database Schema
+
+```prisma
+model Modifier {
+  // ... basic fields ...
+
+  // ✅ INVENTORY TRACKING
+  rawMaterialId   String?               // Links to raw material for deduction
+  rawMaterial     RawMaterial?          @relation(...)
+  quantityPerUnit Decimal?              // Amount to deduct per selection (e.g., 0.03 kg)
+  unit            Unit?                 // Unit of measurement
+  inventoryMode   ModifierInventoryMode @default(ADDITION)
+  cost            Decimal?              // Auto-calculated: avgCostPerUnit × quantityPerUnit
+}
+
+enum ModifierInventoryMode {
+  ADDITION      // Adds extra ingredient (e.g., "Extra Bacon" adds 30g bacon)
+  SUBSTITUTION  // Replaces recipe ingredient (e.g., "Almond Milk" replaces "Whole Milk")
+}
+```
+
+### Two Inventory Modes
+
+| Mode             | Behavior                               | Example                                               |
+| ---------------- | -------------------------------------- | ----------------------------------------------------- |
+| **ADDITION**     | Adds extra on top of recipe            | "Extra Cheese" → deducts 50g cheese in ADDITION       |
+| **SUBSTITUTION** | Replaces variable ingredient in recipe | "Almond Milk" → replaces 200ml whole milk with almond |
+
+### Deduction Flow
+
+```
+Order Payment Complete
+    ↓
+productInventoryIntegration.service.ts → processInventoryDeduction()
+    ↓
+    ├── deductStockForRecipe()      → Base recipe ingredients (FIFO)
+    │   └── SUBSTITUTION modifiers handled here (replace variable ingredients)
+    │
+    └── deductStockForModifiers()   → ADDITION modifiers only
+        └── Extra ingredients added on top
+```
+
+### Cost Auto-Calculation
+
+When a modifier is linked to a raw material, cost is auto-calculated:
+
+```
+modifier.cost = rawMaterial.avgCostPerUnit × modifier.quantityPerUnit
+```
+
+This happens automatically when:
+
+- Creating/updating a modifier with `rawMaterialId` and `quantityPerUnit`
+- Raw material's `avgCostPerUnit` changes (via FIFO batch updates)
+
+### API Endpoints
+
+Base URL: `/api/v1/dashboard/venues/:venueId/modifiers/inventory`
+
+| Endpoint     | Method | Description                                       |
+| ------------ | ------ | ------------------------------------------------- |
+| `/usage`     | GET    | Usage stats (times used, quantity, cost impact)   |
+| `/low-stock` | GET    | Modifiers with raw materials below reorder point  |
+| `/summary`   | GET    | Comprehensive summary (totals, alerts, top costs) |
+| `/list`      | GET    | All modifiers with inventory configuration        |
+
+**Query Parameters:**
+
+- `startDate` / `endDate` - ISO 8601 format
+- `modifierGroupId` - Filter by group
+- `limit` - Max results (1-500, default 50)
+- `includeInactive` - Include inactive modifiers
+
+### Response Types
+
+```typescript
+interface ModifierUsageStats {
+  modifierId: string
+  modifierName: string
+  groupId: string
+  groupName: string
+  timesUsed: number // Selection count
+  totalQuantityUsed: number // Raw material consumed
+  totalCostImpact: number // Cost in currency
+  rawMaterial?: {
+    id: string
+    name: string
+    unit: string
+    currentStock: number
+    costPerUnit: number
+  }
+  inventoryMode: 'ADDITION' | 'SUBSTITUTION' | null
+  quantityPerUnit: number | null
+}
+
+interface ModifierLowStockItem {
+  modifierId: string
+  modifierName: string
+  rawMaterialId: string
+  rawMaterialName: string
+  currentStock: number
+  reorderPoint: number
+  estimatedUsesRemaining: number // currentStock / quantityPerUnit
+}
+
+interface ModifierInventorySummary {
+  totalModifiersWithInventory: number
+  totalModifiersLowStock: number
+  totalCostImpactPeriod: number
+  topCostModifiers: ModifierUsageStats[]
+  lowStockModifiers: ModifierLowStockItem[]
+}
+```
+
+### Key Files
+
+| File                                                                 | Purpose                     |
+| -------------------------------------------------------------------- | --------------------------- |
+| `src/services/dashboard/modifierInventoryAnalytics.service.ts`       | Analytics queries           |
+| `src/services/dashboard/rawMaterial.service.ts`                      | `deductStockForModifiers()` |
+| `src/services/dashboard/productInventoryIntegration.service.ts`      | Orchestrates deduction      |
+| `src/controllers/dashboard/modifierInventoryAnalytics.controller.ts` | API handlers                |
+| `src/schemas/dashboard/modifierInventoryAnalytics.schema.ts`         | Request validation (Zod)    |
+
+### SQL: Check Modifier Inventory Configuration
+
+```sql
+-- List all modifiers with inventory tracking
+SELECT
+  m.id,
+  m.name as modifier_name,
+  mg.name as group_name,
+  rm.name as raw_material,
+  m."quantityPerUnit",
+  m.unit,
+  m."inventoryMode",
+  m.cost,
+  rm."currentStock"
+FROM "Modifier" m
+JOIN "ModifierGroup" mg ON m."groupId" = mg.id
+LEFT JOIN "RawMaterial" rm ON m."rawMaterialId" = rm.id
+WHERE mg."venueId" = 'YOUR_VENUE_ID'
+  AND m."rawMaterialId" IS NOT NULL
+ORDER BY mg.name, m.name;
+
+-- Check low stock modifiers
+SELECT
+  m.name as modifier,
+  rm.name as raw_material,
+  rm."currentStock",
+  rm."reorderPoint",
+  FLOOR(rm."currentStock" / NULLIF(m."quantityPerUnit", 0)) as uses_remaining
+FROM "Modifier" m
+JOIN "ModifierGroup" mg ON m."groupId" = mg.id
+JOIN "RawMaterial" rm ON m."rawMaterialId" = rm.id
+WHERE mg."venueId" = 'YOUR_VENUE_ID'
+  AND rm."currentStock" <= rm."reorderPoint";
+```
 
 ---
 
@@ -396,8 +638,10 @@ WHERE v.id = 'venue_123' AND f.code = 'INVENTORY_MANAGEMENT';
 - **Testing & CI/CD**: `INVENTORY_TESTING.md`
 - **Database Schema**: `DATABASE_SCHEMA.md`
 - **Code Implementation**:
-  - `src/services/dashboard/rawMaterial.service.ts` - Recipe deduction logic
+  - `src/services/dashboard/rawMaterial.service.ts` - Recipe deduction logic + `deductStockForModifiers()`
   - `src/services/dashboard/fifoBatch.service.ts` - FIFO batch allocation
+  - `src/services/dashboard/modifierInventoryAnalytics.service.ts` - Modifier analytics
+  - `src/services/dashboard/productInventoryIntegration.service.ts` - Orchestrates all inventory deductions
   - `src/services/tpv/payment.tpv.service.ts` - Payment triggers inventory deduction
 
 ---

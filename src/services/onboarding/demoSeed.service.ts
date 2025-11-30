@@ -70,8 +70,12 @@ export async function seedDemoVenue(venueId: string): Promise<{ categoriesCreate
   const rawMaterials = await seedRawMaterials(venueId)
   logger.info(`✅ Created ${rawMaterials.length} raw materials`)
 
-  // 9. Create recipes (link products to ingredients)
-  const recipes = await seedRecipes(venueId, products, rawMaterials)
+  // 8.5. Link modifiers to raw materials for inventory tracking (Toast/Square pattern)
+  await linkModifiersToRawMaterials(venueId, modifierGroups, rawMaterials)
+  logger.info(`✅ Linked modifiers to raw materials for inventory tracking`)
+
+  // 9. Create recipes (link products to ingredients, with variable ingredients for modifiers)
+  const recipes = await seedRecipes(venueId, products, rawMaterials, modifierGroups)
   logger.info(`✅ Created ${recipes.length} recipes`)
 
   // 10. Create areas and tables
@@ -558,6 +562,62 @@ async function seedModifierGroups(venueId: string, products: Array<{ id: string;
 }
 
 /**
+ * ✅ WORLD-CLASS: Links modifiers to raw materials for inventory tracking (Toast/Square pattern)
+ * This enables automatic stock deduction when modifiers are selected
+ */
+async function linkModifiersToRawMaterials(
+  venueId: string,
+  modifierGroups: Array<{ id: string; name: string }>,
+  rawMaterials: Array<{ id: string; name: string }>,
+) {
+  // Find the milk modifier group
+  const milkGroup = modifierGroups.find(g => g.name === 'Tipo de Leche')
+  if (!milkGroup) return
+
+  // Get all modifiers in the milk group
+  const modifiers = await prisma.modifier.findMany({
+    where: { groupId: milkGroup.id },
+  })
+
+  // Map modifier names to raw material names
+  const modifierToRawMaterial: Record<string, { rawMaterialName: string; quantityPerUnit: number }> = {
+    'Leche Normal': { rawMaterialName: 'Leche Entera', quantityPerUnit: 0.15 }, // 150ml per serving
+    'Leche Light': { rawMaterialName: 'Leche Light', quantityPerUnit: 0.15 },
+    'Leche de Almendra': { rawMaterialName: 'Leche de Almendra', quantityPerUnit: 0.15 },
+  }
+
+  for (const modifier of modifiers) {
+    const mapping = modifierToRawMaterial[modifier.name]
+    if (!mapping) continue
+
+    const rawMaterial = rawMaterials.find(rm => rm.name === mapping.rawMaterialName)
+    if (!rawMaterial) continue
+
+    // Calculate cost: avgCostPerUnit × quantityPerUnit
+    const rawMaterialData = await prisma.rawMaterial.findUnique({
+      where: { id: rawMaterial.id },
+      select: { avgCostPerUnit: true },
+    })
+
+    const cost = rawMaterialData ? rawMaterialData.avgCostPerUnit.mul(mapping.quantityPerUnit).toNumber() : 0
+
+    // Update modifier with inventory tracking
+    await prisma.modifier.update({
+      where: { id: modifier.id },
+      data: {
+        rawMaterialId: rawMaterial.id,
+        quantityPerUnit: mapping.quantityPerUnit,
+        unit: 'LITER',
+        inventoryMode: 'SUBSTITUTION', // These modifiers SUBSTITUTE the recipe's milk
+        cost,
+      },
+    })
+  }
+
+  logger.info(`✅ Linked ${modifiers.length} milk modifiers to raw materials for inventory tracking`)
+}
+
+/**
  * Seeds raw materials (ingredients)
  */
 async function seedRawMaterials(venueId: string) {
@@ -574,6 +634,30 @@ async function seedRawMaterials(venueId: string) {
       reorderPoint: 15,
       costPerUnit: 22.5, // $22.50 per liter
       avgCostPerUnit: 22.5,
+    },
+    {
+      name: 'Leche Light',
+      sku: 'RM-001B',
+      category: RawMaterialCategory.DAIRY,
+      currentStock: 30,
+      unit: Unit.LITER,
+      unitType: UnitType.VOLUME,
+      minimumStock: 5,
+      reorderPoint: 10,
+      costPerUnit: 20.0, // $20 per liter (slightly cheaper)
+      avgCostPerUnit: 20.0,
+    },
+    {
+      name: 'Leche de Almendra',
+      sku: 'RM-001C',
+      category: RawMaterialCategory.DAIRY,
+      currentStock: 20,
+      unit: Unit.LITER,
+      unitType: UnitType.VOLUME,
+      minimumStock: 5,
+      reorderPoint: 8,
+      costPerUnit: 45.0, // $45 per liter (premium)
+      avgCostPerUnit: 45.0,
     },
     {
       name: 'Queso Manchego',
@@ -773,7 +857,10 @@ async function seedRecipes(
   venueId: string,
   products: Array<{ id: string; name: string }>,
   rawMaterials: Array<{ id: string; name: string }>,
+  modifierGroups: Array<{ id: string; name: string }>,
 ) {
+  // Find the milk modifier group for SUBSTITUTION mode
+  const milkModifierGroup = modifierGroups.find(g => g.name === 'Tipo de Leche')
   // Find products
   const cappuccino = products.find(p => p.name === 'Cappuccino')
   const latte = products.find(p => p.name === 'Latte')
@@ -823,6 +910,10 @@ async function seedRecipes(
         quantity: 0.15, // 150ml
         unit: Unit.LITER,
         displayOrder: 2,
+        // ✅ WORLD-CLASS: Mark milk as variable ingredient for SUBSTITUTION mode
+        // When customer selects "Leche de Almendra", the modifier replaces this ingredient
+        isVariable: true,
+        linkedModifierGroupId: milkModifierGroup?.id,
       },
     })
 
@@ -857,6 +948,9 @@ async function seedRecipes(
         quantity: 0.2, // 200ml
         unit: Unit.LITER,
         displayOrder: 2,
+        // ✅ WORLD-CLASS: Mark milk as variable ingredient for SUBSTITUTION mode
+        isVariable: true,
+        linkedModifierGroupId: milkModifierGroup?.id,
       },
     })
 
