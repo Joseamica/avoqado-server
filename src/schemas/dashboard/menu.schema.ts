@@ -289,7 +289,13 @@ export const CreateModifierSchema = z.object({
 export type CreateModifierDto = z.infer<typeof CreateModifierSchema>['body']
 
 export const UpdateModifierSchema = z.object({
-  body: CreateModifierSchema.shape.body.partial(),
+  body: CreateModifierSchema.shape.body.partial().extend({
+    // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
+    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable().optional(),
+    quantityPerUnit: z.number().positive('Quantity must be positive').optional(),
+    unit: z.enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON']).optional(),
+    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).optional(),
+  }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
@@ -297,6 +303,29 @@ export const UpdateModifierSchema = z.object({
   }),
 })
 export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
+
+// ==========================================
+// MODIFIER INVENTORY CONFIGURATION SCHEMA
+// ==========================================
+
+/**
+ * Schema for configuring modifier inventory tracking
+ * Use this for bulk configuration of modifiers with inventory
+ */
+export const ConfigureModifierInventorySchema = z.object({
+  body: z.object({
+    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable(),
+    quantityPerUnit: z.number().positive('Quantity must be positive'),
+    unit: z.enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON']),
+    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']),
+  }),
+  params: z.object({
+    venueId: z.string().cuid('Invalid venue ID format'),
+    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierId: z.string().cuid('Invalid modifier ID format'),
+  }),
+})
+export type ConfigureModifierInventoryDto = z.infer<typeof ConfigureModifierInventorySchema>['body']
 
 // ==========================================
 // ASSIGNMENT SCHEMAS

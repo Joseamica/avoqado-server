@@ -681,7 +681,16 @@ export async function getModifierGroups(venueId: string, query: ModifierGroupQue
   const args: Prisma.ModifierGroupFindManyArgs = {
     where,
     orderBy: order as any,
-    include: { modifiers: true },
+    include: {
+      modifiers: {
+        include: {
+          // ✅ WORLD-CLASS: Include raw material info for inventory tracking
+          rawMaterial: {
+            select: { id: true, name: true, unit: true, currentStock: true },
+          },
+        },
+      },
+    },
   }
   if (page && limit) {
     args.skip = (page - 1) * limit
@@ -724,7 +733,15 @@ export async function createModifierGroup(venueId: string, data: CreateModifierG
 export async function getModifierGroupById(venueId: string, modifierGroupId: string): Promise<ModifierGroup & { modifiers: Modifier[] }> {
   const group = await prisma.modifierGroup.findFirst({
     where: { id: modifierGroupId, venueId },
-    include: { modifiers: true },
+    include: {
+      modifiers: {
+        include: {
+          rawMaterial: {
+            select: { id: true, name: true, unit: true, currentStock: true },
+          },
+        },
+      },
+    },
   })
 
   if (!group) {
@@ -795,7 +812,14 @@ export async function getModifierById(venueId: string, modifierGroupId: string, 
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
 
-  const modifier = await prisma.modifier.findFirst({ where: { id: modifierId, groupId: modifierGroupId } })
+  const modifier = await prisma.modifier.findFirst({
+    where: { id: modifierId, groupId: modifierGroupId },
+    include: {
+      rawMaterial: {
+        select: { id: true, name: true, unit: true, currentStock: true },
+      },
+    },
+  })
   if (!modifier) {
     throw new NotFoundError(`Modifier with ID ${modifierId} not found in group ${modifierGroupId}.`)
   }
@@ -823,7 +847,61 @@ export async function updateModifier(
   if (data.price !== undefined) updateData.price = data.price
   if (data.active !== undefined) updateData.active = data.active
 
-  return prisma.modifier.update({ where: { id: modifierId }, data: updateData })
+  // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
+  let needsCostRecalculation = false
+  let rawMaterialForCost: { avgCostPerUnit: Prisma.Decimal } | null = null
+
+  if (data.rawMaterialId !== undefined) {
+    // Validate raw material exists in the venue if provided
+    if (data.rawMaterialId !== null) {
+      const rawMaterial = await prisma.rawMaterial.findFirst({
+        where: { id: data.rawMaterialId, venueId },
+        select: { id: true, avgCostPerUnit: true },
+      })
+      if (!rawMaterial) {
+        throw new NotFoundError(`Raw material with ID ${data.rawMaterialId} not found in venue ${venueId}.`)
+      }
+      rawMaterialForCost = rawMaterial
+      needsCostRecalculation = true
+    } else {
+      // rawMaterialId is being set to null - clear cost
+      updateData.cost = null
+    }
+    updateData.rawMaterial = data.rawMaterialId ? { connect: { id: data.rawMaterialId } } : { disconnect: true }
+  }
+  if (data.quantityPerUnit !== undefined) {
+    updateData.quantityPerUnit = data.quantityPerUnit
+    needsCostRecalculation = true
+  }
+  if (data.unit !== undefined) updateData.unit = data.unit
+  if (data.inventoryMode !== undefined) updateData.inventoryMode = data.inventoryMode
+
+  // ✅ AUTO-CALCULATE COST: avgCostPerUnit × quantityPerUnit
+  if (needsCostRecalculation) {
+    // Get raw material data if we don't have it yet (quantityPerUnit changed but rawMaterialId didn't)
+    if (!rawMaterialForCost && existing.rawMaterialId) {
+      rawMaterialForCost = await prisma.rawMaterial.findUnique({
+        where: { id: existing.rawMaterialId },
+        select: { avgCostPerUnit: true },
+      })
+    }
+
+    // Calculate cost if we have both raw material and quantity
+    const effectiveQuantity = data.quantityPerUnit ?? existing.quantityPerUnit
+    if (rawMaterialForCost && effectiveQuantity) {
+      updateData.cost = rawMaterialForCost.avgCostPerUnit.mul(effectiveQuantity)
+    }
+  }
+
+  return prisma.modifier.update({
+    where: { id: modifierId },
+    data: updateData,
+    include: {
+      rawMaterial: {
+        select: { id: true, name: true, unit: true, currentStock: true },
+      },
+    },
+  })
 }
 
 export async function deleteModifier(venueId: string, modifierGroupId: string, modifierId: string): Promise<void> {
