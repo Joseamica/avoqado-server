@@ -57,6 +57,9 @@ import {
   TriggerCostRecalculationSchema,
   GetRecipeCostVariancesSchema,
   VenueIdParamsSchema,
+  // NEW: Modifier Inventory schemas
+  ConfigureVariableIngredientSchema,
+  RecipeLineIdParamsSchema,
 } from '../../schemas/dashboard/inventory.schema'
 
 const router = Router({ mergeParams: true })
@@ -299,6 +302,36 @@ router.post(
  *     summary: Remove ingredient from recipe
  */
 router.delete('/products/:productId/recipe/lines/:recipeLineId', checkPermission('inventory:delete'), recipeController.removeRecipeLine)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/recipe/inventory-config:
+ *   get:
+ *     tags: [Inventory - Recipes]
+ *     summary: Get recipe with full modifier inventory configuration
+ *     description: Returns recipe lines with their linked modifier groups and raw materials
+ */
+router.get(
+  '/products/:productId/recipe/inventory-config',
+  checkPermission('inventory:read'),
+  validateRequest(ProductIdParamsSchema),
+  recipeController.getRecipeWithInventoryConfig,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/recipe/lines/{recipeLineId}/variable:
+ *   put:
+ *     tags: [Inventory - Recipes]
+ *     summary: Configure recipe line as variable ingredient
+ *     description: Mark an ingredient as variable (can be substituted by modifier selections)
+ */
+router.put(
+  '/products/:productId/recipe/lines/:recipeLineId/variable',
+  checkPermission('inventory:update'),
+  validateRequest(ConfigureVariableIngredientSchema),
+  recipeController.configureVariableIngredient,
+)
 
 // ===========================================
 // PRICING ROUTES

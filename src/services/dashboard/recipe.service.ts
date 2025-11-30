@@ -431,3 +431,128 @@ export async function recalculateRecipeCost(recipeId: string): Promise<Recipe> {
 
   return updatedRecipe as any
 }
+
+/**
+ * Configure a recipe line as a variable ingredient
+ * Variable ingredients can be substituted by modifier selections
+ * ✅ WORLD-CLASS: Toast/Square pattern for modifier-based substitution
+ *
+ * @param venueId - Venue ID for authorization
+ * @param productId - Product ID that owns the recipe
+ * @param recipeLineId - Recipe line to configure
+ * @param isVariable - Whether this ingredient is variable (can be substituted)
+ * @param linkedModifierGroupId - Modifier group that provides substitution options
+ */
+export async function configureVariableIngredient(
+  venueId: string,
+  productId: string,
+  recipeLineId: string,
+  data: {
+    isVariable: boolean
+    linkedModifierGroupId?: string | null
+  },
+) {
+  const recipe = await prisma.recipe.findUnique({
+    where: { productId },
+    include: {
+      product: {
+        select: { venueId: true },
+      },
+      lines: true,
+    },
+  })
+
+  if (!recipe || recipe.product.venueId !== venueId) {
+    throw new AppError(`Recipe not found for product ${productId}`, 404)
+  }
+
+  const line = recipe.lines.find(l => l.id === recipeLineId)
+  if (!line) {
+    throw new AppError(`Recipe line not found`, 404)
+  }
+
+  // If linking to a modifier group, validate it exists in the venue
+  if (data.linkedModifierGroupId) {
+    const modifierGroup = await prisma.modifierGroup.findFirst({
+      where: {
+        id: data.linkedModifierGroupId,
+        venueId,
+      },
+    })
+
+    if (!modifierGroup) {
+      throw new AppError(`Modifier group with ID ${data.linkedModifierGroupId} not found in venue`, 404)
+    }
+  }
+
+  const updatedLine = await prisma.recipeLine.update({
+    where: { id: recipeLineId },
+    data: {
+      isVariable: data.isVariable,
+      linkedModifierGroupId: data.linkedModifierGroupId ?? null,
+    },
+    include: {
+      rawMaterial: true,
+      linkedModifierGroup: {
+        include: {
+          modifiers: {
+            include: {
+              rawMaterial: {
+                select: { id: true, name: true, unit: true, currentStock: true },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  return updatedLine
+}
+
+/**
+ * Get recipe with full modifier inventory configuration
+ * Returns recipe lines with their linked modifier groups and raw materials
+ */
+export async function getRecipeWithInventoryConfig(venueId: string, productId: string) {
+  const recipe = await prisma.recipe.findUnique({
+    where: { productId },
+    include: {
+      product: {
+        select: {
+          id: true,
+          name: true,
+          price: true,
+          venueId: true,
+        },
+      },
+      lines: {
+        include: {
+          rawMaterial: {
+            select: { id: true, name: true, unit: true, currentStock: true, costPerUnit: true },
+          },
+          linkedModifierGroup: {
+            include: {
+              modifiers: {
+                include: {
+                  rawMaterial: {
+                    select: { id: true, name: true, unit: true, currentStock: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+        orderBy: {
+          displayOrder: 'asc',
+        },
+      },
+    },
+  })
+
+  if (recipe && recipe.product.venueId !== venueId) {
+    throw new AppError('Recipe not found', 404)
+  }
+
+  return recipe
+}

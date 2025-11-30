@@ -1,4 +1,5 @@
-import { RawMaterial, RawMaterialMovementType, Prisma, Unit, UnitType } from '@prisma/client'
+import { RawMaterial, RawMaterialMovementType, Prisma, Unit, UnitType, ModifierInventoryMode } from '@prisma/client'
+import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '../../utils/prismaClient'
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateRawMaterialDto, UpdateRawMaterialDto, AdjustStockDto } from '../../schemas/dashboard/inventory.schema'
@@ -560,10 +561,118 @@ export async function getStockMovements(
 }
 
 /**
+ * Type for order item modifiers passed to inventory deduction functions
+ * Contains the modifier details needed for inventory tracking
+ */
+export interface OrderModifierForInventory {
+  quantity: number
+  modifier: {
+    id: string
+    name: string
+    groupId: string
+    rawMaterialId: string | null
+    quantityPerUnit: Decimal | null
+    unit: Unit | null
+    inventoryMode: ModifierInventoryMode
+  }
+}
+
+/**
+ * Deduct stock for ADDITION modifiers in an order item
+ * ADDITION modifiers add extra ingredients on top of the recipe
+ * Example: "Extra Bacon" adds 30g bacon to a burger
+ *
+ * Note: SUBSTITUTION modifiers are handled in deductStockForRecipe
+ */
+export async function deductStockForModifiers(
+  venueId: string,
+  orderItemQuantity: number,
+  orderModifiers: OrderModifierForInventory[],
+  orderId: string,
+  staffId?: string,
+): Promise<void> {
+  for (const orderModifier of orderModifiers) {
+    const { modifier, quantity: modifierQty } = orderModifier
+
+    // Skip modifiers without inventory tracking
+    if (!modifier.rawMaterialId || !modifier.quantityPerUnit) continue
+
+    // Only process ADDITION modifiers here
+    // SUBSTITUTION modifiers are handled in deductStockForRecipe
+    if (modifier.inventoryMode !== 'ADDITION') continue
+
+    // Calculate total quantity: modifier.quantityPerUnit × orderItem.quantity × modifier selection qty
+    const totalQuantity = modifier.quantityPerUnit.mul(orderItemQuantity).mul(modifierQty).toNumber()
+
+    await deductStockFIFO(venueId, modifier.rawMaterialId, totalQuantity, RawMaterialMovementType.USAGE, {
+      reason: `Modifier: ${modifier.name}`,
+      reference: orderId,
+      createdBy: staffId,
+    })
+
+    // Check for low stock after deduction
+    await checkAndCreateLowStockAlert(venueId, modifier.rawMaterialId)
+  }
+}
+
+/**
+ * Helper function to check and create low stock alerts
+ */
+async function checkAndCreateLowStockAlert(venueId: string, rawMaterialId: string): Promise<void> {
+  const rawMaterial = await prisma.rawMaterial.findUnique({
+    where: { id: rawMaterialId },
+  })
+
+  if (!rawMaterial) return
+
+  if (rawMaterial.currentStock.lessThanOrEqualTo(rawMaterial.reorderPoint)) {
+    const existingAlert = await prisma.lowStockAlert.findFirst({
+      where: {
+        rawMaterialId,
+        status: 'ACTIVE',
+      },
+    })
+
+    if (!existingAlert) {
+      const alertType = rawMaterial.currentStock.equals(0) ? 'OUT_OF_STOCK' : 'LOW_STOCK'
+
+      await prisma.lowStockAlert.create({
+        data: {
+          venueId,
+          rawMaterialId,
+          alertType,
+          threshold: rawMaterial.reorderPoint,
+          currentLevel: rawMaterial.currentStock,
+        },
+      })
+
+      await sendLowStockAlertNotification(
+        venueId,
+        rawMaterialId,
+        alertType,
+        rawMaterial.currentStock.toNumber(),
+        rawMaterial.unit,
+        rawMaterial.reorderPoint.toNumber(),
+      )
+    }
+  }
+}
+
+/**
  * Deduct stock based on recipe usage (called when order is completed)
  * Uses FIFO batch tracking for accurate cost tracking
+ *
+ * ✅ WORLD-CLASS: Supports variable ingredients that can be substituted by modifiers
+ * Example: Recipe has "Whole Milk" but customer chose "Almond Milk" modifier
  */
-export async function deductStockForRecipe(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
+export async function deductStockForRecipe(
+  venueId: string,
+  productId: string,
+  quantity: number,
+  orderId: string,
+  staffId?: string,
+  orderModifiers?: OrderModifierForInventory[],
+) {
   const recipe = await prisma.recipe.findUnique({
     where: { productId },
     include: {
@@ -571,6 +680,7 @@ export async function deductStockForRecipe(venueId: string, productId: string, q
       lines: {
         include: {
           rawMaterial: true,
+          linkedModifierGroup: true,
         },
       },
     },
@@ -585,6 +695,35 @@ export async function deductStockForRecipe(venueId: string, productId: string, q
   for (const line of recipe.lines) {
     if (line.isOptional) continue // Skip optional ingredients
 
+    // ✅ Check if this is a variable ingredient that can be substituted
+    if (line.isVariable && line.linkedModifierGroupId && orderModifiers?.length) {
+      // Find a SUBSTITUTION modifier from the linked group
+      const substitutionModifier = orderModifiers.find(
+        om =>
+          om.modifier.groupId === line.linkedModifierGroupId &&
+          om.modifier.inventoryMode === 'SUBSTITUTION' &&
+          om.modifier.rawMaterialId &&
+          om.modifier.quantityPerUnit,
+      )
+
+      if (substitutionModifier) {
+        // Use modifier's ingredient instead of recipe default
+        const totalQty = substitutionModifier.modifier.quantityPerUnit!.mul(quantity).mul(substitutionModifier.quantity).toNumber()
+
+        await deductStockFIFO(venueId, substitutionModifier.modifier.rawMaterialId!, totalQty, RawMaterialMovementType.USAGE, {
+          reason: `Substitution: ${substitutionModifier.modifier.name} for ${recipe.product?.name}`,
+          reference: orderId,
+          createdBy: staffId,
+        })
+
+        // Check for low stock on the substituted ingredient
+        await checkAndCreateLowStockAlert(venueId, substitutionModifier.modifier.rawMaterialId!)
+
+        continue // Skip default ingredient - it was substituted
+      }
+    }
+
+    // Use default recipe ingredient (no substitution or not a variable ingredient)
     const deductionQuantity = line.quantity.mul(quantity).toNumber() // quantity per portion × portions sold
 
     // Use FIFO to deduct from oldest batches
@@ -595,41 +734,6 @@ export async function deductStockForRecipe(venueId: string, productId: string, q
     })
 
     // Check for low stock after deduction
-    const updatedRawMaterial = await prisma.rawMaterial.findUnique({
-      where: { id: line.rawMaterialId },
-    })
-
-    if (updatedRawMaterial && updatedRawMaterial.currentStock.lessThanOrEqualTo(line.rawMaterial.reorderPoint)) {
-      const existingAlert = await prisma.lowStockAlert.findFirst({
-        where: {
-          rawMaterialId: line.rawMaterialId,
-          status: 'ACTIVE',
-        },
-      })
-
-      if (!existingAlert) {
-        const alertType = updatedRawMaterial.currentStock.equals(0) ? 'OUT_OF_STOCK' : 'LOW_STOCK'
-
-        await prisma.lowStockAlert.create({
-          data: {
-            venueId,
-            rawMaterialId: line.rawMaterialId,
-            alertType,
-            threshold: line.rawMaterial.reorderPoint,
-            currentLevel: updatedRawMaterial.currentStock,
-          },
-        })
-
-        // Send notification
-        await sendLowStockAlertNotification(
-          venueId,
-          line.rawMaterialId,
-          alertType,
-          updatedRawMaterial.currentStock.toNumber(),
-          line.rawMaterial.unit,
-          line.rawMaterial.reorderPoint.toNumber(),
-        )
-      }
-    }
+    await checkAndCreateLowStockAlert(venueId, line.rawMaterialId)
   }
 }

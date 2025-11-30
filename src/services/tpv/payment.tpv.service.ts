@@ -9,6 +9,7 @@ import { socketManager } from '../../communication/sockets/managers/socketManage
 import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
+import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 
@@ -42,8 +43,10 @@ function mapTpvRatingToNumeric(tpvRating: string): number | null {
 /**
  * ✅ WORLD-CLASS PATTERN: Pre-flight validation (Stripe, Shopify, Toast POS)
  * Validate inventory availability BEFORE capturing payment
+ * Also validates modifier inventory (Toast/Square pattern)
+ *
  * @param venueId Venue ID
- * @param orderItems Order items to validate
+ * @param orderItems Order items to validate (including modifiers)
  * @returns Validation result with issues if any
  */
 async function validateOrderInventoryAvailability(
@@ -52,6 +55,17 @@ async function validateOrderInventoryAvailability(
     productId: string
     product: { name: string }
     quantity: number
+    modifiers?: Array<{
+      quantity: number
+      modifier: {
+        id: string
+        name: string
+        rawMaterialId: string | null
+        quantityPerUnit: any // Decimal
+        unit: string | null
+        inventoryMode: string
+      }
+    }>
   }>,
 ): Promise<{
   available: boolean
@@ -120,6 +134,62 @@ async function validateOrderInventoryAvailability(
         reason: `Validation error: ${error.message}`,
       })
     }
+
+    // ✅ WORLD-CLASS: Validate modifier inventory (Toast/Square pattern)
+    if (item.modifiers?.length) {
+      for (const orderModifier of item.modifiers) {
+        const modifier = orderModifier.modifier
+
+        // Skip modifiers without inventory tracking
+        if (!modifier.rawMaterialId || !modifier.quantityPerUnit) continue
+
+        try {
+          // Check raw material stock for this modifier
+          const rawMaterial = await prisma.rawMaterial.findUnique({
+            where: { id: modifier.rawMaterialId },
+            select: {
+              id: true,
+              name: true,
+              currentStock: true,
+              unit: true,
+            },
+          })
+
+          if (!rawMaterial) {
+            issues.push({
+              productId: item.productId,
+              productName: `${item.product.name} + ${modifier.name}`,
+              requested: orderModifier.quantity,
+              available: 'Unknown',
+              reason: `Raw material not found for modifier ${modifier.name}`,
+            })
+            continue
+          }
+
+          // Calculate total quantity needed: quantityPerUnit × orderItem.quantity × modifier.quantity
+          const quantityPerUnit = parseFloat(modifier.quantityPerUnit.toString())
+          const totalNeeded = quantityPerUnit * item.quantity * orderModifier.quantity
+          const currentStock = parseFloat(rawMaterial.currentStock.toString())
+
+          if (currentStock < totalNeeded) {
+            issues.push({
+              productId: item.productId,
+              productName: `${item.product.name} + ${modifier.name}`,
+              requested: totalNeeded,
+              available: `${currentStock} ${rawMaterial.unit}`,
+              reason: `Insufficient ${rawMaterial.name} for modifier`,
+            })
+          }
+        } catch (modifierError: any) {
+          logger.error('⚠️ Failed to validate inventory for modifier', {
+            productId: item.productId,
+            modifierId: modifier.id,
+            modifierName: modifier.name,
+            error: modifierError.message,
+          })
+        }
+      }
+    }
   }
 
   return {
@@ -142,7 +212,7 @@ async function validatePreFlightInventory(
     id: string
     venueId: string
     total: any
-    items: Array<{ productId: string; product: { name: string }; quantity: number }>
+    items: Array<{ productId: string; product: { name: string }; quantity: number; paymentAllocations?: any[] }>
     payments: Array<{ amount: any; tipAmount: any }>
   },
   paymentAmount: number,
@@ -161,16 +231,23 @@ async function validatePreFlightInventory(
 
   // Only validate inventory if this payment will complete the order
   if (willBeFullyPaid) {
+    // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
+    // Items with paymentAllocations have already been "claimed" by a previous split payment
+    // Their inventory will be deducted when the order is completed
+    const unpaidItems = order.items.filter(item => !item.paymentAllocations || item.paymentAllocations.length === 0)
+
     logger.info('🔍 PRE-FLIGHT: Checking inventory before creating payment', {
       orderId: order.id,
       venueId: order.venueId,
       paymentAmount,
       totalPaid,
       originalTotal,
-      itemCount: order.items.length,
+      totalItems: order.items.length,
+      unpaidItems: unpaidItems.length,
+      paidItems: order.items.length - unpaidItems.length,
     })
 
-    const validation = await validateOrderInventoryAvailability(order.venueId, order.items)
+    const validation = await validateOrderInventoryAvailability(order.venueId, unpaidItems)
 
     if (!validation.available) {
       logger.error('❌ PRE-FLIGHT FAILED: Insufficient inventory - Payment rejected', {
@@ -248,6 +325,8 @@ async function updateOrderTotalsForStandalonePayment(
       items: {
         include: {
           product: true,
+          // ✅ Include paymentAllocations to filter out paid items in validation
+          paymentAllocations: true,
         },
       },
       customer: true, // ⭐ LOYALTY: Need customer for points earning
@@ -273,13 +352,19 @@ async function updateOrderTotalsForStandalonePayment(
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
   if (isFullyPaid) {
+    // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
+    // Items with paymentAllocations have already been "claimed" by a previous split payment
+    const unpaidItems = order.items.filter((item: any) => !item.paymentAllocations || item.paymentAllocations.length === 0)
+
     logger.info('🔍 Pre-flight validation: Checking inventory availability before completing order', {
       orderId,
       venueId: order.venueId,
-      itemCount: order.items.length,
+      totalItems: order.items.length,
+      unpaidItems: unpaidItems.length,
+      paidItems: order.items.length - unpaidItems.length,
     })
 
-    const validation = await validateOrderInventoryAvailability(order.venueId, order.items)
+    const validation = await validateOrderInventoryAvailability(order.venueId, unpaidItems)
 
     if (!validation.available) {
       logger.error('❌ Pre-flight validation failed: Insufficient inventory', {
@@ -329,6 +414,22 @@ async function updateOrderTotalsForStandalonePayment(
       items: {
         include: {
           product: true,
+          // ✅ Include modifiers with inventory-related fields for stock deduction
+          modifiers: {
+            include: {
+              modifier: {
+                select: {
+                  id: true,
+                  name: true,
+                  groupId: true,
+                  rawMaterialId: true,
+                  quantityPerUnit: true,
+                  unit: true,
+                  inventoryMode: true,
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -358,13 +459,36 @@ async function updateOrderTotalsForStandalonePayment(
     // Deduct stock for each product in the order
     for (const item of updatedOrder.items) {
       try {
-        await deductInventoryForProduct(updatedOrder.venueId, item.productId, item.quantity, orderId)
+        // ✅ Transform order item modifiers to inventory format
+        const orderModifiers: OrderModifierForInventory[] =
+          item.modifiers?.map(m => ({
+            quantity: m.quantity,
+            modifier: {
+              id: m.modifier.id,
+              name: m.modifier.name,
+              groupId: m.modifier.groupId,
+              rawMaterialId: m.modifier.rawMaterialId,
+              quantityPerUnit: m.modifier.quantityPerUnit,
+              unit: m.modifier.unit,
+              inventoryMode: m.modifier.inventoryMode,
+            },
+          })) || []
+
+        await deductInventoryForProduct(
+          updatedOrder.venueId,
+          item.productId,
+          item.quantity,
+          orderId,
+          staffId, // staffId for tracking who processed the order
+          orderModifiers,
+        )
 
         logger.info('✅ Stock deducted successfully for product', {
           orderId,
           productId: item.productId,
           productName: item.product.name,
           quantity: item.quantity,
+          modifiersCount: orderModifiers.length,
         })
       } catch (deductionError: any) {
         // Collect errors instead of swallowing them
@@ -873,6 +997,24 @@ export async function recordOrderPayment(
       items: {
         include: {
           product: true, // Need product.name for validation errors
+          // ✅ Include paymentAllocations to filter out paid items in PRE-FLIGHT
+          paymentAllocations: true,
+          // ✅ Include modifiers with inventory fields for pre-flight validation
+          modifiers: {
+            include: {
+              modifier: {
+                select: {
+                  id: true,
+                  name: true,
+                  groupId: true,
+                  rawMaterialId: true,
+                  quantityPerUnit: true,
+                  unit: true,
+                  inventoryMode: true,
+                },
+              },
+            },
+          },
         },
       },
       venue: true,

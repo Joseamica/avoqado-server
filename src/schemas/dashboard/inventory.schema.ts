@@ -777,6 +777,34 @@ export const GetRecipeCostVariancesSchema = z.object({
   }),
 })
 
+// ==========================================
+// MODIFIER INVENTORY SCHEMAS (NEW)
+// ==========================================
+
+/**
+ * Schema for configuring variable ingredients in recipes
+ * ✅ WORLD-CLASS: Toast/Square pattern for modifier-based substitution
+ */
+export const ConfigureVariableIngredientSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    productId: z.string().cuid(),
+    recipeLineId: z.string().cuid(),
+  }),
+  body: z.object({
+    isVariable: z.boolean(),
+    linkedModifierGroupId: z.string().cuid().nullable().optional(),
+  }),
+})
+
+export const RecipeLineIdParamsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    productId: z.string().cuid(),
+    recipeLineId: z.string().cuid(),
+  }),
+})
+
 // Type exports for TypeScript
 export type CreateRawMaterialDto = z.infer<typeof CreateRawMaterialSchema>['body']
 export type UpdateRawMaterialDto = z.infer<typeof UpdateRawMaterialSchema>['body']

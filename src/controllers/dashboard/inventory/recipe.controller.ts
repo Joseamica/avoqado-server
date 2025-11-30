@@ -122,3 +122,53 @@ export async function removeRecipeLine(req: Request, res: Response, next: NextFu
     next(error)
   }
 }
+
+/**
+ * Configure a recipe line as a variable ingredient
+ * ✅ WORLD-CLASS: Toast/Square pattern for modifier-based substitution
+ */
+export async function configureVariableIngredient(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, productId, recipeLineId } = req.params
+    const { isVariable, linkedModifierGroupId } = req.body
+
+    const updatedLine = await recipeService.configureVariableIngredient(venueId, productId, recipeLineId, {
+      isVariable,
+      linkedModifierGroupId,
+    })
+
+    res.json({
+      success: true,
+      message: isVariable ? 'Ingredient marked as variable' : 'Ingredient is no longer variable',
+      data: updatedLine,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Get recipe with full modifier inventory configuration
+ */
+export async function getRecipeWithInventoryConfig(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, productId } = req.params
+
+    const recipe = await recipeService.getRecipeWithInventoryConfig(venueId, productId)
+
+    if (!recipe) {
+      return res.json({
+        success: true,
+        data: null,
+        message: 'No recipe found for this product',
+      })
+    }
+
+    res.json({
+      success: true,
+      data: recipe,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

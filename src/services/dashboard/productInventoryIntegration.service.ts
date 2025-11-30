@@ -1,8 +1,8 @@
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
-import { RawMaterialMovementType } from '@prisma/client'
+import { RawMaterialMovementType, MovementType } from '@prisma/client'
 import AppError from '../../errors/AppError'
-import { deductStockForRecipe } from './rawMaterial.service'
+import { deductStockForRecipe, deductStockForModifiers, OrderModifierForInventory } from './rawMaterial.service'
 
 /**
  * Product Inventory Integration Service
@@ -73,24 +73,55 @@ export async function getProductInventoryMethod(productId: string): Promise<Inve
 /**
  * Process inventory deduction when a product is sold
  * Automatically determines the correct method based on inventory configuration
+ *
+ * ✅ WORLD-CLASS: Supports modifier inventory tracking (Toast/Square pattern)
+ * - ADDITION modifiers: Add extra ingredients on top of the recipe
+ * - SUBSTITUTION modifiers: Replace variable ingredients in the recipe
+ *
+ * @param orderModifiers - Optional: Modifiers selected for this order item
  */
-export async function deductInventoryForProduct(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
+export async function deductInventoryForProduct(
+  venueId: string,
+  productId: string,
+  quantity: number,
+  orderId: string,
+  staffId?: string,
+  orderModifiers?: OrderModifierForInventory[],
+) {
   const inventoryMethod = await getProductInventoryMethod(productId)
 
-  // No inventory tracking
+  // No inventory tracking for product
   if (!inventoryMethod) {
+    // ✅ Still process ADDITION modifiers even if product doesn't track inventory
+    // Example: "Extra Bacon" on a product without recipe tracking
+    if (orderModifiers?.length) {
+      await deductStockForModifiers(venueId, quantity, orderModifiers, orderId, staffId)
+    }
     return {
       inventoryMethod: null,
-      message: 'No inventory deduction needed',
+      message: orderModifiers?.length ? 'No product inventory, modifiers processed' : 'No inventory deduction needed',
     }
   }
 
   switch (inventoryMethod) {
-    case 'QUANTITY':
-      return await deductSimpleStock(venueId, productId, quantity, orderId, staffId)
+    case 'QUANTITY': {
+      const result = await deductSimpleStock(venueId, productId, quantity, orderId, staffId)
+      // ✅ Also deduct ADDITION modifiers for QUANTITY products
+      if (orderModifiers?.length) {
+        await deductStockForModifiers(venueId, quantity, orderModifiers, orderId, staffId)
+      }
+      return result
+    }
 
-    case 'RECIPE':
-      return await deductRecipeBasedInventory(venueId, productId, quantity, orderId, staffId)
+    case 'RECIPE': {
+      // ✅ Pass modifiers to recipe deduction (handles SUBSTITUTION)
+      const result = await deductRecipeBasedInventory(venueId, productId, quantity, orderId, staffId, orderModifiers)
+      // ✅ Also deduct ADDITION modifiers (SUBSTITUTION handled in deductStockForRecipe)
+      if (orderModifiers?.length) {
+        await deductStockForModifiers(venueId, quantity, orderModifiers, orderId, staffId)
+      }
+      return result
+    }
 
     default:
       throw new AppError(`Unknown inventory method: ${inventoryMethod}`, 500)
@@ -99,7 +130,13 @@ export async function deductInventoryForProduct(venueId: string, productId: stri
 
 /**
  * Deduct simple stock (for retail products like jewelry, clothing)
- * Creates a single raw material record for the product itself
+ * ✅ FIX (2025-11-29): Uses Inventory table consistently
+ * - Status check uses Inventory table (getProductInventoryStatus)
+ * - Deduction uses Inventory table (this function)
+ * - Movement tracked in InventoryMovement table
+ *
+ * This ensures QUANTITY products have a single source of truth
+ * (unlike the previous implementation that used RawMaterial for deduction)
  */
 async function deductSimpleStock(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
   const product = await prisma.product.findUnique({
@@ -110,84 +147,44 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
     throw new AppError('Product not found', 404)
   }
 
-  // Find or create raw material for this product
-  // First, check if product has a linked rawMaterialId in externalData
-  const externalData = product.externalData as any
-  let rawMaterial = null
+  // ✅ FIX: Use Inventory table (single source of truth for QUANTITY products)
+  const inventory = await prisma.inventory.findUnique({
+    where: { productId },
+  })
 
-  if (externalData?.rawMaterialId) {
-    rawMaterial = await prisma.rawMaterial.findUnique({
-      where: { id: externalData.rawMaterialId },
-    })
-  }
-
-  // Fallback: search by conventional SKU pattern
-  if (!rawMaterial) {
-    rawMaterial = await prisma.rawMaterial.findFirst({
-      where: {
-        venueId,
-        sku: `PRODUCT-${productId}`,
-      },
-    })
-  }
-
-  if (!rawMaterial) {
-    // Auto-create raw material for simple stock tracking
-    rawMaterial = await prisma.rawMaterial.create({
-      data: {
-        venueId,
-        name: product.name,
-        sku: `PRODUCT-${productId}`,
-        category: 'OTHER', // Use OTHER category for finished goods
-        unit: 'UNIT',
-        unitType: 'COUNT',
-        currentStock: 0, // Will be updated via inventory adjustments
-        minimumStock: 1, // Minimum stock threshold
-        reorderPoint: 5, // Default reorder point
-        costPerUnit: product.price.mul(0.5).toNumber(), // Estimate 50% cost ratio
-        avgCostPerUnit: product.price.mul(0.5).toNumber(),
-        active: true,
-        perishable: false,
-      },
-    })
-
-    // Update product externalData with the new rawMaterialId
-    const updatedExternalData = { ...externalData, rawMaterialId: rawMaterial.id }
-    await prisma.product.update({
-      where: { id: productId },
-      data: { externalData: updatedExternalData },
-    })
+  if (!inventory) {
+    throw new AppError(
+      `No inventory record for product "${product.name}". Create inventory via Product Wizard or manual stock adjustment.`,
+      404,
+    )
   }
 
   // Check if there's enough stock
-  if (rawMaterial.currentStock.lessThan(quantity)) {
+  if (inventory.currentStock.lessThan(quantity)) {
     throw new AppError(
-      `Insufficient stock for ${product.name}. Available: ${rawMaterial.currentStock.toNumber()}, Requested: ${quantity}`,
+      `Insufficient stock for ${product.name}. Available: ${inventory.currentStock.toNumber()}, Requested: ${quantity}`,
       400,
     )
   }
 
   // Deduct stock
-  const previousStock = rawMaterial.currentStock
+  const previousStock = inventory.currentStock
   const newStock = previousStock.minus(quantity)
 
   await prisma.$transaction([
-    prisma.rawMaterial.update({
-      where: { id: rawMaterial.id },
+    prisma.inventory.update({
+      where: { productId },
       data: {
         currentStock: newStock,
       },
     }),
-    prisma.rawMaterialMovement.create({
+    prisma.inventoryMovement.create({
       data: {
-        rawMaterialId: rawMaterial.id,
-        venueId,
-        type: RawMaterialMovementType.USAGE,
+        inventoryId: inventory.id,
+        type: MovementType.SALE,
         quantity: new Decimal(-quantity),
-        unit: rawMaterial.unit,
         previousStock,
         newStock,
-        costImpact: rawMaterial.costPerUnit.mul(quantity),
         reason: `Sold ${quantity}x ${product.name}`,
         reference: orderId,
         createdBy: staffId,
@@ -197,20 +194,30 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
 
   return {
     inventoryMethod: 'QUANTITY',
-    rawMaterialId: rawMaterial.id,
+    inventoryId: inventory.id,
     quantityDeducted: quantity,
     remainingStock: newStock.toNumber(),
-    message: `Deducted ${quantity} unit(s) from quantity tracking`,
+    message: `Deducted ${quantity} unit(s) from inventory tracking`,
   }
 }
 
 /**
  * Deduct recipe-based inventory (for restaurants)
  * Deducts all ingredients used in the recipe
+ *
+ * ✅ WORLD-CLASS: Passes modifiers to support SUBSTITUTION mode
+ * Variable ingredients in recipes can be substituted by modifier selections
  */
-async function deductRecipeBasedInventory(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
-  // Use existing recipe deduction logic
-  await deductStockForRecipe(venueId, productId, quantity, orderId, staffId)
+async function deductRecipeBasedInventory(
+  venueId: string,
+  productId: string,
+  quantity: number,
+  orderId: string,
+  staffId?: string,
+  orderModifiers?: OrderModifierForInventory[],
+) {
+  // Use existing recipe deduction logic with modifier support
+  await deductStockForRecipe(venueId, productId, quantity, orderId, staffId, orderModifiers)
 
   return {
     inventoryMethod: 'RECIPE',
@@ -263,7 +270,26 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
 
   switch (inventoryMethod) {
     case 'QUANTITY': {
-      // First, check if product has a linked rawMaterialId in externalData
+      // ✅ FIX: QUANTITY method should use Inventory table (per productWizard.service.ts design)
+      // First, check the Inventory table (primary source for QUANTITY products)
+      const inventoryRecord = await prisma.inventory.findUnique({
+        where: { productId },
+      })
+
+      if (inventoryRecord) {
+        const currentStock = inventoryRecord.currentStock.toNumber()
+        const minimumStock = inventoryRecord.minimumStock.toNumber()
+        return {
+          inventoryMethod: 'QUANTITY',
+          available: currentStock > 0,
+          currentStock,
+          reorderPoint: minimumStock,
+          lowStock: currentStock <= minimumStock,
+          message: `${currentStock} unit(s) in stock`,
+        }
+      }
+
+      // Fallback: Check RawMaterial (legacy or externalData.rawMaterialId linkage)
       const externalData = product.externalData as any
       let rawMaterial = null
 

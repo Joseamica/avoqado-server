@@ -74,6 +74,21 @@ const prismaMock: any = {
   couponRedemption: createMockModel(),
   customerDiscount: createMockModel(),
   orderDiscount: createMockModel(),
+  // Venue Role Config (custom role display names)
+  venueRoleConfig: createMockModel(),
+  // Modifier Inventory Analytics models
+  modifier: createMockModel(),
+  modifierGroup: createMockModel(),
+  orderItemModifier: createMockModel(),
+  rawMaterial: createMockModel(),
+  // Inventory models (QUANTITY method)
+  inventory: createMockModel(),
+  inventoryMovement: createMockModel(),
+  // Recipe models (RECIPE method)
+  recipe: createMockModel(),
+  recipeLine: createMockModel(),
+  stockBatch: createMockModel(),
+  rawMaterialMovement: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
@@ -81,6 +96,9 @@ const prismaMock: any = {
 
 // Add $transaction after the object is created to avoid circular reference
 prismaMock.$transaction = jest.fn((callback: any) => callback(prismaMock))
+
+// Add $queryRaw for raw SQL queries
+prismaMock.$queryRaw = jest.fn()
 
 // Mock Prisma Client globally
 jest.mock('@/utils/prismaClient', () => ({
