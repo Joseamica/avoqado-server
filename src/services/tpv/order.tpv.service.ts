@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { Order, Prisma } from '@prisma/client'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
+import { NotFoundError, BadRequestError, ConflictError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
@@ -223,11 +223,20 @@ export async function getOrder(
   // Used by Android to restrict incompatible split options (prevents EQUALPARTS → PERPRODUCT)
   const lastSplitType = order.payments?.[0]?.splitType || order.splitType || null
 
+  // ✅ Compute paidItemIds - items that have at least one payment allocation
+  // Used by Android SplitByProductScreen to show paid items as disabled
+  const paidItemIds = order.items
+    .filter((item: any) => item.paymentAllocations && item.paymentAllocations.length > 0)
+    .map((item: any) => item.id)
+
+  logger.info(`🔍 [GET ORDER] paidItemIds: ${paidItemIds.length > 0 ? paidItemIds.join(', ') : 'none'}`)
+
   return {
     ...flattenedOrder,
     amount_left,
     tableName, // 🆕 Add computed tableName for Android MenuScreen title
     lastSplitType, // 🆕 For split type restriction in Android UI
+    paidItemIds, // 🆕 For SplitByProduct screen to show paid items as disabled
   }
 }
 
@@ -373,11 +382,13 @@ export async function addItemsToOrder(
   }
 
   // Optimistic concurrency check
+  // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
+  // This allows the Android client to detect conflicts and refresh automatically
   if (order.version !== expectedVersion) {
     logger.warn(
       `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
     )
-    throw new BadRequestError(
+    throw new ConflictError(
       `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
     )
   }
@@ -407,11 +418,16 @@ export async function addItemsToOrder(
   const allModifierIds = items.flatMap(item => item.modifierIds || [])
   logger.info(`🔍 [ADD ITEMS] Modifier IDs requested: ${JSON.stringify(allModifierIds)}`)
 
+  // ✅ P1 FIX: Add venueId filter through group relation to prevent cross-tenant access (security)
+  // Modifier doesn't have direct venueId; it's accessed via ModifierGroup
   const modifiers =
     allModifierIds.length > 0
       ? await prisma.modifier.findMany({
           where: {
             id: { in: allModifierIds },
+            group: {
+              venueId,  // Security: Only fetch modifiers that belong to this venue's groups
+            },
           },
         })
       : []
@@ -738,11 +754,12 @@ export async function removeOrderItem(
   }
 
   // Optimistic concurrency check
+  // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
   if (order.version !== expectedVersion) {
     logger.warn(
       `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
     )
-    throw new BadRequestError(
+    throw new ConflictError(
       `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
     )
   }
@@ -1058,9 +1075,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   }
 
   // Optimistic concurrency check
+  // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
   if (order.version !== input.expectedVersion) {
     logger.warn(`⚠️ [ORDER SERVICE] Version mismatch! Expected: ${input.expectedVersion}, Got: ${order.version}`)
-    throw new BadRequestError(
+    throw new ConflictError(
       `Order was modified by another request. Please refresh and try again. (Expected version: ${input.expectedVersion}, Current: ${order.version})`,
     )
   }
