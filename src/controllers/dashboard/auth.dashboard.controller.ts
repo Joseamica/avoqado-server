@@ -61,6 +61,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 logo: true,
                 isOnboardingDemo: true,
                 kycStatus: true, // Include KYC status for access control
+                // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+                address: true,
+                city: true,
+                state: true,
+                zipCode: true,
+                country: true,
+                email: true,
+                phone: true,
                 features: {
                   select: {
                     active: true,
@@ -97,6 +105,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       isOnboardingDemo?: boolean
       kycStatus?: string | null // Include KYC verification status
       features?: any[]
+      // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+      address?: string | null
+      city?: string | null
+      state?: string | null
+      zipCode?: string | null
+      country?: string | null
+      email?: string | null
+      phone?: string | null
     }
 
     // Check if user is a SUPERADMIN in any venue
@@ -112,6 +128,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       isOnboardingDemo: sv.venue.isOnboardingDemo,
       kycStatus: sv.venue.kycStatus, // Include KYC status
       features: sv.venue.features, // Incluir las features
+      // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+      address: sv.venue.address,
+      city: sv.venue.city,
+      state: sv.venue.state,
+      zipCode: sv.venue.zipCode,
+      country: sv.venue.country,
+      email: sv.venue.email,
+      phone: sv.venue.phone,
     }))
 
     // Create a map of venue IDs that user already has a direct relationship with
@@ -141,6 +165,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           logo: true,
           isOnboardingDemo: true,
           kycStatus: true, // Include KYC status
+          // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+          address: true,
+          city: true,
+          state: true,
+          zipCode: true,
+          country: true,
+          email: true,
+          phone: true,
           features: {
             select: {
               active: true,
@@ -163,6 +195,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         isOnboardingDemo: venue.isOnboardingDemo,
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
+        // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+        address: venue.address,
+        city: venue.city,
+        state: venue.state,
+        zipCode: venue.zipCode,
+        country: venue.country,
+        email: venue.email,
+        phone: venue.phone,
       }))
 
       // Add all system venues to user's venues array (if not already there)
@@ -189,6 +229,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           logo: true,
           isOnboardingDemo: true,
           kycStatus: true, // Include KYC status
+          // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+          address: true,
+          city: true,
+          state: true,
+          zipCode: true,
+          country: true,
+          email: true,
+          phone: true,
           features: {
             select: {
               active: true,
@@ -211,6 +259,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         isOnboardingDemo: venue.isOnboardingDemo,
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
+        // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+        address: venue.address,
+        city: venue.city,
+        state: venue.state,
+        zipCode: venue.zipCode,
+        country: venue.country,
+        email: venue.email,
+        phone: venue.phone,
       }))
 
       // Add all organization venues to user's venues array (if not already there)
@@ -269,6 +325,11 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       lastLogin: staff.lastLoginAt,
       venues: enrichedVenues, // Use enriched venues with permissions
     }
+
+    // Disable caching for sensitive auth status data
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+    res.setHeader('Pragma', 'no-cache')
+    res.setHeader('Expires', '0')
 
     return res.status(200).json({
       authenticated: true,
