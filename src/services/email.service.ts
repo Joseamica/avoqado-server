@@ -67,6 +67,27 @@ interface PasswordResetData {
   expiresInMinutes: number
 }
 
+interface TerminalPurchaseEmailData {
+  venueName: string
+  contactName: string
+  contactEmail: string
+  quantity: number
+  productName: string
+  productPrice: number
+  shippingAddress: string
+  shippingCity: string
+  shippingState: string
+  shippingPostalCode: string
+  shippingCountry: string
+  shippingSpeed: string
+  subtotal: number
+  shippingCost: number
+  tax: number
+  totalAmount: number
+  currency: string
+  orderDate: string
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -1050,6 +1071,353 @@ class EmailService {
 
     return this.sendEmail({
       to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendTerminalPurchaseEmail(email: string, data: TerminalPurchaseEmailData): Promise<boolean> {
+    const subject = `✅ Confirmación de compra de terminales - ${data.venueName}`
+
+    const shippingSpeedText =
+      data.shippingSpeed === 'express'
+        ? 'Express (2-3 días)'
+        : data.shippingSpeed === 'overnight'
+          ? 'Nocturno (1 día)'
+          : 'Estándar (5-7 días)'
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Confirmación de Compra - ${data.venueName}</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">🎉 ¡Compra confirmada!</h1>
+              <p style="color: #e8f4f8; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola ${data.contactName},</p>
+
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                ¡Gracias por tu compra! Hemos recibido tu orden de terminales PAX A910S. A continuación encontrarás los detalles de tu pedido:
+              </p>
+
+              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0;">
+                <h2 style="font-size: 18px; margin: 0 0 20px 0; color: #3b82f6; border-bottom: 2px solid #3b82f6; padding-bottom: 10px;">📦 Detalles del Pedido</h2>
+
+                <div style="margin-bottom: 15px;">
+                  <strong style="color: #555;">Producto:</strong> ${data.productName}<br>
+                  <strong style="color: #555;">Cantidad:</strong> ${data.quantity} ${data.quantity === 1 ? 'terminal' : 'terminales'}<br>
+                  <strong style="color: #555;">Precio unitario:</strong> $${data.productPrice.toFixed(2)} ${data.currency}<br>
+                  <strong style="color: #555;">Fecha de orden:</strong> ${new Date(data.orderDate).toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric' })}
+                </div>
+              </div>
+
+              <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 25px; margin: 30px 0;">
+                <h2 style="font-size: 18px; margin: 0 0 20px 0; color: #16a34a; border-bottom: 2px solid #16a34a; padding-bottom: 10px;">🚚 Información de Envío</h2>
+
+                <div style="margin-bottom: 15px;">
+                  <strong style="color: #555;">Dirección:</strong><br>
+                  ${data.shippingAddress}<br>
+                  ${data.shippingCity}, ${data.shippingState} ${data.shippingPostalCode}<br>
+                  ${data.shippingCountry}<br><br>
+                  <strong style="color: #555;">Velocidad de envío:</strong> ${shippingSpeedText}
+                </div>
+              </div>
+
+              <div style="background: #fef3c7; border: 1px solid #fde68a; border-radius: 10px; padding: 25px; margin: 30px 0;">
+                <h2 style="font-size: 18px; margin: 0 0 20px 0; color: #d97706; border-bottom: 2px solid #d97706; padding-bottom: 10px;">💰 Resumen de Pago</h2>
+
+                <table style="width: 100%; font-size: 14px;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;">Subtotal (${data.quantity} ${data.quantity === 1 ? 'terminal' : 'terminales'}):</td>
+                    <td style="padding: 8px 0; text-align: right; font-weight: bold;">$${data.subtotal.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;">Envío:</td>
+                    <td style="padding: 8px 0; text-align: right; font-weight: bold;">$${data.shippingCost.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;">IVA (16%):</td>
+                    <td style="padding: 8px 0; text-align: right; font-weight: bold;">$${data.tax.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                  <tr style="border-top: 2px solid #d97706;">
+                    <td style="padding: 15px 0 0 0; color: #333; font-size: 18px;"><strong>Total:</strong></td>
+                    <td style="padding: 15px 0 0 0; text-align: right; font-size: 20px; font-weight: bold; color: #d97706;">$${data.totalAmount.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                </table>
+              </div>
+
+              <div style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  🔑 <strong>Próximos pasos:</strong>
+                </p>
+                <ol style="font-size: 14px; margin: 0; padding-left: 20px; color: #666;">
+                  <li style="margin-bottom: 8px;">Tus terminales serán enviados a la dirección proporcionada</li>
+                  <li style="margin-bottom: 8px;">Una vez que recibas los dispositivos, encontrarás el <strong>número de serie físico</strong> en la parte posterior</li>
+                  <li style="margin-bottom: 8px;">Ingresa a tu dashboard de Avoqado y haz clic en <strong>"Activar"</strong> para registrar cada terminal</li>
+                  <li>¡Listo! Tus terminales estarán activos y listos para procesar pagos</li>
+                </ol>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                Si tienes alguna pregunta sobre tu pedido, no dudes en contactarnos.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      ¡Compra confirmada! - ${data.venueName}
+
+      Hola ${data.contactName},
+
+      ¡Gracias por tu compra! Hemos recibido tu orden de terminales PAX A910S.
+
+      DETALLES DEL PEDIDO
+      -------------------
+      Producto: ${data.productName}
+      Cantidad: ${data.quantity} ${data.quantity === 1 ? 'terminal' : 'terminales'}
+      Precio unitario: $${data.productPrice.toFixed(2)} ${data.currency}
+      Fecha de orden: ${new Date(data.orderDate).toLocaleDateString('es-MX')}
+
+      INFORMACIÓN DE ENVÍO
+      --------------------
+      ${data.shippingAddress}
+      ${data.shippingCity}, ${data.shippingState} ${data.shippingPostalCode}
+      ${data.shippingCountry}
+
+      Velocidad de envío: ${shippingSpeedText}
+
+      RESUMEN DE PAGO
+      ---------------
+      Subtotal: $${data.subtotal.toFixed(2)} ${data.currency}
+      Envío: $${data.shippingCost.toFixed(2)} ${data.currency}
+      IVA (16%): $${data.tax.toFixed(2)} ${data.currency}
+      -------------------
+      TOTAL: $${data.totalAmount.toFixed(2)} ${data.currency}
+
+      PRÓXIMOS PASOS:
+      1. Tus terminales serán enviados a la dirección proporcionada
+      2. Una vez que recibas los dispositivos, encontrarás el número de serie físico en la parte posterior
+      3. Ingresa a tu dashboard de Avoqado y haz clic en "Activar" para registrar cada terminal
+      4. ¡Listo! Tus terminales estarán activos y listos para procesar pagos
+
+      Si tienes alguna pregunta sobre tu pedido, no dudes en contactarnos.
+
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  /**
+   * Send admin notification for terminal purchase order
+   * This email is sent to Avoqado team to process and ship the order
+   */
+  async sendTerminalPurchaseAdminNotification(data: TerminalPurchaseEmailData): Promise<boolean> {
+    const adminEmail = process.env.ORDER_NOTIFICATIONS_EMAIL
+
+    if (!adminEmail) {
+      logger.warn('ORDER_NOTIFICATIONS_EMAIL not configured - skipping admin notification')
+      return false
+    }
+
+    const subject = `🛒 Nueva orden de terminales - ${data.venueName} (${data.quantity}x)`
+
+    const shippingSpeedText =
+      data.shippingSpeed === 'express'
+        ? 'Express (2-3 días)'
+        : data.shippingSpeed === 'overnight'
+          ? 'Nocturno (1 día)'
+          : 'Estándar (5-7 días)'
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Nueva Orden - ${data.venueName}</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #16a34a 0%, #15803d 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">🛒 Nueva Orden de Terminales</h1>
+              <p style="color: #d1fae5; margin: 10px 0 0 0; font-size: 16px;">Fecha: ${new Date(data.orderDate).toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 20px; margin-bottom: 30px; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 16px; margin: 0; color: #92400e;">
+                  <strong>⚡ Acción requerida:</strong> Procesar orden y coordinar envío de terminales.
+                </p>
+              </div>
+
+              <div style="background: #f8f9ff; border: 2px solid #3b82f6; border-radius: 10px; padding: 25px; margin: 30px 0;">
+                <h2 style="font-size: 20px; margin: 0 0 20px 0; color: #3b82f6;">🏢 Información del Cliente</h2>
+
+                <table style="width: 100%; font-size: 15px;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #555; width: 40%;"><strong>Restaurante:</strong></td>
+                    <td style="padding: 8px 0; color: #333;">${data.venueName}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;"><strong>Contacto:</strong></td>
+                    <td style="padding: 8px 0; color: #333;">${data.contactName}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;"><strong>Email:</strong></td>
+                    <td style="padding: 8px 0; color: #333;"><a href="mailto:${data.contactEmail}" style="color: #3b82f6; text-decoration: none;">${data.contactEmail}</a></td>
+                  </tr>
+                </table>
+              </div>
+
+              <div style="background: #f0fdf4; border: 2px solid #16a34a; border-radius: 10px; padding: 25px; margin: 30px 0;">
+                <h2 style="font-size: 20px; margin: 0 0 20px 0; color: #16a34a;">📦 Detalles del Pedido</h2>
+
+                <table style="width: 100%; font-size: 15px;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #555; width: 40%;"><strong>Producto:</strong></td>
+                    <td style="padding: 8px 0; color: #333;">${data.productName}</td>
+                  </tr>
+                  <tr style="background: #dcfce7;">
+                    <td style="padding: 12px 8px; color: #555;"><strong>Cantidad:</strong></td>
+                    <td style="padding: 12px 8px; color: #333; font-size: 18px; font-weight: bold;">${data.quantity} ${data.quantity === 1 ? 'terminal' : 'terminales'}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;"><strong>Precio unitario:</strong></td>
+                    <td style="padding: 8px 0; color: #333;">$${data.productPrice.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;"><strong>Total:</strong></td>
+                    <td style="padding: 8px 0; color: #333; font-size: 18px; font-weight: bold; color: #16a34a;">$${data.totalAmount.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                </table>
+              </div>
+
+              <div style="background: #fef2f2; border: 2px solid #ef4444; border-radius: 10px; padding: 25px; margin: 30px 0;">
+                <h2 style="font-size: 20px; margin: 0 0 20px 0; color: #ef4444;">🚚 Dirección de Envío</h2>
+
+                <div style="background: white; padding: 20px; border-radius: 8px; font-size: 15px; line-height: 1.8;">
+                  <strong style="color: #333; display: block; margin-bottom: 10px;">${data.contactName}</strong>
+                  ${data.shippingAddress}<br>
+                  ${data.shippingCity}, ${data.shippingState} ${data.shippingPostalCode}<br>
+                  ${data.shippingCountry}<br><br>
+                  <div style="background: #fee2e2; padding: 12px; border-radius: 6px; margin-top: 15px;">
+                    <strong style="color: #991b1b;">Velocidad de envío:</strong> ${shippingSpeedText}
+                  </div>
+                </div>
+              </div>
+
+              <div style="background: #fff7ed; border: 1px solid #fdba74; border-radius: 10px; padding: 25px; margin: 30px 0;">
+                <h2 style="font-size: 18px; margin: 0 0 15px 0; color: #ea580c;">💰 Resumen Financiero</h2>
+
+                <table style="width: 100%; font-size: 14px;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;">Subtotal (${data.quantity}x):</td>
+                    <td style="padding: 8px 0; text-align: right;">$${data.subtotal.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;">Envío:</td>
+                    <td style="padding: 8px 0; text-align: right;">$${data.shippingCost.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #555;">IVA (16%):</td>
+                    <td style="padding: 8px 0; text-align: right;">$${data.tax.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                  <tr style="border-top: 2px solid #ea580c;">
+                    <td style="padding: 12px 0 0 0; font-size: 16px;"><strong>Total:</strong></td>
+                    <td style="padding: 12px 0 0 0; text-align: right; font-size: 18px; font-weight: bold; color: #ea580c;">$${data.totalAmount.toFixed(2)} ${data.currency}</td>
+                  </tr>
+                </table>
+              </div>
+
+              <div style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 15px; margin: 0 0 12px 0; color: #1e40af;">
+                  <strong>✅ Próximas acciones:</strong>
+                </p>
+                <ol style="font-size: 14px; margin: 0; padding-left: 20px; color: #334155; line-height: 1.8;">
+                  <li>Verificar disponibilidad de stock de terminales PAX A910S</li>
+                  <li>Coordinar el envío ${shippingSpeedText} a la dirección proporcionada</li>
+                  <li>Generar guía de rastreo y notificar al cliente</li>
+                  <li>El cliente activará las terminales cuando reciba los dispositivos físicos</li>
+                </ol>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 13px; color: #666; text-align: center; margin: 0;">
+                Correo automático enviado por Avoqado Dashboard
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      NUEVA ORDEN DE TERMINALES
+      =========================
+
+      Restaurante: ${data.venueName}
+      Contacto: ${data.contactName}
+      Fecha: ${new Date(data.orderDate).toLocaleDateString('es-MX')}
+
+      DETALLES DEL PEDIDO
+      -------------------
+      Producto: ${data.productName}
+      Cantidad: ${data.quantity} ${data.quantity === 1 ? 'terminal' : 'terminales'}
+      Precio unitario: $${data.productPrice.toFixed(2)} ${data.currency}
+
+      DIRECCIÓN DE ENVÍO
+      ------------------
+      ${data.contactName}
+      ${data.shippingAddress}
+      ${data.shippingCity}, ${data.shippingState} ${data.shippingPostalCode}
+      ${data.shippingCountry}
+
+      Velocidad: ${shippingSpeedText}
+
+      RESUMEN FINANCIERO
+      ------------------
+      Subtotal: $${data.subtotal.toFixed(2)} ${data.currency}
+      Envío: $${data.shippingCost.toFixed(2)} ${data.currency}
+      IVA (16%): $${data.tax.toFixed(2)} ${data.currency}
+      -------------------
+      TOTAL: $${data.totalAmount.toFixed(2)} ${data.currency}
+
+      PRÓXIMAS ACCIONES:
+      1. Verificar disponibilidad de stock
+      2. Coordinar el envío a la dirección proporcionada
+      3. Generar guía de rastreo y notificar al cliente
+      4. El cliente activará las terminales al recibir los dispositivos
+
+      ---
+      Avoqado Dashboard
+    `
+
+    return this.sendEmail({
+      to: adminEmail,
       subject,
       html,
       text,

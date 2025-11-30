@@ -72,6 +72,7 @@ const envSchema = z.object({
   // Resend (Email)
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
+  ORDER_NOTIFICATIONS_EMAIL: z.string().email().optional(),
 
   // Blumon Payment SDK
   USE_BLUMON_MOCK: z
