@@ -146,6 +146,7 @@ model Venue {
   invitations         Invitation[]
   staff               StaffVenue[]
   rolePermissions     VenueRolePermission[]
+  roleConfigs         VenueRoleConfig[]
   menuCategories      MenuCategory[]
   menus               Menu[]
   products            Product[]
@@ -263,6 +264,9 @@ model VenueSettings {
   tipSuggestions      Json? // [15, 18, 20, 25]
   paymentTiming       PaymentTiming      @default(PAY_AFTER) // When to collect payment
   inventoryDeduction  InventoryDeduction @default(ON_ORDER_CREATE) // When to deduct inventory
+
+  // TPV Settings removed (2025-11-29) - now stored per-terminal in Terminal.config.settings
+  // Migration script: scripts/migrate-tpv-settings-to-terminal.ts
 
   updatedAt DateTime @updatedAt
 }
@@ -437,6 +441,32 @@ model VenueRolePermission {
   @@index([modifiedBy])
   @@index([venueId, updatedAt]) // Audit trail: recent changes per venue
   @@index([modifiedBy, updatedAt]) // Audit trail: who changed what when
+}
+
+// ==========================================
+// VenueRoleConfig: Custom Role Display Names
+// ==========================================
+// Allows venues to customize role display names while keeping
+// the internal StaffRole enum for type safety.
+// Example: CASHIER -> "Promotor" for events businesses
+model VenueRoleConfig {
+  id          String    @id @default(cuid())
+  venueId     String
+  venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  role        StaffRole // Internal enum (never changes)
+  displayName String    // Custom name shown to users (e.g., "Promotor")
+  description String?   // Optional description for this role
+  icon        String?   // Optional icon name (e.g., "ticket", "users")
+  color       String?   // Optional hex color for UI badges (e.g., "#7C3AED")
+  isActive    Boolean   @default(true) // Can hide unused roles
+  sortOrder   Int       @default(0) // Custom ordering in UI
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, role]) // One config per role per venue
+  @@index([venueId])
+  @@index([role])
 }
 
 model Invitation {
@@ -815,6 +845,7 @@ model RawMaterial {
   purchaseOrderItems PurchaseOrderItem[]
   lowStockAlerts     LowStockAlert[]
   batches            StockBatch[] // FIFO batch tracking
+  modifiers          Modifier[] // Modifiers linked to this raw material for inventory tracking
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -864,12 +895,20 @@ model RecipeLine {
   isOptional      Boolean  @default(false)
   substituteNotes String? // e.g., "Can use chicken instead of beef"
 
+  // ✅ VARIABLE INGREDIENT SUPPORT (Toast/Square pattern)
+  // When true, this ingredient can be substituted by a modifier from linkedModifierGroup
+  // Example: "Whole Milk" (150ml) can be substituted by "Almond Milk" from "Milk Type" group
+  isVariable              Boolean        @default(false)
+  linkedModifierGroupId   String?        // The modifier group that can substitute this ingredient
+  linkedModifierGroup     ModifierGroup? @relation(fields: [linkedModifierGroupId], references: [id])
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([recipeId, rawMaterialId])
   @@index([recipeId])
   @@index([rawMaterialId])
+  @@index([linkedModifierGroupId])
 }
 
 // Suppliers for raw materials
@@ -1572,6 +1611,9 @@ model ModifierGroup {
   modifiers Modifier[]
   products  ProductModifierGroup[]
 
+  // ✅ Variable ingredients that can be substituted by modifiers from this group
+  linkedRecipeLines RecipeLine[]
+
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
@@ -1590,12 +1632,23 @@ model Modifier {
   name  String
   price Decimal @default(0) @db.Decimal(10, 2)
 
+  // ✅ INVENTORY TRACKING (Toast/Square pattern)
+  // Link modifier to a raw material for inventory deduction
+  rawMaterialId   String?                 // Optional: only if this modifier affects inventory
+  rawMaterial     RawMaterial?            @relation(fields: [rawMaterialId], references: [id])
+  quantityPerUnit Decimal?                @db.Decimal(12, 3) // Amount to deduct per modifier selection
+  unit            Unit?                   // Unit of measurement (must match rawMaterial.unit or be convertible)
+  inventoryMode   ModifierInventoryMode   @default(ADDITION) // ADDITION (extra) or SUBSTITUTION (replace)
+  cost            Decimal?                @db.Decimal(10, 4) // Auto-calculated: rawMaterial.avgCostPerUnit × quantityPerUnit
+
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
   active       Boolean      @default(true)
 
   orderItems OrderItemModifier[]
+
+  @@index([rawMaterialId])
 }
 
 model ProductModifierGroup {
@@ -2026,7 +2079,7 @@ model Terminal {
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id])
 
-  serialNumber String       @unique
+  serialNumber String?      @unique // Optional until device is activated with hardware serial
   name         String
   type         TerminalType
 
@@ -3658,6 +3711,7 @@ enum TerminalType {
 }
 
 enum TerminalStatus {
+  PENDING_ACTIVATION // Purchased but no hardware serial number yet
   ACTIVE
   INACTIVE
   MAINTENANCE
@@ -4231,6 +4285,13 @@ enum CostingMethod {
 enum InventoryMethod {
   QUANTITY // Direct unit counting (retail, bar items)
   RECIPE // Ingredient-based tracking (restaurant items)
+}
+
+// ✅ WORLD-CLASS: Modifier inventory mode (Toast/Square pattern)
+// Determines how a modifier affects inventory when selected
+enum ModifierInventoryMode {
+  ADDITION // Adds extra ingredient (e.g., "Extra Bacon" adds 30g bacon)
+  SUBSTITUTION // Replaces recipe ingredient (e.g., "Almond Milk" replaces "Whole Milk")
 }
 
 // ==========================================
