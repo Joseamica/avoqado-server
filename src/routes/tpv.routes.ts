@@ -1913,6 +1913,103 @@ router.get('/terminals/:serialNumber/activation-status', activationController.ch
  */
 router.get('/terminals/:serialNumber/config', validateRequest(serialNumberParamSchema), terminalController.getTerminalConfig)
 
+/**
+ * @openapi
+ * /tpv/terminals/{serialNumber}/settings:
+ *   put:
+ *     tags: [TPV - Terminal Configuration]
+ *     summary: Update TPV settings for a specific terminal
+ *     description: |
+ *       Update payment flow screen configuration for a specific terminal.
+ *       Each terminal can have individual settings (different from other terminals in the same venue).
+ *
+ *       **Configurable Settings:**
+ *       - showReviewScreen: Show star rating after amount entry
+ *       - showTipScreen: Show tip selection before payment
+ *       - showReceiptScreen: Show QR code and print options after payment
+ *       - defaultTipPercentage: Pre-selected tip percentage
+ *       - tipSuggestions: Available tip percentage options
+ *       - requirePinLogin: Require PIN for staff login
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: serialNumber
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal serial number (e.g., "AVQD-2841548417")
+ *         example: "AVQD-2841548417"
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               showReviewScreen:
+ *                 type: boolean
+ *                 description: Show star rating screen after amount entry
+ *                 example: true
+ *               showTipScreen:
+ *                 type: boolean
+ *                 description: Show tip selection screen before payment
+ *                 example: false
+ *               showReceiptScreen:
+ *                 type: boolean
+ *                 description: Show QR code and print button after payment
+ *                 example: true
+ *               defaultTipPercentage:
+ *                 type: integer
+ *                 nullable: true
+ *                 description: Pre-selected tip percentage (null = no pre-selection)
+ *                 example: 15
+ *               tipSuggestions:
+ *                 type: array
+ *                 items:
+ *                   type: integer
+ *                 description: Available tip percentage options
+ *                 example: [15, 18, 20, 25]
+ *               requirePinLogin:
+ *                 type: boolean
+ *                 description: Require PIN for staff login
+ *                 example: false
+ *     responses:
+ *       200:
+ *         description: Settings updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     showReviewScreen:
+ *                       type: boolean
+ *                     showTipScreen:
+ *                       type: boolean
+ *                     showReceiptScreen:
+ *                       type: boolean
+ *                     defaultTipPercentage:
+ *                       type: integer
+ *                       nullable: true
+ *                     tipSuggestions:
+ *                       type: array
+ *                       items:
+ *                         type: integer
+ *                     requirePinLogin:
+ *                       type: boolean
+ *       401:
+ *         description: Unauthorized - Invalid or missing JWT token
+ *       404:
+ *         description: Terminal not found
+ */
+router.put('/terminals/:serialNumber/settings', authenticateTokenMiddleware, terminalController.updateTpvSettings)
+
 router.post('/venues/:venueId/auth', pinLoginRateLimiter, validateRequest(pinLoginSchema), authController.staffSignIn)
 
 /**

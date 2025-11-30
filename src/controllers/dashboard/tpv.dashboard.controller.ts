@@ -252,3 +252,61 @@ export async function deactivateTpv(req: Request<{ venueId: string; tpvId: strin
     next(error)
   }
 }
+
+/**
+ * Get TPV settings for a specific terminal
+ * @permission tpv-settings:read (MANAGER+)
+ */
+export async function getTpvSettings(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { tpvId } = req.params
+
+    const settings = await tpvDashboardService.getTpvSettings(tpvId)
+
+    res.status(200).json(settings)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Update TPV settings for a specific terminal
+ * @permission tpv-settings:update (ADMIN+)
+ */
+export async function updateTpvSettings(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { tpvId } = req.params
+    const settingsUpdate = req.body
+
+    const updatedSettings = await tpvDashboardService.updateTpvSettings(tpvId, settingsUpdate)
+
+    res.status(200).json(updatedSettings)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Activate a terminal by registering its hardware serial number
+ * @permission tpv:update (MANAGER+)
+ */
+export async function activateTerminal(
+  req: Request<{ venueId: string; tpvId: string }, {}, { serialNumber: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, tpvId } = req.params
+    const { serialNumber } = req.body
+
+    if (!serialNumber || serialNumber.trim().length === 0) {
+      throw new BadRequestError('Serial number is required')
+    }
+
+    const activatedTpv = await tpvDashboardService.activateTerminal(venueId, tpvId, serialNumber.trim())
+
+    res.status(200).json(activatedTpv)
+  } catch (error) {
+    next(error)
+  }
+}

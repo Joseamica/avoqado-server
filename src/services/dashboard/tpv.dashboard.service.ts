@@ -3,6 +3,7 @@ import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { PaginatedTerminalsResponse, UpdateTpvBody, CreateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import logger from '@/config/logger'
+import emailService from '../email.service'
 
 /**
  * Obtiene los datos de las terminales para un venue, con paginación y filtros.
@@ -151,27 +152,80 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
  */
 export async function createTpv(venueId: string, payload: CreateTpvBody): Promise<Terminal> {
   if (!venueId) throw new NotFoundError('El ID del Venue es requerido.')
-  const { name, serialNumber } = payload
-  if (!name || !serialNumber) {
-    throw new NotFoundError('Nombre y número de serie son requeridos')
+  const { name, serialNumber, status } = payload
+  if (!name) {
+    throw new NotFoundError('Nombre es requerido')
   }
 
-  // Ensure serial number is unique
-  const existing = await prisma.terminal.findUnique({ where: { serialNumber } })
-  if (existing) {
-    throw new NotFoundError(`Ya existe un terminal con número de serie ${serialNumber}`)
+  // If serial number is provided, ensure it's unique
+  if (serialNumber) {
+    const existing = await prisma.terminal.findUnique({ where: { serialNumber } })
+    if (existing) {
+      throw new NotFoundError(`Ya existe un terminal con número de serie ${serialNumber}`)
+    }
   }
 
   const created = await prisma.terminal.create({
     data: {
       venueId,
       name,
-      serialNumber,
+      serialNumber: serialNumber || null,
       type: (payload.type as any) || TerminalType.TPV_ANDROID,
-      status: TerminalStatus.INACTIVE,
+      status: (status as any) || TerminalStatus.INACTIVE,
       config: payload.config as any,
     },
   })
+
+  // Check if this is a purchase order (config contains purchaseOrder data)
+  const config = payload.config as any
+  if (config?.purchaseOrder) {
+    const purchaseOrder = config.purchaseOrder
+
+    // Send purchase confirmation and admin notification emails
+    // Only send for the first terminal (sendEmail flag set to true by frontend)
+    if (purchaseOrder.sendEmail && purchaseOrder.shipping?.contactEmail) {
+      // Get venue info for email
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        select: { name: true },
+      })
+
+      const emailData = {
+        venueName: venue?.name || 'Tu restaurante',
+        contactName: purchaseOrder.shipping.contactName || 'Cliente',
+        contactEmail: purchaseOrder.shipping.contactEmail || '',
+        quantity: purchaseOrder.quantity || 1,
+        productName: purchaseOrder.product?.name || 'Terminal PAX A910S',
+        productPrice: purchaseOrder.product?.price || 349,
+        shippingAddress: purchaseOrder.shipping.address || '',
+        shippingCity: purchaseOrder.shipping.city || '',
+        shippingState: purchaseOrder.shipping.state || '',
+        shippingPostalCode: purchaseOrder.shipping.postalCode || '',
+        shippingCountry: purchaseOrder.shipping.country || '',
+        shippingSpeed: purchaseOrder.shipping.shippingSpeed || 'standard',
+        subtotal: (purchaseOrder.product?.price || 349) * (purchaseOrder.quantity || 1),
+        shippingCost:
+          purchaseOrder.shipping.shippingSpeed === 'express' ? 15 : purchaseOrder.shipping.shippingSpeed === 'overnight' ? 35 : 0,
+        tax: purchaseOrder.totalAmount ? (purchaseOrder.totalAmount * 0.16) / 1.16 : 0,
+        totalAmount: purchaseOrder.totalAmount || 0,
+        currency: purchaseOrder.currency || 'USD',
+        orderDate: purchaseOrder.orderDate || new Date().toISOString(),
+      }
+
+      try {
+        // Send customer confirmation email
+        await emailService.sendTerminalPurchaseEmail(purchaseOrder.shipping.contactEmail, emailData)
+        logger.info(`Purchase confirmation email sent to ${purchaseOrder.shipping.contactEmail}`)
+
+        // Send admin notification email
+        await emailService.sendTerminalPurchaseAdminNotification(emailData)
+        logger.info(`Purchase admin notification sent`)
+      } catch (error) {
+        logger.error('Failed to send purchase emails:', error)
+        // Don't fail the terminal creation if email fails
+      }
+    }
+  }
 
   return created
 }
@@ -271,4 +325,150 @@ export async function deactivateTpv(venueId: string, tpvId: string): Promise<Ter
   logger.info(`Terminal ${tpvId} desactivada en venue ${venueId}. Se puede generar nuevo código de activación.`)
 
   return deactivatedTerminal
+}
+
+/**
+ * TPV Settings interface - Matches frontend TpvSettings type
+ */
+export interface TpvSettings {
+  showReviewScreen: boolean
+  showTipScreen: boolean
+  showReceiptScreen: boolean
+  defaultTipPercentage: number | null
+  tipSuggestions: number[]
+  requirePinLogin: boolean
+}
+
+/**
+ * Default TPV settings - Applied when no custom settings exist
+ */
+const DEFAULT_TPV_SETTINGS: TpvSettings = {
+  showReviewScreen: true,
+  showTipScreen: true,
+  showReceiptScreen: true,
+  defaultTipPercentage: null,
+  tipSuggestions: [15, 18, 20, 25],
+  requirePinLogin: false,
+}
+
+/**
+ * Get TPV settings for a specific terminal
+ * Returns default settings if none exist
+ */
+export async function getTpvSettings(tpvId: string): Promise<TpvSettings> {
+  const terminal = await prisma.terminal.findUnique({
+    where: { id: tpvId },
+    select: { config: true },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
+  }
+
+  // If config exists and has settings property, return it merged with defaults
+  const savedSettings = (terminal.config as any)?.settings || {}
+
+  return {
+    ...DEFAULT_TPV_SETTINGS,
+    ...savedSettings,
+  }
+}
+
+/**
+ * Update TPV settings for a specific terminal
+ * Performs partial update, merging with existing settings
+ */
+export async function updateTpvSettings(tpvId: string, settingsUpdate: Partial<TpvSettings>): Promise<TpvSettings> {
+  // 1. Get current terminal to access existing config
+  const terminal = await prisma.terminal.findUnique({
+    where: { id: tpvId },
+    select: { config: true },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
+  }
+
+  // 2. Get current settings (defaults + saved)
+  const currentSettings = await getTpvSettings(tpvId)
+
+  // 3. Merge with update
+  const newSettings: TpvSettings = {
+    ...currentSettings,
+    ...settingsUpdate,
+  }
+
+  // 4. Update config field with new settings
+  const existingConfig = (terminal.config as any) || {}
+  const updatedConfig = {
+    ...existingConfig,
+    settings: newSettings,
+  }
+
+  // 5. Save to database
+  await prisma.terminal.update({
+    where: { id: tpvId },
+    data: {
+      config: updatedConfig,
+      updatedAt: new Date(),
+    },
+  })
+
+  logger.info(`TPV settings updated for terminal ${tpvId}`, { settings: newSettings })
+
+  return newSettings
+}
+
+/**
+ * Activate a terminal by registering its hardware serial number
+ * @param venueId - The venue ID
+ * @param tpvId - The terminal ID
+ * @param serialNumber - The hardware serial number
+ * @returns The updated terminal
+ */
+export async function activateTerminal(venueId: string, tpvId: string, serialNumber: string): Promise<Terminal> {
+  // 1. Verify terminal exists and belongs to the venue
+  const terminal = await prisma.terminal.findFirst({
+    where: {
+      id: tpvId,
+      venueId,
+    },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal ${tpvId} not found in venue ${venueId}`)
+  }
+
+  // 2. Check if terminal is already activated
+  if (terminal.status === 'ACTIVE' && terminal.serialNumber) {
+    throw new BadRequestError(`Terminal ${tpvId} is already activated with serial number ${terminal.serialNumber}`)
+  }
+
+  // 3. Check if terminal is in pending activation status
+  if (terminal.status !== 'PENDING_ACTIVATION') {
+    throw new BadRequestError(`Terminal ${tpvId} is not in PENDING_ACTIVATION status (current status: ${terminal.status})`)
+  }
+
+  // 4. Check if serial number already exists (must be unique globally)
+  const existingTerminal = await prisma.terminal.findUnique({
+    where: { serialNumber },
+  })
+
+  if (existingTerminal) {
+    throw new BadRequestError(`Serial number ${serialNumber} is already registered to another terminal`)
+  }
+
+  // 5. Update terminal with serial number and set status to ACTIVE
+  const updatedTerminal = await prisma.terminal.update({
+    where: { id: tpvId },
+    data: {
+      serialNumber,
+      status: 'ACTIVE',
+      updatedAt: new Date(),
+    },
+  })
+
+  logger.info(`Terminal ${tpvId} activated with serial number ${serialNumber}`)
+
+  return updatedTerminal
 }

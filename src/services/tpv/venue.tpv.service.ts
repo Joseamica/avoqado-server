@@ -1,16 +1,20 @@
 import prisma from '../../utils/prismaClient'
-import { Venue } from '@prisma/client'
+import { Venue, VenueSettings } from '@prisma/client'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '@/config/logger'
 // import { mentaApiService } from './menta.api.service' // 🚫 Disabled: Not using Menta integration
 
 /**
  * Get venue by ID for TPV usage
+ *
+ * NOTE: TPV Settings (showReviewScreen, showTipScreen, etc.) are now per-terminal.
+ * Use GET /tpv/terminals/:serialNumber/config to fetch terminal-specific settings.
+ *
  * @param orgId optional Organization ID (for future authorization)
  * @param venueId Venue ID
- * @returns Venue with staff and related data
+ * @returns Venue with staff, settings, and related data
  */
-export async function getVenueById(venueId: string, _orgId?: string): Promise<Venue> {
+export async function getVenueById(venueId: string, _orgId?: string): Promise<Venue & { settings: VenueSettings | null }> {
   logger.info(`Getting venue by ID: ${venueId}`)
   const venue = await prisma.venue.findUnique({
     where: {
@@ -38,6 +42,7 @@ export async function getVenueById(venueId: string, _orgId?: string): Promise<Ve
         },
       },
       posConnectionStatus: true, // Include POS connection status for Android app
+      settings: true, // Include venue settings (non-TPV settings only)
       // Add other necessary relations based on TPV needs
     },
   })
@@ -191,8 +196,8 @@ export async function getVenueIdFromSerialNumber(serialNumber: string): Promise<
 
   return {
     venueId: terminal.venueId,
-    terminalId: terminal.serialNumber, // ✅ CHANGED: Use serial number directly (no Menta)
-    serialCode: terminal.serialNumber, // Hardware serial for identification
+    terminalId: terminal.serialNumber || terminal.id, // Use serial if available, fallback to ID
+    serialCode: terminal.serialNumber || '', // Hardware serial for identification (empty if not activated)
     status: terminal.status,
     model: terminalTypeMapping[terminal.type] || terminal.type,
     hardwareVersion: terminal.version || '1.0',

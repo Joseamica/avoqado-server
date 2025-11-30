@@ -12,6 +12,42 @@ import prisma from '@/utils/prismaClient'
  */
 
 /**
+ * TPV Settings interface - Per-terminal configuration for payment flow
+ */
+interface TpvSettings {
+  showReviewScreen: boolean
+  showTipScreen: boolean
+  showReceiptScreen: boolean
+  defaultTipPercentage: number | null
+  tipSuggestions: number[]
+  requirePinLogin: boolean
+}
+
+/**
+ * Default TPV settings - Applied when no custom settings exist
+ */
+const DEFAULT_TPV_SETTINGS: TpvSettings = {
+  showReviewScreen: true,
+  showTipScreen: true,
+  showReceiptScreen: true,
+  defaultTipPercentage: null,
+  tipSuggestions: [15, 18, 20, 25],
+  requirePinLogin: false,
+}
+
+/**
+ * Extract TPV settings from terminal config JSON
+ * Merges saved settings with defaults for missing fields
+ */
+function getTpvSettingsFromConfig(config: unknown): TpvSettings {
+  const savedSettings = (config as any)?.settings || {}
+  return {
+    ...DEFAULT_TPV_SETTINGS,
+    ...savedSettings,
+  }
+}
+
+/**
  * GET /api/v1/tpv/terminals/:serialNumber/config
  * Fetch terminal configuration with assigned merchant accounts
  *
@@ -59,16 +95,16 @@ import prisma from '@/utils/prismaClient'
  *         "posId": "376",
  *         "environment": "SANDBOX",
  *         "credentials": {...}
- *       },
- *       {
- *         "id": "ma_yyyyy",
- *         "displayName": "Ghost Kitchen",
- *         "serialNumber": "2841548418",
- *         "posId": "378",
- *         "environment": "SANDBOX",
- *         "credentials": {...}
  *       }
- *     ]
+ *     ],
+ *     "tpvSettings": {
+ *       "showReviewScreen": true,
+ *       "showTipScreen": true,
+ *       "showReceiptScreen": true,
+ *       "defaultTipPercentage": null,
+ *       "tipSuggestions": [15, 18, 20, 25],
+ *       "requirePinLogin": false
+ *     }
  *   }
  * }
  * ```
@@ -155,10 +191,14 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       providerConfig: ma.providerConfig,
     }))
 
+    // Step 4: Extract TPV settings from terminal config
+    const tpvSettings = getTpvSettingsFromConfig(terminal.config)
+
     logger.info('[Terminal Config] Successfully fetched config', {
       terminalId: terminal.id,
       serialNumber: terminal.serialNumber,
       merchantCount: transformedMerchants.length,
+      tpvSettings,
     })
 
     res.status(200).json({
@@ -174,7 +214,109 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
           venue: terminal.venue,
         },
         merchantAccounts: transformedMerchants,
+        tpvSettings, // Per-terminal payment flow configuration
       },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * PUT /api/v1/tpv/terminals/:serialNumber/settings
+ * Update TPV settings for a specific terminal
+ *
+ * **Business Use Case:**
+ * Android TPV app calls this endpoint to update payment flow settings.
+ * Each terminal can have individual settings (different from other terminals in the same venue).
+ *
+ * **Request Body:**
+ * ```json
+ * {
+ *   "showReviewScreen": true,
+ *   "showTipScreen": false,
+ *   "showReceiptScreen": true,
+ *   "defaultTipPercentage": 15,
+ *   "tipSuggestions": [15, 18, 20, 25],
+ *   "requirePinLogin": false
+ * }
+ * ```
+ *
+ * **Response:**
+ * ```json
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "showReviewScreen": true,
+ *     "showTipScreen": false,
+ *     ...
+ *   }
+ * }
+ * ```
+ *
+ * **Security:**
+ * - Requires TPV JWT authentication
+ * - Only updates settings for the specified terminal
+ *
+ * @param req.params.serialNumber - Terminal serial number
+ * @param req.body - Partial TpvSettings to update
+ */
+export async function updateTpvSettings(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { serialNumber } = req.params
+    const settingsUpdate = req.body
+
+    logger.info('[TPV Settings] Updating settings for terminal', {
+      serialNumber,
+      settingsUpdate,
+    })
+
+    // Step 1: Find terminal by serial number
+    const terminal = await prisma.terminal.findFirst({
+      where: { serialNumber },
+      select: { id: true, config: true },
+    })
+
+    if (!terminal) {
+      throw new NotFoundError(`Terminal not found with serial number: ${serialNumber}`)
+    }
+
+    // Step 2: Get current settings (merge with defaults)
+    const existingConfig = (terminal.config as any) || {}
+    const currentSettings = {
+      ...DEFAULT_TPV_SETTINGS,
+      ...(existingConfig.settings || {}),
+    }
+
+    // Step 3: Merge with update (partial update support)
+    const newSettings: TpvSettings = {
+      ...currentSettings,
+      ...settingsUpdate,
+    }
+
+    // Step 4: Update config field with new settings
+    const updatedConfig = {
+      ...existingConfig,
+      settings: newSettings,
+    }
+
+    // Step 5: Save to database
+    await prisma.terminal.update({
+      where: { id: terminal.id },
+      data: {
+        config: updatedConfig,
+        updatedAt: new Date(),
+      },
+    })
+
+    logger.info('[TPV Settings] Settings updated successfully', {
+      serialNumber,
+      settings: newSettings,
+    })
+
+    res.status(200).json({
+      success: true,
+      data: newSettings,
     })
   } catch (error) {
     next(error)
