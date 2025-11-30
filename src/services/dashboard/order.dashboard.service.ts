@@ -52,9 +52,7 @@ export async function getOrders(venueId: string, page: number, pageSize: number)
         servedBy: true, // Quien atendió la orden
         table: true, // Para obtener el número de la mesa
       },
-      orderBy: {
-        updatedAt: 'desc', // Ordenamos por la última actualización
-      },
+      orderBy: { updatedAt: 'desc' },
       skip,
       take,
     }),
