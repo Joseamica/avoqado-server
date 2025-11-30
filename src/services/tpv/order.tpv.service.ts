@@ -426,7 +426,7 @@ export async function addItemsToOrder(
           where: {
             id: { in: allModifierIds },
             group: {
-              venueId,  // Security: Only fetch modifiers that belong to this venue's groups
+              venueId, // Security: Only fetch modifiers that belong to this venue's groups
             },
           },
         })

@@ -34,7 +34,8 @@ export type UpdateTpvBody = {
 // Create TPV body payload
 export type CreateTpvBody = {
   name: string
-  serialNumber: string
+  serialNumber?: string // Optional: can be added later via activation
   type?: TerminalType
+  status?: TerminalStatus // Optional: defaults to PENDING_ACTIVATION if no serialNumber
   config?: any
 }

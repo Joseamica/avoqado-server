@@ -214,10 +214,7 @@ describe('ProductInventoryIntegration Service', () => {
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
       prismaMock.inventory.findUnique.mockResolvedValue(mockInventory as any)
       // Mock array-based $transaction
-      prismaMock.$transaction.mockResolvedValue([
-        { ...mockInventory, currentStock: new Decimal(0) },
-        { id: 'movement-123' },
-      ])
+      prismaMock.$transaction.mockResolvedValue([{ ...mockInventory, currentStock: new Decimal(0) }, { id: 'movement-123' }])
 
       const result = await productInventoryIntegrationService.deductInventoryForProduct(
         'venue-123',
