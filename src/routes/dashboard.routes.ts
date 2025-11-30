@@ -24,6 +24,7 @@ import * as generalStatsController from '../controllers/dashboard/generalStats.d
 import * as googleOAuthController from '../controllers/dashboard/googleOAuth.controller'
 import * as googleIntegrationController from '../controllers/dashboard/googleIntegration.dashboard.controller'
 import * as menuController from '../controllers/dashboard/menu.dashboard.controller'
+import * as modifierInventoryAnalyticsController from '../controllers/dashboard/modifierInventoryAnalytics.controller'
 import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
@@ -32,6 +33,8 @@ import * as reviewController from '../controllers/dashboard/review.dashboard.con
 import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
+import * as venueRoleConfigController from '../controllers/dashboard/venueRoleConfig.dashboard.controller'
+import * as venueSettingsController from '../controllers/dashboard/venueSettings.dashboard.controller'
 import * as loyaltyController from '../controllers/dashboard/loyalty.dashboard.controller'
 import * as discountController from '../controllers/dashboard/discount.dashboard.controller'
 import * as couponController from '../controllers/dashboard/coupon.dashboard.controller'
@@ -110,6 +113,14 @@ import {
   AssignCustomersSchema,
   RemoveCustomersSchema,
 } from '../schemas/dashboard/customerGroup.schema'
+import { UpdateRoleConfigsSchema, RoleConfigParamsSchema } from '../schemas/dashboard/venueRoleConfig.schema'
+import { UpdateVenueSettingsSchema, UpdateTpvSettingsSchema } from '../schemas/dashboard/venueSettings.schema'
+import {
+  GetModifierUsageStatsSchema,
+  GetModifiersLowStockSchema,
+  GetModifierInventorySummarySchema,
+  GetModifiersWithInventorySchema,
+} from '../schemas/dashboard/modifierInventoryAnalytics.schema'
 import {
   UpdateLoyaltyConfigSchema,
   CalculatePointsSchema,
@@ -3130,6 +3141,63 @@ router.put('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPerm
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/{tpvId}/activate:
+ *   patch:
+ *     tags: [TPV (Terminals)]
+ *     summary: Activate a terminal by registering its hardware serial number
+ *     description: |
+ *       Activates a terminal by adding its physical hardware serial number.
+ *       The terminal must be in PENDING_ACTIVATION status.
+ *       Serial numbers must be unique across the system.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - serialNumber
+ *             properties:
+ *               serialNumber:
+ *                 type: string
+ *                 description: The hardware serial number printed on the physical device
+ *                 example: "PAX-A910S-12345678"
+ *     responses:
+ *       200:
+ *         description: Terminal activated successfully
+ *       400:
+ *         description: Bad request (invalid status, duplicate serial number, etc.)
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Terminal not found
+ */
+router.patch(
+  '/venues/:venueId/tpvs/:tpvId/activate',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  tpvController.activateTerminal,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}:
  *   delete:
  *     tags: [TPV (Terminals)]
@@ -3334,6 +3402,126 @@ router.post(
   validateRequest(generateActivationCodeSchema),
   tpvController.generateActivationCode,
 )
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tpv/{tpvId}/settings:
+ *   get:
+ *     tags: [TPV Settings]
+ *     summary: Get TPV settings for a specific terminal
+ *     description: |
+ *       Retrieves the configuration settings for a terminal's payment flow screens.
+ *       Each terminal can have its own configuration (e.g., one terminal with tips, another without).
+ *
+ *       Returns default settings if none have been customized.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID
+ *     responses:
+ *       200:
+ *         description: Settings retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 showReviewScreen:
+ *                   type: boolean
+ *                 showTipScreen:
+ *                   type: boolean
+ *                 showReceiptScreen:
+ *                   type: boolean
+ *                 defaultTipPercentage:
+ *                   type: number
+ *                   nullable: true
+ *                 tipSuggestions:
+ *                   type: array
+ *                   items:
+ *                     type: number
+ *                 requirePinLogin:
+ *                   type: boolean
+ *       403:
+ *         description: Forbidden (missing tpv-settings:read permission)
+ *       404:
+ *         description: Terminal not found
+ */
+router.get('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission('tpv-settings:read'), tpvController.getTpvSettings)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tpv/{tpvId}/settings:
+ *   put:
+ *     tags: [TPV Settings]
+ *     summary: Update TPV settings for a specific terminal
+ *     description: |
+ *       Updates the configuration settings for a terminal's payment flow screens.
+ *       Performs partial update - only provided fields are updated.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               showReviewScreen:
+ *                 type: boolean
+ *               showTipScreen:
+ *                 type: boolean
+ *               showReceiptScreen:
+ *                 type: boolean
+ *               defaultTipPercentage:
+ *                 type: number
+ *                 nullable: true
+ *               tipSuggestions:
+ *                 type: array
+ *                 items:
+ *                   type: number
+ *               requirePinLogin:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Settings updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 showReviewScreen:
+ *                   type: boolean
+ *                 showTipScreen:
+ *                   type: boolean
+ *                 showReceiptScreen:
+ *                   type: boolean
+ *                 defaultTipPercentage:
+ *                   type: number
+ *                   nullable: true
+ *                 tipSuggestions:
+ *                   type: array
+ *                   items:
+ *                     type: number
+ *                 requirePinLogin:
+ *                   type: boolean
+ *       403:
+ *         description: Forbidden (missing tpv-settings:update permission)
+ *       404:
+ *         description: Terminal not found
+ */
+router.put('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission('tpv-settings:update'), tpvController.updateTpvSettings)
 
 // Heartbeat endpoint moved to tpv.routes.ts (unauthenticated endpoint for terminal health monitoring)
 
@@ -4268,6 +4456,138 @@ router.delete(
   checkPermission('menu:update'),
   validateRequest(RemoveModifierGroupFromProductParamsSchema),
   menuController.removeModifierGroupFromProductHandler,
+)
+
+// ==========================================
+// MODIFIER INVENTORY ANALYTICS ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifiers/inventory/usage:
+ *   get:
+ *     tags: [Modifier Inventory]
+ *     summary: Get modifier usage statistics
+ *     description: Returns usage statistics for modifiers including times used, quantity consumed, and cost impact
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: modifierGroupId
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Modifier usage statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/modifiers/inventory/usage',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  validateRequest(GetModifierUsageStatsSchema),
+  modifierInventoryAnalyticsController.getModifierUsageStatsHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifiers/inventory/low-stock:
+ *   get:
+ *     tags: [Modifier Inventory]
+ *     summary: Get modifiers with low stock raw materials
+ *     description: Returns modifiers whose linked raw materials are at or below reorder point
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *     responses:
+ *       200:
+ *         description: Low stock modifiers
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/modifiers/inventory/low-stock',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  validateRequest(GetModifiersLowStockSchema),
+  modifierInventoryAnalyticsController.getModifiersLowStockHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifiers/inventory/summary:
+ *   get:
+ *     tags: [Modifier Inventory]
+ *     summary: Get modifier inventory summary
+ *     description: Returns comprehensive summary including total modifiers with inventory, low stock count, cost impact
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Modifier inventory summary
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/modifiers/inventory/summary',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  validateRequest(GetModifierInventorySummarySchema),
+  modifierInventoryAnalyticsController.getModifierInventorySummaryHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/modifiers/inventory/list:
+ *   get:
+ *     tags: [Modifier Inventory]
+ *     summary: List all modifiers with inventory configuration
+ *     description: Returns all modifiers with their inventory tracking configuration
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: query
+ *         name: includeInactive
+ *         schema: { type: boolean, default: false }
+ *       - in: query
+ *         name: groupId
+ *         schema: { type: string, format: cuid }
+ *     responses:
+ *       200:
+ *         description: List of modifiers with inventory configuration
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/modifiers/inventory/list',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  validateRequest(GetModifiersWithInventorySchema),
+  modifierInventoryAnalyticsController.getModifiersWithInventoryHandler,
 )
 
 // ==========================================
@@ -7613,6 +7933,290 @@ router.post(
     }),
   ),
   couponController.recordRedemption,
+)
+
+// ============================================================================
+// Venue Role Config Routes (Custom Role Display Names)
+// ============================================================================
+// Allows venues to customize role display names while keeping
+// the internal StaffRole enum for type safety.
+// Example: CASHIER -> "Promotor" for events businesses
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/role-config:
+ *   get:
+ *     tags: [Venue Settings]
+ *     summary: Get all role configs for a venue (with defaults for unconfigured roles)
+ *     description: |
+ *       Returns ALL roles with custom display names if configured, or defaults if not.
+ *       Useful for displaying role names in UI (e.g., CASHIER -> "Promotor").
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of role configs for all roles
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 configs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       role: { type: string, enum: [SUPERADMIN, OWNER, ADMIN, MANAGER, CASHIER, WAITER, KITCHEN, HOST, VIEWER] }
+ *                       displayName: { type: string }
+ *                       description: { type: string, nullable: true }
+ *                       icon: { type: string, nullable: true }
+ *                       color: { type: string, nullable: true }
+ *                       isActive: { type: boolean }
+ *                       sortOrder: { type: integer }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/role-config',
+  authenticateTokenMiddleware,
+  checkPermission('role-config:read'),
+  validateRequest(RoleConfigParamsSchema),
+  venueRoleConfigController.getRoleConfigs,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/role-config:
+ *   put:
+ *     tags: [Venue Settings]
+ *     summary: Update role configs for a venue (bulk upsert)
+ *     description: |
+ *       Creates new role configs or updates existing ones.
+ *       SUPERADMIN role cannot be renamed (will be skipped).
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [configs]
+ *             properties:
+ *               configs:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [role, displayName]
+ *                   properties:
+ *                     role: { type: string, enum: [OWNER, ADMIN, MANAGER, CASHIER, WAITER, KITCHEN, HOST, VIEWER] }
+ *                     displayName: { type: string, minLength: 1, maxLength: 50 }
+ *                     description: { type: string, maxLength: 200 }
+ *                     icon: { type: string, maxLength: 50 }
+ *                     color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+ *                     isActive: { type: boolean }
+ *                     sortOrder: { type: integer, minimum: 0, maximum: 100 }
+ *     responses:
+ *       200:
+ *         description: Role configs updated successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/role-config',
+  authenticateTokenMiddleware,
+  checkPermission('role-config:update'),
+  validateRequest(
+    z.object({
+      params: RoleConfigParamsSchema.shape.params,
+      body: UpdateRoleConfigsSchema.shape.body,
+    }),
+  ),
+  venueRoleConfigController.updateRoleConfigs,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/role-config:
+ *   delete:
+ *     tags: [Venue Settings]
+ *     summary: Reset all role configs to defaults for a venue
+ *     description: |
+ *       Deletes all custom role configs for the venue.
+ *       All roles will return to their default display names.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Role configs reset to defaults
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/role-config',
+  authenticateTokenMiddleware,
+  checkPermission('role-config:update'),
+  validateRequest(RoleConfigParamsSchema),
+  venueRoleConfigController.resetRoleConfigs,
+)
+
+// ============================================================================
+// VENUE SETTINGS ENDPOINTS
+// Configure venue operational settings (TPV screens, inventory, payments, etc.)
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settings:
+ *   get:
+ *     tags: [Venue Settings]
+ *     summary: Get all venue settings
+ *     description: Returns all venue settings including operations, inventory, payment, and TPV configuration.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Venue settings
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/settings',
+  authenticateTokenMiddleware,
+  checkPermission('venue:read'),
+  venueSettingsController.getVenueSettings,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settings:
+ *   put:
+ *     tags: [Venue Settings]
+ *     summary: Update venue settings
+ *     description: Updates venue settings. Only provided fields are updated.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tpvShowReviewScreen: { type: boolean, description: Show review screen after payment }
+ *               tpvShowTipScreen: { type: boolean, description: Show tip selection screen }
+ *               tpvShowReceiptScreen: { type: boolean, description: Show receipt options screen }
+ *               tpvDefaultTipPercentage: { type: integer, nullable: true, description: Pre-select tip percentage }
+ *     responses:
+ *       200:
+ *         description: Updated venue settings
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/settings',
+  authenticateTokenMiddleware,
+  checkPermission('venue:update'),
+  validateRequest(UpdateVenueSettingsSchema),
+  venueSettingsController.updateVenueSettings,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settings/tpv:
+ *   get:
+ *     tags: [Venue Settings]
+ *     summary: Get TPV-specific settings
+ *     description: Returns only TPV-related settings for the Android terminal app.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: TPV settings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 showReviewScreen: { type: boolean }
+ *                 showTipScreen: { type: boolean }
+ *                 showReceiptScreen: { type: boolean }
+ *                 defaultTipPercentage: { type: integer, nullable: true }
+ *                 tipSuggestions: { type: array, items: { type: integer } }
+ *                 requirePinLogin: { type: boolean }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/settings/tpv',
+  authenticateTokenMiddleware,
+  checkPermission('venue:read'),
+  venueSettingsController.getTpvSettings,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settings/tpv:
+ *   put:
+ *     tags: [Venue Settings]
+ *     summary: Update TPV-specific settings
+ *     description: Updates only TPV-related settings (review screen, tip screen, etc.)
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               showReviewScreen: { type: boolean, description: Show review screen after payment }
+ *               showTipScreen: { type: boolean, description: Show tip selection screen }
+ *               showReceiptScreen: { type: boolean, description: Show receipt options screen }
+ *               defaultTipPercentage: { type: integer, nullable: true, description: Pre-select tip percentage (0-100) }
+ *     responses:
+ *       200:
+ *         description: Updated TPV settings
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.put(
+  '/venues/:venueId/settings/tpv',
+  authenticateTokenMiddleware,
+  checkPermission('venue:update'),
+  validateRequest(UpdateTpvSettingsSchema),
+  venueSettingsController.updateTpvSettings,
 )
 
 export default router

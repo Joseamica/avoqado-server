@@ -158,6 +158,8 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   ],
   'tpv:command': ['tpv:read', 'tpv:command', 'orders:read'],
   'tpv:delete': ['tpv:read', 'tpv:delete'],
+  'tpv-settings:read': ['tpv:read', 'tpv-settings:read'],
+  'tpv-settings:update': ['tpv:read', 'tpv-settings:read', 'tpv-settings:update'],
 
   // ===========================
   // REVIEWS
@@ -267,6 +269,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'coupons:update': ['coupons:read', 'coupons:update'],
   'coupons:delete': ['coupons:read', 'coupons:delete'],
   'coupons:redeem': ['coupons:read', 'coupons:redeem', 'orders:read', 'orders:update'],
+
+  // ===========================
+  // ROLE CONFIG (Custom Role Display Names)
+  // ===========================
+  'role-config:read': ['role-config:read'],
+  'role-config:update': ['role-config:read', 'role-config:update'],
 }
 
 /**
@@ -449,6 +457,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'coupons:*', // Phase 2: Full coupon management
     'features:read',
     'features:write',
+    'role-config:read', // Can view custom role display names
   ],
 
   /**
@@ -476,6 +485,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'inventory:*',
     'products:*',
     'settings:manage', // Can manage role permissions
+    'role-config:*', // Can customize role display names
   ],
 
   /**
@@ -503,6 +513,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'inventory:*',
     'products:*',
     'settings:manage', // Can manage role permissions
+    'role-config:*', // Can customize role display names
   ],
 
   /**
@@ -812,6 +823,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete'],
   features: ['features:read', 'features:update'],
   products: ['products:read', 'products:create', 'products:update', 'products:delete'],
+  'role-config': ['role-config:read', 'role-config:update'], // Custom role display names
 }
 
 /**
