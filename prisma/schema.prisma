@@ -205,6 +205,12 @@ model Venue {
   // ✅ NEW: Live Demo Session
   liveDemoSession LiveDemoSession?
 
+  // 🆕 TPV Remote Command System (2025-11-30)
+  tpvCommandQueue       TpvCommandQueue[]
+  bulkCommandOperations BulkCommandOperation[]
+  scheduledCommands     ScheduledCommand[]
+  geofenceRules         GeofenceRule[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2124,12 +2130,31 @@ model Terminal {
 
   reviews Review[] // ✅ LÍNEA AGREGADA
 
+  // 🆕 Remote Command System (2025-11-30)
+  // Device lock state for remote lock/unlock commands
+  isLocked    Boolean   @default(false)
+  lockReason  String? // Why terminal was locked (e.g., "security", "maintenance")
+  lockMessage String? // Message to display on lock screen
+  lockedAt    DateTime?
+  lockedBy    String? // StaffId who locked
+
+  // Location tracking for geofencing
+  lastLatitude   Float?
+  lastLongitude  Float?
+  lastLocationAt DateTime?
+
+  // Command system relations
+  commandQueue      TpvCommandQueue[]
+  scheduledCommands ScheduledCommand[]
+  geofenceRules     GeofenceRule[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([venueId])
   @@index([status])
   @@index([activationCode]) // Fast lookup for activation code validation
+  @@index([isLocked]) // Fast lookup for locked terminals
 }
 
 // ==========================================
@@ -4180,6 +4205,351 @@ enum TokenPurchaseStatus {
   COMPLETED // Payment successful, tokens added
   FAILED // Payment failed
   REFUNDED // Payment refunded
+}
+
+// ==========================================
+// TPV REMOTE COMMAND SYSTEM
+// Enterprise-grade device management for terminals
+// Inspired by Stripe Terminal Fleet Management & MDM patterns
+// ==========================================
+
+enum TpvCommandType {
+  // Device State Commands
+  LOCK // Lock terminal, show custom message
+  UNLOCK // Unlock terminal
+  MAINTENANCE_MODE // Enter maintenance mode
+  EXIT_MAINTENANCE // Exit maintenance mode
+  REACTIVATE // Reactivate retired terminal
+
+  // App Lifecycle Commands
+  RESTART // Graceful app restart
+  SHUTDOWN // Complete shutdown
+  CLEAR_CACHE // Clear specified caches
+  FORCE_UPDATE // Force app update
+
+  // Data Management Commands
+  SYNC_DATA // Force data synchronization
+  FACTORY_RESET // Complete data wipe (CRITICAL)
+  EXPORT_LOGS // Export device logs
+
+  // Configuration Commands
+  UPDATE_CONFIG // Push new configuration
+  REFRESH_MENU // Force menu refresh
+  UPDATE_MERCHANT // Change active merchant
+
+  // Automation Commands
+  SCHEDULE // Schedule future command
+  GEOFENCE_TRIGGER // Geo-based automation
+  TIME_RULE // Time-based automation
+}
+
+enum TpvCommandPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+enum TpvCommandStatus {
+  PENDING // Waiting to be sent
+  QUEUED // In queue for offline terminal
+  SENT // Sent, waiting for ACK
+  RECEIVED // Terminal acknowledged receipt
+  EXECUTING // Terminal is executing
+  COMPLETED // Successfully completed
+  FAILED // Failed after retries
+  EXPIRED // Expired before execution
+  CANCELLED // Cancelled by user
+}
+
+enum TpvCommandResultStatus {
+  SUCCESS
+  PARTIAL_SUCCESS
+  FAILED
+  TIMEOUT
+  REJECTED
+}
+
+enum TpvCommandHistoryStatus {
+  SENT
+  ACK_RECEIVED
+  EXECUTION_STARTED
+  COMPLETED
+  FAILED
+  TIMEOUT
+  REJECTED
+  CANCELLED
+}
+
+enum TpvCommandSource {
+  DASHBOARD // Manual from web dashboard
+  API // External API call
+  SCHEDULED // From scheduled command
+  GEOFENCE // Triggered by geofence
+  SYSTEM // System-triggered (auto maintenance, etc.)
+}
+
+enum BulkTargetType {
+  ALL_VENUE // All terminals in venue
+  TERMINAL_GROUP // Custom group of terminals
+  TERMINAL_LIST // Specific list of terminal IDs
+}
+
+enum BulkErrorAction {
+  CONTINUE // Continue with next terminal on error
+  STOP // Stop bulk operation on first error
+  ROLLBACK // Attempt to rollback completed commands
+}
+
+enum BulkOperationStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  PARTIAL_FAILURE
+  FAILED
+  CANCELLED
+}
+
+enum ScheduleType {
+  ONCE // Execute once at specific time
+  DAILY // Execute daily at specific time
+  WEEKLY // Execute weekly on specific day
+  MONTHLY // Execute monthly on specific date
+  CRON // Custom cron expression
+}
+
+// ==========================================
+// TPV Command Queue (Offline Support)
+// Stores pending commands for terminals
+// ==========================================
+
+model TpvCommandQueue {
+  id         String   @id @default(cuid())
+  terminalId String
+  terminal   Terminal @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Command Details
+  commandType TpvCommandType
+  payload     Json?
+  priority    TpvCommandPriority @default(NORMAL)
+
+  // Status Tracking
+  status        TpvCommandStatus @default(PENDING)
+  attempts      Int              @default(0)
+  maxAttempts   Int              @default(3)
+  lastAttemptAt DateTime?
+  nextAttemptAt DateTime? // For retry scheduling
+
+  // Scheduling
+  scheduledFor DateTime? // Execute at specific time
+  expiresAt    DateTime? // Command expires if not executed
+
+  // Execution Result
+  executedAt    DateTime?
+  resultStatus  TpvCommandResultStatus?
+  resultMessage String?
+  resultPayload Json?
+  duration      Int? // Execution duration in milliseconds
+
+  // Audit
+  requestedBy     String // StaffId who initiated
+  requestedByName String? // Staff name at time of request
+  correlationId   String  @unique @default(cuid())
+
+  // Confirmation Requirements
+  requiresPin   Boolean   @default(false)
+  pinVerifiedAt DateTime?
+  pinVerifiedBy String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  history         TpvCommandHistory[]
+  bulkOperation   BulkCommandOperation? @relation(fields: [bulkOperationId], references: [id])
+  bulkOperationId String?
+
+  @@index([terminalId, status])
+  @@index([venueId, status])
+  @@index([status, scheduledFor])
+  @@index([correlationId])
+  @@index([bulkOperationId])
+}
+
+// ==========================================
+// TPV Command History (Audit Trail)
+// Immutable log of all command executions
+// ==========================================
+
+model TpvCommandHistory {
+  id             String            @id @default(cuid())
+  commandQueueId String?
+  commandQueue   TpvCommandQueue?  @relation(fields: [commandQueueId], references: [id], onDelete: SetNull)
+
+  // Terminal Info (denormalized for historical accuracy)
+  terminalId     String
+  terminalSerial String
+  terminalName   String
+  venueId        String
+  venueName      String
+
+  // Command Details
+  commandType TpvCommandType
+  payload     Json?
+
+  // Execution Details
+  status        TpvCommandHistoryStatus
+  executedAt    DateTime?
+  duration      Int? // Milliseconds
+  resultMessage String?
+  resultPayload Json?
+  errorCode     String?
+
+  // Source Info
+  source    TpvCommandSource @default(DASHBOARD)
+  ipAddress String?
+  userAgent String?
+
+  // Audit
+  requestedBy     String
+  requestedByName String
+  requestedByRole String
+  correlationId   String
+
+  createdAt DateTime @default(now())
+
+  @@index([terminalId, createdAt])
+  @@index([venueId, createdAt])
+  @@index([commandType, createdAt])
+  @@index([requestedBy])
+  @@index([correlationId])
+}
+
+// ==========================================
+// Bulk Command Operations
+// Manage commands sent to multiple terminals
+// ==========================================
+
+model BulkCommandOperation {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Target
+  targetType   BulkTargetType
+  targetIds    String[] // Terminal IDs or group IDs
+  totalTargets Int
+
+  // Command
+  commandType TpvCommandType
+  payload     Json?
+
+  // Execution Settings
+  sequential    Boolean         @default(false)
+  onErrorAction BulkErrorAction @default(CONTINUE)
+
+  // Progress
+  status       BulkOperationStatus @default(PENDING)
+  successCount Int                 @default(0)
+  failureCount Int                 @default(0)
+  pendingCount Int                 @default(0)
+
+  // Audit
+  requestedBy     String
+  requestedByName String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  commands TpvCommandQueue[]
+
+  @@index([venueId, status])
+  @@index([status, createdAt])
+}
+
+// ==========================================
+// Scheduled Commands (Recurring)
+// Time-based command automation
+// ==========================================
+
+model ScheduledCommand {
+  id         String    @id @default(cuid())
+  venueId    String
+  venue      Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  terminalId String? // Null = all terminals in venue
+  terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+
+  // Command
+  name        String // User-friendly name
+  description String?
+  commandType TpvCommandType
+  payload     Json?
+
+  // Schedule
+  scheduleType   ScheduleType
+  cronExpression String? // For CRON type
+  timezone       String   @default("America/Mexico_City")
+  nextExecution  DateTime
+  lastExecution  DateTime?
+
+  // Lifecycle
+  enabled        Boolean   @default(true)
+  expiresAt      DateTime? // Optional end date
+  executionCount Int       @default(0)
+  maxExecutions  Int? // Optional limit
+
+  // Audit
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, enabled, nextExecution])
+  @@index([nextExecution])
+}
+
+// ==========================================
+// Geofencing Rules
+// Location-based command triggers
+// ==========================================
+
+model GeofenceRule {
+  id         String    @id @default(cuid())
+  venueId    String
+  venue      Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  terminalId String? // Null = all terminals
+  terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+
+  // Rule Info
+  name        String
+  description String?
+
+  // Geofence Definition
+  centerLat    Float
+  centerLng    Float
+  radiusMeters Int
+
+  // Trigger Actions
+  onEnter        TpvCommandType?
+  onEnterPayload Json?
+  onExit         TpvCommandType?
+  onExitPayload  Json?
+
+  // State
+  enabled       Boolean   @default(true)
+  lastTriggered DateTime?
+  triggerCount  Int       @default(0)
+
+  // Audit
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, enabled])
 }
 
 enum TimeEntryStatus {

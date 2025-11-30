@@ -44,6 +44,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
@@ -168,6 +169,21 @@ import {
   updatePaymentMethodSchema,
   createBillingPortalSessionSchema,
 } from '../schemas/dashboard/venue.schema'
+import {
+  sendCommandBodySchema,
+  bulkCommandBodySchema,
+  commandsQuerySchema,
+  commandHistoryQuerySchema,
+  bulkOperationsQuerySchema,
+  createScheduledCommandBodySchema,
+  updateScheduledCommandBodySchema,
+  scheduledCommandsQuerySchema,
+  createGeofenceRuleBodySchema,
+  updateGeofenceRuleBodySchema,
+  geofenceRulesQuerySchema,
+  terminalAckBodySchema,
+  terminalResultBodySchema,
+} from '../schemas/dashboard/tpv-command.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -3682,6 +3698,931 @@ router.post(
   checkPermission('tpv:command'),
   tpvController.sendTpvCommand,
 )
+
+// =====================================================
+// TPV COMMAND QUEUE ROUTES (Enterprise Remote Command System)
+// =====================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands:
+ *   post:
+ *     tags: [TPV Remote Commands]
+ *     summary: Send a remote command to a TPV terminal
+ *     description: |
+ *       Queue a command for delivery to a TPV terminal.
+ *       Commands are queued if terminal is offline and delivered when it reconnects.
+ *       High-risk commands (REMOTE_WIPE, FACTORY_RESET, LOCK) require PIN confirmation.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - terminalId
+ *               - commandType
+ *             properties:
+ *               terminalId:
+ *                 type: string
+ *                 description: Target terminal ID
+ *               commandType:
+ *                 type: string
+ *                 enum: [RESTART, SHUTDOWN, LOCK, UNLOCK, REMOTE_WIPE, FACTORY_RESET, SYNC_MENU, UPDATE_CONFIG, CLEAR_CACHE, REFRESH_AUTH, PRINT_TEST, SCREENSHOT, LOG_UPLOAD, FORCE_UPDATE, ENTER_MAINTENANCE, EXIT_MAINTENANCE, SET_BRIGHTNESS, MUTE_AUDIO]
+ *               priority:
+ *                 type: string
+ *                 enum: [LOW, NORMAL, HIGH, CRITICAL]
+ *                 default: NORMAL
+ *               payload:
+ *                 type: object
+ *                 description: Command-specific payload
+ *               confirmationPin:
+ *                 type: string
+ *                 description: 4-digit PIN for high-risk commands
+ *               scheduledFor:
+ *                 type: string
+ *                 format: date-time
+ *                 description: Schedule command for future execution
+ *     responses:
+ *       201:
+ *         description: Command queued successfully
+ *       400:
+ *         description: Invalid command data or PIN required
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Insufficient permissions
+ */
+router.post(
+  '/venues/:venueId/tpv-commands',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:write'),
+  validateRequest({ body: sendCommandBodySchema }),
+  tpvCommandController.sendCommand,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands:
+ *   get:
+ *     tags: [TPV Remote Commands]
+ *     summary: List commands for venue terminals
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: terminalId
+ *         in: query
+ *         schema:
+ *           type: string
+ *         description: Filter by terminal ID
+ *       - name: status
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [PENDING, QUEUED, SENT, RECEIVED, EXECUTING, COMPLETED, FAILED, CANCELLED, EXPIRED]
+ *       - name: commandType
+ *         in: query
+ *         schema:
+ *           type: string
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *     responses:
+ *       200:
+ *         description: Commands retrieved successfully
+ */
+router.get(
+  '/venues/:venueId/tpv-commands',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  validateRequest({ query: commandsQuerySchema }),
+  tpvCommandController.getCommands,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/bulk:
+ *   post:
+ *     tags: [TPV Remote Commands]
+ *     summary: Send bulk command to multiple terminals
+ *     description: Execute the same command across multiple terminals simultaneously
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - terminalIds
+ *               - commandType
+ *             properties:
+ *               terminalIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 maxItems: 50
+ *               commandType:
+ *                 type: string
+ *               payload:
+ *                 type: object
+ *               confirmationPin:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Bulk operation created successfully
+ *       400:
+ *         description: Invalid request (FACTORY_RESET not allowed in bulk)
+ */
+router.post(
+  '/venues/:venueId/tpv-commands/bulk',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:bulk'),
+  validateRequest({ body: bulkCommandBodySchema }),
+  tpvCommandController.sendBulkCommand,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/bulk-operations:
+ *   get:
+ *     tags: [TPV Remote Commands]
+ *     summary: List bulk command operations
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: status
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [PENDING, IN_PROGRESS, COMPLETED, PARTIALLY_COMPLETED, FAILED, CANCELLED]
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Bulk operations retrieved successfully
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/bulk-operations',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  validateRequest({ query: bulkOperationsQuerySchema }),
+  tpvCommandController.getBulkOperations,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/bulk-operations/{operationId}:
+ *   get:
+ *     tags: [TPV Remote Commands]
+ *     summary: Get bulk operation details
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: operationId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Bulk operation details
+ *       404:
+ *         description: Operation not found
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/bulk-operations/:operationId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  tpvCommandController.getBulkOperationStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/history:
+ *   get:
+ *     tags: [TPV Remote Commands]
+ *     summary: Get command execution history
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: terminalId
+ *         in: query
+ *         schema:
+ *           type: string
+ *       - name: fromDate
+ *         in: query
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - name: toDate
+ *         in: query
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Command history retrieved successfully
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/history',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  validateRequest({ query: commandHistoryQuerySchema }),
+  tpvCommandController.getCommandHistory,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/{commandId}:
+ *   get:
+ *     tags: [TPV Remote Commands]
+ *     summary: Get command status and details
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: commandId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Command details retrieved
+ *       404:
+ *         description: Command not found
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/:commandId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  tpvCommandController.getCommandStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/{commandId}/cancel:
+ *   post:
+ *     tags: [TPV Remote Commands]
+ *     summary: Cancel a pending or queued command
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: commandId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Optional cancellation reason
+ *     responses:
+ *       200:
+ *         description: Command cancelled successfully
+ *       400:
+ *         description: Command cannot be cancelled (already completed/executing)
+ */
+router.post(
+  '/venues/:venueId/tpv-commands/:commandId/cancel',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:write'),
+  tpvCommandController.cancelCommand,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/{commandId}/retry:
+ *   post:
+ *     tags: [TPV Remote Commands]
+ *     summary: Retry a failed or expired command
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: commandId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       201:
+ *         description: Command retried successfully
+ *       400:
+ *         description: Command cannot be retried
+ */
+router.post(
+  '/venues/:venueId/tpv-commands/:commandId/retry',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:write'),
+  tpvCommandController.retryCommand,
+)
+
+// =====================================================
+// SCHEDULED COMMANDS ROUTES
+// =====================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/scheduled:
+ *   post:
+ *     tags: [TPV Remote Commands - Scheduling]
+ *     summary: Create a scheduled command
+ *     description: Schedule a recurring or one-time command (e.g., restart every night at 3am)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - terminalIds
+ *               - commandType
+ *               - cronExpression
+ *             properties:
+ *               name:
+ *                 type: string
+ *               terminalIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               commandType:
+ *                 type: string
+ *               cronExpression:
+ *                 type: string
+ *                 description: Cron expression (e.g., "0 3 * * *" for 3am daily)
+ *               timezone:
+ *                 type: string
+ *                 default: UTC
+ *               payload:
+ *                 type: object
+ *               enabled:
+ *                 type: boolean
+ *                 default: true
+ *     responses:
+ *       201:
+ *         description: Scheduled command created
+ */
+router.post(
+  '/venues/:venueId/tpv-commands/scheduled',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:schedule'),
+  validateRequest({ body: createScheduledCommandBodySchema }),
+  tpvCommandController.createScheduledCommand,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/scheduled:
+ *   get:
+ *     tags: [TPV Remote Commands - Scheduling]
+ *     summary: List scheduled commands
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: enabled
+ *         in: query
+ *         schema:
+ *           type: boolean
+ *       - name: terminalId
+ *         in: query
+ *         schema:
+ *           type: string
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Scheduled commands retrieved
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/scheduled',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  validateRequest({ query: scheduledCommandsQuerySchema }),
+  tpvCommandController.getScheduledCommands,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/scheduled/{scheduleId}:
+ *   get:
+ *     tags: [TPV Remote Commands - Scheduling]
+ *     summary: Get scheduled command details
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: scheduleId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Scheduled command details
+ *       404:
+ *         description: Schedule not found
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/scheduled/:scheduleId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  tpvCommandController.getScheduledCommand,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/scheduled/{scheduleId}:
+ *   put:
+ *     tags: [TPV Remote Commands - Scheduling]
+ *     summary: Update a scheduled command
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: scheduleId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               cronExpression:
+ *                 type: string
+ *               enabled:
+ *                 type: boolean
+ *               payload:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Scheduled command updated
+ *       404:
+ *         description: Schedule not found
+ */
+router.put(
+  '/venues/:venueId/tpv-commands/scheduled/:scheduleId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:schedule'),
+  validateRequest({ body: updateScheduledCommandBodySchema }),
+  tpvCommandController.updateScheduledCommand,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/scheduled/{scheduleId}:
+ *   delete:
+ *     tags: [TPV Remote Commands - Scheduling]
+ *     summary: Delete a scheduled command
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: scheduleId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Scheduled command deleted
+ *       404:
+ *         description: Schedule not found
+ */
+router.delete(
+  '/venues/:venueId/tpv-commands/scheduled/:scheduleId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:schedule'),
+  tpvCommandController.deleteScheduledCommand,
+)
+
+// =====================================================
+// GEOFENCE RULES ROUTES
+// =====================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/geofence:
+ *   post:
+ *     tags: [TPV Remote Commands - Geofencing]
+ *     summary: Create a geofence rule
+ *     description: |
+ *       Create location-based command rules (e.g., lock terminal if moved outside venue).
+ *       Requires terminal GPS location reporting.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - terminalIds
+ *               - latitude
+ *               - longitude
+ *               - radiusMeters
+ *               - triggerOn
+ *               - commandType
+ *             properties:
+ *               name:
+ *                 type: string
+ *               terminalIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *               latitude:
+ *                 type: number
+ *                 format: double
+ *               longitude:
+ *                 type: number
+ *                 format: double
+ *               radiusMeters:
+ *                 type: integer
+ *                 minimum: 10
+ *                 maximum: 10000
+ *               triggerOn:
+ *                 type: string
+ *                 enum: [EXIT, ENTER]
+ *               commandType:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Geofence rule created
+ */
+router.post(
+  '/venues/:venueId/tpv-commands/geofence',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:geofence'),
+  validateRequest({ body: createGeofenceRuleBodySchema }),
+  tpvCommandController.createGeofenceRule,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/geofence:
+ *   get:
+ *     tags: [TPV Remote Commands - Geofencing]
+ *     summary: List geofence rules
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: enabled
+ *         in: query
+ *         schema:
+ *           type: boolean
+ *       - name: terminalId
+ *         in: query
+ *         schema:
+ *           type: string
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Geofence rules retrieved
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/geofence',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  validateRequest({ query: geofenceRulesQuerySchema }),
+  tpvCommandController.getGeofenceRules,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/geofence/{ruleId}:
+ *   get:
+ *     tags: [TPV Remote Commands - Geofencing]
+ *     summary: Get geofence rule details
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: ruleId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Geofence rule details
+ *       404:
+ *         description: Rule not found
+ */
+router.get(
+  '/venues/:venueId/tpv-commands/geofence/:ruleId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:read'),
+  tpvCommandController.getGeofenceRule,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/geofence/{ruleId}:
+ *   put:
+ *     tags: [TPV Remote Commands - Geofencing]
+ *     summary: Update a geofence rule
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: ruleId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               radiusMeters:
+ *                 type: integer
+ *               enabled:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Geofence rule updated
+ *       404:
+ *         description: Rule not found
+ */
+router.put(
+  '/venues/:venueId/tpv-commands/geofence/:ruleId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:geofence'),
+  validateRequest({ body: updateGeofenceRuleBodySchema }),
+  tpvCommandController.updateGeofenceRule,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv-commands/geofence/{ruleId}:
+ *   delete:
+ *     tags: [TPV Remote Commands - Geofencing]
+ *     summary: Delete a geofence rule
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: ruleId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Geofence rule deleted
+ *       404:
+ *         description: Rule not found
+ */
+router.delete(
+  '/venues/:venueId/tpv-commands/geofence/:ruleId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-commands:geofence'),
+  tpvCommandController.deleteGeofenceRule,
+)
+
+// =====================================================
+// TERMINAL ACK/RESULT HANDLERS (Internal use from Socket.IO)
+// =====================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tpv-commands/{commandId}/ack:
+ *   post:
+ *     tags: [TPV Remote Commands - Terminal Handlers]
+ *     summary: Handle command acknowledgment from terminal
+ *     description: Internal endpoint called when terminal receives and acknowledges a command
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: commandId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - terminalId
+ *             properties:
+ *               terminalId:
+ *                 type: string
+ *               receivedAt:
+ *                 type: string
+ *                 format: date-time
+ *     responses:
+ *       200:
+ *         description: ACK processed
+ */
+router.post(
+  '/tpv-commands/:commandId/ack',
+  authenticateTokenMiddleware,
+  validateRequest({ body: terminalAckBodySchema }),
+  tpvCommandController.handleCommandAck,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tpv-commands/{commandId}/result:
+ *   post:
+ *     tags: [TPV Remote Commands - Terminal Handlers]
+ *     summary: Handle command execution result from terminal
+ *     description: Internal endpoint called when terminal finishes executing a command
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: commandId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - terminalId
+ *               - resultStatus
+ *             properties:
+ *               terminalId:
+ *                 type: string
+ *               resultStatus:
+ *                 type: string
+ *                 enum: [SUCCESS, FAILED, PARTIAL, TIMEOUT, REJECTED, REQUIRES_PIN]
+ *               message:
+ *                 type: string
+ *               resultData:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Result processed
+ */
+router.post(
+  '/tpv-commands/:commandId/result',
+  authenticateTokenMiddleware,
+  validateRequest({ body: terminalResultBodySchema }),
+  tpvCommandController.handleCommandResult,
+)
+
+// =====================================================
+// END TPV COMMAND QUEUE ROUTES
+// =====================================================
 
 /**
  * @openapi

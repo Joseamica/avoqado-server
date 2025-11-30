@@ -358,6 +358,151 @@ export function broadcastTpvStatusUpdate(
 }
 
 /**
+ * Broadcast TPV command status changed
+ * Notifies dashboard when a command's status changes (ACK, completed, failed, etc.)
+ */
+export function broadcastTpvCommandStatusChanged(
+  terminalId: string,
+  venueId: string,
+  statusData: {
+    terminalId: string
+    terminalName: string
+    commandId: string
+    correlationId: string
+    commandType: string
+    previousStatus: string
+    newStatus: string
+    statusChangedAt: Date
+    message?: string
+    requestedByName?: string
+  },
+  options?: BroadcastOptions,
+): void {
+  try {
+    if (socketManager.getServer()) {
+      socketManager.broadcastToVenue(
+        venueId,
+        'tpv_command_status_changed' as any,
+        {
+          ...statusData,
+          correlationId: statusData.correlationId || require('uuid').v4(),
+          timestamp: new Date(),
+        },
+        options,
+      )
+    } else {
+      logger.warn('Socket server not initialized for TPV command status change', {
+        terminalId,
+        venueId,
+        commandId: statusData.commandId,
+        newStatus: statusData.newStatus,
+      })
+    }
+  } catch (error) {
+    logger.error('Error broadcasting TPV command status change', {
+      terminalId,
+      venueId,
+      commandId: statusData.commandId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
+ * Broadcast TPV command queued notification
+ * Notifies dashboard when a command is queued for offline terminal
+ */
+export function broadcastTpvCommandQueued(
+  terminalId: string,
+  venueId: string,
+  queueData: {
+    terminalId: string
+    terminalName: string
+    commandId: string
+    correlationId: string
+    commandType: string
+    queuedAt: Date
+    expiresAt: Date
+    reason: string
+  },
+  options?: BroadcastOptions,
+): void {
+  try {
+    if (socketManager.getServer()) {
+      socketManager.broadcastToVenue(
+        venueId,
+        'tpv_command_queued' as any,
+        {
+          ...queueData,
+          correlationId: queueData.correlationId || require('uuid').v4(),
+          timestamp: new Date(),
+        },
+        options,
+      )
+    } else {
+      logger.warn('Socket server not initialized for TPV command queued', {
+        terminalId,
+        venueId,
+        commandId: queueData.commandId,
+      })
+    }
+  } catch (error) {
+    logger.error('Error broadcasting TPV command queued', {
+      terminalId,
+      venueId,
+      commandId: queueData.commandId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
+ * Broadcast TPV bulk operation progress
+ * Notifies dashboard about progress of bulk command operations (e.g., restart all terminals)
+ */
+export function broadcastTpvBulkOperationProgress(
+  venueId: string,
+  progressData: {
+    operationId: string
+    commandType: string
+    totalTerminals: number
+    completedTerminals: number
+    failedTerminals: number
+    pendingTerminals: number
+    status: string
+    completedAt?: Date
+  },
+  options?: BroadcastOptions,
+): void {
+  try {
+    if (socketManager.getServer()) {
+      socketManager.broadcastToVenue(
+        venueId,
+        'tpv_bulk_operation_progress' as any,
+        {
+          ...progressData,
+          correlationId: require('uuid').v4(),
+          timestamp: new Date(),
+        },
+        options,
+      )
+    } else {
+      logger.warn('Socket server not initialized for TPV bulk operation progress', {
+        venueId,
+        operationId: progressData.operationId,
+        status: progressData.status,
+      })
+    }
+  } catch (error) {
+    logger.error('Error broadcasting TPV bulk operation progress', {
+      venueId,
+      operationId: progressData.operationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Get connection statistics
  * Useful for monitoring and analytics
  */

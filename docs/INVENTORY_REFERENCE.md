@@ -58,18 +58,20 @@ Menu items customers can order. Three tracking modes:
 
 ## 🏗️ Dual-Inventory Architecture (Toast/Square Pattern)
 
-**WHY**: Different business models need different inventory tracking. Retail businesses need simple counting, restaurants need ingredient-level FIFO costing. This is why world-class systems like Toast and Square use separate tracking systems.
+**WHY**: Different business models need different inventory tracking. Retail businesses need simple counting, restaurants need
+ingredient-level FIFO costing. This is why world-class systems like Toast and Square use separate tracking systems.
 
 ### Two Inventory Systems
 
-| System | Tables | Use Case | Complexity |
-|--------|--------|----------|------------|
-| **QUANTITY** | `Inventory` → `InventoryMovement` | Retail (jewelry, wine, clothing) | Simple counting |
-| **RECIPE** | `RawMaterial` → `StockBatch` → `RawMaterialMovement` | Restaurants | FIFO batch tracking |
+| System       | Tables                                               | Use Case                         | Complexity          |
+| ------------ | ---------------------------------------------------- | -------------------------------- | ------------------- |
+| **QUANTITY** | `Inventory` → `InventoryMovement`                    | Retail (jewelry, wine, clothing) | Simple counting     |
+| **RECIPE**   | `RawMaterial` → `StockBatch` → `RawMaterialMovement` | Restaurants                      | FIFO batch tracking |
 
 ### QUANTITY Method (Simple Counting)
 
 **Data Flow:**
+
 ```
 Product Wizard → Creates Inventory record
 Status Check → Reads Inventory.currentStock
@@ -78,11 +80,13 @@ Audit Trail → Creates InventoryMovement (type: SALE)
 ```
 
 **Key Files:**
+
 - Creation: `src/services/dashboard/productWizard.service.ts:setupSimpleStockStep3()`
 - Deduction: `src/services/dashboard/productInventoryIntegration.service.ts:deductSimpleStock()`
 - Status: `src/services/dashboard/productInventoryIntegration.service.ts:getProductInventoryStatus()`
 
 **Database Tables:**
+
 ```sql
 -- Inventory record (one per QUANTITY product)
 SELECT * FROM "Inventory" WHERE "productId" = 'your-product-id';
@@ -95,6 +99,7 @@ ORDER BY "createdAt" DESC;
 ### RECIPE Method (FIFO Batch Tracking)
 
 **Data Flow:**
+
 ```
 Recipe Wizard → Creates Recipe + RecipeLine linking to RawMaterial
 Status Check → Calculates max portions from RawMaterial stock
@@ -103,6 +108,7 @@ Audit Trail → Creates RawMaterialMovement (one per batch)
 ```
 
 **Key Files:**
+
 - Creation: `src/services/dashboard/recipe.service.ts:createRecipe()`
 - Deduction: `src/services/dashboard/fifoBatch.service.ts:deductStockFIFO()`
 - Status: `src/services/dashboard/productInventoryIntegration.service.ts:getProductInventoryStatus()`
@@ -122,6 +128,7 @@ await switchInventoryMethod(venueId, productId, newMethod)
 **Bug**: QUANTITY products checked stock from `Inventory` table but deducted from `RawMaterial` table, causing out-of-sync data.
 
 **Fix**: `deductSimpleStock()` now uses `Inventory` table exclusively:
+
 - Queries `Inventory.findUnique({ where: { productId } })`
 - Updates `Inventory.currentStock`
 - Creates `InventoryMovement` with `type: SALE`

@@ -92,6 +92,22 @@ export enum SocketEventType {
   TPV_COMMAND_RESPONSE = 'tpv_command_response',
   TPV_STATUS_UPDATE = 'tpv_status_update',
 
+  // Business Events - TPV Remote Command ACK System (Enterprise Feature)
+  // Server → Terminal
+  TPV_COMMAND_SEND = 'tpv_command_send', // Command sent to terminal
+  TPV_COMMAND_CANCELLED = 'tpv_command_cancelled', // Command cancelled by admin
+
+  // Terminal → Server
+  TPV_COMMAND_ACK = 'tpv_command_ack', // Terminal received the command
+  TPV_COMMAND_STARTED = 'tpv_command_started', // Terminal started executing
+  TPV_COMMAND_PROGRESS = 'tpv_command_progress', // Progress update (0-100%)
+  TPV_COMMAND_RESULT = 'tpv_command_result', // Final execution result
+
+  // Server → Dashboard (Real-time status updates)
+  TPV_COMMAND_STATUS_CHANGED = 'tpv_command_status_changed', // Status transition notification
+  TPV_BULK_OPERATION_PROGRESS = 'tpv_bulk_operation_progress', // Bulk operation progress
+  TPV_COMMAND_QUEUED = 'tpv_command_queued', // Command added to offline queue
+
   // Business Events - Inventory Real-time
   INVENTORY_LOW_STOCK = 'inventory_low_stock',
   INVENTORY_OUT_OF_STOCK = 'inventory_out_of_stock',
@@ -209,6 +225,129 @@ export interface TPVStatusUpdatePayload extends BaseEventPayload {
   ipAddress?: string
   systemInfo?: Record<string, any>
   metadata?: Record<string, any>
+}
+
+/**
+ * TPV Remote Command ACK System Payloads (Enterprise Feature)
+ * Full bidirectional communication for remote terminal management
+ */
+
+// Server → Terminal: Command to execute
+export interface TPVCommandSendPayload extends BaseEventPayload {
+  terminalId: string
+  commandId: string // TpvCommandQueue.id for tracking
+  commandType:
+    | 'LOCK'
+    | 'UNLOCK'
+    | 'MAINTENANCE_MODE'
+    | 'EXIT_MAINTENANCE'
+    | 'REACTIVATE'
+    | 'RESTART'
+    | 'SHUTDOWN'
+    | 'CLEAR_CACHE'
+    | 'FORCE_UPDATE'
+    | 'SYNC_DATA'
+    | 'FACTORY_RESET'
+    | 'EXPORT_LOGS'
+    | 'UPDATE_CONFIG'
+    | 'REFRESH_MENU'
+    | 'UPDATE_MERCHANT'
+  payload?: Record<string, any>
+  priority: 'LOW' | 'NORMAL' | 'HIGH' | 'CRITICAL'
+  requiresPin: boolean
+  expiresAt?: Date
+  requestedBy: string
+  requestedByName?: string
+}
+
+// Server → Terminal: Command cancelled
+export interface TPVCommandCancelledPayload extends BaseEventPayload {
+  terminalId: string
+  commandId: string
+  reason: string
+  cancelledBy: string
+}
+
+// Terminal → Server: Receipt acknowledgment
+export interface TPVCommandAckPayload extends BaseEventPayload {
+  terminalId: string
+  commandId: string
+  receivedAt: Date
+  terminalStatus: 'READY' | 'BUSY' | 'LOCKED' | 'MAINTENANCE'
+}
+
+// Terminal → Server: Execution started
+export interface TPVCommandStartedPayload extends BaseEventPayload {
+  terminalId: string
+  commandId: string
+  startedAt: Date
+  estimatedDurationMs?: number
+}
+
+// Terminal → Server: Progress update (0-100%)
+export interface TPVCommandProgressPayload extends BaseEventPayload {
+  terminalId: string
+  commandId: string
+  progress: number // 0-100
+  currentStep?: string
+  totalSteps?: number
+  currentStepNumber?: number
+}
+
+// Terminal → Server: Final execution result
+export interface TPVCommandResultPayload extends BaseEventPayload {
+  terminalId: string
+  commandId: string
+  status: 'SUCCESS' | 'PARTIAL_SUCCESS' | 'FAILED' | 'TIMEOUT' | 'REJECTED'
+  executedAt: Date
+  durationMs: number
+  message?: string
+  errorCode?: string
+  resultData?: Record<string, any> // Command-specific result data
+}
+
+// Server → Dashboard: Status transition notification
+export interface TPVCommandStatusChangedPayload extends BaseEventPayload {
+  terminalId: string
+  terminalName: string
+  commandId: string
+  commandType: string
+  previousStatus: string
+  newStatus: string
+  statusChangedAt: Date
+  message?: string
+  requestedByName?: string
+  metadata?: Record<string, any>
+}
+
+// Server → Dashboard: Bulk operation progress
+export interface TPVBulkOperationProgressPayload extends BaseEventPayload {
+  operationId: string
+  commandType: string
+  status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'PARTIAL_FAILURE' | 'FAILED' | 'CANCELLED'
+  totalTargets: number
+  successCount: number
+  failureCount: number
+  pendingCount: number
+  currentTerminalId?: string
+  currentTerminalName?: string
+  failedTerminals?: Array<{
+    terminalId: string
+    terminalName: string
+    error: string
+  }>
+}
+
+// Server → Dashboard: Command queued (terminal offline)
+export interface TPVCommandQueuedPayload extends BaseEventPayload {
+  terminalId: string
+  terminalName: string
+  commandId: string
+  commandType: string
+  queuedAt: Date
+  expiresAt?: Date
+  queuePosition?: number
+  reason: 'TERMINAL_OFFLINE' | 'TERMINAL_BUSY' | 'SCHEDULED'
 }
 
 /**

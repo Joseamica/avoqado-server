@@ -5,6 +5,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { broadcastTpvStatusUpdate } from '../../communication/sockets'
+import { tpvCommandExecutionService } from './command-execution.service'
 
 export interface HeartbeatData {
   terminalId: string
@@ -176,6 +177,26 @@ export class TpvHealthService {
         version,
         ipAddress: clientIp,
       })
+
+      // Process any pending commands in the queue for this terminal
+      // This handles the "offline queue" pattern where commands are queued when terminal is offline
+      // and delivered when it comes back online (like MDM push notifications)
+      try {
+        const sentCount = await tpvCommandExecutionService.processOfflineQueue(terminal.id)
+        if (sentCount > 0) {
+          logger.info(`Processed ${sentCount} queued commands for terminal ${terminal.id}`, {
+            terminalId: terminal.id,
+            serialNumber: terminal.serialNumber,
+            venueId: terminal.venueId,
+          })
+        }
+      } catch (commandError) {
+        // Don't fail the heartbeat if command processing fails - log and continue
+        logger.error(`Failed to process offline command queue for terminal ${terminal.id}:`, {
+          error: commandError instanceof Error ? commandError.message : 'Unknown error',
+          terminalId: terminal.id,
+        })
+      }
     } catch (error) {
       logger.error(`Failed to process heartbeat for terminal ${terminalId}:`, error)
       throw error

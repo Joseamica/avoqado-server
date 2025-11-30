@@ -162,6 +162,20 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'tpv-settings:update': ['tpv:read', 'tpv-settings:read', 'tpv-settings:update'],
 
   // ===========================
+  // TPV Remote Commands (Enterprise Feature)
+  // ===========================
+  // Granular command permissions for remote terminal management
+  'tpv:command:lock': ['tpv:read', 'tpv:command', 'tpv:command:lock'], // Lock/unlock terminal (MANAGER+)
+  'tpv:command:maintenance': ['tpv:read', 'tpv:command', 'tpv:command:maintenance'], // Maintenance mode (MANAGER+)
+  'tpv:command:restart': ['tpv:read', 'tpv:command', 'tpv:command:restart'], // Restart app (MANAGER+)
+  'tpv:command:shutdown': ['tpv:read', 'tpv:command', 'tpv:command:shutdown'], // Shutdown terminal (ADMIN+)
+  'tpv:command:config': ['tpv:read', 'tpv:command', 'tpv:command:config'], // Update config (MANAGER+)
+  'tpv:command:wipe': ['tpv:read', 'tpv:command', 'tpv:command:wipe'], // Factory reset (OWNER+ - Critical!)
+  'tpv:command:bulk': ['tpv:read', 'tpv:command', 'tpv:command:bulk'], // Bulk operations (ADMIN+)
+  'tpv:command:schedule': ['tpv:read', 'tpv:command', 'tpv:command:schedule'], // Scheduled commands (ADMIN+)
+  'tpv:command:geofence': ['tpv:read', 'tpv:command', 'tpv:command:geofence'], // Geofencing (ADMIN+)
+
+  // ===========================
   // REVIEWS
   // ===========================
   'reviews:read': [
@@ -438,6 +452,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv:update',
     'tpv:delete',
     'tpv:command',
+    'tpv:command:lock', // Lock/unlock terminals
+    'tpv:command:maintenance', // Enter/exit maintenance mode
+    'tpv:command:restart', // Restart terminal app
+    'tpv:command:config', // Update terminal config
     'inventory:read',
     'inventory:create',
     'inventory:update',
@@ -808,7 +826,22 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel'],
   payments: ['payments:read', 'payments:create', 'payments:refund'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
-  tpv: ['tpv:read', 'tpv:create', 'tpv:update', 'tpv:delete', 'tpv:command'],
+  tpv: [
+    'tpv:read',
+    'tpv:create',
+    'tpv:update',
+    'tpv:delete',
+    'tpv:command',
+    'tpv:command:lock',
+    'tpv:command:maintenance',
+    'tpv:command:restart',
+    'tpv:command:shutdown',
+    'tpv:command:config',
+    'tpv:command:wipe',
+    'tpv:command:bulk',
+    'tpv:command:schedule',
+    'tpv:command:geofence',
+  ],
   inventory: ['inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete', 'inventory:adjust'],
   reviews: ['reviews:read', 'reviews:respond'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
