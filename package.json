@@ -6,8 +6,9 @@
   "scripts": {
     "build": "npx prisma generate && tsc && tsc-alias",
     "start": "node -r tsconfig-paths/register dist/src/server.js",
-    "dev": "nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts | pino-pretty",
-    "dev:simple-logging": "SIMPLE_LOGGING=true nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts",
+    "dev": "nodemon --watch src --ext ts,json --exec tsx src/server.ts | pino-pretty",
+    "dev:simple-logging": "SIMPLE_LOGGING=true nodemon --watch src --ext ts,json --exec tsx src/server.ts",
+    "dev:slow": "nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts | pino-pretty",
     "kill-port": "bash scripts/kill-port.sh",
     "predeploy:backend": "npx prisma generate && npx prisma migrate deploy ",
     "migrate": "prisma migrate dev",
@@ -159,6 +160,7 @@
     "ts-jest": "^29.3.4",
     "ts-node": "^10.9.2",
     "tsc-alias": "^1.8.16",
+    "tsx": "^4.20.6",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.41.0",
     "unimported": "^1.31.0"
