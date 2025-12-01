@@ -1,11 +1,12 @@
 // services/tpv/tpv-health.service.ts
 
-import { TerminalStatus } from '@prisma/client'
+import { TerminalStatus, TpvCommandType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { broadcastTpvStatusUpdate, broadcastTpvCommandStatusChanged } from '../../communication/sockets'
 import { tpvCommandExecutionService } from './command-execution.service'
+import { tpvCommandQueueService } from './command-queue.service'
 
 export interface HeartbeatData {
   terminalId: string
@@ -205,6 +206,16 @@ export class TpvHealthService {
 
   /**
    * Send command to a specific TPV terminal
+   *
+   * **Square Terminal API Polling Pattern:**
+   * Commands are queued in TpvCommandQueue and delivered via:
+   * 1. Socket.IO broadcast (immediate, if terminal is connected)
+   * 2. Heartbeat polling (reliable, works even on login screen)
+   *
+   * The polling pattern ensures commands are delivered even when:
+   * - Terminal is on login screen (no socket connection)
+   * - Socket connection dropped temporarily
+   * - Network is unstable
    */
   async sendCommand(terminalId: string, command: TpvCommand): Promise<void> {
     try {
@@ -230,74 +241,51 @@ export class TpvHealthService {
         throw new NotFoundError(`Terminal with ID or serial number ${terminalId} not found`)
       }
 
-      // Check if terminal is online (heartbeat within last 2 minutes)
-      // Exception: EXIT_MAINTENANCE and REACTIVATE can be executed even when terminal is offline
+      // Map command.type string to TpvCommandType enum
+      const commandType = command.type as TpvCommandType
+
+      // ✅ SQUARE/TOAST PATTERN: Always queue command for reliable delivery
+      // Commands are delivered via heartbeat polling (works on login screen)
+      // AND via Socket.IO broadcast (for immediate delivery if connected)
+      const queueResult = await tpvCommandQueueService.queueCommand({
+        terminalId: terminal.id,
+        venueId: terminal.venueId,
+        commandType,
+        payload: command.payload,
+        requestedBy: command.requestedBy,
+        source: 'DASHBOARD',
+      })
+
+      logger.info(`Command queued for terminal ${terminal.id}:`, {
+        terminalId: terminal.id,
+        serialNumber: terminal.serialNumber,
+        command: command.type,
+        commandId: queueResult.commandId,
+        correlationId: queueResult.correlationId,
+        requestedBy: command.requestedBy,
+        venueId: terminal.venueId,
+        terminalOnline: queueResult.terminalOnline,
+        message: queueResult.message,
+      })
+
+      // Also broadcast via Socket.IO for immediate delivery (best-effort)
+      // Terminal may or may not be connected - polling via heartbeat is the reliable path
       const cutoff = new Date(Date.now() - 2 * 60 * 1000)
       const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
-      const canExecuteOffline = command.type === 'EXIT_MAINTENANCE' || command.type === 'REACTIVATE'
 
-      if (!isOnline && !canExecuteOffline) {
-        throw new Error(`Terminal ${terminalId} is offline and cannot receive commands`)
-      }
-
-      // Send command via Socket.io to the terminal (only if online)
       if (isOnline) {
         const { broadcastTpvCommand } = require('../../communication/sockets')
-
         // Use serial number for Android device compatibility
-        broadcastTpvCommand(terminal.serialNumber || terminal.id, terminal.venueId, command)
-        logger.info(`Command sent to terminal ${terminal.id}:`, {
-          terminalId: terminal.id,
-          serialNumber: terminal.serialNumber,
-          command: command.type,
-          requestedBy: command.requestedBy,
-          venueId: terminal.venueId,
+        broadcastTpvCommand(terminal.serialNumber || terminal.id, terminal.venueId, {
+          ...command,
+          commandId: queueResult.commandId,
+          correlationId: queueResult.correlationId,
         })
-      } else {
-        logger.info(`Command executed offline for terminal ${terminal.id}:`, {
-          terminalId: terminal.id,
-          serialNumber: terminal.serialNumber,
-          command: command.type,
-          requestedBy: command.requestedBy,
-          venueId: terminal.venueId,
-          reason: 'Terminal offline - database status updated only',
-        })
+        logger.info(`Command also broadcast via Socket.IO to terminal ${terminal.id}`)
       }
 
-      // Update status based on command (use terminal.id, not terminalId which could be serialNumber)
-      if (command.type === 'SHUTDOWN') {
-        await prisma.terminal.update({
-          where: { id: terminal.id },
-          data: {
-            status: TerminalStatus.INACTIVE,
-            updatedAt: new Date(),
-          },
-        })
-      } else if (command.type === 'MAINTENANCE_MODE') {
-        await prisma.terminal.update({
-          where: { id: terminal.id },
-          data: {
-            status: TerminalStatus.MAINTENANCE,
-            updatedAt: new Date(),
-          },
-        })
-      } else if (command.type === 'EXIT_MAINTENANCE') {
-        await prisma.terminal.update({
-          where: { id: terminal.id },
-          data: {
-            status: TerminalStatus.ACTIVE,
-            updatedAt: new Date(),
-          },
-        })
-      } else if (command.type === 'REACTIVATE') {
-        await prisma.terminal.update({
-          where: { id: terminal.id },
-          data: {
-            status: TerminalStatus.ACTIVE,
-            updatedAt: new Date(),
-          },
-        })
-      }
+      // Note: Terminal state updates are handled by TpvCommandQueueService
+      // when command result is received (via acknowledgeCommand)
     } catch (error) {
       logger.error(`Failed to send command to terminal ${terminalId}:`, error)
       throw error
