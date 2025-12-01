@@ -77,8 +77,10 @@ export async function sendCommand(
     // Get user's name for audit trail
     const staff = await prisma.staff.findUnique({
       where: { id: userId },
-      select: { name: true },
+      select: { firstName: true, lastName: true },
     })
+
+    const staffName = staff ? `${staff.firstName} ${staff.lastName}`.trim() : undefined
 
     const result = await tpvCommandExecutionService.executeCommand({
       terminalId: req.body.terminalId,
@@ -87,10 +89,8 @@ export async function sendCommand(
       payload: req.body.payload,
       priority: req.body.priority as any,
       scheduledFor: req.body.scheduledFor,
-      expiresAt: req.body.expiresAt,
       requestedBy: userId,
-      requestedByName: staff?.name,
-      idempotencyKey: req.body.idempotencyKey,
+      requestedByName: staffName,
     })
 
     res.status(201).json({
@@ -123,8 +123,10 @@ export async function sendBulkCommand(
     // Get user's name for audit trail
     const staff = await prisma.staff.findUnique({
       where: { id: userId },
-      select: { name: true },
+      select: { firstName: true, lastName: true },
     })
+
+    const staffName = staff ? `${staff.firstName} ${staff.lastName}`.trim() : undefined
 
     const result = await tpvCommandExecutionService.executeBulkCommand({
       terminalIds: req.body.terminalIds,
@@ -132,7 +134,7 @@ export async function sendBulkCommand(
       commandType: req.body.commandType as TpvCommandType,
       payload: req.body.payload,
       requestedBy: userId,
-      requestedByName: staff?.name,
+      requestedByName: staffName,
     })
 
     res.status(201).json({
@@ -300,13 +302,13 @@ export async function retryCommand(
       where: { id: commandId },
       data: {
         status: 'PENDING',
-        retryCount: 0,
-        maxRetries: req.body.maxRetries || 3,
-        lastError: null,
-        sentAt: null,
-        acknowledgedAt: null,
-        executionStartedAt: null,
-        completedAt: null,
+        attempts: 0,
+        maxAttempts: req.body.maxRetries || 3,
+        lastAttemptAt: null,
+        nextAttemptAt: null,
+        executedAt: null,
+        resultStatus: null,
+        resultMessage: null,
       },
     })
 
@@ -350,11 +352,7 @@ export async function getCommandHistory(
     const [history, total] = await Promise.all([
       prisma.tpvCommandHistory.findMany({
         where,
-        include: {
-          terminal: {
-            select: { id: true, name: true, serialNumber: true },
-          },
-        },
+        // Terminal data is denormalized in TpvCommandHistory (terminalId, terminalName, terminalSerial)
         orderBy: { executedAt: 'desc' },
         skip: (page - 1) * pageSize,
         take: pageSize,
@@ -492,9 +490,7 @@ export async function cancelBulkOperation(
       },
       data: {
         status: 'CANCELLED',
-        cancelledBy: userId,
-        cancelledAt: new Date(),
-        cancelReason: req.body.reason || 'Bulk operation cancelled',
+        resultMessage: `Cancelled by ${userId}: ${req.body.reason || 'Bulk operation cancelled'}`,
       },
     })
 
@@ -546,7 +542,7 @@ export async function getScheduledCommands(
     const [schedules, total] = await Promise.all([
       prisma.scheduledCommand.findMany({
         where,
-        orderBy: { scheduledFor: 'asc' },
+        orderBy: { nextExecution: 'asc' },
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -588,17 +584,17 @@ export async function createScheduledCommand(
     const schedule = await prisma.scheduledCommand.create({
       data: {
         venueId,
-        terminalIds: req.body.terminalIds,
+        terminalId: req.body.terminalIds?.[0] || null, // Single terminal or null for all
         commandType: req.body.commandType as TpvCommandType,
         payload: req.body.payload || {},
-        scheduledFor: req.body.scheduledFor,
+        nextExecution: req.body.scheduledFor,
         name: req.body.name,
         description: req.body.description,
-        recurring: req.body.recurring || false,
+        scheduleType: req.body.recurring ? 'DAILY' : 'ONCE',
         cronExpression: req.body.cronExpression,
-        recurrenceEndDate: req.body.recurrenceEndDate,
+        expiresAt: req.body.recurrenceEndDate,
         createdBy: userId,
-        active: true,
+        enabled: true,
       },
     })
 
@@ -780,17 +776,15 @@ export async function createGeofenceRule(
         venueId,
         name: req.body.name,
         description: req.body.description,
-        latitude: req.body.latitude,
-        longitude: req.body.longitude,
+        centerLat: req.body.latitude,
+        centerLng: req.body.longitude,
         radiusMeters: req.body.radiusMeters,
-        triggerType: req.body.triggerType as any,
-        action: req.body.action as any,
-        terminalIds: req.body.terminalIds || [],
-        payload: req.body.payload || {},
-        activeFrom: req.body.activeFrom,
-        activeUntil: req.body.activeUntil,
-        activeDaysOfWeek: req.body.activeDaysOfWeek || [],
-        active: req.body.active ?? true,
+        terminalId: req.body.terminalIds?.[0] || null, // Single terminal or null for all
+        onEnter: req.body.triggerType === 'ENTER' ? (req.body.action as any) : undefined,
+        onEnterPayload: req.body.triggerType === 'ENTER' ? req.body.payload : undefined,
+        onExit: req.body.triggerType === 'EXIT' ? (req.body.action as any) : undefined,
+        onExitPayload: req.body.triggerType === 'EXIT' ? req.body.payload : undefined,
+        enabled: req.body.active ?? true,
         createdBy: userId,
       },
     })
@@ -974,9 +968,11 @@ export async function handleCommandResult(
 ): Promise<void> {
   try {
     const { commandId } = req.params
-    const { terminalId, success, resultData, errorMessage, completedAt } = req.body
+    const { terminalId, success, resultData, errorMessage } = req.body
 
-    await tpvCommandExecutionService.handleCommandResult(commandId, terminalId, success, resultData, errorMessage, new Date(completedAt))
+    // Convert success boolean to result status
+    const resultStatus = success ? 'SUCCESS' : 'ERROR'
+    await tpvCommandExecutionService.handleCommandResult(commandId, terminalId, resultStatus as any, errorMessage, resultData)
 
     res.status(200).json({
       success: true,

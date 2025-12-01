@@ -31,7 +31,7 @@ export const DEFAULT_VENUE_SETTINGS = {
   autoReplyReviews: false,
   notifyBadReviews: true,
   badReviewThreshold: 3,
-  badReviewAlertRoles: ['OWNER', 'ADMIN', 'MANAGER'] as const,
+  badReviewAlertRoles: ['OWNER', 'ADMIN', 'MANAGER'],
 
   // Inventory
   trackInventory: false,

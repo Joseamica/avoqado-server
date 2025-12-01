@@ -3818,7 +3818,7 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
   validateRequest(commandsQuerySchema),
-  tpvCommandController.getCommands,
+  tpvCommandController.getCommands as any,
 )
 
 /**
@@ -3907,7 +3907,7 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
   validateRequest(bulkOperationsQuerySchema),
-  tpvCommandController.getBulkOperations,
+  tpvCommandController.getBulkOperations as any,
 )
 
 /**
@@ -3987,7 +3987,7 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
   validateRequest(commandHistoryQuerySchema),
-  tpvCommandController.getCommandHistory,
+  tpvCommandController.getCommandHistory as any,
 )
 
 /**
@@ -4196,7 +4196,7 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
   validateRequest(scheduledCommandsQuerySchema),
-  tpvCommandController.getScheduledCommands,
+  tpvCommandController.getScheduledCommands as any,
 )
 
 /**
@@ -4419,7 +4419,7 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
   validateRequest(geofenceRulesQuerySchema),
-  tpvCommandController.getGeofenceRules,
+  tpvCommandController.getGeofenceRules as any,
 )
 
 /**

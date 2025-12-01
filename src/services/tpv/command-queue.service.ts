@@ -274,7 +274,7 @@ export class TpvCommandQueueService {
 
     // Check if terminal is online (heartbeat within last 2 minutes)
     const cutoff = new Date(Date.now() - 2 * 60 * 1000)
-    const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
+    const isOnline = !!(terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff)
 
     // Determine initial status
     const initialStatus: TpvCommandStatus = scheduledFor

@@ -4,7 +4,7 @@ import { TerminalStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
-import { broadcastTpvStatusUpdate } from '../../communication/sockets'
+import { broadcastTpvStatusUpdate, broadcastTpvCommandStatusChanged } from '../../communication/sockets'
 import { tpvCommandExecutionService } from './command-execution.service'
 
 export interface HeartbeatData {
@@ -581,7 +581,7 @@ export class TpvHealthService {
     try {
       const command = await prisma.tpvCommandQueue.findUnique({
         where: { id: commandId },
-        include: { terminal: { select: { id: true, venueId: true, serialNumber: true } } },
+        include: { terminal: { select: { id: true, name: true, venueId: true, serialNumber: true } } },
       })
 
       if (!command) {
@@ -609,14 +609,16 @@ export class TpvHealthService {
       })
 
       // Broadcast result to dashboard via socket
-      broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
-        commandResult: {
-          commandId,
-          type: command.commandType,
-          status: resultStatus,
-          message: resultMessage,
-          executedAt: new Date().toISOString(),
-        },
+      broadcastTpvCommandStatusChanged(command.terminal.id, command.terminal.venueId, {
+        terminalId: command.terminal.id,
+        terminalName: command.terminal.name || 'Unknown',
+        commandId,
+        correlationId: command.correlationId,
+        commandType: command.commandType,
+        previousStatus: command.status,
+        newStatus: statusMap[resultStatus] || 'FAILED',
+        message: resultMessage,
+        statusChangedAt: new Date(),
       })
 
       logger.info(`Command ${commandId} acknowledged: ${resultStatus}`, {

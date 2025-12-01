@@ -16,11 +16,11 @@
  * - MDM push notification patterns
  */
 
-import { TpvCommandType, TpvCommandStatus, TpvCommandResultStatus, BulkCommandOperationStatus } from '@prisma/client'
+import { TpvCommandType, TpvCommandResultStatus, BulkOperationStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
-import { socketManager } from '../../communication/sockets'
+import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import { tpvCommandQueueService, QueueCommandInput, CommandQueueResult } from './command-queue.service'
 
@@ -57,11 +57,11 @@ export interface BulkCommandInput {
  */
 export interface BulkCommandResult {
   operationId: string
-  totalTerminals: number
+  totalTargets: number
   queued: number
   sent: number
   failed: number
-  status: BulkCommandOperationStatus
+  status: BulkOperationStatus
 }
 
 /**
@@ -115,12 +115,13 @@ export class TpvCommandExecutionService {
         venueId,
         commandType,
         payload: payload || {},
-        terminalIds,
-        totalTerminals: terminalIds.length,
+        targetType: 'TERMINAL_LIST',
+        targetIds: terminalIds,
+        totalTargets: terminalIds.length,
         requestedBy,
         requestedByName: requestedByName || 'Unknown',
-        scheduledFor,
         status: scheduledFor ? 'PENDING' : 'IN_PROGRESS',
+        pendingCount: terminalIds.length,
       },
     })
 
@@ -157,20 +158,21 @@ export class TpvCommandExecutionService {
     }
 
     // Update bulk operation with results
-    const finalStatus: BulkCommandOperationStatus =
+    const finalStatus: BulkOperationStatus =
       failed === terminalIds.length
         ? 'FAILED'
         : sent + queued === terminalIds.length
           ? scheduledFor
             ? 'PENDING'
             : 'COMPLETED'
-          : 'PARTIALLY_COMPLETED'
+          : 'PARTIAL_FAILURE'
 
     await prisma.bulkCommandOperation.update({
       where: { id: bulkOperation.id },
       data: {
-        completedTerminals: sent,
-        failedTerminals: failed,
+        successCount: sent,
+        failureCount: failed,
+        pendingCount: queued,
         status: finalStatus,
         completedAt: finalStatus !== 'PENDING' ? new Date() : undefined,
       },
@@ -179,7 +181,7 @@ export class TpvCommandExecutionService {
     logger.info(`Bulk command operation completed`, {
       operationId: bulkOperation.id,
       commandType,
-      totalTerminals: terminalIds.length,
+      totalTargets: terminalIds.length,
       queued,
       sent,
       failed,
@@ -187,7 +189,7 @@ export class TpvCommandExecutionService {
 
     return {
       operationId: bulkOperation.id,
-      totalTerminals: terminalIds.length,
+      totalTargets: terminalIds.length,
       queued,
       sent,
       failed,
@@ -238,7 +240,7 @@ export class TpvCommandExecutionService {
       payload: command.payload as Record<string, any>,
       requiresPin: command.requiresPin,
       priority: command.priority,
-      expiresAt: command.expiresAt,
+      expiresAt: command.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000), // Default 24h
       requestedBy: command.requestedBy,
       requestedByName: command.requestedByName || undefined,
     }
@@ -494,22 +496,23 @@ export class TpvCommandExecutionService {
     }
 
     // Determine operation status
-    let status: BulkCommandOperationStatus = 'IN_PROGRESS'
+    let status: BulkOperationStatus = 'IN_PROGRESS'
     if (pending === 0) {
-      if (failed === operation.totalTerminals) {
+      if (failed === operation.totalTargets) {
         status = 'FAILED'
-      } else if (completed === operation.totalTerminals) {
+      } else if (completed === operation.totalTargets) {
         status = 'COMPLETED'
       } else {
-        status = 'PARTIALLY_COMPLETED'
+        status = 'PARTIAL_FAILURE'
       }
     }
 
     await prisma.bulkCommandOperation.update({
       where: { id: bulkOperationId },
       data: {
-        completedTerminals: completed,
-        failedTerminals: failed,
+        successCount: completed,
+        failureCount: failed,
+        pendingCount: pending,
         status,
         completedAt: pending === 0 ? new Date() : undefined,
       },
@@ -521,7 +524,7 @@ export class TpvCommandExecutionService {
       broadcastTpvBulkOperationProgress(operation.venueId, {
         operationId: bulkOperationId,
         commandType: operation.commandType,
-        totalTerminals: operation.totalTerminals,
+        totalTerminals: operation.totalTargets,
         completedTerminals: completed,
         failedTerminals: failed,
         pendingTerminals: pending,
