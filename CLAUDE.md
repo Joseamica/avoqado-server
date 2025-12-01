@@ -76,6 +76,7 @@ For complex features requiring detailed implementation guides, full documentatio
 - `docs/UNUSED_CODE_DETECTION.md` - Tools and commands for detecting unused code (unimported, knip)
 - `docs/MERCHANT_MODELS_ARCHITECTURE.md` - Why MerchantAccount and ExternalMerchant are separate models (Blumon PAX Terminal SDK vs Hosted
   Checkout API)
+- `docs/TPV_COMMAND_SYSTEM.md` - TPV remote command architecture (heartbeat polling, ACK flow, status management)
 
 **Blumon Payment Integrations** (⚠️ TWO separate integrations - comprehensive documentation in `docs/`):
 

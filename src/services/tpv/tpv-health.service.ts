@@ -8,6 +8,17 @@ import { broadcastTpvStatusUpdate, broadcastTpvCommandStatusChanged } from '../.
 import { tpvCommandExecutionService } from './command-execution.service'
 import { tpvCommandQueueService } from './command-queue.service'
 
+/**
+ * Map of command types to terminal status changes
+ * Used to update terminal status after successful command execution
+ */
+const COMMAND_STATUS_UPDATES: Partial<Record<TpvCommandType, TerminalStatus>> = {
+  MAINTENANCE_MODE: TerminalStatus.MAINTENANCE,
+  EXIT_MAINTENANCE: TerminalStatus.ACTIVE,
+  SHUTDOWN: TerminalStatus.INACTIVE,
+  REACTIVATE: TerminalStatus.ACTIVE,
+}
+
 export interface HeartbeatData {
   terminalId: string
   timestamp: string
@@ -133,23 +144,24 @@ export class TpvHealthService {
       }
 
       // Determine the status to set based on current terminal status and heartbeat
-      let newStatus: TerminalStatus
-      if (terminal.status === TerminalStatus.MAINTENANCE) {
-        // If terminal is in maintenance mode, check if this is a force exit attempt
-        if (status === 'MAINTENANCE') {
-          newStatus = TerminalStatus.MAINTENANCE
-        } else if (status === 'ACTIVE') {
-          // Allow ACTIVE heartbeats to override maintenance mode (for force exits)
-          // This enables force exit functionality from client apps
-          newStatus = TerminalStatus.ACTIVE
-          logger.info(`Terminal ${terminal.id} force exited maintenance mode via ACTIVE heartbeat`)
-        } else {
-          newStatus = TerminalStatus.MAINTENANCE
-        }
-      } else {
-        // Normal status handling for non-maintenance terminals
-        newStatus = status === 'ACTIVE' ? TerminalStatus.ACTIVE : TerminalStatus.MAINTENANCE
+      // **Design Decision (2025-12-01):**
+      // Heartbeat does NOT change terminal status EXCEPT for INACTIVE → ACTIVE transition.
+      // Status changes should ONLY happen via explicit commands (MAINTENANCE_MODE, EXIT_MAINTENANCE, etc.)
+      // This prevents race conditions where:
+      //   1. Dashboard sends MAINTENANCE_MODE command
+      //   2. TPV sends heartbeat with status=ACTIVE (before command is processed)
+      //   3. Server resets terminal to ACTIVE (BUG!)
+      //   4. Command arrives and sets maintenance locally, but server already reset it
+      let newStatus: TerminalStatus = terminal.status // Keep current status by default
+
+      if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
+        // Only allow status change: INACTIVE → ACTIVE (terminal coming online after being inactive)
+        newStatus = TerminalStatus.ACTIVE
+        logger.info(`Terminal ${terminal.id} came online (INACTIVE → ACTIVE via heartbeat)`)
       }
+      // MAINTENANCE status can ONLY be changed via EXIT_MAINTENANCE command
+      // ACTIVE → MAINTENANCE via MAINTENANCE_MODE command
+      // This prevents race conditions with heartbeat
 
       const updatedTerminal = await prisma.terminal.update({
         where: { id: terminal.id },
@@ -567,13 +579,27 @@ export class TpvHealthService {
     resultPayload?: any,
   ): Promise<void> {
     try {
-      const command = await prisma.tpvCommandQueue.findUnique({
+      // Try to find by id first (CUID like cminjwbv5...)
+      let command = await prisma.tpvCommandQueue.findUnique({
         where: { id: commandId },
-        include: { terminal: { select: { id: true, name: true, venueId: true, serialNumber: true } } },
+        include: { terminal: { select: { id: true, name: true, venueId: true, serialNumber: true, status: true } } },
       })
 
+      // Fallback: Try to find by correlationId (UUID like ab5985e5-...)
+      // This handles the case where Socket.IO broadcast sends correlationId as commandId
       if (!command) {
-        logger.warn(`Command ${commandId} not found for acknowledgment`)
+        command = await prisma.tpvCommandQueue.findFirst({
+          where: { correlationId: commandId },
+          include: { terminal: { select: { id: true, name: true, venueId: true, serialNumber: true, status: true } } },
+        })
+
+        if (command) {
+          logger.info(`Command found by correlationId fallback: ${commandId} → ${command.id}`)
+        }
+      }
+
+      if (!command) {
+        logger.warn(`Command ${commandId} not found for acknowledgment (tried both id and correlationId)`)
         return
       }
 
@@ -609,6 +635,115 @@ export class TpvHealthService {
           executedAt: new Date(),
         },
       })
+
+      // Update terminal status if command was successful and affects terminal state
+      if (resultStatus === 'SUCCESS') {
+        const newTerminalStatus = COMMAND_STATUS_UPDATES[command.commandType as TpvCommandType]
+        const updateData: any = { updatedAt: new Date() }
+        let shouldUpdate = false
+
+        // Handle status-changing commands
+        if (newTerminalStatus) {
+          updateData.status = newTerminalStatus
+          shouldUpdate = true
+        }
+
+        // Handle lock-related state changes
+        if (command.commandType === 'LOCK') {
+          updateData.isLocked = true
+          updateData.lockedAt = new Date()
+          shouldUpdate = true
+        } else if (command.commandType === 'UNLOCK') {
+          updateData.isLocked = false
+          updateData.lockReason = null
+          updateData.lockMessage = null
+          updateData.lockedAt = null
+          updateData.lockedBy = null
+          shouldUpdate = true
+        } else if (command.commandType === 'REACTIVATE') {
+          // REACTIVATE also clears lock state
+          updateData.isLocked = false
+          updateData.lockReason = null
+          updateData.lockMessage = null
+          updateData.lockedAt = null
+          updateData.lockedBy = null
+        }
+
+        if (shouldUpdate) {
+          await prisma.terminal.update({
+            where: { id: command.terminal.id },
+            data: updateData,
+          })
+
+          logger.info(`Terminal ${command.terminal.id} state updated after ${command.commandType}`, {
+            terminalId: command.terminal.id,
+            commandType: command.commandType,
+            newStatus: newTerminalStatus || 'unchanged',
+            isLocked: updateData.isLocked,
+          })
+
+          // Broadcast terminal status update to dashboard
+          broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
+            status: newTerminalStatus || (command.terminal.status as any),
+          })
+        }
+      }
+
+      // **State Sync on REJECTED (2025-12-01):**
+      // When a command is REJECTED, it means the terminal is already in the opposite state.
+      // This is important for syncing state when dashboard and terminal are out of sync.
+      // Example: Dashboard shows MAINTENANCE but terminal says "I'm not in maintenance" → sync to ACTIVE
+      if (resultStatus === 'REJECTED') {
+        const syncUpdateData: any = { updatedAt: new Date() }
+        let shouldSyncState = false
+        let syncedStatus: TerminalStatus | undefined
+
+        // EXIT_MAINTENANCE REJECTED = Terminal is NOT in maintenance → sync to ACTIVE
+        if (command.commandType === 'EXIT_MAINTENANCE') {
+          syncUpdateData.status = TerminalStatus.ACTIVE
+          syncedStatus = TerminalStatus.ACTIVE
+          shouldSyncState = true
+          logger.info(`State sync: EXIT_MAINTENANCE rejected, terminal ${command.terminal.id} is not in maintenance → syncing to ACTIVE`)
+        }
+        // MAINTENANCE_MODE REJECTED = Terminal IS in maintenance → sync to MAINTENANCE
+        else if (command.commandType === 'MAINTENANCE_MODE') {
+          syncUpdateData.status = TerminalStatus.MAINTENANCE
+          syncedStatus = TerminalStatus.MAINTENANCE
+          shouldSyncState = true
+          logger.info(
+            `State sync: MAINTENANCE_MODE rejected, terminal ${command.terminal.id} is already in maintenance → syncing to MAINTENANCE`,
+          )
+        }
+        // LOCK REJECTED = Terminal IS locked → sync isLocked = true
+        else if (command.commandType === 'LOCK') {
+          syncUpdateData.isLocked = true
+          shouldSyncState = true
+          logger.info(`State sync: LOCK rejected, terminal ${command.terminal.id} is already locked → syncing isLocked=true`)
+        }
+        // UNLOCK REJECTED = Terminal is NOT locked → sync isLocked = false
+        else if (command.commandType === 'UNLOCK') {
+          syncUpdateData.isLocked = false
+          syncUpdateData.lockReason = null
+          syncUpdateData.lockMessage = null
+          syncUpdateData.lockedAt = null
+          syncUpdateData.lockedBy = null
+          shouldSyncState = true
+          logger.info(`State sync: UNLOCK rejected, terminal ${command.terminal.id} is not locked → syncing isLocked=false`)
+        }
+
+        if (shouldSyncState) {
+          await prisma.terminal.update({
+            where: { id: command.terminal.id },
+            data: syncUpdateData,
+          })
+
+          // Broadcast the corrected state to dashboard
+          broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
+            status: syncedStatus || (command.terminal.status as any),
+            isLocked: syncUpdateData.isLocked,
+          })
+        }
+      }
 
       // Broadcast result to dashboard via socket
       broadcastTpvCommandStatusChanged(command.terminal.id, command.terminal.venueId, {

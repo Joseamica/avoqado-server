@@ -258,10 +258,7 @@ export async function hasDemoData(venueId: string): Promise<boolean> {
     }),
     prisma.merchantAccount.count({
       where: {
-        OR: [
-          { externalMerchantId: { contains: 'demo' } },
-          { blumonSerialNumber: { startsWith: 'DEMO' } },
-        ],
+        OR: [{ externalMerchantId: { contains: 'demo' } }, { blumonSerialNumber: { startsWith: 'DEMO' } }],
       },
     }),
   ])
