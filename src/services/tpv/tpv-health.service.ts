@@ -609,7 +609,9 @@ export class TpvHealthService {
         `AVQD-${command.terminal.serialNumber}`.toLowerCase() === terminalSerialNumber.toLowerCase()
 
       if (!terminalMatches) {
-        logger.warn(`Security: Terminal ${terminalSerialNumber} attempted to ACK command ${commandId} owned by terminal ${command.terminal.serialNumber}`)
+        logger.warn(
+          `Security: Terminal ${terminalSerialNumber} attempted to ACK command ${commandId} owned by terminal ${command.terminal.serialNumber}`,
+        )
         throw new Error(`Unauthorized: Terminal does not own this command`)
       }
 

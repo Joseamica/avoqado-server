@@ -44,6 +44,7 @@
     "check:all": "npm run check:unused && npm run check:dead-code",
     "update:unused-ignore": "node scripts/update-unused-ignore.js",
     "pre-deploy": "bash scripts/pre-deploy-check.sh",
+    "pre-migrate": "npx ts-node -r tsconfig-paths/register scripts/pre-migration-check.ts",
     "blumon:help": "npx ts-node scripts/blumon-help.ts",
     "blumon:auth": "npx ts-node -r tsconfig-paths/register scripts/blumon-authenticate-master.ts",
     "blumon:session": "npx ts-node -r tsconfig-paths/register scripts/create-test-checkout-session.ts",
