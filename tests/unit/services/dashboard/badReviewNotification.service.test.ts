@@ -1,4 +1,4 @@
-import { StaffRole, NotificationType, NotificationPriority, NotificationChannel } from '@prisma/client'
+import { NotificationType, NotificationPriority, NotificationChannel } from '@prisma/client'
 import {
   shouldNotifyBadReview,
   getReviewContext,

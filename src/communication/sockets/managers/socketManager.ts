@@ -21,6 +21,9 @@ import { v4 as uuidv4 } from 'uuid'
 
 // Import event controllers
 import { ConnectionController } from '../controllers/connection.controller'
+
+// Import TPV command service for handling command ACK/results
+import { tpvCommandExecutionService } from '../../../services/tpv/command-execution.service'
 import { RoomController } from '../controllers/room.controller'
 import { BusinessEventController } from '../controllers/businessEvent.controller'
 
@@ -222,6 +225,90 @@ export class SocketManager implements ISocketManager {
     // System events
     socket.on(SocketEventType.SYSTEM_ALERT, (payload, callback) => {
       this.businessEventController.handleSystemAlert(socket, payload, callback)
+    })
+
+    // TPV Command Events (Terminal → Server)
+    // Handle command acknowledgment from terminal
+    socket.on(SocketEventType.TPV_COMMAND_ACK, async (payload, callback) => {
+      try {
+        const { commandId, terminalId, receivedAt } = payload
+        logger.info('📡 TPV Command ACK received', { commandId, terminalId, socketId: socket.id })
+
+        await tpvCommandExecutionService.handleCommandAck(commandId, terminalId, receivedAt ? new Date(receivedAt) : new Date())
+
+        if (callback) callback({ success: true, message: 'ACK processed' })
+      } catch (error) {
+        logger.error('Error processing TPV command ACK', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
+    })
+
+    // Handle command execution started from terminal
+    socket.on(SocketEventType.TPV_COMMAND_STARTED, async (payload, callback) => {
+      try {
+        const { commandId, terminalId, startedAt } = payload
+        logger.info('📡 TPV Command execution started', { commandId, terminalId, socketId: socket.id })
+
+        await tpvCommandExecutionService.handleCommandStarted(commandId, terminalId, startedAt ? new Date(startedAt) : new Date())
+
+        if (callback) callback({ success: true, message: 'Execution start recorded' })
+      } catch (error) {
+        logger.error('Error processing TPV command started', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
+    })
+
+    // Handle command result from terminal (SUCCESS/FAILURE/REJECTED)
+    socket.on(SocketEventType.TPV_COMMAND_RESULT, async (payload, callback) => {
+      try {
+        const { commandId, terminalId, success, resultStatus: directResultStatus, resultData, errorMessage, message } = payload
+
+        // Support both formats:
+        // 1. Android sends: { resultStatus: 'SUCCESS'|'REJECTED'|'FAILED', message: '...' }
+        // 2. Legacy format: { success: true|false, errorMessage: '...' }
+        let resultStatus: string
+        if (directResultStatus) {
+          // Android format - use directly (normalize ERROR → FAILED for backwards compatibility)
+          resultStatus = directResultStatus === 'ERROR' ? 'FAILED' : directResultStatus
+        } else {
+          // Legacy format - convert boolean to status
+          // Valid enum values: SUCCESS, PARTIAL_SUCCESS, FAILED, TIMEOUT, REJECTED
+          resultStatus = success ? 'SUCCESS' : 'FAILED'
+        }
+
+        logger.info('📡 TPV Command result received', {
+          commandId,
+          terminalId,
+          resultStatus,
+          message: message || errorMessage,
+          socketId: socket.id,
+        })
+
+        await tpvCommandExecutionService.handleCommandResult(
+          commandId,
+          terminalId,
+          resultStatus as any,
+          message || errorMessage,
+          resultData,
+        )
+
+        if (callback) callback({ success: true, message: 'Result processed' })
+      } catch (error) {
+        logger.error('Error processing TPV command result', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
     })
 
     // Disconnection

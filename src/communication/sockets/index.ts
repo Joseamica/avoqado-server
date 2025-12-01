@@ -344,6 +344,7 @@ export function broadcastTpvStatusUpdate(
     version?: string
     ipAddress?: string
     systemInfo?: any
+    isLocked?: boolean
   },
   options?: BroadcastOptions,
 ): void {
