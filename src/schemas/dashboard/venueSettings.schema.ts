@@ -36,6 +36,7 @@ export const UpdateVenueSettingsSchema = z.object({
     autoReplyReviews: z.boolean().optional(),
     notifyBadReviews: z.boolean().optional(),
     badReviewThreshold: z.number().int().min(1).max(5).optional(),
+    badReviewAlertRoles: z.array(z.enum(['OWNER', 'ADMIN', 'MANAGER', 'CASHIER', 'WAITER', 'KITCHEN', 'HOST', 'VIEWER'])).optional(),
 
     // Inventory
     trackInventory: z.boolean().optional(),

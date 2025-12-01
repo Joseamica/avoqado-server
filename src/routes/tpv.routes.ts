@@ -383,6 +383,54 @@ router.post('/heartbeat', heartbeatController.processHeartbeat)
 
 /**
  * @openapi
+ * /api/v1/tpv/command-ack:
+ *   post:
+ *     tags:
+ *       - TPV - Health & Commands
+ *     summary: Acknowledge command execution (Square Terminal API pattern)
+ *     description: |
+ *       Called by TPV terminal after processing a command received via heartbeat.
+ *       This completes the polling pattern:
+ *       1. Dashboard sends command → stored as PENDING in TpvCommandQueue
+ *       2. Terminal receives command via heartbeat response
+ *       3. Terminal executes command and calls this endpoint
+ *       4. Dashboard receives notification via WebSocket
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - commandId
+ *               - resultStatus
+ *             properties:
+ *               commandId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: The ID of the command being acknowledged
+ *               resultStatus:
+ *                 type: string
+ *                 enum: [SUCCESS, FAILED, REJECTED, TIMEOUT]
+ *                 description: Result of command execution
+ *               resultMessage:
+ *                 type: string
+ *                 description: Optional human-readable result message
+ *               resultPayload:
+ *                 type: object
+ *                 description: Optional result data (e.g., exported log URL)
+ *     responses:
+ *       200:
+ *         description: Acknowledgment processed successfully
+ *       400:
+ *         description: Invalid request (missing commandId or resultStatus)
+ *       404:
+ *         description: Command not found
+ */
+router.post('/command-ack', heartbeatController.acknowledgeCommand)
+
+/**
+ * @openapi
  * /tpv/venues/{venueId}/orders:
  *   get:
  *     tags:

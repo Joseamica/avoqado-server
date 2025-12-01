@@ -4,6 +4,7 @@ import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.ser
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
 import { generateActivationCode as generateActivationCodeService } from '../../services/dashboard/terminal-activation.service'
 import { BadRequestError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 
 /**
  * Controlador para manejar la solicitud GET de terminales.
@@ -144,6 +145,30 @@ export async function sendTpvCommand(
       payload,
       requestedBy,
     })
+
+    // Update terminal state in database based on command type
+    // This ensures the dashboard shows the correct state immediately
+    if (command === 'LOCK') {
+      await prisma.terminal.update({
+        where: { id: terminalId },
+        data: {
+          isLocked: true,
+          lockedAt: new Date(),
+          lockedBy: requestedBy,
+          lockReason: payload?.reason || null,
+        },
+      })
+    } else if (command === 'UNLOCK') {
+      await prisma.terminal.update({
+        where: { id: terminalId },
+        data: {
+          isLocked: false,
+          lockedAt: null,
+          lockedBy: null,
+          lockReason: null,
+        },
+      })
+    }
 
     res.status(200).json({
       success: true,

@@ -1358,6 +1358,10 @@ async function main() {
           venueId: venue.id,
           trackInventory: isFullVenue,
           allowReservations: isFullVenue,
+          // Bad review notification settings
+          notifyBadReviews: true,
+          badReviewThreshold: 3, // Notify for ratings 1, 2, 3 (less than 4)
+          badReviewAlertRoles: ['OWNER', 'ADMIN', 'MANAGER'],
         },
       })
       if (isFullVenue) {

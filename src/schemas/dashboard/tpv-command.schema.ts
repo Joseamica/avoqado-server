@@ -493,3 +493,90 @@ export type GetGeofenceRulesQuery = z.infer<typeof getGeofenceRulesQuerySchema>
 
 export type CancelCommandBody = z.infer<typeof cancelCommandBodySchema>
 export type RetryCommandBody = z.infer<typeof retryCommandBodySchema>
+
+// ==========================================
+// ROUTE VALIDATION SCHEMAS (wrapped for validateRequest middleware)
+// ==========================================
+
+// These schemas are properly wrapped with z.object({ body/query: ... }) for use with validateRequest middleware
+// The middleware expects schemas structured as z.object({ body: ..., query: ..., params: ... })
+
+// Body validation schemas (for POST/PUT routes)
+export const sendCommandSchema = z.object({
+  body: sendCommandBodySchema,
+})
+
+export const bulkCommandSchema = z.object({
+  body: bulkCommandBodySchema,
+})
+
+export const createScheduledCommandSchema = z.object({
+  body: createScheduledCommandBodySchema,
+})
+
+export const updateScheduledCommandSchema = z.object({
+  body: updateScheduledCommandBodySchema,
+})
+
+export const createGeofenceRuleSchema = z.object({
+  body: createGeofenceRuleBodySchema,
+})
+
+export const updateGeofenceRuleSchema = z.object({
+  body: updateGeofenceRuleBodySchema,
+})
+
+export const cancelCommandSchema = z.object({
+  body: cancelCommandBodySchema,
+})
+
+export const retryCommandSchema = z.object({
+  body: retryCommandBodySchema,
+})
+
+// Query validation schemas (for GET routes)
+export const commandsQuerySchema = z.object({
+  query: getCommandsQuerySchema,
+})
+
+export const commandHistoryQuerySchema = z.object({
+  query: getCommandHistoryQuerySchema,
+})
+
+export const bulkOperationsQuerySchema = z.object({
+  query: getBulkOperationsQuerySchema,
+})
+
+export const scheduledCommandsQuerySchema = z.object({
+  query: getScheduledCommandsQuerySchema,
+})
+
+export const geofenceRulesQuerySchema = z.object({
+  query: getGeofenceRulesQuerySchema,
+})
+
+// Terminal acknowledgment schemas (for TPV terminal callbacks)
+export const terminalAckBodySchema = z.object({
+  commandId: z.string().min(1, 'Command ID is required'),
+  correlationId: z.string().optional(),
+  timestamp: z.coerce.date().optional(),
+})
+
+export const terminalResultBodySchema = z.object({
+  commandId: z.string().min(1, 'Command ID is required'),
+  correlationId: z.string().optional(),
+  status: TpvCommandResultStatusSchema,
+  message: z.string().max(1000).optional(),
+  resultData: z.record(z.any()).optional(),
+  executionTimeMs: z.number().int().optional(),
+  timestamp: z.coerce.date().optional(),
+})
+
+// Wrapped versions for route validation
+export const terminalAckSchema = z.object({
+  body: terminalAckBodySchema,
+})
+
+export const terminalResultSchema = z.object({
+  body: terminalResultBodySchema,
+})

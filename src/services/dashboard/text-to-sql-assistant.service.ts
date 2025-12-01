@@ -29,6 +29,7 @@ interface TextToSqlQuery {
   userRole?: UserRole // For security validation
   ipAddress?: string // For audit logging
   includeVisualization?: boolean // Include chart visualization in response
+  referencesContext?: string // AI references context (selected payments, orders, etc.)
 }
 
 interface ConversationEntry {
@@ -911,9 +912,15 @@ The user wants to see a chart visualization. To generate meaningful charts:
     sqlResult: any,
     sqlExplanation: string,
     venueSlug?: string,
+    referencesContext?: string,
   ): Promise<{ response: string; tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
     const venueContext = venueSlug
       ? `\nCONTEXTO DEL VENUE ACTIVO: El usuario está autenticado en el venue con slug "${venueSlug}".\nSi la pregunta menciona otro venue distinto, deja claro que solo puedes responder con datos de "${venueSlug}" y aclara cualquier diferencia.`
+      : ''
+
+    // AI References context (selected payments, orders, etc. from the dashboard)
+    const referencesSection = referencesContext
+      ? `\n${referencesContext}\n\nIMPORTANTE: El usuario ha seleccionado elementos específicos del dashboard como referencia. Si la pregunta está relacionada con estos elementos, usa ÚNICAMENTE la información proporcionada arriba para responder. No uses los resultados de la base de datos para este tipo de preguntas contextuales.\n`
       : ''
 
     // SECURITY: Sanitize data to remove internal IDs before sending to LLM
@@ -921,7 +928,7 @@ The user wants to see a chart visualization. To generate meaningful charts:
 
     const interpretPrompt = `
 Eres un asistente de restaurante que interpreta resultados de bases de datos.
-
+${referencesSection}
 PREGUNTA ORIGINAL: "${originalQuestion}"
 CONSULTA EJECUTADA: ${sqlExplanation}
 RESULTADO DE LA BASE DE DATOS: ${JSON.stringify(sanitizedResult, null, 2)}
@@ -1413,6 +1420,7 @@ Ejemplos de respuestas CORRECTAS:
             venueSlug: query.venueSlug,
             includeVisualization: query.includeVisualization,
             conversationHistory: query.conversationHistory,
+            referencesContext: query.referencesContext,
           })
         } catch (consensusError: any) {
           logger.warn('⚠️  Consensus voting failed, falling back to single-generation pipeline', {
@@ -1698,7 +1706,13 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       // Step 5: Interpret the results naturally (only if validation passed)
-      const interpretResult = await this.interpretQueryResult(query.message, execution.result, sqlGeneration.explanation, query.venueSlug)
+      const interpretResult = await this.interpretQueryResult(
+        query.message,
+        execution.result,
+        sqlGeneration.explanation,
+        query.venueSlug,
+        query.referencesContext,
+      )
       const naturalResponse = interpretResult.response
 
       // Calculate total token usage for this query
@@ -3839,6 +3853,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     userRole?: UserRole
     includeVisualization?: boolean
     conversationHistory?: ConversationEntry[]
+    referencesContext?: string
   }): Promise<any> {
     const startTime = Date.now()
 
@@ -3914,6 +3929,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         consensus.result,
         sql1Result.explanation || 'Análisis basado en consenso de 3 generaciones SQL independientes.',
         query.venueSlug,
+        query.referencesContext,
       )
       const naturalResponse = interpretResult.response
 

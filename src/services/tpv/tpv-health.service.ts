@@ -264,10 +264,10 @@ export class TpvHealthService {
         })
       }
 
-      // Update status based on command
+      // Update status based on command (use terminal.id, not terminalId which could be serialNumber)
       if (command.type === 'SHUTDOWN') {
         await prisma.terminal.update({
-          where: { id: terminalId },
+          where: { id: terminal.id },
           data: {
             status: TerminalStatus.INACTIVE,
             updatedAt: new Date(),
@@ -275,7 +275,7 @@ export class TpvHealthService {
         })
       } else if (command.type === 'MAINTENANCE_MODE') {
         await prisma.terminal.update({
-          where: { id: terminalId },
+          where: { id: terminal.id },
           data: {
             status: TerminalStatus.MAINTENANCE,
             updatedAt: new Date(),
@@ -283,7 +283,7 @@ export class TpvHealthService {
         })
       } else if (command.type === 'EXIT_MAINTENANCE') {
         await prisma.terminal.update({
-          where: { id: terminalId },
+          where: { id: terminal.id },
           data: {
             status: TerminalStatus.ACTIVE,
             updatedAt: new Date(),
@@ -291,7 +291,7 @@ export class TpvHealthService {
         })
       } else if (command.type === 'REACTIVATE') {
         await prisma.terminal.update({
-          where: { id: terminalId },
+          where: { id: terminal.id },
           data: {
             status: TerminalStatus.ACTIVE,
             updatedAt: new Date(),
@@ -393,29 +393,39 @@ export class TpvHealthService {
    */
   async getTerminalHealth(terminalId: string): Promise<any> {
     try {
-      // Try to find terminal by serial number (with AVQD- prefix handling)
-      // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
-      let terminal = await prisma.terminal.findFirst({
-        where: {
-          serialNumber: {
-            equals: terminalId,
-            mode: 'insensitive', // Case-insensitive matching
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          status: true,
-          lastHeartbeat: true,
-          version: true,
-          systemInfo: true,
-          ipAddress: true,
-          createdAt: true,
-          updatedAt: true,
-        },
+      const selectFields = {
+        id: true,
+        name: true,
+        status: true,
+        lastHeartbeat: true,
+        version: true,
+        systemInfo: true,
+        ipAddress: true,
+        createdAt: true,
+        updatedAt: true,
+      }
+
+      // 1. First try to find by ID (CUID) - Dashboard sends terminal ID
+      let terminal = await prisma.terminal.findUnique({
+        where: { id: terminalId },
+        select: selectFields,
       })
 
-      // If not found and doesn't start with AVQD-, try with prefix (case-insensitive)
+      // 2. If not found, try by serial number (Android sends serialNumber)
+      // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
+      if (!terminal) {
+        terminal = await prisma.terminal.findFirst({
+          where: {
+            serialNumber: {
+              equals: terminalId,
+              mode: 'insensitive', // Case-insensitive matching
+            },
+          },
+          select: selectFields,
+        })
+      }
+
+      // 3. If still not found and doesn't start with AVQD-, try with prefix (case-insensitive)
       // Android removes "AVQD-" prefix before sending, but database stores it with prefix
       if (!terminal && !terminalId.toUpperCase().startsWith('AVQD-')) {
         terminal = await prisma.terminal.findFirst({
@@ -425,22 +435,12 @@ export class TpvHealthService {
               mode: 'insensitive', // Case-insensitive matching
             },
           },
-          select: {
-            id: true,
-            name: true,
-            status: true,
-            lastHeartbeat: true,
-            version: true,
-            systemInfo: true,
-            ipAddress: true,
-            createdAt: true,
-            updatedAt: true,
-          },
+          select: selectFields,
         })
       }
 
       if (!terminal) {
-        throw new NotFoundError(`Terminal with serial number ${terminalId} not found`)
+        throw new NotFoundError(`Terminal with ID or serial number ${terminalId} not found`)
       }
 
       const cutoff = new Date(Date.now() - 2 * 60 * 1000)
@@ -458,6 +458,176 @@ export class TpvHealthService {
       }
     } catch (error) {
       logger.error(`Failed to get health info for terminal ${terminalId}:`, error)
+      throw error
+    }
+  }
+
+  /**
+   * Get pending commands for a terminal (Square Terminal API polling pattern)
+   * Called during heartbeat to deliver commands without requiring socket connection
+   *
+   * @param terminalId - Terminal ID or serial number
+   * @returns Array of pending commands to execute
+   */
+  async getPendingCommands(terminalId: string): Promise<
+    Array<{
+      commandId: string
+      correlationId: string
+      type: string
+      payload: any
+      priority: string
+      requiresPin: boolean
+      expiresAt: string | null
+      requestedBy: string
+      requestedByName: string | null
+      createdAt: string
+    }>
+  > {
+    try {
+      // Find terminal by ID or serial number (case-insensitive)
+      let terminal = await prisma.terminal.findUnique({
+        where: { id: terminalId },
+        select: { id: true },
+      })
+
+      if (!terminal) {
+        terminal = await prisma.terminal.findFirst({
+          where: {
+            serialNumber: {
+              equals: terminalId,
+              mode: 'insensitive',
+            },
+          },
+          select: { id: true },
+        })
+      }
+
+      if (!terminal && !terminalId.toUpperCase().startsWith('AVQD-')) {
+        terminal = await prisma.terminal.findFirst({
+          where: {
+            serialNumber: {
+              equals: `AVQD-${terminalId}`,
+              mode: 'insensitive',
+            },
+          },
+          select: { id: true },
+        })
+      }
+
+      if (!terminal) {
+        return []
+      }
+
+      // Get pending commands that haven't expired
+      const now = new Date()
+      const pendingCommands = await prisma.tpvCommandQueue.findMany({
+        where: {
+          terminalId: terminal.id,
+          status: 'PENDING',
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        },
+        orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+        take: 10, // Limit to prevent overwhelming the terminal
+      })
+
+      // Mark commands as SENT (in-flight)
+      if (pendingCommands.length > 0) {
+        await prisma.tpvCommandQueue.updateMany({
+          where: {
+            id: { in: pendingCommands.map(c => c.id) },
+          },
+          data: {
+            status: 'SENT',
+            lastAttemptAt: now,
+            attempts: { increment: 1 },
+          },
+        })
+
+        logger.info(`Delivering ${pendingCommands.length} commands to terminal ${terminalId} via heartbeat`, {
+          terminalId,
+          commandIds: pendingCommands.map(c => c.id),
+          commandTypes: pendingCommands.map(c => c.commandType),
+        })
+      }
+
+      return pendingCommands.map(cmd => ({
+        commandId: cmd.id,
+        correlationId: cmd.correlationId,
+        type: cmd.commandType,
+        payload: cmd.payload,
+        priority: cmd.priority,
+        requiresPin: cmd.requiresPin,
+        expiresAt: cmd.expiresAt?.toISOString() || null,
+        requestedBy: cmd.requestedBy,
+        requestedByName: cmd.requestedByName,
+        createdAt: cmd.createdAt.toISOString(),
+      }))
+    } catch (error) {
+      logger.error(`Failed to get pending commands for terminal ${terminalId}:`, error)
+      return []
+    }
+  }
+
+  /**
+   * Acknowledge command receipt/execution from terminal
+   * Called by terminal after processing a command received via heartbeat
+   */
+  async acknowledgeCommand(
+    commandId: string,
+    resultStatus: 'SUCCESS' | 'FAILED' | 'REJECTED' | 'TIMEOUT',
+    resultMessage?: string,
+    resultPayload?: any,
+  ): Promise<void> {
+    try {
+      const command = await prisma.tpvCommandQueue.findUnique({
+        where: { id: commandId },
+        include: { terminal: { select: { id: true, venueId: true, serialNumber: true } } },
+      })
+
+      if (!command) {
+        logger.warn(`Command ${commandId} not found for acknowledgment`)
+        return
+      }
+
+      // Map result status to command status
+      const statusMap: Record<string, 'COMPLETED' | 'FAILED'> = {
+        SUCCESS: 'COMPLETED',
+        FAILED: 'FAILED',
+        REJECTED: 'FAILED',
+        TIMEOUT: 'FAILED',
+      }
+
+      await prisma.tpvCommandQueue.update({
+        where: { id: commandId },
+        data: {
+          status: statusMap[resultStatus] || 'FAILED',
+          resultStatus: resultStatus as any,
+          resultMessage,
+          resultPayload: resultPayload || undefined,
+          executedAt: new Date(),
+        },
+      })
+
+      // Broadcast result to dashboard via socket
+      broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
+        commandResult: {
+          commandId,
+          type: command.commandType,
+          status: resultStatus,
+          message: resultMessage,
+          executedAt: new Date().toISOString(),
+        },
+      })
+
+      logger.info(`Command ${commandId} acknowledged: ${resultStatus}`, {
+        commandId,
+        terminalId: command.terminalId,
+        type: command.commandType,
+        resultStatus,
+        resultMessage,
+      })
+    } catch (error) {
+      logger.error(`Failed to acknowledge command ${commandId}:`, error)
       throw error
     }
   }

@@ -170,19 +170,20 @@ import {
   createBillingPortalSessionSchema,
 } from '../schemas/dashboard/venue.schema'
 import {
-  sendCommandBodySchema,
-  bulkCommandBodySchema,
+  // Wrapped schemas for route validation (use these with validateRequest)
+  sendCommandSchema,
+  bulkCommandSchema,
   commandsQuerySchema,
   commandHistoryQuerySchema,
   bulkOperationsQuerySchema,
-  createScheduledCommandBodySchema,
-  updateScheduledCommandBodySchema,
+  createScheduledCommandSchema,
+  updateScheduledCommandSchema,
   scheduledCommandsQuerySchema,
-  createGeofenceRuleBodySchema,
-  updateGeofenceRuleBodySchema,
+  createGeofenceRuleSchema,
+  updateGeofenceRuleSchema,
   geofenceRulesQuerySchema,
-  terminalAckBodySchema,
-  terminalResultBodySchema,
+  terminalAckSchema,
+  terminalResultSchema,
 } from '../schemas/dashboard/tpv-command.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
@@ -3766,7 +3767,7 @@ router.post(
   '/venues/:venueId/tpv-commands',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:write'),
-  validateRequest({ body: sendCommandBodySchema }),
+  validateRequest(sendCommandSchema),
   tpvCommandController.sendCommand,
 )
 
@@ -3816,7 +3817,7 @@ router.get(
   '/venues/:venueId/tpv-commands',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
-  validateRequest({ query: commandsQuerySchema }),
+  validateRequest(commandsQuerySchema),
   tpvCommandController.getCommands,
 )
 
@@ -3866,7 +3867,7 @@ router.post(
   '/venues/:venueId/tpv-commands/bulk',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:bulk'),
-  validateRequest({ body: bulkCommandBodySchema }),
+  validateRequest(bulkCommandSchema),
   tpvCommandController.sendBulkCommand,
 )
 
@@ -3905,7 +3906,7 @@ router.get(
   '/venues/:venueId/tpv-commands/bulk-operations',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
-  validateRequest({ query: bulkOperationsQuerySchema }),
+  validateRequest(bulkOperationsQuerySchema),
   tpvCommandController.getBulkOperations,
 )
 
@@ -3985,7 +3986,7 @@ router.get(
   '/venues/:venueId/tpv-commands/history',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
-  validateRequest({ query: commandHistoryQuerySchema }),
+  validateRequest(commandHistoryQuerySchema),
   tpvCommandController.getCommandHistory,
 )
 
@@ -4152,7 +4153,7 @@ router.post(
   '/venues/:venueId/tpv-commands/scheduled',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:schedule'),
-  validateRequest({ body: createScheduledCommandBodySchema }),
+  validateRequest(createScheduledCommandSchema),
   tpvCommandController.createScheduledCommand,
 )
 
@@ -4194,7 +4195,7 @@ router.get(
   '/venues/:venueId/tpv-commands/scheduled',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
-  validateRequest({ query: scheduledCommandsQuerySchema }),
+  validateRequest(scheduledCommandsQuerySchema),
   tpvCommandController.getScheduledCommands,
 )
 
@@ -4274,7 +4275,7 @@ router.put(
   '/venues/:venueId/tpv-commands/scheduled/:scheduleId',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:schedule'),
-  validateRequest({ body: updateScheduledCommandBodySchema }),
+  validateRequest(updateScheduledCommandSchema),
   tpvCommandController.updateScheduledCommand,
 )
 
@@ -4375,7 +4376,7 @@ router.post(
   '/venues/:venueId/tpv-commands/geofence',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:geofence'),
-  validateRequest({ body: createGeofenceRuleBodySchema }),
+  validateRequest(createGeofenceRuleSchema),
   tpvCommandController.createGeofenceRule,
 )
 
@@ -4417,7 +4418,7 @@ router.get(
   '/venues/:venueId/tpv-commands/geofence',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:read'),
-  validateRequest({ query: geofenceRulesQuerySchema }),
+  validateRequest(geofenceRulesQuerySchema),
   tpvCommandController.getGeofenceRules,
 )
 
@@ -4495,7 +4496,7 @@ router.put(
   '/venues/:venueId/tpv-commands/geofence/:ruleId',
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:geofence'),
-  validateRequest({ body: updateGeofenceRuleBodySchema }),
+  validateRequest(updateGeofenceRuleSchema),
   tpvCommandController.updateGeofenceRule,
 )
 
@@ -4571,7 +4572,7 @@ router.delete(
 router.post(
   '/tpv-commands/:commandId/ack',
   authenticateTokenMiddleware,
-  validateRequest({ body: terminalAckBodySchema }),
+  validateRequest(terminalAckSchema),
   tpvCommandController.handleCommandAck,
 )
 
@@ -4616,7 +4617,7 @@ router.post(
 router.post(
   '/tpv-commands/:commandId/result',
   authenticateTokenMiddleware,
-  validateRequest({ body: terminalResultBodySchema }),
+  validateRequest(terminalResultSchema),
   tpvCommandController.handleCommandResult,
 )
 

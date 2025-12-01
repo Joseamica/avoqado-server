@@ -185,6 +185,10 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       lowStockAlert: selectedFeatures?.includes('inventory') || false,
       autoCloseShifts: false,
       requirePinLogin: true,
+      // Bad review notification settings (enabled by default)
+      notifyBadReviews: true,
+      badReviewThreshold: 3, // Notify for ratings <= 3 (1, 2, 3)
+      badReviewAlertRoles: ['OWNER', 'ADMIN', 'MANAGER'],
     },
   })
 

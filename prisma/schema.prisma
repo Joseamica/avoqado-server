@@ -248,9 +248,10 @@ model VenueSettings {
   requirePinLogin Boolean @default(true)
 
   // Reviews
-  autoReplyReviews   Boolean @default(false)
-  notifyBadReviews   Boolean @default(true)
-  badReviewThreshold Int     @default(3)
+  autoReplyReviews    Boolean  @default(false)
+  notifyBadReviews    Boolean  @default(true)
+  badReviewThreshold  Int      @default(3)
+  badReviewAlertRoles String[] @default(["OWNER", "ADMIN", "MANAGER"])
 
   // Inventory
   trackInventory    Boolean       @default(false)

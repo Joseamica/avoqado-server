@@ -24,10 +24,15 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
     // Get current server status for the terminal to enable synchronization
     const terminalHealth = await tpvHealthService.getTerminalHealth(heartbeatData.terminalId)
 
+    // Get pending commands for this terminal (Square Terminal API polling pattern)
+    // This delivers commands via HTTP instead of requiring socket connection
+    const pendingCommands = await tpvHealthService.getPendingCommands(heartbeatData.terminalId)
+
     logger.info(`Heartbeat processed, server status: ${terminalHealth.status}`, {
       terminalId: heartbeatData.terminalId,
       clientReported: heartbeatData.status,
       serverStatus: terminalHealth.status,
+      pendingCommandsCount: pendingCommands.length,
     })
 
     res.status(200).json({
@@ -35,9 +40,65 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
       message: 'Heartbeat processed successfully',
       serverStatus: terminalHealth.status, // This allows Android to sync its local state
       timestamp: new Date().toISOString(),
+      // Square/Toast pattern: Include pending commands in heartbeat response
+      // Terminal doesn't need socket connection to receive commands
+      pendingCommands: pendingCommands.length > 0 ? pendingCommands : undefined,
     })
   } catch (error) {
     logger.error(`Failed to process unauthenticated heartbeat:`, error)
+    next(error)
+  }
+}
+
+/**
+ * Acknowledge command execution from TPV terminal
+ * Called by terminal after processing a command received via heartbeat
+ */
+export async function acknowledgeCommand(
+  req: Request<{}, {}, { commandId: string; resultStatus: string; resultMessage?: string; resultPayload?: any }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { commandId, resultStatus, resultMessage, resultPayload } = req.body
+
+    if (!commandId || !resultStatus) {
+      res.status(400).json({
+        success: false,
+        error: 'commandId and resultStatus are required',
+      })
+      return
+    }
+
+    const validStatuses = ['SUCCESS', 'FAILED', 'REJECTED', 'TIMEOUT']
+    if (!validStatuses.includes(resultStatus)) {
+      res.status(400).json({
+        success: false,
+        error: `Invalid resultStatus. Must be one of: ${validStatuses.join(', ')}`,
+      })
+      return
+    }
+
+    logger.info(`Command ACK received: ${commandId} - ${resultStatus}`, {
+      commandId,
+      resultStatus,
+      resultMessage,
+    })
+
+    await tpvHealthService.acknowledgeCommand(
+      commandId,
+      resultStatus as 'SUCCESS' | 'FAILED' | 'REJECTED' | 'TIMEOUT',
+      resultMessage,
+      resultPayload,
+    )
+
+    res.status(200).json({
+      success: true,
+      message: 'Command acknowledgment processed',
+      timestamp: new Date().toISOString(),
+    })
+  } catch (error) {
+    logger.error(`Failed to acknowledge command:`, error)
     next(error)
   }
 }

@@ -31,6 +31,7 @@ export const DEFAULT_VENUE_SETTINGS = {
   autoReplyReviews: false,
   notifyBadReviews: true,
   badReviewThreshold: 3,
+  badReviewAlertRoles: ['OWNER', 'ADMIN', 'MANAGER'] as const,
 
   // Inventory
   trackInventory: false,
@@ -117,6 +118,7 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     autoReplyReviews: DEFAULT_VENUE_SETTINGS.autoReplyReviews,
     notifyBadReviews: DEFAULT_VENUE_SETTINGS.notifyBadReviews,
     badReviewThreshold: DEFAULT_VENUE_SETTINGS.badReviewThreshold,
+    badReviewAlertRoles: [...DEFAULT_VENUE_SETTINGS.badReviewAlertRoles],
     trackInventory: DEFAULT_VENUE_SETTINGS.trackInventory,
     lowStockAlert: DEFAULT_VENUE_SETTINGS.lowStockAlert,
     lowStockThreshold: DEFAULT_VENUE_SETTINGS.lowStockThreshold,

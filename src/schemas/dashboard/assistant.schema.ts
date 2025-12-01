@@ -30,6 +30,7 @@ export const assistantQuerySchema = z.object({
     venueSlug: z.string().trim().min(1, 'El identificador del venue no puede estar vacío.').optional(),
     userId: z.string().trim().min(1, 'El identificador del usuario no puede estar vacío.').optional(),
     includeVisualization: z.boolean().optional().default(false),
+    referencesContext: z.string().max(10000, 'El contexto de referencias no puede exceder 10000 caracteres.').optional(),
   }),
 })
 

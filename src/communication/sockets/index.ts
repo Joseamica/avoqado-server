@@ -261,7 +261,7 @@ export function broadcastTpvCommand(
   terminalId: string,
   venueId: string,
   command: {
-    type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS'
+    type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS' | string
     payload?: any
     requestedBy: string
   },
@@ -269,16 +269,28 @@ export function broadcastTpvCommand(
 ): void {
   try {
     if (socketManager.getServer()) {
-      // Broadcast to venue since we don't have room-specific functionality yet
+      const correlationId = require('uuid').v4()
+      const timestamp = new Date().toISOString()
+
+      // Broadcast to venue - structure matches Android SocketManager.kt:732-755
       socketManager.broadcastToVenue(
         venueId,
         'tpv_command' as any,
         {
           terminalId,
+          commandId: correlationId, // Use correlationId as commandId for tracking
+          correlationId,
+          type: command.type, // ← Android expects "type" at root level
+          commandType: command.type, // ← Also include for backwards compatibility
+          payload: command.payload,
+          requiresPin: false,
+          priority: 'NORMAL',
+          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 min expiry
+          requestedBy: command.requestedBy,
+          requestedByName: null,
           venueId,
-          command,
-          correlationId: require('uuid').v4(),
-          timestamp: new Date(),
+          timestamp,
+          metadata: null,
         },
         options,
       )
@@ -291,10 +303,17 @@ export function broadcastTpvCommand(
           terminalId,
           command: command.type,
           requestedBy: command.requestedBy,
-          timestamp: new Date(),
+          timestamp,
         },
         options,
       )
+
+      logger.info(`📡 TPV command broadcast: ${command.type} → ${terminalId}`, {
+        terminalId,
+        venueId,
+        commandType: command.type,
+        correlationId,
+      })
     } else {
       logger.warn('Socket server not initialized for TPV command', {
         terminalId,

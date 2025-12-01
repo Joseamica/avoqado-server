@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
+import { shouldNotifyBadReview, getReviewContext, sendBadReviewNotifications } from '../dashboard/badReviewNotification.service'
 
 /**
  * Interface for review submission from receipt
@@ -96,6 +97,39 @@ export async function submitReceiptReview(reviewData: ReceiptReviewData) {
         servedById: receipt.payment.processedBy?.id, // Link to staff who processed payment
       },
     })
+
+    // Check if we should send bad review notification
+    const { shouldNotify } = await shouldNotifyBadReview(receipt.payment.venue.id, reviewData.overallRating)
+
+    if (shouldNotify) {
+      // Get context for notification (table, order, waiter info)
+      const context = await getReviewContext(receipt.paymentId, receipt.payment.venue.id, review.id)
+
+      if (context) {
+        // Enrich context with review data
+        context.rating = reviewData.overallRating
+        context.comment = reviewData.comment || null
+        context.customerName = reviewData.customerName || null
+        context.customerEmail = reviewData.customerEmail || null
+        context.foodRating = reviewData.foodRating || null
+        context.serviceRating = reviewData.serviceRating || null
+        context.ambienceRating = reviewData.ambienceRating || null
+
+        // Fire and forget - don't block review submission
+        sendBadReviewNotifications(context).catch(err => {
+          logger.error('Background bad review notification failed', {
+            reviewId: review.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+
+        logger.info('Bad review notification triggered', {
+          reviewId: review.id,
+          rating: reviewData.overallRating,
+          venueId: receipt.payment.venue.id,
+        })
+      }
+    }
 
     logger.info('Review submitted successfully from receipt', {
       reviewId: review.id,
