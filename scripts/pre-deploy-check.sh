@@ -33,7 +33,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # 1. ESLint
-echo "📏 Step 1/7: Running ESLint..."
+echo "📏 Step 1/8: Running ESLint..."
 if npm run lint; then
   echo -e "${GREEN}✅ ESLint passed!${NC}"
 else
@@ -43,7 +43,7 @@ fi
 echo ""
 
 # 2. TypeScript compilation check
-echo "🔍 Step 2/7: TypeScript compilation check..."
+echo "🔍 Step 2/8: TypeScript compilation check..."
 if npx tsc --noEmit; then
   echo -e "${GREEN}✅ TypeScript compilation check passed!${NC}"
 else
@@ -53,7 +53,7 @@ fi
 echo ""
 
 # 3. Generate Prisma Client
-echo "🗄️ Step 3/7: Generating Prisma Client..."
+echo "🗄️ Step 3/8: Generating Prisma Client..."
 if npx prisma generate; then
   echo -e "${GREEN}✅ Prisma Client generated!${NC}"
 else
@@ -62,8 +62,18 @@ else
 fi
 echo ""
 
-# 4. Build application
-echo "🏗️ Step 4/7: Building application..."
+# 4. Pre-migration safety check
+echo "🔍 Step 4/8: Pre-migration safety check..."
+if npx ts-node -r tsconfig-paths/register scripts/pre-migration-check.ts; then
+  echo -e "${GREEN}✅ Pre-migration check passed!${NC}"
+else
+  echo -e "${RED}❌ Pre-migration check failed! Fix issues before deploying.${NC}"
+  exit 1
+fi
+echo ""
+
+# 5. Build application
+echo "🏗️ Step 5/8: Building application..."
 if npm run build; then
   echo -e "${GREEN}✅ Build successful!${NC}"
 else
@@ -72,8 +82,8 @@ else
 fi
 echo ""
 
-# 5. Run unit tests
-echo "🧪 Step 5/7: Running unit tests..."
+# 6. Run unit tests
+echo "🧪 Step 6/8: Running unit tests..."
 if npm run test:unit; then
   echo -e "${GREEN}✅ Unit tests passed!${NC}"
 else
@@ -82,8 +92,8 @@ else
 fi
 echo ""
 
-# 6. Run integration tests (optional, requires DATABASE_URL or TEST_DATABASE_URL)
-echo "🏪 Step 6/7: Running integration tests..."
+# 7. Run integration tests (optional, requires DATABASE_URL or TEST_DATABASE_URL)
+echo "🏪 Step 7/8: Running integration tests..."
 # Use TEST_DATABASE_URL if DATABASE_URL is not set
 if [ -z "$DATABASE_URL" ] && [ -n "$TEST_DATABASE_URL" ]; then
   export DATABASE_URL="$TEST_DATABASE_URL"
@@ -103,8 +113,8 @@ else
 fi
 echo ""
 
-# 7. Check for uncommitted changes
-echo "📝 Step 7/7: Checking git status..."
+# 8. Check for uncommitted changes
+echo "📝 Step 8/8: Checking git status..."
 if [[ -n $(git status -s) ]]; then
   echo -e "${YELLOW}⚠️ You have uncommitted changes:${NC}"
   git status -s
