@@ -179,25 +179,11 @@ export class TpvHealthService {
         ipAddress: clientIp,
       })
 
-      // Process any pending commands in the queue for this terminal
-      // This handles the "offline queue" pattern where commands are queued when terminal is offline
-      // and delivered when it comes back online (like MDM push notifications)
-      try {
-        const sentCount = await tpvCommandExecutionService.processOfflineQueue(terminal.id)
-        if (sentCount > 0) {
-          logger.info(`Processed ${sentCount} queued commands for terminal ${terminal.id}`, {
-            terminalId: terminal.id,
-            serialNumber: terminal.serialNumber,
-            venueId: terminal.venueId,
-          })
-        }
-      } catch (commandError) {
-        // Don't fail the heartbeat if command processing fails - log and continue
-        logger.error(`Failed to process offline command queue for terminal ${terminal.id}:`, {
-          error: commandError instanceof Error ? commandError.message : 'Unknown error',
-          terminalId: terminal.id,
-        })
-      }
+      // Note: Command delivery is now handled via the polling pattern in heartbeat.tpv.controller.ts
+      // Commands are returned in the heartbeat HTTP response via getPendingCommands()
+      // This ensures commands reach the terminal even when Socket.IO is not connected (login screen)
+      // The old processOfflineQueue approach (Socket.IO broadcast) was removed as it conflicted
+      // with the polling pattern - it marked commands as SENT before they could be returned in HTTP response
     } catch (error) {
       logger.error(`Failed to process heartbeat for terminal ${terminalId}:`, error)
       throw error
@@ -506,12 +492,14 @@ export class TpvHealthService {
         return []
       }
 
-      // Get pending commands that haven't expired
+      // Get pending/queued commands that haven't expired
+      // Note: Commands are created with status 'QUEUED' when terminal is online,
+      // 'PENDING' when terminal is offline. Both should be delivered via heartbeat.
       const now = new Date()
       const pendingCommands = await prisma.tpvCommandQueue.findMany({
         where: {
           terminalId: terminal.id,
-          status: 'PENDING',
+          status: { in: ['PENDING', 'QUEUED'] },
           OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
         },
         orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
