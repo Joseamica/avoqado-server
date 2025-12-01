@@ -2060,7 +2060,6 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
  */
 function mapPaymentMethodToPOS(method: PaymentMethod): string {
   logger.info('Mapping payment method to POS', { method })
-  logger.info('Pene')
   const paymentMethodMap: Record<PaymentMethod, string> = {
     CASH: 'ACARD', // ✅ CHANGED: Use DEB instead of AEF (tipo=2 CARD) to prevent $0.00 archiving issue
     CREDIT_CARD: 'CRE', // TAR. CREDITO

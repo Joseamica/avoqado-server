@@ -53,19 +53,34 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
 /**
  * Acknowledge command execution from TPV terminal
  * Called by terminal after processing a command received via heartbeat
+ *
+ * **Security: Terminal Ownership Validation**
+ * The terminal must provide its serialNumber (terminalId) in the request.
+ * The service validates that the command belongs to that terminal before processing.
+ * This prevents attackers from spoofing ACKs for commands they don't own.
  */
 export async function acknowledgeCommand(
-  req: Request<{}, {}, { commandId: string; resultStatus: string; resultMessage?: string; resultPayload?: any }>,
+  req: Request<{}, {}, { commandId: string; terminalId: string; resultStatus: string; resultMessage?: string; resultPayload?: any }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { commandId, resultStatus, resultMessage, resultPayload } = req.body
+    const { commandId, terminalId, resultStatus, resultMessage, resultPayload } = req.body
 
+    // Validate required fields
     if (!commandId || !resultStatus) {
       res.status(400).json({
         success: false,
         error: 'commandId and resultStatus are required',
+      })
+      return
+    }
+
+    // Security: Require terminalId to validate ownership
+    if (!terminalId) {
+      res.status(400).json({
+        success: false,
+        error: 'terminalId is required for security validation',
       })
       return
     }
@@ -81,12 +96,15 @@ export async function acknowledgeCommand(
 
     logger.info(`Command ACK received: ${commandId} - ${resultStatus}`, {
       commandId,
+      terminalId,
       resultStatus,
       resultMessage,
     })
 
+    // Service validates terminal ownership before processing
     await tpvHealthService.acknowledgeCommand(
       commandId,
+      terminalId,
       resultStatus as 'SUCCESS' | 'FAILED' | 'REJECTED' | 'TIMEOUT',
       resultMessage,
       resultPayload,

@@ -571,9 +571,21 @@ export class TpvHealthService {
   /**
    * Acknowledge command receipt/execution from terminal
    * Called by terminal after processing a command received via heartbeat
+   *
+   * **Security: Terminal Ownership Validation**
+   * Validates that the terminal sending the ACK actually owns the command.
+   * This prevents attackers from spoofing ACKs for commands they don't own.
+   *
+   * @param commandId - The command to acknowledge
+   * @param terminalSerialNumber - The serial number of the terminal sending the ACK (for ownership validation)
+   * @param resultStatus - The execution result status
+   * @param resultMessage - Optional message describing the result
+   * @param resultPayload - Optional payload with additional result data
+   * @throws BadRequestError if terminal doesn't own the command
    */
   async acknowledgeCommand(
     commandId: string,
+    terminalSerialNumber: string,
     resultStatus: 'SUCCESS' | 'FAILED' | 'REJECTED' | 'TIMEOUT',
     resultMessage?: string,
     resultPayload?: any,
@@ -587,6 +599,18 @@ export class TpvHealthService {
       if (!command) {
         logger.warn(`Command ${commandId} not found for acknowledgment`)
         return
+      }
+
+      // Security: Validate terminal ownership
+      // The terminal sending the ACK must be the one that owns the command
+      const terminalMatches =
+        command.terminal.serialNumber?.toLowerCase() === terminalSerialNumber.toLowerCase() ||
+        command.terminal.serialNumber?.toLowerCase() === terminalSerialNumber.replace(/^AVQD-/i, '').toLowerCase() ||
+        `AVQD-${command.terminal.serialNumber}`.toLowerCase() === terminalSerialNumber.toLowerCase()
+
+      if (!terminalMatches) {
+        logger.warn(`Security: Terminal ${terminalSerialNumber} attempted to ACK command ${commandId} owned by terminal ${command.terminal.serialNumber}`)
+        throw new Error(`Unauthorized: Terminal does not own this command`)
       }
 
       // Map result status to command status
@@ -624,6 +648,7 @@ export class TpvHealthService {
       logger.info(`Command ${commandId} acknowledged: ${resultStatus}`, {
         commandId,
         terminalId: command.terminalId,
+        terminalSerialNumber,
         type: command.commandType,
         resultStatus,
         resultMessage,
