@@ -23,6 +23,8 @@ import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
 import { initializeFirebase } from './config/firebase'
+// Import Stripe feature sync startup
+import { ensureFeaturesAreSyncedToStripe } from './startup/stripe-sync.startup'
 // Import live demo cleanup service (DEMO MODE only)
 import { CronJob } from 'cron'
 import { cleanupExpiredLiveDemos } from './services/cleanup/liveDemoCleanup.service'
@@ -137,6 +139,12 @@ const startApplication = async (retries = 3) => {
       logger.warn('⚠️  Firebase Admin SDK not initialized. File deletion from storage will be skipped.', error)
       // Continue startup even if Firebase is not configured
     }
+
+    // Sync features to Stripe (non-blocking)
+    // Ensures all features have Stripe product/price IDs for subscriptions
+    ensureFeaturesAreSyncedToStripe().catch(err => {
+      logger.warn('⚠️  Stripe feature sync failed during startup:', err)
+    })
 
     // Connect to RabbitMQ in background (non-blocking)
     // If RabbitMQ is unavailable, the app will continue without it
