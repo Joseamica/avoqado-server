@@ -130,8 +130,13 @@ class EmailService {
     }
 
     try {
+      // Format: "Display Name <email>" so recipients see "Avoqado" instead of raw email
+      const fromAddress = process.env.EMAIL_FROM_NAME
+        ? `${process.env.EMAIL_FROM_NAME} <${process.env.SMTP_USER}>`
+        : `Avoqado <${process.env.SMTP_USER}>`
+
       const info = await this.transporter.sendMail({
-        from: process.env.SMTP_USER,
+        from: fromAddress,
         to: options.to,
         subject: options.subject,
         html: options.html,
