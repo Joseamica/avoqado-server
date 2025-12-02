@@ -4,7 +4,7 @@ import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { blumonApiService } from '../../services/blumon/blumonApi.service'
 import type { BlumonEnvironment } from '../../services/blumon/types'
-import { createBlumonService } from '../../services/tpv/blumon.service'
+import { createBlumonTpvService } from '../../services/tpv/blumon-tpv.service'
 import prisma from '@/utils/prismaClient'
 
 /**
@@ -462,12 +462,12 @@ export async function autoFetchBlumonCredentials(req: Request, res: Response, ne
       environment,
     })
 
-    // Create Blumon service for specified environment
-    const blumonService = createBlumonService(environment as 'SANDBOX' | 'PRODUCTION')
+    // Create Blumon TPV service for specified environment
+    const blumonTpvService = createBlumonTpvService(environment as 'SANDBOX' | 'PRODUCTION')
 
     // Auto-fetch credentials from Blumon API
     logger.info('[Blumon Auto-Fetch] Step 1: Fetching credentials from Blumon API...')
-    const merchantInfo = await blumonService.fetchMerchantCredentials(serialNumber, brand, model)
+    const merchantInfo = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
 
     logger.info('[Blumon Auto-Fetch] Step 2: Credentials fetched successfully', {
       posId: merchantInfo.posId,

@@ -64,7 +64,7 @@ This codebase has **TWO separate Blumon integrations** for different use cases. 
 
 - **Blumon Android SDK (TPV/Physical Terminals)**
 - Models: `MerchantAccount` + `Terminal`
-- Service: `src/services/tpv/blumon.service.ts`
+- Service: `src/services/tpv/blumon-tpv.service.ts`
 - Multi-merchant support on one PAX device
 
 ---
@@ -186,7 +186,7 @@ This codebase has **TWO separate Blumon integrations** for different use cases. 
 
    - See: How config is fetched and returned to Android
 
-4. **src/services/tpv/blumon.service.ts** - Blumon OAuth + DUKPT
+4. **src/services/tpv/blumon-tpv.service.ts** - Blumon OAuth + DUKPT
    - See: 3-step credential fetch process
 
 ### Android

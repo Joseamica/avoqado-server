@@ -80,7 +80,7 @@ interface DUKPTKeysResponse {
 // BLUMON SERVICE
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class BlumonService {
+export class BlumonTpvService {
   private tokenServerUrl: string
   private coreServerUrl: string
   private clientId = 'blumon_pay_core_api'
@@ -112,7 +112,7 @@ export class BlumonService {
       },
     })
 
-    logger.info(`[BlumonService] Initialized for ${environment}`, {
+    logger.info(`[BlumonTpvService] Initialized for ${environment}`, {
       tokenServer: this.tokenServerUrl,
       coreServer: this.coreServerUrl,
     })
@@ -164,7 +164,7 @@ export class BlumonService {
       const password = this.calculatePassword(serialNumber, brand, model)
       const authHeader = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64')
 
-      logger.info('[BlumonService] Fetching OAuth token', {
+      logger.info('[BlumonTpvService] Fetching OAuth token', {
         serialNumber,
         brand,
         model,
@@ -187,7 +187,7 @@ export class BlumonService {
       const data = response.data
       const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString()
 
-      logger.info('[BlumonService] OAuth token obtained successfully', {
+      logger.info('[BlumonTpvService] OAuth token obtained successfully', {
         posId: data.userId.toString(),
         expiresIn: data.expires_in,
       })
@@ -199,7 +199,7 @@ export class BlumonService {
         expiresAt,
       }
     } catch (error: any) {
-      logger.error('[BlumonService] OAuth token fetch failed', {
+      logger.error('[BlumonTpvService] OAuth token fetch failed', {
         error: error.response?.data || error.message,
         serialNumber,
       })
@@ -226,7 +226,7 @@ export class BlumonService {
    */
   async getRSAKeys(accessToken: string, posId: string): Promise<{ rsaId: number; rsaKey: string }> {
     try {
-      logger.info('[BlumonService] Fetching RSA keys', { posId })
+      logger.info('[BlumonTpvService] Fetching RSA keys', { posId })
 
       const response = await this.coreClient.post<RSAKeysResponse>(
         '/device/getKey',
@@ -244,14 +244,14 @@ export class BlumonService {
 
       const { rsaId, rsa } = response.data.dataResponse
 
-      logger.info('[BlumonService] RSA keys obtained successfully', {
+      logger.info('[BlumonTpvService] RSA keys obtained successfully', {
         rsaId,
         rsaKeyLength: rsa.length,
       })
 
       return { rsaId, rsaKey: rsa }
     } catch (error: any) {
-      logger.error('[BlumonService] RSA keys fetch failed', {
+      logger.error('[BlumonTpvService] RSA keys fetch failed', {
         error: error.response?.data || error.message,
         posId,
       })
@@ -292,7 +292,7 @@ export class BlumonService {
     keyCheckValue: string
   }> {
     try {
-      logger.info('[BlumonService] Initializing DUKPT keys', { posId })
+      logger.info('[BlumonTpvService] Initializing DUKPT keys', { posId })
 
       const response = await this.coreClient.post<DUKPTKeysResponse>(
         '/device/initDukptKeys',
@@ -310,7 +310,7 @@ export class BlumonService {
       )
 
       if (!response.data.status) {
-        logger.error('[BlumonService] DUKPT API returned status false', {
+        logger.error('[BlumonTpvService] DUKPT API returned status false', {
           fullResponse: response.data,
         })
         throw new Error(`Blumon API returned status: false - ${JSON.stringify(response.data)}`)
@@ -318,7 +318,7 @@ export class BlumonService {
 
       const { ksn, key, keyCrc32, keyCheckValue } = response.data.dataResponse
 
-      logger.info('[BlumonService] DUKPT keys initialized successfully', {
+      logger.info('[BlumonTpvService] DUKPT keys initialized successfully', {
         ksnLength: ksn.length,
         keyLength: key.length,
       })
@@ -330,7 +330,7 @@ export class BlumonService {
         keyCheckValue,
       }
     } catch (error: any) {
-      logger.error('[BlumonService] DUKPT keys initialization failed', {
+      logger.error('[BlumonTpvService] DUKPT keys initialization failed', {
         error: error.response?.data || error.message,
         posId,
       })
@@ -360,7 +360,7 @@ export class BlumonService {
    */
   async fetchMerchantCredentials(serialNumber: string, brand: string, model: string): Promise<BlumonMerchantInfo> {
     try {
-      logger.info('[BlumonService] Starting complete auto-fetch flow', {
+      logger.info('[BlumonTpvService] Starting complete auto-fetch flow', {
         serialNumber,
         brand,
         model,
@@ -380,9 +380,9 @@ export class BlumonService {
         const { ksn, key, keyCrc32, keyCheckValue } = await this.getDUKPTKeys(accessToken, posId, rsaKey)
         dukptData = { ksn, key, keyCrc32, keyCheckValue }
         dukptKeysAvailable = true
-        logger.info('[BlumonService] DUKPT keys fetched successfully')
+        logger.info('[BlumonTpvService] DUKPT keys fetched successfully')
       } catch (error: any) {
-        logger.warn('[BlumonService] DUKPT keys not available (will be initialized on first payment)', {
+        logger.warn('[BlumonTpvService] DUKPT keys not available (will be initialized on first payment)', {
           error: error.message,
           serialNumber,
         })
@@ -403,7 +403,7 @@ export class BlumonService {
         }),
       }
 
-      logger.info('[BlumonService] Auto-fetch completed successfully', {
+      logger.info('[BlumonTpvService] Auto-fetch completed successfully', {
         serialNumber,
         posId,
         dukptKeysAvailable,
@@ -418,7 +418,7 @@ export class BlumonService {
         dukptKeysAvailable,
       }
     } catch (error: any) {
-      logger.error('[BlumonService] Auto-fetch failed', {
+      logger.error('[BlumonTpvService] Auto-fetch failed', {
         error: error.message,
         serialNumber,
       })
@@ -451,10 +451,10 @@ export class BlumonService {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Export singleton instances for both environments
-export const blumonServiceSandbox = new BlumonService('SANDBOX')
-export const blumonServiceProduction = new BlumonService('PRODUCTION')
+export const blumonTpvServiceSandbox = new BlumonTpvService('SANDBOX')
+export const blumonTpvServiceProduction = new BlumonTpvService('PRODUCTION')
 
 // Export factory function for custom environment
-export function createBlumonService(environment: 'SANDBOX' | 'PRODUCTION'): BlumonService {
-  return new BlumonService(environment)
+export function createBlumonTpvService(environment: 'SANDBOX' | 'PRODUCTION'): BlumonTpvService {
+  return new BlumonTpvService(environment)
 }

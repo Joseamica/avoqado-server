@@ -2,7 +2,7 @@
  * Blumon E-commerce Service
  *
  * Handles Blumon Hosted Checkout integration for SDK payments.
- * This is DIFFERENT from the PAX terminal SDK in blumon.service.ts
+ * This is DIFFERENT from the PAX terminal SDK in blumon-tpv.service.ts
  *
  * **Flow:**
  * 1. Client creates checkout session via Avoqado SDK

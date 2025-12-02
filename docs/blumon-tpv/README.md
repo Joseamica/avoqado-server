@@ -123,7 +123,7 @@ Cashier selects merchant before payment → SDK switches credentials → Payment
 
 ### Services
 
-- `src/services/tpv/blumon.service.ts` - Blumon SDK integration
+- `src/services/tpv/blumon-tpv.service.ts` - Blumon SDK integration
 - `src/services/tpv/payment.tpv.service.ts` - Payment processing
 - `src/services/tpv/venue.tpv.service.ts` - Terminal configuration
 

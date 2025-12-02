@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 | **¿Cómo se configura el ambiente?** | **Build variant del APK** (`sandboxRelease` vs `productionRelease`) | **Variable `USE_BLUMON_MOCK`** en backend      |
 | **`USE_BLUMON_MOCK`**               | ❌ **NO APLICA**                                                    | ✅ `true`=mock, `false`=API real               |
 | **Modelo de BD**                    | `MerchantAccount` + `Terminal`                                      | `EcommerceMerchant` + `CheckoutSession`        |
-| **Servicio**                        | `src/services/tpv/blumon.service.ts`                                | `src/services/sdk/blumon-ecommerce.service.ts` |
+| **Servicio**                        | `src/services/tpv/blumon-tpv.service.ts`                            | `src/services/sdk/blumon-ecommerce.service.ts` |
 
 **📖 Documentación completa:** `docs/BLUMON_TWO_INTEGRATIONS.md`
 
@@ -121,10 +121,10 @@ For complex features requiring detailed implementation guides, full documentatio
 
 **Blumon Android SDK** (Physical PAX terminals):
 
-- `docs/blumon-android-sdk/BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide for Android SDK docs (start here)
-- `docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
-- `docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
-- `docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
+- `docs/blumon-tpv/BLUMON_DOCUMENTATION_INDEX.md` - Navigation guide for Android SDK docs (start here)
+- `docs/blumon-tpv/BLUMON_ARCHITECTURE_SUMMARY.txt` - Quick 5-minute overview
+- `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md` - Developer reference while coding
+- `docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md` - Complete technical deep dive
 
 **General Production Readiness**:
 
@@ -894,8 +894,8 @@ psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHear
 | **Model**    | `EcommerceMerchant` + `CheckoutSession`               | `MerchantAccount` + `Terminal`                         |
 | **Auth**     | OAuth 2.0 tokens                                      | Terminal credentials                                   |
 | **Flow**     | Hosted checkout → Webhook                             | Card reader → Real-time                                |
-| **Service**  | `blumon-ecommerce.service.ts`                         | `blumon.service.ts`                                    |
-| **Docs**     | `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | `blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md` |
+| **Service**  | `blumon-ecommerce.service.ts`                         | `blumon-tpv.service.ts`                                |
+| **Docs**     | `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | `blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md`         |
 
 ---
 
@@ -915,37 +915,37 @@ credentials, POS IDs, and cost structures.
 
 **📖 COMPLETE DOCUMENTATION**: When working with Blumon Android SDK, multi-merchants, or payment routing, refer to these files:
 
-1. **docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
+1. **docs/blumon-tpv/BLUMON_ARCHITECTURE_SUMMARY.txt** - Quick 5-minute overview
 
    - Best for: Understanding system at a glance
    - Contains: Serial numbers explained, database hierarchy, payment flow, cost structure
    - Use when: Need quick context before diving into code
 
-2. **docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
+2. **docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md** - Developer reference while coding
 
    - Best for: Finding file locations, field definitions, debugging
    - Contains: Critical file locations (backend + Android), field glossary, common issues
    - Use when: Implementing features, debugging merchant issues, need to find specific code
 
-3. **docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
+3. **docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md** - Complete technical deep dive
 
    - Best for: Full system understanding, explaining to team members
    - Contains: Complete architecture, data flow with code examples, credential management
    - Use when: Need comprehensive understanding, implementing major features
 
-4. **docs/blumon-android-sdk/BLUMON_DOCUMENTATION_INDEX.md** - Navigation guide
+4. **docs/blumon-tpv/BLUMON_DOCUMENTATION_INDEX.md** - Navigation guide
    - Best for: Finding specific information quickly
    - Contains: Document comparison, quick navigation, topic-based lookup
    - Use when: Don't know which document to read
 
 **Quick Topic Lookup**:
 
-- MerchantAccount model → See docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md (Critical File Locations)
-- Credential switching → See docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 4)
-- Payment routing → See docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 5)
-- Cost structure per merchant → See docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 6)
-- Real restaurant example → See docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 9)
-- Common debugging → See docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md (Common Issues & Solutions)
+- MerchantAccount model → See docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md (Critical File Locations)
+- Credential switching → See docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 4)
+- Payment routing → See docs/blumon-tpv/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 5)
+- Cost structure per merchant → See docs/blumon-tpv/BLUMON_ARCHITECTURE_SUMMARY.txt (Section 6)
+- Real restaurant example → See docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md (Section 9)
+- Common debugging → See docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md (Common Issues & Solutions)
 
 **Key Architecture**:
 
@@ -979,7 +979,7 @@ One Physical Terminal (e.g., PAX A910S)
 **Key Files**:
 
 - MerchantAccount model: `prisma/schema.prisma:1958`
-- Blumon service: `src/services/tpv/blumon.service.ts`
+- Blumon service: `src/services/tpv/blumon-tpv.service.ts`
 - Terminal config endpoint: `src/controllers/tpv/terminal.tpv.controller.ts:83`
 - Cost structure: `prisma/schema.prisma:2116` (ProviderCostStructure)
 

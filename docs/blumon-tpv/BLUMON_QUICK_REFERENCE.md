@@ -16,7 +16,7 @@ each to a different Momentum API account.**
 | `/prisma/schema.prisma:1958`                             | MerchantAccount model       | `blumonSerialNumber`, `blumonPosId`, `blumonEnvironment`, `credentialsEncrypted` |
 | `/prisma/schema.prisma:2116`                             | ProviderCostStructure model | **Costs per MerchantAccount** (not per Terminal)                                 |
 | `/src/controllers/tpv/terminal.tpv.controller.ts:83`     | Terminal config endpoint    | Returns all merchants assigned to terminal                                       |
-| `/src/services/tpv/blumon.service.ts:1`                  | Blumon OAuth + DUKPT        | 3-step credential fetch (OAuth → RSA → DUKPT)                                    |
+| `/src/services/tpv/blumon-tpv.service.ts:1`              | Blumon OAuth + DUKPT        | 3-step credential fetch (OAuth → RSA → DUKPT)                                    |
 | `/src/services/superadmin/merchantAccount.service.ts:70` | Merchant account creation   | Handles multi-merchant setup                                                     |
 
 ---
@@ -127,9 +127,9 @@ viewModel.selectMerchant(merchantB)
 ```
 MultiMerchantSDKManager.switchMerchant(merchantB)
     ├─ Decrypt merchant B credentials
-    ├─ Call BlumonService.getAccessToken(serial="2841548418")
-    ├─ Call BlumonService.getRSAKeys(posId="378")
-    ├─ Call BlumonService.getDUKPTKeys(serial="2841548418")
+    ├─ Call BlumonTpvService.getAccessToken(serial="2841548418")
+    ├─ Call BlumonTpvService.getRSAKeys(posId="378")
+    ├─ Call BlumonTpvService.getDUKPTKeys(serial="2841548418")
     └─ SDK ready for payment
 ```
 
@@ -326,7 +326,7 @@ const oauth = await blumonService.getAccessToken(
 
 ### Reference (If Debugging)
 
-- `blumon.service.ts` → OAuth + DUKPT logic
+- `blumon-tpv.service.ts` → OAuth + DUKPT logic
 - `merchantAccount.service.ts` → Backend merchant creation
 - `MerchantSelectionContent.kt` → UI component
 

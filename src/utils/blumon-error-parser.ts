@@ -184,7 +184,7 @@ const ERROR_MESSAGES: Record<string, FriendlyError> = {
  * @example
  * ```typescript
  * try {
- *   await blumonService.tokenizeCard(...)
+ *   await blumonTpvService.tokenizeCard(...)
  * } catch (error) {
  *   const friendlyError = parseBlumonError(error)
  *   return res.status(400).json({

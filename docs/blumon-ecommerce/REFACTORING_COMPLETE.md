@@ -332,7 +332,7 @@ Frontend shows result immediately (no redirect, no polling)
 
 - `socketManager.ts:171` - unused var (pre-existing)
 - `googleOAuth.service.ts:366` - unused var (pre-existing)
-- `blumon.service.ts:441` - unused arg (pre-existing)
+- `blumon-tpv.service.ts:441` - unused arg (pre-existing)
 - Test files - unused vars (pre-existing)
 
 ---

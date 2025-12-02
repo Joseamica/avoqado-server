@@ -23,7 +23,7 @@ This directory contains all documentation for integrating **Blumon E-commerce Ho
 - You need **in-person payments** at a restaurant
 - You have a **PAX Android terminal**
 - Payment happens via **card reader** (tap/swipe/chip)
-- → **Go to `../blumon-android-sdk/` instead!**
+- → **Go to `../blumon-tpv/` instead!**
 
 ---
 
@@ -77,7 +77,7 @@ This directory contains all documentation for integrating **Blumon E-commerce Ho
 ## 🗺️ Related Documentation
 
 - **Master Distinction Guide**: `../BLUMON_TWO_INTEGRATIONS.md` - Complete comparison
-- **Android SDK Documentation**: `../blumon-android-sdk/` - In-person payments
+- **Android SDK Documentation**: `../blumon-tpv/` - In-person payments
 - **Merchant Models Explained**: `../MERCHANT_MODELS_ARCHITECTURE.md` - Why two models exist
 
 ---

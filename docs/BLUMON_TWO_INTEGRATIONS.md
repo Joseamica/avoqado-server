@@ -4,17 +4,17 @@
 
 This codebase has **TWO completely different Blumon integrations** that serve different purposes. **DO NOT confuse them!**
 
-| Aspect             | Blumon E-commerce Integration                              | Blumon Android SDK (TPV)                                    |
-| ------------------ | ---------------------------------------------------------- | ----------------------------------------------------------- |
-| **Use Case**       | Online payments (web checkout)                             | In-person payments (physical terminal)                      |
-| **Platform**       | Web browsers, mobile web                                   | Android TPV app (PAX terminals)                             |
-| **Model**          | `EcommerceMerchant` + `CheckoutSession`                    | `MerchantAccount` + `Terminal`                              |
-| **Payment Flow**   | Hosted checkout page → Webhook                             | Direct card swipe/tap → Real-time response                  |
-| **Authentication** | OAuth 2.0 access tokens                                    | Terminal credentials (POS ID + Serial)                      |
-| **Card Data**      | Customer enters on Blumon page (PCI-compliant)             | Card reader on PAX terminal (hardware)                      |
-| **Service File**   | `src/services/sdk/blumon-ecommerce.service.ts`             | `src/services/tpv/blumon.service.ts`                        |
-| **API Base URL**   | `https://sandbox-ecommerce.blumonpay.net`                  | `https://api-sbx.blumonpay.net`                             |
-| **Documentation**  | `docs/blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | `docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md` |
+| Aspect             | Blumon E-commerce Integration                              | Blumon Android SDK (TPV)                            |
+| ------------------ | ---------------------------------------------------------- | --------------------------------------------------- |
+| **Use Case**       | Online payments (web checkout)                             | In-person payments (physical terminal)              |
+| **Platform**       | Web browsers, mobile web                                   | Android TPV app (PAX terminals)                     |
+| **Model**          | `EcommerceMerchant` + `CheckoutSession`                    | `MerchantAccount` + `Terminal`                      |
+| **Payment Flow**   | Hosted checkout page → Webhook                             | Direct card swipe/tap → Real-time response          |
+| **Authentication** | OAuth 2.0 access tokens                                    | Terminal credentials (POS ID + Serial)              |
+| **Card Data**      | Customer enters on Blumon page (PCI-compliant)             | Card reader on PAX terminal (hardware)              |
+| **Service File**   | `src/services/sdk/blumon-ecommerce.service.ts`             | `src/services/tpv/blumon-tpv.service.ts`            |
+| **API Base URL**   | `https://sandbox-ecommerce.blumonpay.net`                  | `https://api-sbx.blumonpay.net`                     |
+| **Documentation**  | `docs/blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | `docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md` |
 
 ---
 
@@ -248,7 +248,7 @@ model Terminal {
 
 | File                                             | Purpose                                         |
 | ------------------------------------------------ | ----------------------------------------------- |
-| `src/services/tpv/blumon.service.ts`             | Blumon Android SDK API client (NOT e-commerce!) |
+| `src/services/tpv/blumon-tpv.service.ts`         | Blumon Android SDK API client (NOT e-commerce!) |
 | `src/services/tpv/payment.tpv.service.ts`        | TPV payment processing                          |
 | `src/services/tpv/venue.tpv.service.ts`          | Terminal configuration for Android              |
 | `src/controllers/tpv/payment.tpv.controller.ts`  | TPV payment endpoints                           |
@@ -290,10 +290,10 @@ Body: {
 
 ### Documentation
 
-- **Multi-Merchant Architecture**: `docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md`
-- **Quick Reference**: `docs/blumon-android-sdk/BLUMON_QUICK_REFERENCE.md`
-- **Architecture Summary**: `docs/blumon-android-sdk/BLUMON_ARCHITECTURE_SUMMARY.txt`
-- **Documentation Index**: `docs/blumon-android-sdk/BLUMON_DOCUMENTATION_INDEX.md`
+- **Multi-Merchant Architecture**: `docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md`
+- **Quick Reference**: `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`
+- **Architecture Summary**: `docs/blumon-tpv/BLUMON_ARCHITECTURE_SUMMARY.txt`
+- **Documentation Index**: `docs/blumon-tpv/BLUMON_DOCUMENTATION_INDEX.md`
 - **Payment Architecture**: `docs/PAYMENT_ARCHITECTURE.md`
 - **Merchant Models**: `docs/MERCHANT_MODELS_ARCHITECTURE.md`
 
@@ -383,7 +383,7 @@ src/
 │   │   └── checkout-session.service.ts
 │   │
 │   └── tpv/                          # ANDROID SDK INTEGRATION
-│       ├── blumon.service.ts         # ← Android SDK client
+│       ├── blumon-tpv.service.ts      # ← Android SDK client
 │       ├── payment.tpv.service.ts
 │       └── venue.tpv.service.ts
 │
@@ -436,7 +436,7 @@ USE_BLUMON_MOCK=true
 
 | ❌ WRONG                                                | ✅ CORRECT                                |
 | ------------------------------------------------------- | ----------------------------------------- |
-| Using `blumon-ecommerce.service.ts` in TPV payment flow | Use `blumon.service.ts` for TPV           |
+| Using `blumon-ecommerce.service.ts` in TPV payment flow | Use `blumon-tpv.service.ts` for TPV       |
 | Using `MerchantAccount` for e-commerce merchants        | Use `EcommerceMerchant` for e-commerce    |
 | Expecting webhooks from Android SDK                     | Android SDK returns synchronous responses |
 | Using OAuth tokens for Android SDK                      | Android SDK uses POS credentials          |
@@ -450,8 +450,8 @@ USE_BLUMON_MOCK=true
 **Need e-commerce/web payments?** → Read: `docs/blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` → Use: `EcommerceMerchant` +
 `CheckoutSession` → Service: `src/services/sdk/blumon-ecommerce.service.ts`
 
-**Need in-person/terminal payments?** → Read: `docs/blumon-android-sdk/BLUMON_MULTI_MERCHANT_ANALYSIS.md` → Use: `MerchantAccount` +
-`Terminal` → Service: `src/services/tpv/blumon.service.ts`
+**Need in-person/terminal payments?** → Read: `docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md` → Use: `MerchantAccount` + `Terminal` →
+Service: `src/services/tpv/blumon-tpv.service.ts`
 
 ---
 

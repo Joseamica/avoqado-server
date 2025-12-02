@@ -367,7 +367,7 @@ MerchantAccount B:
 
 ### OAuth Flow (Per Merchant)
 
-**Blumon Service** (`blumon.service.ts`) - 3-step process:
+**Blumon Service** (`blumon-tpv.service.ts`) - 3-step process:
 
 ```typescript
 // Step 1: Get OAuth Token

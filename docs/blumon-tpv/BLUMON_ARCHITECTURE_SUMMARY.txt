@@ -75,9 +75,9 @@ STEP 2: User Selects Merchant
 STEP 3: SDK Reinitializes (3-5 seconds)
    MultiMerchantSDKManager:
    ├─ Decrypts merchant B credentials
-   ├─ Calls: BlumonService.getAccessToken(serial="2841548418")
-   ├─ Calls: BlumonService.getRSAKeys(posId="378")
-   ├─ Calls: BlumonService.getDUKPTKeys(serial="2841548418")
+   ├─ Calls: BlumonTpvService.getAccessToken(serial="2841548418")
+   ├─ Calls: BlumonTpvService.getRSAKeys(posId="378")
+   ├─ Calls: BlumonTpvService.getDUKPTKeys(serial="2841548418")
    └─ SDK context updated for merchant B
 
 STEP 4: Card Processing
@@ -162,7 +162,7 @@ BACKEND:
   /prisma/schema.prisma:1958           → MerchantAccount model
   /prisma/schema.prisma:2116           → ProviderCostStructure model
   /src/controllers/tpv/terminal.tpv.controller.ts   → Config endpoint
-  /src/services/tpv/blumon.service.ts  → OAuth + DUKPT fetch
+  /src/services/tpv/blumon-tpv.service.ts  → OAuth + DUKPT fetch
 
 ANDROID:
   /features/payment/domain/model/MerchantAccount.kt  → Domain model

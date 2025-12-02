@@ -736,7 +736,7 @@ Each would require separate KYC submission to Blumon.
 | **Auth**        | OAuth 2.0 (username/password)           | Terminal credentials                |
 | **Credentials** | `blumonUsername`, `blumonPassword`      | `blumonPosId`, `blumonSerialNumber` |
 | **Flow**        | Tokenize → Authorize (synchronous)      | Card reader → Real-time             |
-| **Service**     | `blumon-ecommerce.service.ts`           | `blumon.service.ts`                 |
+| **Service**     | `blumon-ecommerce.service.ts`           | `blumon-tpv.service.ts`             |
 
 **⚠️ CRITICAL**: Never use Android SDK credentials for e-commerce or vice versa!
 

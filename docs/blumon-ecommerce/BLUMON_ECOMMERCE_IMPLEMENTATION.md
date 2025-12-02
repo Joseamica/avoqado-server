@@ -43,7 +43,7 @@ Before reading further, confirm you need **Blumon E-commerce Integration**:
    - Models: `MerchantAccount` + `Terminal`
    - Authentication: Terminal credentials (POS ID + Serial)
    - API: `https://api-sbx.blumonpay.net`
-   - Service: `src/services/tpv/blumon.service.ts`
+   - Service: `src/services/tpv/blumon-tpv.service.ts`
 
 **DO NOT confuse these two integrations!** They use:
 

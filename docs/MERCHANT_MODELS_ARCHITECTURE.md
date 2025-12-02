@@ -38,7 +38,7 @@ After analyzing the codebase, we discovered that **Blumon offers TWO completely 
 
 ### **Product #1: PAX Terminal SDK** (for MerchantAccount)
 
-**Location**: `src/services/tpv/blumon.service.ts`
+**Location**: `src/services/tpv/blumon-tpv.service.ts`
 
 **API URLs**:
 

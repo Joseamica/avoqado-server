@@ -2117,7 +2117,22 @@ router.post(
   venueController.uploadVenueDocument,
 )
 
-// Venue KYC Resubmission (after rejection)
+// Venue KYC - Upload single document (auto-save)
+router.put(
+  '/venues/:venueId/kyc/document/:documentKey',
+  authenticateTokenMiddleware,
+  documentUpload.single('file'),
+  venueKycController.uploadSingleKycDocument,
+)
+
+// Venue KYC - Submit for review
+router.post(
+  '/venues/:venueId/kyc/submit',
+  authenticateTokenMiddleware,
+  venueKycController.submitKycForReview,
+)
+
+// Venue KYC Resubmission (after rejection) - LEGACY: kept for backwards compatibility
 router.post(
   '/venues/:venueId/kyc/resubmit',
   authenticateTokenMiddleware,
