@@ -304,7 +304,9 @@ model Staff {
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Authentication
-  email    String  @unique
+  // NOTE: email is GLOBALLY UNIQUE (industry standard: Stripe, Shopify, Toast)
+  // One person = one Staff account, can be member of multiple orgs via StaffVenue
+  email    String   @unique
   password String? // Null for PIN-only users or OAuth users
   googleId String? @unique // Google OAuth ID
   // pin      String? // ❌ REMOVER - Se mueve a StaffVenue
@@ -375,6 +377,7 @@ model Staff {
   resetTokenUsedAt  DateTime?
   lastPasswordReset DateTime?
 
+  // Email is now @unique on the field itself (globally unique)
   @@index([email])
   // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
   @@index([organizationId])
