@@ -81,6 +81,7 @@ const envSchema = z.object({
     .default('true'),
   BLUMON_MASTER_USERNAME: z.string().optional(),
   BLUMON_MASTER_PASSWORD: z.string().optional(),
+  BLUMON_KYC_EMAILS: z.string().optional(), // Comma-separated emails for KYC document delivery
 
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string().optional(),

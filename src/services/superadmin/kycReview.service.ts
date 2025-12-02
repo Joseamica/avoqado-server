@@ -11,7 +11,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import * as notificationService from '@/services/dashboard/notification.service'
-import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
+import { sendKycDocumentsToBlumon } from '@/services/resend.service'
 
 /**
  * Get all venues pending KYC review
@@ -116,6 +116,108 @@ export async function getVenueKycDetails(venueId: string) {
 }
 
 /**
+ * Send KYC documents to Blumon after approval
+ *
+ * This is a fire-and-forget operation - failure does not block the approval.
+ * Collects all venue, owner, and document info and sends to configured Blumon emails.
+ *
+ * @param venueId - Venue ID that was approved
+ * @param approvedById - Staff ID who approved the KYC
+ */
+async function sendKycToBlumonAfterApproval(venueId: string, approvedById: string): Promise<void> {
+  try {
+    // Get complete venue data with all relationships
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      include: {
+        organization: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
+    })
+
+    if (!venue) {
+      logger.warn(`Cannot send KYC to Blumon: Venue ${venueId} not found`)
+      return
+    }
+
+    // Get venue owner (Staff user with OWNER role)
+    const ownerAssignment = await prisma.staffVenue.findFirst({
+      where: {
+        venueId,
+        role: 'OWNER',
+        active: true,
+      },
+      include: {
+        staff: {
+          select: {
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
+    })
+
+    // Get onboarding progress to retrieve CLABE from step7_paymentInfo
+    const onboarding = await prisma.onboardingProgress.findUnique({
+      where: { organizationId: venue.organizationId },
+    })
+
+    // Extract payment info from onboarding (temporary storage)
+    const paymentInfo = onboarding?.step7_paymentInfo as any
+
+    // Get approver name
+    const approver = await prisma.staff.findUnique({
+      where: { id: approvedById },
+      select: { firstName: true, lastName: true, email: true },
+    })
+
+    const approverName = approver ? `${approver.firstName || ''} ${approver.lastName || ''}`.trim() || approver.email : approvedById
+
+    // Send to Blumon
+    const success = await sendKycDocumentsToBlumon({
+      venueName: venue.name,
+      venueId: venue.id,
+      venueSlug: venue.slug,
+      entityType: venue.entityType as 'PERSONA_FISICA' | 'PERSONA_MORAL' | null,
+      rfc: venue.rfc,
+      clabe: paymentInfo?.clabe || null,
+      bankName: paymentInfo?.bankName || null,
+      accountHolder: paymentInfo?.accountHolder || null,
+      ownerName: ownerAssignment
+        ? `${ownerAssignment.staff.firstName || ''} ${ownerAssignment.staff.lastName || ''}`.trim() || 'No name'
+        : 'No owner assigned',
+      ownerEmail: ownerAssignment?.staff.email || 'No email',
+      ownerPhone: ownerAssignment?.staff.phone || null,
+      documents: {
+        ineUrl: venue.idDocumentUrl,
+        rfcDocumentUrl: venue.rfcDocumentUrl,
+        comprobanteDomicilioUrl: venue.comprobanteDomicilioUrl,
+        caratulaBancariaUrl: venue.caratulaBancariaUrl,
+        actaConstitutivaUrl: venue.actaDocumentUrl,
+        poderLegalUrl: venue.poderLegalUrl,
+      },
+      approvedBy: approverName,
+      approvalDate: new Date(),
+    })
+
+    if (success) {
+      logger.info(`📧 KYC documents sent to Blumon for venue ${venueId}`)
+    } else {
+      logger.warn(`⚠️ KYC documents NOT sent to Blumon for venue ${venueId} (check BLUMON_KYC_EMAILS config)`)
+    }
+  } catch (error) {
+    // Log error but don't throw - this should not block KYC approval
+    logger.error(`Failed to send KYC documents to Blumon for venue ${venueId}:`, error)
+  }
+}
+
+/**
  * Simple KYC approval without processor assignment
  *
  * This is a simplified approval that just marks the venue as VERIFIED
@@ -146,15 +248,8 @@ export async function approveKyc(venueId: string, superadminId: string) {
 
   logger.info(`✅ Approving KYC for venue ${venueId} by superadmin ${superadminId}`)
 
-  // Clean demo data before converting to real venue
-  // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
-  try {
-    const cleanupResult = await cleanDemoData(venueId)
-    logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
-  } catch (cleanupError) {
-    logger.error(`⚠️ Demo cleanup failed for venue ${venueId}, continuing with approval:`, cleanupError)
-    // Don't block approval if cleanup fails - venue can still operate
-  }
+  // Note: Demo data cleanup is now done in convertDemoVenue (when user submits KYC docs)
+  // We don't clean here because user might have added real data while waiting for approval
 
   // Update venue status to VERIFIED
   const updatedVenue = await prisma.venue.update({
@@ -170,6 +265,11 @@ export async function approveKyc(venueId: string, superadminId: string) {
 
   // Send notification to venue owner
   await notifyVenueOwnerKycApproved(venueId, venue.name)
+
+  // Send KYC documents to Blumon (fire-and-forget, doesn't block approval)
+  sendKycToBlumonAfterApproval(venueId, superadminId).catch(() => {
+    // Error already logged inside the function
+  })
 
   return updatedVenue
 }
@@ -247,15 +347,8 @@ export async function assignProcessorAndApproveKyc(
     superadminId,
   })
 
-  // Clean demo data before converting to real venue
-  // This removes demo orders, payments, reviews, merchant accounts, etc.
-  try {
-    const cleanupResult = await cleanDemoData(venueId)
-    logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
-  } catch (cleanupError) {
-    logger.error(`⚠️ Demo cleanup failed for venue ${venueId}, continuing with approval:`, cleanupError)
-    // Don't block approval if cleanup fails - venue can still operate
-  }
+  // Note: Demo data cleanup is now done in convertDemoVenue (when user submits KYC docs)
+  // We don't clean here because user might have added real data while waiting for approval
 
   // Use transaction to ensure atomicity
   const result = await prisma.$transaction(async tx => {
@@ -342,6 +435,11 @@ export async function assignProcessorAndApproveKyc(
 
   // Notify venue owner about KYC approval
   await notifyVenueOwnerKycApproved(venueId, venue.name)
+
+  // Send KYC documents to Blumon (fire-and-forget, doesn't block approval)
+  sendKycToBlumonAfterApproval(venueId, superadminId).catch(() => {
+    // Error already logged inside the function
+  })
 
   return result
 }

@@ -304,7 +304,9 @@ model Staff {
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Authentication
-  email    String  @unique
+  // NOTE: email is GLOBALLY UNIQUE (industry standard: Stripe, Shopify, Toast)
+  // One person = one Staff account, can be member of multiple orgs via StaffVenue
+  email    String   @unique
   password String? // Null for PIN-only users or OAuth users
   googleId String? @unique // Google OAuth ID
   // pin      String? // ❌ REMOVER - Se mueve a StaffVenue
@@ -375,6 +377,7 @@ model Staff {
   resetTokenUsedAt  DateTime?
   lastPasswordReset DateTime?
 
+  // Email is now @unique on the field itself (globally unique)
   @@index([email])
   // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
   @@index([organizationId])
@@ -625,6 +628,9 @@ model MenuCategory {
   syncStatus   SyncStatus   @default(NOT_REQUIRED)
   lastSyncAt   DateTime?
 
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -659,6 +665,9 @@ model Menu {
 
   // Relations
   categories MenuCategoryAssignment[]
+
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -750,6 +759,9 @@ model Product {
   recipe         Recipe? // ✅ NEW: Recipe composition
   pricingPolicy  PricingPolicy? // ✅ NEW: Pricing strategy
 
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -777,6 +789,9 @@ model Inventory {
   lastCountedAt   DateTime?
 
   movements InventoryMovement[]
+
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
 
   updatedAt DateTime @updatedAt
 
@@ -854,6 +869,9 @@ model RawMaterial {
   batches            StockBatch[] // FIFO batch tracking
   modifiers          Modifier[] // Modifiers linked to this raw material for inventory tracking
 
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -880,6 +898,9 @@ model Recipe {
 
   // Relations
   lines RecipeLine[] // Individual ingredients
+
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
 
   updatedAt DateTime @updatedAt
 
@@ -908,6 +929,9 @@ model RecipeLine {
   isVariable              Boolean        @default(false)
   linkedModifierGroupId   String?        // The modifier group that can substitute this ingredient
   linkedModifierGroup     ModifierGroup? @relation(fields: [linkedModifierGroupId], references: [id])
+
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1262,6 +1286,9 @@ model Area {
   tables        Table[] // Un área tiene muchas mesas
   floorElements FloorElement[] // Elementos decorativos del área (paredes, barras, etc.)
 
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1301,6 +1328,9 @@ model Table {
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
   externalId   String?
+
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -1625,6 +1655,9 @@ model ModifierGroup {
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
 
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1652,6 +1685,9 @@ model Modifier {
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
   active       Boolean      @default(true)
+
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
 
   orderItems OrderItemModifier[]
 
@@ -3043,6 +3079,9 @@ model CustomerGroup {
 
   active Boolean @default(true)
 
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3071,6 +3110,9 @@ model LoyaltyConfig {
   pointsExpireDays Int? // Points expire after X days (null = never expire)
 
   active Boolean @default(true)
+
+  // Demo data flag (for cleanup on conversion)
+  isDemo Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3469,13 +3511,57 @@ enum PaymentSource {
   OTHER
 }
 
+/// Business type enum - expanded to support multiple business verticals
+/// Category is derived in code via getBusinessCategory() helper function
+/// See: src/utils/businessCategory.ts
 enum BusinessType {
-  RESTAURANT
-  RETAIL
-  HOTEL
-  FITNESS
-  SPA
-  OTHER
+  // === FOOD_SERVICE Category ===
+  RESTAURANT           // Full-service restaurant
+  BAR                  // Bar, pub, cantina
+  CAFE                 // Coffee shop, cafetería
+  BAKERY               // Panadería, pastelería
+  FOOD_TRUCK           // Food truck, puesto móvil
+  FAST_FOOD            // Quick service restaurant
+  CATERING             // Catering service
+  CLOUD_KITCHEN        // Virtual kitchen, delivery only
+
+  // === RETAIL Category ===
+  RETAIL_STORE         // General retail store
+  JEWELRY              // Joyería
+  CLOTHING             // Tienda de ropa, boutique
+  ELECTRONICS          // Electrónica, celulares
+  PHARMACY             // Farmacia
+  CONVENIENCE_STORE    // Tienda de conveniencia, OXXO-style
+  SUPERMARKET          // Supermercado, grocery
+  LIQUOR_STORE         // Licorería, vinatería
+  FURNITURE            // Mueblería
+  HARDWARE             // Ferretería
+  BOOKSTORE            // Librería
+  PET_STORE            // Tienda de mascotas
+
+  // === SERVICES Category ===
+  SALON                // Hair salon, barbería
+  SPA                  // Spa, wellness center
+  FITNESS              // Gym, fitness studio
+  CLINIC               // Clínica médica, dental
+  VETERINARY           // Veterinaria
+  AUTO_SERVICE         // Taller mecánico, autolavado
+  LAUNDRY              // Lavandería, tintorería
+  REPAIR_SHOP          // Reparación general
+
+  // === HOSPITALITY Category ===
+  HOTEL                // Hotel
+  HOSTEL               // Hostel
+  RESORT               // Resort, vacation property
+
+  // === ENTERTAINMENT Category ===
+  CINEMA               // Cine
+  ARCADE               // Arcade, game center
+  EVENT_VENUE          // Salón de eventos
+  NIGHTCLUB            // Antro, club nocturno
+  BOWLING              // Boliche
+
+  OTHER                // Catch-all for unlisted types
 }
 
 enum EntityType {
@@ -3491,16 +3577,59 @@ enum VerificationStatus {
   REJECTED // KYC rejected, needs resubmission
 }
 
+/// Venue type enum - mirrors BusinessType for backwards compatibility
+/// Both enums should stay in sync
 enum VenueType {
+  // === FOOD_SERVICE Category ===
   RESTAURANT
   BAR
   CAFE
-  FAST_FOOD
+  BAKERY
   FOOD_TRUCK
+  FAST_FOOD
+  CATERING
+  CLOUD_KITCHEN
+
+  // === RETAIL Category ===
   RETAIL_STORE
+  JEWELRY
+  CLOTHING
+  ELECTRONICS
+  PHARMACY
+  CONVENIENCE_STORE
+  SUPERMARKET
+  LIQUOR_STORE
+  FURNITURE
+  HARDWARE
+  BOOKSTORE
+  PET_STORE
+
+  // === SERVICES Category ===
+  SALON
+  SPA
+  FITNESS
+  CLINIC
+  VETERINARY
+  AUTO_SERVICE
+  LAUNDRY
+  REPAIR_SHOP
+
+  // === HOSPITALITY Category ===
+  HOTEL
+  HOSTEL
+  RESORT
+
+  // === ENTERTAINMENT Category ===
+  CINEMA
+  ARCADE
+  EVENT_VENUE
+  NIGHTCLUB
+  BOWLING
+
+  // === LEGACY (kept for backwards compatibility) ===
   HOTEL_RESTAURANT
   FITNESS_STUDIO
-  SPA
+
   OTHER
 }
 

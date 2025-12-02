@@ -255,6 +255,29 @@ npm run dev
 # 3. Test feature works with seeded data
 ```
 
+### Demo Data Cleanup with `isDemo` Field
+
+**WHY**: When users convert from demo to real venue (after KYC approval), they may have added their own business data during the trial. We
+need to preserve user-created data while removing demo seed data.
+
+**Design Decision**: All demo-seeded business setup data is marked with `isDemo: true`. During cleanup (`cleanDemoData()`), only records
+with `isDemo: true` are deleted, preserving user-created data.
+
+**Models with `isDemo` field**: `Product`, `MenuCategory`, `Menu`, `RawMaterial`, `ModifierGroup`, `Modifier`, `Recipe`, `RecipeLine`,
+`Table`, `Area`, `LoyaltyConfig`, `CustomerGroup`, `Inventory`
+
+**Key Files**:
+
+- Schema: `prisma/schema.prisma` - `isDemo Boolean @default(false)` on 13 models
+- Seed: `src/services/onboarding/demoSeed.service.ts` - All creates include `isDemo: true`
+- Cleanup: `src/services/onboarding/demoCleanup.service.ts` - Filters by `isDemo: true` for business setup data
+
+**Behavior**:
+
+- **Demo data** (`isDemo: true`): Created by seed, deleted during conversion
+- **User data** (`isDemo: false`): Created by user, preserved during conversion (stock reset to 0)
+- **Transactional data** (orders, payments, reviews): Always deleted regardless of `isDemo` flag
+
 ### Testing
 
 - `npm test` - Run all tests with Jest

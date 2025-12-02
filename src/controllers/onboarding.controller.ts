@@ -13,6 +13,7 @@ import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
 import logger from '../config/logger'
 import { BadRequestError, NotFoundError } from '../errors/AppError'
+import prisma from '../utils/prismaClient'
 
 /**
  * POST /api/v1/onboarding/signup
@@ -510,6 +511,29 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
 
     if (!progress.step3_businessInfo) {
       throw new BadRequestError('Step 3 (Business Info) must be completed')
+    }
+
+    // Check if onboarding already completed (prevent duplicate venue creation)
+    if (progress.completedAt) {
+      // Find existing venue for this organization
+      const existingVenue = await prisma.venue.findFirst({
+        where: { organizationId },
+        select: { id: true, slug: true, name: true, isOnboardingDemo: true },
+      })
+
+      if (existingVenue) {
+        logger.info(`⚠️ Onboarding already completed for organization ${organizationId}, returning existing venue ${existingVenue.id}`)
+        res.status(200).json({
+          message: 'Onboarding already completed',
+          venue: existingVenue,
+          summary: {
+            categoriesCreated: 0,
+            productsCreated: 0,
+            demoDataSeeded: false,
+          },
+        })
+        return
+      }
     }
 
     // Log payment method and features before creating venue

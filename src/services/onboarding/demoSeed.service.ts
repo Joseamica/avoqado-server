@@ -233,6 +233,7 @@ async function seedMenu(venueId: string) {
       isDefault: true,
       active: true,
       displayOrder: 1,
+      isDemo: true, // Mark as demo data for cleanup
     },
   })
 
@@ -292,6 +293,7 @@ async function seedMenuCategories(venueId: string) {
         venueId,
         ...category,
         active: true,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
     createdCategories.push(createdCategory)
@@ -436,6 +438,7 @@ async function seedProducts(venueId: string, categories: Array<{ id: string; slu
         price: product.price,
         type: product.type as any,
         active: true,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
     createdProducts.push(createdProduct)
@@ -475,6 +478,7 @@ async function seedProductInventory(venueId: string, products: Array<{ id: strin
         minimumStock: invProduct.minimumStock,
         maximumStock: invProduct.maximumStock,
         reservedStock: 0,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -513,6 +517,7 @@ async function seedModifierGroups(venueId: string, products: Array<{ id: string;
       minSelections: 0,
       maxSelections: 1,
       active: true,
+      isDemo: true, // Mark as demo data for cleanup
     },
   })
 
@@ -544,6 +549,7 @@ async function seedModifierGroups(venueId: string, products: Array<{ id: string;
         groupId: milkGroup.id,
         name: modifier.name,
         price: modifier.price,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
   }
@@ -804,6 +810,7 @@ async function seedRawMaterials(venueId: string) {
       data: {
         venueId,
         ...material,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -890,6 +897,7 @@ async function seedRecipes(
         portionYield: 1,
         totalCost: 8.5, // Calculated cost
         prepTime: 3,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -900,6 +908,7 @@ async function seedRecipes(
         quantity: 0.018, // 18g
         unit: Unit.KILOGRAM,
         displayOrder: 1,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -914,6 +923,7 @@ async function seedRecipes(
         // When customer selects "Leche de Almendra", the modifier replaces this ingredient
         isVariable: true,
         linkedModifierGroupId: milkModifierGroup?.id,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -928,6 +938,7 @@ async function seedRecipes(
         portionYield: 1,
         totalCost: 9.0,
         prepTime: 3,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -938,6 +949,7 @@ async function seedRecipes(
         quantity: 0.018, // 18g
         unit: Unit.KILOGRAM,
         displayOrder: 1,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -951,6 +963,7 @@ async function seedRecipes(
         // ✅ WORLD-CLASS: Mark milk as variable ingredient for SUBSTITUTION mode
         isVariable: true,
         linkedModifierGroupId: milkModifierGroup?.id,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -966,6 +979,7 @@ async function seedRecipes(
         totalCost: 32.0,
         prepTime: 8,
         cookTime: 5,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -976,6 +990,7 @@ async function seedRecipes(
         quantity: 0.15, // 150g
         unit: Unit.KILOGRAM,
         displayOrder: 1,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -986,6 +1001,7 @@ async function seedRecipes(
         quantity: 0.03, // 30g
         unit: Unit.KILOGRAM,
         displayOrder: 2,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -996,6 +1012,7 @@ async function seedRecipes(
         quantity: 0.05, // 50g
         unit: Unit.KILOGRAM,
         displayOrder: 3,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1006,6 +1023,7 @@ async function seedRecipes(
         quantity: 0.5, // Half avocado
         unit: Unit.UNIT,
         displayOrder: 4,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1020,6 +1038,7 @@ async function seedRecipes(
         portionYield: 1,
         totalCost: 22.0,
         prepTime: 5,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1030,6 +1049,7 @@ async function seedRecipes(
         quantity: 0.15, // 150g
         unit: Unit.KILOGRAM,
         displayOrder: 1,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1040,6 +1060,7 @@ async function seedRecipes(
         quantity: 0.03, // 30g
         unit: Unit.KILOGRAM,
         displayOrder: 2,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1054,6 +1075,7 @@ async function seedRecipes(
         portionYield: 1,
         totalCost: 18.0,
         prepTime: 3,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1064,6 +1086,7 @@ async function seedRecipes(
         quantity: 0.15, // 150g
         unit: Unit.KILOGRAM,
         displayOrder: 1,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1074,6 +1097,7 @@ async function seedRecipes(
         quantity: 0.2, // 200ml
         unit: Unit.LITER,
         displayOrder: 2,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1088,6 +1112,7 @@ async function seedRecipes(
         portionYield: 1,
         totalCost: 12.0,
         prepTime: 2,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1098,6 +1123,7 @@ async function seedRecipes(
         quantity: 3, // 3 oranges
         unit: Unit.UNIT,
         displayOrder: 1,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
 
@@ -1127,6 +1153,7 @@ async function seedTablesAndAreas(venueId: string) {
       venueId,
       name: 'Sala Principal',
       description: 'Área principal del restaurante',
+      isDemo: true, // Mark as demo data for cleanup
     },
   })
 
@@ -1141,6 +1168,7 @@ async function seedTablesAndAreas(venueId: string) {
         capacity: i <= 6 ? 4 : 6, // Mesas 1-6 para 4, 7-10 para 6
         qrCode: `DEMO-${venueId.substring(0, 8)}-T${i}`,
         active: true,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
     tables.push(table)
@@ -1328,6 +1356,7 @@ async function seedLoyaltyConfig(venueId: string) {
       minPointsRedeem: 100,
       pointsExpireDays: 365,
       active: true,
+      isDemo: true, // Mark as demo data for cleanup
     },
   })
 
@@ -1338,34 +1367,28 @@ async function seedLoyaltyConfig(venueId: string) {
  * Seeds customer groups for a venue
  */
 async function seedCustomerGroups(venueId: string) {
+  // Note: CustomerGroup model only has: name, description, color, autoAssignRules, active
+  // Discounts are now managed via the separate Discount model linked to customerGroupId
   const groups = [
     {
       name: 'VIP',
       description: 'Clientes frecuentes con beneficios exclusivos',
       color: '#FFD700', // Gold
-      discountPercentage: 10,
-      priority: 1,
     },
     {
       name: 'Nuevos',
       description: 'Clientes en su primera visita',
       color: '#4CAF50', // Green
-      discountPercentage: 5,
-      priority: 3,
     },
     {
       name: 'Cumpleañeros',
       description: 'Clientes celebrando su cumpleaños este mes',
       color: '#E91E63', // Pink
-      discountPercentage: 15,
-      priority: 2,
     },
     {
       name: 'Empleados',
       description: 'Empleados y colaboradores',
       color: '#2196F3', // Blue
-      discountPercentage: 20,
-      priority: 4,
     },
   ]
 
@@ -1374,8 +1397,11 @@ async function seedCustomerGroups(venueId: string) {
     const created = await prisma.customerGroup.create({
       data: {
         venueId,
-        ...group,
+        name: group.name,
+        description: group.description,
+        color: group.color,
         active: true,
+        isDemo: true, // Mark as demo data for cleanup
       },
     })
     createdGroups.push(created)
