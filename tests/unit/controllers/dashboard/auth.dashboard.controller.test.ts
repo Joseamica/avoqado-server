@@ -279,7 +279,7 @@ describe('Dashboard Auth Controller', () => {
         httpOnly: true,
         secure: false, // NODE_ENV = 'development'
         sameSite: 'lax',
-        maxAge: 15 * 60 * 1000,
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours (matches JWT expiration)
         path: '/',
       })
       expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockRefreshToken, {
@@ -476,7 +476,7 @@ describe('Dashboard Auth Controller', () => {
         httpOnly: true,
         secure: false,
         sameSite: 'lax',
-        maxAge: 15 * 60 * 1000,
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours (matches JWT expiration)
         path: '/',
       })
       expect(res.cookie).toHaveBeenNthCalledWith(2, 'refreshToken', mockNewRefreshToken, {
