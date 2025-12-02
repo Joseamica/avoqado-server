@@ -9,19 +9,16 @@
 
 ## 🗃️ Database Configuration
 
-### Staging Database (Neon Dev Branch)
+### Production Database (Fly Postgres)
 
-- **Branch**: `dev`
-- **Endpoint**: `ep-winter-night-afehcg83.c-2.us-west-2.aws.neon.tech`
-- **Database**: `neondb`
-- **Connection**: Ready for staging deployments
+- **App**: `avoqado-server-db`
+- **Database**: `avoqado_server`
+- **Internal URL**: `postgres://postgres:PASSWORD@avoqado-server-db.internal:5432/avoqado_server`
 
-### Production Database (Neon Main Branch)
+### Render Production Database
 
-- **Branch**: `main`
-- **Endpoint**: `ep-cold-math-aforhbky.c-2.us-west-2.aws.neon.tech`
-- **Database**: `neondb`
-- **Connection**: Ready for production deployments
+- **Service**: `avoqado-server-db` on Render
+- **Connection**: Via internal connection string in environment variables
 
 ## 🚀 Render Service Setup
 
@@ -38,6 +35,19 @@
 2. Environment → Environment Variables
 3. Copy all variables from `.env.production`
 4. **Important**: Use `sync: false` for all secret values in `render.yaml`
+
+## 🚀 Fly.io Service Setup
+
+### For Production Service (avoqado-server):
+
+1. Set secrets via `flyctl secrets set KEY=value -a avoqado-server`
+2. Database URL is internal: `postgres://postgres:PASSWORD@avoqado-server-db.internal:5432/avoqado_server`
+
+### Run Migrations on Fly:
+
+```bash
+flyctl ssh console -a avoqado-server -C "npx prisma migrate deploy"
+```
 
 ## 🔐 Security Notes
 
@@ -64,13 +74,11 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ### Staging: `https://develop.avoqado-web-dashboard.pages.dev`
 
 - CORS configured for staging API
-- Connected to dev database branch
 - Safe for testing and development
 
 ### Production: `https://dashboard.avoqado.io`
 
 - CORS configured for production API
-- Connected to main database branch
 - Live customer environment
 
 ## 📊 Database Migration Strategy
@@ -78,13 +86,13 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ### Staging Deployments:
 
 1. Code pushed to `develop` branch
-2. GitHub Actions runs migrations on dev database branch
+2. Run migrations manually or via CI/CD
 3. Safe testing environment with isolated data
 
 ### Production Deployments:
 
 1. Code pushed to `main` branch
-2. GitHub Actions runs migrations on main database branch
+2. Run migrations: `flyctl ssh console -a avoqado-server -C "npx prisma migrate deploy"`
 3. Live environment with customer data
 
 ## 🔧 GitHub Secrets Required
@@ -92,26 +100,23 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 Ensure these secrets are set in your GitHub repository:
 
 ```bash
-# Already set:
-gh secret set RENDER_API_KEY --body "rnd_LnaLuhWvxKQnABGfpthnViBWVKmn"
-gh secret set RENDER_PRODUCTION_SERVICE_ID --body "srv-d2oe3gggjchc73elk460"
-gh secret set NEON_API_KEY --body "your-neon-api-key"
-
-# Still needed after creating staging service:
-gh secret set RENDER_STAGING_SERVICE_ID --body "srv-xxxxx" # Get from Render dashboard
+# Render secrets:
+gh secret set RENDER_API_KEY --body "your-render-api-key"
+gh secret set RENDER_PRODUCTION_SERVICE_ID --body "srv-xxxxx"
+gh secret set RENDER_STAGING_SERVICE_ID --body "srv-xxxxx"
 ```
 
 ## ✅ Next Steps
 
 1. **Create staging service** using Blueprint with `develop` branch
 2. **Get staging service ID** and add as GitHub secret
-3. **Configure environment variables** in both Render services
+3. **Configure environment variables** in both Render/Fly services
 4. **Test deployment pipeline** by pushing to `develop` branch
 5. **Generate new production secrets** before going live
 
 ## 🎯 Environment Summary
 
-| Environment | Branch    | Database Branch | Frontend URL                                    | API URL                                     |
-| ----------- | --------- | --------------- | ----------------------------------------------- | ------------------------------------------- |
-| Staging     | `develop` | `dev`           | https://develop.avoqado-web-dashboard.pages.dev | https://avoqado-server-staging.onrender.com |
-| Production  | `main`    | `main`          | https://dashboard.avoqado.io                    | https://avoqado-server.onrender.com         |
+| Environment | Branch    | Database     | Frontend URL                                    | API URL                                     |
+| ----------- | --------- | ------------ | ----------------------------------------------- | ------------------------------------------- |
+| Staging     | `develop` | Render PG    | https://develop.avoqado-web-dashboard.pages.dev | https://avoqado-server-staging.onrender.com |
+| Production  | `main`    | Fly Postgres | https://dashboard.avoqado.io                    | https://avoqado-server.fly.dev              |

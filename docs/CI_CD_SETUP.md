@@ -16,10 +16,9 @@ postgresql://username:password@host:port/database?sslmode=require
 
 **How to set up**:
 
-1. **Create a test database in Neon** (recommended) or any PostgreSQL provider:
+1. **Create a test database** in any PostgreSQL provider (Fly Postgres, Railway, Supabase, etc.):
 
-   - Go to https://console.neon.tech/
-   - Create a new database branch named `ci-test` or similar
+   - Create a new database for CI testing
    - Copy the connection string
 
 2. **Add secret to GitHub**:

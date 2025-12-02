@@ -30,10 +30,6 @@ Go to **Settings → Secrets and Variables → Actions** and add:
 RENDER_API_KEY=your_render_api_key_here
 RENDER_STAGING_SERVICE_ID=srv-xxxxxxxxx     # From staging service
 RENDER_PRODUCTION_SERVICE_ID=srv-yyyyyyyyy  # From production service
-
-# Neon Database (for branching workflow)
-NEON_API_KEY=your_neon_api_key
-NEON_PROJECT_ID=muddy-band-82943019         # Your development project ID
 ```
 
 ### Environment Variables (per environment)
@@ -88,8 +84,6 @@ You can manually trigger deployments from GitHub Actions:
 - [ ] `RENDER_API_KEY`
 - [ ] `RENDER_STAGING_SERVICE_ID`
 - [ ] `RENDER_PRODUCTION_SERVICE_ID`
-- [ ] `NEON_API_KEY`
-- [ ] `NEON_PROJECT_ID`
 
 ### 3. Add Environment Variables
 
@@ -123,12 +117,6 @@ You can manually trigger deployments from GitHub Actions:
 2. Create new API key
 3. Copy the key (starts with `rnd_`)
 
-### Neon API Key
-
-1. Go to [Neon Console](https://console.neon.tech)
-2. Account Settings → API Keys
-3. Create new API key
-
 ## 🏗️ Workflow Overview
 
 ### CI/CD Pipeline (`ci-cd.yml`)
@@ -152,13 +140,6 @@ You can manually trigger deployments from GitHub Actions:
 - Generates detailed changelog
 - Includes database migration notes
 
-### Neon Branching (`neon_workflow.yml`)
-
-- Creates database branch per PR
-- Runs migrations automatically
-- Seeds test data
-- Cleans up on PR close
-
 ## 🔧 Environment Configuration
 
 Each Render service needs these environment variables:
@@ -167,7 +148,7 @@ Each Render service needs these environment variables:
 
 ```bash
 NODE_ENV=staging
-DATABASE_URL=postgresql://neondb_owner:npg_rzaM3Pyt4Tgf@ep-cold-math-aforhbky.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL=your_staging_database_url
 FRONTEND_URL=https://develop.avoqado-web-dashboard.pages.dev
 # ... other secrets from your .env file
 ```
@@ -176,7 +157,7 @@ FRONTEND_URL=https://develop.avoqado-web-dashboard.pages.dev
 
 ```bash
 NODE_ENV=production
-DATABASE_URL=postgresql://neondb_owner:npg_Feb5NKx3RzBW@ep-rough-cake-admwvkl6.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL=your_production_database_url
 FRONTEND_URL=https://dashboard.avoqado.io
 # ... other secrets from your .env file
 ```
