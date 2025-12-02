@@ -574,8 +574,11 @@ model OnboardingProgress {
   // Step 6: Premium features selection (optional)
   step6_selectedFeatures String[] // ["inventory", "advanced_reports", "ai_assistant", "online_ordering"]
 
-  // Step 7: Payment configuration (CLABE)
-  step7_paymentInfo Json? // {clabe, bankName, accountHolder}
+  // Step 7: KYC Documents
+  step7_kycDocuments Json? // {entityType, documents: {ineUrl, rfcDocumentUrl, ...}}
+
+  // Step 8: Payment configuration (CLABE)
+  step8_paymentInfo Json? // {clabe, bankName, accountHolder}
 
   // Metadata
   startedAt   DateTime  @default(now())

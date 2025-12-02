@@ -21,6 +21,7 @@ import {
   UpdateStep5Schema,
   UpdateStep6Schema,
   UpdateStep7Schema,
+  UpdateStep8Schema,
   CompleteOnboardingSchema,
   GetMenuTemplateSchema,
 } from '../schemas/onboarding.schema'
@@ -219,6 +220,23 @@ const upload = multer({
       cb(null, true)
     } else {
       cb(new Error('Only CSV files are allowed'))
+    }
+  },
+})
+
+// Configure multer for KYC document uploads (memory storage, max 10MB)
+const documentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+  fileFilter: (_req, file, cb) => {
+    // Accept PDF, JPG, JPEG, PNG files
+    const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png']
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true)
+    } else {
+      cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed'))
     }
   },
 })
@@ -542,7 +560,7 @@ router.put('/organizations/:organizationId/step/6', validateRequest(UpdateStep6S
  * /api/v1/onboarding/organizations/{organizationId}/step/7:
  *   put:
  *     tags: [Onboarding]
- *     summary: Update Step 7 - CLABE Payment Info
+ *     summary: Update Step 7 - KYC Documents
  *     parameters:
  *       - in: path
  *         name: organizationId
@@ -554,18 +572,116 @@ router.put('/organizations/:organizationId/step/6', validateRequest(UpdateStep6S
  *         application/json:
  *           schema:
  *             type: object
- *             required: [clabe]
+ *             required: [entityType, documents]
+ *             properties:
+ *               entityType: { type: string, enum: [PERSONA_FISICA, PERSONA_MORAL] }
+ *               documents:
+ *                 type: object
+ *                 properties:
+ *                   ineUrl: { type: string }
+ *                   rfcDocumentUrl: { type: string }
+ *                   comprobanteDomicilioUrl: { type: string }
+ *                   caratulaBancariaUrl: { type: string }
+ *                   actaDocumentUrl: { type: string }
+ *                   poderLegalUrl: { type: string }
+ *     responses:
+ *       200:
+ *         description: Step 7 completed successfully
+ */
+router.put(
+  '/organizations/:organizationId/step/7',
+  authenticateTokenMiddleware,
+  validateRequest(UpdateStep7Schema),
+  onboardingController.updateStep7,
+)
+
+/**
+ * @openapi
+ * /api/v1/onboarding/organizations/{organizationId}/kyc/document/{documentKey}:
+ *   put:
+ *     tags: [Onboarding]
+ *     summary: Upload a KYC document during onboarding
+ *     description: Upload a single KYC document (INE, RFC, etc.) during onboarding. The document is stored in Firebase Storage and the URL is saved to OnboardingProgress.
+ *     parameters:
+ *       - in: path
+ *         name: organizationId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *       - in: path
+ *         name: documentKey
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [ine, rfcDocument, comprobanteDomicilio, caratulaBancaria, actaDocument, poderLegal]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       200:
+ *         description: Document uploaded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     documentKey: { type: string }
+ *                     url: { type: string }
+ *       400:
+ *         description: Invalid document key or no file provided
+ */
+router.put(
+  '/organizations/:organizationId/kyc/document/:documentKey',
+  authenticateTokenMiddleware,
+  documentUpload.single('file'),
+  onboardingController.uploadKycDocument,
+)
+
+/**
+ * @openapi
+ * /api/v1/onboarding/organizations/{organizationId}/step/8:
+ *   put:
+ *     tags: [Onboarding]
+ *     summary: Update Step 8 - CLABE Payment Info
+ *     parameters:
+ *       - in: path
+ *         name: organizationId
+ *         required: true
+ *         schema: { type: string, format: cuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [clabe, accountHolder]
  *             properties:
  *               clabe: { type: string, pattern: '^\\d{18}$' }
  *               bankName: { type: string }
  *               accountHolder: { type: string }
  *     responses:
  *       200:
- *         description: Step 7 completed successfully
+ *         description: Step 8 completed successfully
  *       400:
  *         description: Invalid CLABE
  */
-router.put('/organizations/:organizationId/step/7', validateRequest(UpdateStep7Schema), onboardingController.updateStep7)
+router.put(
+  '/organizations/:organizationId/step/8',
+  authenticateTokenMiddleware,
+  validateRequest(UpdateStep8Schema),
+  onboardingController.updateStep8,
+)
 
 /**
  * @openapi

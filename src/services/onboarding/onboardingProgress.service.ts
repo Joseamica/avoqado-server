@@ -7,6 +7,8 @@
 
 import { OnboardingType, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { uploadFileToStorage } from '@/services/storage.service'
+import logger from '@/config/logger'
 
 // Types
 export interface OnboardingStepData {
@@ -47,17 +49,21 @@ export interface OnboardingStepData {
     role: string
   }>
   step6_selectedFeatures?: string[]
-  step7_paymentInfo?: {
+  step7_kycDocuments?: {
+    entityType: 'PERSONA_FISICA' | 'PERSONA_MORAL'
+    documents: {
+      ineUrl?: string // INE/IFE (ID document)
+      rfcDocumentUrl?: string // RFC certificate
+      comprobanteDomicilioUrl?: string // Address proof
+      caratulaBancariaUrl?: string // Bank statement with CLABE
+      actaDocumentUrl?: string // Acta Constitutiva (Persona Moral only)
+      poderLegalUrl?: string // Power of attorney (Persona Moral only)
+    }
+  }
+  step8_paymentInfo?: {
     clabe: string
     bankName?: string
-    accountHolder?: string
-    // KYC Document URLs (uploaded to S3/storage)
-    ineUrl?: string // INE/IFE (ID document)
-    rfcDocumentUrl?: string // RFC certificate
-    comprobanteDomicilioUrl?: string // Address proof
-    caratulaBancariaUrl?: string // Bank statement with CLABE
-    actaConstitutivaUrl?: string // Acta Constitutiva (Persona Moral only)
-    poderLegalUrl?: string // Power of attorney (Persona Moral only)
+    accountHolder: string
   }
 }
 
@@ -144,8 +150,11 @@ export async function updateOnboardingStep(organizationId: string, stepNumber: n
   if (stepData.step6_selectedFeatures) {
     updateData.step6_selectedFeatures = stepData.step6_selectedFeatures
   }
-  if (stepData.step7_paymentInfo) {
-    updateData.step7_paymentInfo = stepData.step7_paymentInfo as unknown as Prisma.InputJsonValue
+  if (stepData.step7_kycDocuments) {
+    updateData.step7_kycDocuments = stepData.step7_kycDocuments as unknown as Prisma.InputJsonValue
+  }
+  if (stepData.step8_paymentInfo) {
+    updateData.step8_paymentInfo = stepData.step8_paymentInfo as unknown as Prisma.InputJsonValue
   }
 
   // Update progress
@@ -168,7 +177,7 @@ export async function completeOnboarding(organizationId: string) {
     where: { organizationId },
     data: {
       completedAt: new Date(),
-      currentStep: 7, // Final step
+      currentStep: 8, // Final step (8 steps total)
     },
   })
 
@@ -223,7 +232,7 @@ export async function getOnboardingCompletionPercentage(organizationId: string):
     return 100
   }
 
-  const totalSteps = 7
+  const totalSteps = 8
   const completedSteps = Array.isArray(progress.completedSteps) ? (progress.completedSteps as number[]).length : 0
 
   return Math.round((completedSteps / totalSteps) * 100)
@@ -238,4 +247,86 @@ export async function deleteOnboardingProgress(organizationId: string) {
   await prisma.onboardingProgress.delete({
     where: { organizationId },
   })
+}
+
+// Document key to clean file name mapping
+const DOCUMENT_KEY_TO_NAME: Record<string, string> = {
+  ine: 'INE',
+  rfcDocument: 'RFC',
+  comprobanteDomicilio: 'Comprobante_Domicilio',
+  caratulaBancaria: 'Caratula_Bancaria',
+  actaDocument: 'Acta_Constitutiva',
+  poderLegal: 'Poder_Legal',
+}
+
+// Document key to URL field mapping
+const DOCUMENT_KEY_TO_URL_FIELD: Record<string, string> = {
+  ine: 'ineUrl',
+  rfcDocument: 'rfcDocumentUrl',
+  comprobanteDomicilio: 'comprobanteDomicilioUrl',
+  caratulaBancaria: 'caratulaBancariaUrl',
+  actaDocument: 'actaDocumentUrl',
+  poderLegal: 'poderLegalUrl',
+}
+
+interface UploadedFile {
+  buffer: Buffer
+  originalname: string
+  mimetype: string
+}
+
+/**
+ * Uploads a KYC document during onboarding
+ *
+ * @param organizationId - Organization ID
+ * @param documentKey - Document key (ine, rfcDocument, etc.)
+ * @param file - Uploaded file from multer
+ * @returns Document key and URL
+ */
+export async function uploadKycDocument(
+  organizationId: string,
+  documentKey: string,
+  file: UploadedFile,
+): Promise<{ documentKey: string; url: string }> {
+  // Get or create onboarding progress
+  const progress = await getOrCreateOnboardingProgress(organizationId)
+
+  // Determine file extension
+  const extension = file.originalname.split('.').pop()?.toLowerCase() || 'pdf'
+  const cleanName = DOCUMENT_KEY_TO_NAME[documentKey] || documentKey
+
+  // Upload to Firebase Storage (path: onboarding/{organizationId}/kyc/{documentName}.{ext})
+  const filePath = `onboarding/${organizationId}/kyc/${cleanName}.${extension}`
+  const downloadUrl = await uploadFileToStorage(file.buffer, filePath, file.mimetype)
+
+  logger.info(`📄 Uploaded KYC document for onboarding: ${organizationId} - ${documentKey}`)
+
+  // Get current KYC documents from progress (or initialize empty object)
+  const currentKycDocs = (progress.step7_kycDocuments as any) || { entityType: null, documents: {} }
+  const urlField = DOCUMENT_KEY_TO_URL_FIELD[documentKey]
+
+  // Update documents object with new URL
+  const updatedDocuments = {
+    ...currentKycDocs.documents,
+    [urlField]: downloadUrl,
+  }
+
+  // Update onboarding progress with new document URL
+  await prisma.onboardingProgress.update({
+    where: { organizationId },
+    data: {
+      step7_kycDocuments: {
+        entityType: currentKycDocs.entityType,
+        documents: updatedDocuments,
+      } as unknown as Prisma.InputJsonValue,
+      updatedAt: new Date(),
+    },
+  })
+
+  logger.info(`  ✅ Saved document URL to onboarding progress: ${urlField}`)
+
+  return {
+    documentKey,
+    url: downloadUrl,
+  }
 }

@@ -46,17 +46,21 @@ export interface CreateVenueInput {
       categorySlug: string
     }>
   }
+  kycDocuments?: {
+    entityType: 'PERSONA_FISICA' | 'PERSONA_MORAL'
+    documents: {
+      ineUrl?: string
+      rfcDocumentUrl?: string
+      comprobanteDomicilioUrl?: string
+      caratulaBancariaUrl?: string
+      actaDocumentUrl?: string
+      poderLegalUrl?: string
+    }
+  }
   paymentInfo?: {
     clabe: string
     bankName?: string
-    accountHolder?: string
-    // KYC Document URLs
-    ineUrl?: string
-    rfcDocumentUrl?: string
-    comprobanteDomicilioUrl?: string
-    caratulaBancariaUrl?: string
-    actaConstitutivaUrl?: string
-    poderLegalUrl?: string
+    accountHolder: string
   }
   selectedFeatures?: string[]
   stripePaymentMethodId?: string // Payment method collected via Stripe Elements
@@ -93,6 +97,7 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     onboardingType,
     businessInfo,
     menuData,
+    kycDocuments,
     paymentInfo,
     selectedFeatures,
     stripePaymentMethodId,
@@ -108,12 +113,12 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
 
   // Check if any KYC documents were provided (for real venues)
   const hasKycDocuments =
-    paymentInfo?.ineUrl ||
-    paymentInfo?.rfcDocumentUrl ||
-    paymentInfo?.comprobanteDomicilioUrl ||
-    paymentInfo?.caratulaBancariaUrl ||
-    paymentInfo?.actaConstitutivaUrl ||
-    paymentInfo?.poderLegalUrl
+    kycDocuments?.documents?.ineUrl ||
+    kycDocuments?.documents?.rfcDocumentUrl ||
+    kycDocuments?.documents?.comprobanteDomicilioUrl ||
+    kycDocuments?.documents?.caratulaBancariaUrl ||
+    kycDocuments?.documents?.actaDocumentUrl ||
+    kycDocuments?.documents?.poderLegalUrl
 
   // Determine KYC status:
   // - DEMO venues: NOT_SUBMITTED (KYC not required, frontend bypasses via isOnboardingDemo)
@@ -142,16 +147,19 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       phone: businessInfo.phone,
       email: businessInfo.email,
 
-      // Legal Entity Type
-      entityType: businessInfo.entityType as any, // PERSONA_FISICA or PERSONA_MORAL
+      // Legal Entity Type (from KYC documents step or business info)
+      entityType: (kycDocuments?.entityType || businessInfo.entityType) as any, // PERSONA_FISICA or PERSONA_MORAL
 
-      // KYC Documents (if provided in paymentInfo)
-      idDocumentUrl: paymentInfo?.ineUrl, // INE/IFE
-      rfcDocumentUrl: paymentInfo?.rfcDocumentUrl,
-      comprobanteDomicilioUrl: paymentInfo?.comprobanteDomicilioUrl,
-      caratulaBancariaUrl: paymentInfo?.caratulaBancariaUrl,
-      actaDocumentUrl: paymentInfo?.actaConstitutivaUrl, // Acta Constitutiva
-      poderLegalUrl: paymentInfo?.poderLegalUrl,
+      // KYC Documents (from step 7)
+      idDocumentUrl: kycDocuments?.documents?.ineUrl, // INE/IFE
+      rfcDocumentUrl: kycDocuments?.documents?.rfcDocumentUrl,
+      comprobanteDomicilioUrl: kycDocuments?.documents?.comprobanteDomicilioUrl,
+      caratulaBancariaUrl: kycDocuments?.documents?.caratulaBancariaUrl,
+      actaDocumentUrl: kycDocuments?.documents?.actaDocumentUrl, // Acta Constitutiva
+      poderLegalUrl: kycDocuments?.documents?.poderLegalUrl,
+
+      // Note: CLABE/payment info stored in OnboardingProgress.step8_paymentInfo
+      // Will be used when creating MerchantAccount after KYC approval
 
       // KYC Status based on onboarding type and documents
       kycStatus,

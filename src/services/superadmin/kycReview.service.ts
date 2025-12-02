@@ -83,13 +83,13 @@ export async function getVenueKycDetails(venueId: string) {
     },
   })
 
-  // Get onboarding progress to retrieve CLABE from step7_paymentInfo
+  // Get onboarding progress to retrieve CLABE from step8_paymentInfo
   const onboarding = await prisma.onboardingProgress.findUnique({
     where: { organizationId: venue.organizationId },
   })
 
   // Extract payment info from onboarding (temporary storage)
-  const paymentInfo = onboarding?.step7_paymentInfo as any
+  const paymentInfo = onboarding?.step8_paymentInfo as any
 
   return {
     venue,
@@ -163,13 +163,13 @@ async function sendKycToBlumonAfterApproval(venueId: string, approvedById: strin
       },
     })
 
-    // Get onboarding progress to retrieve CLABE from step7_paymentInfo
+    // Get onboarding progress to retrieve CLABE from step8_paymentInfo
     const onboarding = await prisma.onboardingProgress.findUnique({
       where: { organizationId: venue.organizationId },
     })
 
     // Extract payment info from onboarding (temporary storage)
-    const paymentInfo = onboarding?.step7_paymentInfo as any
+    const paymentInfo = onboarding?.step8_paymentInfo as any
 
     // Get approver name
     const approver = await prisma.staff.findUnique({

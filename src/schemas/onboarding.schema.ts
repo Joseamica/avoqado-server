@@ -164,9 +164,31 @@ export const UpdateStep6Schema = z.object({
 })
 
 /**
- * Validates Step 7: CLABE Payment Info & KYC Documents
+ * Validates Step 7: KYC Documents
  */
 export const UpdateStep7Schema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('Invalid organization ID format'),
+  }),
+  body: z.object({
+    entityType: z.enum(['PERSONA_FISICA', 'PERSONA_MORAL'], {
+      errorMap: () => ({ message: 'Entity type must be PERSONA_FISICA or PERSONA_MORAL' }),
+    }),
+    documents: z.object({
+      ineUrl: z.string().url('Invalid INE document URL').optional(),
+      rfcDocumentUrl: z.string().url('Invalid RFC document URL').optional(),
+      comprobanteDomicilioUrl: z.string().url('Invalid address proof URL').optional(),
+      caratulaBancariaUrl: z.string().url('Invalid bank statement URL').optional(),
+      actaDocumentUrl: z.string().url('Invalid Acta Constitutiva URL').optional(),
+      poderLegalUrl: z.string().url('Invalid power of attorney URL').optional(),
+    }),
+  }),
+})
+
+/**
+ * Validates Step 8: CLABE Payment Info
+ */
+export const UpdateStep8Schema = z.object({
   params: z.object({
     organizationId: z.string().cuid('Invalid organization ID format'),
   }),
@@ -182,14 +204,7 @@ export const UpdateStep7Schema = z.object({
         { message: 'Invalid CLABE format' },
       ),
     bankName: z.string().optional(),
-    accountHolder: z.string().optional(),
-    // KYC Document URLs (uploaded to storage before submitting this step)
-    ineUrl: z.string().url('Invalid INE document URL').optional(),
-    rfcDocumentUrl: z.string().url('Invalid RFC document URL').optional(),
-    comprobanteDomicilioUrl: z.string().url('Invalid address proof URL').optional(),
-    caratulaBancariaUrl: z.string().url('Invalid bank statement URL').optional(),
-    actaConstitutivaUrl: z.string().url('Invalid Acta Constitutiva URL').optional(),
-    poderLegalUrl: z.string().url('Invalid power of attorney URL').optional(),
+    accountHolder: z.string().min(1, 'Account holder name is required'),
   }),
 })
 

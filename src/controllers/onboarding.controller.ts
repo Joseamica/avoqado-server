@@ -483,6 +483,48 @@ export async function updateStep7(req: Request, res: Response, next: NextFunctio
 }
 
 /**
+ * PUT /api/v1/onboarding/organizations/:organizationId/kyc/document/:documentKey
+ *
+ * Uploads a single KYC document during onboarding
+ */
+export async function uploadKycDocument(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId, documentKey } = req.params
+    const file = req.file as Express.Multer.File
+
+    if (!file) {
+      throw new BadRequestError('No document provided')
+    }
+
+    // Valid document keys
+    const validDocumentKeys = ['ine', 'rfcDocument', 'comprobanteDomicilio', 'caratulaBancaria', 'actaDocument', 'poderLegal']
+    if (!validDocumentKeys.includes(documentKey)) {
+      throw new BadRequestError(`Invalid document key: ${documentKey}. Valid keys are: ${validDocumentKeys.join(', ')}`)
+    }
+
+    const result = await onboardingProgressService.uploadKycDocument(organizationId, documentKey, {
+      buffer: file.buffer,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+    })
+
+    logger.info(`KYC document uploaded for organization ${organizationId}: ${documentKey}`)
+
+    res.status(200).json({
+      success: true,
+      message: 'Document uploaded successfully',
+      data: {
+        documentKey: result.documentKey,
+        url: result.url,
+      },
+    })
+  } catch (error) {
+    logger.error('Error uploading KYC document:', error)
+    next(error)
+  }
+}
+
+/**
  * PUT /api/v1/onboarding/organizations/:organizationId/step/8
  *
  * Updates Step 8: CLABE Payment Info
