@@ -23,6 +23,14 @@ export const switchVenueSchema = z.object({
   }),
 })
 
+// Password validation: 8+ chars, uppercase, lowercase, number
+const strongPasswordSchema = z
+  .string()
+  .min(8, { message: 'La contraseña debe tener al menos 8 caracteres.' })
+  .regex(/[A-Z]/, { message: 'La contraseña debe contener al menos una letra mayúscula.' })
+  .regex(/[a-z]/, { message: 'La contraseña debe contener al menos una letra minúscula.' })
+  .regex(/[0-9]/, { message: 'La contraseña debe contener al menos un número.' })
+
 export const updateAccountSchema = z.object({
   body: z
     .object({
@@ -32,7 +40,7 @@ export const updateAccountSchema = z.object({
       email: z.string().email({ message: 'Email inválido.' }).optional(),
       phone: z.string().optional(), // Phone is completely optional
       old_password: z.string().optional(),
-      password: z.string().optional(),
+      password: strongPasswordSchema.optional(),
     })
     .refine(
       data => {
@@ -45,18 +53,11 @@ export const updateAccountSchema = z.object({
           if (data.old_password && !data.password) {
             return false
           }
-          // Validate minimum lengths only when changing password
-          if (data.password && data.password.length < 4) {
-            return false
-          }
-          if (data.old_password && data.old_password.length < 4) {
-            return false
-          }
         }
         return true
       },
       {
-        message: 'Para cambiar la contraseña, ambos campos son requeridos y deben tener al menos 4 caracteres.',
+        message: 'Para cambiar la contraseña, ambos campos (contraseña actual y nueva) son requeridos.',
         path: ['password'],
       },
     ),
@@ -71,15 +72,7 @@ export const requestPasswordResetSchema = z.object({
 export const resetPasswordSchema = z.object({
   body: z.object({
     token: z.string({ required_error: 'El token es requerido.' }).min(32, { message: 'Token inválido.' }),
-    newPassword: z
-      .string({ required_error: 'La nueva contraseña es requerida.' })
-      .min(8, { message: 'La contraseña debe tener al menos 8 caracteres.' })
-      .regex(/[A-Z]/, { message: 'La contraseña debe contener al menos una letra mayúscula.' })
-      .regex(/[a-z]/, { message: 'La contraseña debe contener al menos una letra minúscula.' })
-      .regex(/[0-9]/, { message: 'La contraseña debe contener al menos un número.' })
-      .regex(/[^A-Za-z0-9]/, {
-        message: 'La contraseña debe contener al menos un carácter especial.',
-      }),
+    newPassword: strongPasswordSchema,
   }),
 })
 

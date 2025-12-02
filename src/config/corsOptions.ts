@@ -39,8 +39,9 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
 
   // Combine all allowed origins for this environment
   const allowedOrigins = [
-    // Add null origin to support login form in Swagger UI auth page
-    'null',
+    // SECURITY: 'null' origin only in development for Swagger UI
+    // In production, 'null' can be exploited via local HTML files or data: URLs
+    ...(env === 'development' ? ['null'] : []),
     ...(dashboardOrigins[env] || []),
     ...(mobileOrigins[env] || []),
     ...(posOrigins[env] || []),

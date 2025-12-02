@@ -409,7 +409,7 @@ src/
 ### E-commerce Mock Service
 
 ```bash
-# Enable mock
+# Enable mock (SOLO para E-commerce, NO aplica a TPV)
 USE_BLUMON_MOCK=true
 
 # Test cards
@@ -417,12 +417,17 @@ USE_BLUMON_MOCK=true
 4000000000000002  # Card declined
 ```
 
+**⚠️ IMPORTANTE:** `USE_BLUMON_MOCK` solo controla el servicio E-commerce. **NO tiene ningún efecto** en el SDK de Android/TPV.
+
 ### Android SDK Testing
 
 ```bash
-# Use Blumon sandbox credentials
+# El ambiente de TPV se controla con el BUILD VARIANT del APK:
+# - assembleSandboxDebug/Release → sandbox-tokener.blumonpay.net
+# - assembleProductionRelease → tokener.blumonpay.net
+
+# USE_BLUMON_MOCK NO APLICA aquí - el APK se conecta directo a Blumon
 # Test with physical PAX terminal or emulator
-# No mock service available (hardware required)
 ```
 
 ---

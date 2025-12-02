@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with the backend server codebase.
 
+---
+
+## 🚨 STOP - LEE ESTO PRIMERO: Blumon tiene DOS integraciones separadas
+
+**⚠️ ANTES de trabajar con cualquier cosa de Blumon**, identifica cuál integración estás usando:
+
+|                                     | **TPV (SDK Android)**                                               | **E-commerce (Links de pago)**                 |
+| ----------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------- |
+| **¿Qué es?**                        | Terminales PAX físicas                                              | SDK web para pagos online                      |
+| **¿Dónde corre?**                   | El APK se conecta DIRECTO a Blumon                                  | El BACKEND llama a Blumon API                  |
+| **¿Cómo se configura el ambiente?** | **Build variant del APK** (`sandboxRelease` vs `productionRelease`) | **Variable `USE_BLUMON_MOCK`** en backend      |
+| **`USE_BLUMON_MOCK`**               | ❌ **NO APLICA**                                                    | ✅ `true`=mock, `false`=API real               |
+| **Modelo de BD**                    | `MerchantAccount` + `Terminal`                                      | `EcommerceMerchant` + `CheckoutSession`        |
+| **Servicio**                        | `src/services/tpv/blumon.service.ts`                                | `src/services/sdk/blumon-ecommerce.service.ts` |
+
+**📖 Documentación completa:** `docs/BLUMON_TWO_INTEGRATIONS.md`
+
+**Regla de oro:** Cuando hables de Blumon, SIEMPRE especifica "Blumon TPV" o "Blumon E-commerce". Solo decir "Blumon" es ambiguo.
+
+---
+
 ## 📚 Documentation Policy
 
 **Role of claude** Always assume the role of a world-class, battle-tested full-stack engineer with a global footprint and an unrivaled track

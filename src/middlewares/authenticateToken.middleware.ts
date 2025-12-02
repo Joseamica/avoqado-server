@@ -24,8 +24,11 @@ export const authenticateTokenMiddleware = (req: Request, res: Response, next: N
       return
     }
 
-    // Verificar token
-    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!) as any
+    // SECURITY: Explicitly specify algorithm to prevent algorithm substitution attacks
+    // Without this, an attacker could use 'none' algorithm or switch to RS256
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!, {
+      algorithms: ['HS256'],
+    }) as any
 
     // Crear contexto de autenticación
     const authContext: AuthContext = {

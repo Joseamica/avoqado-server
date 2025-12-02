@@ -26,6 +26,7 @@ export interface AccessTokenPayload extends jwt.JwtPayload {
   orgId: string // Staff.organizationId
   venueId: string // Venue actual de operación
   role: StaffRole // StaffVenue.role para el venueId actual
+  jti: string // SECURITY: JWT ID for token blacklisting/revocation
 }
 
 /**
@@ -60,12 +61,18 @@ export function generateAccessToken(
     orgId: organizationId,
     venueId: venueId,
     role: role,
+    // SECURITY: JTI (JWT ID) enables token blacklisting for:
+    // - Logout from specific device
+    // - Session invalidation on password change
+    // - Revoking compromised tokens
+    jti: crypto.randomUUID(),
   }
   // Explicitly type the secret and options
   const secret: Secret = ACCESS_TOKEN_SECRET!
   const options: SignOptions = {
     // rememberMe: 30 days (2592000 seconds), normal: 24 hours (86400 seconds)
     expiresIn: rememberMe ? 2592000 : 86400,
+    algorithm: 'HS256', // SECURITY: Explicitly specify algorithm
   }
   return jwt.sign(payload, secret, options)
 }
@@ -90,6 +97,7 @@ export function generateRefreshToken(staffId: string, organizationId?: string, r
   const options: SignOptions = {
     // rememberMe: 90 days (7776000 seconds), normal: 7 days (604800 seconds)
     expiresIn: rememberMe ? 7776000 : 604800,
+    algorithm: 'HS256', // SECURITY: Explicitly specify algorithm
   }
   return jwt.sign(payload, secret, options)
 }
@@ -103,7 +111,10 @@ export function generateRefreshToken(staffId: string, organizationId?: string, r
  * @throws JsonWebTokenError si el token es inválido o ha expirado.
  */
 export function verifyAccessToken(token: string): AccessTokenPayload {
-  const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!) as AccessTokenPayload
+  // SECURITY: Explicitly specify algorithm to prevent algorithm substitution attacks
+  const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!, {
+    algorithms: ['HS256'],
+  }) as AccessTokenPayload
   // Validaciones adicionales del payload si es necesario
   if (!decoded.sub || !decoded.orgId || !decoded.venueId || !decoded.role) {
     throw new jwt.JsonWebTokenError('Payload del token de acceso incompleto.')
@@ -111,6 +122,8 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
   if (!Object.values(StaffRole).includes(decoded.role as StaffRole)) {
     throw new jwt.JsonWebTokenError('Rol en token de acceso no es un StaffRole válido.')
   }
+  // Note: JTI validation for blacklisting would be done here when Redis is implemented
+  // if (await isTokenBlacklisted(decoded.jti)) throw new Error('Token revoked')
   return decoded
 }
 
@@ -121,7 +134,10 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
  * @throws JsonWebTokenError si el token es inválido o ha expirado.
  */
 export function verifyRefreshToken(token: string): RefreshTokenPayload {
-  const decoded = jwt.verify(token, REFRESH_TOKEN_SECRET!) as RefreshTokenPayload
+  // SECURITY: Explicitly specify algorithm to prevent algorithm substitution attacks
+  const decoded = jwt.verify(token, REFRESH_TOKEN_SECRET!, {
+    algorithms: ['HS256'],
+  }) as RefreshTokenPayload
   // Validaciones adicionales del payload si es necesario
   if (!decoded.sub || !decoded.tokenId) {
     throw new jwt.JsonWebTokenError('Payload del token de refresco incompleto.')

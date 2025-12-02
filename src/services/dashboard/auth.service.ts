@@ -72,13 +72,14 @@ export async function loginStaff(loginData: LoginDto) {
     const updates: any = { failedLoginAttempts: newAttempts }
 
     // Lock account after 5 failed attempts (FAANG best practice)
+    // SECURITY: 60 min lockout (30 min was too short - 240 attempts/day possible)
     if (newAttempts >= 5) {
-      updates.lockedUntil = new Date(Date.now() + 30 * 60 * 1000) // 30 minutes
+      updates.lockedUntil = new Date(Date.now() + 60 * 60 * 1000) // 60 minutes
       await prisma.staff.update({
         where: { id: staff.id },
         data: updates,
       })
-      throw new ForbiddenError('Account locked due to too many failed login attempts. Please try again in 30 minutes.')
+      throw new ForbiddenError('Account locked due to too many failed login attempts. Please try again in 60 minutes.')
     }
 
     await prisma.staff.update({
@@ -342,8 +343,13 @@ export async function requestPasswordReset(data: RequestPasswordResetDto) {
     // 4. Generate secure random token (32 bytes = 64 hex characters)
     const resetToken = crypto.randomBytes(32).toString('hex')
 
-    // 5. Hash the token before storing (bcrypt with 10 salt rounds)
-    const hashedToken = await bcrypt.hash(resetToken, 10)
+    // 5. SECURITY: Hash token with SHA256 for O(1) database lookup
+    // SHA256 is sufficient here because:
+    // - Token is cryptographically random (256 bits entropy)
+    // - Token expires in 1 hour
+    // - Single use only
+    // bcrypt would require O(n) iteration over all tokens (timing attack)
+    const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex')
 
     // 6. Calculate expiry time (1 hour from now)
     const expiryTime = new Date()
@@ -388,117 +394,103 @@ export async function requestPasswordReset(data: RequestPasswordResetDto) {
 
 /**
  * Validate reset token
+ * SECURITY: Uses SHA256 for O(1) lookup (prevents timing attacks)
  * @param token - Plain reset token from URL
- * @returns Staff email if valid
+ * @returns { valid: true } if valid (no email exposed)
  */
 export async function validateResetToken(token: string) {
-  // 1. Find all staff with non-null reset tokens
-  const staffWithTokens = await prisma.staff.findMany({
+  // 1. SECURITY: SHA256 hash for O(1) database lookup (prevents timing attack)
+  // With bcrypt, we'd need to iterate all tokens and compare each (O(n))
+  // which reveals information via response timing
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex')
+
+  // 2. Direct database lookup (constant time)
+  const staff = await prisma.staff.findFirst({
     where: {
-      resetToken: { not: null },
-      resetTokenExpiry: { not: null },
+      resetToken: hashedToken,
     },
     select: {
       id: true,
-      email: true,
-      firstName: true,
-      resetToken: true,
       resetTokenExpiry: true,
       resetTokenUsedAt: true,
     },
   })
 
-  // 2. Compare provided token against all hashed tokens
-  for (const staff of staffWithTokens) {
-    if (!staff.resetToken || !staff.resetTokenExpiry) continue
-
-    const isTokenValid = await bcrypt.compare(token, staff.resetToken)
-
-    if (isTokenValid) {
-      // 3. Check if token has expired (must be within 1 hour)
-      const now = new Date()
-      if (now > staff.resetTokenExpiry) {
-        throw new BadRequestError('Este enlace de restablecimiento ha expirado. Por favor solicita uno nuevo.')
-      }
-
-      // 4. Check if token has already been used
-      if (staff.resetTokenUsedAt) {
-        throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
-      }
-
-      // 5. Token is valid - return masked email for confirmation
-      const emailParts = staff.email.split('@')
-      const maskedEmail = `${emailParts[0][0]}***@${emailParts[1]}`
-
-      return {
-        valid: true,
-        email: maskedEmail,
-      }
-    }
+  // 3. Token not found
+  if (!staff) {
+    throw new BadRequestError('Este enlace de restablecimiento es inválido. Por favor solicita uno nuevo.')
   }
 
-  // Token not found or invalid
-  throw new BadRequestError('Este enlace de restablecimiento es inválido. Por favor solicita uno nuevo.')
+  // 4. Check if token has expired
+  if (!staff.resetTokenExpiry || new Date() > staff.resetTokenExpiry) {
+    throw new BadRequestError('Este enlace de restablecimiento ha expirado. Por favor solicita uno nuevo.')
+  }
+
+  // 5. Check if token has already been used
+  if (staff.resetTokenUsedAt) {
+    throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
+  }
+
+  // 6. SECURITY: Don't return email (even masked) - reduces information leakage
+  // Email domain was previously exposed via masked format
+  return { valid: true }
 }
 
 /**
  * Reset password with token
+ * SECURITY: Uses SHA256 for O(1) lookup + atomic update to prevent race conditions
  * @param data - Token and new password
  */
 export async function resetPassword(data: ResetPasswordDto) {
   const { token, newPassword } = data
 
-  // 1. Find all staff with non-null reset tokens
-  const staffWithTokens = await prisma.staff.findMany({
+  // 1. SECURITY: SHA256 hash for O(1) database lookup (prevents timing attack)
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex')
+
+  // 2. First verify token exists and is valid (for proper error messages)
+  const staff = await prisma.staff.findFirst({
     where: {
-      resetToken: { not: null },
-      resetTokenExpiry: { not: null },
+      resetToken: hashedToken,
     },
     select: {
       id: true,
       email: true,
-      firstName: true,
-      resetToken: true,
       resetTokenExpiry: true,
       resetTokenUsedAt: true,
     },
   })
 
-  // 2. Compare provided token against all hashed tokens
-  let staffToUpdate: (typeof staffWithTokens)[0] | null = null
-
-  for (const staff of staffWithTokens) {
-    if (!staff.resetToken || !staff.resetTokenExpiry) continue
-
-    const isTokenValid = await bcrypt.compare(token, staff.resetToken)
-
-    if (isTokenValid) {
-      // Check expiry
-      const now = new Date()
-      if (now > staff.resetTokenExpiry) {
-        throw new BadRequestError('Este enlace de restablecimiento ha expirado. Por favor solicita uno nuevo.')
-      }
-
-      // Check if already used
-      if (staff.resetTokenUsedAt) {
-        throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
-      }
-
-      staffToUpdate = staff
-      break
-    }
-  }
-
-  if (!staffToUpdate) {
+  // 3. Token not found
+  if (!staff) {
     throw new BadRequestError('Este enlace de restablecimiento es inválido. Por favor solicita uno nuevo.')
   }
 
-  // 3. Hash new password
+  // 4. Check if token has expired
+  if (!staff.resetTokenExpiry || new Date() > staff.resetTokenExpiry) {
+    throw new BadRequestError('Este enlace de restablecimiento ha expirado. Por favor solicita uno nuevo.')
+  }
+
+  // 5. Check if token has already been used (informational only - atomic check below)
+  if (staff.resetTokenUsedAt) {
+    throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
+  }
+
+  // 6. Hash new password
   const hashedPassword = await bcrypt.hash(newPassword, 10)
 
-  // 4. Update staff: set new password, mark token as used, clear reset fields
-  await prisma.staff.update({
-    where: { id: staffToUpdate.id },
+  // 7. SECURITY: Atomic update with condition to prevent race condition
+  // Two simultaneous requests with the same token:
+  // - Request A: Checks resetTokenUsedAt is null ✓
+  // - Request B: Checks resetTokenUsedAt is null ✓ (same time)
+  // - Request A: Updates password to "pass1"
+  // - Request B: Updates password to "pass2" (overwrites!)
+  // Solution: Include the condition IN the update query itself
+  const updateResult = await prisma.staff.updateMany({
+    where: {
+      id: staff.id,
+      resetToken: hashedToken, // Verify token hasn't changed
+      resetTokenUsedAt: null, // CRITICAL: Only update if NOT already used
+    },
     data: {
       password: hashedPassword,
       resetToken: null, // Clear token
@@ -511,10 +503,16 @@ export async function resetPassword(data: ResetPasswordDto) {
     },
   })
 
-  // 5. TODO: Invalidate all refresh tokens (force re-login on all devices)
+  // 8. Check if update actually happened (race condition lost)
+  if (updateResult.count === 0) {
+    // Another request already used this token
+    throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
+  }
+
+  // 9. TODO: Invalidate all refresh tokens (force re-login on all devices)
   // This requires Redis session management implementation
 
-  logger.info(`Password reset successfully for staff: ${staffToUpdate.email}`)
+  logger.info(`Password reset successfully for staff: ${staff.email}`)
 
   return { message: 'Contraseña restablecida exitosamente. Ya puedes iniciar sesión con tu nueva contraseña.' }
 }

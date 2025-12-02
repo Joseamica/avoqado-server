@@ -52,15 +52,49 @@ const API_PREFIX = process.env.API_PREFIX || '/api/v1' // Define un prefijo base
 app.use(API_PREFIX, mainApiRouter)
 
 // Health check endpoints
+// Lightweight check for load balancers (no DB query)
 app.get('/health', (req: ExpressRequest, res: ExpressResponse) => {
-  // Simple health check for Railway
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() })
 })
 
-app.get('/api/public/healthcheck', (req: ExpressRequest, res: ExpressResponse) => {
+// Deep health check with database connectivity verification
+app.get('/api/public/healthcheck', async (req: ExpressRequest, res: ExpressResponse) => {
   const correlationId = (req as any).correlationId || 'N/A'
-  logger.info('Health check accessed.', { correlationId })
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), correlationId })
+  const startTime = Date.now()
+
+  try {
+    // Import prisma lazily to avoid circular dependency
+    const prisma = (await import('./utils/prismaClient')).default
+
+    // Simple DB connectivity check (SELECT 1)
+    await prisma.$queryRaw`SELECT 1`
+
+    const responseTime = Date.now() - startTime
+    logger.info('Health check accessed.', { correlationId, responseTime })
+
+    res.status(200).json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      correlationId,
+      checks: {
+        database: 'connected',
+        responseTimeMs: responseTime,
+      },
+    })
+  } catch (error) {
+    const responseTime = Date.now() - startTime
+    logger.error('Health check failed - database unreachable', { correlationId, error })
+
+    res.status(503).json({
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      correlationId,
+      checks: {
+        database: 'disconnected',
+        responseTimeMs: responseTime,
+      },
+    })
+  }
 })
 
 // --- Development Only Endpoints ---
