@@ -56,6 +56,38 @@ interface KycNotificationData {
   recipients: string[] // Array of email addresses (superadmins + owner)
 }
 
+interface KycDocumentsToBlumonData {
+  venueName: string
+  venueId: string
+  venueSlug: string
+  entityType: 'PERSONA_FISICA' | 'PERSONA_MORAL' | null
+  rfc: string | null
+
+  // Bank info
+  clabe: string | null
+  bankName: string | null
+  accountHolder: string | null
+
+  // Owner info
+  ownerName: string
+  ownerEmail: string
+  ownerPhone: string | null
+
+  // Documents (URLs)
+  documents: {
+    ineUrl: string | null
+    rfcDocumentUrl: string | null
+    comprobanteDomicilioUrl: string | null
+    caratulaBancariaUrl: string | null
+    actaConstitutivaUrl: string | null
+    poderLegalUrl: string | null
+  }
+
+  // Approval info
+  approvedBy: string
+  approvalDate: Date
+}
+
 /**
  * Send KYC submission notification to admin team
  * Now sends to multiple recipients: all SUPERADMINs + venue OWNER
@@ -323,6 +355,246 @@ Este correo fue enviado por Avoqado
     return true
   } catch (error) {
     logger.error(`Error sending notification email to ${to}:`, error)
+    return false
+  }
+}
+
+/**
+ * Send KYC documents to Blumon for merchant onboarding
+ *
+ * Triggered when superadmin approves a venue's KYC.
+ * Sends professional email with document links (Toast/Square style).
+ *
+ * @param data - KYC document data including venue info, documents, and owner details
+ * @returns true if at least one email was sent successfully
+ */
+export async function sendKycDocumentsToBlumon(data: KycDocumentsToBlumonData): Promise<boolean> {
+  // Get recipients from ENV
+  const blumonEmails = process.env.BLUMON_KYC_EMAILS
+  if (!blumonEmails) {
+    logger.warn('📧 BLUMON_KYC_EMAILS not configured - skipping KYC document delivery to Blumon')
+    return false
+  }
+
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping KYC document delivery to Blumon')
+    return false
+  }
+
+  const recipients = blumonEmails
+    .split(',')
+    .map(email => email.trim())
+    .filter(Boolean)
+  if (recipients.length === 0) {
+    logger.warn('📧 No valid Blumon email recipients configured')
+    return false
+  }
+
+  try {
+    const entityTypeDisplay = data.entityType === 'PERSONA_MORAL' ? 'Persona Moral' : 'Persona Física'
+    const approvalDateFormatted = data.approvalDate.toLocaleDateString('es-MX', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+
+    // Build documents table rows (only include documents that exist)
+    const documentRows: { name: string; url: string }[] = []
+    if (data.documents.ineUrl) documentRows.push({ name: 'INE/IFE', url: data.documents.ineUrl })
+    if (data.documents.rfcDocumentUrl) documentRows.push({ name: 'Constancia RFC', url: data.documents.rfcDocumentUrl })
+    if (data.documents.comprobanteDomicilioUrl)
+      documentRows.push({ name: 'Comprobante de Domicilio', url: data.documents.comprobanteDomicilioUrl })
+    if (data.documents.caratulaBancariaUrl) documentRows.push({ name: 'Carátula Bancaria', url: data.documents.caratulaBancariaUrl })
+    if (data.documents.actaConstitutivaUrl) documentRows.push({ name: 'Acta Constitutiva', url: data.documents.actaConstitutivaUrl })
+    if (data.documents.poderLegalUrl) documentRows.push({ name: 'Poder Legal', url: data.documents.poderLegalUrl })
+
+    const documentRowsHtml = documentRows
+      .map(
+        doc => `
+        <tr>
+          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; font-size: 14px;">${doc.name}</td>
+          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; text-align: center;">
+            <a href="${doc.url}" style="background: #667eea; color: white; padding: 8px 16px; text-decoration: none; border-radius: 5px; font-size: 13px; display: inline-block;">Ver documento</a>
+          </td>
+        </tr>
+      `,
+      )
+      .join('')
+
+    const documentRowsText = documentRows.map(doc => `• ${doc.name}: ${doc.url}`).join('\n')
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Nueva Alta de Comercio - ${data.venueName}</title>
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 24px; font-weight: bold;">📋 Nueva Alta de Comercio</h1>
+              <p style="color: #a0aec0; margin: 10px 0 0 0; font-size: 16px;">${data.venueName} • ${entityTypeDisplay}</p>
+            </div>
+
+            <!-- Content -->
+            <div style="padding: 40px 30px;">
+
+              <!-- Venue Info Section -->
+              <div style="background: #f8f9ff; border-radius: 10px; padding: 25px; margin-bottom: 30px;">
+                <h2 style="color: #1a1a2e; font-size: 16px; margin: 0 0 20px 0; text-transform: uppercase; letter-spacing: 1px;">
+                  🏢 Información del Comercio
+                </h2>
+                <table style="width: 100%; border-collapse: collapse;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #666; width: 40%;">Nombre:</td>
+                    <td style="padding: 8px 0; color: #333; font-weight: 600;">${data.venueName}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #666;">Tipo de Entidad:</td>
+                    <td style="padding: 8px 0; color: #333; font-weight: 600;">${entityTypeDisplay}</td>
+                  </tr>
+                  ${data.rfc ? `<tr><td style="padding: 8px 0; color: #666;">RFC:</td><td style="padding: 8px 0; color: #333; font-weight: 600;">${data.rfc}</td></tr>` : ''}
+                  ${data.clabe ? `<tr><td style="padding: 8px 0; color: #666;">CLABE:</td><td style="padding: 8px 0; color: #333; font-weight: 600; font-family: monospace;">${data.clabe}</td></tr>` : ''}
+                  ${data.bankName ? `<tr><td style="padding: 8px 0; color: #666;">Banco:</td><td style="padding: 8px 0; color: #333; font-weight: 600;">${data.bankName}</td></tr>` : ''}
+                  ${data.accountHolder ? `<tr><td style="padding: 8px 0; color: #666;">Titular:</td><td style="padding: 8px 0; color: #333; font-weight: 600;">${data.accountHolder}</td></tr>` : ''}
+                </table>
+              </div>
+
+              <!-- Owner Info Section -->
+              <div style="background: #fff8e1; border-radius: 10px; padding: 25px; margin-bottom: 30px;">
+                <h2 style="color: #1a1a2e; font-size: 16px; margin: 0 0 20px 0; text-transform: uppercase; letter-spacing: 1px;">
+                  👤 Contacto del Propietario
+                </h2>
+                <table style="width: 100%; border-collapse: collapse;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #666; width: 40%;">Nombre:</td>
+                    <td style="padding: 8px 0; color: #333; font-weight: 600;">${data.ownerName}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #666;">Email:</td>
+                    <td style="padding: 8px 0; color: #333;"><a href="mailto:${data.ownerEmail}" style="color: #667eea;">${data.ownerEmail}</a></td>
+                  </tr>
+                  ${data.ownerPhone ? `<tr><td style="padding: 8px 0; color: #666;">Teléfono:</td><td style="padding: 8px 0; color: #333;"><a href="tel:${data.ownerPhone}" style="color: #667eea;">${data.ownerPhone}</a></td></tr>` : ''}
+                </table>
+              </div>
+
+              <!-- Documents Section -->
+              <div style="margin-bottom: 30px;">
+                <h2 style="color: #1a1a2e; font-size: 16px; margin: 0 0 20px 0; text-transform: uppercase; letter-spacing: 1px;">
+                  📄 Documentos KYC
+                </h2>
+                <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
+                  <thead>
+                    <tr style="background: #f0f0f0;">
+                      <th style="padding: 15px; text-align: left; font-size: 13px; color: #666; text-transform: uppercase;">Documento</th>
+                      <th style="padding: 15px; text-align: center; font-size: 13px; color: #666; text-transform: uppercase;">Enlace</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${documentRowsHtml}
+                  </tbody>
+                </table>
+                ${data.entityType === 'PERSONA_MORAL' ? '<p style="font-size: 12px; color: #666; margin-top: 10px;">* Acta Constitutiva y Poder Legal requeridos para Persona Moral</p>' : ''}
+              </div>
+
+              <!-- Footer Info -->
+              <div style="background: #f0f0f0; border-radius: 10px; padding: 20px; text-align: center;">
+                <p style="font-size: 13px; color: #666; margin: 0 0 10px 0;">
+                  <strong>Aprobado por:</strong> ${data.approvedBy}
+                </p>
+                <p style="font-size: 13px; color: #666; margin: 0 0 10px 0;">
+                  <strong>Fecha:</strong> ${approvalDateFormatted}
+                </p>
+                <p style="font-size: 12px; color: #999; margin: 0;">
+                  ID Venue: <code style="background: #e0e0e0; padding: 2px 6px; border-radius: 3px;">${data.venueId}</code>
+                </p>
+              </div>
+
+            </div>
+
+            <!-- Email Footer -->
+            <div style="background: #1a1a2e; padding: 20px; text-align: center;">
+              <p style="color: #a0aec0; font-size: 12px; margin: 0;">
+                Email automático de Avoqado Platform • No responder a este correo
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+NUEVA ALTA DE COMERCIO - ${data.venueName}
+${'='.repeat(50)}
+
+INFORMACIÓN DEL COMERCIO
+------------------------
+Nombre: ${data.venueName}
+Tipo: ${entityTypeDisplay}
+${data.rfc ? `RFC: ${data.rfc}` : ''}
+${data.clabe ? `CLABE: ${data.clabe}` : ''}
+${data.bankName ? `Banco: ${data.bankName}` : ''}
+${data.accountHolder ? `Titular: ${data.accountHolder}` : ''}
+
+CONTACTO DEL PROPIETARIO
+------------------------
+Nombre: ${data.ownerName}
+Email: ${data.ownerEmail}
+${data.ownerPhone ? `Teléfono: ${data.ownerPhone}` : ''}
+
+DOCUMENTOS KYC
+--------------
+${documentRowsText}
+
+${'='.repeat(50)}
+Aprobado por: ${data.approvedBy}
+Fecha: ${approvalDateFormatted}
+ID Venue: ${data.venueId}
+
+---
+Email automático de Avoqado Platform
+    `
+
+    logger.info(`📧 Sending KYC documents to Blumon for venue: ${data.venueName}`)
+    logger.info(`📧 Recipients: ${recipients.join(', ')}`)
+
+    // Send email to all recipients
+    const results = await Promise.allSettled(
+      recipients.map(email =>
+        resend.emails.send({
+          from: FROM_EMAIL,
+          to: email,
+          subject: `[Avoqado] Nueva Alta de Comercio - ${data.venueName} (${entityTypeDisplay})`,
+          html,
+          text,
+        }),
+      ),
+    )
+
+    // Check results
+    const successCount = results.filter(r => r.status === 'fulfilled' && !(r.value as any).error).length
+    const failureCount = results.length - successCount
+
+    if (failureCount > 0) {
+      logger.warn(`⚠️ KYC to Blumon: ${successCount} sent, ${failureCount} failed`)
+      results.forEach((result, index) => {
+        if (result.status === 'rejected' || (result.status === 'fulfilled' && (result.value as any).error)) {
+          const email = recipients[index]
+          const error = result.status === 'rejected' ? result.reason : (result.value as any).error
+          logger.error(`Failed to send KYC documents to ${email}:`, error)
+        }
+      })
+    }
+
+    logger.info(`✅ KYC documents sent to Blumon: ${successCount}/${results.length} recipients`)
+    return successCount > 0
+  } catch (error) {
+    logger.error('Error sending KYC documents to Blumon:', error)
     return false
   }
 }
