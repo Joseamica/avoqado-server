@@ -459,7 +459,9 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
 
   logger.info(`🎉 Demo data cleanup complete for venue ${venueId}`)
   logger.info(`   Transactional: ${result.deletedOrders} orders, ${result.deletedPayments} payments`)
-  logger.info(`   Business Setup: ${result.deletedProducts} products, ${result.deletedMenuCategories} categories, ${result.deletedRecipes} recipes`)
+  logger.info(
+    `   Business Setup: ${result.deletedProducts} products, ${result.deletedMenuCategories} categories, ${result.deletedRecipes} recipes`,
+  )
   logger.info(`   User data preserved: ${result.resetRawMaterials} raw materials reset, ${result.resetInventory} inventory reset`)
 
   return result
@@ -474,13 +476,7 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
  */
 export async function hasDemoData(venueId: string): Promise<boolean> {
   // Check for demo indicators using isDemo field
-  const [
-    demoOrderCount,
-    demoProductCount,
-    demoMenuCount,
-    demoRawMaterialCount,
-    demoCustomerCount,
-  ] = await Promise.all([
+  const [demoOrderCount, demoProductCount, demoMenuCount, demoRawMaterialCount, demoCustomerCount] = await Promise.all([
     prisma.order.count({
       where: {
         venueId,
