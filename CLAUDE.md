@@ -888,14 +888,14 @@ psql -c "SELECT serialNumber, lastHeartbeat, status FROM Terminal WHERE lastHear
 
 **📖 READ FIRST**: `docs/BLUMON_TWO_INTEGRATIONS.md` - Complete comparison and distinction guide
 
-| Aspect       | Blumon E-commerce                                     | Blumon Android SDK (TPV)                               |
-| ------------ | ----------------------------------------------------- | ------------------------------------------------------ |
-| **Use Case** | Online payments (web)                                 | In-person payments (terminals)                         |
-| **Model**    | `EcommerceMerchant` + `CheckoutSession`               | `MerchantAccount` + `Terminal`                         |
-| **Auth**     | OAuth 2.0 tokens                                      | Terminal credentials                                   |
-| **Flow**     | Hosted checkout → Webhook                             | Card reader → Real-time                                |
-| **Service**  | `blumon-ecommerce.service.ts`                         | `blumon-tpv.service.ts`                                |
-| **Docs**     | `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | `blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md`         |
+| Aspect       | Blumon E-commerce                                     | Blumon Android SDK (TPV)                       |
+| ------------ | ----------------------------------------------------- | ---------------------------------------------- |
+| **Use Case** | Online payments (web)                                 | In-person payments (terminals)                 |
+| **Model**    | `EcommerceMerchant` + `CheckoutSession`               | `MerchantAccount` + `Terminal`                 |
+| **Auth**     | OAuth 2.0 tokens                                      | Terminal credentials                           |
+| **Flow**     | Hosted checkout → Webhook                             | Card reader → Real-time                        |
+| **Service**  | `blumon-ecommerce.service.ts`                         | `blumon-tpv.service.ts`                        |
+| **Docs**     | `blumon-ecommerce/BLUMON_ECOMMERCE_IMPLEMENTATION.md` | `blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md` |
 
 ---
 

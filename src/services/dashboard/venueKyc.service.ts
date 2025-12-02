@@ -66,13 +66,15 @@ export async function uploadSingleKycDocument(venueId: string, userId: string, d
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
       include: {
-        staff: isSuperadmin ? undefined : {
-          where: {
-            staffId: userId,
-            role: { in: ['OWNER', 'ADMIN'] },
-            active: true,
-          },
-        },
+        staff: isSuperadmin
+          ? undefined
+          : {
+              where: {
+                staffId: userId,
+                role: { in: ['OWNER', 'ADMIN'] },
+                active: true,
+              },
+            },
       },
     })
 
@@ -97,9 +99,7 @@ export async function uploadSingleKycDocument(venueId: string, userId: string, d
       const rejectedDocs = venue.kycRejectedDocuments || []
       // If there's a specific rejection list and this doc wasn't rejected, block it
       if (rejectedDocs.length > 0 && !rejectedDocs.includes(documentKey)) {
-        throw new BadRequestError(
-          `Cannot modify approved document: ${documentKey}. Only rejected documents can be re-uploaded.`,
-        )
+        throw new BadRequestError(`Cannot modify approved document: ${documentKey}. Only rejected documents can be re-uploaded.`)
       }
     }
 
@@ -154,13 +154,15 @@ export async function submitKycForReview(venueId: string, userId: string, userRo
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
       include: {
-        staff: isSuperadmin ? undefined : {
-          where: {
-            staffId: userId,
-            role: { in: ['OWNER', 'ADMIN'] },
-            active: true,
-          },
-        },
+        staff: isSuperadmin
+          ? undefined
+          : {
+              where: {
+                staffId: userId,
+                role: { in: ['OWNER', 'ADMIN'] },
+                active: true,
+              },
+            },
       },
     })
 
@@ -180,9 +182,7 @@ export async function submitKycForReview(venueId: string, userId: string, userRo
 
     // Determine required documents based on entityType
     const commonDocs = ['idDocumentUrl', 'rfcDocumentUrl', 'comprobanteDomicilioUrl', 'caratulaBancariaUrl']
-    const requiredDocs = venue.entityType === 'PERSONA_MORAL'
-      ? ['actaDocumentUrl', 'poderLegalUrl', ...commonDocs]
-      : commonDocs
+    const requiredDocs = venue.entityType === 'PERSONA_MORAL' ? ['actaDocumentUrl', 'poderLegalUrl', ...commonDocs] : commonDocs
 
     // Check which required documents are missing
     const missingDocs = requiredDocs.filter(field => {

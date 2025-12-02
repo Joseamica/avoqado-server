@@ -2126,11 +2126,7 @@ router.put(
 )
 
 // Venue KYC - Submit for review
-router.post(
-  '/venues/:venueId/kyc/submit',
-  authenticateTokenMiddleware,
-  venueKycController.submitKycForReview,
-)
+router.post('/venues/:venueId/kyc/submit', authenticateTokenMiddleware, venueKycController.submitKycForReview)
 
 // Venue KYC Resubmission (after rejection) - LEGACY: kept for backwards compatibility
 router.post(
