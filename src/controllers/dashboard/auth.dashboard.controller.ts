@@ -357,16 +357,22 @@ export const getAuthStatus = async (req: Request, res: Response) => {
 export async function dashboardLoginController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const loginData = req.body
+    const rememberMe = loginData.rememberMe === true
 
     // Llamar al servicio
     const { accessToken, refreshToken, staff } = await authService.loginStaff(loginData)
+
+    // Cookie maxAge must match JWT expiration to prevent premature logout
+    // JWT expires in: 24h (normal) or 30 days (rememberMe)
+    const accessTokenMaxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000
+    const refreshTokenMaxAge = rememberMe ? 90 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000
 
     // Establecer cookies
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
-      maxAge: 15 * 60 * 1000, // 15 minutos
+      maxAge: accessTokenMaxAge,
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
@@ -375,7 +381,7 @@ export async function dashboardLoginController(req: Request, res: Response, next
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
+      maxAge: refreshTokenMaxAge,
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
@@ -443,12 +449,16 @@ export async function switchVenueController(req: Request, res: Response, next: N
     // Llamar al servicio para realizar la lógica y obtener los nuevos tokens
     const { accessToken, refreshToken } = await authService.switchVenueForStaff(staffId, orgId, targetVenueId)
 
+    // Cookie maxAge must match JWT expiration (24h default since no rememberMe context here)
+    const accessTokenMaxAge = 24 * 60 * 60 * 1000 // 24 hours
+    const refreshTokenMaxAge = 7 * 24 * 60 * 60 * 1000 // 7 days
+
     // Establecer las nuevas cookies, sobrescribiendo las anteriores
     res.cookie('accessToken', accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
-      maxAge: 15 * 60 * 1000, // 15 minutos
+      maxAge: accessTokenMaxAge,
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
@@ -457,7 +467,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
+      maxAge: refreshTokenMaxAge,
       path: '/', // Ajusta el path si tu ruta de refresh es específica
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })

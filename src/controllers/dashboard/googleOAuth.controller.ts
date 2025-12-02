@@ -34,12 +34,16 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
       !!code, // isCode = true if code is provided
     )
 
+    // Cookie maxAge must match JWT expiration (24h default for OAuth login)
+    const accessTokenMaxAge = 24 * 60 * 60 * 1000 // 24 hours
+    const refreshTokenMaxAge = 7 * 24 * 60 * 60 * 1000 // 7 days
+
     // Set cookies
     res.cookie('accessToken', result.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
-      maxAge: 15 * 60 * 1000, // 15 minutes
+      maxAge: accessTokenMaxAge,
       path: '/',
     })
 
@@ -47,7 +51,7 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: refreshTokenMaxAge,
       path: '/',
     })
 
@@ -75,12 +79,16 @@ export async function googleOneTapLogin(req: Request, res: Response, next: NextF
 
     const result = await googleOAuthService.loginWithGoogleOneTap(credential)
 
+    // Cookie maxAge must match JWT expiration (24h default for OAuth login)
+    const accessTokenMaxAge = 24 * 60 * 60 * 1000 // 24 hours
+    const refreshTokenMaxAge = 7 * 24 * 60 * 60 * 1000 // 7 days
+
     // Set cookies
     res.cookie('accessToken', result.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
-      maxAge: 15 * 60 * 1000, // 15 minutes
+      maxAge: accessTokenMaxAge,
       path: '/',
     })
 
@@ -88,7 +96,7 @@ export async function googleOneTapLogin(req: Request, res: Response, next: NextF
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: refreshTokenMaxAge,
       path: '/',
     })
 

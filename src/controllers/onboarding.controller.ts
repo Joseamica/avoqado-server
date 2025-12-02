@@ -62,12 +62,16 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
     // Verify email and get tokens for auto-login
     const result = await signupService.verifyEmailCode(email, verificationCode)
 
+    // Cookie maxAge must match JWT expiration (24h default for onboarding)
+    const accessTokenMaxAge = 24 * 60 * 60 * 1000 // 24 hours
+    const refreshTokenMaxAge = 7 * 24 * 60 * 60 * 1000 // 7 days
+
     // Set auth cookies after successful verification (auto-login)
     res.cookie('accessToken', result.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
-      maxAge: 15 * 60 * 1000, // 15 minutes
+      maxAge: accessTokenMaxAge,
       path: '/',
     })
 
@@ -75,7 +79,7 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
       sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: refreshTokenMaxAge,
       path: '/',
     })
 
@@ -204,7 +208,8 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
         step4_menuData: progress.step4_menuData,
         step5_teamInvites: progress.step5_teamInvites,
         step6_selectedFeatures: progress.step6_selectedFeatures,
-        // Don't expose step7_paymentInfo for security
+        step7_kycDocuments: progress.step7_kycDocuments,
+        // Don't expose step8_paymentInfo for security (contains CLABE)
       },
     })
   } catch (error) {
@@ -454,9 +459,35 @@ export async function updateStep6(req: Request, res: Response, next: NextFunctio
 /**
  * PUT /api/v1/onboarding/organizations/:organizationId/step/7
  *
- * Updates Step 7: CLABE Payment Info
+ * Updates Step 7: KYC Documents
  */
 export async function updateStep7(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId } = req.params
+    const { entityType, documents } = req.body
+
+    const progress = await onboardingProgressService.updateOnboardingStep(organizationId, 7, {
+      step7_kycDocuments: { entityType, documents },
+    })
+
+    logger.info(`Step 7 (KYC Documents) completed for organization: ${organizationId}`)
+
+    res.status(200).json({
+      message: 'Step 7 completed successfully',
+      currentStep: progress.currentStep,
+    })
+  } catch (error) {
+    logger.error('Error updating Step 7:', error)
+    next(error)
+  }
+}
+
+/**
+ * PUT /api/v1/onboarding/organizations/:organizationId/step/8
+ *
+ * Updates Step 8: CLABE Payment Info
+ */
+export async function updateStep8(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { organizationId } = req.params
     const { clabe, bankName, accountHolder } = req.body
@@ -466,18 +497,18 @@ export async function updateStep7(req: Request, res: Response, next: NextFunctio
       throw new BadRequestError('Invalid CLABE. Please check the number and try again.')
     }
 
-    const progress = await onboardingProgressService.updateOnboardingStep(organizationId, 7, {
-      step7_paymentInfo: { clabe, bankName, accountHolder },
+    const progress = await onboardingProgressService.updateOnboardingStep(organizationId, 8, {
+      step8_paymentInfo: { clabe, bankName, accountHolder },
     })
 
-    logger.info(`Step 7 completed for organization: ${organizationId}`)
+    logger.info(`Step 8 (Payment Info) completed for organization: ${organizationId}`)
 
     res.status(200).json({
-      message: 'Step 7 completed successfully',
+      message: 'Step 8 completed successfully',
       currentStep: progress.currentStep,
     })
   } catch (error) {
-    logger.error('Error updating Step 7:', error)
+    logger.error('Error updating Step 8:', error)
     next(error)
   }
 }
@@ -551,7 +582,8 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       onboardingType: progress.step2_onboardingType,
       businessInfo: progress.step3_businessInfo as any,
       menuData: progress.step4_menuData as any,
-      paymentInfo: progress.step7_paymentInfo as any,
+      kycDocuments: progress.step7_kycDocuments as any, // KYC documents from step 7
+      paymentInfo: progress.step8_paymentInfo as any, // Payment info from step 8
       selectedFeatures: progress.step6_selectedFeatures || [],
       stripePaymentMethodId, // Pass payment method for trial setup
       teamInvites: progress.step5_teamInvites as any, // Pass team invites for processing
