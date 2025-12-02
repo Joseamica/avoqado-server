@@ -177,9 +177,7 @@ async function sendKycToBlumonAfterApproval(venueId: string, approvedById: strin
       select: { firstName: true, lastName: true, email: true },
     })
 
-    const approverName = approver
-      ? `${approver.firstName || ''} ${approver.lastName || ''}`.trim() || approver.email
-      : approvedById
+    const approverName = approver ? `${approver.firstName || ''} ${approver.lastName || ''}`.trim() || approver.email : approvedById
 
     // Send to Blumon
     const success = await sendKycDocumentsToBlumon({
