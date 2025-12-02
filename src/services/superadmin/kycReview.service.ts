@@ -11,7 +11,6 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import * as notificationService from '@/services/dashboard/notification.service'
-import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
 
 /**
  * Get all venues pending KYC review
@@ -146,15 +145,8 @@ export async function approveKyc(venueId: string, superadminId: string) {
 
   logger.info(`✅ Approving KYC for venue ${venueId} by superadmin ${superadminId}`)
 
-  // Clean demo data before converting to real venue
-  // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
-  try {
-    const cleanupResult = await cleanDemoData(venueId)
-    logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
-  } catch (cleanupError) {
-    logger.error(`⚠️ Demo cleanup failed for venue ${venueId}, continuing with approval:`, cleanupError)
-    // Don't block approval if cleanup fails - venue can still operate
-  }
+  // Note: Demo data cleanup is now done in convertDemoVenue (when user submits KYC docs)
+  // We don't clean here because user might have added real data while waiting for approval
 
   // Update venue status to VERIFIED
   const updatedVenue = await prisma.venue.update({
@@ -247,15 +239,8 @@ export async function assignProcessorAndApproveKyc(
     superadminId,
   })
 
-  // Clean demo data before converting to real venue
-  // This removes demo orders, payments, reviews, merchant accounts, etc.
-  try {
-    const cleanupResult = await cleanDemoData(venueId)
-    logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
-  } catch (cleanupError) {
-    logger.error(`⚠️ Demo cleanup failed for venue ${venueId}, continuing with approval:`, cleanupError)
-    // Don't block approval if cleanup fails - venue can still operate
-  }
+  // Note: Demo data cleanup is now done in convertDemoVenue (when user submits KYC docs)
+  // We don't clean here because user might have added real data while waiting for approval
 
   // Use transaction to ensure atomicity
   const result = await prisma.$transaction(async tx => {

@@ -2,8 +2,8 @@
 
 ## Overview
 
-Remote command system for TPV terminals following Square Terminal API patterns.
-Commands are queued in database and delivered via heartbeat polling for maximum reliability.
+Remote command system for TPV terminals following Square Terminal API patterns. Commands are queued in database and delivered via heartbeat
+polling for maximum reliability.
 
 ## Flow Diagram
 
@@ -30,31 +30,31 @@ Dashboard                  Server                     TPV
 
 Primary service for terminal health and command management:
 
-| Method | Purpose |
-|--------|---------|
-| `processHeartbeat()` | Updates terminal status, returns pending commands |
-| `sendCommand()` | Queues command for terminal delivery |
-| `acknowledgeCommand()` | Processes command ACK from terminal |
-| `getPendingCommands()` | Returns QUEUED/SENT commands for delivery |
+| Method                 | Purpose                                           |
+| ---------------------- | ------------------------------------------------- |
+| `processHeartbeat()`   | Updates terminal status, returns pending commands |
+| `sendCommand()`        | Queues command for terminal delivery              |
+| `acknowledgeCommand()` | Processes command ACK from terminal               |
+| `getPendingCommands()` | Returns QUEUED/SENT commands for delivery         |
 
 ### TpvCommandQueueService (`src/services/tpv/command-queue.service.ts`)
 
 Manages command queue lifecycle:
 
-| Method | Purpose |
-|--------|---------|
-| `queueCommand()` | Creates command in database |
-| `updateCommandStatus()` | Updates command status |
-| `getExpiredCommands()` | Finds commands past timeout |
+| Method                  | Purpose                     |
+| ----------------------- | --------------------------- |
+| `queueCommand()`        | Creates command in database |
+| `updateCommandStatus()` | Updates command status      |
+| `getExpiredCommands()`  | Finds commands past timeout |
 
 ### Socket Broadcasts (`src/sockets/sockets.ts`)
 
 Real-time notifications to dashboard:
 
-| Function | Purpose |
-|----------|---------|
-| `broadcastTpvCommandStatusChanged()` | Notifies dashboard of command result |
-| `broadcastTpvStatusUpdate()` | Notifies dashboard of terminal status change |
+| Function                             | Purpose                                      |
+| ------------------------------------ | -------------------------------------------- |
+| `broadcastTpvCommandStatusChanged()` | Notifies dashboard of command result         |
+| `broadcastTpvStatusUpdate()`         | Notifies dashboard of terminal status change |
 
 ## Database Model
 
@@ -111,6 +111,7 @@ enum TpvCommandResultStatus {
 ## API Endpoints
 
 ### Send Command
+
 ```
 POST /api/v1/dashboard/tpv/:terminalId/command
 Body: { command: string, payload?: object }
@@ -118,6 +119,7 @@ Response: { correlationId: string, status: string }
 ```
 
 ### Heartbeat (TPV -> Server)
+
 ```
 POST /api/v1/tpv/heartbeat
 Body: { terminalId, status, timestamp, version?, systemInfo? }
@@ -125,6 +127,7 @@ Response: { success: true, commands: TpvCommand[] }
 ```
 
 ### Command ACK (TPV -> Server)
+
 ```
 POST /api/v1/tpv/heartbeat/ack
 Body: { commandId, terminalId, status, resultStatus?, resultMessage? }
@@ -148,19 +151,21 @@ PENDING ─┬─> QUEUED ─┬─> SENT ─┬─> RECEIVED ─> EXECUTING ─
 **Problem Solved:** Race condition between heartbeat and command execution.
 
 **Previous Behavior (BUG):**
+
 ```typescript
 // Server would reset MAINTENANCE to ACTIVE via heartbeat
 if (terminal.status === TerminalStatus.MAINTENANCE) {
   if (status === 'ACTIVE') {
-    newStatus = TerminalStatus.ACTIVE  // <-- THIS CAUSED THE BUG
+    newStatus = TerminalStatus.ACTIVE // <-- THIS CAUSED THE BUG
   }
 }
 ```
 
 **Current Behavior (FIXED):**
+
 ```typescript
 // Heartbeat only changes status for INACTIVE -> ACTIVE (terminal coming online)
-let newStatus = terminal.status  // Keep current status
+let newStatus = terminal.status // Keep current status
 
 if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
   newStatus = TerminalStatus.ACTIVE
@@ -170,6 +175,7 @@ if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
 ```
 
 **Why:** Prevents this race condition:
+
 1. Dashboard sends MAINTENANCE_MODE command
 2. TPV heartbeat arrives with `status: ACTIVE` (before command processed)
 3. Server resets terminal to ACTIVE (BUG!)
@@ -179,6 +185,7 @@ if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
 ### 2. Dual ID System (id vs correlationId)
 
 **Design:**
+
 - `id`: Database CUID for internal operations
 - `correlationId`: UUID for tracking across systems (Android <-> Server)
 
@@ -190,14 +197,15 @@ if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
 
 **Solution:** When a command is REJECTED, it means the terminal is in the opposite state. Server syncs accordingly:
 
-| Command | REJECTED Means | Server Syncs To |
-|---------|---------------|-----------------|
-| `EXIT_MAINTENANCE` | Terminal NOT in maintenance | `status = ACTIVE` |
+| Command            | REJECTED Means                  | Server Syncs To        |
+| ------------------ | ------------------------------- | ---------------------- |
+| `EXIT_MAINTENANCE` | Terminal NOT in maintenance     | `status = ACTIVE`      |
 | `MAINTENANCE_MODE` | Terminal already in maintenance | `status = MAINTENANCE` |
-| `LOCK` | Terminal already locked | `isLocked = true` |
-| `UNLOCK` | Terminal not locked | `isLocked = false` |
+| `LOCK`             | Terminal already locked         | `isLocked = true`      |
+| `UNLOCK`           | Terminal not locked             | `isLocked = false`     |
 
 **Example Flow:**
+
 1. Dashboard shows MAINTENANCE (wrong state in DB)
 2. User toggles maintenance switch OFF
 3. Server sends EXIT_MAINTENANCE
@@ -210,6 +218,7 @@ if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
 **Design:** TPV sends ACK via HTTP POST only, not Socket.IO.
 
 **Why:**
+
 - Socket.IO may not be connected (login screen)
 - HTTP is always available
 - Single source of truth for command status
@@ -220,6 +229,7 @@ if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
 **Design:** Commands are returned in heartbeat HTTP response body, not pushed via Socket.IO.
 
 **Why:**
+
 - Works even when Socket.IO is disconnected
 - Guaranteed delivery (polling pattern)
 - Follows Square Terminal API pattern
@@ -252,22 +262,24 @@ const [pendingCommand, setPendingCommand] = useState<string | null>(null)
 
 const sendTpvCommand = (command: string) => {
   setPendingCommand(command)
-  commandMutation.mutate({ command, payload }, {
-    onSettled: () => setPendingCommand(null)
-  })
+  commandMutation.mutate(
+    { command, payload },
+    {
+      onSettled: () => setPendingCommand(null),
+    },
+  )
 }
 
 // Show spinner instead of icon while pending
-{pendingCommand === 'MAINTENANCE_MODE' ? (
-  <Loader2 className="animate-spin" />
-) : (
-  <Wrench />
-)}
+{
+  pendingCommand === 'MAINTENANCE_MODE' ? <Loader2 className="animate-spin" /> : <Wrench />
+}
 ```
 
 ## Debugging
 
 ### Check Terminal Status
+
 ```sql
 SELECT id, serialNumber, status, lastHeartbeat, "isLocked"
 FROM "Terminal"
@@ -275,6 +287,7 @@ WHERE id = 'xxx';
 ```
 
 ### Check Command History
+
 ```sql
 SELECT id, correlationId, "commandType", status, "resultStatus",
        "createdAt", "acknowledgedAt"
@@ -285,6 +298,7 @@ LIMIT 20;
 ```
 
 ### Server Logs
+
 ```bash
 # Watch command flow
 tail -f logs/development*.log | grep -E "(command|heartbeat|ACK|MAINTENANCE)"
@@ -293,21 +307,25 @@ tail -f logs/development*.log | grep -E "(command|heartbeat|ACK|MAINTENANCE)"
 ## Common Issues
 
 ### 1. Command Not Delivered
+
 - Check terminal lastHeartbeat < 2 minutes ago
 - Check command status is QUEUED (not already SENT)
 - Verify terminal is sending heartbeats
 
 ### 2. ACK Not Received
+
 - Check Android logs for ACK HTTP errors
 - Verify correlationId matches
 - Check server ACK endpoint is reachable
 
 ### 3. Maintenance Mode Resets
+
 - **Fixed 2025-12-01**: Heartbeat no longer overrides MAINTENANCE
 - Check for other code paths changing status
 - Verify EXIT_MAINTENANCE command isn't being sent
 
 ### 4. Dashboard Shows Wrong State
+
 - Check Socket.IO connection
 - Verify TanStack Query is invalidating after command
 - Check broadcastTpvStatusUpdate is being called
@@ -316,11 +334,12 @@ tail -f logs/development*.log | grep -E "(command|heartbeat|ACK|MAINTENANCE)"
 
 ### Emitted by Server
 
-| Event | Payload | Trigger |
-|-------|---------|---------|
+| Event                | Payload                                           | Trigger              |
+| -------------------- | ------------------------------------------------- | -------------------- |
 | `tpv:command:status` | `{ terminalId, commandId, status, resultStatus }` | Command ACK received |
-| `tpv:status:update` | `{ terminalId, status, lastHeartbeat }` | Heartbeat processed |
+| `tpv:status:update`  | `{ terminalId, status, lastHeartbeat }`           | Heartbeat processed  |
 
 ### Room Structure
+
 - Dashboard clients join: `venue_{venueId}`
 - Events broadcast to venue room for real-time updates

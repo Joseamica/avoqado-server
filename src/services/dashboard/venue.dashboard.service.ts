@@ -44,6 +44,7 @@ import {
   createTrialSetupIntent,
 } from '../stripe.service'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
+import { cleanDemoData } from '../onboarding/demoCleanup.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -785,6 +786,17 @@ export async function convertDemoVenue(
   if (!existingVenue.isOnboardingDemo) {
     logger.error('Attempted to convert non-demo venue', { venueId })
     throw new BadRequestError('This venue is not in demo mode')
+  }
+
+  // 🧹 Clean demo data before converting to real venue
+  // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
+  try {
+    const cleanupResult = await cleanDemoData(venueId)
+    logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
+  } catch (cleanupError) {
+    logger.error(`⚠️ Demo cleanup failed for venue ${venueId}:`, cleanupError)
+    // Don't block conversion if cleanup fails - venue can still operate
+    // The demo data will just remain but venue will be marked as real
   }
 
   // 🎯 STRIPE INTEGRATION: Create customer and attach payment method

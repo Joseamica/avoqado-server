@@ -4,7 +4,10 @@
  * Cleans demo/sample data from a venue when converting from demo to real.
  * Called during KYC approval to give the venue a fresh start.
  *
- * What gets DELETED (transactional data):
+ * IMPORTANT: Uses `isDemo` field to distinguish demo data from user data.
+ * Only data with `isDemo: true` will be deleted for business setup items.
+ *
+ * What gets DELETED (transactional data - ALL):
  * - Orders and OrderItems
  * - Payments
  * - Reviews
@@ -13,19 +16,23 @@
  * - Demo MerchantAccounts
  * - Demo Customers
  *
- * What gets RESET (keep structure, zero out values):
- * - RawMaterial currentStock -> 0
- * - Inventory currentStock -> 0
- * - Customer loyalty points -> 0 (if keeping customers)
- *
- * What gets KEPT (business setup):
- * - Menu, categories, products
- * - Modifier groups and modifiers
- * - Tables and areas
- * - Raw materials (ingredient list)
- * - Recipes
+ * What gets DELETED (business setup - ONLY isDemo: true):
+ * - RecipeLine
+ * - Recipe
+ * - Inventory
+ * - Product
+ * - Modifier
+ * - ModifierGroup
+ * - MenuCategory
+ * - Menu
+ * - Table
+ * - Area
+ * - CustomerGroup
  * - LoyaltyConfig
- * - CustomerGroups
+ * - RawMaterial
+ *
+ * What gets KEPT:
+ * - All data created by the user (isDemo: false)
  * - Staff/team members
  */
 
@@ -33,6 +40,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 
 interface CleanupResult {
+  // Transactional data (all deleted)
   deletedOrders: number
   deletedPayments: number
   deletedReviews: number
@@ -40,12 +48,27 @@ interface CleanupResult {
   deletedBatches: number
   deletedMerchantAccounts: number
   deletedCustomers: number
+  // Business setup (only isDemo: true deleted)
+  deletedRecipeLines: number
+  deletedRecipes: number
+  deletedInventory: number
+  deletedProducts: number
+  deletedModifiers: number
+  deletedModifierGroups: number
+  deletedMenuCategories: number
+  deletedMenus: number
+  deletedTables: number
+  deletedAreas: number
+  deletedCustomerGroups: number
+  deletedLoyaltyConfig: number
+  deletedRawMaterials: number
+  // Reset counts
   resetRawMaterials: number
   resetInventory: number
 }
 
 /**
- * Cleans all demo/sample transactional data from a venue
+ * Cleans all demo/sample data from a venue
  * Call this when converting from demo to real (KYC approval)
  *
  * @param venueId - Venue ID to clean
@@ -62,6 +85,19 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
     deletedBatches: 0,
     deletedMerchantAccounts: 0,
     deletedCustomers: 0,
+    deletedRecipeLines: 0,
+    deletedRecipes: 0,
+    deletedInventory: 0,
+    deletedProducts: 0,
+    deletedModifiers: 0,
+    deletedModifierGroups: 0,
+    deletedMenuCategories: 0,
+    deletedMenus: 0,
+    deletedTables: 0,
+    deletedAreas: 0,
+    deletedCustomerGroups: 0,
+    deletedLoyaltyConfig: 0,
+    deletedRawMaterials: 0,
     resetRawMaterials: 0,
     resetInventory: 0,
   }
@@ -69,6 +105,11 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
   // Use transaction to ensure atomicity
   await prisma.$transaction(
     async tx => {
+      // ==========================================
+      // PHASE 1: Delete ALL transactional data
+      // (These are always temporary demo data)
+      // ==========================================
+
       // 1. Delete Payments (must delete before orders due to FK)
       const deletedPayments = await tx.payment.deleteMany({
         where: { venueId },
@@ -77,7 +118,6 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       logger.info(`  ✓ Deleted ${deletedPayments.count} payments`)
 
       // 2. Delete OrderItems (cascade from orders)
-      // Note: OrderItems have orderId FK, need to delete via orders
       const orders = await tx.order.findMany({
         where: { venueId },
         select: { id: true },
@@ -118,34 +158,16 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       result.deletedBatches = deletedBatches.count
       logger.info(`  ✓ Deleted ${deletedBatches.count} stock batches`)
 
-      // 7. Reset RawMaterial currentStock to 0
-      const resetRawMaterials = await tx.rawMaterial.updateMany({
-        where: { venueId },
-        data: {
-          currentStock: 0,
-          avgCostPerUnit: 0,
-        },
-      })
-      result.resetRawMaterials = resetRawMaterials.count
-      logger.info(`  ✓ Reset ${resetRawMaterials.count} raw materials to 0 stock`)
-
-      // 8. Reset Inventory (product inventory) to 0
-      const resetInventory = await tx.inventory.updateMany({
-        where: { venueId },
-        data: {
-          currentStock: 0,
-          reservedStock: 0,
-        },
-      })
-      result.resetInventory = resetInventory.count
-      logger.info(`  ✓ Reset ${resetInventory.count} product inventories to 0 stock`)
-
-      // 9. Delete demo MerchantAccounts
-      // First get VenuePaymentConfig to find linked merchant accounts
+      // 7. Delete demo MerchantAccounts for THIS venue only
       const venuePaymentConfig = await tx.venuePaymentConfig.findUnique({
         where: { venueId },
-        select: { primaryAccountId: true, secondaryAccountId: true },
+        select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
       })
+
+      const venueAccountIds: string[] = []
+      if (venuePaymentConfig?.primaryAccountId) venueAccountIds.push(venuePaymentConfig.primaryAccountId)
+      if (venuePaymentConfig?.secondaryAccountId) venueAccountIds.push(venuePaymentConfig.secondaryAccountId)
+      if (venuePaymentConfig?.tertiaryAccountId) venueAccountIds.push(venuePaymentConfig.tertiaryAccountId)
 
       // Delete VenuePaymentConfig first (has FK to MerchantAccount)
       if (venuePaymentConfig) {
@@ -154,42 +176,62 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
         })
       }
 
-      // Find demo merchant accounts (those with DEMO in externalMerchantId or displayName)
-      const demoMerchantAccounts = await tx.merchantAccount.findMany({
-        where: {
-          OR: [
-            { externalMerchantId: { contains: 'demo' } },
-            { externalMerchantId: { contains: 'DEMO' } },
-            { displayName: { contains: 'Demo' } },
-            { blumonSerialNumber: { startsWith: 'DEMO' } },
-          ],
-        },
-        select: { id: true },
+      // Delete VenuePricingStructure for this venue
+      await tx.venuePricingStructure.deleteMany({
+        where: { venueId },
       })
 
-      if (demoMerchantAccounts.length > 0) {
-        const demoAccountIds = demoMerchantAccounts.map(m => m.id)
-
-        // Delete ProviderCostStructure for demo accounts
-        await tx.providerCostStructure.deleteMany({
-          where: { merchantAccountId: { in: demoAccountIds } },
+      if (venueAccountIds.length > 0) {
+        const demoAccountsForVenue = await tx.merchantAccount.findMany({
+          where: {
+            id: { in: venueAccountIds },
+            OR: [
+              { externalMerchantId: { contains: 'demo', mode: 'insensitive' } },
+              { displayName: { contains: 'Demo', mode: 'insensitive' } },
+              { blumonSerialNumber: { startsWith: 'DEMO' } },
+            ],
+          },
+          select: { id: true },
         })
 
-        // Delete VenuePricingStructure for this venue
-        await tx.venuePricingStructure.deleteMany({
-          where: { venueId },
-        })
+        if (demoAccountsForVenue.length > 0) {
+          const demoAccountIds = demoAccountsForVenue.map(m => m.id)
 
-        // Delete demo MerchantAccounts
-        const deletedMerchantAccounts = await tx.merchantAccount.deleteMany({
-          where: { id: { in: demoAccountIds } },
-        })
-        result.deletedMerchantAccounts = deletedMerchantAccounts.count
-        logger.info(`  ✓ Deleted ${deletedMerchantAccounts.count} demo merchant accounts`)
+          const stillReferenced = await tx.venuePaymentConfig.findMany({
+            where: {
+              OR: [
+                { primaryAccountId: { in: demoAccountIds } },
+                { secondaryAccountId: { in: demoAccountIds } },
+                { tertiaryAccountId: { in: demoAccountIds } },
+              ],
+            },
+            select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+          })
+
+          const stillReferencedIds = new Set<string>()
+          for (const config of stillReferenced) {
+            if (config.primaryAccountId) stillReferencedIds.add(config.primaryAccountId)
+            if (config.secondaryAccountId) stillReferencedIds.add(config.secondaryAccountId)
+            if (config.tertiaryAccountId) stillReferencedIds.add(config.tertiaryAccountId)
+          }
+
+          const safeToDeleteIds = demoAccountIds.filter(id => !stillReferencedIds.has(id))
+
+          if (safeToDeleteIds.length > 0) {
+            await tx.providerCostStructure.deleteMany({
+              where: { merchantAccountId: { in: safeToDeleteIds } },
+            })
+
+            const deletedMerchantAccounts = await tx.merchantAccount.deleteMany({
+              where: { id: { in: safeToDeleteIds } },
+            })
+            result.deletedMerchantAccounts = deletedMerchantAccounts.count
+            logger.info(`  ✓ Deleted ${deletedMerchantAccounts.count} demo merchant accounts`)
+          }
+        }
       }
 
-      // 10. Delete demo Customers (those created by seed)
-      // Demo customers have email pattern *@demo.com
+      // 8. Delete demo Customers (those created by seed)
       const deletedCustomers = await tx.customer.deleteMany({
         where: {
           venueId,
@@ -199,7 +241,7 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       result.deletedCustomers = deletedCustomers.count
       logger.info(`  ✓ Deleted ${deletedCustomers.count} demo customers`)
 
-      // 11. Reset remaining customers loyalty data (if any real customers were added)
+      // 9. Reset remaining customers loyalty data
       await tx.customer.updateMany({
         where: { venueId },
         data: {
@@ -213,7 +255,118 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       })
       logger.info(`  ✓ Reset loyalty data for remaining customers`)
 
-      // 12. Reset table statuses to available
+      // ==========================================
+      // PHASE 2: Delete DEMO business setup data (isDemo: true only)
+      // User-created data (isDemo: false) is preserved!
+      // ==========================================
+
+      logger.info(`  📦 Cleaning demo business setup data (preserving user data)...`)
+
+      // 10. Delete demo RecipeLines first (FK to Recipe)
+      const deletedRecipeLines = await tx.recipeLine.deleteMany({
+        where: { isDemo: true },
+      })
+      result.deletedRecipeLines = deletedRecipeLines.count
+      logger.info(`  ✓ Deleted ${deletedRecipeLines.count} demo recipe lines`)
+
+      // 11. Delete demo Recipes (FK to Product)
+      const deletedRecipes = await tx.recipe.deleteMany({
+        where: { isDemo: true },
+      })
+      result.deletedRecipes = deletedRecipes.count
+      logger.info(`  ✓ Deleted ${deletedRecipes.count} demo recipes`)
+
+      // 12. Delete demo Inventory (FK to Product)
+      const deletedInventory = await tx.inventory.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedInventory = deletedInventory.count
+      logger.info(`  ✓ Deleted ${deletedInventory.count} demo inventory records`)
+
+      // 13. Delete ProductModifierGroup links for demo products
+      const demoProducts = await tx.product.findMany({
+        where: { venueId, isDemo: true },
+        select: { id: true },
+      })
+      if (demoProducts.length > 0) {
+        await tx.productModifierGroup.deleteMany({
+          where: { productId: { in: demoProducts.map(p => p.id) } },
+        })
+      }
+
+      // 14. Delete demo Products (FK to MenuCategory)
+      const deletedProducts = await tx.product.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedProducts = deletedProducts.count
+      logger.info(`  ✓ Deleted ${deletedProducts.count} demo products`)
+
+      // 15. Delete demo Modifiers (FK to ModifierGroup)
+      const deletedModifiers = await tx.modifier.deleteMany({
+        where: { isDemo: true },
+      })
+      result.deletedModifiers = deletedModifiers.count
+      logger.info(`  ✓ Deleted ${deletedModifiers.count} demo modifiers`)
+
+      // 16. Delete demo ModifierGroups
+      const deletedModifierGroups = await tx.modifierGroup.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedModifierGroups = deletedModifierGroups.count
+      logger.info(`  ✓ Deleted ${deletedModifierGroups.count} demo modifier groups`)
+
+      // 17. Delete MenuCategoryAssignments for demo categories
+      const demoCategories = await tx.menuCategory.findMany({
+        where: { venueId, isDemo: true },
+        select: { id: true },
+      })
+      if (demoCategories.length > 0) {
+        await tx.menuCategoryAssignment.deleteMany({
+          where: { categoryId: { in: demoCategories.map(c => c.id) } },
+        })
+      }
+
+      // 18. Delete demo MenuCategories
+      const deletedMenuCategories = await tx.menuCategory.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedMenuCategories = deletedMenuCategories.count
+      logger.info(`  ✓ Deleted ${deletedMenuCategories.count} demo menu categories`)
+
+      // 19. Delete MenuCategoryAssignments for demo menus
+      const demoMenus = await tx.menu.findMany({
+        where: { venueId, isDemo: true },
+        select: { id: true },
+      })
+      if (demoMenus.length > 0) {
+        await tx.menuCategoryAssignment.deleteMany({
+          where: { menuId: { in: demoMenus.map(m => m.id) } },
+        })
+      }
+
+      // 20. Delete demo Menus
+      const deletedMenus = await tx.menu.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedMenus = deletedMenus.count
+      logger.info(`  ✓ Deleted ${deletedMenus.count} demo menus`)
+
+      // 21. Reset tables and delete demo tables
       await tx.table.updateMany({
         where: { venueId },
         data: {
@@ -221,15 +374,93 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
           currentOrderId: null,
         },
       })
-      logger.info(`  ✓ Reset all tables to AVAILABLE status`)
+
+      const deletedTables = await tx.table.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedTables = deletedTables.count
+      logger.info(`  ✓ Deleted ${deletedTables.count} demo tables`)
+
+      // 22. Delete demo Areas
+      const deletedAreas = await tx.area.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedAreas = deletedAreas.count
+      logger.info(`  ✓ Deleted ${deletedAreas.count} demo areas`)
+
+      // 23. Delete demo CustomerGroups
+      const deletedCustomerGroups = await tx.customerGroup.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedCustomerGroups = deletedCustomerGroups.count
+      logger.info(`  ✓ Deleted ${deletedCustomerGroups.count} demo customer groups`)
+
+      // 24. Delete demo LoyaltyConfig
+      const deletedLoyaltyConfig = await tx.loyaltyConfig.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedLoyaltyConfig = deletedLoyaltyConfig.count
+      logger.info(`  ✓ Deleted ${deletedLoyaltyConfig.count} demo loyalty configs`)
+
+      // 25. Reset non-demo RawMaterial stock to 0 (keep the records)
+      const resetRawMaterials = await tx.rawMaterial.updateMany({
+        where: {
+          venueId,
+          isDemo: false,
+        },
+        data: {
+          currentStock: 0,
+          avgCostPerUnit: 0,
+        },
+      })
+      result.resetRawMaterials = resetRawMaterials.count
+      logger.info(`  ✓ Reset ${resetRawMaterials.count} user raw materials to 0 stock`)
+
+      // 26. Delete demo RawMaterials
+      const deletedRawMaterials = await tx.rawMaterial.deleteMany({
+        where: {
+          venueId,
+          isDemo: true,
+        },
+      })
+      result.deletedRawMaterials = deletedRawMaterials.count
+      logger.info(`  ✓ Deleted ${deletedRawMaterials.count} demo raw materials`)
+
+      // 27. Reset non-demo Inventory to 0 (keep the records)
+      const resetInventory = await tx.inventory.updateMany({
+        where: {
+          venueId,
+          isDemo: false,
+        },
+        data: {
+          currentStock: 0,
+          reservedStock: 0,
+        },
+      })
+      result.resetInventory = resetInventory.count
+      logger.info(`  ✓ Reset ${resetInventory.count} user inventory records to 0 stock`)
     },
     {
-      timeout: 60000, // 60 second timeout for large cleanups
+      timeout: 120000, // 2 minute timeout for comprehensive cleanup
     },
   )
 
   logger.info(`🎉 Demo data cleanup complete for venue ${venueId}`)
-  logger.info(`   Summary: ${result.deletedOrders} orders, ${result.deletedPayments} payments, ${result.deletedReviews} reviews`)
+  logger.info(`   Transactional: ${result.deletedOrders} orders, ${result.deletedPayments} payments`)
+  logger.info(`   Business Setup: ${result.deletedProducts} products, ${result.deletedMenuCategories} categories, ${result.deletedRecipes} recipes`)
+  logger.info(`   User data preserved: ${result.resetRawMaterials} raw materials reset, ${result.resetInventory} inventory reset`)
 
   return result
 }
@@ -242,12 +473,36 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
  * @returns true if venue has demo data
  */
 export async function hasDemoData(venueId: string): Promise<boolean> {
-  // Check for demo indicators
-  const [orderCount, demoCustomerCount, demoMerchantCount] = await Promise.all([
+  // Check for demo indicators using isDemo field
+  const [
+    demoOrderCount,
+    demoProductCount,
+    demoMenuCount,
+    demoRawMaterialCount,
+    demoCustomerCount,
+  ] = await Promise.all([
     prisma.order.count({
       where: {
         venueId,
         orderNumber: { startsWith: 'DEMO-' },
+      },
+    }),
+    prisma.product.count({
+      where: {
+        venueId,
+        isDemo: true,
+      },
+    }),
+    prisma.menu.count({
+      where: {
+        venueId,
+        isDemo: true,
+      },
+    }),
+    prisma.rawMaterial.count({
+      where: {
+        venueId,
+        isDemo: true,
       },
     }),
     prisma.customer.count({
@@ -256,12 +511,7 @@ export async function hasDemoData(venueId: string): Promise<boolean> {
         email: { endsWith: '@demo.com' },
       },
     }),
-    prisma.merchantAccount.count({
-      where: {
-        OR: [{ externalMerchantId: { contains: 'demo' } }, { blumonSerialNumber: { startsWith: 'DEMO' } }],
-      },
-    }),
   ])
 
-  return orderCount > 0 || demoCustomerCount > 0 || demoMerchantCount > 0
+  return demoOrderCount > 0 || demoProductCount > 0 || demoMenuCount > 0 || demoRawMaterialCount > 0 || demoCustomerCount > 0
 }
