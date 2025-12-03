@@ -67,6 +67,7 @@
     "node": "20.x"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
     "@google-cloud/local-auth": "^3.0.1",
     "@prisma/client": "^6.14.0",
     "@radix-ui/react-scroll-area": "^1.2.10",
@@ -103,6 +104,7 @@
     "nodemailer": "^7.0.9",
     "openai": "^5.15.0",
     "papaparse": "^5.5.3",
+    "pdf-to-img": "^5.0.0",
     "pg": "^8.16.0",
     "pm2": "^6.0.8",
     "rate-limit-redis": "^4.2.1",
@@ -116,6 +118,7 @@
     "uuid": "^11.1.0",
     "vitest": "^3.2.4",
     "winston": "^3.17.0",
+    "xlsx": "^0.18.5",
     "yaml": "^2.8.1",
     "zod": "^3.25.51"
   },

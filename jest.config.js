@@ -52,6 +52,7 @@ module.exports = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
     '^@tests/(.*)$': '<rootDir>/tests/$1',
+    '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
   },
 
   // 🔥 NEW: Test configuration
@@ -71,6 +72,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
       },
     },
     {
@@ -83,6 +85,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
       },
     },
     {
@@ -95,6 +98,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
       },
     },
     {
@@ -107,6 +111,7 @@ module.exports = {
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
+        '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
       },
     },
   ],

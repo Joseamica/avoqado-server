@@ -12,6 +12,7 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import * as notificationService from '@/services/dashboard/notification.service'
 import { sendKycDocumentsToBlumon } from '@/services/resend.service'
+import { generateBlumonExcel } from '@/services/superadmin/blumonExcelGenerator.service'
 
 /**
  * Get all venues pending KYC review
@@ -120,6 +121,7 @@ export async function getVenueKycDetails(venueId: string) {
  *
  * This is a fire-and-forget operation - failure does not block the approval.
  * Collects all venue, owner, and document info and sends to configured Blumon emails.
+ * Also generates Blumon Excel from KYC documents using Claude Vision.
  *
  * @param venueId - Venue ID that was approved
  * @param approvedById - Staff ID who approved the KYC
@@ -179,6 +181,35 @@ async function sendKycToBlumonAfterApproval(venueId: string, approvedById: strin
 
     const approverName = approver ? `${approver.firstName || ''} ${approver.lastName || ''}`.trim() || approver.email : approvedById
 
+    // Generate Blumon Excel from KYC documents (Claude Vision extraction)
+    let blumonExcelUrl: string | null = null
+    try {
+      logger.info(`📊 Generating Blumon Excel for venue ${venueId}...`)
+      const excelResult = await generateBlumonExcel(
+        {
+          rfcDocumentUrl: venue.rfcDocumentUrl,
+          idDocumentUrl: venue.idDocumentUrl,
+        },
+        {
+          name: venue.name,
+          slug: venue.slug,
+          phone: ownerAssignment?.staff.phone || null,
+          email: ownerAssignment?.staff.email || null,
+          website: venue.website || null,
+        },
+      )
+
+      if (excelResult.success && excelResult.excelUrl) {
+        blumonExcelUrl = excelResult.excelUrl
+        logger.info(`✅ Blumon Excel generated: ${blumonExcelUrl}`)
+      } else {
+        logger.warn(`⚠️ Could not generate Blumon Excel for venue ${venueId}`)
+      }
+    } catch (excelError) {
+      logger.error(`Error generating Blumon Excel for venue ${venueId}:`, excelError)
+      // Continue with email even if Excel generation fails
+    }
+
     // Send to Blumon
     const success = await sendKycDocumentsToBlumon({
       venueName: venue.name,
@@ -204,6 +235,7 @@ async function sendKycToBlumonAfterApproval(venueId: string, approvedById: strin
       },
       approvedBy: approverName,
       approvalDate: new Date(),
+      blumonExcelUrl, // Include the generated Excel URL
     })
 
     if (success) {
