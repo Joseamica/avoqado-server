@@ -34,14 +34,14 @@ Routes → Middleware → Controllers → Services → Prisma (Database)
 
 ### Layer Responsibilities
 
-| Layer | Purpose | What it does | What it does NOT do |
-|-------|---------|--------------|---------------------|
-| **Routes** (`/src/routes/`) | HTTP endpoint definitions | Attach middleware chains to URLs | Business logic, data access |
-| **Controllers** (`/src/controllers/`) | HTTP orchestration (thin layer) | Extract req data, call services, send responses | Business validation, database access |
-| **Services** (`/src/services/`) | Business logic (core layer) | Validations, calculations, database operations | HTTP concerns (req/res), status codes |
-| **Middlewares** (`/src/middlewares/`) | Cross-cutting concerns | Auth, validation, logging, permissions | Business logic, data persistence |
-| **Schemas** (`/src/schemas/`) | Data validation | Zod schemas for request/response validation | Business rules enforcement |
-| **Prisma** | Database access layer | ORM for type-safe database queries | Business logic |
+| Layer                                 | Purpose                         | What it does                                    | What it does NOT do                   |
+| ------------------------------------- | ------------------------------- | ----------------------------------------------- | ------------------------------------- |
+| **Routes** (`/src/routes/`)           | HTTP endpoint definitions       | Attach middleware chains to URLs                | Business logic, data access           |
+| **Controllers** (`/src/controllers/`) | HTTP orchestration (thin layer) | Extract req data, call services, send responses | Business validation, database access  |
+| **Services** (`/src/services/`)       | Business logic (core layer)     | Validations, calculations, database operations  | HTTP concerns (req/res), status codes |
+| **Middlewares** (`/src/middlewares/`) | Cross-cutting concerns          | Auth, validation, logging, permissions          | Business logic, data persistence      |
+| **Schemas** (`/src/schemas/`)         | Data validation                 | Zod schemas for request/response validation     | Business rules enforcement            |
+| **Prisma**                            | Database access layer           | ORM for type-safe database queries              | Business logic                        |
 
 ### Why This Architecture?
 
@@ -53,6 +53,7 @@ Routes → Middleware → Controllers → Services → Prisma (Database)
 ### Code Examples
 
 See code comments in:
+
 - `src/controllers/dashboard/venue.dashboard.controller.ts:1-21` - Thin controller pattern explained
 - `src/services/dashboard/venue.dashboard.service.ts:1-24` - HTTP-agnostic service pattern explained
 - `src/utils/prismaClient.ts:3-21` - Singleton pattern for database connection pooling
@@ -62,6 +63,7 @@ See code comments in:
 ## Multi-Tenant Architecture
 
 All operations are scoped to:
+
 - **Organization** - Top-level tenant
 - **Venue** - Individual business location
 
@@ -71,7 +73,9 @@ All operations are scoped to:
 
 ## Control Plane vs Application Plane (API Routes)
 
-Industry-standard pattern for multi-tenant SaaS ([AWS](https://docs.aws.amazon.com/whitepapers/latest/saas-architecture-fundamentals/control-plane-vs.-application-plane.html), [Microsoft](https://learn.microsoft.com/en-us/azure/architecture/guide/multitenant/considerations/control-planes)).
+Industry-standard pattern for multi-tenant SaaS
+([AWS](https://docs.aws.amazon.com/whitepapers/latest/saas-architecture-fundamentals/control-plane-vs.-application-plane.html),
+[Microsoft](https://learn.microsoft.com/en-us/azure/architecture/guide/multitenant/considerations/control-planes)).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -97,12 +101,13 @@ Industry-standard pattern for multi-tenant SaaS ([AWS](https://docs.aws.amazon.c
 
 ### Decision Rule for New Endpoints
 
-| Question | Answer | Where to add route |
-|----------|--------|-------------------|
-| Affects ALL venues/platform? | Yes | `superadmin.routes.ts` |
-| Affects ONE specific venue? | Yes | `dashboard.routes.ts` with venueId param |
+| Question                     | Answer | Where to add route                       |
+| ---------------------------- | ------ | ---------------------------------------- |
+| Affects ALL venues/platform? | Yes    | `superadmin.routes.ts`                   |
+| Affects ONE specific venue?  | Yes    | `dashboard.routes.ts` with venueId param |
 
 **Example:** Creating a new KYC endpoint
+
 - `GET /superadmin/kyc` → List KYC queue for ALL venues (Control Plane)
 - `POST /dashboard/venues/:venueId/kyc/approve` → Approve THIS venue's KYC (Application Plane)
 
@@ -110,28 +115,28 @@ Industry-standard pattern for multi-tenant SaaS ([AWS](https://docs.aws.amazon.c
 
 ## Technical Stack
 
-| Component | Technology |
-|-----------|------------|
-| **Framework** | Express.js with TypeScript |
-| **Database** | PostgreSQL with Prisma ORM |
-| **Real-time** | Socket.IO for live updates |
-| **Message Queue** | RabbitMQ for POS command processing |
-| **Session** | Redis-backed sessions |
-| **Authentication** | JWT with refresh tokens |
-| **Validation** | Zod schemas |
-| **Testing** | Jest with unit, API, and workflow tests |
+| Component          | Technology                              |
+| ------------------ | --------------------------------------- |
+| **Framework**      | Express.js with TypeScript              |
+| **Database**       | PostgreSQL with Prisma ORM              |
+| **Real-time**      | Socket.IO for live updates              |
+| **Message Queue**  | RabbitMQ for POS command processing     |
+| **Session**        | Redis-backed sessions                   |
+| **Authentication** | JWT with refresh tokens                 |
+| **Validation**     | Zod schemas                             |
+| **Testing**        | Jest with unit, API, and workflow tests |
 
 ---
 
 ## Service Organization
 
-| Directory | Purpose |
-|-----------|---------|
-| `src/services/dashboard/` | Admin interface operations |
-| `src/services/tpv/` | Point-of-sale terminal operations |
-| `src/services/pos-sync/` | Legacy POS integration (SoftRestaurant) |
-| `src/services/onboarding/` | Demo data seeding and cleanup |
-| `src/services/sdk/` | Blumon E-commerce SDK |
+| Directory                  | Purpose                                 |
+| -------------------------- | --------------------------------------- |
+| `src/services/dashboard/`  | Admin interface operations              |
+| `src/services/tpv/`        | Point-of-sale terminal operations       |
+| `src/services/pos-sync/`   | Legacy POS integration (SoftRestaurant) |
+| `src/services/onboarding/` | Demo data seeding and cleanup           |
+| `src/services/sdk/`        | Blumon E-commerce SDK                   |
 
 ---
 

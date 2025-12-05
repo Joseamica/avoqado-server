@@ -8,7 +8,8 @@ This document covers how Android TPV terminals are identified, activated, and mo
 
 **WHY**: Android TPV terminals need unique identification for activation, heartbeats, and payment processing.
 
-**Design Decision**: Use device hardware serial number (`Build.SERIAL`) as the primary identifier. This persists across app reinstalls, factory resets, and OS updates.
+**Design Decision**: Use device hardware serial number (`Build.SERIAL`) as the primary identifier. This persists across app reinstalls,
+factory resets, and OS updates.
 
 ---
 
@@ -50,12 +51,12 @@ This document covers how Android TPV terminals are identified, activated, and mo
 
 ## Serial Number Format
 
-| Source | Format | Example |
-|--------|--------|---------|
-| Android generates | `AVQD-{ANDROID_ID}` (uppercase) | `AVQD-6D52CB5103BB42DC` |
-| Database stores | With prefix, uppercase | `AVQD-6D52CB5103BB42DC` |
-| Heartbeat sends | Without prefix, lowercase | `6d52cb5103bb42dc` |
-| Backend matches | Case-insensitive, tries both | Works with any variation |
+| Source            | Format                          | Example                  |
+| ----------------- | ------------------------------- | ------------------------ |
+| Android generates | `AVQD-{ANDROID_ID}` (uppercase) | `AVQD-6D52CB5103BB42DC`  |
+| Database stores   | With prefix, uppercase          | `AVQD-6D52CB5103BB42DC`  |
+| Heartbeat sends   | Without prefix, lowercase       | `6d52cb5103bb42dc`       |
+| Backend matches   | Case-insensitive, tries both    | Works with any variation |
 
 ---
 
@@ -89,12 +90,12 @@ const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
 
 ### Timing Configuration
 
-| Setting | Value | Notes |
-|---------|-------|-------|
-| Heartbeat interval | 30 seconds | Android sends every 30s |
-| Offline threshold | 2 minutes | 4 heartbeats missed = offline |
-| Network timeout | 10 seconds | Per heartbeat request |
-| Retry on failure | Immediate once | Then next scheduled heartbeat |
+| Setting            | Value          | Notes                         |
+| ------------------ | -------------- | ----------------------------- |
+| Heartbeat interval | 30 seconds     | Android sends every 30s       |
+| Offline threshold  | 2 minutes      | 4 heartbeats missed = offline |
+| Network timeout    | 10 seconds     | Per heartbeat request         |
+| Retry on failure   | Immediate once | Then next scheduled heartbeat |
 
 ### Recommended Android Settings
 
@@ -118,13 +119,13 @@ const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
 
 ## Key Files
 
-| Purpose | File |
-|---------|------|
-| Android serial generation | `avoqado-tpv/app/.../DeviceInfoManager.kt:55-62` |
-| Android heartbeat worker | `avoqado-tpv/app/.../HeartbeatWorker.kt:137-140` |
-| Backend activation | `src/services/dashboard/terminal-activation.service.ts:80-182` |
-| Backend heartbeat | `src/services/tpv/tpv-health.service.ts:51-151` |
-| Backend venue lookup | `src/services/tpv/venue.tpv.service.ts:62-193` |
+| Purpose                   | File                                                           |
+| ------------------------- | -------------------------------------------------------------- |
+| Android serial generation | `avoqado-tpv/app/.../DeviceInfoManager.kt:55-62`               |
+| Android heartbeat worker  | `avoqado-tpv/app/.../HeartbeatWorker.kt:137-140`               |
+| Backend activation        | `src/services/dashboard/terminal-activation.service.ts:80-182` |
+| Backend heartbeat         | `src/services/tpv/tpv-health.service.ts:51-151`                |
+| Backend venue lookup      | `src/services/tpv/venue.tpv.service.ts:62-193`                 |
 
 ---
 
@@ -145,6 +146,7 @@ const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
 ### Intermittent "Offline" Status
 
 **Troubleshooting steps**:
+
 1. Check Android heartbeat worker logs for failed requests
 2. Verify no battery optimization blocking background workers
 3. Check backend logs for heartbeat gaps:

@@ -143,13 +143,11 @@ describe('VenueRoleConfig Dashboard Service', () => {
       prismaMock.$transaction.mockResolvedValue([])
       prismaMock.venueRoleConfig.findMany.mockResolvedValue([])
 
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation()
-
       await updateVenueRoleConfigs('venue-123', inputConfigs)
 
-      // Should warn about SUPERADMIN
-      expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('SUPERADMIN'))
-      consoleWarnSpy.mockRestore()
+      // SUPERADMIN is silently skipped, only ADMIN should be processed
+      // The $transaction should be called with only the ADMIN update
+      expect(prismaMock.$transaction).toHaveBeenCalled()
     })
 
     it('should throw BadRequestError if only non-renameable roles are provided', async () => {

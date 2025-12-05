@@ -8,12 +8,12 @@ This file is the **index** for Claude Code. It provides quick context and points
 
 **BEFORE working on anything Blumon**, identify which integration:
 
-|                        | **TPV (Android SDK)**                  | **E-commerce (Web Payments)**          |
-| ---------------------- | -------------------------------------- | -------------------------------------- |
-| **What is it?**        | Physical PAX terminals                 | Web SDK for online payments            |
-| **Where does it run?** | APK connects DIRECTLY to Blumon        | BACKEND calls Blumon API               |
-| **Environment config** | **APK build variant** (sandbox/prod)   | **`USE_BLUMON_MOCK`** env var          |
-| **Database model**     | `MerchantAccount` + `Terminal`         | `EcommerceMerchant` + `CheckoutSession`|
+|                        | **TPV (Android SDK)**                    | **E-commerce (Web Payments)**                  |
+| ---------------------- | ---------------------------------------- | ---------------------------------------------- |
+| **What is it?**        | Physical PAX terminals                   | Web SDK for online payments                    |
+| **Where does it run?** | APK connects DIRECTLY to Blumon          | BACKEND calls Blumon API                       |
+| **Environment config** | **APK build variant** (sandbox/prod)     | **`USE_BLUMON_MOCK`** env var                  |
+| **Database model**     | `MerchantAccount` + `Terminal`           | `EcommerceMerchant` + `CheckoutSession`        |
 | **Service file**       | `src/services/tpv/blumon-tpv.service.ts` | `src/services/sdk/blumon-ecommerce.service.ts` |
 
 **Full docs**: `docs/BLUMON_TWO_INTEGRATIONS.md`
@@ -24,7 +24,8 @@ This file is the **index** for Claude Code. It provides quick context and points
 
 ## 2. Role & Identity
 
-Always assume the role of a world-class, battle-tested full-stack engineer with experience at Toast and Square. You have elite mastery of POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliability, and merchant experience end-to-end.
+Always assume the role of a world-class, battle-tested full-stack engineer with experience at Toast and Square. You have elite mastery of
+POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliability, and merchant experience end-to-end.
 
 ---
 
@@ -32,57 +33,57 @@ Always assume the role of a world-class, battle-tested full-stack engineer with 
 
 ### Architecture & Core
 
-| Document | Description |
-|----------|-------------|
+| Document                        | Description                                                   |
+| ------------------------------- | ------------------------------------------------------------- |
 | `docs/ARCHITECTURE_OVERVIEW.md` | Layered architecture, multi-tenant, control/application plane |
-| `docs/PERMISSIONS_SYSTEM.md` | Permission system, RBAC, override vs merge modes |
-| `docs/DATABASE_SCHEMA.md` | Complete database schema reference |
+| `docs/PERMISSIONS_SYSTEM.md`    | Permission system, RBAC, override vs merge modes              |
+| `docs/DATABASE_SCHEMA.md`       | Complete database schema reference                            |
 
 ### Payments
 
-| Document | Description |
-|----------|-------------|
-| `docs/BLUMON_TWO_INTEGRATIONS.md` | **READ FIRST**: TPV vs E-commerce distinction |
-| `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md` | Developer reference for TPV coding |
-| `docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md` | Multi-merchant deep dive |
-| `docs/blumon-ecommerce/REFACTORING_COMPLETE.md` | E-commerce direct charge implementation |
-| `docs/PAYMENT_ARCHITECTURE.md` | Money flow, merchant accounts, profit calculation |
-| `docs/STRIPE_INTEGRATION.md` | Stripe subscriptions, feature gating, webhooks |
+| Document                                            | Description                                       |
+| --------------------------------------------------- | ------------------------------------------------- |
+| `docs/BLUMON_TWO_INTEGRATIONS.md`                   | **READ FIRST**: TPV vs E-commerce distinction     |
+| `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`         | Developer reference for TPV coding                |
+| `docs/blumon-tpv/BLUMON_MULTI_MERCHANT_ANALYSIS.md` | Multi-merchant deep dive                          |
+| `docs/blumon-ecommerce/REFACTORING_COMPLETE.md`     | E-commerce direct charge implementation           |
+| `docs/PAYMENT_ARCHITECTURE.md`                      | Money flow, merchant accounts, profit calculation |
+| `docs/STRIPE_INTEGRATION.md`                        | Stripe subscriptions, feature gating, webhooks    |
 
 ### Inventory
 
-| Document | Description |
-|----------|-------------|
+| Document                      | Description                                 |
+| ----------------------------- | ------------------------------------------- |
 | `docs/INVENTORY_REFERENCE.md` | FIFO batch system, stock deduction, recipes |
-| `docs/INVENTORY_TESTING.md` | Integration tests, critical bugs fixed |
+| `docs/INVENTORY_TESTING.md`   | Integration tests, critical bugs fixed      |
 
 ### AI Chatbot
 
-| Document | Description |
-|----------|-------------|
+| Document                                | Description                                 |
+| --------------------------------------- | ------------------------------------------- |
 | `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md` | 5-layer security, consensus voting, testing |
 
 ### Terminal & TPV
 
-| Document | Description |
-|----------|-------------|
+| Document                          | Description                           |
+| --------------------------------- | ------------------------------------- |
 | `docs/TERMINAL_IDENTIFICATION.md` | Serial numbers, activation, heartbeat |
-| `docs/TPV_COMMAND_SYSTEM.md` | Remote commands, polling, ACK flow |
+| `docs/TPV_COMMAND_SYSTEM.md`      | Remote commands, polling, ACK flow    |
 
 ### Development & Operations
 
-| Document | Description |
-|----------|-------------|
-| `docs/DATETIME_SYNC.md` | Timezone handling between frontend/backend |
-| `docs/CI_CD_SETUP.md` | GitHub Actions, deployment |
-| `docs/ENVIRONMENT_SETUP_GUIDE.md` | Local development setup |
-| `docs/PRODUCTION_READINESS_CHECKLIST.md` | Pre-deployment checklist |
-| `docs/UNUSED_CODE_DETECTION.md` | Dead code detection tools |
+| Document                                 | Description                                |
+| ---------------------------------------- | ------------------------------------------ |
+| `docs/DATETIME_SYNC.md`                  | Timezone handling between frontend/backend |
+| `docs/CI_CD_SETUP.md`                    | GitHub Actions, deployment                 |
+| `docs/ENVIRONMENT_SETUP_GUIDE.md`        | Local development setup                    |
+| `docs/PRODUCTION_READINESS_CHECKLIST.md` | Pre-deployment checklist                   |
+| `docs/UNUSED_CODE_DETECTION.md`          | Dead code detection tools                  |
 
 ### Implementation Plans (In Progress)
 
-| Document | Description |
-|----------|-------------|
+| Document                                        | Description                         |
+| ----------------------------------------------- | ----------------------------------- |
 | `docs/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md` | Customer + Discounts (Phase 1: 85%) |
 
 ---
@@ -111,12 +112,14 @@ npm run studio       # Launch Prisma Studio
 ### Seed Data Policy
 
 When implementing NEW features, update:
+
 - `prisma/seed.ts` - Global seed data (features, payment providers)
 - `src/services/onboarding/demoSeed.service.ts` - Demo venue data
 
 ### Testing Policy
 
 After major changes:
+
 1. Create test script in `scripts/` for validation
 2. Migrate to Jest tests before committing
 3. Delete temporary scripts
@@ -130,12 +133,12 @@ After major changes:
 Routes → Middleware → Controllers → Services → Prisma (Database)
 ```
 
-| Layer | Responsibility |
-|-------|----------------|
-| **Routes** | HTTP endpoint definitions |
+| Layer           | Responsibility                                         |
+| --------------- | ------------------------------------------------------ |
+| **Routes**      | HTTP endpoint definitions                              |
 | **Controllers** | Extract req data, call services, send responses (thin) |
-| **Services** | Business logic, validations, database operations |
-| **Middlewares** | Auth, validation, logging, permissions |
+| **Services**    | Business logic, validations, database operations       |
+| **Middlewares** | Auth, validation, logging, permissions                 |
 
 **Full details**: `docs/ARCHITECTURE_OVERVIEW.md`
 
@@ -143,17 +146,17 @@ Routes → Middleware → Controllers → Services → Prisma (Database)
 
 ## 6. Role Hierarchy
 
-| Role | Scope | Key Permissions |
-|------|-------|-----------------|
-| **SUPERADMIN** | Full system | Complete administrative control |
-| **OWNER** | Organization-wide | Can manage all venues in org |
-| **ADMIN** | Venue-specific | Complete venue management |
-| **MANAGER** | Venue-specific | Shift, staff, inventory management |
-| **CASHIER** | Venue-specific | Payment processing, POS |
-| **WAITER** | Venue-specific | Order management, table service |
-| **KITCHEN** | Venue-specific | Kitchen display, order prep |
-| **HOST** | Venue-specific | Reservations, seating |
-| **VIEWER** | Venue-specific | Read-only access |
+| Role           | Scope             | Key Permissions                    |
+| -------------- | ----------------- | ---------------------------------- |
+| **SUPERADMIN** | Full system       | Complete administrative control    |
+| **OWNER**      | Organization-wide | Can manage all venues in org       |
+| **ADMIN**      | Venue-specific    | Complete venue management          |
+| **MANAGER**    | Venue-specific    | Shift, staff, inventory management |
+| **CASHIER**    | Venue-specific    | Payment processing, POS            |
+| **WAITER**     | Venue-specific    | Order management, table service    |
+| **KITCHEN**    | Venue-specific    | Kitchen display, order prep        |
+| **HOST**       | Venue-specific    | Reservations, seating              |
+| **VIEWER**     | Venue-specific    | Read-only access                   |
 
 ---
 
@@ -174,7 +177,7 @@ const user = (req as any).user // undefined!
 ```typescript
 // EVERY database query MUST filter by venueId or orgId
 const orders = await prisma.order.findMany({
-  where: { venueId } // ALWAYS include this
+  where: { venueId }, // ALWAYS include this
 })
 ```
 
@@ -182,10 +185,10 @@ const orders = await prisma.order.findMany({
 
 ```typescript
 // CORRECT - Use Decimal
-amount: new Prisma.Decimal(100.50)
+amount: new Prisma.Decimal(100.5)
 
 // WRONG - Never use float for money
-amount: 100.50 // precision loss!
+amount: 100.5 // precision loss!
 ```
 
 ### Payment Transactions
@@ -218,7 +221,7 @@ app.use(express.json()) // After webhooks
 - Quick architecture reference
 - Critical patterns
 
-### What goes in docs/*.md
+### What goes in docs/\*.md
 
 - Detailed implementation guides
 - Complete architecture explanations
@@ -239,6 +242,7 @@ app.use(express.json()) // After webhooks
 ### Chatbot Token Pricing (Requested 2025-01-25)
 
 Currently hardcoded in:
+
 - `src/services/dashboard/token-budget.service.ts`
 - `src/controllers/dashboard/token-budget.dashboard.controller.ts`
 
@@ -248,14 +252,14 @@ TODO: Create superadmin-configurable pricing system.
 
 ## Quick Links
 
-| Need to... | Go to... |
-|------------|----------|
-| Understand architecture | `docs/ARCHITECTURE_OVERVIEW.md` |
-| Work on Blumon TPV | `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md` |
+| Need to...                | Go to...                                        |
+| ------------------------- | ----------------------------------------------- |
+| Understand architecture   | `docs/ARCHITECTURE_OVERVIEW.md`                 |
+| Work on Blumon TPV        | `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`     |
 | Work on Blumon E-commerce | `docs/blumon-ecommerce/REFACTORING_COMPLETE.md` |
-| Work on inventory | `docs/INVENTORY_REFERENCE.md` |
-| Work on chatbot | `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md` |
-| Work on Stripe | `docs/STRIPE_INTEGRATION.md` |
-| Work on permissions | `docs/PERMISSIONS_SYSTEM.md` |
-| Work on terminals | `docs/TERMINAL_IDENTIFICATION.md` |
-| Deploy to production | `docs/PRODUCTION_READINESS_CHECKLIST.md` |
+| Work on inventory         | `docs/INVENTORY_REFERENCE.md`                   |
+| Work on chatbot           | `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md`         |
+| Work on Stripe            | `docs/STRIPE_INTEGRATION.md`                    |
+| Work on permissions       | `docs/PERMISSIONS_SYSTEM.md`                    |
+| Work on terminals         | `docs/TERMINAL_IDENTIFICATION.md`               |
+| Deploy to production      | `docs/PRODUCTION_READINESS_CHECKLIST.md`        |

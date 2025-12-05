@@ -2706,9 +2706,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       const useCompletedFilter = originalSQL.toLowerCase().includes('completed')
 
       // Use parameterized query to prevent SQL injection
-      const statusFilter = useCompletedFilter
-        ? Prisma.sql`AND "status" = 'COMPLETED'`
-        : Prisma.empty
+      const statusFilter = useCompletedFilter ? Prisma.sql`AND "status" = 'COMPLETED'` : Prisma.empty
 
       const validationResult = (await prisma.$queryRaw`
         SELECT
