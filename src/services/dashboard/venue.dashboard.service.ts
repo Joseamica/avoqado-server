@@ -45,6 +45,7 @@ import {
 } from '../stripe.service'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
+import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -539,6 +540,32 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
   })
 
   logger.info(`🎉 Venue deletion complete for venueId: ${venueId}`)
+
+  // Check if organization has any remaining venues
+  const remainingVenues = await prisma.venue.count({
+    where: { organizationId: existingVenue.organizationId },
+  })
+
+  // If no more venues, reset onboarding so user can start fresh
+  if (remainingVenues === 0) {
+    logger.info(`🔄 No remaining venues for organization ${existingVenue.organizationId}, resetting onboarding progress`)
+
+    try {
+      // Delete onboarding progress
+      await deleteOnboardingProgress(existingVenue.organizationId)
+      logger.info(`  ✅ Deleted onboarding progress`)
+
+      // Reset organization's onboarding completed status
+      await prisma.organization.update({
+        where: { id: existingVenue.organizationId },
+        data: { onboardingCompletedAt: null },
+      })
+      logger.info(`  ✅ Reset organization onboarding status`)
+    } catch (error) {
+      // Don't fail venue deletion if onboarding reset fails
+      logger.warn(`⚠️ Failed to reset onboarding progress: ${error}`)
+    }
+  }
 }
 
 /**
