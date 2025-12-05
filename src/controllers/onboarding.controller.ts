@@ -586,16 +586,29 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       throw new BadRequestError('Step 3 (Business Info) must be completed')
     }
 
-    // Check if onboarding already completed (prevent duplicate venue creation)
-    if (progress.completedAt) {
-      // Find existing venue for this organization
+    // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
+    // This prevents race condition where double-click creates 2 venues
+    const lockResult = await prisma.onboardingProgress.updateMany({
+      where: {
+        organizationId,
+        completedAt: null, // Only update if not already completed
+      },
+      data: {
+        completedAt: new Date(),
+      },
+    })
+
+    // If no rows updated, another request already completed onboarding
+    if (lockResult.count === 0) {
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
         select: { id: true, slug: true, name: true, isOnboardingDemo: true },
       })
 
       if (existingVenue) {
-        logger.info(`⚠️ Onboarding already completed for organization ${organizationId}, returning existing venue ${existingVenue.id}`)
+        logger.info(
+          `⚠️ Onboarding already completed (race condition prevented) for organization ${organizationId}, returning existing venue ${existingVenue.id}`,
+        )
         res.status(200).json({
           message: 'Onboarding already completed',
           venue: existingVenue,
@@ -607,7 +620,19 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
         })
         return
       }
+
+      // Rare edge case: completedAt is set but no venue exists
+      // This could happen if previous venue creation failed after setting completedAt
+      // Reset the lock and let them retry
+      logger.warn(`⚠️ Onboarding marked complete but no venue found for organization ${organizationId} - resetting lock`)
+      await prisma.onboardingProgress.update({
+        where: { organizationId },
+        data: { completedAt: null },
+      })
+      throw new BadRequestError('Previous onboarding attempt failed. Please try again.')
     }
+
+    logger.info(`🔒 Acquired onboarding lock for organization ${organizationId}`)
 
     // Log payment method and features before creating venue
     logger.info(`🎯 Completing onboarding for organization ${organizationId}:`, {
@@ -632,10 +657,21 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
     }
 
     // Create venue and assign to user
-    const result = await venueCreationService.createVenueFromOnboarding(venueInput)
+    // If this fails, we need to release the lock (rollback completedAt)
+    let result: Awaited<ReturnType<typeof venueCreationService.createVenueFromOnboarding>>
+    try {
+      result = await venueCreationService.createVenueFromOnboarding(venueInput)
+    } catch (venueError) {
+      // Rollback: Reset completedAt so user can retry
+      logger.error(`❌ Venue creation failed for organization ${organizationId} - rolling back lock`, venueError)
+      await prisma.onboardingProgress.update({
+        where: { organizationId },
+        data: { completedAt: null },
+      })
+      throw venueError
+    }
 
-    // Mark onboarding as complete
-    await onboardingProgressService.completeOnboarding(organizationId)
+    // No need to call completeOnboarding - we already set completedAt above
 
     logger.info(`✅ Onboarding completed for organization: ${organizationId}, venue: ${result.venue.id}, user: ${authContext.userId}`)
 

@@ -3010,8 +3010,8 @@ model ActivityLog {
 
 model Customer {
   id    String  @id @default(cuid())
-  email String? @unique
-  phone String? @unique
+  email String? // Unique per venue, not globally (allows same email in different venues)
+  phone String? // Unique per venue, not globally
 
   firstName String?
   lastName  String?
@@ -3060,12 +3060,10 @@ model Customer {
   customerDiscounts CustomerDiscount[]
   couponRedemptions CouponRedemption[]
 
-  @@index([email])
-  @@index([phone])
   @@index([venueId])
   @@index([customerGroupId])
-  @@index([venueId, email])
-  @@index([venueId, phone])
+  @@unique([venueId, email]) // Unique email per venue (not globally)
+  @@unique([venueId, phone]) // Unique phone per venue (not globally)
 }
 
 model CustomerGroup {
