@@ -2,6 +2,11 @@ import 'dotenv/config'
 import path from 'node:path'
 import type { PrismaConfig } from 'prisma'
 
+// If USE_RENDER_DB is set, override DATABASE_URL with RENDER_DATABASE_URL
+if (process.env.USE_RENDER_DB === 'true' && process.env.RENDER_DATABASE_URL) {
+  process.env.DATABASE_URL = process.env.RENDER_DATABASE_URL
+}
+
 export default {
   schema: path.join('prisma', 'schema.prisma'),
   migrations: {
