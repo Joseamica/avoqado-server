@@ -1091,6 +1091,80 @@ export async function recordOrderPayment(
     logger.warn(`⚠️ No merchantAccountId - payment will have null merchant (legacy mode)`)
   }
 
+  // ⭐ 3-TIER MERCHANT RESOLUTION (Stripe-inspired pattern)
+  // TIER 1: Direct Attribution - Use provided merchantAccountId if valid + active
+  // TIER 2: Inference Recovery - Infer from blumonSerialNumber (SOURCE OF TRUTH from processor)
+  // TIER 3: Reconciliation Flag - Null with full context for manual resolution
+  if (merchantAccountId) {
+    const merchantExists = await prisma.merchantAccount.findUnique({
+      where: { id: merchantAccountId },
+      select: { id: true, active: true },
+    })
+
+    if (!merchantExists) {
+      logger.error(`❌ MerchantAccount not found: ${merchantAccountId}`, {
+        venueId,
+        orderId,
+        paymentMethod: paymentData.method,
+        providedId: merchantAccountId,
+        blumonSerialNumber: paymentData.blumonSerialNumber,
+        hint: 'Android may have stale config. Attempting TIER 2 recovery from blumonSerialNumber.',
+      })
+
+      // TIER 2: Attempt recovery from blumonSerialNumber (the actual serial Blumon used)
+      if (paymentData.blumonSerialNumber) {
+        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
+        if (recoveredMerchantId) {
+          logger.info(`✅ TIER 2 Recovery SUCCESS: Inferred merchant from blumonSerialNumber`, {
+            providedMerchantId: merchantAccountId,
+            blumonSerialNumber: paymentData.blumonSerialNumber,
+            recoveredMerchantId,
+          })
+          merchantAccountId = recoveredMerchantId
+        } else {
+          // TIER 3: Cannot resolve - flag for reconciliation
+          logger.error(`❌ TIER 3: Cannot resolve merchant - reconciliation required`, {
+            providedMerchantId: merchantAccountId,
+            blumonSerialNumber: paymentData.blumonSerialNumber,
+            authorizationNumber: paymentData.authorizationNumber,
+            referenceNumber: paymentData.referenceNumber,
+            venueId,
+            orderId,
+          })
+          merchantAccountId = undefined
+        }
+      } else {
+        // No blumonSerialNumber for recovery - fall back to null
+        logger.warn(`⚠️ No blumonSerialNumber for TIER 2 recovery - falling back to null`)
+        merchantAccountId = undefined
+      }
+    } else if (!merchantExists.active) {
+      logger.warn(`⚠️ MerchantAccount ${merchantAccountId} is inactive`, {
+        venueId,
+        orderId,
+        paymentMethod: paymentData.method,
+        blumonSerialNumber: paymentData.blumonSerialNumber,
+      })
+
+      // TIER 2: Attempt recovery for inactive merchant (find another active one with same serial)
+      if (paymentData.blumonSerialNumber) {
+        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
+        if (recoveredMerchantId && recoveredMerchantId !== merchantAccountId) {
+          logger.info(`✅ TIER 2 Recovery: Found active merchant with same serial`, {
+            inactiveMerchantId: merchantAccountId,
+            blumonSerialNumber: paymentData.blumonSerialNumber,
+            recoveredMerchantId,
+          })
+          merchantAccountId = recoveredMerchantId
+        } else {
+          merchantAccountId = undefined
+        }
+      } else {
+        merchantAccountId = undefined
+      }
+    }
+  }
+
   // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const payment = await prisma.$transaction(async tx => {
@@ -1116,6 +1190,8 @@ export async function recordOrderPayment(
           mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
           mentaTicketId: paymentData.mentaTicketId,
           isInternational: paymentData.isInternational,
+          // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
+          blumonSerialNumber: paymentData.blumonSerialNumber || null,
         },
         // New enhanced fields in the Payment table
         authorizationNumber: paymentData.authorizationNumber,
@@ -1539,6 +1615,75 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     logger.warn(`⚠️ No merchantAccountId - payment will have null merchant (legacy mode)`)
   }
 
+  // ⭐ 3-TIER MERCHANT RESOLUTION (Stripe-inspired pattern) - Fast Payments
+  // TIER 1: Direct Attribution - Use provided merchantAccountId if valid + active
+  // TIER 2: Inference Recovery - Infer from blumonSerialNumber (SOURCE OF TRUTH from processor)
+  // TIER 3: Reconciliation Flag - Null with full context for manual resolution
+  if (merchantAccountId) {
+    const merchantExists = await prisma.merchantAccount.findUnique({
+      where: { id: merchantAccountId },
+      select: { id: true, active: true },
+    })
+
+    if (!merchantExists) {
+      logger.error(`❌ [FastPayment] MerchantAccount not found: ${merchantAccountId}`, {
+        venueId,
+        paymentMethod: paymentData.method,
+        providedId: merchantAccountId,
+        blumonSerialNumber: paymentData.blumonSerialNumber,
+        hint: 'Android may have stale config. Attempting TIER 2 recovery from blumonSerialNumber.',
+      })
+
+      // TIER 2: Attempt recovery from blumonSerialNumber
+      if (paymentData.blumonSerialNumber) {
+        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
+        if (recoveredMerchantId) {
+          logger.info(`✅ [FastPayment] TIER 2 Recovery SUCCESS: Inferred merchant from blumonSerialNumber`, {
+            providedMerchantId: merchantAccountId,
+            blumonSerialNumber: paymentData.blumonSerialNumber,
+            recoveredMerchantId,
+          })
+          merchantAccountId = recoveredMerchantId
+        } else {
+          logger.error(`❌ [FastPayment] TIER 3: Cannot resolve merchant - reconciliation required`, {
+            providedMerchantId: merchantAccountId,
+            blumonSerialNumber: paymentData.blumonSerialNumber,
+            authorizationNumber: paymentData.authorizationNumber,
+            referenceNumber: paymentData.referenceNumber,
+            venueId,
+          })
+          merchantAccountId = undefined
+        }
+      } else {
+        logger.warn(`⚠️ [FastPayment] No blumonSerialNumber for TIER 2 recovery - falling back to null`)
+        merchantAccountId = undefined
+      }
+    } else if (!merchantExists.active) {
+      logger.warn(`⚠️ [FastPayment] MerchantAccount ${merchantAccountId} is inactive`, {
+        venueId,
+        paymentMethod: paymentData.method,
+        blumonSerialNumber: paymentData.blumonSerialNumber,
+      })
+
+      // TIER 2: Attempt recovery for inactive merchant
+      if (paymentData.blumonSerialNumber) {
+        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
+        if (recoveredMerchantId && recoveredMerchantId !== merchantAccountId) {
+          logger.info(`✅ [FastPayment] TIER 2 Recovery: Found active merchant with same serial`, {
+            inactiveMerchantId: merchantAccountId,
+            blumonSerialNumber: paymentData.blumonSerialNumber,
+            recoveredMerchantId,
+          })
+          merchantAccountId = recoveredMerchantId
+        } else {
+          merchantAccountId = undefined
+        }
+      } else {
+        merchantAccountId = undefined
+      }
+    }
+  }
+
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const { payment, fastOrder } = await prisma.$transaction(async tx => {
@@ -1581,6 +1726,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           authorizationNumber: paymentData.authorizationNumber,
           referenceNumber: paymentData.referenceNumber,
           isInternational: paymentData.isInternational,
+          // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
+          blumonSerialNumber: paymentData.blumonSerialNumber || null,
         },
         // New enhanced fields in the Payment table
         authorizationNumber: paymentData.authorizationNumber,

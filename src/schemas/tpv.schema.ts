@@ -171,7 +171,12 @@ export const recordPaymentBodySchema = z.object({
       // Allows TPV to specify which merchant account should process the payment
       // ✅ CONDITIONAL VALIDATION: Required for card payments, null for cash
       merchantAccountId: z.string().cuid({ message: 'El ID de la cuenta merchant debe ser un CUID válido.' }).nullable().optional(),
-      blumonSerialNumber: z.string().optional(), // Legacy: Backward compatibility for old Android clients
+      // Blumon serial number format: 10-digit numeric string (e.g., "2841548417")
+      // Used for TIER 2 merchant recovery when merchantAccountId is invalid/missing
+      blumonSerialNumber: z
+        .string()
+        .regex(/^[0-9]{10}$/, { message: 'El serial Blumon debe ser un número de 10 dígitos' })
+        .optional(),
 
       // Split payment specific fields
       equalPartsPartySize: z.number().int().positive().optional(),
@@ -179,9 +184,13 @@ export const recordPaymentBodySchema = z.object({
     })
     .refine(
       data => {
-        // ✅ Business rule: Card payments MUST have merchantAccountId
+        // ✅ Business rule: Card payments need merchantAccountId OR blumonSerialNumber (for TIER 2 recovery)
+        // TIER 1: merchantAccountId provided directly
+        // TIER 2: blumonSerialNumber allows backend to infer merchantAccountId (SOURCE OF TRUTH)
         if (['CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'].includes(data.method)) {
-          return data.merchantAccountId != null && data.merchantAccountId !== ''
+          const hasMerchantId = data.merchantAccountId != null && data.merchantAccountId !== ''
+          const hasBlumonSerial = data.blumonSerialNumber != null && data.blumonSerialNumber !== ''
+          return hasMerchantId || hasBlumonSerial // Either one allows TIER 1 or TIER 2 resolution
         }
         // ✅ Business rule: Cash payments SHOULD NOT have merchantAccountId (null = correct separation for reconciliation)
         if (data.method === 'CASH') {
@@ -191,7 +200,7 @@ export const recordPaymentBodySchema = z.object({
       },
       {
         message:
-          'Card payments require merchantAccountId. Cash payments should not have merchantAccountId (use null for proper reconciliation).',
+          'Card payments require merchantAccountId OR blumonSerialNumber for merchant resolution. Cash payments should not have merchantAccountId.',
         path: ['merchantAccountId'],
       },
     ),
