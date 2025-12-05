@@ -108,6 +108,10 @@ export enum SocketEventType {
   TPV_BULK_OPERATION_PROGRESS = 'tpv_bulk_operation_progress', // Bulk operation progress
   TPV_COMMAND_QUEUED = 'tpv_command_queued', // Command added to offline queue
 
+  // Server → TPV (Config Invalidation - Multi-Merchant Cache Sync)
+  // Pattern: Toast/Square style - Backend is SOURCE OF TRUTH, push notifications for config changes
+  TERMINAL_CONFIG_CHANGED = 'terminal_config_changed', // Merchant added/updated/deleted
+
   // Business Events - Inventory Real-time
   INVENTORY_LOW_STOCK = 'inventory_low_stock',
   INVENTORY_OUT_OF_STOCK = 'inventory_out_of_stock',
@@ -348,6 +352,29 @@ export interface TPVCommandQueuedPayload extends BaseEventPayload {
   expiresAt?: Date
   queuePosition?: number
   reason: 'TERMINAL_OFFLINE' | 'TERMINAL_BUSY' | 'SCHEDULED'
+}
+
+/**
+ * Terminal Config Changed Payload - Multi-Merchant Cache Invalidation
+ * Pattern: Toast/Square style - Backend is SOURCE OF TRUTH, push notifications for config changes
+ *
+ * Use Case: When admin creates/updates/deletes a MerchantAccount, notify affected terminals
+ * so they can refresh their cached merchant configuration.
+ *
+ * 3-Layer Cache Invalidation Architecture:
+ * 1. PUSH (this event) - Immediate notification when merchants change
+ * 2. PULL (heartbeat configVersion) - Catches missed events if terminal was offline
+ * 3. FALLBACK (backend validation) - Graceful fallback if terminal sends stale merchantAccountId
+ */
+export interface TerminalConfigChangedPayload extends BaseEventPayload {
+  terminalId: string
+  terminalSerialNumber: string
+  changeType: 'MERCHANT_ADDED' | 'MERCHANT_UPDATED' | 'MERCHANT_DELETED' | 'TERMINAL_UPDATED'
+  merchantId?: string // The affected merchant (if applicable)
+  merchantName?: string // Human-readable name for logging
+  configVersion: number // Timestamp-based version for comparison
+  urgent: boolean // true = refresh immediately (DELETED), false = refresh when convenient (ADDED/UPDATED)
+  reason?: string // Optional human-readable reason for the change
 }
 
 /**

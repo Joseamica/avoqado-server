@@ -19,6 +19,7 @@ import {
   ShiftEventPayload,
   SocketEventType,
   SystemAlertPayload,
+  TerminalConfigChangedPayload,
   TPVCommandPayload,
   TPVCommandResponsePayload,
   TPVStatusUpdatePayload,
@@ -534,6 +535,49 @@ export class BroadcastingService {
       terminalId: statusData.terminalId,
       status: statusData.status,
       lastHeartbeat: statusData.lastHeartbeat,
+    })
+  }
+
+  /**
+   * Terminal Config Changed Event - Multi-Merchant Cache Invalidation
+   *
+   * Notifies TPV terminals when merchant configuration changes, allowing them to
+   * refresh their cached merchant list. Part of the 3-layer cache invalidation strategy:
+   *
+   * Layer 1: PUSH (this event) - Immediate notification when merchants change
+   * Layer 2: PULL (heartbeat configVersion) - Catches missed events if terminal was offline
+   * Layer 3: FALLBACK (backend validation) - Graceful fallback if terminal sends stale merchantAccountId
+   *
+   * Pattern inspired by Toast/Square: Backend is SOURCE OF TRUTH, push notifications for critical changes.
+   */
+  public broadcastTerminalConfigChanged(
+    venueId: string,
+    configData: Omit<TerminalConfigChangedPayload, 'correlationId' | 'timestamp' | 'venueId'>,
+    options?: BroadcastOptions,
+  ): void {
+    const payload: TerminalConfigChangedPayload = {
+      ...configData,
+      venueId,
+      correlationId: uuidv4(),
+      timestamp: new Date(),
+    }
+
+    // Broadcast to venue so all connected terminals receive the config change notification
+    this.broadcastToVenue(venueId, SocketEventType.TERMINAL_CONFIG_CHANGED, payload, options)
+
+    // Log with appropriate level based on change type
+    const logLevel = configData.urgent ? 'warn' : 'info'
+    logger[logLevel]('Terminal config change broadcasted', {
+      correlationId: payload.correlationId,
+      venueId,
+      terminalId: configData.terminalId,
+      terminalSerialNumber: configData.terminalSerialNumber,
+      changeType: configData.changeType,
+      merchantId: configData.merchantId,
+      merchantName: configData.merchantName,
+      configVersion: configData.configVersion,
+      urgent: configData.urgent,
+      reason: configData.reason,
     })
   }
 
