@@ -37,6 +37,13 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     production: [],
   }
 
+  // Public customer-facing sites (bills, payments, etc.)
+  const publicSiteOrigins = {
+    development: ['http://localhost:3001'], // Local bills dev
+    staging: [],
+    production: ['https://bills.avoqado.io', 'https://avoqado.io'],
+  }
+
   // Combine all allowed origins for this environment
   const allowedOrigins = [
     // SECURITY: 'null' origin only in development for Swagger UI
@@ -46,6 +53,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     ...(mobileOrigins[env] || []),
     ...(posOrigins[env] || []),
     ...(swaggerOrigins[env] || []),
+    ...(publicSiteOrigins[env] || []),
   ]
 
   return {
