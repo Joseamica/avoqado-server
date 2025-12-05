@@ -47,6 +47,11 @@ app.get('/v1/demo/generate', (req: ExpressRequest, res: ExpressResponse) => {
   res.redirect(301, 'https://links.avoqado.io/')
 })
 
+// Redirect bill generation to deprecated API (old avo-pwa backend)
+app.get('/v1/venues/:venueId/bill/generate', (req: ExpressRequest, res: ExpressResponse) => {
+  res.redirect(301, `https://api-deprecated.avoqado.io/v1/venues/${req.params.venueId}/bill/generate`)
+})
+
 // --- Montaje de Rutas de la API ---
 const API_PREFIX = process.env.API_PREFIX || '/api/v1' // Define un prefijo base para tu API
 app.use(API_PREFIX, mainApiRouter)
