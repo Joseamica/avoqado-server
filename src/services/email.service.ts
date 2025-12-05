@@ -56,6 +56,12 @@ interface SubscriptionCanceledEmailData {
   suspendedAt: Date
 }
 
+interface TrialExpiredEmailData {
+  venueName: string
+  featureName: string
+  expiredAt: Date
+}
+
 interface EmailVerificationData {
   firstName: string
   verificationCode: string
@@ -791,6 +797,103 @@ class EmailService {
       Contáctanos si necesitas ayuda.
 
       Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.
+
+      Equipo de Avoqado
+    `
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendTrialExpiredEmail(email: string, data: TrialExpiredEmailData): Promise<boolean> {
+    const subject = `⏰ Tu período de prueba de ${data.featureName} ha terminado - ${data.venueName}`
+    const expiredDateFormatted = data.expiredAt.toLocaleDateString('es-MX', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Período de prueba terminado</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <div style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">⏰ Período de Prueba Terminado</h1>
+              <p style="color: #fef3c7; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
+            </div>
+
+            <div style="padding: 40px 30px;">
+              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola,</p>
+
+              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
+                Tu período de prueba de <strong>${data.featureName}</strong> ha <strong>terminado</strong> el ${expiredDateFormatted}.
+              </p>
+
+              <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #92400e;">
+                  📅 <strong>Fecha de expiración:</strong> ${expiredDateFormatted}
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #92400e;">
+                  Tu acceso a ${data.featureName} ha sido desactivado temporalmente.
+                </p>
+              </div>
+
+              <div style="background: #e3f2fd; border-left: 4px solid #2196f3; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666;">
+                  💡 <strong>¿Te gustó ${data.featureName}?</strong>
+                </p>
+                <p style="font-size: 14px; margin: 0; color: #666;">
+                  Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos están seguros y el acceso se reactivará inmediatamente.
+                </p>
+              </div>
+
+              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0; text-align: center;">
+                <p style="font-size: 16px; margin-bottom: 20px; color: #555;">¿Listo para suscribirte?</p>
+                <p style="font-size: 14px; margin-bottom: 20px; color: #666;">
+                  Visita la sección de facturación en tu dashboard para activar tu suscripción.
+                </p>
+              </div>
+
+              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
+
+              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
+                Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aquí para ayudarte.
+              </p>
+              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
+                Este correo fue enviado automáticamente por Avoqado.
+              </p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+      Hola,
+
+      Tu período de prueba de ${data.featureName} ha TERMINADO el ${expiredDateFormatted}.
+
+      📅 Fecha de expiración: ${expiredDateFormatted}
+
+      Tu acceso a ${data.featureName} ha sido desactivado temporalmente.
+
+      ¿Te gustó ${data.featureName}?
+      Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos están seguros y el acceso se reactivará inmediatamente.
+
+      Visita la sección de facturación en tu dashboard para activar tu suscripción.
+
+      Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aquí para ayudarte.
 
       Equipo de Avoqado
     `

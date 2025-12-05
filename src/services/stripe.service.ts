@@ -441,8 +441,9 @@ export async function createTrialSubscriptions(
 
       // Active logic:
       // - If trialPeriodDays > 0: active=true (trial, no payment required yet)
-      // - If trialPeriodDays = 0: active=false (wait for payment confirmation via webhook)
-      const isActive = trialPeriodDays > 0
+      // - If subscription.status is 'active' or 'trialing': active=true (already paid/valid in Stripe)
+      // - Otherwise: active=false (wait for payment confirmation via webhook)
+      const isActive = trialPeriodDays > 0 || subscription.status === 'active' || subscription.status === 'trialing'
 
       await prisma.venueFeature.upsert({
         where: {
@@ -475,7 +476,8 @@ export async function createTrialSubscriptions(
 
       subscriptionIds.push(subscription.id)
       if (isActive) {
-        logger.info(`  ✅ Created trial subscription ${subscription.id} for feature ${feature.code} (active=true)`)
+        const reason = trialPeriodDays > 0 ? 'trial' : subscription.status === 'active' ? 'already paid' : subscription.status
+        logger.info(`  ✅ Subscription ${subscription.id} for feature ${feature.code} is ACTIVE (reason: ${reason})`)
       } else {
         logger.info(
           `  ⏳ Created subscription ${subscription.id} for feature ${feature.code} (active=false, waiting for payment confirmation)`,
@@ -494,7 +496,22 @@ export async function createTrialSubscriptions(
               const paidInvoice = await stripe.invoices.pay(invoiceId)
 
               if (paidInvoice.status === 'paid') {
-                logger.info(`  ✅ Payment successful! Invoice ${invoiceId} paid, subscription activated`)
+                // ✅ FIX BUG #2: Immediately activate feature instead of waiting for webhook
+                // Webhook can have 1-10 second latency, causing "pending" state after successful payment
+                await prisma.venueFeature.update({
+                  where: {
+                    venueId_featureId: {
+                      venueId,
+                      featureId: feature.id,
+                    },
+                  },
+                  data: {
+                    active: true,
+                    endDate: null,
+                    startDate: new Date(),
+                  },
+                })
+                logger.info(`  ✅ Payment successful! Invoice ${invoiceId} paid, feature IMMEDIATELY activated`)
               } else {
                 logger.warn(`  ⚠️ Payment incomplete. Invoice ${invoiceId} status: ${paidInvoice.status}`)
               }

@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import crypto from 'crypto'
+import socketManager from '../../communication/sockets'
 
 /**
  * MerchantAccount Service
@@ -64,6 +65,108 @@ function decryptCredentials(encryptedData: any): any {
   } catch (error) {
     logger.error('Failed to decrypt credentials', { error })
     throw new Error('Credential decryption failed')
+  }
+}
+
+/**
+ * Notify terminals when merchant configuration changes
+ * Part of the 3-layer cache invalidation strategy (Layer 1: PUSH)
+ *
+ * Pattern inspired by Toast/Square: Backend is SOURCE OF TRUTH, push notifications for critical changes.
+ *
+ * @param merchantId The ID of the merchant that changed
+ * @param merchantName The display name of the merchant
+ * @param changeType The type of change that occurred
+ * @param urgent Whether the terminal should refresh immediately (true for DELETED, false otherwise)
+ */
+async function notifyAffectedTerminals(
+  merchantId: string,
+  merchantName: string,
+  changeType: 'MERCHANT_ADDED' | 'MERCHANT_UPDATED' | 'MERCHANT_DELETED',
+  urgent: boolean = false,
+): Promise<void> {
+  try {
+    // Find all terminals that have this merchant assigned
+    const affectedTerminals = await prisma.terminal.findMany({
+      where: {
+        assignedMerchantIds: {
+          has: merchantId,
+        },
+      },
+      select: {
+        id: true,
+        serialNumber: true,
+        name: true,
+        venueId: true,
+      },
+    })
+
+    if (affectedTerminals.length === 0) {
+      logger.debug('No terminals affected by merchant change', {
+        merchantId,
+        changeType,
+      })
+      return
+    }
+
+    const broadcastingService = socketManager.getBroadcastingService()
+    if (!broadcastingService) {
+      logger.warn('Broadcasting service not available, cannot notify terminals of merchant change', {
+        merchantId,
+        changeType,
+        affectedTerminalCount: affectedTerminals.length,
+      })
+      return
+    }
+
+    // Generate a config version (timestamp-based)
+    const configVersion = Date.now()
+
+    // Group terminals by venue and broadcast once per venue
+    const venueTerminals = affectedTerminals.reduce(
+      (acc, terminal) => {
+        if (!acc[terminal.venueId]) {
+          acc[terminal.venueId] = []
+        }
+        acc[terminal.venueId].push(terminal)
+        return acc
+      },
+      {} as Record<string, typeof affectedTerminals>,
+    )
+
+    // Broadcast to each affected venue
+    for (const [venueId, terminals] of Object.entries(venueTerminals)) {
+      for (const terminal of terminals) {
+        broadcastingService.broadcastTerminalConfigChanged(venueId, {
+          terminalId: terminal.id,
+          terminalSerialNumber: terminal.serialNumber || terminal.id,
+          changeType,
+          merchantId,
+          merchantName,
+          configVersion,
+          urgent,
+          reason: `Merchant "${merchantName}" was ${changeType.toLowerCase().replace('merchant_', '')}`,
+        })
+      }
+    }
+
+    logger.info('🔔 Terminal config change notifications sent', {
+      merchantId,
+      merchantName,
+      changeType,
+      urgent,
+      affectedTerminalCount: affectedTerminals.length,
+      affectedVenueCount: Object.keys(venueTerminals).length,
+      configVersion,
+    })
+  } catch (error) {
+    // Don't throw - this is a best-effort notification
+    // The 3-layer architecture ensures terminals will eventually sync via heartbeat or backend validation
+    logger.error('Failed to notify terminals of merchant change (non-blocking)', {
+      merchantId,
+      changeType,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
   }
 }
 
@@ -351,6 +454,17 @@ export async function updateMerchantAccount(id: string, data: UpdateMerchantAcco
     credentialsUpdated: !!data.credentials,
   })
 
+  // 🔔 Layer 1: Push notification to affected terminals via Socket.IO
+  // Non-blocking - terminals will sync via heartbeat (Layer 2) if this fails
+  notifyAffectedTerminals(
+    id,
+    account.displayName || account.alias || account.externalMerchantId,
+    'MERCHANT_UPDATED',
+    false, // Not urgent - terminal can refresh when convenient
+  ).catch(err => {
+    logger.error('Failed to notify terminals of merchant update (non-blocking)', { err })
+  })
+
   return {
     ...account,
     credentialsEncrypted: undefined, // Don't expose encrypted data
@@ -385,6 +499,17 @@ export async function toggleMerchantAccountStatus(id: string) {
   logger.info('Merchant account status toggled', {
     accountId: id,
     newStatus: updated.active,
+  })
+
+  // 🔔 Layer 1: Push notification to affected terminals via Socket.IO
+  // Status toggle is URGENT - merchant may have become inactive (can't accept payments)
+  notifyAffectedTerminals(
+    id,
+    updated.displayName || updated.alias || updated.externalMerchantId,
+    'MERCHANT_UPDATED',
+    !updated.active, // Urgent if merchant was DEACTIVATED (can't accept payments anymore)
+  ).catch(err => {
+    logger.error('Failed to notify terminals of merchant status toggle (non-blocking)', { err })
   })
 
   return {

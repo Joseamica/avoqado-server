@@ -251,15 +251,31 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
     return
   }
 
-  // Verify VenueFeature is active
-  const venueFeature = await prisma.venueFeature.findFirst({
+  // ✅ FIX BUG #7: Retry with backoff if VenueFeature not yet created
+  // Race condition: Webhook can fire before sync code creates VenueFeature
+  let venueFeature = await prisma.venueFeature.findFirst({
     where: { stripeSubscriptionId: subscriptionIdStr },
     include: { feature: true },
   })
 
   if (!venueFeature) {
-    logger.warn('⚠️ Webhook: Subscription not found for invoice', { subscriptionId: subscriptionIdStr, invoiceId: invoice.id })
-    return
+    // Wait 2 seconds and retry once - VenueFeature might be being created
+    logger.info('⏳ Webhook: VenueFeature not found, retrying in 2s...', { subscriptionId: subscriptionIdStr, invoiceId: invoice.id })
+    await new Promise(resolve => setTimeout(resolve, 2000))
+
+    venueFeature = await prisma.venueFeature.findFirst({
+      where: { stripeSubscriptionId: subscriptionIdStr },
+      include: { feature: true },
+    })
+
+    if (!venueFeature) {
+      // Still not found after retry - log warning and return
+      // The sync code's immediate activation should handle this
+      logger.warn('⚠️ Webhook: VenueFeature still not found after retry', { subscriptionId: subscriptionIdStr, invoiceId: invoice.id })
+      return
+    }
+
+    logger.info('✅ Webhook: VenueFeature found on retry', { subscriptionId: subscriptionIdStr, venueId: venueFeature.venueId })
   }
 
   // Ensure feature is active
@@ -275,6 +291,14 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       venueId: venueFeature.venueId,
       featureCode: venueFeature.feature.code,
       amountPaid,
+    })
+  } else {
+    // Feature already active - this is expected when immediate payment activation
+    // happened in createTrialSubscriptions() before webhook arrived
+    logger.info('ℹ️ Webhook: Invoice paid but feature already active (immediate activation worked)', {
+      venueId: venueFeature.venueId,
+      featureCode: venueFeature.feature.code,
+      subscriptionId: subscriptionIdStr,
     })
   }
 }

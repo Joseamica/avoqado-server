@@ -276,7 +276,18 @@ export async function createTransactionCost(paymentId: string) {
   // Step 5: Calculate Costs and Revenue
   // ========================================
 
-  const amount = parseFloat(payment.amount.toString())
+  // IMPORTANT: Use total processed amount (including tip) for cost calculation
+  // The payment processor charges commission on ALL money that passes through the terminal
+  const baseAmount = parseFloat(payment.amount.toString())
+  const tipAmount = parseFloat(payment.tipAmount?.toString() || '0')
+  const amount = baseAmount + tipAmount
+
+  logger.info('Transaction amount calculated', {
+    paymentId,
+    baseAmount,
+    tipAmount,
+    totalAmount: amount,
+  })
 
   // For TEST payments, use zero rates
   let providerRate = 0
