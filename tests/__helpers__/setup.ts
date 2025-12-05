@@ -9,6 +9,7 @@ jest.setTimeout(30000)
 // Set required environment variables for tests
 process.env.NODE_ENV = 'test'
 process.env.ACCESS_TOKEN_SECRET = 'test-access-token-secret'
+process.env.REFRESH_TOKEN_SECRET = 'test-refresh-token-secret'
 process.env.SESSION_SECRET = 'test-session-secret'
 process.env.COOKIE_SECRET = 'test-cookie-secret'
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test'
