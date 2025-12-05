@@ -155,7 +155,7 @@ export const addVenueFeaturesSchema = z.object({
       .array(z.string())
       .min(1, { message: 'Al menos un feature code es requerido' })
       .max(10, { message: 'Máximo 10 features a la vez' }),
-    trialPeriodDays: z.number().int().min(0).max(30).optional().default(2),
+    trialPeriodDays: z.number().int().min(0).max(365).optional().default(2), // Stripe allows up to 730 days
   }),
 })
 
