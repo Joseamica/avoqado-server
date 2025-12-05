@@ -208,6 +208,33 @@ router.post('/resend-verification', resendRateLimiter, onboardingController.rese
  */
 router.get('/email-status', emailStatusRateLimiter, onboardingController.getEmailStatus)
 
+/**
+ * @openapi
+ * /api/v1/onboarding/setup-intent:
+ *   post:
+ *     tags: [Onboarding]
+ *     summary: Create SetupIntent for card validation during onboarding
+ *     description: Creates a Stripe SetupIntent without a customer. The PaymentMethod will be attached to a customer when the venue is created.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: SetupIntent created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     clientSecret: { type: string }
+ *       401:
+ *         description: Authentication required
+ */
+router.post('/setup-intent', authenticateTokenMiddleware, onboardingController.createSetupIntent)
+
 // Configure multer for CSV uploads (memory storage, max 5MB)
 const upload = multer({
   storage: multer.memoryStorage(),

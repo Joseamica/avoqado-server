@@ -520,6 +520,53 @@ describe('Stripe Service - Comprehensive Tests', () => {
         })
       })
     })
+
+    describe('createOnboardingSetupIntent()', () => {
+      it('should create setup intent WITHOUT customer for onboarding flow', async () => {
+        const mockClientSecret = 'seti_onboarding_secret_456'
+
+        mockStripeInstance.setupIntents.create.mockResolvedValueOnce({
+          id: 'seti_onboarding_456',
+          client_secret: mockClientSecret,
+          // No customer property - this is the key difference
+        })
+
+        const result = await stripeService.createOnboardingSetupIntent()
+
+        expect(result).toBe(mockClientSecret)
+        expect(mockStripeInstance.setupIntents.create).toHaveBeenCalledWith({
+          payment_method_types: ['card'],
+          usage: 'off_session', // Important: allows future payments without customer present
+        })
+        // Verify NO customer was passed
+        expect(mockStripeInstance.setupIntents.create).not.toHaveBeenCalledWith(expect.objectContaining({ customer: expect.anything() }))
+      })
+
+      it('should handle Stripe API errors gracefully', async () => {
+        const stripeError = new Error('Stripe API unavailable')
+        ;(stripeError as any).type = 'api_error'
+        mockStripeInstance.setupIntents.create.mockRejectedValueOnce(stripeError)
+
+        await expect(stripeService.createOnboardingSetupIntent()).rejects.toThrow('Stripe API unavailable')
+      })
+
+      it('should return client_secret that can be used by frontend', async () => {
+        // Verify the format matches what Stripe.js expects
+        const mockClientSecret = 'seti_1ABC123_secret_XYZ789'
+
+        mockStripeInstance.setupIntents.create.mockResolvedValueOnce({
+          id: 'seti_1ABC123',
+          client_secret: mockClientSecret,
+          status: 'requires_payment_method',
+        })
+
+        const result = await stripeService.createOnboardingSetupIntent()
+
+        // Client secret should contain the SetupIntent ID
+        expect(result).toContain('seti_')
+        expect(result).toContain('_secret_')
+      })
+    })
   })
 
   describe('📄 TEST 4: Invoices', () => {

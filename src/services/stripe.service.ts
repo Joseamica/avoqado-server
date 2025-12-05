@@ -1225,6 +1225,24 @@ export async function handlePaymentFailure(
   logger.info(`✅ Payment failure handling complete for subscription ${subscriptionId}`)
 }
 
+/**
+ * Create SetupIntent for onboarding (without customer)
+ *
+ * Used during onboarding when the customer/venue doesn't exist yet.
+ * The PaymentMethod can be attached to a customer later when the venue is created.
+ *
+ * @returns SetupIntent client secret
+ */
+export async function createOnboardingSetupIntent(): Promise<string> {
+  const setupIntent = await stripe.setupIntents.create({
+    payment_method_types: ['card'],
+    usage: 'off_session', // Allow future payments without customer present
+  })
+
+  logger.info(`✅ Created onboarding setup intent ${setupIntent.id} (no customer)`)
+  return setupIntent.client_secret!
+}
+
 export default {
   getOrCreateStripeCustomer,
   syncFeaturesToStripe,
@@ -1233,6 +1251,7 @@ export default {
   cancelSubscription,
   updatePaymentMethod,
   createTrialSetupIntent,
+  createOnboardingSetupIntent,
   getCustomerInvoices,
   getInvoicePdfUrl,
   listPaymentMethods,

@@ -9,6 +9,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as onboardingProgressService from '../services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '../services/onboarding/venueCreation.service'
 import * as signupService from '../services/onboarding/signup.service'
+import { createOnboardingSetupIntent } from '../services/stripe.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
 import logger from '../config/logger'
@@ -452,6 +453,30 @@ export async function updateStep6(req: Request, res: Response, next: NextFunctio
     })
   } catch (error) {
     logger.error('Error updating Step 6:', error)
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/onboarding/setup-intent
+ *
+ * Creates a Stripe SetupIntent for onboarding (no customer yet)
+ * Used to validate card details before venue creation
+ */
+export async function createSetupIntent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const clientSecret = await createOnboardingSetupIntent()
+
+    logger.info('✅ Created onboarding SetupIntent for card validation')
+
+    res.status(200).json({
+      success: true,
+      data: {
+        clientSecret,
+      },
+    })
+  } catch (error) {
+    logger.error('Error creating onboarding SetupIntent:', error)
     next(error)
   }
 }

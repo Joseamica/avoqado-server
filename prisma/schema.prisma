@@ -2398,6 +2398,21 @@ model EcommerceMerchant {
   @@index([providerId])
 }
 
+// =============================================================================
+// EXTERNAL TABLE: Session Storage (managed by connect-pg-simple)
+// =============================================================================
+// This table is auto-created by Express session middleware.
+// We define it here to prevent Prisma from detecting it as "drift".
+// DO NOT use this model in application code - it's managed externally.
+model user_sessions {
+  sid    String   @id @db.VarChar
+  sess   Json     @db.Json
+  expire DateTime @db.Timestamp(6)
+
+  @@index([expire], map: "IDX_session_expire")
+  @@map("user_sessions")
+}
+
 /// Temporary checkout sessions for SDK payments
 /// Acts as a payment intent before the customer completes the payment
 model CheckoutSession {
