@@ -252,16 +252,19 @@ TODO: Create superadmin-configurable pricing system.
 
 **What:** Redirect in `src/app.ts` for `/v1/venues/:venueId/bill/generate`
 
-**Why:** Physical QR codes are printed pointing to `api.avoqado.io/v1/venues/:venueId/bill/generate`. The old backend (avo-pwa) was migrated to `api-deprecated.avoqado.io`, but QRs can't be changed.
+**Why:** Physical QR codes are printed pointing to `api.avoqado.io/v1/venues/:venueId/bill/generate`. The old backend (avo-pwa) was migrated
+to `api-deprecated.avoqado.io`, but QRs can't be changed.
 
 **How it works:**
+
 ```
 QR scan → api.avoqado.io/v1/venues/X/bill/generate
        → 301 redirect → api-deprecated.avoqado.io/v1/venues/X/bill/generate
        → Old backend serves the bill
 ```
 
-**When to remove:** Once the bill generation functionality is migrated to this backend (avoqado-server), or when all physical QRs are replaced.
+**When to remove:** Once the bill generation functionality is migrated to this backend (avoqado-server), or when all physical QRs are
+replaced.
 
 **File:** `src/app.ts` (lines 50-53)
 

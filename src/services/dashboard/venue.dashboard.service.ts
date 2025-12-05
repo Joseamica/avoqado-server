@@ -745,10 +745,11 @@ export async function convertDemoVenue(
   conversionData: {
     // Entity type (PERSONA_FISICA or PERSONA_MORAL)
     entityType: EntityType
-    // Basic business info
-    rfc: string
-    legalName: string
-    fiscalRegime: string
+    // Fiscal info - Optional for PERSONA_FISICA, required for PERSONA_MORAL
+    // For PERSONA_FISICA: extracted from Constancia de Situación Fiscal during verification
+    rfc?: string | null
+    legalName?: string | null
+    fiscalRegime?: string | null
     // Documents - Required for all entity types (Blumonpay requirements)
     idDocumentUrl: string
     rfcDocumentUrl: string
@@ -830,10 +831,11 @@ export async function convertDemoVenue(
       }
 
       // Create or get Stripe customer for the venue
+      // Use organization name, then legal name, then venue name as fallback
       stripeCustomerId = await getOrCreateStripeCustomer(
         venueId,
         billingEmail,
-        organization.name || conversionData.legalName,
+        organization.name || conversionData.legalName || existingVenue.name,
         existingVenue.name, // venueName
         existingVenue.slug, // venueSlug
       )

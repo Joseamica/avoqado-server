@@ -100,16 +100,17 @@ export const convertDemoVenueSchema = z.object({
         errorMap: () => ({ message: 'Tipo de persona es requerido o inválido' }),
       }),
 
-      // Basic business info (required for all)
+      // Fiscal info - Optional for PERSONA_FISICA, required for PERSONA_MORAL
+      // For PERSONA_FISICA: extracted from Constancia de Situación Fiscal during verification
       rfc: z
-        .string({ required_error: 'RFC es requerido' })
+        .string()
         .min(12, { message: 'RFC debe tener al menos 12 caracteres' })
         .max(13, { message: 'RFC debe tener máximo 13 caracteres' })
-        .regex(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'Formato de RFC inválido' }),
-      legalName: z
-        .string({ required_error: 'Razón social es requerida' })
-        .min(3, { message: 'Razón social debe tener al menos 3 caracteres' }),
-      fiscalRegime: z.string({ required_error: 'Régimen fiscal es requerido' }).min(1, { message: 'Régimen fiscal es requerido' }),
+        .regex(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'Formato de RFC inválido' })
+        .optional()
+        .nullable(),
+      legalName: z.string().min(3, { message: 'Razón social debe tener al menos 3 caracteres' }).optional().nullable(),
+      fiscalRegime: z.string().min(1, { message: 'Régimen fiscal es requerido' }).optional().nullable(),
 
       // Documents - Required for ALL entity types (Blumonpay requirements)
       idDocumentUrl: z.string({ required_error: 'Identificación oficial es requerida' }).url({ message: 'URL de identificación inválida' }),
@@ -134,15 +135,25 @@ export const convertDemoVenueSchema = z.object({
       selectedFeatures: z.array(z.string()).optional(),
       paymentMethodId: z.string().optional(),
     })
+    // Acta Constitutiva is required for PERSONA_MORAL
     .refine(
       data => {
-        // Acta Constitutiva is required for PERSONA_MORAL
         if (data.entityType === EntityType.PERSONA_MORAL) {
           return !!data.actaDocumentUrl
         }
         return true
       },
       { message: 'Acta Constitutiva es requerida para Persona Moral', path: ['actaDocumentUrl'] },
+    )
+    // RFC, legalName, and fiscalRegime are required for PERSONA_MORAL
+    .refine(
+      data => {
+        if (data.entityType === EntityType.PERSONA_MORAL) {
+          return !!data.rfc && !!data.legalName && !!data.fiscalRegime
+        }
+        return true
+      },
+      { message: 'RFC, Razón Social y Régimen Fiscal son requeridos para Persona Moral', path: ['rfc'] },
     ),
 })
 

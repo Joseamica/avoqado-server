@@ -154,6 +154,32 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
     throw new BadRequestError('Invalid email or verification code')
   }
 
+  // DEV BYPASS: Accept '000000' code in development mode
+  const isDev = process.env.NODE_ENV === 'development'
+  const isBypassCode = verificationCode === '000000'
+
+  if (isDev && isBypassCode && !staff.emailVerified) {
+    // Auto-verify in dev mode with bypass code
+    await prisma.staff.update({
+      where: { id: staff.id },
+      data: {
+        emailVerified: true,
+        emailVerificationCode: null,
+        emailVerificationExpires: null,
+      },
+    })
+
+    // Generate JWT tokens for auto-login
+    const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, 'pending', StaffRole.OWNER)
+    const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+
+    return {
+      emailVerified: true,
+      accessToken,
+      refreshToken,
+    }
+  }
+
   // 2. Check if already verified
   if (staff.emailVerified) {
     // Already verified - generate tokens for auto-login
