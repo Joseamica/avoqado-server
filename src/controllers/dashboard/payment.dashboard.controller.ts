@@ -138,3 +138,83 @@ export async function getReceiptById(req: Request<{ receiptId: string }>, res: R
     next(error)
   }
 }
+
+// Ruta: PUT /venues/:venueId/payments/:paymentId (SUPERADMIN only)
+export async function updatePayment(
+  req: Request<{ paymentId: string; venueId: string }, {}, paymentDashboardService.UpdatePaymentData>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { paymentId, venueId } = req.params
+    const updateData = req.body
+
+    // Verify payment belongs to this venue
+    const payment = await prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        venueId,
+      },
+    })
+
+    if (!payment) {
+      throw new NotFoundError('Payment not found in this venue')
+    }
+
+    logger.info('Updating payment', {
+      paymentId,
+      venueId,
+      userId: req.authContext?.userId,
+      fields: Object.keys(updateData),
+    })
+
+    const updatedPayment = await paymentDashboardService.updatePayment(paymentId, updateData)
+
+    res.status(200).json(updatedPayment)
+  } catch (error) {
+    logger.error('Error updating payment', {
+      paymentId: req.params.paymentId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+}
+
+// Ruta: DELETE /venues/:venueId/payments/:paymentId (SUPERADMIN only)
+export async function deletePayment(
+  req: Request<{ paymentId: string; venueId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { paymentId, venueId } = req.params
+
+    // Verify payment belongs to this venue
+    const payment = await prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        venueId,
+      },
+    })
+
+    if (!payment) {
+      throw new NotFoundError('Payment not found in this venue')
+    }
+
+    logger.info('Deleting payment', {
+      paymentId,
+      venueId,
+      userId: req.authContext?.userId,
+    })
+
+    await paymentDashboardService.deletePayment(paymentId)
+
+    res.status(204).send()
+  } catch (error) {
+    logger.error('Error deleting payment', {
+      paymentId: req.params.paymentId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+}

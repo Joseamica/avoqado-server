@@ -1,8 +1,8 @@
-import prisma from '../../utils/prismaClient'
+import { MovementType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
-import { RawMaterialMovementType, MovementType } from '@prisma/client'
 import AppError from '../../errors/AppError'
-import { deductStockForRecipe, deductStockForModifiers, OrderModifierForInventory } from './rawMaterial.service'
+import prisma from '../../utils/prismaClient'
+import { deductStockForModifiers, deductStockForRecipe, OrderModifierForInventory } from './rawMaterial.service'
 
 /**
  * Product Inventory Integration Service

@@ -18,6 +18,7 @@
 
 import { StaffRole, VenueRoleConfig } from '@prisma/client'
 
+import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { RoleConfigItem, RoleConfigResponse } from '@/schemas/dashboard/venueRoleConfig.schema'
 import prisma from '@/utils/prismaClient'
@@ -152,7 +153,7 @@ export async function updateVenueRoleConfigs(venueId: string, configs: RoleConfi
   const renameable = configs.filter(config => {
     if (NON_RENAMEABLE_ROLES.includes(config.role as StaffRole)) {
       // Log warning but don't fail
-      console.warn(`[VenueRoleConfig] Attempted to rename non-renameable role: ${config.role}`)
+      logger.warn(`Attempted to rename non-renameable role: ${config.role}`)
       return false
     }
     return true

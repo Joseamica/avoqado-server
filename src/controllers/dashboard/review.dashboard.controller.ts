@@ -4,6 +4,9 @@ import * as reviewsDashboardService from '../../services/dashboard/review.dashbo
 import * as reviewResponseService from '../../services/reviewResponse.service'
 import { DashboardWithDates } from '../../schemas/dashboard/home.schema'
 import { parseDateRange } from '@/utils/datetime'
+import prisma from '../../utils/prismaClient'
+import { NotFoundError } from '../../errors/AppError'
+import logger from '../../config/logger'
 
 export async function getReviewsData(
   req: Request<DashboardWithDates['params'], any, any, DashboardWithDates['query']>,
@@ -72,6 +75,44 @@ export async function submitResponseFeedback(req: Request, res: Response, next: 
 
     res.status(200).json(result)
   } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Delete a review (SUPERADMIN only)
+ * DELETE /api/v1/dashboard/venues/:venueId/reviews/:reviewId
+ */
+export async function deleteReview(req: Request<{ reviewId: string; venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { reviewId, venueId } = req.params
+
+    // Verify review belongs to this venue
+    const review = await prisma.review.findFirst({
+      where: {
+        id: reviewId,
+        venueId,
+      },
+    })
+
+    if (!review) {
+      throw new NotFoundError('Review not found in this venue')
+    }
+
+    logger.info('Deleting review', {
+      reviewId,
+      venueId,
+      userId: req.authContext?.userId,
+    })
+
+    await reviewsDashboardService.deleteReview(reviewId)
+
+    res.status(204).send()
+  } catch (error) {
+    logger.error('Error deleting review', {
+      reviewId: req.params.reviewId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
     next(error)
   }
 }

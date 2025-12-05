@@ -211,6 +211,46 @@ export async function disableFeatureForVenue(req: Request, res: Response, next: 
 }
 
 /**
+ * Grant a DB-only trial for a venue (no Stripe subscription)
+ * Validation handled by Zod schema in routes (grantTrialSchema)
+ */
+export async function grantTrialForVenue(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, featureCode } = req.params
+    const { trialDays } = req.body // Validated by Zod: number, 1-365
+
+    logger.info('Granting DB-only trial for venue', {
+      venueId,
+      featureCode,
+      trialDays,
+      userId: req.authContext?.userId,
+    })
+
+    const result = await superadminService.grantTrialForVenue(venueId, featureCode, trialDays)
+
+    res.json({
+      success: true,
+      data: {
+        venueId,
+        featureCode,
+        trialDays,
+        endDate: result.endDate,
+      },
+      message: `Trial granted successfully. Feature will expire on ${result.endDate.toISOString()}`,
+    })
+  } catch (error) {
+    logger.error('Error granting trial for venue', {
+      venueId: req.params.venueId,
+      featureCode: req.params.featureCode,
+      trialDays: req.body.trialDays,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
  * Get revenue metrics for a date range
  */
 export async function getRevenueMetrics(req: Request, res: Response, next: NextFunction): Promise<void> {

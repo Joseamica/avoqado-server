@@ -86,3 +86,28 @@ export async function deleteShift(req: Request, res: Response, next: NextFunctio
     next(error)
   }
 }
+
+export async function updateShift(
+  req: Request<{ venueId: string; shiftId: string }, {}, shiftDashboardService.UpdateShiftData>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const shiftId: string = req.params.shiftId
+    const updateData = req.body
+
+    const result = await shiftDashboardService.updateShift(venueId, shiftId, updateData)
+
+    if (!result) {
+      res.status(404).json({
+        error: 'Shift not found',
+      })
+      return
+    }
+
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}

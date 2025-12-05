@@ -481,6 +481,68 @@ export async function disableFeatureForVenue(venueId: string, featureCode: strin
 }
 
 /**
+ * Grant a DB-only trial for a venue (no Stripe subscription)
+ * Sets an endDate that will be expired by the daily cron job
+ */
+export async function grantTrialForVenue(venueId: string, featureCode: string, trialDays: number): Promise<{ endDate: Date }> {
+  try {
+    // Ensure venue exists
+    const venue = await prisma.venue.findUnique({ where: { id: venueId } })
+    if (!venue) {
+      throw new Error('Venue not found')
+    }
+
+    // Find feature by code
+    const feature = await prisma.feature.findUnique({ where: { code: featureCode } })
+    if (!feature) {
+      throw new Error('Feature not found')
+    }
+
+    // Calculate trial end date
+    const startDate = new Date()
+    const endDate = new Date(startDate)
+    endDate.setDate(endDate.getDate() + trialDays)
+
+    // Upsert venue-feature association with trial end date
+    await prisma.venueFeature.upsert({
+      where: { venueId_featureId: { venueId, featureId: feature.id } },
+      create: {
+        venueId,
+        featureId: feature.id,
+        active: true,
+        monthlyPrice: feature.monthlyPrice,
+        startDate,
+        endDate, // Trial expires on this date
+        // No stripeSubscriptionId = DB-only trial
+      },
+      update: {
+        active: true,
+        startDate,
+        endDate, // Trial expires on this date
+        monthlyPrice: feature.monthlyPrice,
+        // Clear any previous Stripe subscription
+        stripeSubscriptionId: null,
+        stripeSubscriptionItemId: null,
+        suspendedAt: null,
+        gracePeriodEndsAt: null,
+      },
+    })
+
+    logger.info(`Granted ${trialDays}-day DB-only trial for ${featureCode} to venue ${venueId}`, {
+      venueId,
+      featureCode,
+      trialDays,
+      endDate,
+    })
+
+    return { endDate }
+  } catch (error) {
+    logger.error('Error granting trial for venue:', error)
+    throw new Error('Failed to grant trial for venue')
+  }
+}
+
+/**
  * Get venue details by ID
  */
 export async function getVenueDetails(venueId: string): Promise<SuperadminVenue | null> {

@@ -2,6 +2,7 @@ import OpenAI from 'openai'
 import logger from '@/config/logger'
 import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { Prisma } from '@prisma/client'
 import { AILearningService } from './ai-learning.service'
 import { SqlValidationService } from './sql-validation.service'
 import { SharedQueryService } from './shared-query.service'
@@ -2704,22 +2705,25 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       // Determine the correct query based on what the original used
       const useCompletedFilter = originalSQL.toLowerCase().includes('completed')
 
-      const validationQuery = `
-        SELECT 
+      // Use parameterized query to prevent SQL injection
+      const statusFilter = useCompletedFilter
+        ? Prisma.sql`AND "status" = 'COMPLETED'`
+        : Prisma.empty
+
+      const validationResult = (await prisma.$queryRaw`
+        SELECT
           SUM("tipAmount") as tips,
           SUM("total") as sales,
-          CASE 
-            WHEN SUM("total") > 0 
+          CASE
+            WHEN SUM("total") > 0
             THEN ROUND((SUM("tipAmount") / SUM("total") * 100)::numeric, 2)
-            ELSE 0 
+            ELSE 0
           END as expected_percentage
-        FROM "Order" 
-        WHERE "venueId" = '${venueId}' 
+        FROM "Order"
+        WHERE "venueId" = ${venueId}
           AND "createdAt" >= DATE_TRUNC('month', CURRENT_DATE)
-          ${useCompletedFilter ? 'AND "status" = \'COMPLETED\'' : ''}
-      `
-
-      const validationResult = (await prisma.$queryRawUnsafe(validationQuery)) as any[]
+          ${statusFilter}
+      `) as any[]
       const row = validationResult[0]
 
       if (row) {

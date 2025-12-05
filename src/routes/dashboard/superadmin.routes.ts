@@ -48,6 +48,13 @@ const suspendVenueSchema = z.object({
   }),
 })
 
+// Schema for granting DB-only trial
+const grantTrialSchema = z.object({
+  body: z.object({
+    trialDays: z.number().int().min(1, 'Trial must be at least 1 day').max(365, 'Trial cannot exceed 365 days'),
+  }),
+})
+
 // Schema for feature creation
 const createFeatureSchema = z.object({
   body: z.object({
@@ -81,6 +88,11 @@ router.get('/features', superadminController.getAllFeatures)
 router.post('/features', validateRequest(createFeatureSchema), superadminController.createFeature)
 router.post('/venues/:venueId/features/:featureCode/enable', superadminController.enableFeatureForVenue)
 router.delete('/venues/:venueId/features/:featureCode/disable', superadminController.disableFeatureForVenue)
+router.post(
+  '/venues/:venueId/features/:featureCode/grant-trial',
+  validateRequest(grantTrialSchema),
+  superadminController.grantTrialForVenue,
+)
 
 // Revenue tracking routes
 router.get('/revenue/metrics', superadminController.getRevenueMetrics)

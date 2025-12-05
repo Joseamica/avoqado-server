@@ -109,11 +109,11 @@ export async function getOrderById(orderId: string) {
 
 /**
  * Actualizar una orden.
- * NOTA: Por seguridad, solo deberías permitir actualizar ciertos campos.
+ * SUPERADMIN puede actualizar más campos que usuarios normales.
  */
 export async function updateOrder(orderId: string, data: Partial<Order>) {
-  // Aquí puedes validar qué campos se pueden actualizar, ej: status, customerName
-  const { status, customerName } = data // Solo extraemos los campos permitidos
+  // Extract allowed fields for SUPERADMIN editing
+  const { status, customerName, tableId, servedById, tipAmount, total, subtotal, createdAt, orderNumber, type } = data as any
 
   // Get the current order to check previous status
   const currentOrder = await prisma.order.findUnique({
@@ -128,10 +128,17 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
-      status,
-      customerName,
+      ...(status !== undefined && { status }),
+      ...(customerName !== undefined && { customerName }),
+      ...(tableId !== undefined && { tableId: tableId || null }),
+      ...(servedById !== undefined && { servedById: servedById || null }),
+      ...(tipAmount !== undefined && { tipAmount: Number(tipAmount) }),
+      ...(total !== undefined && { total: Number(total) }),
+      ...(subtotal !== undefined && { subtotal: Number(subtotal) }),
+      ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
+      ...(orderNumber !== undefined && { orderNumber }),
+      ...(type !== undefined && { type }),
       ...(status === 'COMPLETED' && { completedAt: new Date() }),
-      // No permitir actualizar montos directamente desde aquí
     },
     include: {
       items: {

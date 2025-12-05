@@ -1180,6 +1180,13 @@ router.delete(
  */
 router.get('/venues/:venueId/reviews', authenticateTokenMiddleware, checkPermission('reviews:read'), reviewController.getReviewsData)
 
+router.delete(
+  '/venues/:venueId/reviews/:reviewId',
+  authenticateTokenMiddleware,
+  checkPermission('reviews:delete'), // SUPERADMIN only
+  reviewController.deleteReview,
+)
+
 // Google Business Profile Integration Routes
 /**
  * @openapi
@@ -2614,6 +2621,21 @@ router.get(
   checkPermission('payments:read'), // Allows WAITER+ to view payment details (read-only)
   paymentController.getPayment,
 )
+
+router.delete(
+  '/venues/:venueId/payments/:paymentId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:delete'), // SUPERADMIN only
+  paymentController.deletePayment,
+)
+
+router.put(
+  '/venues/:venueId/payments/:paymentId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:update'), // SUPERADMIN only
+  paymentController.updatePayment,
+)
+
 /**
  * @openapi
  * /api/v1/dashboard/payments/{paymentId}/send-receipt:
@@ -6159,6 +6181,13 @@ router.delete(
   authenticateTokenMiddleware,
   checkPermission('shifts:delete'),
   shiftController.deleteShift,
+)
+
+router.put(
+  '/venues/:venueId/shifts/:shiftId',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:update'), // SUPERADMIN only
+  shiftController.updateShift,
 )
 
 // ==========================================

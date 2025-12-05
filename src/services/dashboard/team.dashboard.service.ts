@@ -6,6 +6,7 @@ import emailService from '../email.service'
 
 interface TeamMember {
   id: string
+  staffId: string // The Staff table ID (for order references like servedById, createdById)
   firstName: string
   lastName: string
   email: string
@@ -156,6 +157,7 @@ export async function getTeamMembers(
     const stats = statsMap.get(sv.staff.id) || { totalSales: 0, totalTips: 0, totalOrders: 0 }
     return {
       id: sv.id,
+      staffId: sv.staff.id, // Staff table ID for order references (servedById, createdById)
       firstName: sv.staff.firstName,
       lastName: sv.staff.lastName,
       email: sv.staff.email,
@@ -500,6 +502,7 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
 
   return {
     id: updatedStaffVenue.id,
+    staffId: updatedStaffVenue.staffId,
     firstName: updatedStaffVenue.staff.firstName,
     lastName: updatedStaffVenue.staff.lastName,
     email: updatedStaffVenue.staff.email,

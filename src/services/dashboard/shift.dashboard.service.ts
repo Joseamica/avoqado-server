@@ -379,3 +379,129 @@ export async function deleteShift(venueId: string, shiftId: string): Promise<boo
     throw error
   }
 }
+
+/**
+ * Update shift data interface
+ */
+export interface UpdateShiftData {
+  startTime?: Date
+  endTime?: Date | null
+  startingCash?: number
+  endingCash?: number | null
+  totalSales?: number
+  totalTips?: number
+  totalOrders?: number
+  status?: 'OPEN' | 'CLOSED'
+  staffId?: string
+}
+
+/**
+ * Update a shift by ID (SUPERADMIN only)
+ * @param venueId Venue ID
+ * @param shiftId Shift ID to update
+ * @param data Update data
+ * @returns Updated shift
+ */
+export async function updateShift(venueId: string, shiftId: string, data: UpdateShiftData): Promise<any> {
+  logger.info('Updating shift', { venueId, shiftId, fields: Object.keys(data) })
+
+  // First check if shift exists and belongs to the venue
+  const existingShift = await prisma.shift.findFirst({
+    where: {
+      id: shiftId,
+      venueId: venueId,
+    },
+  })
+
+  if (!existingShift) {
+    logger.warn('Shift not found for update', { venueId, shiftId })
+    return null
+  }
+
+  // Build update data object, only including provided fields
+  const updateData: any = {}
+
+  if (data.startTime !== undefined) {
+    updateData.startTime = data.startTime
+  }
+  if (data.endTime !== undefined) {
+    updateData.endTime = data.endTime
+  }
+  if (data.startingCash !== undefined) {
+    updateData.startingCash = data.startingCash
+  }
+  if (data.endingCash !== undefined) {
+    updateData.endingCash = data.endingCash
+  }
+  if (data.totalSales !== undefined) {
+    updateData.totalSales = data.totalSales
+  }
+  if (data.totalTips !== undefined) {
+    updateData.totalTips = data.totalTips
+  }
+  if (data.totalOrders !== undefined) {
+    updateData.totalOrders = data.totalOrders
+  }
+  if (data.status !== undefined) {
+    updateData.status = data.status
+  }
+  if (data.staffId !== undefined) {
+    updateData.staffId = data.staffId
+  }
+
+  // Calculate cash difference if both startingCash and endingCash are available
+  const effectiveStartingCash = data.startingCash !== undefined ? data.startingCash : Number(existingShift.startingCash)
+  const effectiveEndingCash =
+    data.endingCash !== undefined ? data.endingCash : existingShift.endingCash ? Number(existingShift.endingCash) : null
+
+  if (effectiveEndingCash !== null) {
+    updateData.cashDifference = effectiveEndingCash - effectiveStartingCash
+  }
+
+  // Update the shift
+  const updatedShift = await prisma.shift.update({
+    where: {
+      id: shiftId,
+    },
+    data: updateData,
+    include: {
+      staff: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+        },
+      },
+      venue: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  })
+
+  // Determine effective status based on time logic
+  const now = new Date()
+  const effectiveStatus = updatedShift.endTime && updatedShift.endTime < now ? 'CLOSED' : updatedShift.status
+
+  logger.info('Shift updated successfully', { venueId, shiftId })
+
+  return {
+    id: updatedShift.id,
+    venueId: updatedShift.venueId,
+    staffId: updatedShift.staffId,
+    startTime: updatedShift.startTime,
+    endTime: updatedShift.endTime,
+    startingCash: Number(updatedShift.startingCash),
+    endingCash: updatedShift.endingCash ? Number(updatedShift.endingCash) : null,
+    cashDifference: updatedShift.cashDifference ? Number(updatedShift.cashDifference) : null,
+    totalSales: Number(updatedShift.totalSales),
+    totalTips: Number(updatedShift.totalTips),
+    totalOrders: updatedShift.totalOrders,
+    status: effectiveStatus,
+    staff: updatedShift.staff,
+    venue: updatedShift.venue,
+  }
+}
