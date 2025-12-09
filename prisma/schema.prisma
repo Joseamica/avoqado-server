@@ -76,15 +76,21 @@ model Venue {
   active           Boolean   @default(true)
   operationalSince DateTime?
 
-  // ✅ Demo/onboarding tracking
-  isOnboardingDemo      Boolean   @default(false) // Is this an ONBOARDING demo venue?
-  demoExpiresAt         DateTime? // Demo expiration date
-  onboardingCompletedAt DateTime? // When onboarding was completed
+  // ✅ NEW: Venue operational status (replaces active boolean logic)
+  // Mexican law requires data retention - venues cannot be hard deleted
+  status           VenueStatus @default(ONBOARDING)
+  statusChangedAt  DateTime?   // When status was last changed
+  statusChangedBy  String?     // Staff ID who changed the status
+  suspensionReason String?     @db.Text // Reason for suspension (for audit trail)
 
-  // ✅ Live Demo (public demo.dashboard.avoqado.io)
-  isLiveDemo        Boolean   @default(false) // Is this a PUBLIC live demo venue?
-  liveDemoSessionId String?   @unique // Links to browser session
-  lastActivityAt    DateTime? @default(now()) // Track activity for cleanup
+  // NOTE: isOnboardingDemo and isLiveDemo fields were REMOVED on 2024-12-08
+  // Use status field instead: TRIAL = demo during onboarding, LIVE_DEMO = ephemeral demo
+
+  // Demo-specific fields (valid when status = TRIAL or LIVE_DEMO)
+  demoExpiresAt         DateTime? // Demo expiration date (TRIAL only)
+  onboardingCompletedAt DateTime? // When onboarding was completed
+  liveDemoSessionId     String?   @unique // Browser session ID (LIVE_DEMO only)
+  lastActivityAt        DateTime? @default(now()) // Last activity for cleanup (LIVE_DEMO only)
 
   // Legal Entity Type
   entityType     EntityType? // PERSONA_FISICA or PERSONA_MORAL
@@ -217,6 +223,7 @@ model Venue {
   @@index([organizationId])
   @@index([slug])
   @@index([active])
+  @@index([status]) // For filtering by operational status
 }
 
 // ✅ Live Demo Session Tracking
@@ -3591,6 +3598,24 @@ enum VerificationStatus {
   IN_REVIEW // Superadmin is currently reviewing
   VERIFIED // KYC approved, venue can operate
   REJECTED // KYC rejected, needs resubmission
+}
+
+/// Venue operational status - single source of truth for venue lifecycle
+/// Consolidates previous isOnboardingDemo/isLiveDemo booleans into status
+/// Mexican law requires data retention - PRODUCTION venues cannot be hard deleted
+/// DEMO venues (LIVE_DEMO, TRIAL) CAN be deleted as they contain fake data
+enum VenueStatus {
+  // === Demo States (Ephemeral - CAN be deleted) ===
+  LIVE_DEMO // Public demo.dashboard.avoqado.io (anonymous, auto-cleanup)
+  TRIAL // Private onboarding demo (30-day trial, user registered)
+
+  // === Production States (SAT - CANNOT be deleted) ===
+  ONBOARDING // Real venue being configured (post-demo conversion)
+  PENDING_ACTIVATION // KYC submitted, awaiting Avoqado review
+  ACTIVE // Fully operational venue
+  SUSPENDED // Suspended by venue owner (voluntary, can reactivate)
+  ADMIN_SUSPENDED // Suspended by Avoqado (non-payment, policy violation)
+  CLOSED // Permanently closed (data retained for audit, immutable)
 }
 
 /// Venue type enum - mirrors BusinessType for backwards compatibility
