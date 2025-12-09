@@ -57,4 +57,36 @@ router.get('/:orgId/stats', checkOwnerAccess, organizationController.getOrganiza
  */
 router.put('/:orgId', checkOwnerAccess, organizationController.updateOrganization)
 
+// =============================================================================
+// Analytics Endpoints
+// =============================================================================
+
+/**
+ * GET /organizations/:orgId/analytics/enhanced-overview
+ * Get enhanced overview with comparisons, period changes, and top venues
+ * Query params: timeRange (7d|30d|90d|ytd|all), from, to
+ */
+router.get('/:orgId/analytics/enhanced-overview', checkOwnerAccess, organizationController.getEnhancedOverview)
+
+/**
+ * GET /organizations/:orgId/analytics/revenue-trends
+ * Get revenue trends with time series data for charts
+ * Query params: timeRange (7d|30d|90d|ytd|all), from, to
+ */
+router.get('/:orgId/analytics/revenue-trends', checkOwnerAccess, organizationController.getRevenueTrends)
+
+/**
+ * GET /organizations/:orgId/analytics/top-items
+ * Get top selling items across organization
+ * Query params: timeRange (7d|30d|90d|ytd|all), from, to, limit
+ */
+router.get('/:orgId/analytics/top-items', checkOwnerAccess, organizationController.getTopItems)
+
+/**
+ * GET /organizations/:orgId/analytics/venue-benchmarks
+ * Get venue benchmarks comparing against organization averages
+ * Query params: timeRange (7d|30d|90d|ytd|all), from, to
+ */
+router.get('/:orgId/analytics/venue-benchmarks', checkOwnerAccess, organizationController.getVenueBenchmarks)
+
 export default router

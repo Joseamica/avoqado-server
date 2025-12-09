@@ -112,3 +112,92 @@ export async function updateOrganization(req: Request, res: Response, next: Next
     next(error)
   }
 }
+
+/**
+ * GET /organizations/:orgId/analytics/enhanced-overview
+ * Get enhanced organization overview with comparisons, trends, and rankings
+ */
+export async function getEnhancedOverview(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { orgId } = req.params
+    const { timeRange, from, to } = req.query
+
+    const filter: organizationService.DateRangeFilter = {
+      timeRange: timeRange as '7d' | '30d' | '90d' | 'ytd' | 'all' | undefined,
+      from: from ? new Date(from as string) : undefined,
+      to: to ? new Date(to as string) : undefined,
+    }
+
+    const overview = await organizationService.getEnhancedOrganizationOverview(orgId, filter)
+    res.json(overview)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /organizations/:orgId/analytics/revenue-trends
+ * Get revenue trends with time series data
+ */
+export async function getRevenueTrends(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { orgId } = req.params
+    const { timeRange, from, to } = req.query
+
+    const filter: organizationService.DateRangeFilter = {
+      timeRange: timeRange as '7d' | '30d' | '90d' | 'ytd' | 'all' | undefined,
+      from: from ? new Date(from as string) : undefined,
+      to: to ? new Date(to as string) : undefined,
+    }
+
+    const trends = await organizationService.getRevenueTrends(orgId, filter)
+    res.json(trends)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /organizations/:orgId/analytics/top-items
+ * Get top selling items across organization
+ */
+export async function getTopItems(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { orgId } = req.params
+    const { timeRange, from, to, limit } = req.query
+
+    const filter: organizationService.DateRangeFilter = {
+      timeRange: timeRange as '7d' | '30d' | '90d' | 'ytd' | 'all' | undefined,
+      from: from ? new Date(from as string) : undefined,
+      to: to ? new Date(to as string) : undefined,
+    }
+
+    const itemLimit = limit ? parseInt(limit as string, 10) : 10
+    const topItems = await organizationService.getTopItems(orgId, filter, itemLimit)
+    res.json(topItems)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /organizations/:orgId/analytics/venue-benchmarks
+ * Get venue benchmarks comparing against organization averages
+ */
+export async function getVenueBenchmarks(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { orgId } = req.params
+    const { timeRange, from, to } = req.query
+
+    const filter: organizationService.DateRangeFilter = {
+      timeRange: timeRange as '7d' | '30d' | '90d' | 'ytd' | 'all' | undefined,
+      from: from ? new Date(from as string) : undefined,
+      to: to ? new Date(to as string) : undefined,
+    }
+
+    const benchmarks = await organizationService.getVenueBenchmarks(orgId, filter)
+    res.json(benchmarks)
+  } catch (error) {
+    next(error)
+  }
+}

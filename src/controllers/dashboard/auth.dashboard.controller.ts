@@ -114,6 +114,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       country?: string | null
       email?: string | null
       phone?: string | null
+      // Organization info (needed for VenuesSwitcher grouping)
+      organizationId?: string
+      organization?: { id: string; name: string } | null
     }
 
     // Check if user is a SUPERADMIN in any venue
@@ -174,6 +177,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           country: true,
           email: true,
           phone: true,
+          // Organization info (needed for VenuesSwitcher grouping)
+          organizationId: true,
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
           features: {
             select: {
               active: true,
@@ -204,6 +215,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         country: venue.country,
         email: venue.email,
         phone: venue.phone,
+        // Organization info (needed for VenuesSwitcher grouping)
+        organizationId: venue.organizationId,
+        organization: venue.organization,
       }))
 
       // Add all system venues to user's venues array (if not already there)
@@ -238,6 +252,14 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           country: true,
           email: true,
           phone: true,
+          // Organization info (needed for VenuesSwitcher grouping)
+          organizationId: true,
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
           features: {
             select: {
               active: true,
@@ -268,6 +290,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         country: venue.country,
         email: venue.email,
         phone: venue.phone,
+        // Organization info (needed for VenuesSwitcher grouping)
+        organizationId: venue.organizationId,
+        organization: venue.organization,
       }))
 
       // Add all organization venues to user's venues array (if not already there)
