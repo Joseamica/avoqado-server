@@ -175,7 +175,7 @@ describe('Dashboard Auth Controller', () => {
               name: 'Test Venue',
               slug: 'test-venue',
               logo: null,
-              isOnboardingDemo: false,
+              status: 'ACTIVE',
               kycStatus: null,
               features: [], // Features array with proper structure
               address: null,
@@ -199,7 +199,7 @@ describe('Dashboard Auth Controller', () => {
           name: 'Test Venue',
           slug: 'test-venue',
           logo: null,
-          isOnboardingDemo: false,
+          status: 'ACTIVE',
           kycStatus: null,
           features: [],
           address: null,

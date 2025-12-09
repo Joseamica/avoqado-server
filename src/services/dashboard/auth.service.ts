@@ -8,6 +8,7 @@ import * as jwtService from '../../jwt.service'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 import emailService from '../email.service'
 import logger from '@/config/logger'
+import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 export async function loginStaff(loginData: LoginDto) {
   const { email, password, venueId, rememberMe } = loginData
@@ -32,7 +33,11 @@ export async function loginStaff(loginData: LoginDto) {
       lastLoginAt: true,
       organization: true,
       venues: {
-        where: { active: true },
+        where: {
+          active: true,
+          // Filter by venue operational status (exclude SUSPENDED, ADMIN_SUSPENDED, CLOSED)
+          venue: { status: { in: OPERATIONAL_VENUE_STATUSES } },
+        },
         include: {
           venue: {
             select: {
@@ -40,7 +45,8 @@ export async function loginStaff(loginData: LoginDto) {
               name: true,
               slug: true,
               logo: true,
-              isOnboardingDemo: true,
+              status: true, // Single source of truth for venue state
+              kycStatus: true, // Include KYC status for frontend
             },
           },
         },
@@ -204,7 +210,8 @@ export async function loginStaff(loginData: LoginDto) {
         slug: sv.venue.slug,
         logo: sv.venue.logo,
         role: sv.role,
-        isOnboardingDemo: sv.venue.isOnboardingDemo,
+        status: sv.venue.status, // Single source of truth for venue state
+        kycStatus: sv.venue.kycStatus, // KYC compliance status
         permissions, // Include permissions in response
       }
     }),
@@ -252,17 +259,29 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
   const isSuperAdmin = staff.venues.some(sv => sv.role === StaffRole.SUPERADMIN)
   const isOwner = staff.venues.some(sv => sv.role === StaffRole.OWNER)
 
-  // First check if venue exists
+  // First check if venue exists and is operational
   const targetVenue = await prisma.venue.findUnique({
     where: { id: targetVenueId },
     select: {
       id: true,
       organizationId: true,
+      status: true, // Include venue status for operational check
     },
   })
 
   if (!targetVenue) {
     throw new ForbiddenError('El establecimiento solicitado no existe.')
+  }
+
+  // Security Enhancement: Verify venue is operational before allowing switch
+  // This prevents users from switching to SUSPENDED, ADMIN_SUSPENDED, or CLOSED venues
+  if (!OPERATIONAL_VENUE_STATUSES.includes(targetVenue.status)) {
+    logger.warn('switchVenue rejected: venue not operational', {
+      staffId,
+      targetVenueId,
+      venueStatus: targetVenue.status,
+    })
+    throw new ForbiddenError('El establecimiento no está operacional. Contacta a soporte para más información.')
   }
 
   // Si es SUPERADMIN, permitir acceso a cualquier venue

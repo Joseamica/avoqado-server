@@ -126,7 +126,7 @@ export async function loginWithGoogle(
               name: true,
               slug: true,
               logo: true,
-              isOnboardingDemo: true,
+              status: true, // Single source of truth for venue state
             },
           },
         },
@@ -193,7 +193,7 @@ export async function loginWithGoogle(
                 name: true,
                 slug: true,
                 logo: true,
-                isOnboardingDemo: true,
+                status: true,
               },
             },
           },
@@ -234,7 +234,7 @@ export async function loginWithGoogle(
                 name: true,
                 slug: true,
                 logo: true,
-                isOnboardingDemo: true,
+                status: true,
               },
             },
           },
@@ -329,7 +329,7 @@ export async function loginWithGoogle(
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       role: sv.role,
-      isOnboardingDemo: sv.venue.isOnboardingDemo,
+      status: sv.venue.status, // Single source of truth
     })),
   }
 

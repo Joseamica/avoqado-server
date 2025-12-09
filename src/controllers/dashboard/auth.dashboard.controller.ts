@@ -2,12 +2,13 @@ import { NextFunction, Request, Response } from 'express'
 import jwt from 'jsonwebtoken'
 import prisma from '../../utils/prismaClient' // Corrected import path
 import { AuthenticationError } from '../../errors/AppError'
-import { StaffRole } from '@prisma/client'
+import { StaffRole, VenueStatus } from '@prisma/client'
 import { UpdateAccountDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
 import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
+import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 /**
  * Endpoint para verificar el estado de autenticación de un usuario.
@@ -59,7 +60,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 name: true,
                 slug: true,
                 logo: true,
-                isOnboardingDemo: true,
+                status: true, // Single source of truth for venue state
                 kycStatus: true, // Include KYC status for access control
                 // Contact & Address fields (needed for TPV purchase wizard pre-fill)
                 address: true,
@@ -102,7 +103,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: string
       logo: string | null
       role?: any
-      isOnboardingDemo?: boolean
+      status?: VenueStatus // Single source of truth for venue state
       kycStatus?: string | null // Include KYC verification status
       features?: any[]
       // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -125,7 +126,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       role: sv.role,
-      isOnboardingDemo: sv.venue.isOnboardingDemo,
+      status: sv.venue.status, // Single source of truth
       kycStatus: sv.venue.kycStatus, // Include KYC status
       features: sv.venue.features, // Incluir las features
       // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -154,16 +155,16 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       },
     })
 
-    // If SUPERADMIN, fetch all venues in the system
+    // If SUPERADMIN, fetch all operational venues in the system (includes TRIAL demos)
     if (isSuperAdmin) {
       const allSystemVenues = await prisma.venue.findMany({
-        where: { active: true },
+        where: { status: { in: OPERATIONAL_VENUE_STATUSES } }, // All operational venues including demos
         select: {
           id: true,
           name: true,
           slug: true,
           logo: true,
-          isOnboardingDemo: true,
+          status: true, // Single source of truth
           kycStatus: true, // Include KYC status
           // Contact & Address fields (needed for TPV purchase wizard pre-fill)
           address: true,
@@ -192,7 +193,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
-        isOnboardingDemo: venue.isOnboardingDemo,
+        status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
         // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -227,7 +228,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
-          isOnboardingDemo: true,
+          status: true, // Single source of truth
           kycStatus: true, // Include KYC status
           // Contact & Address fields (needed for TPV purchase wizard pre-fill)
           address: true,
@@ -256,7 +257,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
-        isOnboardingDemo: venue.isOnboardingDemo,
+        status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
         // Contact & Address fields (needed for TPV purchase wizard pre-fill)
