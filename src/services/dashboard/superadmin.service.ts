@@ -1,9 +1,14 @@
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { VenueStatus } from '@prisma/client'
+import { PRODUCTION_VENUE_STATUSES, OPERATIONAL_VENUE_STATUSES, DEMO_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 // ===== PRODUCTION VENUE FILTER =====
-// Excludes demo venues from analytics to prevent skewed metrics
-const PRODUCTION_VENUE_FILTER = { isOnboardingDemo: false }
+// Excludes demo/trial venues (LIVE_DEMO, TRIAL) from analytics to prevent skewed metrics
+// Uses status as single source of truth (not isOnboardingDemo boolean)
+const PRODUCTION_VENUE_FILTER = {
+  status: { in: PRODUCTION_VENUE_STATUSES, notIn: DEMO_VENUE_STATUSES },
+}
 
 export interface SuperadminDashboardData {
   kpis: {
@@ -75,7 +80,7 @@ export interface SuperadminVenue {
   id: string
   name: string
   slug: string
-  status: string
+  status: VenueStatus // Use enum type
   subscriptionPlan: string
   monthlyRevenue: number
   commissionRate: number
@@ -110,6 +115,9 @@ export interface SuperadminVenue {
     totalMonthlyBill: number
     paymentStatus: string
   }
+  kycStatus?: string | null
+  statusChangedAt?: string | null
+  suspensionReason?: string | null
   approvedAt?: string
   approvedBy?: string
   createdAt: string
@@ -124,7 +132,12 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
     // Get venue statistics (exclude demo venues)
     const [totalVenues, activeVenues, totalUsers] = await Promise.all([
       prisma.venue.count({ where: PRODUCTION_VENUE_FILTER }),
-      prisma.venue.count({ where: { active: true, ...PRODUCTION_VENUE_FILTER } }),
+      prisma.venue.count({
+        where: {
+          ...PRODUCTION_VENUE_FILTER,
+          status: { in: OPERATIONAL_VENUE_STATUSES },
+        },
+      }),
       prisma.staff.count(),
     ])
 
@@ -299,7 +312,7 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
         id: venue.id,
         name: venue.name,
         slug: venue.slug || venue.name.toLowerCase().replace(/\s+/g, '-'),
-        status: venue.active ? 'ACTIVE' : 'INACTIVE',
+        status: venue.status, // Use actual status from database
         subscriptionPlan: 'PROFESSIONAL', // Would come from subscription model
         monthlyRevenue,
         commissionRate: 15, // Default commission rate
@@ -329,6 +342,8 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
           paymentStatus: 'PAID',
         },
         kycStatus: venue.kycStatus || null, // Include KYC status for superadmin review
+        statusChangedAt: venue.statusChangedAt?.toISOString() || null, // When status changed
+        suspensionReason: venue.suspensionReason || null, // Why suspended (if applicable)
         createdAt: venue.createdAt.toISOString(),
         updatedAt: venue.updatedAt.toISOString(),
       }
@@ -369,45 +384,156 @@ export async function getAllPlatformFeatures(): Promise<PlatformFeature[]> {
 }
 
 /**
- * Approve a venue for platform access
+ * Approve a venue for platform access (Superadmin action)
+ * Transitions venue from PENDING_ACTIVATION to ACTIVE
  */
 export async function approveVenue(venueId: string, approvedBy: string): Promise<void> {
   try {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { status: true, name: true },
+    })
+
+    if (!venue) {
+      throw new Error('Venue not found')
+    }
+
+    // Can only approve from PENDING_ACTIVATION status
+    if (venue.status !== VenueStatus.PENDING_ACTIVATION) {
+      throw new Error(`Cannot approve venue in ${venue.status} status. Expected PENDING_ACTIVATION.`)
+    }
+
     await prisma.venue.update({
       where: { id: venueId },
       data: {
-        active: true,
+        status: VenueStatus.ACTIVE,
+        statusChangedAt: new Date(),
+        statusChangedBy: approvedBy,
+        active: true, // Keep backwards compatible
         updatedAt: new Date(),
       },
     })
 
-    // Would also create an approval record in a real implementation
-    logger.info(`Venue ${venueId} approved by ${approvedBy}`)
+    logger.info(`Venue ${venue.name} (${venueId}) approved by ${approvedBy}`)
   } catch (error) {
     logger.error('Error approving venue:', error)
-    throw new Error('Failed to approve venue')
+    throw error instanceof Error ? error : new Error('Failed to approve venue')
   }
 }
 
 /**
- * Suspend a venue
+ * Suspend a venue by Superadmin (ADMIN_SUSPENDED status)
+ * Use this for non-payment, policy violations, or administrative actions
  */
-export async function suspendVenue(venueId: string, reason: string): Promise<void> {
+export async function suspendVenueByAdmin(venueId: string, reason: string, suspendedBy: string): Promise<void> {
   try {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { status: true, name: true },
+    })
+
+    if (!venue) {
+      throw new Error('Venue not found')
+    }
+
+    // Can only suspend from ACTIVE status
+    if (venue.status !== VenueStatus.ACTIVE) {
+      throw new Error(`Cannot suspend venue in ${venue.status} status. Expected ACTIVE.`)
+    }
+
     await prisma.venue.update({
       where: { id: venueId },
       data: {
-        active: false,
+        status: VenueStatus.ADMIN_SUSPENDED,
+        statusChangedAt: new Date(),
+        statusChangedBy: suspendedBy,
+        suspensionReason: reason,
+        active: false, // Keep backwards compatible
         updatedAt: new Date(),
       },
     })
 
-    // Would also create a suspension record in a real implementation
-    logger.info(`Venue ${venueId} suspended. Reason: ${reason}`)
+    logger.info(`Venue ${venue.name} (${venueId}) suspended by admin ${suspendedBy}. Reason: ${reason}`)
   } catch (error) {
     logger.error('Error suspending venue:', error)
-    throw new Error('Failed to suspend venue')
+    throw error instanceof Error ? error : new Error('Failed to suspend venue')
   }
+}
+
+/**
+ * Reactivate a suspended venue (Superadmin action)
+ * Transitions venue from SUSPENDED or ADMIN_SUSPENDED back to ACTIVE
+ */
+export async function reactivateVenueByAdmin(venueId: string, reactivatedBy: string): Promise<void> {
+  try {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { status: true, name: true },
+    })
+
+    if (!venue) {
+      throw new Error('Venue not found')
+    }
+
+    // Can only reactivate from SUSPENDED or ADMIN_SUSPENDED
+    if (venue.status !== VenueStatus.SUSPENDED && venue.status !== VenueStatus.ADMIN_SUSPENDED) {
+      throw new Error(`Cannot reactivate venue in ${venue.status} status. Expected SUSPENDED or ADMIN_SUSPENDED.`)
+    }
+
+    await prisma.venue.update({
+      where: { id: venueId },
+      data: {
+        status: VenueStatus.ACTIVE,
+        statusChangedAt: new Date(),
+        statusChangedBy: reactivatedBy,
+        suspensionReason: null, // Clear suspension reason
+        active: true, // Keep backwards compatible
+        updatedAt: new Date(),
+      },
+    })
+
+    logger.info(`Venue ${venue.name} (${venueId}) reactivated by ${reactivatedBy}`)
+  } catch (error) {
+    logger.error('Error reactivating venue:', error)
+    throw error instanceof Error ? error : new Error('Failed to reactivate venue')
+  }
+}
+
+/**
+ * Get venues by status (for superadmin dashboard)
+ */
+export async function getVenuesByStatus(status?: VenueStatus): Promise<{ status: VenueStatus; count: number }[]> {
+  try {
+    if (status) {
+      const count = await prisma.venue.count({
+        where: { status },
+      })
+      return [{ status, count }]
+    }
+
+    // Get counts for all statuses
+    const allStatuses = Object.values(VenueStatus)
+    const counts = await Promise.all(
+      allStatuses.map(async s => ({
+        status: s,
+        count: await prisma.venue.count({ where: { status: s } }),
+      })),
+    )
+
+    return counts.filter(c => c.count > 0)
+  } catch (error) {
+    logger.error('Error getting venues by status:', error)
+    throw new Error('Failed to get venues by status')
+  }
+}
+
+/**
+ * @deprecated Use suspendVenueByAdmin instead
+ * Legacy function for backwards compatibility
+ */
+export async function suspendVenue(venueId: string, reason: string): Promise<void> {
+  // Delegate to new function with unknown suspender
+  return suspendVenueByAdmin(venueId, reason, 'system')
 }
 
 /**
@@ -765,14 +891,17 @@ export async function getRevenueBreakdown(startDate?: Date, endDate?: Date): Pro
  * Calculate subscription revenue from venue monthly fees (prorated)
  */
 async function calculateSubscriptionRevenue(startDate: Date, endDate: Date): Promise<number> {
-  // Get venues that were active during the period (exclude demo venues)
+  // Get venues that were operational during the period (exclude demo venues)
+  // Uses status as single source of truth instead of deprecated isOnboardingDemo boolean
   const activeVenues = await prisma.venue.findMany({
     where: {
-      active: true,
+      status: {
+        in: OPERATIONAL_VENUE_STATUSES, // Only count operational venues
+        notIn: DEMO_VENUE_STATUSES, // Exclude LIVE_DEMO and TRIAL
+      },
       createdAt: {
         lte: endDate,
       },
-      ...PRODUCTION_VENUE_FILTER,
     },
     select: {
       id: true,
@@ -1249,21 +1378,23 @@ export async function getMerchantAccountsList(providerId?: string) {
 /**
  * Get simplified venues list for dropdowns (exclude demo venues by default)
  * @param includeDemos - Whether to include demo venues (default: false)
+ * @param includeAllStatuses - Whether to include non-operational venues (default: false)
  */
-export async function getVenuesListSimple(includeDemos = false) {
+export async function getVenuesListSimple(includeDemos = false, includeAllStatuses = false) {
   try {
-    logger.info('Getting venues list (simple)', { includeDemos })
+    logger.info('Getting venues list (simple)', { includeDemos, includeAllStatuses })
 
     const venues = await prisma.venue.findMany({
       where: {
-        active: true,
+        ...(includeAllStatuses ? {} : { status: { in: OPERATIONAL_VENUE_STATUSES } }),
         ...(includeDemos ? {} : PRODUCTION_VENUE_FILTER),
       },
       select: {
         id: true,
         name: true,
         slug: true,
-        active: true,
+        status: true,
+        active: true, // Keep for backwards compatibility
       },
       orderBy: { name: 'asc' },
     })

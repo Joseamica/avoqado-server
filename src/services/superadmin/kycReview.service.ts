@@ -6,7 +6,7 @@
  * and creates MerchantAccount upon approval.
  */
 
-import { Prisma, NotificationType, NotificationPriority, NotificationChannel } from '@prisma/client'
+import { Prisma, NotificationType, NotificationPriority, NotificationChannel, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -283,13 +283,18 @@ export async function approveKyc(venueId: string, superadminId: string) {
   // Note: Demo data cleanup is now done in convertDemoVenue (when user submits KYC docs)
   // We don't clean here because user might have added real data while waiting for approval
 
-  // Update venue status to VERIFIED
+  // Update venue status to VERIFIED and set operational status to ACTIVE
   const updatedVenue = await prisma.venue.update({
     where: { id: venueId },
     data: {
       kycStatus: 'VERIFIED',
       kycCompletedAt: new Date(),
       kycVerifiedBy: superadminId,
+      // ✅ NEW: Set operational status to ACTIVE upon KYC approval
+      status: VenueStatus.ACTIVE,
+      statusChangedAt: new Date(),
+      statusChangedBy: superadminId,
+      active: true, // Backwards compatibility
     },
   })
 
@@ -450,17 +455,21 @@ export async function assignProcessorAndApproveKyc(
 
     logger.info(`✅ Created VenuePaymentConfig for venue ${venueId}`)
 
-    // 5. Update venue KYC status to VERIFIED
+    // 5. Update venue KYC status to VERIFIED and activate venue
     await tx.venue.update({
       where: { id: venueId },
       data: {
         kycStatus: 'VERIFIED',
         kycCompletedAt: new Date(),
         kycVerifiedBy: superadminId,
+        status: VenueStatus.ACTIVE,
+        statusChangedAt: new Date(),
+        statusChangedBy: superadminId,
+        active: true,
       },
     })
 
-    logger.info(`✅ Updated venue ${venueId} kycStatus to VERIFIED`)
+    logger.info(`✅ Updated venue ${venueId}: kycStatus=VERIFIED, status=ACTIVE`)
 
     return merchantAccount
   })
@@ -505,7 +514,7 @@ export async function rejectKyc(venueId: string, superadminId: string, rejection
     rejectedDocuments: rejectedDocuments || 'all documents',
   })
 
-  // Update venue status to REJECTED
+  // Update venue KYC status to REJECTED with audit trail
   const updatedVenue = await prisma.venue.update({
     where: { id: venueId },
     data: {
@@ -513,6 +522,9 @@ export async function rejectKyc(venueId: string, superadminId: string, rejection
       kycRejectionReason: rejectionReason,
       kycRejectedDocuments: rejectedDocuments || [], // Empty array means all documents rejected
       kycVerifiedBy: superadminId,
+      // Audit trail for status changes
+      statusChangedAt: new Date(),
+      statusChangedBy: superadminId,
     },
   })
 
@@ -550,11 +562,14 @@ export async function markKycInReview(venueId: string, superadminId: string) {
     where: { id: venueId },
     data: {
       kycStatus: 'IN_REVIEW',
-      kycVerifiedBy: superadminId,
+      kycVerifiedBy: superadminId, // Tracks who started the review
+      // Audit trail for status changes
+      statusChangedAt: new Date(),
+      statusChangedBy: superadminId,
     },
   })
 
-  logger.info(`🔍 Venue ${venueId} KYC marked as IN_REVIEW by ${superadminId}`)
+  logger.info(`🔍 Venue ${venueId} KYC marked as IN_REVIEW by superadmin ${superadminId}`)
 
   // Notify venue owner that KYC is under review
   await notifyVenueOwnerKycInReview(venueId, venue.name)
