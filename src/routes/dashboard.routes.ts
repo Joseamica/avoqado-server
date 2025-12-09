@@ -1650,6 +1650,170 @@ router.put('/venues/:venueId', authenticateTokenMiddleware, checkPermission('ven
  */
 router.delete('/venues/:venueId', authenticateTokenMiddleware, checkPermission('venues:manage'), venueController.deleteVenue)
 
+// ============================================
+// VENUE STATUS MANAGEMENT ROUTES
+// ============================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/suspend:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Suspend a venue (voluntary)
+ *     description: |
+ *       Suspends a venue temporarily. The venue owner/admin can request suspension.
+ *       This transitions the venue from ACTIVE to SUSPENDED status.
+ *       Staff and TPV cannot access a suspended venue.
+ *       This is reversible - use the reactivate endpoint to restore access.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [reason]
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Reason for suspension (for audit purposes)
+ *                 example: Temporary closure for renovation
+ *     responses:
+ *       200:
+ *         description: Venue suspended successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data: { $ref: '#/components/schemas/Venue' }
+ *                 message: { type: string, example: Venue suspendido exitosamente }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post('/venues/:venueId/suspend', authenticateTokenMiddleware, checkPermission('venues:manage'), venueController.suspendVenue)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/close:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Close a venue permanently
+ *     description: |
+ *       Closes a venue permanently. This is a terminal state - the venue cannot be reactivated.
+ *       Data is retained for audit purposes (Mexican regulatory compliance - SAT).
+ *       The venue must already be in SUSPENDED or ADMIN_SUSPENDED state.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [reason]
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Reason for permanent closure (for audit purposes)
+ *                 example: Business cessation
+ *     responses:
+ *       200:
+ *         description: Venue closed permanently
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data: { $ref: '#/components/schemas/Venue' }
+ *                 message: { type: string, example: Venue cerrado permanentemente }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post('/venues/:venueId/close', authenticateTokenMiddleware, checkPermission('venues:manage'), venueController.closeVenue)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/reactivate:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Reactivate a suspended venue
+ *     description: |
+ *       Reactivates a suspended venue, restoring full access.
+ *       Only works for SUSPENDED status (user-initiated suspension).
+ *       ADMIN_SUSPENDED venues require superadmin intervention.
+ *       CLOSED venues cannot be reactivated.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Venue reactivated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data: { $ref: '#/components/schemas/Venue' }
+ *                 message: { type: string, example: Venue reactivado exitosamente }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post('/venues/:venueId/reactivate', authenticateTokenMiddleware, checkPermission('venues:manage'), venueController.reactivateVenue)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/status-history:
+ *   get:
+ *     tags: [Venues]
+ *     summary: Get venue status information
+ *     description: |
+ *       Returns the current status and related metadata for a venue.
+ *       Useful for audit and displaying status information in the dashboard.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Venue status information
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     venueId: { type: string }
+ *                     venueName: { type: string }
+ *                     currentStatus: { type: string, enum: [ONBOARDING, TRIAL, PENDING_ACTIVATION, ACTIVE, SUSPENDED, ADMIN_SUSPENDED, CLOSED] }
+ *                     statusChangedAt: { type: string, format: date-time }
+ *                     statusChangedBy: { type: string }
+ *                     suspensionReason: { type: string }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/status-history',
+  authenticateTokenMiddleware,
+  checkPermission('venues:read'),
+  venueController.getVenueStatusHistory,
+)
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/payment-method:

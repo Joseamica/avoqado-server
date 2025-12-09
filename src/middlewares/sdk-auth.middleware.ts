@@ -23,6 +23,7 @@ import prisma from '@/utils/prismaClient'
 import { UnauthorizedError, BadRequestError } from '@/errors/AppError'
 import crypto from 'crypto'
 import logger from '@/config/logger'
+import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -31,6 +32,7 @@ import logger from '@/config/logger'
 export interface SDKContext {
   merchantId: string
   merchantName: string
+  venueId: string // Added for venue tracking
   keyType: 'public' | 'secret'
   sandboxMode: boolean
   providerId: string
@@ -149,6 +151,7 @@ export function authenticateSDK(requireSecretKey: boolean = false) {
           where: { publicKey: apiKey },
           include: {
             provider: true,
+            venue: { select: { id: true, status: true } }, // Include venue status for operational check
           },
         })
       } else {
@@ -159,6 +162,7 @@ export function authenticateSDK(requireSecretKey: boolean = false) {
           where: { secretKeyHash: keyHash },
           include: {
             provider: true,
+            venue: { select: { id: true, status: true } }, // Include venue status for operational check
           },
         })
       }
@@ -172,6 +176,16 @@ export function authenticateSDK(requireSecretKey: boolean = false) {
         throw new UnauthorizedError('Merchant account is inactive')
       }
 
+      // 5.5. Verify venue is operational (not SUSPENDED, ADMIN_SUSPENDED, or CLOSED)
+      if (!merchant.venue || !OPERATIONAL_VENUE_STATUSES.includes(merchant.venue.status)) {
+        logger.warn('SDK auth rejected: venue not operational', {
+          merchantId: merchant.id,
+          venueId: merchant.venueId,
+          venueStatus: merchant.venue?.status,
+        })
+        throw new UnauthorizedError('Venue is not operational. Contact support for assistance.')
+      }
+
       // 6. Verify key mode matches merchant sandbox mode
       const sandboxMode = mode === 'test'
 
@@ -183,6 +197,7 @@ export function authenticateSDK(requireSecretKey: boolean = false) {
       req.sdkContext = {
         merchantId: merchant.id,
         merchantName: merchant.businessName,
+        venueId: merchant.venueId, // Added for venue tracking
         keyType: type,
         sandboxMode,
         providerId: merchant.providerId,
