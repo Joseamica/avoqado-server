@@ -14,6 +14,7 @@ import { NotificationType, NotificationChannel, NotificationPriority, StaffRole 
 import { handlePaymentFailure, generateBillingPortalUrl } from './stripe.service'
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
+import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 /**
  * Handle subscription updated event
@@ -43,6 +44,18 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
 
   if (!venueFeature) {
     logger.warn('⚠️ Webhook: Subscription not found in database', { subscriptionId })
+    return
+  }
+
+  // Security Enhancement: Skip activation for non-operational venues
+  // Venues that are SUSPENDED, ADMIN_SUSPENDED, or CLOSED should not receive feature activations
+  if (!OPERATIONAL_VENUE_STATUSES.includes(venueFeature.venue.status)) {
+    logger.warn('⚠️ Webhook: Ignoring subscription update for non-operational venue', {
+      subscriptionId,
+      venueId: venueFeature.venueId,
+      venueStatus: venueFeature.venue.status,
+      status,
+    })
     return
   }
 
@@ -255,7 +268,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
   // Race condition: Webhook can fire before sync code creates VenueFeature
   let venueFeature = await prisma.venueFeature.findFirst({
     where: { stripeSubscriptionId: subscriptionIdStr },
-    include: { feature: true },
+    include: { feature: true, venue: { select: { status: true } } },
   })
 
   if (!venueFeature) {
@@ -265,7 +278,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
 
     venueFeature = await prisma.venueFeature.findFirst({
       where: { stripeSubscriptionId: subscriptionIdStr },
-      include: { feature: true },
+      include: { feature: true, venue: { select: { status: true } } },
     })
 
     if (!venueFeature) {
@@ -276,6 +289,16 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
     }
 
     logger.info('✅ Webhook: VenueFeature found on retry', { subscriptionId: subscriptionIdStr, venueId: venueFeature.venueId })
+  }
+
+  // Security Enhancement: Skip activation for non-operational venues
+  if (!OPERATIONAL_VENUE_STATUSES.includes(venueFeature.venue.status)) {
+    logger.warn('⚠️ Webhook: Ignoring invoice payment for non-operational venue', {
+      invoiceId: invoice.id,
+      venueId: venueFeature.venueId,
+      venueStatus: venueFeature.venue.status,
+    })
+    return
   }
 
   // Ensure feature is active
@@ -667,6 +690,16 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
 
   if (!venueFeature) {
     logger.warn('⚠️ Webhook: Subscription not found', { subscriptionId })
+    return
+  }
+
+  // Security Enhancement: Skip notifications for non-operational venues
+  if (!OPERATIONAL_VENUE_STATUSES.includes(venueFeature.venue.status)) {
+    logger.warn('⚠️ Webhook: Ignoring trial ending notification for non-operational venue', {
+      subscriptionId,
+      venueId: venueFeature.venueId,
+      venueStatus: venueFeature.venue.status,
+    })
     return
   }
 

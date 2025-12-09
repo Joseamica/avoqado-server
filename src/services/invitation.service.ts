@@ -137,46 +137,26 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
     // Hash the password
     const hashedPassword = await bcrypt.hash(userData.password, 12)
 
-    // Validate and hash the PIN if provided (PIN is stored in StaffVenue, not Staff)
-    let hashedPin: string | null = null
+    // Validate PIN if provided (stored as PLAIN TEXT for fast TPV login)
+    // ⚠️ PIN is NOT hashed - auth.tpv.service.ts does plain text comparison
+    let validatedPin: string | null = null
     if (userData.pin) {
-      // Check if PIN is already used in this venue
+      // Check if PIN is already used in this venue (plain text comparison)
       if (invitation.venueId) {
         const existingPinUser = await tx.staffVenue.findFirst({
           where: {
             venueId: invitation.venueId,
-            pin: {
-              not: null,
-            },
+            pin: userData.pin, // Plain text comparison
             active: true,
-          },
-          include: {
-            staff: true,
           },
         })
 
-        // Verify PIN against all existing hashed PINs in the venue
         if (existingPinUser) {
-          const allStaffWithPins = await tx.staffVenue.findMany({
-            where: {
-              venueId: invitation.venueId,
-              pin: {
-                not: null,
-              },
-              active: true,
-            },
-          })
-
-          for (const staff of allStaffWithPins) {
-            const pinMatches = await bcrypt.compare(userData.pin, staff.pin!)
-            if (pinMatches) {
-              throw new AppError('PIN no disponible. Por favor, elige otro diferente.', 409)
-            }
-          }
+          throw new AppError('PIN no disponible. Por favor, elige otro diferente.', 409)
         }
       }
 
-      hashedPin = await bcrypt.hash(userData.pin, 12)
+      validatedPin = userData.pin // Store as plain text
     }
 
     // Create or reuse the staff record
@@ -227,20 +207,19 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
           where: { id: existingAssignment.id },
           data: {
             role: invitation.role,
-            pin: hashedPin,
+            pin: validatedPin,
             active: true,
             startDate: new Date(),
           },
         })
       } else {
-        // Create new assignment
+        // Create new assignment (let Prisma auto-generate CUID)
         await tx.staffVenue.create({
           data: {
-            id: uuidv4(),
             staffId: staff.id,
             venueId: invitation.venueId,
             role: invitation.role,
-            pin: hashedPin, // PIN is stored per venue
+            pin: validatedPin, // PIN is stored per venue
             active: true,
             startDate: new Date(),
             totalSales: 0,

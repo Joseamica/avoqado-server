@@ -138,7 +138,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         featureId: 'feature_1',
         active: false,
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
-        venue: { id: 'venue_1', name: 'Test Venue' },
+        venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
       ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValueOnce({})
@@ -189,7 +189,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         featureId: 'feature_1',
         active: false,
         feature: { code: 'TEST' },
-        venue: { name: 'Test' },
+        venue: { name: 'Test', status: 'ACTIVE' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
       ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
@@ -291,7 +291,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         featureId: 'feature_1',
         active: false,
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
-        venue: { id: 'venue_1', name: 'Test Venue' },
+        venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
@@ -324,7 +324,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         featureId: 'feature_1',
         active: true,
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
-        venue: { id: 'venue_1', name: 'Test Venue' },
+        venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
@@ -358,7 +358,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         featureId: 'feature_1',
         active: false,
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
-        venue: { id: 'venue_1', name: 'Test Venue' },
+        venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
@@ -390,7 +390,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         featureId: 'feature_1',
         active: true,
         feature: { code: 'TEST' },
-        venue: { name: 'Test' },
+        venue: { name: 'Test', status: 'ACTIVE' },
       })
 
       await handleSubscriptionUpdated(mockSubscription)
@@ -415,7 +415,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         featureId: 'feature_1',
         active: true,
         feature: { code: 'TEST' },
-        venue: { name: 'Test' },
+        venue: { name: 'Test', status: 'ACTIVE' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
@@ -444,6 +444,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         venueId: 'venue_1',
         active: false, // Was inactive
         feature: { code: 'TEST' },
+        venue: { name: 'Test', status: 'ACTIVE' },
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
@@ -481,6 +482,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { code: 'TEST', name: 'Test Feature' },
         venue: {
           name: 'Test Venue',
+          status: 'ACTIVE',
           organization: {
             email: 'test@example.com',
             stripeCustomerId: 'cus_test123',
@@ -682,7 +684,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         id: 'vf_1',
         venueId: 'venue_1',
         feature: { name: 'Analytics', code: 'ANALYTICS' },
-        venue: { name: 'Test Venue' },
+        venue: { name: 'Test Venue', status: 'ACTIVE' },
       })
 
       // Mock staff query for notifications
