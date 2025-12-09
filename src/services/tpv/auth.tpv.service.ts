@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { generateAccessToken, generateRefreshToken, verifyToken } from '../../security'
 import { v4 as uuidv4 } from 'uuid'
+import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 /**
  * Staff sign-in using PIN for TPV access
@@ -28,6 +29,8 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
   }
 
   // Find staff member with matching PIN in this venue
+  // ⚠️ IMPORTANT: Do NOT filter by venue.status here - we need to distinguish
+  // between "wrong PIN" and "venue suspended" errors
   const staffVenue = await prisma.staffVenue.findFirst({
     where: {
       venueId: venueId,
@@ -57,6 +60,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
           posType: true,
           posStatus: true,
           logo: true,
+          status: true, // Include for frontend to know venue status
         },
       },
     },
@@ -65,6 +69,18 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
   if (!staffVenue) {
     // ⚠️ SECURITY: Use generic error message to prevent PIN enumeration
     throw new NotFoundError('Pin Incorrecto')
+  }
+
+  // ✅ Check venue status AFTER finding staff (so we can give specific error)
+  if (!OPERATIONAL_VENUE_STATUSES.includes(staffVenue.venue.status as any)) {
+    const statusMessages: Record<string, string> = {
+      SUSPENDED: 'Este establecimiento está suspendido temporalmente. Contacta al administrador para más información.',
+      ADMIN_SUSPENDED: 'Este establecimiento ha sido suspendido por el administrador. Contacta a soporte para más información.',
+      CLOSED: 'Este establecimiento ha sido cerrado permanentemente.',
+    }
+    const message = statusMessages[staffVenue.venue.status] || 'Este establecimiento no está operacional.'
+    logger.warn(`Login blocked: venue ${venueId} is ${staffVenue.venue.status}`)
+    throw new UnauthorizedError(message)
   }
 
   // ✅ SECURITY: Validate terminal activation status
@@ -207,6 +223,10 @@ export async function refreshAccessToken(refreshToken: string) {
       staff: {
         active: true,
       },
+      // ✅ Block refresh if venue is SUSPENDED, ADMIN_SUSPENDED, or CLOSED
+      venue: {
+        status: { in: OPERATIONAL_VENUE_STATUSES },
+      },
     },
     include: {
       staff: {
@@ -215,11 +235,19 @@ export async function refreshAccessToken(refreshToken: string) {
           active: true,
         },
       },
+      // Include venue info for client status awareness
+      venue: {
+        select: {
+          id: true,
+          name: true,
+          status: true, // Single source of truth for venue state
+        },
+      },
     },
   })
 
   if (!staffVenue) {
-    throw new UnauthorizedError('User no longer active or not authorized for this venue')
+    throw new UnauthorizedError('User no longer active or venue is not operational')
   }
 
   // Generate new access token with same permissions
@@ -239,6 +267,7 @@ export async function refreshAccessToken(refreshToken: string) {
   logger.info('Access token refreshed successfully', {
     userId: staffVenue.staffId,
     venueId: staffVenue.venueId,
+    venueStatus: staffVenue.venue.status,
     correlationId,
   })
 
@@ -248,6 +277,12 @@ export async function refreshAccessToken(refreshToken: string) {
     tokenType: 'Bearer',
     correlationId,
     issuedAt: new Date().toISOString(),
+    // Include venue info so client can detect status changes mid-session
+    venue: {
+      id: staffVenue.venue.id,
+      name: staffVenue.venue.name,
+      status: staffVenue.venue.status,
+    },
   }
 }
 

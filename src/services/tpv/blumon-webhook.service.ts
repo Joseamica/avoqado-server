@@ -19,6 +19,7 @@
 import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
+import { isVenueOperational } from '@/lib/venueStatus.constants'
 
 /**
  * Helper function for async delay
@@ -246,6 +247,13 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
               id: true,
               orderNumber: true,
               venueId: true,
+              venue: {
+                select: {
+                  id: true,
+                  name: true,
+                  status: true,
+                },
+              },
             },
           },
         },
@@ -264,6 +272,23 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
     }
 
     if (payment) {
+      // Security Enhancement: Check if venue is operational
+      // We still process the webhook for data integrity, but log a warning
+      const venueStatus = payment.order?.venue?.status
+      const venueName = payment.order?.venue?.name
+      if (venueStatus && !isVenueOperational(venueStatus)) {
+        logger.warn('⚠️ Blumon webhook: Payment confirmation for NON-OPERATIONAL venue', {
+          correlationId,
+          paymentId: payment.id,
+          venueId: payment.order?.venueId,
+          venueName,
+          venueStatus,
+          reference: payload.reference,
+          amount: blumonAmount,
+          note: 'Payment was processed before venue was suspended. Webhook still processed for reconciliation.',
+        })
+      }
+
       // Payment found - verify amounts match
       const recordedAmount = parseFloat(payment.amount.toString())
       const difference = Math.abs(blumonAmount - recordedAmount)

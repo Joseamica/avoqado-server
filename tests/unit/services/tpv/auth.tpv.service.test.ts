@@ -1,9 +1,10 @@
 import { staffSignIn } from '../../../../src/services/tpv/auth.tpv.service'
-import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
-import { StaffRole } from '@prisma/client'
+import { BadRequestError, NotFoundError, UnauthorizedError } from '../../../../src/errors/AppError'
+import { StaffRole, VenueStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '../../../../src/utils/prismaClient'
 import * as security from '../../../../src/security'
+import { OPERATIONAL_VENUE_STATUSES } from '../../../../src/lib/venueStatus.constants'
 
 // Mock dependencies
 jest.mock('../../../../src/utils/prismaClient', () => ({
@@ -29,6 +30,7 @@ jest.mock('../../../../src/config/logger', () => ({
   __esModule: true,
   default: {
     info: jest.fn(),
+    warn: jest.fn(),
   },
 }))
 
@@ -64,6 +66,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       posType: null,
       posStatus: null,
       logo: null,
+      status: VenueStatus.ACTIVE,
     },
   }
 
@@ -185,6 +188,8 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       await staffSignIn('venue-1', '1234', 'SERIAL-001')
 
       // Assert
+      // Note: venue.status is NOT filtered in query - checked separately after finding staff
+      // This allows distinguishing "wrong PIN" from "venue suspended" errors
       expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith({
         where: {
           venueId: 'venue-1',
@@ -214,9 +219,61 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
               posType: true,
               posStatus: true,
               logo: true,
+              status: true,
             },
           },
         },
+      })
+    })
+
+    it('should throw UnauthorizedError when venue is SUSPENDED', async () => {
+      // Arrange - Staff exists but venue is suspended
+      const suspendedVenueStaff = {
+        ...mockStaffVenue,
+        venue: {
+          ...mockStaffVenue.venue,
+          status: VenueStatus.SUSPENDED,
+        },
+      }
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(suspendedVenueStaff)
+
+      // Act & Assert
+      await expect(staffSignIn('venue-1', '1234', 'SERIAL-001')).rejects.toMatchObject({
+        message: 'Este establecimiento está suspendido temporalmente. Contacta al administrador para más información.',
+      })
+    })
+
+    it('should throw UnauthorizedError when venue is ADMIN_SUSPENDED', async () => {
+      // Arrange - Staff exists but venue is admin suspended
+      const adminSuspendedVenueStaff = {
+        ...mockStaffVenue,
+        venue: {
+          ...mockStaffVenue.venue,
+          status: VenueStatus.ADMIN_SUSPENDED,
+        },
+      }
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminSuspendedVenueStaff)
+
+      // Act & Assert
+      await expect(staffSignIn('venue-1', '1234', 'SERIAL-001')).rejects.toMatchObject({
+        message: 'Este establecimiento ha sido suspendido por el administrador. Contacta a soporte para más información.',
+      })
+    })
+
+    it('should throw UnauthorizedError when venue is CLOSED', async () => {
+      // Arrange - Staff exists but venue is closed
+      const closedVenueStaff = {
+        ...mockStaffVenue,
+        venue: {
+          ...mockStaffVenue.venue,
+          status: VenueStatus.CLOSED,
+        },
+      }
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(closedVenueStaff)
+
+      // Act & Assert
+      await expect(staffSignIn('venue-1', '1234', 'SERIAL-001')).rejects.toMatchObject({
+        message: 'Este establecimiento ha sido cerrado permanentemente.',
       })
     })
 
