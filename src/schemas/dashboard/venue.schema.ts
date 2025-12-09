@@ -144,17 +144,18 @@ export const convertDemoVenueSchema = z.object({
         return true
       },
       { message: 'Acta Constitutiva es requerida para Persona Moral', path: ['actaDocumentUrl'] },
-    )
-    // RFC, legalName, and fiscalRegime are required for PERSONA_MORAL
-    .refine(
-      data => {
-        if (data.entityType === EntityType.PERSONA_MORAL) {
-          return !!data.rfc && !!data.legalName && !!data.fiscalRegime
-        }
-        return true
-      },
-      { message: 'RFC, Razón Social y Régimen Fiscal son requeridos para Persona Moral', path: ['rfc'] },
     ),
+  // TODO: Re-enable when CSF extraction is implemented
+  // RFC, legalName, and fiscalRegime will be extracted from Constancia de Situación Fiscal
+  // .refine(
+  //   data => {
+  //     if (data.entityType === EntityType.PERSONA_MORAL) {
+  //       return !!data.rfc && !!data.legalName && !!data.fiscalRegime
+  //     }
+  //     return true
+  //   },
+  //   { message: 'RFC, Razón Social y Régimen Fiscal son requeridos para Persona Moral', path: ['rfc'] },
+  // ),
 })
 
 export type ConvertDemoVenueDto = z.infer<typeof convertDemoVenueSchema.shape.body>

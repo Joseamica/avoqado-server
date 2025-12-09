@@ -1,6 +1,13 @@
 import { z } from 'zod'
 import { StaffRole } from '@prisma/client'
 
+// Helper: Accept both CUID and UUID formats (for legacy data compatibility)
+const cuidOrUuid = z
+  .string()
+  .refine(val => /^c[a-z0-9]{24,}$/.test(val) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val), {
+    message: 'Invalid id format (must be CUID or UUID)',
+  })
+
 // Parameter schemas
 export const VenueIdParamsSchema = z.object({
   params: z.object({
@@ -11,7 +18,7 @@ export const VenueIdParamsSchema = z.object({
 export const TeamMemberParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    teamMemberId: z.string().cuid(),
+    teamMemberId: cuidOrUuid, // Accept both CUID and UUID for legacy compatibility
   }),
 })
 
@@ -48,7 +55,7 @@ export const InviteTeamMemberSchema = z.object({
 export const UpdateTeamMemberSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    teamMemberId: z.string().cuid(),
+    teamMemberId: cuidOrUuid, // Accept both CUID and UUID for legacy compatibility
   }),
   body: z
     .object({

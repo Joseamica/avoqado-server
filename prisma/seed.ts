@@ -41,6 +41,8 @@ import {
   Unit,
   UnitType,
   VenueType,
+  VenueStatus,
+  VerificationStatus,
   EntityType,
 } from '@prisma/client'
 import bcrypt from 'bcryptjs'
@@ -1054,12 +1056,61 @@ async function main() {
       console.log(`  Created a sample invitation.`)
     }
 
-    // --- Bucle de Venues: solo dos venues (uno completo, otro vacio) ---
+    // --- Bucle de Venues: diferentes venues con distintos estados para testing ---
+    // Cada venue tiene un status y kycStatus diferente para probar todos los flujos
     const venuesConfig =
       orgIndex === 0
         ? [
-            { name: 'Avoqado Full', slug: 'avoqado-full', seedFullData: true },
-            { name: 'Avoqado Empty', slug: 'avoqado-empty', seedFullData: false },
+            // 1. Venue principal: ACTIVE con KYC VERIFIED (full data)
+            {
+              name: 'Avoqado Full',
+              slug: 'avoqado-full',
+              seedFullData: true,
+              status: VenueStatus.ACTIVE,
+              kycStatus: VerificationStatus.VERIFIED,
+            },
+            // 2. Venue en TRIAL (demo de onboarding, 30 días)
+            {
+              name: 'Avoqado Trial',
+              slug: 'avoqado-trial',
+              seedFullData: false,
+              status: VenueStatus.TRIAL,
+              kycStatus: VerificationStatus.NOT_SUBMITTED,
+              demoExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+            },
+            // 3. Venue en ONBOARDING con KYC PENDING_REVIEW (esperando revisión)
+            {
+              name: 'Avoqado Onboarding',
+              slug: 'avoqado-onboarding',
+              seedFullData: false,
+              status: VenueStatus.ONBOARDING,
+              kycStatus: VerificationStatus.PENDING_REVIEW,
+            },
+            // 4. Venue PENDING_ACTIVATION (KYC en revisión por Avoqado)
+            {
+              name: 'Avoqado Pending',
+              slug: 'avoqado-pending',
+              seedFullData: false,
+              status: VenueStatus.PENDING_ACTIVATION,
+              kycStatus: VerificationStatus.IN_REVIEW,
+            },
+            // 5. Venue SUSPENDED (suspendido por owner)
+            {
+              name: 'Avoqado Suspended',
+              slug: 'avoqado-suspended',
+              seedFullData: false,
+              status: VenueStatus.SUSPENDED,
+              kycStatus: VerificationStatus.VERIFIED,
+              suspensionReason: 'Vacaciones de temporada - reabrimos en enero',
+            },
+            // 6. Venue con KYC REJECTED (necesita reenviar)
+            {
+              name: 'Avoqado Rejected',
+              slug: 'avoqado-rejected',
+              seedFullData: false,
+              status: VenueStatus.ONBOARDING,
+              kycStatus: VerificationStatus.REJECTED,
+            },
           ]
         : []
 
@@ -1073,10 +1124,9 @@ async function main() {
           name: venueName,
           slug: venueSlug,
           type: VenueType.RESTAURANT,
-          entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA, // First venue is company, second is individual
+          entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA,
           address: faker.location.streetAddress(),
           city: faker.location.city(),
-          kycStatus: index === 0 ? 'VERIFIED' : 'REJECTED', // Avoqado Full (index 0) is VERIFIED, others REJECTED
           state: faker.location.state(),
           zipCode: faker.location.zipCode(),
           country: 'MX',
@@ -1085,81 +1135,91 @@ async function main() {
           logo: faker.image.urlLoremFlickr({ category: 'restaurant,logo' }),
           feeValue: 0.025,
           feeScheduleId: feeSchedule.id,
+          // Use status and kycStatus from venueConfig
+          status: venueConfig.status,
+          kycStatus: venueConfig.kycStatus,
+          statusChangedAt: new Date(),
+          // Optional fields from config
+          ...('demoExpiresAt' in venueConfig && { demoExpiresAt: venueConfig.demoExpiresAt }),
+          ...('suspensionReason' in venueConfig && { suspensionReason: venueConfig.suspensionReason }),
         },
       })
-      console.log(`    -> Created Venue: ${venue.name}.`)
+      console.log(`    -> Created Venue: ${venue.name} (status: ${venueConfig.status}, kyc: ${venueConfig.kycStatus})`)
 
       // Crear staff específico para este venue (solo para org 0)
       const venueSpecificStaff: (any & { assignedRole: StaffRole })[] = []
       if (orgIndex === 0) {
-        const suffix = index === 0 ? '' : '2' // '' para avoqado-full, '2' para avoqado-empty
+        // Use short suffix based on venue slug for unique emails
+        // avoqado-full -> '', avoqado-trial -> 'trial', etc.
+        const suffix = index === 0 ? '' : venueSlug.replace('avoqado-', '')
+        const emailSuffix = suffix ? `.${suffix}` : ''
         const venueStaffToCreate = [
           {
-            email: `admin${suffix}@admin${suffix}.com`,
-            password: suffix ? `admin${suffix}` : 'admin',
+            email: `admin${emailSuffix}@admin.com`,
+            password: suffix || 'admin',
             role: StaffRole.ADMIN,
             firstName: 'Admin',
             lastName: `Venue ${index + 1}`,
           },
           {
-            email: `manager${suffix}@manager${suffix}.com`,
-            password: suffix ? `manager${suffix}` : 'manager',
+            email: `manager${emailSuffix}@manager.com`,
+            password: suffix || 'manager',
             role: StaffRole.MANAGER,
             firstName: 'Manager',
             lastName: `Venue ${index + 1}`,
           },
           {
-            email: `cashier${suffix}@cashier${suffix}.com`,
-            password: suffix ? `cashier${suffix}` : 'cashier',
+            email: `cashier${emailSuffix}@cashier.com`,
+            password: suffix || 'cashier',
             role: StaffRole.CASHIER,
             firstName: 'Cashier',
             lastName: `Venue ${index + 1}`,
           },
           {
-            email: `waiter${suffix}@waiter${suffix}.com`,
-            password: suffix ? `waiter${suffix}` : 'waiter',
+            email: `waiter${emailSuffix}@waiter.com`,
+            password: suffix || 'waiter',
             role: StaffRole.WAITER,
             firstName: 'Waiter',
             lastName: `Venue ${index + 1}`,
           },
           {
-            email: `waiter2${suffix}@waiter${suffix}.com`,
-            password: suffix ? `waiter2${suffix}` : 'waiter2',
+            email: `waiter2${emailSuffix}@waiter.com`,
+            password: suffix ? `waiter2.${suffix}` : 'waiter2',
             role: StaffRole.WAITER,
             firstName: 'María',
             lastName: 'González',
           },
           {
-            email: `waiter3${suffix}@waiter${suffix}.com`,
-            password: suffix ? `waiter3${suffix}` : 'waiter3',
+            email: `waiter3${emailSuffix}@waiter.com`,
+            password: suffix ? `waiter3.${suffix}` : 'waiter3',
             role: StaffRole.WAITER,
             firstName: 'Carlos',
             lastName: 'Rodríguez',
           },
           {
-            email: `waiter4${suffix}@waiter${suffix}.com`,
-            password: suffix ? `waiter4${suffix}` : 'waiter4',
+            email: `waiter4${emailSuffix}@waiter.com`,
+            password: suffix ? `waiter4.${suffix}` : 'waiter4',
             role: StaffRole.WAITER,
             firstName: 'Ana',
             lastName: 'Martínez',
           },
           {
-            email: `kitchen${suffix}@kitchen${suffix}.com`,
-            password: suffix ? `kitchen${suffix}` : 'kitchen',
+            email: `kitchen${emailSuffix}@kitchen.com`,
+            password: suffix || 'kitchen',
             role: StaffRole.KITCHEN,
             firstName: 'Kitchen',
             lastName: `Venue ${index + 1}`,
           },
           {
-            email: `host${suffix}@host${suffix}.com`,
-            password: suffix ? `host${suffix}` : 'host',
+            email: `host${emailSuffix}@host.com`,
+            password: suffix || 'host',
             role: StaffRole.HOST,
             firstName: 'Host',
             lastName: `Venue ${index + 1}`,
           },
           {
-            email: `viewer${suffix}@viewer${suffix}.com`,
-            password: suffix ? `viewer${suffix}` : 'viewer',
+            email: `viewer${emailSuffix}@viewer.com`,
+            password: suffix || 'viewer',
             role: StaffRole.VIEWER,
             firstName: 'Viewer',
             lastName: `Venue ${index + 1}`,
