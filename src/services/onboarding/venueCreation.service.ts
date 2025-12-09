@@ -5,7 +5,7 @@
  * Supports both demo venues (pre-populated) and real business venues.
  */
 
-import { BusinessType, OnboardingType, VenueType, InvitationType, InvitationStatus, StaffRole } from '@prisma/client'
+import { BusinessType, OnboardingType, VenueType, InvitationType, InvitationStatus, StaffRole, VenueStatus } from '@prisma/client'
 import { addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
@@ -14,6 +14,7 @@ import * as stripeService from '@/services/stripe.service'
 import * as kycReviewService from '@/services/superadmin/kycReview.service'
 import emailService from '@/services/email.service'
 import logger from '@/config/logger'
+import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 // Types
 export interface CreateVenueInput {
@@ -77,7 +78,7 @@ export interface CreateVenueResult {
     id: string
     slug: string
     name: string
-    isOnboardingDemo: boolean
+    status: VenueStatus // Single source of truth for venue lifecycle
   }
   categoriesCreated?: number
   productsCreated?: number
@@ -121,10 +122,20 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     kycDocuments?.documents?.poderLegalUrl
 
   // Determine KYC status:
-  // - DEMO venues: NOT_SUBMITTED (KYC not required, frontend bypasses via isOnboardingDemo)
+  // - DEMO venues (status: TRIAL): NOT_SUBMITTED (KYC not required for demos)
   // - REAL venues with documents: PENDING_REVIEW (awaiting admin review)
   // - REAL venues without documents: NOT_SUBMITTED (needs to upload documents first)
   const kycStatus = hasKycDocuments ? 'PENDING_REVIEW' : 'NOT_SUBMITTED'
+
+  // Determine venue operational status:
+  // - DEMO venues: TRIAL (30-day demo trial)
+  // - REAL venues with KYC submitted: PENDING_ACTIVATION (awaiting KYC approval)
+  // - REAL venues without KYC: ONBOARDING (needs to complete setup)
+  const venueStatus: VenueStatus = isOnboardingDemo
+    ? VenueStatus.TRIAL
+    : hasKycDocuments
+      ? VenueStatus.PENDING_ACTIVATION
+      : VenueStatus.ONBOARDING
 
   // Create venue
   const venue = await prisma.venue.create({
@@ -164,13 +175,15 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       // KYC Status based on onboarding type and documents
       kycStatus,
 
-      // Onboarding Demo tracking
-      isOnboardingDemo,
-      demoExpiresAt: isOnboardingDemo ? addDays(new Date(), 30) : null, // 30 days trial
+      // ✅ Venue operational status - single source of truth
+      // Use status (TRIAL, ONBOARDING, PENDING_ACTIVATION, etc.) to determine venue state
+      status: venueStatus,
+      statusChangedAt: new Date(),
+      demoExpiresAt: venueStatus === VenueStatus.TRIAL ? addDays(new Date(), 30) : null, // 30 days trial
       onboardingCompletedAt: new Date(),
 
-      // Active by default
-      active: true,
+      // Active by default (backwards compatibility - computed from status)
+      active: OPERATIONAL_VENUE_STATUSES.includes(venueStatus),
       operationalSince: new Date(),
     },
   })
@@ -205,7 +218,7 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       id: venue.id,
       slug: venue.slug,
       name: venue.name,
-      isOnboardingDemo,
+      status: venueStatus, // Single source of truth
     },
   }
 

@@ -27,7 +27,7 @@
 import prisma from '../../utils/prismaClient'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
-import { Venue, AccountType, EntityType, VerificationStatus } from '@prisma/client'
+import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, StaffRole } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
@@ -46,6 +46,7 @@ import {
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
+import { OPERATIONAL_VENUE_STATUSES, canDeleteVenue, isDemoVenue, isTrialVenue } from '@/lib/venueStatus.constants'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -283,6 +284,21 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
   if (!existingVenue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found in organization`)
   }
+
+  // SECURITY: Mexican law (SAT) requires data retention for tax audits
+  // Only demo venues (status: LIVE_DEMO or TRIAL) can be hard deleted
+  // Real venues must use closeVenue() instead to retain data
+  if (!canDeleteVenue(existingVenue.status)) {
+    throw new BadRequestError(
+      'Cannot delete real venues (Mexican law requires data retention for SAT audits). Use closeVenue() to mark the venue as permanently closed while retaining data.',
+    )
+  }
+
+  logger.info(`🗑️ Deleting demo venue: ${existingVenue.name} (${existingVenue.slug})`, {
+    venueId,
+    status: existingVenue.status, // Single source of truth
+    isDemoVenue: isDemoVenue(existingVenue.status),
+  })
 
   // Delete all Firebase Storage files for this venue BEFORE deleting database records
   // This is a "best effort" deletion - we don't want to block venue deletion if storage cleanup fails
@@ -769,6 +785,7 @@ async function setupPricingStructure(tx: any, venueId: string, venueData: Enhanc
 export async function convertDemoVenue(
   orgId: string,
   venueId: string,
+  staffId: string, // Who performed the conversion (audit trail)
   conversionData: {
     // Entity type (PERSONA_FISICA or PERSONA_MORAL)
     entityType: EntityType
@@ -810,9 +827,10 @@ export async function convertDemoVenue(
     throw new NotFoundError(`Venue with ID ${venueId} not found in organization`)
   }
 
-  // Verify that the venue is actually in demo mode
-  if (!existingVenue.isOnboardingDemo) {
-    logger.error('Attempted to convert non-demo venue', { venueId })
+  // Verify that the venue is actually in demo mode (TRIAL status)
+  // Uses status as single source of truth instead of deprecated isOnboardingDemo boolean
+  if (!isTrialVenue(existingVenue.status)) {
+    logger.error('Attempted to convert non-demo venue', { venueId, status: existingVenue.status })
     throw new BadRequestError('This venue is not in demo mode')
   }
 
@@ -887,7 +905,10 @@ export async function convertDemoVenue(
   const updatedVenue = await prisma.venue.update({
     where: { id: venueId },
     data: {
-      isOnboardingDemo: false,
+      // ✅ Update status from TRIAL to PENDING_ACTIVATION (single source of truth)
+      status: VenueStatus.PENDING_ACTIVATION,
+      statusChangedAt: new Date(),
+      statusChangedBy: staffId, // Audit trail: who performed the conversion
       demoExpiresAt: null,
       // Entity type (PERSONA_FISICA or PERSONA_MORAL)
       entityType: conversionData.entityType,
@@ -972,6 +993,294 @@ export async function convertDemoVenue(
     }
   }
 
+  return updatedVenue
+}
+
+// ==========================================
+// VENUE STATUS MANAGEMENT (Mexican Regulatory Compliance)
+// ==========================================
+// Mexican law requires data retention - venues cannot be hard deleted
+// Only Live Demo venues can be deleted (they are ephemeral by design)
+// All other venues must be SUSPENDED or CLOSED (data retained for audit)
+
+/**
+ * Valid status transitions for venue lifecycle
+ * State machine to prevent invalid transitions
+ *
+ * Key Design Decisions:
+ * - LIVE_DEMO has no transitions (ephemeral - just delete)
+ * - TRIAL → PENDING_ACTIVATION is NOT allowed (demos don't need KYC)
+ * - TRIAL venues can only be SUSPENDED or CLOSED
+ * - ADMIN_SUSPENDED can only be reactivated by SUPERADMIN (enforced in reactivateVenue)
+ */
+const VALID_STATUS_TRANSITIONS: Record<VenueStatus, VenueStatus[]> = {
+  // Demo states - ephemeral, typically just deleted
+  [VenueStatus.LIVE_DEMO]: [], // No transitions - just delete when done
+  [VenueStatus.TRIAL]: [VenueStatus.SUSPENDED, VenueStatus.CLOSED, VenueStatus.ONBOARDING], // Can convert to real venue via ONBOARDING
+  // Production states
+  [VenueStatus.ONBOARDING]: [VenueStatus.TRIAL, VenueStatus.PENDING_ACTIVATION],
+  [VenueStatus.PENDING_ACTIVATION]: [VenueStatus.ACTIVE, VenueStatus.SUSPENDED],
+  [VenueStatus.ACTIVE]: [VenueStatus.SUSPENDED, VenueStatus.ADMIN_SUSPENDED, VenueStatus.CLOSED],
+  [VenueStatus.SUSPENDED]: [VenueStatus.ACTIVE, VenueStatus.CLOSED],
+  [VenueStatus.ADMIN_SUSPENDED]: [VenueStatus.ACTIVE, VenueStatus.CLOSED], // Only SUPERADMIN can reactivate
+  [VenueStatus.CLOSED]: [], // Terminal state - no transitions allowed
+}
+
+/**
+ * Suspend venue (user-initiated)
+ * Venue owner or admin can suspend their own venue
+ * Staff can no longer login, but all data is retained
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID to suspend
+ * @param staffId - Staff ID performing the action
+ * @param reason - Reason for suspension (for audit trail)
+ * @param options - Optional parameters
+ * @returns Updated venue
+ */
+export async function suspendVenue(
+  orgId: string,
+  venueId: string,
+  staffId: string,
+  reason: string,
+  options: { skipOrgCheck?: boolean } = {},
+): Promise<Venue> {
+  logger.info(`🔒 Suspending venue ${venueId} by staff ${staffId}`)
+
+  // Get venue with current status
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // Validate transition
+  if (!VALID_STATUS_TRANSITIONS[venue.status].includes(VenueStatus.SUSPENDED)) {
+    throw new BadRequestError(
+      `Cannot suspend venue from status ${venue.status}. Venue must be in TRIAL, PENDING_ACTIVATION, or ACTIVE status.`,
+    )
+  }
+
+  // Update venue status
+  const updatedVenue = await prisma.venue.update({
+    where: { id: venueId },
+    data: {
+      status: VenueStatus.SUSPENDED,
+      statusChangedAt: new Date(),
+      statusChangedBy: staffId,
+      suspensionReason: reason,
+      active: false, // Backwards compatibility
+    },
+  })
+
+  logger.info(`✅ Venue ${venueId} suspended successfully. Reason: ${reason}`)
+  return updatedVenue
+}
+
+/**
+ * Admin suspend venue (Avoqado-initiated)
+ * Only SUPERADMIN can use this - for non-payment, policy violations, etc.
+ *
+ * @param venueId - Venue ID to suspend
+ * @param staffId - Superadmin staff ID performing the action
+ * @param reason - Reason for suspension (for audit trail)
+ * @returns Updated venue
+ */
+export async function adminSuspendVenue(venueId: string, staffId: string, reason: string): Promise<Venue> {
+  logger.info(`🔒 Admin suspending venue ${venueId} by superadmin ${staffId}`)
+
+  // Get venue with current status
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // Validate transition
+  if (!VALID_STATUS_TRANSITIONS[venue.status].includes(VenueStatus.ADMIN_SUSPENDED)) {
+    throw new BadRequestError(`Cannot admin-suspend venue from status ${venue.status}. Venue must be in ACTIVE status.`)
+  }
+
+  // Update venue status
+  const updatedVenue = await prisma.venue.update({
+    where: { id: venueId },
+    data: {
+      status: VenueStatus.ADMIN_SUSPENDED,
+      statusChangedAt: new Date(),
+      statusChangedBy: staffId,
+      suspensionReason: reason,
+      active: false, // Backwards compatibility
+    },
+  })
+
+  logger.info(`✅ Venue ${venueId} admin-suspended by superadmin. Reason: ${reason}`)
+  return updatedVenue
+}
+
+/**
+ * Close venue permanently
+ * Data is retained for Mexican regulatory compliance (SAT audit requirements)
+ * This is a TERMINAL state - cannot be reversed
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID to close
+ * @param staffId - Staff ID performing the action
+ * @param reason - Reason for closure (for audit trail)
+ * @param options - Optional parameters
+ * @returns Updated venue
+ */
+export async function closeVenue(
+  orgId: string,
+  venueId: string,
+  staffId: string,
+  reason: string,
+  options: { skipOrgCheck?: boolean } = {},
+): Promise<Venue> {
+  logger.warn(`⚠️ CLOSING venue ${venueId} permanently (terminal state) by staff ${staffId}`)
+
+  // Get venue with current status
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // Validate transition - can only close from SUSPENDED or ADMIN_SUSPENDED
+  if (!VALID_STATUS_TRANSITIONS[venue.status].includes(VenueStatus.CLOSED)) {
+    throw new BadRequestError(
+      `Cannot close venue from status ${venue.status}. Venue must be in ACTIVE, SUSPENDED, or ADMIN_SUSPENDED status.`,
+    )
+  }
+
+  // Update venue status
+  const updatedVenue = await prisma.venue.update({
+    where: { id: venueId },
+    data: {
+      status: VenueStatus.CLOSED,
+      statusChangedAt: new Date(),
+      statusChangedBy: staffId,
+      suspensionReason: reason || venue.suspensionReason, // Keep existing reason if not provided
+      active: false, // Backwards compatibility
+    },
+  })
+
+  logger.warn(`⚠️ Venue ${venueId} CLOSED permanently. This action cannot be reversed. Reason: ${reason}`)
+  return updatedVenue
+}
+
+/**
+ * Reactivate suspended venue
+ * Only SUPERADMIN can reactivate venues
+ * Cannot reactivate CLOSED venues (terminal state)
+ *
+ * @param venueId - Venue ID to reactivate
+ * @param staffId - Superadmin staff ID performing the action
+ * @returns Updated venue
+ */
+export async function reactivateVenue(
+  orgId: string,
+  venueId: string,
+  staffId: string,
+  options: { skipOrgCheck?: boolean } = {},
+): Promise<Venue> {
+  logger.info(`🔓 Reactivating venue ${venueId} by staff ${staffId}`)
+
+  // Get venue with current status
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // Can only reactivate SUSPENDED venues (user-initiated)
+  // ADMIN_SUSPENDED requires superadmin role (validated in controller via skipOrgCheck)
+  if (venue.status !== VenueStatus.SUSPENDED && venue.status !== VenueStatus.ADMIN_SUSPENDED) {
+    throw new BadRequestError(
+      `Cannot reactivate venue from status ${venue.status}. Only SUSPENDED or ADMIN_SUSPENDED venues can be reactivated.`,
+    )
+  }
+
+  // If ADMIN_SUSPENDED, only superadmin can reactivate
+  if (venue.status === VenueStatus.ADMIN_SUSPENDED && !options.skipOrgCheck) {
+    throw new BadRequestError('ADMIN_SUSPENDED venues can only be reactivated by a superadmin.')
+  }
+
+  // Update venue status back to ACTIVE
+  const updatedVenue = await prisma.venue.update({
+    where: { id: venueId },
+    data: {
+      status: VenueStatus.ACTIVE,
+      statusChangedAt: new Date(),
+      statusChangedBy: staffId,
+      suspensionReason: null, // Clear suspension reason
+      active: true, // Backwards compatibility
+    },
+  })
+
+  logger.info(`✅ Venue ${venueId} reactivated successfully`)
+  return updatedVenue
+}
+
+/**
+ * Update venue status (generic transition)
+ * Use this for status transitions during onboarding flow
+ *
+ * @param venueId - Venue ID
+ * @param newStatus - New status to set
+ * @param staffId - Staff ID performing the action (optional)
+ * @returns Updated venue
+ */
+export async function updateVenueStatus(venueId: string, newStatus: VenueStatus, staffId?: string): Promise<Venue> {
+  logger.info(`📝 Updating venue ${venueId} status to ${newStatus}`)
+
+  // Get venue with current status
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // Validate transition
+  if (!VALID_STATUS_TRANSITIONS[venue.status].includes(newStatus)) {
+    throw new BadRequestError(`Invalid status transition from ${venue.status} to ${newStatus}`)
+  }
+
+  // Calculate active boolean based on new status (using centralized constants)
+  const isActive = OPERATIONAL_VENUE_STATUSES.includes(newStatus)
+
+  // Update venue status
+  const updatedVenue = await prisma.venue.update({
+    where: { id: venueId },
+    data: {
+      status: newStatus,
+      statusChangedAt: new Date(),
+      statusChangedBy: staffId || null,
+      active: isActive, // Backwards compatibility
+      // Clear suspension reason if transitioning to non-suspended state
+      ...(isActive ? { suspensionReason: null } : {}),
+    },
+  })
+
+  logger.info(`✅ Venue ${venueId} status updated to ${newStatus}`)
   return updatedVenue
 }
 

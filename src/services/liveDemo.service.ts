@@ -6,13 +6,14 @@
  * Sessions expire after 5 hours of inactivity.
  */
 
-import { StaffRole } from '@prisma/client'
+import { StaffRole, VenueStatus } from '@prisma/client'
 import { addHours, addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
 import { seedDemoVenue } from './onboarding/demoSeed.service'
 import * as jwtService from '@/jwt.service'
 import logger from '@/config/logger'
+import { isLiveDemoVenue as isLiveDemoStatus } from '@/lib/venueStatus.constants'
 
 const LIVE_DEMO_DURATION_HOURS = 5
 const LIVE_DEMO_ORG_NAME = 'Live Demo Organization'
@@ -151,8 +152,8 @@ async function createLiveDemoSession(sessionId: string): Promise<LiveDemoSession
       currency: 'MXN',
       country: 'MX',
 
-      // Mark as live demo
-      isLiveDemo: true,
+      // Mark as live demo using status (single source of truth)
+      status: VenueStatus.LIVE_DEMO,
       liveDemoSessionId: sessionId,
       lastActivityAt: new Date(),
 
@@ -303,13 +304,13 @@ export async function updateLiveDemoActivity(sessionId: string): Promise<void> {
  * Checks if a venue is a live demo venue
  *
  * @param venueId - Venue ID to check
- * @returns True if venue is a live demo
+ * @returns True if venue is a live demo (status = LIVE_DEMO)
  */
 export async function isLiveDemoVenue(venueId: string): Promise<boolean> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { isLiveDemo: true },
+    select: { status: true },
   })
 
-  return venue?.isLiveDemo || false
+  return venue ? isLiveDemoStatus(venue.status) : false
 }

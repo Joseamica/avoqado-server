@@ -737,7 +737,7 @@ router.put(
  *                     id: { type: string }
  *                     slug: { type: string }
  *                     name: { type: string }
- *                     isOnboardingDemo: { type: boolean }
+ *                     status: { type: string, enum: [TRIAL, ONBOARDING, PENDING_ACTIVATION, ACTIVE, SUSPENDED, ADMIN_SUSPENDED, CLOSED] }
  *                 summary:
  *                   type: object
  *                   properties:

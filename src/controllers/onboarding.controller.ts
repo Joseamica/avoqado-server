@@ -627,7 +627,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
     if (lockResult.count === 0) {
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
-        select: { id: true, slug: true, name: true, isOnboardingDemo: true },
+        select: { id: true, slug: true, name: true, status: true },
       })
 
       if (existingVenue) {

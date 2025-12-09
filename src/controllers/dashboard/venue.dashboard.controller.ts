@@ -219,16 +219,23 @@ export async function convertDemoVenue(
 
     const venueId: string = req.params.venueId
     const conversionData: ConvertDemoVenueDto = req.body
+    const staffId = req.authContext?.userId
+
+    if (!staffId) {
+      logger.error('User context not found in demo venue conversion')
+      return next(new Error('Contexto de usuario no encontrado'))
+    }
 
     logger.info('Converting demo venue to real', {
       orgId,
       venueId,
+      staffId,
       rfc: conversionData.rfc,
     })
 
     // SUPERADMIN can convert any venue across organizations
     const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
-    const updatedVenue = await venueDashboardService.convertDemoVenue(orgId, venueId, conversionData, { skipOrgCheck })
+    const updatedVenue = await venueDashboardService.convertDemoVenue(orgId, venueId, staffId, conversionData, { skipOrgCheck })
 
     res.status(200).json({
       success: true,
@@ -543,6 +550,169 @@ export async function createVenueSetupIntent(req: Request<{ venueId: string }>, 
     })
   } catch (error) {
     logger.error('Error creating SetupIntent', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+// ============================================
+// VENUE STATUS MANAGEMENT ENDPOINTS
+// ============================================
+
+/**
+ * Suspend a venue (voluntary suspension by owner/admin)
+ * Transitions venue from ACTIVE to SUSPENDED status
+ */
+export async function suspendVenue(
+  req: Request<{ venueId: string }, any, { reason: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const userId = req.authContext?.userId
+    if (!orgId || !userId) {
+      return next(new Error('Contexto de autenticación no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+    const { reason } = req.body
+
+    if (!reason || reason.trim().length === 0) {
+      return next(new Error('Se requiere una razón para suspender el venue'))
+    }
+
+    logger.info('Suspending venue', { orgId, venueId, userId, reason })
+
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const updatedVenue = await venueDashboardService.suspendVenue(orgId, venueId, userId, reason, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      data: updatedVenue,
+      message: 'Venue suspendido exitosamente',
+    })
+  } catch (error) {
+    logger.error('Error suspending venue', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Close a venue permanently (data retained for audit)
+ * Transitions venue from SUSPENDED/ADMIN_SUSPENDED to CLOSED status
+ * This is a terminal state - venue cannot be reactivated after closing
+ */
+export async function closeVenue(
+  req: Request<{ venueId: string }, any, { reason: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const userId = req.authContext?.userId
+    if (!orgId || !userId) {
+      return next(new Error('Contexto de autenticación no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+    const { reason } = req.body
+
+    if (!reason || reason.trim().length === 0) {
+      return next(new Error('Se requiere una razón para cerrar el venue'))
+    }
+
+    logger.info('Closing venue permanently', { orgId, venueId, userId, reason })
+
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const updatedVenue = await venueDashboardService.closeVenue(orgId, venueId, userId, reason, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      data: updatedVenue,
+      message: 'Venue cerrado permanentemente. Los datos se conservarán para auditoría.',
+    })
+  } catch (error) {
+    logger.error('Error closing venue', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Reactivate a suspended venue
+ * Transitions venue from SUSPENDED back to ACTIVE status
+ * Note: ADMIN_SUSPENDED venues can only be reactivated by superadmin
+ */
+export async function reactivateVenue(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const userId = req.authContext?.userId
+    if (!orgId || !userId) {
+      return next(new Error('Contexto de autenticación no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+
+    logger.info('Reactivating venue', { orgId, venueId, userId })
+
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const updatedVenue = await venueDashboardService.reactivateVenue(orgId, venueId, userId, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      data: updatedVenue,
+      message: 'Venue reactivado exitosamente',
+    })
+  } catch (error) {
+    logger.error('Error reactivating venue', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get venue status history (for audit purposes)
+ */
+export async function getVenueStatusHistory(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const venue = await venueDashboardService.getVenueById(orgId, venueId, { skipOrgCheck })
+
+    // Return current status info (history would require a separate audit log table)
+    res.status(200).json({
+      success: true,
+      data: {
+        venueId: venue.id,
+        venueName: venue.name,
+        currentStatus: venue.status,
+        statusChangedAt: venue.statusChangedAt,
+        statusChangedBy: venue.statusChangedBy,
+        suspensionReason: venue.suspensionReason,
+      },
+    })
+  } catch (error) {
+    logger.error('Error getting venue status history', {
       error: error instanceof Error ? error.message : 'Unknown error',
       orgId: req.authContext?.orgId,
       venueId: req.params?.venueId,
