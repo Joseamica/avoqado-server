@@ -158,10 +158,10 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       },
     })
 
-    // If SUPERADMIN, fetch all operational venues in the system (includes TRIAL demos)
+    // If SUPERADMIN, fetch ALL venues in the system (including suspended/closed for management)
     if (isSuperAdmin) {
       const allSystemVenues = await prisma.venue.findMany({
-        where: { status: { in: OPERATIONAL_VENUE_STATUSES } }, // All operational venues including demos
+        // SUPERADMIN sees ALL venues - no status filter (they need to manage suspended venues too)
         select: {
           id: true,
           name: true,

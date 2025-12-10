@@ -32,8 +32,11 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# 1. ESLint
+# 1. ESLint (auto-fix first, then check)
 echo "📏 Step 1/8: Running ESLint..."
+echo "   Auto-fixing issues..."
+npm run lint:fix 2>/dev/null || true
+echo "   Checking for remaining issues..."
 if npm run lint; then
   echo -e "${GREEN}✅ ESLint passed!${NC}"
 else

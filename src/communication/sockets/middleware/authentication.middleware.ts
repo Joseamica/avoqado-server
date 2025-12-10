@@ -93,7 +93,8 @@ export const socketAuthenticationMiddleware = (socket: AuthenticatedSocket, next
 
       // Security Enhancement: Verify venue is operational before allowing connection
       // This prevents TPV at suspended venues from maintaining active socket connections
-      if (decoded.venueId && decoded.venueId !== 'pending') {
+      // EXCEPTION: SUPERADMIN can connect to any venue for management purposes
+      if (decoded.venueId && decoded.venueId !== 'pending' && decoded.role !== 'SUPERADMIN') {
         const venue = await prisma.venue.findUnique({
           where: { id: decoded.venueId },
           select: { id: true, status: true },

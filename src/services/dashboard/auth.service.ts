@@ -14,6 +14,22 @@ export async function loginStaff(loginData: LoginDto) {
   const { email, password, venueId, rememberMe } = loginData
 
   // 1. Buscar staff con TODOS sus venues (no solo el solicitado)
+  // First query: get basic staff info to check if SUPERADMIN
+  const staffBasic = await prisma.staff.findUnique({
+    where: { email: email.toLowerCase() },
+    select: {
+      id: true,
+      venues: {
+        where: { active: true },
+        select: { role: true },
+      },
+    },
+  })
+
+  const isSuperadmin = staffBasic?.venues.some(sv => sv.role === StaffRole.SUPERADMIN) ?? false
+
+  // Second query: get full staff with venues
+  // SUPERADMIN can see ALL venues (including suspended), others only see operational venues
   const staff = await prisma.staff.findUnique({
     where: { email: email.toLowerCase() },
     select: {
@@ -35,8 +51,8 @@ export async function loginStaff(loginData: LoginDto) {
       venues: {
         where: {
           active: true,
-          // Filter by venue operational status (exclude SUSPENDED, ADMIN_SUSPENDED, CLOSED)
-          venue: { status: { in: OPERATIONAL_VENUE_STATUSES } },
+          // SUPERADMIN sees ALL venues, others only see operational venues
+          ...(isSuperadmin ? {} : { venue: { status: { in: OPERATIONAL_VENUE_STATUSES } } }),
         },
         include: {
           venue: {
@@ -275,7 +291,8 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
 
   // Security Enhancement: Verify venue is operational before allowing switch
   // This prevents users from switching to SUSPENDED, ADMIN_SUSPENDED, or CLOSED venues
-  if (!OPERATIONAL_VENUE_STATUSES.includes(targetVenue.status)) {
+  // EXCEPTION: SUPERADMIN can switch to ANY venue (including suspended)
+  if (!isSuperAdmin && !OPERATIONAL_VENUE_STATUSES.includes(targetVenue.status)) {
     logger.warn('switchVenue rejected: venue not operational', {
       staffId,
       targetVenueId,
