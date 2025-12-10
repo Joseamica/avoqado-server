@@ -250,8 +250,34 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
     orderBy: [{ displayOrder: 'asc' }, { createdAt: 'desc' }],
   })
 
+  // Get terminal counts for each merchant account
+  // Since assignedMerchantIds is a String[] array, we can't use Prisma _count
+  // We need to count terminals where the account ID is in the array
+  const accountIds = accounts.map(a => a.id)
+  const terminalsWithMerchants = await prisma.terminal.findMany({
+    where: {
+      assignedMerchantIds: {
+        hasSome: accountIds,
+      },
+    },
+    select: {
+      id: true,
+      assignedMerchantIds: true,
+    },
+  })
+
+  // Build a map of merchantAccountId -> terminal count
+  const terminalCountByMerchant: Record<string, number> = {}
+  for (const terminal of terminalsWithMerchants) {
+    for (const merchantId of terminal.assignedMerchantIds) {
+      if (accountIds.includes(merchantId)) {
+        terminalCountByMerchant[merchantId] = (terminalCountByMerchant[merchantId] || 0) + 1
+      }
+    }
+  }
+
   // Remove encrypted credentials from response for security
-  // Also compute total venue configs count
+  // Also compute total venue configs count and terminals count
   const sanitizedAccounts = accounts.map(account => ({
     ...account,
     credentialsEncrypted: undefined, // Don't expose encrypted data
@@ -259,6 +285,7 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
     _count: {
       costStructures: account._count.costStructures,
       venueConfigs: account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary,
+      terminals: terminalCountByMerchant[account.id] || 0,
     },
   }))
 

@@ -251,7 +251,36 @@ export async function getVenueConfigsByMerchantAccount(merchantAccountId: string
 }
 
 /**
+ * Delete venue payment configuration
+ * @param venueId Venue ID
+ */
+export async function deleteVenuePaymentConfig(venueId: string) {
+  // Check if config exists
+  const existingConfig = await prisma.venuePaymentConfig.findUnique({
+    where: { venueId },
+  })
+
+  if (!existingConfig) {
+    throw new NotFoundError(`Venue ${venueId} has no payment configuration`)
+  }
+
+  await prisma.venuePaymentConfig.delete({
+    where: { venueId },
+  })
+
+  logger.info('Venue payment config deleted', {
+    venueId,
+    configId: existingConfig.id,
+  })
+}
+
+/**
  * Update venue payment configuration
+ *
+ * IMPORTANT: When assigning an account to a slot, this function automatically
+ * removes the account from any other slot it currently occupies in the same venue.
+ * This prevents the same account from appearing in multiple slots simultaneously.
+ *
  * @param venueId Venue ID
  * @param data Update data
  * @returns Updated payment config
@@ -294,15 +323,101 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
     }
   }
 
+  // Build update data, ensuring account is only in ONE slot at a time
+  const updateData: any = {}
+
+  // Determine which account is being assigned (if any)
+  const accountBeingAssigned = data.primaryAccountId || data.secondaryAccountId || data.tertiaryAccountId
+
+  if (accountBeingAssigned) {
+    // Check if this account currently exists in any other slot and clear it
+    // This prevents the same account from appearing in multiple slots
+    //
+    // IMPORTANT: PRIMARY is a REQUIRED field - cannot be set to null!
+    // If account is being moved FROM PRIMARY, we need special handling.
+
+    // If assigning to PRIMARY, clear from SECONDARY and TERTIARY if present
+    if (data.primaryAccountId) {
+      if (existingConfig.secondaryAccountId === data.primaryAccountId) {
+        updateData.secondaryAccountId = null
+        logger.info('Auto-clearing account from SECONDARY slot (moving to PRIMARY)', {
+          accountId: data.primaryAccountId,
+          venueId,
+        })
+      }
+      if (existingConfig.tertiaryAccountId === data.primaryAccountId) {
+        updateData.tertiaryAccountId = null
+        logger.info('Auto-clearing account from TERTIARY slot (moving to PRIMARY)', {
+          accountId: data.primaryAccountId,
+          venueId,
+        })
+      }
+    }
+
+    // If assigning to SECONDARY, check if moving from PRIMARY (not allowed without replacement)
+    if (data.secondaryAccountId) {
+      if (existingConfig.primaryAccountId === data.secondaryAccountId) {
+        // Cannot leave PRIMARY empty - it's a required field
+        // Check if a new PRIMARY is being set in this same request
+        if (!data.primaryAccountId) {
+          throw new BadRequestError(
+            'No puedes mover la cuenta primaria a otro slot sin asignar una nueva cuenta primaria. ' +
+              'La cuenta primaria es obligatoria.',
+          )
+        }
+      }
+      if (existingConfig.tertiaryAccountId === data.secondaryAccountId) {
+        updateData.tertiaryAccountId = null
+        logger.info('Auto-clearing account from TERTIARY slot (moving to SECONDARY)', {
+          accountId: data.secondaryAccountId,
+          venueId,
+        })
+      }
+    }
+
+    // If assigning to TERTIARY, check if moving from PRIMARY (not allowed without replacement)
+    if (data.tertiaryAccountId) {
+      if (existingConfig.primaryAccountId === data.tertiaryAccountId) {
+        // Cannot leave PRIMARY empty - it's a required field
+        // Check if a new PRIMARY is being set in this same request
+        if (!data.primaryAccountId) {
+          throw new BadRequestError(
+            'No puedes mover la cuenta primaria a otro slot sin asignar una nueva cuenta primaria. ' +
+              'La cuenta primaria es obligatoria.',
+          )
+        }
+      }
+      if (existingConfig.secondaryAccountId === data.tertiaryAccountId) {
+        updateData.secondaryAccountId = null
+        logger.info('Auto-clearing account from SECONDARY slot (moving to TERTIARY)', {
+          accountId: data.tertiaryAccountId,
+          venueId,
+        })
+      }
+    }
+  }
+
+  // Apply the requested slot changes
+  // Note: primaryAccountId can only be set to a value, never to null (required field)
+  if (data.primaryAccountId) {
+    updateData.primaryAccountId = data.primaryAccountId
+  }
+  if (data.secondaryAccountId !== undefined) {
+    updateData.secondaryAccountId = data.secondaryAccountId
+  }
+  if (data.tertiaryAccountId !== undefined) {
+    updateData.tertiaryAccountId = data.tertiaryAccountId
+  }
+  if (data.routingRules !== undefined) {
+    updateData.routingRules = data.routingRules
+  }
+  if (data.preferredProcessor) {
+    updateData.preferredProcessor = data.preferredProcessor
+  }
+
   const config = await prisma.venuePaymentConfig.update({
     where: { venueId },
-    data: {
-      ...(data.primaryAccountId && { primaryAccountId: data.primaryAccountId }),
-      ...(data.secondaryAccountId !== undefined && { secondaryAccountId: data.secondaryAccountId }),
-      ...(data.tertiaryAccountId !== undefined && { tertiaryAccountId: data.tertiaryAccountId }),
-      ...(data.routingRules !== undefined && { routingRules: data.routingRules }),
-      ...(data.preferredProcessor && { preferredProcessor: data.preferredProcessor }),
-    },
+    data: updateData,
     include: {
       venue: true,
       primaryAccount: {
@@ -326,6 +441,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
   logger.info('Venue payment config updated', {
     venueId,
     updates: Object.keys(data),
+    autoCleared: Object.keys(updateData).filter(k => updateData[k] === null),
   })
 
   return config
@@ -532,6 +648,45 @@ export async function createVenuePricingStructure(data: CreateVenuePricingStruct
 
   // Wrap in transaction to prevent race conditions when creating multiple pricing structures simultaneously
   const pricingStructure = await prisma.$transaction(async tx => {
+    // Check if there's an existing structure with the EXACT same effectiveFrom date
+    // This would violate the unique constraint (venueId, accountType, effectiveFrom)
+    const existingWithSameDate = await tx.venuePricingStructure.findFirst({
+      where: {
+        venueId: data.venueId,
+        accountType: data.accountType,
+        effectiveFrom: data.effectiveFrom,
+      },
+    })
+
+    if (existingWithSameDate) {
+      // Update the existing structure instead of creating a new one
+      logger.info('Updating existing venue pricing structure with same effectiveFrom date', {
+        existingId: existingWithSameDate.id,
+        effectiveFrom: data.effectiveFrom,
+      })
+
+      return await tx.venuePricingStructure.update({
+        where: { id: existingWithSameDate.id },
+        data: {
+          debitRate: data.debitRate,
+          creditRate: data.creditRate,
+          amexRate: data.amexRate,
+          internationalRate: data.internationalRate,
+          fixedFeePerTransaction: data.fixedFeePerTransaction || null,
+          monthlyServiceFee: data.monthlyServiceFee || null,
+          minimumMonthlyVolume: data.minimumMonthlyVolume || null,
+          volumePenalty: data.volumePenalty || null,
+          contractReference: data.contractReference || null,
+          notes: data.notes || null,
+          active: true,
+          effectiveTo: null, // Reset end date
+        },
+        include: {
+          venue: true,
+        },
+      })
+    }
+
     // End any existing active pricing structure for this venue and account type
     const existingActivePricingStructure = await tx.venuePricingStructure.findFirst({
       where: {

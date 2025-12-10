@@ -1309,7 +1309,33 @@ export async function recordOrderPayment(
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
-    await createTransactionCost(payment.id)
+    const costResult = await createTransactionCost(payment.id)
+
+    // Update Payment and VenueTransaction with calculated fee values
+    if (costResult && costResult.feeAmount > 0) {
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          feeAmount: costResult.feeAmount,
+          netAmount: costResult.netAmount,
+        },
+      })
+
+      await prisma.venueTransaction.update({
+        where: { paymentId: payment.id },
+        data: {
+          feeAmount: costResult.feeAmount,
+          netAmount: costResult.netAmount,
+          netSettlementAmount: costResult.netAmount,
+        },
+      })
+
+      logger.info('Payment and VenueTransaction updated with fee values', {
+        paymentId: payment.id,
+        feeAmount: costResult.feeAmount,
+        netAmount: costResult.netAmount,
+      })
+    }
   } catch (transactionCostError) {
     logger.error('Failed to create TransactionCost', {
       paymentId: payment.id,

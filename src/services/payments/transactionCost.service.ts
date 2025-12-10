@@ -157,9 +157,13 @@ function getRateForTransactionType(structure: any, transactionType: TransactionC
  * 7. Creates TransactionCost record
  *
  * @param paymentId - Payment ID to create TransactionCost for
- * @returns Created TransactionCost record or null if skipped
+ * @returns Object with transactionCost record, feeAmount, and netAmount (or null if skipped)
  */
-export async function createTransactionCost(paymentId: string) {
+export async function createTransactionCost(paymentId: string): Promise<{
+  transactionCost: any
+  feeAmount: number
+  netAmount: number
+} | null> {
   logger.info('Creating TransactionCost', { paymentId })
 
   // Fetch payment with all necessary relations
@@ -360,12 +364,22 @@ export async function createTransactionCost(paymentId: string) {
     },
   })
 
+  // Calculate fee and net amounts for caller
+  const totalFee = venueChargeAmount + venueFixedFee
+  const netAmountCalculated = amount - totalFee
+
   logger.info('TransactionCost created successfully', {
     transactionCostId: transactionCost.id,
     paymentId,
     grossProfit,
     profitMargin,
+    feeAmount: totalFee,
+    netAmount: netAmountCalculated,
   })
 
-  return transactionCost
+  return {
+    transactionCost,
+    feeAmount: totalFee,
+    netAmount: netAmountCalculated,
+  }
 }

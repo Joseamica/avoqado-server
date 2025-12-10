@@ -1,10 +1,9 @@
 import { staffSignIn } from '../../../../src/services/tpv/auth.tpv.service'
-import { BadRequestError, NotFoundError, UnauthorizedError } from '../../../../src/errors/AppError'
+import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { StaffRole, VenueStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '../../../../src/utils/prismaClient'
 import * as security from '../../../../src/security'
-import { OPERATIONAL_VENUE_STATUSES } from '../../../../src/lib/venueStatus.constants'
 
 // Mock dependencies
 jest.mock('../../../../src/utils/prismaClient', () => ({

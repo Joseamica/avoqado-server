@@ -107,6 +107,30 @@ export async function getVenueConfigsByMerchantAccount(req: Request, res: Respon
 }
 
 /**
+ * DELETE /api/v1/superadmin/venue-pricing/config/:venueId
+ * Delete venue payment configuration
+ */
+export async function deleteVenuePaymentConfig(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+
+    await venuePricingService.deleteVenuePaymentConfig(venueId)
+
+    logger.warn('Venue payment config deleted via API', {
+      venueId,
+      deletedBy: (req as any).user?.uid,
+    })
+
+    res.json({
+      success: true,
+      message: 'Venue payment configuration deleted successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * PUT /api/v1/superadmin/venue-pricing/config/:venueId
  * Update venue payment configuration
  */

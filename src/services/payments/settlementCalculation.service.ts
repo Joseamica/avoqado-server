@@ -255,7 +255,7 @@ export function calculateSettlementDate(
  */
 export async function calculateNetSettlementAmount(
   payment: Payment,
-  transactionCost?: { providerCostAmount: number; venueChargeAmount: number },
+  transactionCost?: { providerCostAmount: number; venueChargeAmount: number; venueFixedFee: number },
 ): Promise<number> {
   // If transaction cost not provided, fetch it
   if (!transactionCost) {
@@ -264,6 +264,7 @@ export async function calculateNetSettlementAmount(
       select: {
         providerCostAmount: true,
         venueChargeAmount: true,
+        venueFixedFee: true,
       },
     })
 
@@ -271,6 +272,7 @@ export async function calculateNetSettlementAmount(
       transactionCost = {
         providerCostAmount: Number(cost.providerCostAmount),
         venueChargeAmount: Number(cost.venueChargeAmount),
+        venueFixedFee: Number(cost.venueFixedFee),
       }
     }
   }
@@ -283,14 +285,17 @@ export async function calculateNetSettlementAmount(
     return grossAmount
   }
 
-  // Net = Gross - Venue Charge (what Avoqado charges)
+  // Net = Gross - Total Venue Charge (percentage + fixed fee)
   // Note: Provider cost is Avoqado's expense, venue charge is what venue pays
-  const netAmount = grossAmount - transactionCost.venueChargeAmount
+  const totalVenueCharge = transactionCost.venueChargeAmount + transactionCost.venueFixedFee
+  const netAmount = grossAmount - totalVenueCharge
 
   logger.debug('Net settlement amount calculated', {
     paymentId: payment.id,
     grossAmount,
-    venueCharge: transactionCost.venueChargeAmount,
+    venueChargeAmount: transactionCost.venueChargeAmount,
+    venueFixedFee: transactionCost.venueFixedFee,
+    totalVenueCharge,
     netAmount,
   })
 

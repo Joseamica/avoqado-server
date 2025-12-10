@@ -54,7 +54,7 @@ export async function findCustomerByPhone(venueId: string, phone: string, limit:
   logger.debug(`🔍 TPV Customer search by phone: ${phone}`, { venueId })
 
   // Normalize phone: remove spaces, dashes, parentheses
-  const normalizedPhone = phone.replace(/[\s\-\(\)]/g, '')
+  const normalizedPhone = phone.replace(/[\s\-()]/g, '')
 
   const customers = await prisma.customer.findMany({
     where: {
@@ -175,7 +175,7 @@ export async function searchCustomers(venueId: string, query: string, limit: num
         { firstName: { contains: searchTerm, mode: 'insensitive' } },
         { lastName: { contains: searchTerm, mode: 'insensitive' } },
         { email: { contains: searchTerm, mode: 'insensitive' } },
-        { phone: { contains: searchTerm.replace(/[\s\-\(\)]/g, ''), mode: 'insensitive' } },
+        { phone: { contains: searchTerm.replace(/[\s\-()]/g, ''), mode: 'insensitive' } },
       ],
     },
     take: limit,
@@ -275,7 +275,7 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
 
   // Check for duplicate phone
   if (data.phone) {
-    const normalizedPhone = data.phone.replace(/[\s\-\(\)]/g, '')
+    const normalizedPhone = data.phone.replace(/[\s\-()]/g, '')
     const existingByPhone = await prisma.customer.findFirst({
       where: {
         venueId,
@@ -345,7 +345,7 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
       venueId,
       firstName: data.firstName,
       lastName: data.lastName,
-      phone: data.phone?.replace(/[\s\-\(\)]/g, ''),
+      phone: data.phone?.replace(/[\s\-()]/g, ''),
       email: data.email?.toLowerCase(),
     },
     select: {

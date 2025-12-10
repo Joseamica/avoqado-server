@@ -33,6 +33,9 @@ router.post('/config', venuePricingController.createVenuePaymentConfig)
 // PUT /api/v1/superadmin/venue-pricing/config/:venueId
 router.put('/config/:venueId', venuePricingController.updateVenuePaymentConfig)
 
+// DELETE /api/v1/superadmin/venue-pricing/config/:venueId
+router.delete('/config/:venueId', venuePricingController.deleteVenuePaymentConfig)
+
 /**
  * ========================================
  * VENUE PRICING STRUCTURE ROUTES
