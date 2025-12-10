@@ -123,9 +123,10 @@ const result = lookupRatesByBusinessName('Gimnasio')
 
 ### Implementation Plans (In Progress)
 
-| Document                                        | Description                         |
-| ----------------------------------------------- | ----------------------------------- |
-| `docs/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md` | Customer + Discounts (Phase 1: 85%) |
+| Document                                                          | Description                                |
+| ----------------------------------------------------------------- | ------------------------------------------ |
+| `docs/clients&promotions/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md` | Customer + Discounts (Phase 1: 85%)        |
+| `docs/clients&promotions/CUSTOMER_LOYALTY_PROMOTIONS_REFERENCE.md` | Complete reference for customers & promos  |
 
 ---
 

@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build": "npx prisma generate && tsc && tsc-alias",
+    "build": "npx prisma generate && tsc && tsc-alias && npm run copy-data",
+    "copy-data": "cp -r src/data dist/src/",
     "start": "node -r tsconfig-paths/register dist/src/server.js",
     "dev": "nodemon --watch src --ext ts,json --exec tsx src/server.ts | pino-pretty",
     "dev:simple-logging": "SIMPLE_LOGGING=true nodemon --watch src --ext ts,json --exec tsx src/server.ts",
