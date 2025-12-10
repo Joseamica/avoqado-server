@@ -361,8 +361,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
         // Check if a new PRIMARY is being set in this same request
         if (!data.primaryAccountId) {
           throw new BadRequestError(
-            'No puedes mover la cuenta primaria a otro slot sin asignar una nueva cuenta primaria. ' +
-              'La cuenta primaria es obligatoria.',
+            'No puedes mover la cuenta primaria a otro slot sin asignar una nueva cuenta primaria. ' + 'La cuenta primaria es obligatoria.',
           )
         }
       }
@@ -382,8 +381,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
         // Check if a new PRIMARY is being set in this same request
         if (!data.primaryAccountId) {
           throw new BadRequestError(
-            'No puedes mover la cuenta primaria a otro slot sin asignar una nueva cuenta primaria. ' +
-              'La cuenta primaria es obligatoria.',
+            'No puedes mover la cuenta primaria a otro slot sin asignar una nueva cuenta primaria. ' + 'La cuenta primaria es obligatoria.',
           )
         }
       }
