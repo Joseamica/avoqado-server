@@ -11,13 +11,9 @@
  *   → Tasas: { credito: 1.70%, debito: 1.63%, internacional: 3.30%, amex: 3.00% }
  */
 
-import fs from 'fs'
-import path from 'path'
-
-// Load JSON data
-const dataDir = path.join(__dirname, '../../data/blumon-pricing')
-const familiasTasas = JSON.parse(fs.readFileSync(path.join(dataDir, 'familias-tasas.json'), 'utf-8'))
-const businessSynonyms = JSON.parse(fs.readFileSync(path.join(dataDir, 'business-synonyms.json'), 'utf-8'))
+// Import JSON directly - TypeScript bundles them, no fs.readFileSync needed
+import familiasTasas from '../../data/blumon-pricing/familias-tasas.json'
+import businessSynonyms from '../../data/blumon-pricing/business-synonyms.json'
 
 export interface BlumonRates {
   credito: number
