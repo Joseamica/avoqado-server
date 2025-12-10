@@ -86,6 +86,27 @@ export async function createVenuePaymentConfig(req: Request, res: Response, next
 }
 
 /**
+ * GET /api/v1/superadmin/venue-pricing/configs-by-merchant/:merchantAccountId
+ * Get all venue payment configs that reference a specific merchant account
+ * Useful for dependency checking before deleting a merchant account
+ */
+export async function getVenueConfigsByMerchantAccount(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { merchantAccountId } = req.params
+
+    const configs = await venuePricingService.getVenueConfigsByMerchantAccount(merchantAccountId)
+
+    res.json({
+      success: true,
+      data: configs,
+      count: configs.length,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * PUT /api/v1/superadmin/venue-pricing/config/:venueId
  * Update venue payment configuration
  */

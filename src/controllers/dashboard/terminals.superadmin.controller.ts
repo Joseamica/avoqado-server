@@ -81,10 +81,16 @@ export const createTerminal = async (req: Request, res: Response, next: NextFunc
       staffId,
     })
 
+    const message =
+      result.autoAttachedMerchants.length > 0
+        ? `Terminal created successfully. Auto-attached ${result.autoAttachedMerchants.length} merchant(s).`
+        : 'Terminal created successfully'
+
     return res.status(201).json({
       data: result.terminal,
       activationCode: result.activationCode,
-      message: 'Terminal created successfully',
+      autoAttachedMerchants: result.autoAttachedMerchants,
+      message,
     })
   } catch (error) {
     next(error)

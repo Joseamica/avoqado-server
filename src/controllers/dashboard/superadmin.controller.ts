@@ -23,12 +23,15 @@ export async function getDashboardData(req: Request, res: Response, next: NextFu
 
 /**
  * Get all venues with detailed management information
+ * Query params:
+ * - includeDemos: boolean (default: false) - Include LIVE_DEMO and TRIAL venues
  */
 export async function getAllVenues(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    logger.info('Getting all venues for superadmin', { userId: req.authContext?.userId })
+    const includeDemos = req.query.includeDemos === 'true'
+    logger.info('Getting all venues for superadmin', { userId: req.authContext?.userId, includeDemos })
 
-    const venues = await superadminService.getAllVenuesForSuperadmin()
+    const venues = await superadminService.getAllVenuesForSuperadmin(includeDemos)
 
     res.json({ success: true, data: venues, message: 'Venues retrieved successfully' })
   } catch (error) {

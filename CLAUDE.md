@@ -50,6 +50,47 @@ POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliabi
 | `docs/PAYMENT_ARCHITECTURE.md`                      | Money flow, merchant accounts, profit calculation |
 | `docs/STRIPE_INTEGRATION.md`                        | Stripe subscriptions, feature gating, webhooks    |
 
+### Blumon MCC & Provider Cost Rates
+
+**What is MCC Anexo 53?**
+Blumon's official document (AN53.pdf) that maps 700+ business types to MCC codes and "Familias" (categories).
+Each Familia has specific processing rates that Blumon charges.
+
+**Rate Flow:**
+```
+VenueType (RESTAURANT) → MCC Lookup → Familia (Restaurantes) → Provider Rates
+                                                              ↓
+                                           { credito: 2.30%, debito: 1.68%, intl: 3.30%, amex: 3.00% }
+```
+
+**Data Files:**
+| File | Description |
+|------|-------------|
+| `src/data/blumon-pricing/familias-tasas.json` | 29 Familias with Blumon's rates (from AN53) |
+| `src/data/blumon-pricing/business-synonyms.json` | 185+ business name → MCC/Familia mappings |
+
+**Service:**
+| File | Function |
+|------|----------|
+| `src/services/pricing/blumon-mcc-lookup.service.ts` | `lookupRatesByBusinessName()` - Fuzzy match business name to rates |
+
+**Cost Structure Relationship:**
+| Model | What it represents | Example |
+|-------|-------------------|---------|
+| `ProviderCostStructure` | What Blumon charges Avoqado | 2.30% credit (from MCC lookup) |
+| `VenuePricingStructure` | What Avoqado charges venue | 2.50% credit (includes ~0.20% margin) |
+
+**Usage Example:**
+```typescript
+import { lookupRatesByBusinessName } from '@/services/pricing/blumon-mcc-lookup.service'
+
+const result = lookupRatesByBusinessName('Gimnasio')
+// → { familia: 'Entretenimiento', mcc: '7941', confidence: 100,
+//    rates: { credito: 1.70, debito: 1.63, internacional: 3.30, amex: 3.00 } }
+```
+
+**Test:** `npx ts-node scripts/test-mcc-lookup.ts`
+
 ### Inventory
 
 | Document                      | Description                                 |

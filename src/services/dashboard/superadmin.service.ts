@@ -1348,8 +1348,12 @@ export async function getMerchantAccountsList(providerId?: string) {
       select: {
         id: true,
         externalMerchantId: true,
+        displayName: true,
         alias: true,
+        active: true,
         providerId: true,
+        blumonEnvironment: true, // SANDBOX or PRODUCTION
+        credentialsEncrypted: true, // Check if credentials exist
         provider: {
           select: {
             id: true,
@@ -1357,17 +1361,33 @@ export async function getMerchantAccountsList(providerId?: string) {
             code: true,
           },
         },
+        _count: {
+          select: {
+            costStructures: true,
+            venueConfigsPrimary: true,
+            venueConfigsSecondary: true,
+            venueConfigsTertiary: true,
+          },
+        },
       },
-      orderBy: [{ provider: { name: 'asc' } }, { alias: 'asc' }],
+      orderBy: [{ provider: { name: 'asc' } }, { displayName: 'asc' }, { alias: 'asc' }],
     })
 
     return merchantAccounts.map(account => ({
       id: account.id,
       externalMerchantId: account.externalMerchantId,
+      displayName: account.displayName,
       alias: account.alias,
       providerId: account.providerId,
       providerName: account.provider.name,
-      active: true, // Assuming active if not specified
+      active: account.active,
+      environment: account.blumonEnvironment || null, // 'SANDBOX' | 'PRODUCTION' | null
+      hasCredentials: !!account.credentialsEncrypted, // Computed from credentialsEncrypted
+      _count: {
+        costStructures: account._count.costStructures,
+        // Sum all venue config relations
+        venueConfigs: account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary,
+      },
     }))
   } catch (error) {
     logger.error('Error getting merchant accounts list:', error)

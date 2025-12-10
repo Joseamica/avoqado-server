@@ -1,7 +1,11 @@
 import { Router } from 'express'
 import * as venuePaymentConfigController from '../../controllers/venuePaymentConfig.controller'
+import * as venuePaymentReadinessController from '../../controllers/dashboard/venuePaymentReadiness.controller'
 
 const router = Router({ mergeParams: true })
+
+// Payment readiness check (must be before generic routes)
+router.get('/readiness', venuePaymentReadinessController.getVenuePaymentReadiness)
 
 // Payment configuration routes
 router.get('/', venuePaymentConfigController.getVenuePaymentConfig)

@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import crypto from 'crypto'
 import socketManager from '../../communication/sockets'
+import { lookupRatesByBusinessName, lookupRatesByVenueType, type MCCLookupResult } from '../pricing/blumon-mcc-lookup.service'
 
 /**
  * MerchantAccount Service
@@ -79,7 +80,7 @@ function decryptCredentials(encryptedData: any): any {
  * @param changeType The type of change that occurred
  * @param urgent Whether the terminal should refresh immediately (true for DELETED, false otherwise)
  */
-async function notifyAffectedTerminals(
+export async function notifyAffectedTerminals(
   merchantId: string,
   merchantName: string,
   changeType: 'MERCHANT_ADDED' | 'MERCHANT_UPDATED' | 'MERCHANT_DELETED',
@@ -531,6 +532,8 @@ export async function deleteMerchantAccount(id: string) {
       _count: {
         select: {
           costStructures: true,
+          payments: true,
+          transactionCosts: true,
         },
       },
     },
@@ -540,7 +543,23 @@ export async function deleteMerchantAccount(id: string) {
     throw new NotFoundError(`Merchant account ${id} not found`)
   }
 
-  // Check if account is being used
+  // Check if account has processed payments (CRITICAL - cannot delete historical data)
+  if (account._count.payments > 0) {
+    throw new BadRequestError(
+      `Cannot delete merchant account "${account.displayName || account.externalMerchantId}" because it has ${account._count.payments} payment(s) processed. ` +
+        `Historical payment data must be preserved for compliance. Deactivate the account instead.`,
+    )
+  }
+
+  // Check if account has transaction costs
+  if (account._count.transactionCosts > 0) {
+    throw new BadRequestError(
+      `Cannot delete merchant account "${account.displayName || account.externalMerchantId}" because it has ${account._count.transactionCosts} transaction cost record(s). ` +
+        `Deactivate the account instead.`,
+    )
+  }
+
+  // Check if account is being used in venue configs
   const venueConfigs = await prisma.venuePaymentConfig.count({
     where: {
       OR: [{ primaryAccountId: id }, { secondaryAccountId: id }, { tertiaryAccountId: id }],
@@ -584,6 +603,67 @@ export async function deleteMerchantAccount(id: string) {
 }
 
 /**
+ * Get terminals that have a merchant account assigned
+ * @param merchantAccountId Merchant account ID
+ * @returns List of terminals using this merchant account
+ */
+export async function getTerminalsByMerchantAccount(merchantAccountId: string) {
+  const terminals = await prisma.terminal.findMany({
+    where: {
+      assignedMerchantIds: {
+        has: merchantAccountId,
+      },
+    },
+    select: {
+      id: true,
+      name: true,
+      serialNumber: true,
+      venue: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+        },
+      },
+    },
+  })
+
+  return terminals
+}
+
+/**
+ * Remove merchant account from a terminal's assignedMerchantIds
+ * @param terminalId Terminal ID
+ * @param merchantAccountId Merchant account ID to remove
+ */
+export async function removeMerchantFromTerminal(terminalId: string, merchantAccountId: string) {
+  const terminal = await prisma.terminal.findUnique({
+    where: { id: terminalId },
+    select: { assignedMerchantIds: true, name: true, serialNumber: true },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal ${terminalId} not found`)
+  }
+
+  const updatedIds = terminal.assignedMerchantIds.filter(id => id !== merchantAccountId)
+
+  await prisma.terminal.update({
+    where: { id: terminalId },
+    data: { assignedMerchantIds: updatedIds },
+  })
+
+  logger.info('Merchant account removed from terminal', {
+    terminalId,
+    terminalName: terminal.name,
+    serialNumber: terminal.serialNumber,
+    merchantAccountId,
+  })
+
+  return { success: true }
+}
+
+/**
  * Get decrypted credentials for a merchant account
  * SECURITY: Only use this for payment processing
  * @param id Merchant account ID
@@ -614,4 +694,183 @@ export async function getDecryptedCredentials(id: string) {
   })
 
   return credentials
+}
+
+/**
+ * Auto-create ProviderCostStructure when a MerchantAccount is created
+ *
+ * Uses MCC lookup to determine Blumon's rates based on:
+ * 1. PRIORITY: venue.type (VenueType enum from onboarding) - most reliable
+ * 2. FALLBACK: businessCategory (Giro) - manual input if venue.type doesn't match
+ *
+ * The rates from Blumon represent what Blumon charges Avoqado (our cost).
+ *
+ * @param merchantAccountId - The MerchantAccount ID to link to
+ * @param providerId - The PaymentProvider ID (should be Blumon)
+ * @param options.venueType - The venue's type enum (e.g., 'FITNESS', 'RESTAURANT') - PRIORITY
+ * @param options.businessCategory - Manual business category/giro as fallback
+ * @returns The created ProviderCostStructure or null if creation failed
+ */
+export async function autoCreateProviderCostStructure(
+  merchantAccountId: string,
+  providerId: string,
+  options: {
+    venueType?: string | null
+    businessCategory?: string | null
+  },
+): Promise<{ costStructure: any; mccLookup: MCCLookupResult } | null> {
+  try {
+    // Check if a ProviderCostStructure already exists for this merchant
+    const existing = await prisma.providerCostStructure.findFirst({
+      where: {
+        merchantAccountId,
+        active: true,
+      },
+    })
+
+    if (existing) {
+      logger.info(`⚡ ProviderCostStructure already exists for merchant ${merchantAccountId}, skipping auto-create`)
+      return null
+    }
+
+    // Determine MCC lookup strategy
+    // PRIORITY: venueType (from onboarding) → businessCategory (manual fallback)
+    let mccLookup: MCCLookupResult
+    let lookupSource: string
+
+    if (options.venueType) {
+      // Use venueType first (more reliable, comes from onboarding)
+      mccLookup = lookupRatesByVenueType(options.venueType)
+      lookupSource = `venueType:${options.venueType}`
+      logger.info(`🔍 MCC lookup using venueType: ${options.venueType}`, {
+        found: mccLookup.found,
+        familia: mccLookup.familia,
+        confidence: mccLookup.confidence,
+      })
+    } else if (options.businessCategory) {
+      // Fallback to manual businessCategory (giro)
+      mccLookup = lookupRatesByBusinessName(options.businessCategory)
+      lookupSource = `businessCategory:${options.businessCategory}`
+      logger.info(`🔍 MCC lookup using businessCategory: ${options.businessCategory}`, {
+        found: mccLookup.found,
+        familia: mccLookup.familia,
+        confidence: mccLookup.confidence,
+      })
+    } else {
+      // No lookup source provided, use default rates
+      mccLookup = lookupRatesByBusinessName('otros')
+      lookupSource = 'default'
+      logger.warn(`⚠️ No venueType or businessCategory provided, using default rates`)
+    }
+
+    if (!mccLookup.rates) {
+      logger.warn(`❌ No rates found for ${lookupSource}`)
+      return null
+    }
+
+    // Convert percentage rates (e.g., 1.70) to decimal rates (e.g., 0.0170)
+    // MCC lookup returns rates as percentages like 1.70 for 1.70%
+    // Database stores rates as decimals like 0.0170
+    const rates = {
+      debitRate: mccLookup.rates.debito / 100,
+      creditRate: mccLookup.rates.credito / 100,
+      amexRate: mccLookup.rates.amex / 100,
+      internationalRate: mccLookup.rates.internacional / 100,
+    }
+
+    // Create ProviderCostStructure
+    const costStructure = await prisma.providerCostStructure.create({
+      data: {
+        providerId,
+        merchantAccountId,
+        debitRate: rates.debitRate,
+        creditRate: rates.creditRate,
+        amexRate: rates.amexRate,
+        internationalRate: rates.internationalRate,
+        fixedCostPerTransaction: 0, // Blumon typically doesn't have fixed fees
+        effectiveFrom: new Date(),
+        active: true,
+        proposalReference: `AUTO-MCC-${mccLookup.mcc || 'DEFAULT'}-${Date.now()}`,
+        notes: `Auto-creado via MCC lookup (${lookupSource}). Familia: ${mccLookup.familia || 'Otros'}, Match: ${mccLookup.matchType || 'default'}, Confidence: ${mccLookup.confidence}%`,
+      },
+    })
+
+    logger.info(`✅ Auto-created ProviderCostStructure for merchant ${merchantAccountId}`, {
+      costStructureId: costStructure.id,
+      lookupSource,
+      venueType: options.venueType,
+      businessCategory: options.businessCategory,
+      familia: mccLookup.familia,
+      mcc: mccLookup.mcc,
+      confidence: mccLookup.confidence,
+      rates: {
+        debit: `${mccLookup.rates.debito}%`,
+        credit: `${mccLookup.rates.credito}%`,
+        amex: `${mccLookup.rates.amex}%`,
+        international: `${mccLookup.rates.internacional}%`,
+      },
+    })
+
+    return { costStructure, mccLookup }
+  } catch (error) {
+    logger.error(`Failed to auto-create ProviderCostStructure for merchant ${merchantAccountId}:`, error)
+    return null
+  }
+}
+
+/**
+ * Get MCC rate suggestion for a business name
+ *
+ * This is used by the frontend to show suggested rates when creating a MerchantAccount.
+ * The superadmin can accept these rates or modify them.
+ *
+ * @param businessName - The business name to lookup
+ * @returns MCCLookupResult with rates and metadata
+ */
+export function getMccRateSuggestion(businessName: string): MCCLookupResult {
+  return lookupRatesByBusinessName(businessName)
+}
+
+/**
+ * Create MerchantAccount and auto-create ProviderCostStructure
+ *
+ * This is a convenience function that creates both in one call.
+ * Used when creating a MerchantAccount for a specific venue.
+ *
+ * @param data - MerchantAccount creation data
+ * @param options.venueType - Venue type enum for MCC lookup (PRIORITY)
+ * @param options.businessCategory - Manual business category/giro as fallback
+ * @returns Created MerchantAccount and optionally ProviderCostStructure
+ */
+export async function createMerchantAccountWithCostStructure(
+  data: CreateMerchantAccountData,
+  options?: {
+    venueType?: string | null
+    businessCategory?: string | null
+  },
+): Promise<{
+  merchantAccount: any
+  costStructure?: any
+  mccLookup?: MCCLookupResult
+}> {
+  // Create the MerchantAccount
+  const merchantAccount = await createMerchantAccount(data)
+
+  // If venueType or businessCategory is provided, auto-create ProviderCostStructure
+  if (options?.venueType || options?.businessCategory) {
+    const result = await autoCreateProviderCostStructure(merchantAccount.id, data.providerId, {
+      venueType: options.venueType,
+      businessCategory: options.businessCategory,
+    })
+
+    if (result) {
+      return {
+        merchantAccount,
+        costStructure: result.costStructure,
+        mccLookup: result.mccLookup,
+      }
+    }
+  }
+
+  return { merchantAccount }
 }

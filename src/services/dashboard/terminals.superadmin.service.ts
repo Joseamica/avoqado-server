@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateActivationCode as generateActivationCodeUtil } from './terminal-activation.service'
+import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
 
 /**
  * Get All Terminals (Cross-Venue)
@@ -166,6 +167,71 @@ export async function createTerminal(data: {
 
   logger.info(`Terminal created successfully: ${terminal.id}`)
 
+  // Auto-attach existing merchant accounts with matching serial number
+  // Note: Terminal serialNumber may have prefix (e.g., "AVQD-2841548417") while
+  // MerchantAccount.blumonSerialNumber has raw serial ("2841548417")
+  let autoAttachedMerchants: Array<{ id: string; displayName: string | null }> = []
+
+  if (data.serialNumber) {
+    // Extract raw serial by removing common prefixes (AVQD-, AVQ-, etc.)
+    const rawSerial = data.serialNumber.replace(/^(AVQD-|AVQ-|AVO-)/i, '')
+    logger.info('[Terminal Create] Searching for merchants to auto-attach', {
+      terminalSerial: data.serialNumber,
+      rawSerial,
+    })
+
+    const matchingMerchants = await prisma.merchantAccount.findMany({
+      where: {
+        OR: [
+          { blumonSerialNumber: data.serialNumber }, // Exact match
+          { blumonSerialNumber: rawSerial }, // Match raw serial
+        ],
+        active: true,
+      },
+      select: {
+        id: true,
+        displayName: true,
+      },
+    })
+
+    if (matchingMerchants.length > 0) {
+      // Filter out merchants that were already passed in assignedMerchantIds
+      const existingIds = new Set(data.assignedMerchantIds || [])
+      const newMerchants = matchingMerchants.filter(m => !existingIds.has(m.id))
+
+      if (newMerchants.length > 0) {
+        // Update terminal with additional merchants
+        const updatedTerminal = await prisma.terminal.update({
+          where: { id: terminal.id },
+          data: {
+            assignedMerchantIds: {
+              push: newMerchants.map(m => m.id),
+            },
+          },
+        })
+
+        autoAttachedMerchants = newMerchants
+
+        // Notify terminals about the new merchants
+        for (const merchant of newMerchants) {
+          await notifyAffectedTerminals(merchant.id, merchant.displayName || `Blumon ${data.serialNumber}`, 'MERCHANT_ADDED', false)
+        }
+
+        logger.info(`[Terminal Create] Auto-attached ${newMerchants.length} merchant(s) to terminal`, {
+          terminalId: terminal.id,
+          merchantIds: newMerchants.map(m => m.id),
+        })
+
+        // Update terminal object with new assignedMerchantIds for return
+        terminal.assignedMerchantIds = updatedTerminal.assignedMerchantIds
+      }
+    } else {
+      logger.info('[Terminal Create] No existing merchants found with matching serial for auto-attach', {
+        serialNumber: data.serialNumber,
+      })
+    }
+  }
+
   // Generate activation code if requested
   let activationCodeData = null
   if (data.generateActivationCode && data.staffId) {
@@ -176,6 +242,7 @@ export async function createTerminal(data: {
   return {
     terminal,
     activationCode: activationCodeData,
+    autoAttachedMerchants,
   }
 }
 

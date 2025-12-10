@@ -14,6 +14,12 @@ const router = Router()
 // Query params: ?providerId=xxx&active=true
 router.get('/', merchantAccountController.getMerchantAccounts)
 
+// GET /api/v1/superadmin/merchant-accounts/mcc-lookup
+// Get MCC rate suggestion for a business name
+// Query params: ?businessName=xxx (required)
+// IMPORTANT: This must be BEFORE /:id route to avoid matching "mcc-lookup" as an id
+router.get('/mcc-lookup', merchantAccountController.getMccRateSuggestion)
+
 // GET /api/v1/superadmin/merchant-accounts/:id
 // Query params: ?includeCredentials=true (optional, defaults to false)
 router.get('/:id', merchantAccountController.getMerchantAccount)
@@ -22,8 +28,20 @@ router.get('/:id', merchantAccountController.getMerchantAccount)
 // SECURITY: Only use when needed for payment processing setup
 router.get('/:id/credentials', merchantAccountController.getMerchantAccountCredentials)
 
+// GET /api/v1/superadmin/merchant-accounts/:id/terminals
+// Get terminals that have this merchant account assigned
+router.get('/:id/terminals', merchantAccountController.getTerminalsByMerchantAccount)
+
+// DELETE /api/v1/superadmin/merchant-accounts/:id/terminals/:terminalId
+// Remove merchant account from a terminal
+router.delete('/:id/terminals/:terminalId', merchantAccountController.removeMerchantFromTerminal)
+
 // POST /api/v1/superadmin/merchant-accounts
 router.post('/', merchantAccountController.createMerchantAccount)
+
+// POST /api/v1/superadmin/merchant-accounts/with-cost-structure
+// Create MerchantAccount and auto-create ProviderCostStructure using MCC lookup
+router.post('/with-cost-structure', merchantAccountController.createMerchantAccountWithCostStructure)
 
 // POST /api/v1/superadmin/merchant-accounts/blumon/register
 // Specialized endpoint for Blumon merchant registration with auto-config

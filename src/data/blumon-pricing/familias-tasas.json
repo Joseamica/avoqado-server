@@ -1,0 +1,180 @@
+{
+  "version": "2025-01",
+  "source": "Blumon Anexo Tasas por Familia",
+  "familias": {
+    "Beneficiencia": {
+      "credito": 1.00,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Educación básica": {
+      "credito": 1.00,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Guarderías": {
+      "credito": 1.00,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Médicos y dentistas": {
+      "credito": 1.00,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Misceláneas": {
+      "credito": 1.00,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Refacciones y ferreterías": {
+      "credito": 1.00,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Salones de belleza": {
+      "credito": 1.00,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Gasolineras": {
+      "credito": 1.60,
+      "debito": 1.05,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Gobierno": {
+      "credito": 1.70,
+      "debito": 1.28,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Estacionamientos": {
+      "credito": 1.58,
+      "debito": 1.55,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Colegios y universidades": {
+      "credito": 1.65,
+      "debito": 1.28,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Comida rápida": {
+      "credito": 1.70,
+      "debito": 1.35,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Entretenimiento": {
+      "credito": 1.70,
+      "debito": 1.63,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Peaje": {
+      "credito": 1.70,
+      "debito": 1.53,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Transporte Terrestre de pasajeros": {
+      "credito": 1.70,
+      "debito": 1.65,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Telecomunicaciones": {
+      "credito": 1.98,
+      "debito": 1.68,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Transporte Aéreo": {
+      "credito": 2.05,
+      "debito": 1.28,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Hospitales": {
+      "credito": 2.05,
+      "debito": 1.68,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Otros": {
+      "credito": 2.05,
+      "debito": 1.68,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Supermercados": {
+      "credito": 2.05,
+      "debito": 1.63,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Ventas al menudeo": {
+      "credito": 2.05,
+      "debito": 1.68,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Aseguradoras": {
+      "credito": 2.08,
+      "debito": 1.70,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Agencias de viajes": {
+      "credito": 2.20,
+      "debito": 1.85,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Hoteles": {
+      "credito": 2.10,
+      "debito": 1.63,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Renta de autos": {
+      "credito": 2.10,
+      "debito": 1.64,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Restaurantes": {
+      "credito": 2.30,
+      "debito": 1.68,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Agregadores": {
+      "credito": 2.30,
+      "debito": 1.68,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Farmacias": {
+      "credito": 1.28,
+      "debito": 1.00,
+      "internacional": 3.30,
+      "amex": 3.00
+    },
+    "Ventas al detalle (Retail)": {
+      "credito": 1.53,
+      "debito": 1.15,
+      "internacional": 3.30,
+      "amex": 3.00
+    }
+  }
+}

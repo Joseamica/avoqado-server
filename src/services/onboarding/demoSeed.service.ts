@@ -217,6 +217,22 @@ async function seedPaymentProvidersAndMerchants(venueId: string) {
     },
   })
 
+  // 3. Create VenuePaymentConfig to associate accounts with the venue
+  // This makes the accounts show up correctly in /venues/:slug/merchant-accounts
+  await prisma.venuePaymentConfig.upsert({
+    where: { venueId },
+    update: {
+      primaryAccountId: blumonMerchant.id, // Blumon TPV as primary (physical payments)
+      secondaryAccountId: stripeMerchant.id, // Stripe as secondary (online payments)
+    },
+    create: {
+      venueId,
+      primaryAccountId: blumonMerchant.id,
+      secondaryAccountId: stripeMerchant.id,
+      preferredProcessor: 'AUTO',
+    },
+  })
+
   return [stripeMerchant, blumonMerchant]
 }
 

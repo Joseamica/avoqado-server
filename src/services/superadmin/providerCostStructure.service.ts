@@ -199,9 +199,10 @@ export async function createProviderCostStructure(data: CreateProviderCostStruct
   }
 
   // Validate effectiveFrom is not in the past (allow same day)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  if (data.effectiveFrom < today) {
+  // Compare dates only (ignore time), using Mexico City timezone
+  const nowMexico = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' }) // YYYY-MM-DD format
+  const effectiveFromStr = data.effectiveFrom.toISOString().split('T')[0] // YYYY-MM-DD format
+  if (effectiveFromStr < nowMexico) {
     throw new BadRequestError('effectiveFrom cannot be in the past')
   }
 
@@ -223,12 +224,14 @@ export async function createProviderCostStructure(data: CreateProviderCostStruct
       where: { id: existingActiveCostStructure.id },
       data: {
         effectiveTo: previousEndDate,
+        active: false, // Deactivate the previous structure
       },
     })
 
-    logger.info('Ended previous cost structure', {
+    logger.info('Deactivated previous cost structure', {
       previousCostStructureId: existingActiveCostStructure.id,
       endedOn: previousEndDate,
+      active: false,
     })
   }
 

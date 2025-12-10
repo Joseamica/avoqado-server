@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import * as superadminController from '../../controllers/dashboard/superadmin.controller'
 import * as costManagementController from '../../controllers/dashboard/cost-management.controller'
+import * as venuePaymentReadinessController from '../../controllers/dashboard/venuePaymentReadiness.controller'
 
 import { validateRequest } from '../../middlewares/validation'
 
@@ -161,5 +162,8 @@ router.use('/settlement-configurations', settlementConfigRoutes)
 
 // Terminal Management (Create, Update, Assign Merchants)
 router.use('/terminals', terminalRoutes)
+
+// Payment Readiness Check (for superadmin dashboard)
+router.get('/payment-readiness', venuePaymentReadinessController.getMultipleVenuesPaymentReadiness)
 
 export default router

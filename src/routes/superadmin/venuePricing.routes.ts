@@ -23,6 +23,10 @@ const router = Router()
 // GET /api/v1/superadmin/venue-pricing/config/:venueId
 router.get('/config/:venueId', venuePricingController.getVenuePaymentConfig)
 
+// GET /api/v1/superadmin/venue-pricing/configs-by-merchant/:merchantAccountId
+// Get all venue payment configs that reference a specific merchant account
+router.get('/configs-by-merchant/:merchantAccountId', venuePricingController.getVenueConfigsByMerchantAccount)
+
 // POST /api/v1/superadmin/venue-pricing/config
 router.post('/config', venuePricingController.createVenuePaymentConfig)
 

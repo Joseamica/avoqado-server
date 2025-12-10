@@ -192,6 +192,65 @@ export async function createVenuePaymentConfig(data: CreateVenuePaymentConfigDat
 }
 
 /**
+ * Get all venue payment configs that reference a specific merchant account
+ * This is useful for dependency checking before deleting a merchant account
+ *
+ * @param merchantAccountId Merchant account ID
+ * @returns List of venue payment configs with the account type (PRIMARY, SECONDARY, or TERTIARY)
+ */
+export async function getVenueConfigsByMerchantAccount(merchantAccountId: string) {
+  // Find all configs where this merchant account is used as primary, secondary, or tertiary
+  const configs = await prisma.venuePaymentConfig.findMany({
+    where: {
+      OR: [{ primaryAccountId: merchantAccountId }, { secondaryAccountId: merchantAccountId }, { tertiaryAccountId: merchantAccountId }],
+    },
+    include: {
+      venue: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+        },
+      },
+      primaryAccount: {
+        include: { provider: true },
+      },
+      secondaryAccount: {
+        include: { provider: true },
+      },
+      tertiaryAccount: {
+        include: { provider: true },
+      },
+    },
+  })
+
+  // Add accountType field to indicate which slot this merchant account occupies
+  const result = configs.map(config => {
+    let accountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' = 'PRIMARY'
+
+    if (config.primaryAccountId === merchantAccountId) {
+      accountType = 'PRIMARY'
+    } else if (config.secondaryAccountId === merchantAccountId) {
+      accountType = 'SECONDARY'
+    } else if (config.tertiaryAccountId === merchantAccountId) {
+      accountType = 'TERTIARY'
+    }
+
+    return {
+      ...config,
+      accountType,
+    }
+  })
+
+  logger.info('Retrieved venue configs by merchant account', {
+    merchantAccountId,
+    count: result.length,
+  })
+
+  return result
+}
+
+/**
  * Update venue payment configuration
  * @param venueId Venue ID
  * @param data Update data
@@ -454,9 +513,11 @@ export async function createVenuePricingStructure(data: CreateVenuePricingStruct
   }
 
   // Validate effectiveFrom is not in the past
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  if (data.effectiveFrom < today) {
+  // Compare dates only (ignore time), using Mexico City timezone
+  // The frontend sends dates in local timezone, so we compare date strings
+  const nowMexico = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' }) // YYYY-MM-DD format
+  const effectiveFromStr = data.effectiveFrom.toISOString().split('T')[0] // YYYY-MM-DD format
+  if (effectiveFromStr < nowMexico) {
     throw new BadRequestError('effectiveFrom cannot be in the past')
   }
 

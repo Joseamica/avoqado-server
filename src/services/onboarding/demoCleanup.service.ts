@@ -13,7 +13,7 @@
  * - Reviews
  * - RawMaterialMovement (inventory movements)
  * - StockBatch (FIFO batches)
- * - Demo MerchantAccounts
+ * - Demo MerchantAccounts (if externalMerchantId contains 'demo')
  * - Demo Customers
  *
  * What gets DELETED (business setup - ONLY isDemo: true):
@@ -31,9 +31,17 @@
  * - LoyaltyConfig
  * - RawMaterial
  *
+ * What gets DELETED (payment config - ONLY if demo accounts):
+ * - VenuePaymentConfig (only if linked to demo merchant accounts)
+ * - VenuePricingStructure (only if VenuePaymentConfig was demo)
+ * - ProviderCostStructure (only for demo merchant accounts)
+ *
  * What gets KEPT:
  * - All data created by the user (isDemo: false)
  * - Staff/team members
+ * - Real VenuePaymentConfig (post-KYC setup with real merchant accounts)
+ * - Real VenuePricingStructure (configured for real accounts)
+ * - Real ProviderCostStructure (for real merchant accounts)
  */
 
 import prisma from '@/utils/prismaClient'
@@ -169,19 +177,41 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       if (venuePaymentConfig?.secondaryAccountId) venueAccountIds.push(venuePaymentConfig.secondaryAccountId)
       if (venuePaymentConfig?.tertiaryAccountId) venueAccountIds.push(venuePaymentConfig.tertiaryAccountId)
 
-      // Delete VenuePaymentConfig first (has FK to MerchantAccount)
-      if (venuePaymentConfig) {
+      // Check if any of the venue's merchant accounts are demo accounts
+      let hasDemoMerchantAccounts = false
+      if (venueAccountIds.length > 0) {
+        const demoAccountCheck = await tx.merchantAccount.findMany({
+          where: {
+            id: { in: venueAccountIds },
+            OR: [
+              { externalMerchantId: { contains: 'demo', mode: 'insensitive' } },
+              { displayName: { contains: 'Demo', mode: 'insensitive' } },
+              { blumonSerialNumber: { startsWith: 'DEMO' } },
+            ],
+          },
+          select: { id: true },
+        })
+        hasDemoMerchantAccounts = demoAccountCheck.length > 0
+      }
+
+      // Delete VenuePaymentConfig ONLY if it points to demo accounts
+      // Preserve real config that was set up post-KYC
+      if (venuePaymentConfig && hasDemoMerchantAccounts) {
         await tx.venuePaymentConfig.delete({
           where: { venueId },
         })
+
+        // Delete VenuePricingStructure ONLY if the config was demo
+        // This preserves pricing structures created for real accounts post-KYC
+        await tx.venuePricingStructure.deleteMany({
+          where: { venueId },
+        })
+        logger.info(`  ✓ Deleted demo VenuePaymentConfig and VenuePricingStructures`)
+      } else if (venuePaymentConfig) {
+        logger.info(`  ⚡ Preserved real VenuePaymentConfig and VenuePricingStructures (non-demo accounts)`)
       }
 
-      // Delete VenuePricingStructure for this venue
-      await tx.venuePricingStructure.deleteMany({
-        where: { venueId },
-      })
-
-      if (venueAccountIds.length > 0) {
+      if (venueAccountIds.length > 0 && hasDemoMerchantAccounts) {
         const demoAccountsForVenue = await tx.merchantAccount.findMany({
           where: {
             id: { in: venueAccountIds },
