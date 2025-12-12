@@ -85,6 +85,7 @@ export async function getOrderById(orderId: string) {
         // Incluimos los pagos asociados
         include: {
           processedBy: true, // Y quién procesó cada pago
+          saleVerification: true, // 📸 PRE-payment verification photos
         },
       },
       items: {

@@ -974,6 +974,16 @@ interface PaymentCreationData {
   // Split payment specific fields
   equalPartsPartySize?: number
   equalPartsPayedFor?: number
+
+  // 🔧 PRE-payment verification fields (generated ONCE when entering verification screen)
+  // orderReference ensures photos match order number (FAST-{timestamp} or ORD-{number})
+  orderReference?: string
+
+  // Firebase Storage URLs of verification photos (uploaded before payment)
+  verificationPhotos?: string[]
+
+  // Scanned barcodes from verification screen
+  verificationBarcodes?: string[]
 }
 
 /**
@@ -1798,19 +1808,27 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const { payment, fastOrder } = await prisma.$transaction(async tx => {
+    // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
+    // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
+    // Photos are uploaded to Firebase with this same reference
+    // This ensures photos at "venues/X/verifications/2024-01-01/FAST-123456_1.jpg" match the order
+    const orderNumber = paymentData.orderReference || `FAST-${Date.now()}`
+
     // Create fast order
     const order = await tx.order.create({
       data: {
         venueId,
-        orderNumber: `FAST-${Date.now()}`,
-        type: 'DINE_IN',
+        orderNumber,
+        type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
         source: 'TPV',
-        status: 'CONFIRMED',
+        status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
+        completedAt: new Date(),
         subtotal: paymentData.amount / 100, // Convert to decimal
         taxAmount: 0, // No tax for fast payments
         total: paymentData.amount / 100, // Convert to decimal
         paymentStatus: 'PAID',
         splitType: paymentData.splitType as any, // Set splitType for fast orders
+        createdById: validatedStaffId, // Track which staff created the fast order
       },
     })
 
@@ -1908,6 +1926,36 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         shiftId: currentShift.id,
         incrementedSales: totalAmount,
         incrementedTips: tipAmount,
+      })
+    }
+
+    // 📸 Create SaleVerification if verification photos or barcodes were provided
+    // This links the pre-uploaded Firebase photos to the payment record
+    if (
+      validatedStaffId &&
+      ((paymentData.verificationPhotos && paymentData.verificationPhotos.length > 0) ||
+        (paymentData.verificationBarcodes && paymentData.verificationBarcodes.length > 0))
+    ) {
+      await tx.saleVerification.create({
+        data: {
+          venueId,
+          paymentId: newPayment.id,
+          staffId: validatedStaffId,
+          photos: paymentData.verificationPhotos || [],
+          scannedProducts: paymentData.verificationBarcodes
+            ? paymentData.verificationBarcodes.map((barcode: string) => ({
+                barcode,
+                format: 'UNKNOWN',
+                inventoryDeducted: false,
+              }))
+            : [],
+          status: 'PENDING', // Will be processed for inventory deduction later
+        },
+      })
+      logger.info('📸 SaleVerification created for fast payment', {
+        paymentId: newPayment.id,
+        photosCount: paymentData.verificationPhotos?.length || 0,
+        barcodesCount: paymentData.verificationBarcodes?.length || 0,
       })
     }
 
