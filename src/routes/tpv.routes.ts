@@ -38,6 +38,9 @@ import {
   validateCouponSchema,
   removeOrderDiscountSchema,
   getOrderDiscountsSchema,
+  createSaleVerificationSchema,
+  listSaleVerificationsSchema,
+  getSaleVerificationSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
@@ -54,6 +57,7 @@ import * as floorElementController from '../controllers/tpv/floor-element.tpv.co
 import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 import * as customerController from '../controllers/tpv/customer.tpv.controller'
 import * as discountController from '../controllers/tpv/discount.tpv.controller'
+import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
 
 const router = express.Router()
 
@@ -3739,6 +3743,219 @@ router.delete(
   checkPermission('orders:discount'),
   validateRequest(removeOrderDiscountSchema),
   discountController.removeDiscount,
+)
+
+// ============================================================
+// SALE VERIFICATION ROUTES (Step 4 - Post-payment verification)
+// ============================================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/verificaciones:
+ *   post:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Create a sale verification record
+ *     description: Records photos and scanned barcodes for post-payment verification (Step 4)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - paymentId
+ *               - staffId
+ *             properties:
+ *               paymentId:
+ *                 type: string
+ *                 format: cuid
+ *               staffId:
+ *                 type: string
+ *                 format: cuid
+ *               photos:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: uri
+ *               scannedProducts:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     barcode:
+ *                       type: string
+ *                     format:
+ *                       type: string
+ *                     productName:
+ *                       type: string
+ *                     productId:
+ *                       type: string
+ *                     hasInventory:
+ *                       type: boolean
+ *                     quantity:
+ *                       type: number
+ *               deviceId:
+ *                 type: string
+ *               notes:
+ *                 type: string
+ *               status:
+ *                 type: string
+ *                 enum: [PENDING, PROCESSING, COMPLETED, FAILED, SKIPPED]
+ *     responses:
+ *       201:
+ *         description: Verification created successfully
+ *       400:
+ *         description: Verification already exists or invalid data
+ *       404:
+ *         description: Payment or staff not found
+ */
+router.post(
+  '/venues/:venueId/verificaciones',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(createSaleVerificationSchema),
+  saleVerificationController.createSaleVerification,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/verificaciones:
+ *   get:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: List sale verifications
+ *     description: Get a paginated list of sale verifications for a venue
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: pageSize
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *       - in: query
+ *         name: pageNumber
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [PENDING, PROCESSING, COMPLETED, FAILED, SKIPPED]
+ *       - in: query
+ *         name: staffId
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: fromDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: toDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *     responses:
+ *       200:
+ *         description: List of verifications with pagination
+ */
+router.get(
+  '/venues/:venueId/verificaciones',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(listSaleVerificationsSchema),
+  saleVerificationController.listSaleVerifications,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/verificaciones/{verificationId}:
+ *   get:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Get a sale verification by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: verificationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Verification details
+ *       404:
+ *         description: Verification not found
+ */
+router.get(
+  '/venues/:venueId/verificaciones/:verificationId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(getSaleVerificationSchema),
+  saleVerificationController.getSaleVerification,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/payments/{paymentId}/verificacion:
+ *   get:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Get verification by payment ID
+ *     description: Get the verification associated with a specific payment
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: paymentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Verification details
+ *       404:
+ *         description: No verification found for payment
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/verificacion',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getVerificationByPaymentId,
 )
 
 export default router

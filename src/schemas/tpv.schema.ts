@@ -509,3 +509,58 @@ export const getOrderDiscountsSchema = z.object({
     orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
   }),
 })
+
+// ============================================================
+// 📸 Step 4: Sale Verification Schemas
+// ============================================================
+// Used by retail/telecommunications venues to capture evidence
+// of sales (photos + barcodes) for audit and inventory deduction
+
+/** Schema for scanned product in verification */
+const scannedProductSchema = z.object({
+  barcode: z.string().min(1, { message: 'El código de barras es requerido.' }),
+  format: z.string().default('UNKNOWN'),
+  productName: z.string().optional().nullable(),
+  productId: z.string().cuid().optional().nullable(),
+  hasInventory: z.boolean().default(false),
+  quantity: z.number().int().positive().default(1),
+})
+
+/** Schema for creating a sale verification */
+export const createSaleVerificationSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    paymentId: z.string().cuid({ message: 'El ID del pago debe ser un CUID válido.' }),
+    staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+    photos: z.array(z.string().url({ message: 'Cada foto debe ser una URL válida.' })).default([]),
+    scannedProducts: z.array(scannedProductSchema).default([]),
+    deviceId: z.string().optional().nullable(),
+    notes: z.string().optional().nullable(),
+    status: z.enum(['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED']).default('PENDING'),
+  }),
+})
+
+/** Schema for listing sale verifications */
+export const listSaleVerificationsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  query: z.object({
+    pageSize: z.string().optional().default('20'),
+    pageNumber: z.string().optional().default('1'),
+    status: z.enum(['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED']).optional(),
+    staffId: z.string().cuid().optional(),
+    fromDate: z.string().datetime().optional(),
+    toDate: z.string().datetime().optional(),
+  }),
+})
+
+/** Schema for getting a single verification */
+export const getSaleVerificationSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    verificationId: z.string().cuid({ message: 'El ID de la verificación debe ser un CUID válido.' }),
+  }),
+})
