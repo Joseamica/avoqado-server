@@ -66,10 +66,7 @@ interface PaginatedResponse<T> {
  * Create a sale verification record
  * Called when TPV completes Step 4 (photo + barcode capture)
  */
-export async function createSaleVerification(
-  venueId: string,
-  data: CreateSaleVerificationData,
-): Promise<SaleVerificationResponse> {
+export async function createSaleVerification(venueId: string, data: CreateSaleVerificationData): Promise<SaleVerificationResponse> {
   logger.info(`📸 [SALE VERIFICATION SERVICE] Creating verification for payment ${data.paymentId}`)
 
   // Validate payment exists and belongs to venue
@@ -135,10 +132,7 @@ export async function getSaleVerification(venueId: string, verificationId: strin
 /**
  * Get verification by payment ID
  */
-export async function getVerificationByPaymentId(
-  venueId: string,
-  paymentId: string,
-): Promise<SaleVerificationResponse | null> {
+export async function getVerificationByPaymentId(venueId: string, paymentId: string): Promise<SaleVerificationResponse | null> {
   logger.info(`📸 [SALE VERIFICATION SERVICE] Getting verification for payment ${paymentId}`)
 
   const verification = await prisma.saleVerification.findFirst({

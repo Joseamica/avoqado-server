@@ -52,9 +52,7 @@ export async function listSaleVerifications(req: Request, res: Response): Promis
     const { venueId } = req.params
     const { pageSize = '20', pageNumber = '1', status, staffId, fromDate, toDate } = req.query
 
-    logger.info(
-      `[SALE VERIFICATION CONTROLLER] GET /tpv/venues/${venueId}/verificaciones - Page ${pageNumber}, Size ${pageSize}`,
-    )
+    logger.info(`[SALE VERIFICATION CONTROLLER] GET /tpv/venues/${venueId}/verificaciones - Page ${pageNumber}, Size ${pageSize}`)
 
     const result = await saleVerificationService.listSaleVerifications(venueId, {
       pageSize: parseInt(pageSize as string, 10),
@@ -146,9 +144,7 @@ export async function updateVerificationStatus(req: Request, res: Response): Pro
     const { venueId, verificationId } = req.params
     const { status, inventoryDeducted } = req.body
 
-    logger.info(
-      `[SALE VERIFICATION CONTROLLER] PATCH /tpv/venues/${venueId}/verificaciones/${verificationId}/status -> ${status}`,
-    )
+    logger.info(`[SALE VERIFICATION CONTROLLER] PATCH /tpv/venues/${venueId}/verificaciones/${verificationId}/status -> ${status}`)
 
     const verification = await saleVerificationService.updateVerificationStatus(
       venueId,

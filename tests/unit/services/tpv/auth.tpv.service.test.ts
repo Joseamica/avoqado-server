@@ -223,6 +223,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
             select: {
               id: true,
               name: true,
+              slug: true,
               posType: true,
               posStatus: true,
               logo: true,

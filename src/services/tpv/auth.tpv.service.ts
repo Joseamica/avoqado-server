@@ -57,7 +57,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
         select: {
           id: true,
           name: true,
-          slug: true,  // 📸 For Firebase Storage path: venues/{slug}/verifications/
+          slug: true, // 📸 For Firebase Storage path: venues/{slug}/verifications/
           posType: true,
           posStatus: true,
           logo: true,
