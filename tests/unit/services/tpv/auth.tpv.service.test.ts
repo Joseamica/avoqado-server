@@ -16,6 +16,9 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     terminal: {
       findUnique: jest.fn(),
     },
+    loyaltyConfig: {
+      findUnique: jest.fn(),
+    },
   },
 }))
 
@@ -88,6 +91,8 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
     ;(security.generateRefreshToken as jest.Mock).mockReturnValue('mock-refresh-token')
     ;(prisma.staffVenue.update as jest.Mock).mockResolvedValue(mockStaffVenue)
     ;(prisma.terminal.findUnique as jest.Mock).mockResolvedValue(mockTerminal)
+    // Mock loyaltyConfig lookup (added for loyalty program feature)
+    ;(prisma.loyaltyConfig.findUnique as jest.Mock).mockResolvedValue({ active: false })
   })
 
   afterEach(() => {
@@ -126,6 +131,9 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         // Metadata
         correlationId: expect.any(String),
         issuedAt: expect.any(String),
+
+        // Loyalty program status
+        loyaltyActive: false,
       })
     })
 

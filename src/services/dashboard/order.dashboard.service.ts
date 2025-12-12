@@ -98,6 +98,18 @@ export async function getOrderById(orderId: string) {
           },
         },
       },
+      orderCustomers: {
+        include: {
+          customer: {
+            include: {
+              customerGroup: true,
+            },
+          },
+        },
+        orderBy: {
+          isPrimary: 'desc', // Primary customer first
+        },
+      },
     },
   })
 

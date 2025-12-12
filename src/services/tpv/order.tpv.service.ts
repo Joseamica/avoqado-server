@@ -435,7 +435,10 @@ export async function addItemsToOrder(
   logger.info(`✅ [ADD ITEMS] Modifiers fetched from DB: ${modifiers.length} modifiers`)
   modifiers.forEach(m => logger.info(`  - ${m.name} (${m.id}): $${m.price}`))
 
-  // Create new order items with modifiers
+  // ⭐ P0 FIX: UPSERT items - update existing items or create new ones
+  // This fixes the bug where quantity updates created duplicate items
+  // Previously, when TPV synced a quantity change, it called addItemsToOrder
+  // which always created NEW items. Now we check for existing items first.
   const newOrderItems = await Promise.all(
     items.map(async item => {
       const product = products.find(p => p.id === item.productId)!
@@ -454,7 +457,74 @@ export async function addItemsToOrder(
       // Calculate item total: (product price + modifiers) * quantity
       const itemTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * item.quantity)
 
-      // Create order item with modifiers
+      // ⭐ P0 FIX: Check if item with same productId AND same modifiers already exists
+      // Sort modifier IDs for consistent comparison
+      const sortedNewModifiers = [...itemModifiers].sort()
+
+      const existingItem = order.items.find(existing => {
+        if (existing.productId !== item.productId) return false
+
+        // Get existing item's modifier IDs (need to fetch them)
+        // For simplicity, we compare by productId only if no modifiers involved
+        // Items with different modifiers are considered different items
+        if (itemModifiers.length === 0) {
+          // No modifiers in new item - match any existing item with no modifiers
+          return true // Will be refined below with actual modifier check
+        }
+        return false // With modifiers, we create new (can't easily compare here)
+      })
+
+      // More precise check: query existing item with its modifiers
+      const existingItemWithModifiers = await prisma.orderItem.findFirst({
+        where: {
+          orderId: order.id,
+          productId: item.productId,
+        },
+        include: {
+          modifiers: true,
+        },
+      })
+
+      // Check if modifiers match
+      let shouldUpdate = false
+      if (existingItemWithModifiers) {
+        const existingModifierIds = existingItemWithModifiers.modifiers.map(m => m.modifierId).sort()
+        shouldUpdate = JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+      }
+
+      if (shouldUpdate && existingItemWithModifiers) {
+        // ⭐ UPDATE existing item instead of creating new one
+        logger.info(
+          `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${item.quantity}`,
+        )
+
+        const updatedItem = await prisma.orderItem.update({
+          where: { id: existingItemWithModifiers.id },
+          data: {
+            quantity: item.quantity,
+            total: itemTotal,
+            notes: item.notes ?? existingItemWithModifiers.notes,
+          },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
+            },
+          },
+        })
+
+        logger.info(`✅ [ADD ITEMS] UPDATED OrderItem: ${product.name} | qty=${updatedItem.quantity}`)
+        return updatedItem
+      }
+
+      // Create NEW order item with modifiers (original behavior)
       const createdItem = await prisma.orderItem.create({
         data: {
           orderId: order.id,
@@ -492,25 +562,71 @@ export async function addItemsToOrder(
         },
       })
 
-      logger.info(`✅ [ADD ITEMS] Created OrderItem: ${product.name} with ${createdItem.modifiers.length} modifiers`)
+      logger.info(`✅ [ADD ITEMS] Created NEW OrderItem: ${product.name} with ${createdItem.modifiers.length} modifiers`)
       return createdItem
     }),
   )
 
-  // Calculate new totals
-  const allItems = [...order.items, ...newOrderItems]
-  const newSubtotal = allItems.reduce((sum, item) => sum + Number(item.total), 0)
-  const newTotal = newSubtotal // Can add tax/discount logic here
+  // ⭐ P0 FIX: Re-fetch all items from DB to avoid double-counting updated items
+  // Previously we did [...order.items, ...newOrderItems] but this would duplicate
+  // items that were UPDATED (old version + new version)
+  const allItemsFromDb = await prisma.orderItem.findMany({
+    where: { orderId: order.id },
+  })
+  const newSubtotal = allItemsFromDb.reduce((sum, item) => sum + Number(item.total), 0)
+
+  // 🔄 Recalculate percentage-based discounts when items are added
+  // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
+  const orderDiscounts = await prisma.orderDiscount.findMany({
+    where: { orderId },
+    include: { discount: true },
+  })
+
+  let newDiscountAmount = 0
+  for (const orderDiscount of orderDiscounts) {
+    // Check if this is a percentage discount (from discount relation or type field)
+    const discountType = orderDiscount.discount?.type || orderDiscount.type
+    const discountValue = Number(orderDiscount.discount?.value || orderDiscount.value || 0)
+
+    if (discountType === 'PERCENTAGE' && discountValue > 0) {
+      // Recalculate percentage based on NEW subtotal
+      const recalculatedAmount = (newSubtotal * discountValue) / 100
+      const roundedAmount = Math.round(recalculatedAmount * 100) / 100
+
+      logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
+
+      // Update individual OrderDiscount record
+      await prisma.orderDiscount.update({
+        where: { id: orderDiscount.id },
+        data: { amount: roundedAmount },
+      })
+
+      newDiscountAmount += roundedAmount
+    } else {
+      // FIXED_AMOUNT or COUPON - keep original amount
+      newDiscountAmount += Number(orderDiscount.amount)
+    }
+  }
+
+  // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
+  if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
+    newDiscountAmount = Number(order.discountAmount)
+  }
+
+  const newTotal = newSubtotal - newDiscountAmount
 
   // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)
   const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+  logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
 
   // Update order with new totals and increment version
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       subtotal: newSubtotal,
+      discountAmount: newDiscountAmount,
       total: newTotal,
       remainingBalance: newRemainingBalance,
       version: {
@@ -612,6 +728,7 @@ interface UpdateGuestInfoInput {
   customerName?: string | null
   customerPhone?: string | null
   specialRequests?: string | null
+  customerId?: string | null
 }
 
 /**
@@ -650,6 +767,7 @@ export async function updateGuestInfo(
       ...(guestInfo.customerName !== undefined && { customerName: guestInfo.customerName }),
       ...(guestInfo.customerPhone !== undefined && { customerPhone: guestInfo.customerPhone }),
       ...(guestInfo.specialRequests !== undefined && { specialRequests: guestInfo.specialRequests }),
+      ...(guestInfo.customerId !== undefined && { customerId: guestInfo.customerId }),
     },
     include: {
       items: {
@@ -785,17 +903,59 @@ export async function removeOrderItem(
   // Calculate new totals
   const remainingItems = order.items.filter(item => item.id !== orderItemId)
   const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
-  const newTotal = newSubtotal // Can add tax/discount logic here
+
+  // 🔄 Recalculate percentage-based discounts when items are removed
+  // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
+  const orderDiscounts = await prisma.orderDiscount.findMany({
+    where: { orderId },
+    include: { discount: true },
+  })
+
+  let newDiscountAmount = 0
+  for (const orderDiscount of orderDiscounts) {
+    // Check if this is a percentage discount (from discount relation or type field)
+    const discountType = orderDiscount.discount?.type || orderDiscount.type
+    const discountValue = Number(orderDiscount.discount?.value || orderDiscount.value || 0)
+
+    if (discountType === 'PERCENTAGE' && discountValue > 0) {
+      // Recalculate percentage based on NEW subtotal
+      const recalculatedAmount = (newSubtotal * discountValue) / 100
+      const roundedAmount = Math.round(recalculatedAmount * 100) / 100
+
+      logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
+
+      // Update individual OrderDiscount record
+      await prisma.orderDiscount.update({
+        where: { id: orderDiscount.id },
+        data: { amount: roundedAmount },
+      })
+
+      newDiscountAmount += roundedAmount
+    } else {
+      // FIXED_AMOUNT or COUPON - keep original amount
+      newDiscountAmount += Number(orderDiscount.amount)
+    }
+  }
+
+  // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
+  if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
+    newDiscountAmount = Number(order.discountAmount)
+  }
+
+  const newTotal = newSubtotal - newDiscountAmount
 
   // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)
   const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+  logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
 
   // Update order with new totals and increment version
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       subtotal: newSubtotal,
+      discountAmount: newDiscountAmount,
       total: newTotal,
       remainingBalance: newRemainingBalance,
       version: {
@@ -1439,4 +1599,342 @@ export async function applyDiscount(
     ...flattenOrderModifiers(updatedOrder),
     tableName: discountTableName,
   }
+}
+
+// ============================================================================
+// Order-Customer Relationship Functions (Multi-Customer Support)
+// ============================================================================
+
+/**
+ * Get all customers associated with an order
+ */
+export async function getOrderCustomers(venueId: string, orderId: string) {
+  logger.info(`👥 [ORDER SERVICE] Getting customers for order ${orderId}`)
+
+  // Verify order exists and belongs to venue
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { id: true },
+  })
+
+  if (!order) {
+    throw new NotFoundError('Order not found')
+  }
+
+  const orderCustomers = await prisma.orderCustomer.findMany({
+    where: { orderId },
+    include: {
+      customer: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          loyaltyPoints: true,
+          totalVisits: true,
+          totalSpent: true,
+          customerGroupId: true,
+          customerGroup: {
+            select: {
+              id: true,
+              name: true,
+              color: true,
+            },
+          },
+          tags: true,
+        },
+      },
+    },
+    orderBy: { addedAt: 'asc' },
+  })
+
+  logger.info(`✅ [ORDER SERVICE] Found ${orderCustomers.length} customers for order ${orderId}`)
+
+  return orderCustomers
+}
+
+/**
+ * Add a customer to an order (multi-customer support)
+ * First customer added becomes primary (receives loyalty points)
+ */
+export async function addCustomerToOrder(venueId: string, orderId: string, customerId: string) {
+  logger.info(`👤 [ORDER SERVICE] Adding customer ${customerId} to order ${orderId}`)
+
+  // Verify order exists and belongs to venue
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { id: true, orderNumber: true },
+  })
+
+  if (!order) {
+    throw new NotFoundError('Order not found')
+  }
+
+  // Verify customer exists and belongs to venue
+  const customer = await prisma.customer.findUnique({
+    where: { id: customerId },
+    select: { id: true, venueId: true, firstName: true, lastName: true },
+  })
+
+  if (!customer || customer.venueId !== venueId) {
+    throw new NotFoundError('Customer not found')
+  }
+
+  // Check if customer already added to order
+  const existingAssociation = await prisma.orderCustomer.findUnique({
+    where: { orderId_customerId: { orderId, customerId } },
+  })
+
+  if (existingAssociation) {
+    throw new BadRequestError('Customer already added to this order')
+  }
+
+  // 🔒 RACE CONDITION FIX: Use Serializable isolation to prevent multiple primaries
+  // Combined with partial unique index on (orderId) WHERE isPrimary=true as defense-in-depth
+  // Retry up to 5 times on serialization conflicts with exponential backoff
+  const MAX_RETRIES = 5
+  let lastError: any = null
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await prisma.$transaction(
+        async tx => {
+          // Check if this will be the first customer (primary) - inside transaction for consistency
+          const existingCustomersCount = await tx.orderCustomer.count({
+            where: { orderId },
+          })
+          const isPrimary = existingCustomersCount === 0
+
+          // Add customer to order
+          await tx.orderCustomer.create({
+            data: {
+              orderId,
+              customerId,
+              isPrimary,
+            },
+          })
+
+          return { isPrimary }
+        },
+        {
+          isolationLevel: 'Serializable', // Prevents race conditions
+          timeout: 10000, // 10 second timeout
+        },
+      )
+
+      logger.info(
+        `✅ [ORDER SERVICE] Added customer ${customer.firstName || 'N/A'} ${customer.lastName || ''} to order ${order.orderNumber} | isPrimary=${result.isPrimary}`,
+      )
+      // Success - exit the retry loop
+      break
+    } catch (error: any) {
+      lastError = error
+      // Handle unique constraint violation (partial unique index on isPrimary)
+      if (error.code === 'P2002') {
+        logger.warn(`⚠️ [ORDER SERVICE] Race condition detected - another customer was set as primary simultaneously`)
+        // The customer was likely added with isPrimary=false due to timing, which is correct behavior
+        // Re-check and add with isPrimary=false
+        const existingAfterRace = await prisma.orderCustomer.findUnique({
+          where: { orderId_customerId: { orderId, customerId } },
+        })
+        if (!existingAfterRace) {
+          await prisma.orderCustomer.create({
+            data: { orderId, customerId, isPrimary: false },
+          })
+          logger.info(`✅ [ORDER SERVICE] Added customer as non-primary after race condition resolution`)
+        }
+        break // Successfully handled
+      } else if (error.code === 'P2034') {
+        // Serialization failure - another transaction was modifying the same data
+        logger.warn(`⚠️ [ORDER SERVICE] Serialization conflict, retrying... (attempt ${attempt}/${MAX_RETRIES})`)
+        if (attempt < MAX_RETRIES) {
+          // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+          await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)))
+          continue // Retry
+        }
+        // Max retries reached
+        throw new BadRequestError('Conflicto de concurrencia persistente, por favor intente de nuevo')
+      } else {
+        throw error
+      }
+    }
+  }
+
+  // Return updated list of order customers
+  return getOrderCustomers(venueId, orderId)
+}
+
+/**
+ * Remove a customer from an order
+ * If removing primary customer, the next oldest customer becomes primary
+ */
+export async function removeCustomerFromOrder(venueId: string, orderId: string, customerId: string) {
+  logger.info(`🗑️ [ORDER SERVICE] Removing customer ${customerId} from order ${orderId}`)
+
+  // Verify order exists and belongs to venue
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { id: true, orderNumber: true },
+  })
+
+  if (!order) {
+    throw new NotFoundError('Order not found')
+  }
+
+  // Find the association to remove
+  const association = await prisma.orderCustomer.findUnique({
+    where: { orderId_customerId: { orderId, customerId } },
+  })
+
+  if (!association) {
+    throw new NotFoundError('Customer not associated with this order')
+  }
+
+  const wasPrimary = association.isPrimary
+
+  // Remove the association
+  await prisma.orderCustomer.delete({
+    where: { orderId_customerId: { orderId, customerId } },
+  })
+
+  // If removed customer was primary, promote the next oldest customer
+  if (wasPrimary) {
+    const nextCustomer = await prisma.orderCustomer.findFirst({
+      where: { orderId },
+      orderBy: { addedAt: 'asc' },
+    })
+
+    if (nextCustomer) {
+      await prisma.orderCustomer.update({
+        where: { id: nextCustomer.id },
+        data: { isPrimary: true },
+      })
+      logger.info(`👑 [ORDER SERVICE] Promoted customer ${nextCustomer.customerId} to primary for order ${orderId}`)
+    }
+  }
+
+  logger.info(`✅ [ORDER SERVICE] Removed customer from order ${order.orderNumber}`)
+
+  // Return updated list of order customers
+  return getOrderCustomers(venueId, orderId)
+}
+
+/**
+ * Create a new customer and immediately add them to an order
+ * Allows creating customer with minimal info (firstName OR phone OR email)
+ */
+export async function createAndAddCustomerToOrder(
+  venueId: string,
+  orderId: string,
+  customerData: { firstName?: string; phone?: string; email?: string },
+) {
+  logger.info(`🆕 [ORDER SERVICE] Creating customer and adding to order ${orderId}`)
+
+  // Verify order exists and belongs to venue
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { id: true, orderNumber: true },
+  })
+
+  if (!order) {
+    throw new NotFoundError('Order not found')
+  }
+
+  // Check for duplicate email/phone in venue (if provided)
+  if (customerData.email) {
+    const existingByEmail = await prisma.customer.findUnique({
+      where: { venueId_email: { venueId, email: customerData.email } },
+    })
+    if (existingByEmail) {
+      throw new BadRequestError('Ya existe un cliente con ese email en este venue')
+    }
+  }
+
+  if (customerData.phone) {
+    const existingByPhone = await prisma.customer.findUnique({
+      where: { venueId_phone: { venueId, phone: customerData.phone } },
+    })
+    if (existingByPhone) {
+      throw new BadRequestError('Ya existe un cliente con ese teléfono en este venue')
+    }
+  }
+
+  // 🔒 RACE CONDITION FIX: Create customer and add to order in Serializable transaction
+  // Combined with partial unique index on (orderId) WHERE isPrimary=true as defense-in-depth
+  // Retry up to 5 times on serialization conflicts with exponential backoff
+  const MAX_RETRIES = 5
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await prisma.$transaction(
+        async tx => {
+          // Check if this will be the first customer (primary) - INSIDE transaction for consistency
+          const existingCustomersCount = await tx.orderCustomer.count({
+            where: { orderId },
+          })
+          const isPrimary = existingCustomersCount === 0
+
+          // Create the customer
+          const newCustomer = await tx.customer.create({
+            data: {
+              venueId,
+              firstName: customerData.firstName || null,
+              phone: customerData.phone || null,
+              email: customerData.email || null,
+              firstVisitAt: new Date(),
+            },
+          })
+
+          // Add to order
+          await tx.orderCustomer.create({
+            data: {
+              orderId,
+              customerId: newCustomer.id,
+              isPrimary,
+            },
+          })
+
+          logger.info(
+            `✅ [ORDER SERVICE] Created customer ${newCustomer.id} and added to order ${order.orderNumber} | isPrimary=${isPrimary}`,
+          )
+        },
+        {
+          isolationLevel: 'Serializable', // Prevents race conditions
+          timeout: 10000, // 10 second timeout
+        },
+      )
+      // Success - exit the retry loop
+      break
+    } catch (error: any) {
+      // Handle unique constraint violation (partial unique index on isPrimary)
+      if (error.code === 'P2002') {
+        // Could be duplicate email/phone OR isPrimary constraint
+        if (error.meta?.target?.includes('email')) {
+          throw new BadRequestError('Ya existe un cliente con ese email en este venue')
+        }
+        if (error.meta?.target?.includes('phone')) {
+          throw new BadRequestError('Ya existe un cliente con ese teléfono en este venue')
+        }
+        // isPrimary constraint - this shouldn't happen in normal flow due to count check
+        logger.warn(`⚠️ [ORDER SERVICE] Race condition on isPrimary detected during createAndAdd`)
+        throw new BadRequestError('Conflicto de concurrencia, por favor intente de nuevo')
+      } else if (error.code === 'P2034') {
+        // Serialization failure - retry with exponential backoff
+        logger.warn(`⚠️ [ORDER SERVICE] Serialization conflict in createAndAddCustomerToOrder (attempt ${attempt}/${MAX_RETRIES})`)
+        if (attempt < MAX_RETRIES) {
+          // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+          await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)))
+          continue // Retry
+        }
+        // Max retries reached
+        throw new BadRequestError('Conflicto de concurrencia persistente, por favor intente de nuevo')
+      } else {
+        throw error
+      }
+    }
+  }
+
+  // Return updated list of order customers
+  return getOrderCustomers(venueId, orderId)
 }

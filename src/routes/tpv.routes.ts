@@ -24,6 +24,9 @@ import {
   addOrderItemsSchema,
   removeOrderItemSchema,
   updateGuestInfoSchema,
+  addOrderCustomerSchema,
+  removeOrderCustomerSchema,
+  createAndAddCustomerSchema,
   compItemsSchema,
   voidItemsSchema,
   applyDiscountSchema,
@@ -2731,6 +2734,181 @@ router.patch(
   checkPermission('orders:update'),
   validateRequest(updateGuestInfoSchema),
   orderController.updateGuestInfo,
+)
+
+// ============================================================================
+// Order-Customer Relationship Routes (Multi-Customer Support)
+// ============================================================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers:
+ *   get:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Get all customers for an order
+ *     description: Returns list of customers associated with an order (multi-customer support)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: List of order customers
+ */
+router.get(
+  '/venues/:venueId/orders/:orderId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  orderController.getOrderCustomers,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Add customer to order
+ *     description: Add an existing customer to an order (multi-customer support). First customer becomes primary.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - customerId
+ *             properties:
+ *               customerId:
+ *                 type: string
+ *                 format: cuid
+ *     responses:
+ *       201:
+ *         description: Customer added to order successfully
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(addOrderCustomerSchema),
+  orderController.addCustomerToOrder,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers/create:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Create customer and add to order
+ *     description: Create a new customer with minimal info and immediately add to order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               firstName:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *                 format: email
+ *     responses:
+ *       201:
+ *         description: Customer created and added to order successfully
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/customers/create',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(createAndAddCustomerSchema),
+  orderController.createAndAddCustomerToOrder,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers/{customerId}:
+ *   delete:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Remove customer from order
+ *     description: Remove a customer from an order. If primary is removed, next oldest becomes primary.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: customerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Customer removed from order successfully
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(removeOrderCustomerSchema),
+  orderController.removeCustomerFromOrder,
 )
 
 /**

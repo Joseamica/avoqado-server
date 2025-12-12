@@ -219,3 +219,97 @@ export async function applyDiscount(
     next(error)
   }
 }
+
+// ============================================================================
+// Order-Customer Relationship Controllers (Multi-Customer Support)
+// ============================================================================
+
+export async function getOrderCustomers(
+  req: Request<{ venueId: string; orderId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const orderId: string = req.params.orderId
+
+    const orderCustomers = await orderTpvService.getOrderCustomers(venueId, orderId)
+
+    res.status(200).json({
+      success: true,
+      data: orderCustomers,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function addCustomerToOrder(
+  req: Request<{ venueId: string; orderId: string }, any, { customerId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const orderId: string = req.params.orderId
+    const { customerId } = req.body
+
+    const orderCustomers = await orderTpvService.addCustomerToOrder(venueId, orderId, customerId)
+
+    res.status(201).json({
+      success: true,
+      data: orderCustomers,
+      message: 'Customer added to order successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function removeCustomerFromOrder(
+  req: Request<{ venueId: string; orderId: string; customerId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const orderId: string = req.params.orderId
+    const customerId: string = req.params.customerId
+
+    const orderCustomers = await orderTpvService.removeCustomerFromOrder(venueId, orderId, customerId)
+
+    res.status(200).json({
+      success: true,
+      data: orderCustomers,
+      message: 'Customer removed from order successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function createAndAddCustomerToOrder(
+  req: Request<{ venueId: string; orderId: string }, any, { firstName?: string; phone?: string; email?: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const orderId: string = req.params.orderId
+    const { firstName, phone, email } = req.body
+
+    const orderCustomers = await orderTpvService.createAndAddCustomerToOrder(venueId, orderId, {
+      firstName,
+      phone,
+      email,
+    })
+
+    res.status(201).json({
+      success: true,
+      data: orderCustomers,
+      message: 'Customer created and added to order successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}

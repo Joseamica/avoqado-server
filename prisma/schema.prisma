@@ -1580,6 +1580,9 @@ model Order {
   orderDiscounts   OrderDiscount[]
   couponRedemption CouponRedemption?
 
+  // Multi-customer support (N:N relationship)
+  orderCustomers OrderCustomer[]
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
@@ -1592,6 +1595,24 @@ model Order {
   @@index([customerId])
   @@index([venueId, tableId, paymentStatus])
   @@index([venueId, customerIdentifier, paymentStatus])
+}
+
+// Junction table for many-to-many Order <-> Customer relationship
+// Allows multiple customers per order for visit tracking and loyalty
+model OrderCustomer {
+  id         String   @id @default(cuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  // First customer added = primary (receives loyalty points)
+  isPrimary Boolean  @default(false)
+  addedAt   DateTime @default(now())
+
+  @@unique([orderId, customerId]) // Prevent duplicate customer on same order
+  @@index([orderId])
+  @@index([customerId])
 }
 
 model OrderItem {
@@ -3081,6 +3102,9 @@ model Customer {
   // Discount System (Phase 2)
   customerDiscounts CustomerDiscount[]
   couponRedemptions CouponRedemption[]
+
+  // Multi-customer support (N:N relationship with orders)
+  orderAssociations OrderCustomer[]
 
   @@index([venueId])
   @@index([customerGroupId])

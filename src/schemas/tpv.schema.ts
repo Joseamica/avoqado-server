@@ -291,7 +291,46 @@ export const updateGuestInfoSchema = z.object({
       .optional()
       .nullable(),
     specialRequests: z.string().optional().nullable(),
+    customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }).optional().nullable(),
   }),
+})
+
+// Order-Customer relationship schemas (multi-customer support)
+export const addOrderCustomerSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }),
+  }),
+})
+
+export const removeOrderCustomerSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+    customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }),
+  }),
+})
+
+export const createAndAddCustomerSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
+  body: z
+    .object({
+      firstName: z.string().min(1, { message: 'El nombre no puede estar vacío.' }).optional(),
+      phone: z
+        .string()
+        .regex(/^[0-9+\-() ]+$/, { message: 'El teléfono debe contener solo números y símbolos válidos.' })
+        .optional(),
+      email: z.string().email({ message: 'El email debe ser válido.' }).optional(),
+    })
+    .refine(data => data.firstName || data.phone || data.email, {
+      message: 'Se requiere al menos nombre, teléfono o email.',
+    }),
 })
 
 // Order action schemas (comp, void, discount)

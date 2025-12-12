@@ -1952,9 +1952,27 @@ async function main() {
         console.log(`      - Created secondary terminal: ${secondaryTerminal.serialNumber}`)
       }
 
+      // Category colors for visual distinction (Square/Toast pattern)
+      const categoryColors: Record<string, string> = {
+        Hamburguesas: '#FF5722', // Deep Orange
+        'Tacos Mexicanos': '#4CAF50', // Green
+        Pizzas: '#E91E63', // Pink
+        Entradas: '#9C27B0', // Purple
+        Bebidas: '#2196F3', // Blue
+        Postres: '#FFEB3B', // Yellow
+      }
+
       const categories = await Promise.all(
         ['Hamburguesas', 'Tacos Mexicanos', 'Pizzas', 'Entradas', 'Bebidas', 'Postres'].map((name, index) =>
-          prisma.menuCategory.create({ data: { venueId: venue.id, name, slug: generateSlug(name), displayOrder: index } }),
+          prisma.menuCategory.create({
+            data: {
+              venueId: venue.id,
+              name,
+              slug: generateSlug(name),
+              displayOrder: index,
+              color: categoryColors[name],
+            },
+          }),
         ),
       )
       console.log(`      - Created ${categories.length} menu categories.`)
@@ -2182,7 +2200,28 @@ async function main() {
           },
         })
 
-        console.log(`        * Table ${orderData.table.number}: Order ${order.orderNumber} - ${orderData.covers} covers - $${orderTotal}`)
+        // 👥 Add customers to pending orders (multi-customer demo)
+        // First table: 1 customer, Second table: 2 customers, Third table: 3 customers
+        const tableIndex = tablesToOccupy.indexOf(orderData.table)
+        const customersToAdd = Math.min(tableIndex + 1, customers.length)
+
+        for (let i = 0; i < customersToAdd; i++) {
+          if (customers[i]) {
+            await prisma.orderCustomer.create({
+              data: {
+                orderId: order.id,
+                customerId: customers[i].id,
+                isPrimary: i === 0, // First customer is primary
+                addedAt: new Date(Date.now() + i * 1000),
+              },
+            })
+          }
+        }
+
+        const customerCount = customersToAdd > 0 ? ` (${customersToAdd} customers)` : ''
+        console.log(
+          `        * Table ${orderData.table.number}: Order ${order.orderNumber} - ${orderData.covers} covers - $${orderTotal}${customerCount}`,
+        )
       }
 
       // ==========================================
@@ -3825,6 +3864,51 @@ async function main() {
             where: { id: order.id },
             data: { subtotal, taxAmount, tipAmount, total },
           })
+
+          // 👥 Create OrderCustomer records (multi-customer support)
+          // If order has a customer, create OrderCustomer junction record
+          if (shouldAddCustomer && customer) {
+            // Create primary customer association
+            await prisma.orderCustomer.create({
+              data: {
+                orderId: order.id,
+                customerId: customer.id,
+                isPrimary: true,
+                addedAt: orderCreatedAt,
+              },
+            })
+
+            // For ~30% of orders with customers, add a second customer (party of 2+)
+            if (Math.random() < 0.3 && customers.length > 1) {
+              // Pick a different customer
+              const secondCustomer = customers.find(c => c.id !== customer.id) || customers[0]
+              if (secondCustomer && secondCustomer.id !== customer.id) {
+                await prisma.orderCustomer.create({
+                  data: {
+                    orderId: order.id,
+                    customerId: secondCustomer.id,
+                    isPrimary: false,
+                    addedAt: new Date(orderCreatedAt.getTime() + 1000), // 1 second after
+                  },
+                })
+              }
+            }
+
+            // For ~10% of orders, add a third customer (larger party)
+            if (Math.random() < 0.1 && customers.length > 2) {
+              const thirdCustomer = customers.find(c => c.id !== customer.id && c.email !== customer.email)
+              if (thirdCustomer) {
+                await prisma.orderCustomer.create({
+                  data: {
+                    orderId: order.id,
+                    customerId: thirdCustomer.id,
+                    isPrimary: false,
+                    addedAt: new Date(orderCreatedAt.getTime() + 2000), // 2 seconds after
+                  },
+                })
+              }
+            }
+          }
 
           totalOrdersGenerated++
 
