@@ -36,6 +36,14 @@ export interface ReorderProductsDto {
   displayOrder: number
 }
 
+export interface QuickAddProductDto {
+  barcode: string
+  name: string
+  price: number
+  categoryId?: string
+  trackInventory?: boolean
+}
+
 /**
  * Calculate available portions from recipe (Toast POS pattern)
  *
@@ -596,4 +604,162 @@ export async function removeModifierGroupFromProduct(venueId: string, productId:
       groupId: modifierGroupId,
     },
   })
+}
+
+/**
+ * Search product by barcode (SKU)
+ *
+ * ✅ BARCODE QUICK ADD: Find product by scanning barcode
+ * Uses unique constraint (venueId, sku) for O(1) lookup
+ */
+export async function getProductByBarcode(venueId: string, barcode: string): Promise<any | null> {
+  const product = await prisma.product.findFirst({
+    where: {
+      venueId,
+      sku: barcode, // ✅ SKU field stores barcode
+      active: true,
+      deletedAt: null, // Exclude soft-deleted products
+    },
+    include: {
+      category: true,
+      inventory: true,
+      modifierGroups: {
+        include: {
+          group: {
+            include: {
+              modifiers: true,
+            },
+          },
+        },
+        orderBy: { displayOrder: 'asc' },
+      },
+      recipe: {
+        include: {
+          lines: {
+            include: {
+              rawMaterial: {
+                select: {
+                  id: true,
+                  currentStock: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  if (!product) {
+    return null
+  }
+
+  // ✅ Calculate availableQuantity (Toast POS pattern)
+  let availableQuantity = null
+
+  if (product.trackInventory) {
+    if (product.inventoryMethod === 'QUANTITY') {
+      availableQuantity = Math.floor(Number(product.inventory?.currentStock ?? 0))
+    } else if (product.inventoryMethod === 'RECIPE' && product.recipe) {
+      availableQuantity = calculateAvailablePortions(product.recipe)
+    }
+  }
+
+  return {
+    ...product,
+    availableQuantity,
+  }
+}
+
+/**
+ * Create product quickly from barcode scan (Square POS pattern)
+ *
+ * ✅ BARCODE QUICK ADD: When scanning unknown barcode, create product on-the-fly
+ * Creates minimal product with barcode as SKU
+ */
+export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto): Promise<Product> {
+  const { barcode, name, price, categoryId, trackInventory } = quickAddData
+
+  // ✅ Check if product with this barcode already exists
+  const existing = await prisma.product.findFirst({
+    where: {
+      venueId,
+      sku: barcode,
+    },
+  })
+
+  if (existing) {
+    throw new AppError(`Product with barcode ${barcode} already exists in venue ${venueId}`, 409)
+  }
+
+  // Get the next display order
+  const maxOrder = await prisma.product.findFirst({
+    where: { venueId },
+    orderBy: { displayOrder: 'desc' },
+    select: { displayOrder: true },
+  })
+
+  const displayOrder = (maxOrder?.displayOrder || 0) + 1
+
+  // ✅ Create product with barcode as SKU
+  const product = await prisma.product.create({
+    data: {
+      name,
+      sku: barcode, // ✅ Barcode becomes the SKU
+      price,
+      venueId,
+      type: 'PRODUCT', // Default type
+      categoryId: categoryId || null,
+      trackInventory: trackInventory || false,
+      inventoryMethod: trackInventory ? 'QUANTITY' : null,
+      displayOrder,
+      active: true,
+    },
+    include: {
+      category: true,
+      inventory: true,
+      modifierGroups: {
+        include: {
+          group: {
+            include: {
+              modifiers: true,
+            },
+          },
+        },
+      },
+    },
+  })
+
+  // 🔌 REAL-TIME: Broadcast product creation via Socket.IO
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastMenuItemCreated(venueId, {
+      itemId: product.id,
+      itemName: product.name,
+      sku: product.sku,
+      categoryId: product.categoryId,
+      categoryName: product.category?.name || '',
+      price: Number(product.price),
+      available: product.active,
+      imageUrl: product.imageUrl,
+      description: product.description,
+      modifierGroupIds: product.modifierGroups.map(mg => mg.groupId),
+    })
+
+    broadcastingService.broadcastMenuUpdated(venueId, {
+      updateType: 'PARTIAL_UPDATE',
+      productIds: [product.id],
+      categoryIds: product.categoryId ? [product.categoryId] : [],
+      reason: 'ITEM_ADDED',
+    })
+
+    logger.info('🔌 Quick-add product created and broadcasted', {
+      venueId,
+      productId: product.id,
+      productName: product.name,
+      barcode,
+    })
+  }
+
+  return product
 }

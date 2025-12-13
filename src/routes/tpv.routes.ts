@@ -1,4 +1,4 @@
-import express from 'express'
+import express, { Request, Response, NextFunction } from 'express'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
@@ -58,6 +58,11 @@ import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 import * as customerController from '../controllers/tpv/customer.tpv.controller'
 import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
+import * as productService from '../services/dashboard/product.dashboard.service'
+import AppError from '../errors/AppError'
+import logger from '../config/logger'
+import { Decimal } from '@prisma/client/runtime/library'
+import prisma from '../utils/prismaClient'
 
 const router = express.Router()
 
@@ -3956,6 +3961,284 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   saleVerificationController.getVerificationByPaymentId,
+)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BARCODE QUICK ADD (Square POS "Scan & Go" Pattern)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/products/barcode/{barcode}:
+ *   get:
+ *     tags:
+ *       - TPV - Products
+ *     summary: Search product by barcode (Scan & Go)
+ *     description: |
+ *       Find a product by scanning its barcode. Used by Android TPV app for quick product lookup.
+ *
+ *       **Square POS Pattern:**
+ *       - Scan barcode → Find product by SKU → Add to order
+ *       - If not found → Show "Quick Add Product" dialog
+ *
+ *       **Flow:**
+ *       1. User presses VOLUME+ button on PAX terminal
+ *       2. Opens barcode scanner
+ *       3. Scans product barcode
+ *       4. Calls this endpoint
+ *       5. If found → Add to order with quantity=1
+ *       6. If not found (404) → Show creation dialog
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: Venue ID from terminal authentication
+ *       - in: path
+ *         name: barcode
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Barcode string (EAN-13, UPC-A, Code-128, etc.)
+ *         example: "AVO-PROD-ALO"
+ *     responses:
+ *       200:
+ *         description: Product found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Product found for barcode AVO-PROD-ALO"
+ *                 data:
+ *                   type: object
+ *                   description: Product details with inventory, modifiers, recipe
+ *       404:
+ *         description: Product not found (client should show Quick Add dialog)
+ *       401:
+ *         description: Unauthorized (terminal not authenticated)
+ *       403:
+ *         description: Forbidden (terminal lacks menu:read permission)
+ */
+router.get(
+  '/venues/:venueId/products/barcode/:barcode',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, barcode } = req.params
+
+      logger.info(`🔍 [TPV Barcode] Searching product by barcode: ${barcode} for venueId: ${venueId}`, {
+        correlationId: req.correlationId,
+        venueId,
+        barcode,
+      })
+
+      // Search product by SKU (Product.sku stores barcode)
+      const product = await productService.getProductByBarcode(venueId, barcode)
+
+      if (!product) {
+        logger.warn(`⚠️ [TPV Barcode] Product not found for barcode: ${barcode}`, {
+          correlationId: req.correlationId,
+          venueId,
+          barcode,
+        })
+
+        return next(new AppError(`Product with barcode ${barcode} not found in venue ${venueId}`, 404))
+      }
+
+      logger.info(`✅ [TPV Barcode] Product found: ${product.name} (${product.id})`, {
+        correlationId: req.correlationId,
+        productId: product.id,
+        productName: product.name,
+      })
+
+      res.status(200).json({
+        message: `Product found for barcode ${barcode}`,
+        data: product,
+        correlationId: req.correlationId,
+      })
+    } catch (error) {
+      logger.error(`❌ [TPV Barcode] Error searching product by barcode`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/products/quick-add:
+ *   post:
+ *     tags:
+ *       - TPV - Products
+ *     summary: Create product on-the-fly from barcode scan
+ *     description: |
+ *       Create a new product when barcode is not found during scanning.
+ *       Allows cashier to add products to catalog in real-time without leaving MenuScreen.
+ *
+ *       **Square POS Pattern:**
+ *       - Scan unknown barcode → 404 from search endpoint
+ *       - Show "Quick Add Product" dialog
+ *       - User enters name, price, category
+ *       - Submit → Product created → Added to order
+ *
+ *       **Flow:**
+ *       1. Scan barcode "7501234567890"
+ *       2. GET /barcode/:barcode returns 404
+ *       3. Show dialog with barcode pre-filled (readonly)
+ *       4. User enters: name="iPhone 15", price=999.00
+ *       5. POST to this endpoint
+ *       6. Product created with sku=barcode
+ *       7. Automatically add to current order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - barcode
+ *               - name
+ *               - price
+ *               - categoryId
+ *             properties:
+ *               barcode:
+ *                 type: string
+ *                 description: Scanned barcode (will be saved as SKU)
+ *                 example: "7501234567890"
+ *               name:
+ *                 type: string
+ *                 description: Product name
+ *                 example: "iPhone 15 Pro Max 256GB"
+ *               price:
+ *                 type: number
+ *                 format: decimal
+ *                 description: Product price
+ *                 example: 999.00
+ *               categoryId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Category ID (required)
+ *               trackInventory:
+ *                 type: boolean
+ *                 default: false
+ *                 description: Whether to track inventory for this product
+ *     responses:
+ *       201:
+ *         description: Product created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Product created successfully"
+ *                 data:
+ *                   type: object
+ *                   description: Created product with inventory
+ *       409:
+ *         description: Product with this barcode already exists
+ *       400:
+ *         description: Invalid request (missing required fields)
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden (lacks menu:write permission)
+ */
+router.post(
+  '/venues/:venueId/products/quick-add',
+  authenticateTokenMiddleware,
+  checkPermission('menu:write'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const { barcode, name, price, categoryId, trackInventory } = req.body
+
+      // Validate required fields
+      if (!barcode || !name || price === undefined || !categoryId) {
+        return next(new AppError('Missing required fields: barcode, name, price, and categoryId are required', 400))
+      }
+
+      logger.info(`📦 [TPV Quick Add] Creating product from barcode scan`, {
+        correlationId: req.correlationId,
+        venueId,
+        barcode,
+        name,
+        price,
+        categoryId,
+      })
+
+      // Check if product already exists with this barcode
+      const existingProduct = await productService.getProductByBarcode(venueId, barcode)
+      if (existingProduct) {
+        logger.warn(`⚠️ [TPV Quick Add] Product already exists with barcode: ${barcode}`, {
+          correlationId: req.correlationId,
+          existingProductId: existingProduct.id,
+        })
+
+        return res.status(409).json({
+          message: `Product already exists with barcode ${barcode}`,
+          data: existingProduct,
+          correlationId: req.correlationId,
+        })
+      }
+
+      // Create product using Prisma directly
+      const product = await prisma.product.create({
+        data: {
+          venueId,
+          sku: barcode, // ✅ Store barcode as SKU
+          name,
+          price: new Decimal(price),
+          categoryId, // ✅ Required field
+          trackInventory: trackInventory || false,
+          active: true,
+          displayOrder: 0,
+        },
+        include: {
+          category: true,
+          inventory: true,
+        },
+      })
+
+      logger.info(`✅ [TPV Quick Add] Product created successfully: ${product.name} (${product.id})`, {
+        correlationId: req.correlationId,
+        productId: product.id,
+        barcode,
+      })
+
+      res.status(201).json({
+        message: 'Product created successfully',
+        data: product,
+        correlationId: req.correlationId,
+      })
+    } catch (error) {
+      logger.error(`❌ [TPV Quick Add] Error creating product`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
 )
 
 export default router

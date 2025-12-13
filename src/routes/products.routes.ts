@@ -27,6 +27,81 @@ const mockProducts: Product[] = [
 
 // --- Product Routes ---
 
+// GET /api/v1/venues/:venueId/products/barcode/:barcode
+// Search product by barcode (for barcode scanning feature)
+router.get('/barcode/:barcode', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, barcode } = req.params
+    logger.info(`🔍 Searching product by barcode: ${barcode} for venueId: ${venueId}`, { correlationId: req.correlationId })
+
+    if (!venueId || !barcode) {
+      return next(new AppError('Venue ID and barcode are required', 400))
+    }
+
+    const product = await productService.getProductByBarcode(venueId, barcode)
+
+    if (!product) {
+      return next(new AppError(`Product with barcode ${barcode} not found in venue ${venueId}`, 404))
+    }
+
+    res.status(200).json({
+      message: `Product found for barcode ${barcode}`,
+      data: product,
+      correlationId: req.correlationId,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// POST /api/v1/venues/:venueId/products/quick-add
+// Create product quickly from barcode scan
+router.post(
+  '/quick-add',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const { barcode, name, price, categoryId, trackInventory } = req.body
+
+      logger.info(`📦 Quick-add product from barcode: ${barcode} in venue ${venueId}`, {
+        correlationId: req.correlationId,
+        authContext: req.authContext,
+        productName: name,
+      })
+
+      if (!venueId) {
+        return next(new AppError('Venue ID is required to create a product', 400))
+      }
+
+      if (!barcode || !name || !price) {
+        return next(new AppError('Barcode, name, and price are required', 400))
+      }
+
+      if (typeof price !== 'number' || price <= 0) {
+        return next(new AppError('Price must be a positive number', 400))
+      }
+
+      const product = await productService.createQuickAddProduct(venueId, {
+        barcode,
+        name,
+        price,
+        categoryId,
+        trackInventory,
+      })
+
+      res.status(201).json({
+        message: `Product '${name}' created successfully from barcode ${barcode}`,
+        data: product,
+        correlationId: req.correlationId,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
 // GET /api/v1/venues/:venueId/products
 // Get all products for a specific venue
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
