@@ -680,6 +680,11 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
 export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto): Promise<Product> {
   const { barcode, name, price, categoryId, trackInventory } = quickAddData
 
+  // ✅ CategoryId is required by the database schema
+  if (!categoryId) {
+    throw new AppError('categoryId is required for creating a product', 400)
+  }
+
   // ✅ Check if product with this barcode already exists
   const existing = await prisma.product.findFirst({
     where: {
@@ -708,8 +713,8 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
       sku: barcode, // ✅ Barcode becomes the SKU
       price,
       venueId,
-      type: 'PRODUCT', // Default type
-      categoryId: categoryId || null,
+      categoryId, // Validated above, always present
+      type: ProductType.OTHER, // Default type for quick-add
       trackInventory: trackInventory || false,
       inventoryMethod: trackInventory ? 'QUANTITY' : null,
       displayOrder,
@@ -733,17 +738,21 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
   // 🔌 REAL-TIME: Broadcast product creation via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
+    const productWithRelations = product as typeof product & {
+      category?: { name: string } | null
+      modifierGroups: Array<{ groupId: string }>
+    }
     broadcastingService.broadcastMenuItemCreated(venueId, {
       itemId: product.id,
       itemName: product.name,
       sku: product.sku,
       categoryId: product.categoryId,
-      categoryName: product.category?.name || '',
+      categoryName: productWithRelations.category?.name || '',
       price: Number(product.price),
       available: product.active,
       imageUrl: product.imageUrl,
       description: product.description,
-      modifierGroupIds: product.modifierGroups.map(mg => mg.groupId),
+      modifierGroupIds: productWithRelations.modifierGroups.map(mg => mg.groupId),
     })
 
     broadcastingService.broadcastMenuUpdated(venueId, {
