@@ -201,20 +201,58 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
   }
 
   try {
-    // Extract venue info from dataSnapshot for email
+    // Extract all receipt data from dataSnapshot for email
     const dataSnapshot = receipt.dataSnapshot as any
-    const venueName = dataSnapshot?.venue?.name || 'Establecimiento'
-    const venueLogoUrl = dataSnapshot?.venue?.logo || undefined
-    const orderNumber = dataSnapshot?.order?.number?.toString() || undefined
-    const totalAmount = dataSnapshot?.payment?.totalAmount ? `$${parseFloat(dataSnapshot.payment.totalAmount).toFixed(2)}` : undefined
+    const venue = dataSnapshot?.venue || {}
+    const order = dataSnapshot?.order || {}
+    const payment = dataSnapshot?.payment || {}
 
-    // Send actual email using the email service
+    // Format the payment date
+    const paymentDate = payment.createdAt
+      ? new Date(payment.createdAt).toLocaleDateString('es-MX', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : undefined
+
+    // Calculate total with fallbacks for older receipts
+    const subtotal = order.subtotal || 0
+    const taxAmount = order.taxAmount || 0
+    const tipAmount = payment.tipAmount || 0
+    // Use payment.totalAmount if available, otherwise calculate from order.total + tip, or from components
+    const totalAmount = payment.totalAmount || order.total + tipAmount || subtotal + taxAmount + tipAmount || payment.amount + tipAmount
+
+    // Send actual email using the email service with full receipt data
     const emailSent = await emailService.sendReceiptEmail(receipt.recipientEmail, {
-      venueName,
+      // Venue info
+      venueName: venue.name || 'Establecimiento',
+      venueLogoUrl: venue.logo || undefined,
+      venueAddress: venue.address || undefined,
+      venueCity: venue.city || undefined,
+      venueState: venue.state || undefined,
+      venuePhone: venue.phone || undefined,
+      venueEmail: venue.email || undefined,
+      currency: venue.currency || 'MXN',
+      // Receipt info
       receiptUrl: `${process.env.FRONTEND_URL}/receipts/public/${receipt.accessKey}`,
-      venueLogoUrl,
-      orderNumber,
+      receiptNumber: receipt.accessKey.slice(-4).toUpperCase(),
+      orderNumber: order.number?.toString() || undefined,
+      // Order items
+      items: order.items || [],
+      // Totals
+      subtotal,
+      taxAmount,
+      tipAmount,
       totalAmount,
+      // Payment info
+      paymentMethod: payment.method,
+      paymentDate,
+      // People
+      processedBy: dataSnapshot?.processedBy?.name || undefined,
+      customerName: dataSnapshot?.customer?.name || undefined,
     })
 
     if (!emailSent) {
@@ -224,7 +262,7 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
     logger.info(`Receipt email sent successfully to ${receipt.recipientEmail}`, {
       receiptId: receipt.id,
       accessKey: receipt.accessKey,
-      venueName,
+      venueName: venue.name,
     })
 
     // Update receipt status

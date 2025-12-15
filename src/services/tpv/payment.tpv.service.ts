@@ -1641,7 +1641,7 @@ export async function recordOrderPayment(
       ? {
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
-          receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`,
+          receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
         }
       : null,
   }
@@ -2104,7 +2104,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       ? {
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
-          receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`,
+          receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
         }
       : null,
   }

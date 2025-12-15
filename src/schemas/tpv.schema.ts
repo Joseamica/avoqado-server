@@ -171,11 +171,11 @@ export const recordPaymentBodySchema = z.object({
       // Allows TPV to specify which merchant account should process the payment
       // ✅ CONDITIONAL VALIDATION: Required for card payments, null for cash
       merchantAccountId: z.string().cuid({ message: 'El ID de la cuenta merchant debe ser un CUID válido.' }).nullable().optional(),
-      // Blumon serial number format: 10-digit numeric string (e.g., "2841548417")
+      // Blumon serial number format: 10-11 character alphanumeric string (e.g., "2841548417" or "A2841548418")
       // Used for TIER 2 merchant recovery when merchantAccountId is invalid/missing
       blumonSerialNumber: z
         .string()
-        .regex(/^[0-9]{10}$/, { message: 'El serial Blumon debe ser un número de 10 dígitos' })
+        .regex(/^[A-Za-z0-9]{10,11}$/, { message: 'El serial Blumon debe ser alfanumérico de 10-11 caracteres' })
         .optional(),
 
       // Split payment specific fields
