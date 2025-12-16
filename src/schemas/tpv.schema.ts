@@ -198,6 +198,11 @@ export const recordPaymentBodySchema = z.object({
 
       // Scanned barcodes from verification screen
       verificationBarcodes: z.array(z.string()).optional(),
+
+      // 💸 Blumon Operation Number (2025-12-16) - For refunds without webhook
+      // Small integer from SDK response (response.operation) needed for CancelIcc refunds
+      // Example: 12945658 (fits in Int, unlike the 12-digit referenceNumber)
+      blumonOperationNumber: z.number().int().positive().optional(),
     })
     .refine(
       data => {
