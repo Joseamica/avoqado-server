@@ -105,4 +105,4 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: FRONTEND_URL
-        value: https://avoqado-web-dashboard.pages.dev
+        value: https://dashboardv2.avoqado.io
