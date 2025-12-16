@@ -12,6 +12,7 @@ import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboa
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
+import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -553,14 +554,99 @@ async function updateOrderTotalsForStandalonePayment(
       totalItems: updatedOrder.items.length,
     })
 
-    // 🎁 LOYALTY POINTS: Automatically earn points when order is fully paid
-    // ✅ WORLD-CLASS PATTERN: Reward customers for completed purchases (Square, Toast, Shopify)
-    if (order.customerId && order.customer) {
-      try {
-        const orderTotal = parseFloat(updatedOrder.total.toString())
-        const loyaltyResult = await earnPoints(updatedOrder.venueId, order.customerId, orderTotal, orderId, staffId)
+    // 🎟️ COUPON FINALIZATION: Mark coupons as redeemed when order is fully paid
+    // ✅ WORLD-CLASS PATTERN: Coupons are "applied" at checkout but only "redeemed" on payment (Toast, Square)
+    try {
+      await finalizeCouponsForOrder(updatedOrder.venueId, orderId)
+    } catch (couponError: any) {
+      // ⚠️ Don't fail the payment if coupon finalization fails - just log the error
+      logger.error('⚠️ Failed to finalize coupons (payment still succeeded)', {
+        orderId,
+        error: couponError.message,
+      })
+      // Continue execution - payment is still successful
+    }
 
-        logger.info('🎁 Loyalty points earned successfully', {
+    // 🎁 CUSTOMER METRICS & LOYALTY POINTS: Update for ALL customers, points for PRIMARY only
+    // ✅ WORLD-CLASS PATTERN: Multiple customers per order (visit tracking + loyalty)
+    const orderTotal = parseFloat(updatedOrder.total.toString())
+
+    // 🔧 FIX: LoyaltyTransaction.createdById expects StaffVenue ID (not Staff ID)
+    // Look up StaffVenue ID from Staff ID for proper foreign key reference
+    let staffVenueId: string | undefined = undefined
+    if (staffId) {
+      const staffVenue = await prisma.staffVenue.findFirst({
+        where: {
+          staffId: staffId,
+          venueId: updatedOrder.venueId,
+        },
+        select: { id: true },
+      })
+      staffVenueId = staffVenue?.id
+    }
+
+    // Get ALL customers associated with this order (multi-customer support)
+    const orderCustomers = await prisma.orderCustomer.findMany({
+      where: { orderId },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+      orderBy: { addedAt: 'asc' },
+    })
+
+    if (orderCustomers.length > 0) {
+      // Update metrics (totalVisits, lastVisitAt, totalSpent) for ALL customers
+      for (const oc of orderCustomers) {
+        try {
+          await updateCustomerMetrics(oc.customerId, orderTotal)
+          logger.info('📊 Customer metrics updated', {
+            orderId,
+            customerId: oc.customerId,
+            customerName: `${oc.customer.firstName || ''} ${oc.customer.lastName || ''}`.trim(),
+            isPrimary: oc.isPrimary,
+          })
+        } catch (metricsError: any) {
+          logger.error('⚠️ Failed to update customer metrics (continuing)', {
+            orderId,
+            customerId: oc.customerId,
+            error: metricsError.message,
+          })
+        }
+
+        // Award loyalty points ONLY to PRIMARY customer (first added)
+        if (oc.isPrimary) {
+          try {
+            const loyaltyResult = await earnPoints(updatedOrder.venueId, oc.customerId, orderTotal, orderId, staffVenueId)
+            logger.info('🎁 Loyalty points earned (PRIMARY customer)', {
+              orderId,
+              customerId: oc.customerId,
+              customerName: `${oc.customer.firstName || ''} ${oc.customer.lastName || ''}`.trim(),
+              orderTotal,
+              pointsEarned: loyaltyResult.pointsEarned,
+              newBalance: loyaltyResult.newBalance,
+            })
+          } catch (loyaltyError: any) {
+            logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
+              orderId,
+              customerId: oc.customerId,
+              error: loyaltyError.message,
+              reason: loyaltyError.message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
+            })
+          }
+        }
+      }
+    } else if (order.customerId && order.customer) {
+      // Backward compatibility: If no OrderCustomer records, use legacy single customerId
+      try {
+        await updateCustomerMetrics(order.customerId, orderTotal)
+        const loyaltyResult = await earnPoints(updatedOrder.venueId, order.customerId, orderTotal, orderId, staffVenueId)
+        logger.info('🎁 Loyalty points earned (legacy single customer)', {
           orderId,
           customerId: order.customerId,
           customerName: `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim(),
@@ -569,20 +655,19 @@ async function updateOrderTotalsForStandalonePayment(
           newBalance: loyaltyResult.newBalance,
         })
       } catch (loyaltyError: any) {
-        // ⚠️ Don't fail the payment if loyalty points fail - just log the error
         logger.error('⚠️ Failed to earn loyalty points (payment still succeeded)', {
           orderId,
           customerId: order.customerId,
           error: loyaltyError.message,
           reason: loyaltyError.message.includes('not enabled') ? 'LOYALTY_DISABLED' : 'LOYALTY_ERROR',
         })
-        // Continue execution - payment is still successful
       }
     } else {
       logger.info('⏭️ Loyalty points skipped: Order has no customer', {
         orderId,
         hasCustomerId: !!order.customerId,
-        isGuestOrder: !order.customerId,
+        orderCustomersCount: orderCustomers.length,
+        isGuestOrder: !order.customerId && orderCustomers.length === 0,
       })
     }
   }
@@ -889,6 +974,22 @@ interface PaymentCreationData {
   // Split payment specific fields
   equalPartsPartySize?: number
   equalPartsPayedFor?: number
+
+  // 🔧 PRE-payment verification fields (generated ONCE when entering verification screen)
+  // orderReference ensures photos match order number (FAST-{timestamp} or ORD-{number})
+  orderReference?: string
+
+  // Firebase Storage URLs of verification photos (uploaded before payment)
+  verificationPhotos?: string[]
+
+  // Scanned barcodes from verification screen
+  verificationBarcodes?: string[]
+
+  // 💸 Blumon Operation Number (2025-12-16)
+  // Small integer from SDK response (response.operation) needed for CancelIcc refunds
+  // This allows refunds to work WITHOUT waiting for Blumon webhook
+  // Example: 12945658 (fits in number, unlike the 12-digit referenceNumber string)
+  blumonOperationNumber?: number
 }
 
 /**
@@ -1192,6 +1293,8 @@ export async function recordOrderPayment(
           isInternational: paymentData.isInternational,
           // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
           blumonSerialNumber: paymentData.blumonSerialNumber || null,
+          // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+          blumonOperationNumber: paymentData.blumonOperationNumber || null,
         },
         // New enhanced fields in the Payment table
         authorizationNumber: paymentData.authorizationNumber,
@@ -1546,7 +1649,7 @@ export async function recordOrderPayment(
       ? {
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
-          receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`,
+          receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
         }
       : null,
   }
@@ -1713,19 +1816,27 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const { payment, fastOrder } = await prisma.$transaction(async tx => {
+    // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
+    // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
+    // Photos are uploaded to Firebase with this same reference
+    // This ensures photos at "venues/X/verifications/2024-01-01/FAST-123456_1.jpg" match the order
+    const orderNumber = paymentData.orderReference || `FAST-${Date.now()}`
+
     // Create fast order
     const order = await tx.order.create({
       data: {
         venueId,
-        orderNumber: `FAST-${Date.now()}`,
-        type: 'DINE_IN',
+        orderNumber,
+        type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
         source: 'TPV',
-        status: 'CONFIRMED',
+        status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
+        completedAt: new Date(),
         subtotal: paymentData.amount / 100, // Convert to decimal
         taxAmount: 0, // No tax for fast payments
         total: paymentData.amount / 100, // Convert to decimal
         paymentStatus: 'PAID',
         splitType: paymentData.splitType as any, // Set splitType for fast orders
+        createdById: validatedStaffId, // Track which staff created the fast order
       },
     })
 
@@ -1754,6 +1865,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           isInternational: paymentData.isInternational,
           // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
           blumonSerialNumber: paymentData.blumonSerialNumber || null,
+          // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+          blumonOperationNumber: paymentData.blumonOperationNumber || null,
         },
         // New enhanced fields in the Payment table
         authorizationNumber: paymentData.authorizationNumber,
@@ -1823,6 +1936,36 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         shiftId: currentShift.id,
         incrementedSales: totalAmount,
         incrementedTips: tipAmount,
+      })
+    }
+
+    // 📸 Create SaleVerification if verification photos or barcodes were provided
+    // This links the pre-uploaded Firebase photos to the payment record
+    if (
+      validatedStaffId &&
+      ((paymentData.verificationPhotos && paymentData.verificationPhotos.length > 0) ||
+        (paymentData.verificationBarcodes && paymentData.verificationBarcodes.length > 0))
+    ) {
+      await tx.saleVerification.create({
+        data: {
+          venueId,
+          paymentId: newPayment.id,
+          staffId: validatedStaffId,
+          photos: paymentData.verificationPhotos || [],
+          scannedProducts: paymentData.verificationBarcodes
+            ? paymentData.verificationBarcodes.map((barcode: string) => ({
+                barcode,
+                format: 'UNKNOWN',
+                inventoryDeducted: false,
+              }))
+            : [],
+          status: 'PENDING', // Will be processed for inventory deduction later
+        },
+      })
+      logger.info('📸 SaleVerification created for fast payment', {
+        paymentId: newPayment.id,
+        photosCount: paymentData.verificationPhotos?.length || 0,
+        barcodesCount: paymentData.verificationBarcodes?.length || 0,
       })
     }
 
@@ -1971,7 +2114,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       ? {
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
-          receiptUrl: `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}${process.env.API_PREFIX || '/api/v1'}/public/receipt/${digitalReceipt.accessKey}`,
+          receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
         }
       : null,
   }
@@ -2243,4 +2386,92 @@ function mapPaymentMethodToPOS(method: PaymentMethod): string {
   }
 
   return paymentMethodMap[method] || 'ACARD' // ✅ CHANGED: Default fallback to DEB
+}
+
+// ==========================================
+// COUPON FINALIZATION
+// ==========================================
+
+/**
+ * Finalize coupon redemptions when order payment completes.
+ * Called ONLY when order is fully paid - not on partial payments.
+ *
+ * This follows Toast/Square best practice: coupons are "applied" at checkout
+ * but only "redeemed" (counted against limits) when payment succeeds.
+ *
+ * @param venueId Venue ID for logging
+ * @param orderId Order ID to finalize coupons for
+ */
+async function finalizeCouponsForOrder(venueId: string, orderId: string): Promise<void> {
+  // Find all coupon-based discounts on this order
+  const couponDiscounts = await prisma.orderDiscount.findMany({
+    where: {
+      orderId,
+      couponCodeId: { not: null },
+    },
+    include: {
+      couponCode: {
+        include: { discount: true },
+      },
+    },
+  })
+
+  if (couponDiscounts.length === 0) {
+    logger.debug('🎟️ No coupons to finalize for order', { orderId })
+    return
+  }
+
+  // Get order for customerId
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { customerId: true },
+  })
+
+  for (const orderDiscount of couponDiscounts) {
+    if (!orderDiscount.couponCodeId || !orderDiscount.couponCode) continue
+
+    // Check if already redeemed (idempotency - prevents double counting on retries)
+    const existingRedemption = await prisma.couponRedemption.findUnique({
+      where: { orderId },
+    })
+    if (existingRedemption) {
+      logger.debug('🎟️ Coupon already redeemed for order, skipping', {
+        orderId,
+        couponCodeId: orderDiscount.couponCodeId,
+      })
+      continue
+    }
+
+    // Create redemption record
+    await prisma.couponRedemption.create({
+      data: {
+        couponCodeId: orderDiscount.couponCodeId,
+        orderId,
+        customerId: order?.customerId,
+        amountSaved: orderDiscount.amount,
+      },
+    })
+
+    // Increment CouponCode.currentUses
+    await prisma.couponCode.update({
+      where: { id: orderDiscount.couponCodeId },
+      data: { currentUses: { increment: 1 } },
+    })
+
+    // Increment Discount.currentUses
+    if (orderDiscount.couponCode.discountId) {
+      await prisma.discount.update({
+        where: { id: orderDiscount.couponCode.discountId },
+        data: { currentUses: { increment: 1 } },
+      })
+    }
+
+    logger.info('✅ Coupon finalized on payment completion', {
+      orderId,
+      venueId,
+      couponCode: orderDiscount.couponCode.code,
+      couponCodeId: orderDiscount.couponCodeId,
+      amountSaved: orderDiscount.amount.toString(),
+    })
+  }
 }

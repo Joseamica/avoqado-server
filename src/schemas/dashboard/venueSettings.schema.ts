@@ -14,6 +14,10 @@ export const UpdateTpvSettingsSchema = z.object({
     showTipScreen: z.boolean().optional(),
     showReceiptScreen: z.boolean().optional(),
     defaultTipPercentage: z.number().int().min(0).max(100).nullable().optional(),
+    // Step 4: Sale Verification (for retail/telecomunicaciones venues)
+    showVerificationScreen: z.boolean().optional(),
+    requireVerificationPhoto: z.boolean().optional(),
+    requireVerificationBarcode: z.boolean().optional(),
   }),
 })
 
@@ -77,6 +81,10 @@ export const TpvSettingsResponseSchema = z.object({
   defaultTipPercentage: z.number().nullable(),
   tipSuggestions: z.array(z.number()),
   requirePinLogin: z.boolean(),
+  // Step 4: Sale Verification (for retail/telecomunicaciones venues)
+  showVerificationScreen: z.boolean(),
+  requireVerificationPhoto: z.boolean(),
+  requireVerificationBarcode: z.boolean(),
 })
 
 export type TpvSettingsResponse = z.infer<typeof TpvSettingsResponseSchema>

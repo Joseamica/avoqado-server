@@ -422,14 +422,10 @@ export async function applyCouponCode(
       },
     })
 
-    // Record coupon redemption
-    await couponService.recordCouponRedemption(venueId, coupon.id, orderId, discountAmount, order.customerId ?? undefined)
-
-    // Increment discount usage
-    await tx.discount.update({
-      where: { id: discount.id },
-      data: { currentUses: { increment: 1 } },
-    })
+    // NOTE: Coupon redemption and usage counter increment moved to payment completion
+    // See finalizeCouponsForOrder() in payment.tpv.service.ts
+    // This follows Toast/Square best practice: coupons are "applied" at checkout
+    // but only "redeemed" (counted against limits) when payment succeeds.
 
     return {
       orderDiscountId: orderDiscount.id,

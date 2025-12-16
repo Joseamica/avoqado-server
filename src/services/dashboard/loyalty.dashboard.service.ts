@@ -20,6 +20,7 @@
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { LoyaltyTransactionType } from '@prisma/client'
+import logger from '@/config/logger'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -175,6 +176,10 @@ export async function canRedeemPoints(venueId: string, customerId: string, point
 /**
  * Award loyalty points to customer for a purchase
  * Called automatically when order payment is completed
+ *
+ * 🔒 IDEMPOTENCY: If points were already awarded for this order+customer,
+ * returns the existing values without creating duplicates.
+ * This prevents double-earning on payment retries.
  */
 export async function earnPoints(
   venueId: string,
@@ -189,38 +194,90 @@ export async function earnPoints(
     return { pointsEarned: 0, newBalance: 0 }
   }
 
+  // 🔒 IDEMPOTENCY CHECK: Prevent double-earning on payment retries
+  const existingEarnTransaction = await prisma.loyaltyTransaction.findFirst({
+    where: {
+      customerId,
+      orderId,
+      type: LoyaltyTransactionType.EARN,
+    },
+  })
+
+  if (existingEarnTransaction) {
+    // Points already awarded for this order - return existing values (idempotent)
+    const customer = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { loyaltyPoints: true },
+    })
+    logger.warn(`⚠️ [LOYALTY] Idempotency: Points already earned for order ${orderId}, customer ${customerId}`, {
+      existingPoints: existingEarnTransaction.points,
+      currentBalance: customer?.loyaltyPoints,
+    })
+    return {
+      pointsEarned: existingEarnTransaction.points,
+      newBalance: customer?.loyaltyPoints ?? 0,
+    }
+  }
+
   const pointsEarned = await calculatePointsForAmount(venueId, amount)
 
   if (pointsEarned === 0) {
     return { pointsEarned: 0, newBalance: 0 }
   }
 
-  // Create transaction and update customer balance in a transaction
-  const [transaction, customer] = await prisma.$transaction([
-    prisma.loyaltyTransaction.create({
-      data: {
-        customerId,
-        type: LoyaltyTransactionType.EARN,
-        points: pointsEarned,
-        orderId,
-        reason: `Earned ${pointsEarned} points for purchase of $${amount.toFixed(2)}`,
-        createdById: staffId,
-      },
-    }),
-    prisma.customer.update({
-      where: { id: customerId },
-      data: {
-        loyaltyPoints: { increment: pointsEarned },
-      },
-      select: {
-        loyaltyPoints: true,
-      },
-    }),
-  ])
+  // 🔒 RACE CONDITION FIX: Database has partial unique index to prevent duplicates
+  // If concurrent calls occur, the DB will reject duplicates with P2002
+  try {
+    // Create transaction and update customer balance in a transaction
+    const [transaction, customer] = await prisma.$transaction([
+      prisma.loyaltyTransaction.create({
+        data: {
+          customerId,
+          type: LoyaltyTransactionType.EARN,
+          points: pointsEarned,
+          orderId,
+          reason: `Earned ${pointsEarned} points for purchase of $${amount.toFixed(2)}`,
+          createdById: staffId,
+        },
+      }),
+      prisma.customer.update({
+        where: { id: customerId },
+        data: {
+          loyaltyPoints: { increment: pointsEarned },
+        },
+        select: {
+          loyaltyPoints: true,
+        },
+      }),
+    ])
 
-  return {
-    pointsEarned,
-    newBalance: customer.loyaltyPoints,
+    return {
+      pointsEarned,
+      newBalance: customer.loyaltyPoints,
+    }
+  } catch (error: any) {
+    // Handle unique constraint violation from partial unique index
+    // This happens when concurrent calls race past the idempotency check
+    if (error.code === 'P2002') {
+      logger.warn(`⚠️ [LOYALTY] Race condition caught by DB constraint - returning existing values`, {
+        customerId,
+        orderId,
+        attemptedPoints: pointsEarned,
+      })
+      // Fetch the existing transaction that won the race
+      const existingTransaction = await prisma.loyaltyTransaction.findFirst({
+        where: { customerId, orderId, type: LoyaltyTransactionType.EARN },
+      })
+      const customer = await prisma.customer.findUnique({
+        where: { id: customerId },
+        select: { loyaltyPoints: true },
+      })
+      return {
+        pointsEarned: existingTransaction?.points ?? pointsEarned,
+        newBalance: customer?.loyaltyPoints ?? 0,
+      }
+    }
+    throw error
   }
 }
 

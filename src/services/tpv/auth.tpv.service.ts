@@ -57,6 +57,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
         select: {
           id: true,
           name: true,
+          slug: true, // 📸 For Firebase Storage path: venues/{slug}/verifications/
           posType: true,
           posStatus: true,
           logo: true,
@@ -162,6 +163,13 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     role: staffVenue.role,
   })
 
+  // 🎁 Check if loyalty program is active for this venue (Toast/Square pattern)
+  const loyaltyConfig = await prisma.loyaltyConfig.findUnique({
+    where: { venueId },
+    select: { active: true },
+  })
+  const loyaltyActive = loyaltyConfig?.active ?? false
+
   // Return staff information with venue-specific data and JWT tokens
   return {
     // Existing staff data
@@ -186,6 +194,9 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     // Metadata
     correlationId,
     issuedAt: new Date().toISOString(),
+
+    // 🎁 Loyalty program status (Toast/Square pattern: hide UI if inactive)
+    loyaltyActive,
   }
 }
 

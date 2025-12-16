@@ -9,11 +9,10 @@
  * @see docs/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md - Phase 2 specifications
  */
 
-import prisma from '@/utils/prismaClient'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
-import { DiscountType, DiscountScope, Prisma } from '@prisma/client'
-import { Decimal } from '@prisma/client/runtime/library'
+import { NotFoundError } from '@/errors/AppError'
+import prisma from '@/utils/prismaClient'
+import { DiscountScope, DiscountType } from '@prisma/client'
 
 // ==========================================
 // TYPES & INTERFACES

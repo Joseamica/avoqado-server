@@ -2,8 +2,8 @@
 
 ## Overview
 
-This document provides a comprehensive explanation of the Avoqado database schema, designed for a multi-tenant restaurant management
-platform. The schema supports multiple organizations with multiple venues, payment processing, POS integration, staff management, and
+This document provides a comprehensive explanation of the Avoqado database schema, designed for a multi-tenant, multi-sector venue management
+platform supporting restaurants, hotels, gyms, retail, services, and entertainment businesses. The schema supports multiple organizations with multiple venues, payment processing, POS integration, staff management, and
 comprehensive cost tracking.
 
 ## Core Architecture
@@ -24,7 +24,7 @@ The schema follows a hierarchical multi-tenant architecture:
 
 **Purpose**: Root-level entity for multi-tenant architecture. Represents a business group or franchise that owns multiple venues.
 
-**Use Case**: A restaurant chain like "Grupo Avoqado Prime" that owns multiple locations (Avoqado Centro, Avoqado Sur). Each organization
+**Use Case**: A multi-location business group like "Grupo Avoqado Prime" that owns multiple venues (Avoqado Centro, Avoqado Sur). This could be a restaurant chain, hotel group, gym franchise, or retail chain. Each organization
 has its own billing, staff, and venues but shares the same Avoqado platform.
 
 **Model Definition**:
@@ -108,9 +108,9 @@ const orgWithVenues = await prisma.organization.findUnique({
 
 #### **Venue**
 
-**Purpose**: Individual restaurant/business location within an organization. The operational unit where actual business happens.
+**Purpose**: Individual business location within an organization. The operational unit where actual business operations happen.
 
-**Use Case**: "Avoqado Centro" restaurant in Mexico City. Each venue has its own menu, staff assignments, orders, payments, and operational
+**Use Case**: "Avoqado Centro" venue in Mexico City (could be a restaurant, hotel, gym, or retail store). Each venue has its own menu/catalog, staff assignments, orders/transactions, payments, and operational
 settings while belonging to the parent organization.
 
 **Model Definition**:

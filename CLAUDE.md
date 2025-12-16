@@ -167,6 +167,17 @@ After major changes:
 3. Delete temporary scripts
 4. Run `npm run pre-deploy` before push
 
+### Git Policy
+
+**CRITICAL: NEVER commit, push, or make git changes without explicit user permission.**
+
+- Before `git add` → Ask user first
+- Before `git commit` → Ask user first
+- Before `git push` → Ask user first
+- Before `git merge` → Ask user first
+
+This applies even if changes look complete. Always ask: "¿Quieres que haga commit de estos cambios?"
+
 ---
 
 ## 5. Architecture Quick Reference

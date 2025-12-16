@@ -19,9 +19,34 @@ interface InvitationEmailData {
 interface ReceiptEmailData {
   venueName: string
   receiptUrl: string
+  receiptNumber: string // Last 4 chars of accessKey
   orderNumber?: string
-  totalAmount?: string
   venueLogoUrl?: string
+  venueAddress?: string
+  venueCity?: string
+  venueState?: string
+  venuePhone?: string
+  venueEmail?: string
+  currency?: string
+  // Order items
+  items?: Array<{
+    name: string
+    quantity: number
+    price: number
+    totalPrice: number
+    modifiers?: Array<{ name: string; price: number }>
+  }>
+  // Totals
+  subtotal?: number
+  taxAmount?: number
+  tipAmount?: number
+  totalAmount?: number
+  // Payment info
+  paymentMethod?: string
+  paymentDate?: string
+  // People
+  processedBy?: string
+  customerName?: string
 }
 
 interface TrialEndingEmailData {
@@ -158,7 +183,56 @@ class EmailService {
   }
 
   async sendReceiptEmail(email: string, data: ReceiptEmailData): Promise<boolean> {
-    const subject = `Tu recibo digital de ${data.venueName} - Avoqado`
+    const subject = `Recibo #${data.receiptNumber} - ${data.venueName}`
+    const currency = data.currency || 'MXN'
+
+    // Format currency
+    const formatCurrency = (amount: number | undefined) => {
+      if (amount === undefined) return ''
+      return new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(amount)
+    }
+
+    // Format payment method
+    const formatPaymentMethod = (method: string | undefined) => {
+      if (!method) return 'N/A'
+      const methods: Record<string, string> = {
+        CASH: 'Efectivo',
+        CARD: 'Tarjeta',
+        TRANSFER: 'Transferencia',
+        CREDIT_CARD: 'Tarjeta de Crédito',
+        DEBIT_CARD: 'Tarjeta de Débito',
+      }
+      return methods[method] || method
+    }
+
+    // Build items HTML
+    const itemsHtml =
+      data.items && data.items.length > 0
+        ? data.items
+            .map(
+              item => `
+          <tr>
+            <td style="padding: 12px 0; border-bottom: 1px solid #27272a;">
+              <div style="color: #fafafa; font-size: 14px; font-weight: 500;">${item.name}</div>
+              ${
+                item.modifiers && item.modifiers.length > 0
+                  ? `<div style="color: #71717a; font-size: 12px; margin-top: 4px;">${item.modifiers.map(m => `+ ${m.name}`).join(', ')}</div>`
+                  : ''
+              }
+            </td>
+            <td style="padding: 12px 0; border-bottom: 1px solid #27272a; text-align: center; color: #a1a1aa; font-size: 14px;">×${item.quantity}</td>
+            <td style="padding: 12px 0; border-bottom: 1px solid #27272a; text-align: right; color: #fafafa; font-size: 14px;">${formatCurrency(item.totalPrice)}</td>
+          </tr>
+        `,
+            )
+            .join('')
+        : ''
+
+    // Build items text for plain text version
+    const itemsText =
+      data.items && data.items.length > 0
+        ? data.items.map(item => `  ${item.name} x${item.quantity} - ${formatCurrency(item.totalPrice)}`).join('\n')
+        : ''
 
     const html = `
       <!DOCTYPE html>
@@ -166,78 +240,134 @@ class EmailService {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Recibo Digital - ${data.venueName}</title>
+          <meta name="color-scheme" content="dark">
+          <title>Recibo #${data.receiptNumber} - ${data.venueName}</title>
         </head>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-              ${data.venueLogoUrl ? `<img src="${data.venueLogoUrl}" alt="${data.venueName}" style="max-height: 60px; margin-bottom: 20px; background: white; padding: 10px; border-radius: 8px;">` : ''}
-              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">¡Tu recibo digital está listo!</h1>
-              <p style="color: #e8f4f8; margin: 10px 0 0 0; font-size: 16px;">${data.venueName}</p>
-            </div>
-            
-            <div style="padding: 40px 30px;">
-              <p style="font-size: 18px; margin-bottom: 20px; color: #333;">Hola,</p>
-              
-              <p style="font-size: 16px; margin-bottom: 25px; color: #555;">
-                Gracias por tu visita a <strong>${data.venueName}</strong>. Tu recibo digital está disponible y puedes acceder a él en cualquier momento.
-              </p>
-              
-              ${data.orderNumber ? `<p style="font-size: 14px; color: #666; margin-bottom: 20px;">Orden: <strong>#${data.orderNumber}</strong></p>` : ''}
-              ${data.totalAmount ? `<p style="font-size: 14px; color: #666; margin-bottom: 30px;">Total: <strong>${data.totalAmount}</strong></p>` : ''}
-              
-              <div style="background: #f8f9ff; border: 1px solid #e1e5f2; border-radius: 10px; padding: 25px; margin: 30px 0; text-align: center;">
-                <p style="font-size: 16px; margin-bottom: 20px; color: #555;">Accede a tu recibo digital:</p>
-                <a href="${data.receiptUrl}" 
-                   style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                          color: white; 
-                          padding: 15px 35px; 
-                          text-decoration: none; 
-                          border-radius: 25px; 
-                          font-weight: bold; 
-                          font-size: 16px;
-                          display: inline-block;
-                          box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-                          transition: all 0.3s ease;">
-                  📱 Ver Recibo Digital
-                </a>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.5; margin: 0; padding: 0; background-color: #0a0a0a;">
+          <div style="max-width: 500px; margin: 0 auto; padding: 32px 16px;">
+
+            <!-- Main Card -->
+            <div style="background: #18181b; border-radius: 16px; overflow: hidden; border: 1px solid #27272a;">
+
+              <!-- Header with Logo -->
+              <div style="padding: 28px 24px 20px 24px; text-align: center; border-bottom: 1px solid #27272a;">
+                ${
+                  data.venueLogoUrl
+                    ? `<img src="${data.venueLogoUrl}" alt="${data.venueName}" style="max-width: 80px; max-height: 80px; width: auto; height: auto; margin-bottom: 12px; border-radius: 8px; object-fit: contain;">`
+                    : `<div style="width: 48px; height: 48px; background: #3b82f6; border-radius: 12px; margin: 0 auto 12px auto; line-height: 48px; text-align: center;">
+                    <span style="color: white; font-size: 20px; font-weight: bold;">${data.venueName.charAt(0)}</span>
+                  </div>`
+                }
+                <h1 style="color: #fafafa; margin: 0 0 4px 0; font-size: 18px; font-weight: 600;">${data.venueName}</h1>
+                ${
+                  data.venueAddress || data.venueCity
+                    ? `<p style="color: #71717a; margin: 0; font-size: 12px;">${[data.venueAddress, data.venueCity, data.venueState].filter(Boolean).join(', ')}</p>`
+                    : ''
+                }
               </div>
-              
-              <div style="background: #f9f9f9; border-left: 4px solid #667eea; padding: 20px; margin: 30px 0; border-radius: 0 8px 8px 0;">
-                <p style="font-size: 14px; margin: 0; color: #666;">
-                  💡 <strong>Tip:</strong> Guarda este enlace para acceder a tu recibo cuando lo necesites. También puedes imprimirlo o descargarlo como PDF desde la página del recibo.
+
+              <!-- Receipt Info -->
+              <div style="padding: 20px 24px; border-bottom: 1px solid #27272a;">
+                <table style="width: 100%; border-collapse: collapse;">
+                  <tr>
+                    <td style="color: #71717a; font-size: 13px; padding: 4px 0;">Recibo</td>
+                    <td style="color: #fafafa; font-size: 13px; padding: 4px 0; text-align: right; font-weight: 500;">#${data.receiptNumber}</td>
+                  </tr>
+                  ${data.orderNumber ? `<tr><td style="color: #71717a; font-size: 13px; padding: 4px 0;">Orden</td><td style="color: #fafafa; font-size: 13px; padding: 4px 0; text-align: right;">#${data.orderNumber}</td></tr>` : ''}
+                  ${data.paymentDate ? `<tr><td style="color: #71717a; font-size: 13px; padding: 4px 0;">Fecha</td><td style="color: #fafafa; font-size: 13px; padding: 4px 0; text-align: right;">${data.paymentDate}</td></tr>` : ''}
+                  ${data.processedBy ? `<tr><td style="color: #71717a; font-size: 13px; padding: 4px 0;">Atendido por</td><td style="color: #fafafa; font-size: 13px; padding: 4px 0; text-align: right;">${data.processedBy}</td></tr>` : ''}
+                </table>
+              </div>
+
+              ${
+                itemsHtml
+                  ? `
+              <!-- Items -->
+              <div style="padding: 20px 24px; border-bottom: 1px solid #27272a;">
+                <h2 style="color: #a1a1aa; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 12px 0;">Productos</h2>
+                <table style="width: 100%; border-collapse: collapse;">
+                  ${itemsHtml}
+                </table>
+              </div>
+              `
+                  : ''
+              }
+
+              <!-- Totals -->
+              <div style="padding: 20px 24px; border-bottom: 1px solid #27272a;">
+                <table style="width: 100%; border-collapse: collapse;">
+                  ${data.subtotal !== undefined ? `<tr><td style="color: #a1a1aa; font-size: 14px; padding: 6px 0;">Subtotal</td><td style="color: #fafafa; font-size: 14px; padding: 6px 0; text-align: right;">${formatCurrency(data.subtotal)}</td></tr>` : ''}
+                  ${data.taxAmount !== undefined && data.taxAmount > 0 ? `<tr><td style="color: #a1a1aa; font-size: 14px; padding: 6px 0;">Impuestos</td><td style="color: #fafafa; font-size: 14px; padding: 6px 0; text-align: right;">${formatCurrency(data.taxAmount)}</td></tr>` : ''}
+                  ${data.tipAmount !== undefined && data.tipAmount > 0 ? `<tr><td style="color: #a1a1aa; font-size: 14px; padding: 6px 0;">Propina</td><td style="color: #3b82f6; font-size: 14px; padding: 6px 0; text-align: right;">${formatCurrency(data.tipAmount)}</td></tr>` : ''}
+                  <tr>
+                    <td style="color: #fafafa; font-size: 18px; font-weight: 600; padding: 12px 0 0 0;">Total</td>
+                    <td style="color: #22c55e; font-size: 20px; font-weight: 700; padding: 12px 0 0 0; text-align: right;">${formatCurrency(data.totalAmount)}</td>
+                  </tr>
+                </table>
+              </div>
+
+              <!-- Payment Method -->
+              <div style="padding: 16px 24px; border-bottom: 1px solid #27272a; background: #1f1f23;">
+                <table style="width: 100%; border-collapse: collapse;">
+                  <tr>
+                    <td style="color: #71717a; font-size: 13px;">Método de pago</td>
+                    <td style="color: #fafafa; font-size: 13px; text-align: right; font-weight: 500;">${formatPaymentMethod(data.paymentMethod)}</td>
+                  </tr>
+                </table>
+              </div>
+
+              <!-- CTA Button -->
+              <div style="padding: 24px; text-align: center;">
+                <a href="${data.receiptUrl}"
+                   style="background: #3b82f6;
+                          color: white;
+                          padding: 12px 28px;
+                          text-decoration: none;
+                          border-radius: 8px;
+                          font-weight: 600;
+                          font-size: 14px;
+                          display: inline-block;">
+                  Ver Recibo Completo
+                </a>
+                <p style="color: #52525b; font-size: 11px; margin: 12px 0 0 0;">
+                  Descarga o imprime desde el enlace
                 </p>
               </div>
-              
-              <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 30px 0;">
-              
-              <p style="font-size: 14px; color: #666; text-align: center; margin-bottom: 10px;">
-                ¡Gracias por elegirnos! Esperamos verte pronto.
-              </p>
-              <p style="font-size: 12px; color: #999; text-align: center; margin: 0;">
-                Este correo fue enviado automáticamente por Avoqado.
-              </p>
+
+              <!-- Footer -->
+              <div style="padding: 16px 24px; border-top: 1px solid #27272a; text-align: center; background: #141417;">
+                <p style="font-size: 12px; color: #52525b; margin: 0;">
+                  Recibo enviado por ${data.venueName} vía Avoqado
+                </p>
+              </div>
             </div>
+
           </div>
         </body>
       </html>
     `
 
     const text = `
-      Hola,
-      
-      Gracias por tu visita a ${data.venueName}. Tu recibo digital está disponible en el siguiente enlace:
-      
-      ${data.receiptUrl}
-      
-      ${data.orderNumber ? `Orden: #${data.orderNumber}` : ''}
-      ${data.totalAmount ? `Total: ${data.totalAmount}` : ''}
-      
-      Puedes acceder a tu recibo, imprimirlo o descargarlo como PDF desde el enlace anterior.
-      
-      ¡Gracias por elegirnos!
-      
-      Equipo de Avoqado
+RECIBO DIGITAL #${data.receiptNumber}
+${data.venueName}
+${[data.venueAddress, data.venueCity, data.venueState].filter(Boolean).join(', ')}
+
+${data.orderNumber ? `Orden: #${data.orderNumber}` : ''}
+${data.paymentDate ? `Fecha: ${data.paymentDate}` : ''}
+${data.processedBy ? `Atendido por: ${data.processedBy}` : ''}
+
+${itemsText ? `PRODUCTOS:\n${itemsText}\n` : ''}
+${data.subtotal !== undefined ? `Subtotal: ${formatCurrency(data.subtotal)}` : ''}
+${data.taxAmount !== undefined && data.taxAmount > 0 ? `Impuestos: ${formatCurrency(data.taxAmount)}` : ''}
+${data.tipAmount !== undefined && data.tipAmount > 0 ? `Propina: ${formatCurrency(data.tipAmount)}` : ''}
+TOTAL: ${formatCurrency(data.totalAmount)}
+
+Método de pago: ${formatPaymentMethod(data.paymentMethod)}
+
+Ver recibo completo: ${data.receiptUrl}
+
+¡Gracias por tu preferencia!
+Recibo enviado por ${data.venueName} vía Avoqado
     `
 
     return this.sendEmail({

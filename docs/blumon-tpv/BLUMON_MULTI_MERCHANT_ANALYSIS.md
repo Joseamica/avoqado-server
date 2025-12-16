@@ -400,7 +400,206 @@ const dukpt = await blumonService.getDUKPTKeys(
 
 ---
 
-## 5. Android TPV Implementation
+## 5. SDK Internal Behavior (Critical Knowledge)
+
+### ⚠️ WARNING: This section documents critical bugs discovered in production (2025-12-15)
+
+Understanding these SDK internals is **essential** for anyone working on multi-merchant switching. Failure to follow these patterns **will cause "NO AUTORIZADO" errors**.
+
+### 5.1 SDK Init Table Behavior
+
+The Blumon SDK uses an internal Room database with an `Init` table to store initialization data (posId, commerce name, keys, etc.).
+
+**Critical Discovery:**
+
+| UseCase | Behavior | Impact |
+|---------|----------|--------|
+| `GetInitDataUseCase` | Returns **FIRST** record from Init table | Stale posId if multiple records exist |
+| `InsertInitUseCase` | **ADDS** new records (doesn't update) | Init table accumulates records |
+| `InitializerUseCase` | OAuth + DUKPT → may insert wrong posId | Race condition with merchant switch |
+| `SaleIccUseCase` | Internally calls `getInitDataUseCase.runInfallible()` | **Cannot override posId via parameters** |
+
+**Problem Scenario (Before Fix):**
+```
+App starts with Merchant A (posId: 376)
+  ↓
+User switches A→B (posId: 387)
+  - InitializerUseCase runs (may insert 376 from server)
+  - InsertInitUseCase adds 387
+  - Init table: [376, 387]
+  - GetInitDataUseCase returns 376 (WRONG!)
+  ↓
+User switches B→C (posId: 398)
+  - InitializerUseCase runs (may insert 376 again)
+  - InsertInitUseCase adds 398
+  - Init table: [376, 387, 398]
+  - GetInitDataUseCase returns 376 (WRONG!)
+  ↓
+Payment fails: "NO AUTORIZADO" (using stale posId 376)
+```
+
+### 5.2 Room In-Memory Cache Issue
+
+**Discovery:** Room loads database into memory on app start, **independent of SQLite file changes**.
+
+**Problem:**
+```
+1. App restarts after A→B→C switches in previous session
+2. Room loads Init table into memory (with stale posId from previous session)
+3. HomeViewModel calls ensureInitialized()
+4. Even if we clear SQLite directly, Room's cache is NOT updated
+5. GetInitDataUseCase returns stale data from Room cache
+6. First payment fails: "NO AUTORIZADO"
+```
+
+**Why direct SQLite clearing doesn't work:**
+- We used `SQLiteDatabase.openDatabase()` to bypass Room
+- Deleted records successfully at SQLite level
+- But Room's in-memory cache was loaded BEFORE our clear
+- `GetInitDataUseCase` uses Room → returns stale cached data
+
+### 5.3 The Solution: Force Full Re-Init
+
+**Strategy:** When app restarts AND we have a known merchant, force full SDK re-initialization.
+
+**File:** `InitializationManager.kt` (sandbox + production variants)
+
+**Key Code:**
+```kotlin
+suspend fun ensureInitialized(defaultMerchantPosId: String? = null): Result<Unit> {
+    return initMutex.withLock {
+        val lastInit = secureStorage.getLastBlumonInitTimestamp()
+        val now = System.currentTimeMillis()
+
+        if (shouldInitialize(lastInit, now)) {
+            // Normal full init path
+            executeInitialization(now, merchantPosId = defaultMerchantPosId)
+        } else {
+            // CRITICAL FIX: When defaultMerchantPosId is provided, always do full re-init
+            // Reason: Room's in-memory cache may have stale posId
+            if (defaultMerchantPosId != null) {
+                Timber.i("🔄 App restart detected - forcing full re-init to fix posId")
+                executeInitialization(now, merchantPosId = defaultMerchantPosId)
+            } else {
+                // No defaultMerchantPosId = normal skip (24hr cache)
+                Result.success(Unit)
+            }
+        }
+    }
+}
+```
+
+**HomeViewModel Integration:**
+```kotlin
+// Fetch default merchant from backend
+val merchants = getMerchantsUseCase().firstOrNull()
+val defaultMerchant = merchants?.firstOrNull()
+
+// Pass posId to handle app restart after merchant switch
+initializationManager.ensureInitialized(defaultMerchantPosId = defaultMerchant?.posId)
+```
+
+### 5.4 clearInitTable() Implementation
+
+For merchant switching within the same session, we clear the Init table using raw SQLite:
+
+**File:** `InitializationManager.kt`
+
+```kotlin
+private fun clearInitTable(): Boolean {
+    val dbPath = context.getDatabasePath("movildevice").absolutePath
+    val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+
+    // SDK uses various table names
+    val tableNames = listOf("InitEntity", "init_entity", "Init", "init", "InitData", "init_data")
+
+    for (tableName in tableNames) {
+        try {
+            val deletedRows = db.delete(tableName, null, null)
+            if (deletedRows > 0) {
+                Timber.i("✅ Cleared $deletedRows rows from '$tableName' table")
+                db.close()
+                return true
+            }
+        } catch (e: Exception) {
+            // Table doesn't exist, try next name
+        }
+    }
+
+    db.close()
+    return false
+}
+```
+
+**When used:**
+- Called in `executeInitialization()` AFTER `InitializerUseCase` completes
+- Called BEFORE `InsertInitUseCase` runs
+- Ensures only the correct posId record exists
+
+### 5.5 Complete Multi-Merchant Flow (Fixed)
+
+**Same Session Switch (A→B→C):**
+```
+User taps "Account B"
+  ↓
+MultiMerchantSDKManager.switchMerchant(accountB)
+  ↓
+1. TerminalConfig.updateSerial("2841548418")
+2. InitializationManager.forceReinitialize(merchantPosId: "387")
+  ↓
+3. executeInitialization():
+   a. InitializerUseCase → OAuth + DUKPT (may insert wrong posId)
+   b. clearInitTable() → DELETE all Init records
+   c. InsertInitUseCase → Insert posId 387 (ONLY record now)
+  ↓
+4. GetInitDataUseCase returns 387 ✓
+5. SaleIccUseCase uses posId 387 ✓
+6. Payment succeeds ✓
+```
+
+**App Restart After Previous Session Switches:**
+```
+App starts
+  ↓
+HomeViewModel.launchBlumonInit()
+  ↓
+1. Fetch merchants from backend
+2. defaultMerchant = merchants.first() (e.g., posId 376)
+3. TerminalConfig.updateSerial(defaultMerchant.serialNumber)
+4. initializationManager.ensureInitialized(defaultMerchantPosId: "376")
+  ↓
+5. Force full re-init (defaultMerchantPosId != null)
+6. executeInitialization() clears Init table + inserts 376
+  ↓
+7. GetInitDataUseCase returns 376 ✓
+8. First payment succeeds ✓
+```
+
+### 5.6 Debugging Tips
+
+**Check Init table state:**
+```bash
+adb logcat -s InitializationManager | grep -E "posId|Init|table"
+```
+
+**Expected logs for successful switch:**
+```
+🔄 [InitializationManager] Forcing re-init with merchantPosId: 387
+[INIT STEP 1.5] Clearing init table for merchant switch...
+   ✅ Cleared 1 rows from 'Init' table
+[INIT STEP 2] InsertInitUseCase - Forcing correct posId (387)...
+[INIT STEP 3] GetInitDataUseCase - Verifying posId...
+   posId: 387 (safe to parse as Int)
+```
+
+**Red flags to look for:**
+- `posId: 376` when you expected `387` → Stale cache, re-init didn't work
+- `Could not find init table` → SDK changed table name, add to `tableNames` list
+- `NO AUTORIZADO` → posId mismatch, check Init table state
+
+---
+
+## 6. Android TPV Implementation
 
 ### Model Classes
 
@@ -447,7 +646,7 @@ fun startPayment() {
 
 ---
 
-## 6. Payment Routing Logic
+## 7. Payment Routing Logic
 
 ### How Blumon Routes Based on Virtual Serial
 
@@ -502,7 +701,7 @@ fun startPayment() {
 
 ---
 
-## 7. Cost Structure Assignment
+## 8. Cost Structure Assignment
 
 ### Per-Merchant Costs
 
@@ -534,7 +733,7 @@ Terminal AVQD-2841548417
 
 ---
 
-## 8. Admin Configuration (Superadmin Perspective)
+## 9. Admin Configuration (Superadmin Perspective)
 
 ### Creating Multi-Merchant Terminal
 
@@ -622,7 +821,7 @@ await prisma.providerCostStructure.create({
 
 ---
 
-## 9. Real Example: Multi-Merchant Restaurant
+## 10. Real Example: Multi-Merchant Restaurant
 
 ### Business Setup
 
@@ -676,7 +875,7 @@ await prisma.providerCostStructure.create({
 
 ---
 
-## 10. Key Answers to Your Questions
+## 11. Key Answers to Your Questions
 
 ### Q1: Is there a distinction between physical vs virtual serial?
 
@@ -733,7 +932,7 @@ val paymentData = PaymentCreationData(
 
 ---
 
-## 11. Architecture Diagram (Complete)
+## 12. Architecture Diagram (Complete)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -803,7 +1002,7 @@ val paymentData = PaymentCreationData(
 
 ---
 
-## 12. Technical Stack Summary
+## 13. Technical Stack Summary
 
 | Component       | Technology       | Purpose                       |
 | --------------- | ---------------- | ----------------------------- |
@@ -815,7 +1014,7 @@ val paymentData = PaymentCreationData(
 
 ---
 
-## 13. Remaining Work
+## 14. Remaining Work
 
 ### Backend
 
@@ -825,9 +1024,11 @@ val paymentData = PaymentCreationData(
 
 ### Android
 
-- [ ] Test multi-merchant switching (3-5 second lag)
-- [ ] Verify SDK state after merchant switch
-- [ ] Handle network errors during switch
+- [x] Test multi-merchant switching (3-5 second lag) ✅ (Fixed 2025-12-15)
+- [x] Verify SDK state after merchant switch ✅ (Fixed 2025-12-15 - clearInitTable)
+- [x] Handle network errors during switch ✅ (User-friendly error messages added)
+- [x] Fix "NO AUTORIZADO" after app restart ✅ (Fixed 2025-12-15 - Force re-init)
+- [x] Fix B→C switching bug (stale posId) ✅ (Fixed 2025-12-15 - clearInitTable)
 
 ### Database
 
@@ -836,4 +1037,8 @@ val paymentData = PaymentCreationData(
 
 ---
 
-**Document Version**: 2025-11-06 **Status**: Complete (Blumon Multi-Merchant Architecture Explained)
+**Document Version**: 2025-12-15 **Status**: Complete (Multi-Merchant SDK Switching Fixed)
+
+**Changelog:**
+- 2025-12-15: Added Section 5 "SDK Internal Behavior" with critical bug fixes for multi-merchant switching
+- 2025-11-06: Initial version - Blumon Multi-Merchant Architecture

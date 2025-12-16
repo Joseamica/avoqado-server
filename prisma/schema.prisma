@@ -211,6 +211,9 @@ model Venue {
   // ✅ NEW: Live Demo Session
   liveDemoSession LiveDemoSession?
 
+  // 📸 Step 4: Sale Verifications for this venue
+  saleVerifications SaleVerification[]
+
   // 🆕 TPV Remote Command System (2025-11-30)
   tpvCommandQueue       TpvCommandQueue[]
   bulkCommandOperations BulkCommandOperation[]
@@ -366,6 +369,9 @@ model Staff {
 
   // ✅ NEW: Settlement simulations
   settlementSimulations SettlementSimulation[]
+
+  // 📸 Step 4: Sale Verifications processed by this staff
+  saleVerifications SaleVerification[]
 
   // ✅ NEW: E-commerce Merchant (SDK client) dashboard access
   ecommerceMerchant EcommerceMerchant?
@@ -1580,6 +1586,9 @@ model Order {
   orderDiscounts   OrderDiscount[]
   couponRedemption CouponRedemption?
 
+  // Multi-customer support (N:N relationship)
+  orderCustomers OrderCustomer[]
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
@@ -1592,6 +1601,24 @@ model Order {
   @@index([customerId])
   @@index([venueId, tableId, paymentStatus])
   @@index([venueId, customerIdentifier, paymentStatus])
+}
+
+// Junction table for many-to-many Order <-> Customer relationship
+// Allows multiple customers per order for visit tracking and loyalty
+model OrderCustomer {
+  id         String   @id @default(cuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  // First customer added = primary (receives loyalty points)
+  isPrimary Boolean  @default(false)
+  addedAt   DateTime @default(now())
+
+  @@unique([orderId, customerId]) // Prevent duplicate customer on same order
+  @@index([orderId])
+  @@index([customerId])
 }
 
 model OrderItem {
@@ -1823,10 +1850,11 @@ model Payment {
   syncedAt     DateTime?
 
   // Relations
-  transaction     VenueTransaction?
-  allocations     PaymentAllocation[] // ✅ LÍNEA AGREGADA
-  review          Review? // ✅ LÍNEA AGREGADA (en singular porque es 1-a-1)
-  transactionCost TransactionCost?
+  transaction      VenueTransaction?
+  allocations      PaymentAllocation[] // ✅ LÍNEA AGREGADA
+  review           Review? // ✅ LÍNEA AGREGADA (en singular porque es 1-a-1)
+  transactionCost  TransactionCost?
+  saleVerification SaleVerification? // 📸 Step 4 verification evidence
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1889,6 +1917,45 @@ model DigitalReceipt {
 
   @@index([accessKey])
   @@index([paymentId])
+}
+
+// ============================================================
+// SALE VERIFICATION (Step 4 - Post-payment verification)
+// ============================================================
+// Used by retail/telecommunications venues to capture evidence
+// of sales (photos + barcodes) for audit and inventory deduction
+model SaleVerification {
+  id        String @id @default(cuid())
+  venueId   String
+  venue     Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  paymentId String @unique // One verification per payment
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  staffId   String
+  staff     Staff  @relation(fields: [staffId], references: [id], onDelete: Restrict)
+
+  // Photo URLs (Firebase Storage paths)
+  photos String[] // Array of URLs: venues/{venueId}/verificaciones/{paymentId}/*.jpg
+
+  // Scanned products with barcode data
+  // JSON array of: { barcode, format, productId?, productName?, inventoryDeducted }
+  scannedProducts Json @default("[]")
+
+  // Processing state
+  status            SaleVerificationStatus @default(PENDING)
+  inventoryDeducted Boolean                @default(false) // Whether stock was deducted
+
+  // Metadata
+  deviceId   String? // TPV device that captured the verification
+  notes      String? // Optional notes from staff
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([paymentId])
+  @@index([staffId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model VenueTransaction {
@@ -3082,6 +3149,9 @@ model Customer {
   customerDiscounts CustomerDiscount[]
   couponRedemptions CouponRedemption[]
 
+  // Multi-customer support (N:N relationship with orders)
+  orderAssociations OrderCustomer[]
+
   @@index([venueId])
   @@index([customerGroupId])
   @@unique([venueId, email]) // Unique email per venue (not globally)
@@ -3644,6 +3714,7 @@ enum VenueType {
   HARDWARE
   BOOKSTORE
   PET_STORE
+  TELECOMUNICACIONES // Telcel/AT&T stores, phone repair shops, etc.
 
   // === SERVICES Category ===
   SALON
@@ -3920,6 +3991,14 @@ enum SyncStatus {
   SYNCED
   FAILED
   NOT_REQUIRED
+}
+
+enum SaleVerificationStatus {
+  PENDING    // Just created, awaiting processing
+  PROCESSING // Processing inventory deduction
+  COMPLETED  // Successfully processed
+  FAILED     // Failed to process
+  SKIPPED    // User skipped verification
 }
 
 enum InvitationType {

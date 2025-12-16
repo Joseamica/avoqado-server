@@ -1292,6 +1292,35 @@ async function seedOrders(
       })
     }
 
+    // 👥 Create OrderCustomer record for multi-customer support
+    // This enables the new orderCustomers junction table feature
+    if (customer) {
+      await prisma.orderCustomer.create({
+        data: {
+          orderId: order.id,
+          customerId: customer.id,
+          isPrimary: true, // First customer is always primary
+          addedAt: orderDate,
+        },
+      })
+
+      // For ~20% of orders with customers, add a second customer (party of 2+)
+      if (Math.random() < 0.2 && customers.length > 1) {
+        const otherCustomers = customers.filter(c => c.id !== customer.id)
+        if (otherCustomers.length > 0) {
+          const secondCustomer = otherCustomers[Math.floor(Math.random() * otherCustomers.length)]
+          await prisma.orderCustomer.create({
+            data: {
+              orderId: order.id,
+              customerId: secondCustomer.id,
+              isPrimary: false, // Secondary customers don't get loyalty points
+              addedAt: orderDate,
+            },
+          })
+        }
+      }
+    }
+
     // Create payment with tip and merchant account
     // Distribution: 50% Blumon (TPV), 20% Stripe (online), 30% Cash
     const randomValue = Math.random()

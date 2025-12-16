@@ -21,6 +21,10 @@ interface TpvSettings {
   defaultTipPercentage: number | null
   tipSuggestions: number[]
   requirePinLogin: boolean
+  // Step 4: Sale Verification (for retail/telecomunicaciones venues)
+  showVerificationScreen: boolean
+  requireVerificationPhoto: boolean
+  requireVerificationBarcode: boolean
 }
 
 /**
@@ -33,6 +37,10 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   defaultTipPercentage: null,
   tipSuggestions: [15, 18, 20, 25],
   requirePinLogin: false,
+  // Step 4: Verification disabled by default (only for retail/telecomunicaciones)
+  showVerificationScreen: false,
+  requireVerificationPhoto: false,
+  requireVerificationBarcode: false,
 }
 
 /**

@@ -1,4 +1,4 @@
-import express from 'express'
+import express, { Request, Response, NextFunction } from 'express'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
@@ -24,6 +24,9 @@ import {
   addOrderItemsSchema,
   removeOrderItemSchema,
   updateGuestInfoSchema,
+  addOrderCustomerSchema,
+  removeOrderCustomerSchema,
+  createAndAddCustomerSchema,
   compItemsSchema,
   voidItemsSchema,
   applyDiscountSchema,
@@ -35,11 +38,15 @@ import {
   validateCouponSchema,
   removeOrderDiscountSchema,
   getOrderDiscountsSchema,
+  createSaleVerificationSchema,
+  listSaleVerificationsSchema,
+  getSaleVerificationSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
+import * as refundController from '../controllers/tpv/refund.tpv.controller'
 import * as shiftController from '../controllers/tpv/shift.tpv.controller'
 import * as authController from '../controllers/tpv/auth.tpv.controller'
 import * as activationController from '../controllers/tpv/activation.controller'
@@ -51,6 +58,12 @@ import * as floorElementController from '../controllers/tpv/floor-element.tpv.co
 import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 import * as customerController from '../controllers/tpv/customer.tpv.controller'
 import * as discountController from '../controllers/tpv/discount.tpv.controller'
+import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
+import * as productService from '../services/dashboard/product.dashboard.service'
+import AppError from '../errors/AppError'
+import logger from '../config/logger'
+import { Decimal } from '@prisma/client/runtime/library'
+import prisma from '../utils/prismaClient'
 
 const router = express.Router()
 
@@ -2397,6 +2410,95 @@ router.post(
 )
 
 // ==========================================
+// REFUND ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/refunds:
+ *   post:
+ *     summary: Record a refund for an existing payment
+ *     description: |
+ *       Records a refund that was processed by the Blumon SDK (CancelIcc).
+ *       The refund MUST be processed through the same merchant account as the original payment.
+ *
+ *       **Flow:**
+ *       1. TPV app processes refund via Blumon SDK (CancelIcc)
+ *       2. TPV app calls this endpoint to record the refund
+ *       3. Backend validates and creates refund record
+ *       4. Backend updates original payment's refunded tracking
+ *       5. Backend generates digital receipt
+ *     tags:
+ *       - TPV - Refunds
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - originalPaymentId
+ *               - amount
+ *               - reason
+ *               - staffId
+ *               - blumonSerialNumber
+ *               - authorizationNumber
+ *               - referenceNumber
+ *             properties:
+ *               originalPaymentId:
+ *                 type: string
+ *                 description: ID of the original payment being refunded
+ *               amount:
+ *                 type: integer
+ *                 description: Refund amount in cents (5000 = $50.00)
+ *               reason:
+ *                 type: string
+ *                 description: Refund reason (CUSTOMER_REQUEST, DUPLICATE_CHARGE, etc.)
+ *               staffId:
+ *                 type: string
+ *                 description: ID of staff processing the refund
+ *               merchantAccountId:
+ *                 type: string
+ *                 description: Merchant account ID (must match original payment)
+ *               blumonSerialNumber:
+ *                 type: string
+ *                 description: Blumon terminal serial number
+ *               authorizationNumber:
+ *                 type: string
+ *                 description: Authorization code from Blumon CancelIcc
+ *               referenceNumber:
+ *                 type: string
+ *                 description: Reference number from Blumon CancelIcc
+ *     responses:
+ *       201:
+ *         description: Refund recorded successfully
+ *       400:
+ *         description: Invalid refund data or amount exceeds refundable
+ *       404:
+ *         description: Original payment not found
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden - missing refunds:create permission
+ */
+router.post(
+  '/venues/:venueId/refunds',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  validateRequest(recordFastPaymentParamsSchema), // Reuse for venueId param validation
+  refundController.recordRefund,
+)
+
+// ==========================================
 // TIME ENTRY ROUTES
 // ==========================================
 
@@ -2731,6 +2833,181 @@ router.patch(
   checkPermission('orders:update'),
   validateRequest(updateGuestInfoSchema),
   orderController.updateGuestInfo,
+)
+
+// ============================================================================
+// Order-Customer Relationship Routes (Multi-Customer Support)
+// ============================================================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers:
+ *   get:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Get all customers for an order
+ *     description: Returns list of customers associated with an order (multi-customer support)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: List of order customers
+ */
+router.get(
+  '/venues/:venueId/orders/:orderId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  orderController.getOrderCustomers,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Add customer to order
+ *     description: Add an existing customer to an order (multi-customer support). First customer becomes primary.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - customerId
+ *             properties:
+ *               customerId:
+ *                 type: string
+ *                 format: cuid
+ *     responses:
+ *       201:
+ *         description: Customer added to order successfully
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(addOrderCustomerSchema),
+  orderController.addCustomerToOrder,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers/create:
+ *   post:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Create customer and add to order
+ *     description: Create a new customer with minimal info and immediately add to order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               firstName:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *                 format: email
+ *     responses:
+ *       201:
+ *         description: Customer created and added to order successfully
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/customers/create',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(createAndAddCustomerSchema),
+  orderController.createAndAddCustomerToOrder,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/orders/{orderId}/customers/{customerId}:
+ *   delete:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Remove customer from order
+ *     description: Remove a customer from an order. If primary is removed, next oldest becomes primary.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: customerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Customer removed from order successfully
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(removeOrderCustomerSchema),
+  orderController.removeCustomerFromOrder,
 )
 
 /**
@@ -3561,6 +3838,497 @@ router.delete(
   checkPermission('orders:discount'),
   validateRequest(removeOrderDiscountSchema),
   discountController.removeDiscount,
+)
+
+// ============================================================
+// SALE VERIFICATION ROUTES (Step 4 - Post-payment verification)
+// ============================================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/verificaciones:
+ *   post:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Create a sale verification record
+ *     description: Records photos and scanned barcodes for post-payment verification (Step 4)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - paymentId
+ *               - staffId
+ *             properties:
+ *               paymentId:
+ *                 type: string
+ *                 format: cuid
+ *               staffId:
+ *                 type: string
+ *                 format: cuid
+ *               photos:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: uri
+ *               scannedProducts:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     barcode:
+ *                       type: string
+ *                     format:
+ *                       type: string
+ *                     productName:
+ *                       type: string
+ *                     productId:
+ *                       type: string
+ *                     hasInventory:
+ *                       type: boolean
+ *                     quantity:
+ *                       type: number
+ *               deviceId:
+ *                 type: string
+ *               notes:
+ *                 type: string
+ *               status:
+ *                 type: string
+ *                 enum: [PENDING, PROCESSING, COMPLETED, FAILED, SKIPPED]
+ *     responses:
+ *       201:
+ *         description: Verification created successfully
+ *       400:
+ *         description: Verification already exists or invalid data
+ *       404:
+ *         description: Payment or staff not found
+ */
+router.post(
+  '/venues/:venueId/verificaciones',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(createSaleVerificationSchema),
+  saleVerificationController.createSaleVerification,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/verificaciones:
+ *   get:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: List sale verifications
+ *     description: Get a paginated list of sale verifications for a venue
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: pageSize
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *       - in: query
+ *         name: pageNumber
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [PENDING, PROCESSING, COMPLETED, FAILED, SKIPPED]
+ *       - in: query
+ *         name: staffId
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: query
+ *         name: fromDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: toDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *     responses:
+ *       200:
+ *         description: List of verifications with pagination
+ */
+router.get(
+  '/venues/:venueId/verificaciones',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(listSaleVerificationsSchema),
+  saleVerificationController.listSaleVerifications,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/verificaciones/{verificationId}:
+ *   get:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Get a sale verification by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: verificationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Verification details
+ *       404:
+ *         description: Verification not found
+ */
+router.get(
+  '/venues/:venueId/verificaciones/:verificationId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(getSaleVerificationSchema),
+  saleVerificationController.getSaleVerification,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/payments/{paymentId}/verificacion:
+ *   get:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Get verification by payment ID
+ *     description: Get the verification associated with a specific payment
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: paymentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     responses:
+ *       200:
+ *         description: Verification details
+ *       404:
+ *         description: No verification found for payment
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/verificacion',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getVerificationByPaymentId,
+)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BARCODE QUICK ADD (Square POS "Scan & Go" Pattern)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/products/barcode/{barcode}:
+ *   get:
+ *     tags:
+ *       - TPV - Products
+ *     summary: Search product by barcode (Scan & Go)
+ *     description: |
+ *       Find a product by scanning its barcode. Used by Android TPV app for quick product lookup.
+ *
+ *       **Square POS Pattern:**
+ *       - Scan barcode → Find product by SKU → Add to order
+ *       - If not found → Show "Quick Add Product" dialog
+ *
+ *       **Flow:**
+ *       1. User presses VOLUME+ button on PAX terminal
+ *       2. Opens barcode scanner
+ *       3. Scans product barcode
+ *       4. Calls this endpoint
+ *       5. If found → Add to order with quantity=1
+ *       6. If not found (404) → Show creation dialog
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: Venue ID from terminal authentication
+ *       - in: path
+ *         name: barcode
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Barcode string (EAN-13, UPC-A, Code-128, etc.)
+ *         example: "AVO-PROD-ALO"
+ *     responses:
+ *       200:
+ *         description: Product found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Product found for barcode AVO-PROD-ALO"
+ *                 data:
+ *                   type: object
+ *                   description: Product details with inventory, modifiers, recipe
+ *       404:
+ *         description: Product not found (client should show Quick Add dialog)
+ *       401:
+ *         description: Unauthorized (terminal not authenticated)
+ *       403:
+ *         description: Forbidden (terminal lacks menu:read permission)
+ */
+router.get(
+  '/venues/:venueId/products/barcode/:barcode',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, barcode } = req.params
+
+      logger.info(`🔍 [TPV Barcode] Searching product by barcode: ${barcode} for venueId: ${venueId}`, {
+        correlationId: req.correlationId,
+        venueId,
+        barcode,
+      })
+
+      // Search product by SKU (Product.sku stores barcode)
+      const product = await productService.getProductByBarcode(venueId, barcode)
+
+      if (!product) {
+        logger.warn(`⚠️ [TPV Barcode] Product not found for barcode: ${barcode}`, {
+          correlationId: req.correlationId,
+          venueId,
+          barcode,
+        })
+
+        return next(new AppError(`Product with barcode ${barcode} not found in venue ${venueId}`, 404))
+      }
+
+      logger.info(`✅ [TPV Barcode] Product found: ${product.name} (${product.id})`, {
+        correlationId: req.correlationId,
+        productId: product.id,
+        productName: product.name,
+      })
+
+      res.status(200).json({
+        message: `Product found for barcode ${barcode}`,
+        data: product,
+        correlationId: req.correlationId,
+      })
+    } catch (error) {
+      logger.error(`❌ [TPV Barcode] Error searching product by barcode`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/products/quick-add:
+ *   post:
+ *     tags:
+ *       - TPV - Products
+ *     summary: Create product on-the-fly from barcode scan
+ *     description: |
+ *       Create a new product when barcode is not found during scanning.
+ *       Allows cashier to add products to catalog in real-time without leaving MenuScreen.
+ *
+ *       **Square POS Pattern:**
+ *       - Scan unknown barcode → 404 from search endpoint
+ *       - Show "Quick Add Product" dialog
+ *       - User enters name, price, category
+ *       - Submit → Product created → Added to order
+ *
+ *       **Flow:**
+ *       1. Scan barcode "7501234567890"
+ *       2. GET /barcode/:barcode returns 404
+ *       3. Show dialog with barcode pre-filled (readonly)
+ *       4. User enters: name="iPhone 15", price=999.00
+ *       5. POST to this endpoint
+ *       6. Product created with sku=barcode
+ *       7. Automatically add to current order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - barcode
+ *               - name
+ *               - price
+ *               - categoryId
+ *             properties:
+ *               barcode:
+ *                 type: string
+ *                 description: Scanned barcode (will be saved as SKU)
+ *                 example: "7501234567890"
+ *               name:
+ *                 type: string
+ *                 description: Product name
+ *                 example: "iPhone 15 Pro Max 256GB"
+ *               price:
+ *                 type: number
+ *                 format: decimal
+ *                 description: Product price
+ *                 example: 999.00
+ *               categoryId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Category ID (required)
+ *               trackInventory:
+ *                 type: boolean
+ *                 default: false
+ *                 description: Whether to track inventory for this product
+ *     responses:
+ *       201:
+ *         description: Product created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: "Product created successfully"
+ *                 data:
+ *                   type: object
+ *                   description: Created product with inventory
+ *       409:
+ *         description: Product with this barcode already exists
+ *       400:
+ *         description: Invalid request (missing required fields)
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden (lacks menu:write permission)
+ */
+router.post(
+  '/venues/:venueId/products/quick-add',
+  authenticateTokenMiddleware,
+  checkPermission('menu:write'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const { barcode, name, price, categoryId, trackInventory } = req.body
+
+      // Validate required fields
+      if (!barcode || !name || price === undefined || !categoryId) {
+        return next(new AppError('Missing required fields: barcode, name, price, and categoryId are required', 400))
+      }
+
+      logger.info(`📦 [TPV Quick Add] Creating product from barcode scan`, {
+        correlationId: req.correlationId,
+        venueId,
+        barcode,
+        name,
+        price,
+        categoryId,
+      })
+
+      // Check if product already exists with this barcode
+      const existingProduct = await productService.getProductByBarcode(venueId, barcode)
+      if (existingProduct) {
+        logger.warn(`⚠️ [TPV Quick Add] Product already exists with barcode: ${barcode}`, {
+          correlationId: req.correlationId,
+          existingProductId: existingProduct.id,
+        })
+
+        return res.status(409).json({
+          message: `Product already exists with barcode ${barcode}`,
+          data: existingProduct,
+          correlationId: req.correlationId,
+        })
+      }
+
+      // Create product using Prisma directly
+      const product = await prisma.product.create({
+        data: {
+          venueId,
+          sku: barcode, // ✅ Store barcode as SKU
+          name,
+          price: new Decimal(price),
+          categoryId, // ✅ Required field
+          trackInventory: trackInventory || false,
+          active: true,
+          displayOrder: 0,
+        },
+        include: {
+          category: true,
+          inventory: true,
+        },
+      })
+
+      logger.info(`✅ [TPV Quick Add] Product created successfully: ${product.name} (${product.id})`, {
+        correlationId: req.correlationId,
+        productId: product.id,
+        barcode,
+      })
+
+      res.status(201).json({
+        message: 'Product created successfully',
+        data: product,
+        correlationId: req.correlationId,
+      })
+    } catch (error) {
+      logger.error(`❌ [TPV Quick Add] Error creating product`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
 )
 
 export default router
