@@ -46,6 +46,7 @@ import { activateTerminalSchema } from '../schemas/activation.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
+import * as refundController from '../controllers/tpv/refund.tpv.controller'
 import * as shiftController from '../controllers/tpv/shift.tpv.controller'
 import * as authController from '../controllers/tpv/auth.tpv.controller'
 import * as activationController from '../controllers/tpv/activation.controller'
@@ -2406,6 +2407,95 @@ router.post(
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentController.recordFastPayment,
+)
+
+// ==========================================
+// REFUND ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/refunds:
+ *   post:
+ *     summary: Record a refund for an existing payment
+ *     description: |
+ *       Records a refund that was processed by the Blumon SDK (CancelIcc).
+ *       The refund MUST be processed through the same merchant account as the original payment.
+ *
+ *       **Flow:**
+ *       1. TPV app processes refund via Blumon SDK (CancelIcc)
+ *       2. TPV app calls this endpoint to record the refund
+ *       3. Backend validates and creates refund record
+ *       4. Backend updates original payment's refunded tracking
+ *       5. Backend generates digital receipt
+ *     tags:
+ *       - TPV - Refunds
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - originalPaymentId
+ *               - amount
+ *               - reason
+ *               - staffId
+ *               - blumonSerialNumber
+ *               - authorizationNumber
+ *               - referenceNumber
+ *             properties:
+ *               originalPaymentId:
+ *                 type: string
+ *                 description: ID of the original payment being refunded
+ *               amount:
+ *                 type: integer
+ *                 description: Refund amount in cents (5000 = $50.00)
+ *               reason:
+ *                 type: string
+ *                 description: Refund reason (CUSTOMER_REQUEST, DUPLICATE_CHARGE, etc.)
+ *               staffId:
+ *                 type: string
+ *                 description: ID of staff processing the refund
+ *               merchantAccountId:
+ *                 type: string
+ *                 description: Merchant account ID (must match original payment)
+ *               blumonSerialNumber:
+ *                 type: string
+ *                 description: Blumon terminal serial number
+ *               authorizationNumber:
+ *                 type: string
+ *                 description: Authorization code from Blumon CancelIcc
+ *               referenceNumber:
+ *                 type: string
+ *                 description: Reference number from Blumon CancelIcc
+ *     responses:
+ *       201:
+ *         description: Refund recorded successfully
+ *       400:
+ *         description: Invalid refund data or amount exceeds refundable
+ *       404:
+ *         description: Original payment not found
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden - missing refunds:create permission
+ */
+router.post(
+  '/venues/:venueId/refunds',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  validateRequest(recordFastPaymentParamsSchema), // Reuse for venueId param validation
+  refundController.recordRefund,
 )
 
 // ==========================================

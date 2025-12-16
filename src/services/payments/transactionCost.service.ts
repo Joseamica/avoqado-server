@@ -383,3 +383,91 @@ export async function createTransactionCost(paymentId: string): Promise<{
     netAmount: netAmountCalculated,
   }
 }
+
+/**
+ * Create a negative TransactionCost record for a refund
+ *
+ * This function mirrors the original payment's TransactionCost but with negative values.
+ * This ensures that:
+ * - SUM(grossProfit) correctly subtracts refunded amounts
+ * - Dashboard totals and profit analytics are accurate
+ * - Refunds are properly tracked in financial reports
+ *
+ * Example:
+ * - Original payment: $11.00, profit = $0.02
+ * - Refund: -$11.00, profit = -$0.02
+ * - Net profit after refund: $0.00 ✓
+ *
+ * @param refundPaymentId - The ID of the refund Payment record
+ * @param originalPaymentId - The ID of the original Payment that was refunded
+ * @returns The created TransactionCost record or null if original had no TransactionCost
+ */
+export async function createRefundTransactionCost(refundPaymentId: string, originalPaymentId: string): Promise<any | null> {
+  logger.info('Creating refund TransactionCost', { refundPaymentId, originalPaymentId })
+
+  // Find the original payment's TransactionCost
+  const originalTransactionCost = await prisma.transactionCost.findUnique({
+    where: { paymentId: originalPaymentId },
+  })
+
+  if (!originalTransactionCost) {
+    logger.info('No TransactionCost found for original payment, skipping refund TransactionCost', {
+      refundPaymentId,
+      originalPaymentId,
+    })
+    return null
+  }
+
+  // Fetch the refund payment to get amount info
+  const refundPayment = await prisma.payment.findUnique({
+    where: { id: refundPaymentId },
+  })
+
+  if (!refundPayment) {
+    throw new NotFoundError(`Refund payment ${refundPaymentId} not found`)
+  }
+
+  // Calculate the refund ratio (for partial refunds)
+  // If original was $100 and refund is $50, ratio = 0.5
+  const originalAmount = parseFloat(originalTransactionCost.amount.toString())
+  const refundAmount = Math.abs(parseFloat(refundPayment.amount.toString()))
+  const refundRatio = originalAmount > 0 ? refundAmount / originalAmount : 1
+
+  // Create negative TransactionCost mirroring the original (scaled by refund ratio for partial refunds)
+  const refundTransactionCost = await prisma.transactionCost.create({
+    data: {
+      paymentId: refundPaymentId,
+      merchantAccountId: originalTransactionCost.merchantAccountId,
+      transactionType: originalTransactionCost.transactionType,
+
+      // Negative amount
+      amount: -refundAmount,
+
+      // Provider costs (negative - Avoqado "un-pays" these)
+      providerRate: originalTransactionCost.providerRate,
+      providerCostAmount: -(parseFloat(originalTransactionCost.providerCostAmount.toString()) * refundRatio),
+      providerFixedFee: refundRatio === 1 ? -parseFloat(originalTransactionCost.providerFixedFee.toString()) : 0,
+      providerCostStructureId: originalTransactionCost.providerCostStructureId,
+
+      // Venue pricing (negative - Avoqado "un-charges" these)
+      venueRate: originalTransactionCost.venueRate,
+      venueChargeAmount: -(parseFloat(originalTransactionCost.venueChargeAmount.toString()) * refundRatio),
+      venueFixedFee: refundRatio === 1 ? -parseFloat(originalTransactionCost.venueFixedFee.toString()) : 0,
+      venuePricingStructureId: originalTransactionCost.venuePricingStructureId,
+
+      // Profit calculation (negative - Avoqado "un-earns" this)
+      grossProfit: -(parseFloat(originalTransactionCost.grossProfit.toString()) * refundRatio),
+      profitMargin: parseFloat(originalTransactionCost.profitMargin.toString()), // Margin stays same (it's a ratio)
+    },
+  })
+
+  logger.info('Refund TransactionCost created successfully', {
+    refundTransactionCostId: refundTransactionCost.id,
+    refundPaymentId,
+    originalPaymentId,
+    grossProfit: refundTransactionCost.grossProfit,
+    refundRatio,
+  })
+
+  return refundTransactionCost
+}
