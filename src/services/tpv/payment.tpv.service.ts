@@ -984,6 +984,12 @@ interface PaymentCreationData {
 
   // Scanned barcodes from verification screen
   verificationBarcodes?: string[]
+
+  // 💸 Blumon Operation Number (2025-12-16)
+  // Small integer from SDK response (response.operation) needed for CancelIcc refunds
+  // This allows refunds to work WITHOUT waiting for Blumon webhook
+  // Example: 12945658 (fits in number, unlike the 12-digit referenceNumber string)
+  blumonOperationNumber?: number
 }
 
 /**
@@ -1287,6 +1293,8 @@ export async function recordOrderPayment(
           isInternational: paymentData.isInternational,
           // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
           blumonSerialNumber: paymentData.blumonSerialNumber || null,
+          // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+          blumonOperationNumber: paymentData.blumonOperationNumber || null,
         },
         // New enhanced fields in the Payment table
         authorizationNumber: paymentData.authorizationNumber,
@@ -1857,6 +1865,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           isInternational: paymentData.isInternational,
           // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
           blumonSerialNumber: paymentData.blumonSerialNumber || null,
+          // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+          blumonOperationNumber: paymentData.blumonOperationNumber || null,
         },
         // New enhanced fields in the Payment table
         authorizationNumber: paymentData.authorizationNumber,
