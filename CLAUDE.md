@@ -128,6 +128,28 @@ const result = lookupRatesByBusinessName('Gimnasio')
 | `docs/clients&promotions/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md` | Customer + Discounts (Phase 1: 85%)        |
 | `docs/clients&promotions/CUSTOMER_LOYALTY_PROMOTIONS_REFERENCE.md` | Complete reference for customers & promos  |
 
+### Industry Configuration (Multi-Vertical Support)
+
+| Document                                      | Description                                           |
+| --------------------------------------------- | ----------------------------------------------------- |
+| `docs/industry-config/README.md`              | Overview and index for industry configuration system  |
+| `docs/industry-config/ARCHITECTURE.md`        | Configuration-driven architecture patterns            |
+| `docs/industry-config/IMPLEMENTATION_PLAN.md` | Phase-by-phase implementation plan                    |
+| `docs/industry-config/BACKEND_SPEC.md`        | Backend technical specifications                      |
+| `docs/industry-config/TPV_SPEC.md`            | TPV Android specifications                            |
+| `docs/industry-config/REQUIREMENTS_TELECOM.md`| PlayTelecom client requirements                       |
+
+**Key Concept:** Configuration-driven architecture allows serving multiple industries (Telecom, Retail, Restaurant) with a single codebase. No client-specific code.
+
+```typescript
+// NEVER do this:
+if (venue.slug === 'playtelecom') { ... }
+
+// ALWAYS do this:
+const config = getIndustryConfig(venue)
+if (config.attendance.requirePhoto) { ... }
+```
+
 ---
 
 ## 4. Development Commands
