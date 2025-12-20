@@ -289,6 +289,44 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'role-config:read': ['role-config:read'],
   'role-config:update': ['role-config:read', 'role-config:update'],
+
+  // ===========================
+  // TPV-SPECIFIC PERMISSIONS (Granular TPV Features)
+  // ===========================
+  // Terminal Configuration
+  'tpv-terminal:settings': ['tpv-terminal:settings', 'tpv:read'],
+
+  // Orders - TPV-specific actions
+  'tpv-orders:comp': ['tpv-orders:comp', 'orders:read', 'orders:update'],
+  'tpv-orders:void': ['tpv-orders:void', 'orders:read', 'orders:update'],
+  'tpv-orders:discount': ['tpv-orders:discount', 'orders:read', 'orders:update', 'discounts:read'],
+
+  // Time Entries
+  'tpv-time-entries:read': ['tpv-time-entries:read', 'teams:read'],
+  'tpv-time-entries:write': ['tpv-time-entries:write', 'tpv-time-entries:read', 'teams:read'],
+
+  // Tables & Floor Management
+  'tpv-tables:assign': ['tpv-tables:assign', 'tables:read', 'tables:update', 'orders:read'],
+  'tpv-tables:write': ['tpv-tables:write', 'tables:read', 'tables:update'],
+  'tpv-tables:delete': ['tpv-tables:delete', 'tables:read'],
+
+  'tpv-floor-elements:read': ['tpv-floor-elements:read'],
+  'tpv-floor-elements:write': ['tpv-floor-elements:write', 'tpv-floor-elements:read'],
+  'tpv-floor-elements:delete': ['tpv-floor-elements:delete', 'tpv-floor-elements:read'],
+
+  // Payments - TPV-specific
+  'tpv-payments:send-receipt': ['tpv-payments:send-receipt', 'payments:read'],
+
+  // Reports
+  'tpv-reports:read': ['tpv-reports:read', 'payments:read', 'orders:read', 'analytics:read'],
+  'tpv-reports:export': ['tpv-reports:export', 'tpv-reports:read'],
+
+  // Products (Barcode / Scan & Go)
+  'tpv-products:read': ['tpv-products:read', 'products:read'],
+  'tpv-products:write': ['tpv-products:write', 'tpv-products:read', 'products:read'],
+
+  // Factory Reset (CRITICAL - Destructive)
+  'tpv-factory-reset:execute': ['tpv-factory-reset:execute', 'tpv:read'],
 }
 
 /**
@@ -305,7 +343,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
  * //                    payments:read, menu:read, inventory:read
  * ```
  */
-function resolvePermissions(permissions: string[]): Set<string> {
+export function resolvePermissions(permissions: string[]): Set<string> {
   const resolved = new Set<string>()
 
   // Handle wildcard permission
@@ -398,6 +436,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
     'teams:read',
     'tpv:read', // Can view TPV terminals (but not create/edit/command)
+    // TPV-specific permissions
+    'tpv-tables:assign', // Can assign tables to orders
+    'tpv-time-entries:write', // Can clock in/out, take breaks
   ],
 
   /**
@@ -420,6 +461,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
     'teams:read',
+    // TPV-specific permissions
+    'tpv-tables:assign', // Can assign tables
+    'tpv-time-entries:write', // Can clock in/out
+    'tpv-products:read', // Can search products by barcode
   ],
 
   /**
@@ -476,6 +521,22 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'features:read',
     'features:write',
     'role-config:read', // Can view custom role display names
+    // TPV-specific permissions
+    'tpv-orders:comp', // Can comp items
+    'tpv-orders:void', // Can void items
+    'tpv-orders:discount', // Can apply custom discounts
+    'tpv-tables:assign',
+    'tpv-tables:write', // Can create/modify tables
+    'tpv-floor-elements:read',
+    'tpv-floor-elements:write',
+    'tpv-time-entries:read', // Can view time entries
+    'tpv-time-entries:write',
+    'tpv-payments:send-receipt',
+    'tpv-products:read',
+    'tpv-products:write', // Can create products on-the-fly (Scan & Go)
+    // NO: tpv-terminal:settings (ADMIN+ only)
+    // NO: tpv-reports (ADMIN+ only)
+    // NO: tpv-factory-reset (OWNER only)
   ],
 
   /**
@@ -484,6 +545,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.ADMIN]: [
     'home:*',
     'analytics:*',
+    'settlements:*', // Available Balance (settlements) - was missing!
     'menu:*',
     'orders:*',
     'payments:*',
@@ -504,6 +566,25 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'products:*',
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
+    // TPV-specific permissions (all except factory-reset)
+    'tpv-terminal:settings', // Can modify terminal configuration
+    'tpv-orders:comp',
+    'tpv-orders:void',
+    'tpv-orders:discount',
+    'tpv-tables:assign',
+    'tpv-tables:write',
+    'tpv-tables:delete',
+    'tpv-floor-elements:read',
+    'tpv-floor-elements:write',
+    'tpv-floor-elements:delete',
+    'tpv-time-entries:read',
+    'tpv-time-entries:write',
+    'tpv-payments:send-receipt',
+    'tpv-reports:read', // Can view reports
+    'tpv-reports:export', // Can export data
+    'tpv-products:read',
+    'tpv-products:write',
+    // NO: tpv-factory-reset:execute (OWNER only - destructive)
   ],
 
   /**
@@ -512,6 +593,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.OWNER]: [
     'home:*',
     'analytics:*',
+    'settlements:*', // Available Balance (settlements) - was missing!
     'menu:*',
     'orders:*',
     'payments:*',
@@ -532,6 +614,25 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'products:*',
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
+    // TPV-specific permissions (ALL including factory-reset)
+    'tpv-terminal:settings',
+    'tpv-orders:comp',
+    'tpv-orders:void',
+    'tpv-orders:discount',
+    'tpv-tables:assign',
+    'tpv-tables:write',
+    'tpv-tables:delete',
+    'tpv-floor-elements:read',
+    'tpv-floor-elements:write',
+    'tpv-floor-elements:delete',
+    'tpv-time-entries:read',
+    'tpv-time-entries:write',
+    'tpv-payments:send-receipt',
+    'tpv-reports:read',
+    'tpv-reports:export',
+    'tpv-products:read',
+    'tpv-products:write',
+    'tpv-factory-reset:execute', // ⚠️ CRITICAL: Can factory reset terminal (destructive)
   ],
 
   /**
@@ -792,10 +893,10 @@ export function validatePermissionFormat(permission: string): string | null {
   // Allow wildcard
   if (permission === '*:*') return null
 
-  // Check format: "resource:action"
+  // Check format: "resource:action" or "resource:action:subaction" (for granular TPV commands)
   const parts = permission.split(':')
-  if (parts.length !== 2) {
-    return `Invalid format: "${permission}". Expected format: "resource:action"`
+  if (parts.length < 2 || parts.length > 3) {
+    return `Invalid format: "${permission}". Expected format: "resource:action" or "resource:action:subaction"`
   }
 
   const [resource, action] = parts
@@ -857,6 +958,18 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   features: ['features:read', 'features:update'],
   products: ['products:read', 'products:create', 'products:update', 'products:delete'],
   'role-config': ['role-config:read', 'role-config:update'], // Custom role display names
+  // TPV-specific permissions (granular features)
+  'tpv-terminal': ['tpv-terminal:settings'],
+  'tpv-orders': ['tpv-orders:comp', 'tpv-orders:void', 'tpv-orders:discount'],
+  'tpv-payments': ['tpv-payments:send-receipt'],
+  'tpv-shifts': ['tpv-shifts:create', 'tpv-shifts:close'],
+  'tpv-tables': ['tpv-tables:assign', 'tpv-tables:write', 'tpv-tables:delete'],
+  'tpv-floor-elements': ['tpv-floor-elements:read', 'tpv-floor-elements:write', 'tpv-floor-elements:delete'],
+  'tpv-customers': ['tpv-customers:read', 'tpv-customers:create'],
+  'tpv-time-entries': ['tpv-time-entries:read', 'tpv-time-entries:write'],
+  'tpv-reports': ['tpv-reports:read', 'tpv-reports:export'],
+  'tpv-products': ['tpv-products:read', 'tpv-products:write'],
+  'tpv-factory-reset': ['tpv-factory-reset:execute'],
 }
 
 /**
