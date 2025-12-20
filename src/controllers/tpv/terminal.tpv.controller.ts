@@ -25,6 +25,10 @@ interface TpvSettings {
   showVerificationScreen: boolean
   requireVerificationPhoto: boolean
   requireVerificationBarcode: boolean
+  // Venue-level settings (from VenueSettings)
+  enableShifts: boolean
+  // Clock-in photo verification (anti-fraud, from VenueSettings)
+  requireClockInPhoto: boolean
 }
 
 /**
@@ -41,6 +45,10 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showVerificationScreen: false,
   requireVerificationPhoto: false,
   requireVerificationBarcode: false,
+  // Shift system enabled by default (can be disabled per-venue)
+  enableShifts: true,
+  // Clock-in photo disabled by default (anti-fraud feature)
+  requireClockInPhoto: false,
 }
 
 /**
@@ -200,7 +208,23 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     }))
 
     // Step 4: Extract TPV settings from terminal config
-    const tpvSettings = getTpvSettingsFromConfig(terminal.config)
+    const terminalTpvSettings = getTpvSettingsFromConfig(terminal.config)
+
+    // Step 5: Fetch venue-level settings from VenueSettings
+    const venueSettings = await prisma.venueSettings.findUnique({
+      where: { venueId: terminal.venueId },
+      select: {
+        enableShifts: true,
+        requireClockInPhoto: true, // Anti-fraud: require photo on clock-in
+      },
+    })
+
+    // Merge terminal settings with venue-level settings
+    const tpvSettings: TpvSettings = {
+      ...terminalTpvSettings,
+      enableShifts: venueSettings?.enableShifts ?? DEFAULT_TPV_SETTINGS.enableShifts,
+      requireClockInPhoto: venueSettings?.requireClockInPhoto ?? DEFAULT_TPV_SETTINGS.requireClockInPhoto,
+    }
 
     logger.info('[Terminal Config] Successfully fetched config', {
       terminalId: terminal.id,
@@ -279,10 +303,10 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
       settingsUpdate,
     })
 
-    // Step 1: Find terminal by serial number
+    // Step 1: Find terminal by serial number (include venueId for enableShifts)
     const terminal = await prisma.terminal.findFirst({
       where: { serialNumber },
-      select: { id: true, config: true },
+      select: { id: true, config: true, venueId: true },
     })
 
     if (!terminal) {
@@ -308,7 +332,7 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
       settings: newSettings,
     }
 
-    // Step 5: Save to database
+    // Step 5: Save terminal-level settings to database
     await prisma.terminal.update({
       where: { id: terminal.id },
       data: {
@@ -316,6 +340,22 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
         updatedAt: new Date(),
       },
     })
+
+    // Step 6: If enableShifts was passed, update VenueSettings (venue-level setting)
+    if (settingsUpdate.enableShifts !== undefined) {
+      await prisma.venueSettings.upsert({
+        where: { venueId: terminal.venueId },
+        update: { enableShifts: settingsUpdate.enableShifts },
+        create: {
+          venueId: terminal.venueId,
+          enableShifts: settingsUpdate.enableShifts,
+        },
+      })
+      logger.info('[TPV Settings] VenueSettings.enableShifts updated', {
+        venueId: terminal.venueId,
+        enableShifts: settingsUpdate.enableShifts,
+      })
+    }
 
     logger.info('[TPV Settings] Settings updated successfully', {
       serialNumber,

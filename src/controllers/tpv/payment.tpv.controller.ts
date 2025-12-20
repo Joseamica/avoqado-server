@@ -1,7 +1,10 @@
 import { NextFunction, Request, Response } from 'express'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
+import * as receiptDashboardService from '../../services/dashboard/receipt.dashboard.service'
+import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 
 export async function getPayments(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -145,6 +148,51 @@ export async function getMentaRoute(req: Request, res: Response, next: NextFunct
       success: true,
       data: result,
       message: 'Payment routing retrieved successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Send a payment receipt by email
+ * @param req Request with venueId, paymentId and recipientEmail
+ * @param res Response
+ * @param next Next function for error handling
+ */
+export async function sendPaymentReceipt(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const paymentId: string = req.params.paymentId
+    const { recipientEmail } = req.body
+
+    // Verify that the payment exists and belongs to the venue
+    const payment = await prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        venueId: venueId,
+      },
+    })
+
+    if (!payment) {
+      throw new NotFoundError('Payment not found or does not belong to this venue')
+    }
+
+    // Generate (or update) the receipt with the recipient email
+    const receipt = await receiptDashboardService.generateAndStoreReceipt(paymentId, recipientEmail)
+
+    // Send the email asynchronously (don't block response)
+    receiptDashboardService.sendReceiptByEmail(receipt.id).catch(error => {
+      logger.error(`Failed to send receipt email for payment ${paymentId}:`, error)
+    })
+
+    logger.info(`Receipt email queued for payment ${paymentId} to ${recipientEmail}`)
+
+    // Send success response
+    res.status(200).json({
+      success: true,
+      receiptId: receipt.id,
+      message: 'Recibo enviado exitosamente',
     })
   } catch (error) {
     next(error)
