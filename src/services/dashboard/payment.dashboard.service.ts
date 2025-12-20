@@ -153,6 +153,7 @@ export async function getPaymentById(paymentId: string) {
         },
       },
       transactionCost: true, // Include profit/cost information
+      saleVerification: true, // Pre-payment verification photos
     },
   })
 

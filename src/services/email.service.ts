@@ -119,6 +119,17 @@ interface TerminalPurchaseEmailData {
   orderDate: string
 }
 
+interface TpvFeedbackEmailData {
+  feedbackType: 'bug' | 'feature'
+  message: string
+  venueSlug: string
+  appVersion: string
+  buildVersion: string
+  androidVersion: string
+  deviceModel: string
+  deviceManufacturer: string
+}
+
 class EmailService {
   private transporter: nodemailer.Transporter | null = null
 
@@ -1659,6 +1670,132 @@ Recibo enviado por ${data.venueName} vía Avoqado
       subject,
       html,
       text,
+    })
+  }
+
+  /**
+   * Send TPV feedback email (bug report or feature suggestion)
+   * Sent to hola@avoqado.io with device info and venue context
+   */
+  async sendTpvFeedbackEmail(data: TpvFeedbackEmailData): Promise<boolean> {
+    const feedbackTypeLabel = data.feedbackType === 'bug' ? '🐛 Reporte de Bug' : '💡 Sugerencia de Función'
+    const subject = data.feedbackType === 'bug' ? `🐛 Reporte de bug - ${data.venueSlug}` : `💡 Sugerencia - ${data.venueSlug}`
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.6;
+      color: #333;
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .header {
+      background: ${data.feedbackType === 'bug' ? '#dc2626' : '#f59e0b'};
+      color: white;
+      padding: 20px;
+      border-radius: 8px 8px 0 0;
+      text-align: center;
+    }
+    .content {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-top: none;
+      padding: 30px;
+      border-radius: 0 0 8px 8px;
+    }
+    .message-box {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .device-info {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 15px;
+      margin-top: 20px;
+      font-size: 14px;
+    }
+    .device-info table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .device-info td {
+      padding: 6px 0;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .device-info td:first-child {
+      font-weight: 600;
+      width: 140px;
+      color: #6b7280;
+    }
+    .footer {
+      margin-top: 30px;
+      padding-top: 20px;
+      border-top: 1px solid #e5e7eb;
+      text-align: center;
+      color: #6b7280;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1 style="margin: 0;">${feedbackTypeLabel}</h1>
+    <p style="margin: 10px 0 0 0;">Desde TPV: ${data.venueSlug}</p>
+  </div>
+  <div class="content">
+    <h2 style="margin-top: 0;">Mensaje del Usuario:</h2>
+    <div class="message-box">${data.message}</div>
+
+    <div class="device-info">
+      <h3 style="margin-top: 0;">📱 Información del Dispositivo</h3>
+      <table>
+        <tr>
+          <td>Venue:</td>
+          <td><strong>${data.venueSlug}</strong></td>
+        </tr>
+        <tr>
+          <td>App Version:</td>
+          <td>${data.appVersion}</td>
+        </tr>
+        <tr>
+          <td>Build:</td>
+          <td>${data.buildVersion}</td>
+        </tr>
+        <tr>
+          <td>Android:</td>
+          <td>${data.androidVersion}</td>
+        </tr>
+        <tr>
+          <td>Device:</td>
+          <td>${data.deviceManufacturer} ${data.deviceModel}</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="footer">
+      <p>Este email fue enviado automáticamente desde Avoqado TPV</p>
+      <p>Para responder al usuario, contacta directamente al venue: ${data.venueSlug}</p>
+    </div>
+  </div>
+</body>
+</html>
+    `
+
+    return this.sendEmail({
+      to: 'hola@avoqado.io',
+      subject,
+      html,
     })
   }
 

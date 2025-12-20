@@ -1,9 +1,14 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { TransactionCardType, SettlementStatus, SimulationType } from '@prisma/client'
+import { TransactionCardType, SettlementStatus, SimulationType, PaymentMethod } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import { calculateSettlementDate, findActiveSettlementConfig } from '../payments/settlementCalculation.service'
 import { addDays } from 'date-fns'
+import { getLastCloseoutDate } from './cashCloseout.dashboard.service'
+
+// Extended card type that includes CASH (for frontend compatibility)
+// CASH is not in Prisma enum but we treat it as a synthetic type
+export type ExtendedCardType = TransactionCardType | 'CASH'
 
 /**
  * Available Balance Dashboard Service
@@ -31,11 +36,11 @@ export interface AvailableBalanceSummary {
 }
 
 export interface CardTypeBreakdown {
-  cardType: TransactionCardType
+  cardType: ExtendedCardType
   totalSales: number
   fees: number
   netAmount: number
-  settlementDays: number | null // Typical settlement days
+  settlementDays: number | null // Typical settlement days (0 for cash - instant)
   pendingAmount: number
   settledAmount: number
   transactionCount: number
@@ -56,27 +61,30 @@ export interface TimelineEntry {
  *
  * @param venueId - Venue ID
  * @param dateRange - Optional date range filter
- * @returns Available balance summary
+ * @returns Available balance summary (includes CASH as immediately available)
  */
 export async function getAvailableBalance(venueId: string, dateRange?: { from: Date; to: Date }): Promise<AvailableBalanceSummary> {
   logger.info('Fetching available balance summary', { venueId, dateRange })
 
-  // Build where clause
-  const whereClause: any = {
-    venueId,
-    status: 'COMPLETED',
-  }
-
+  // Build base where clause for date range
+  const dateFilter: any = {}
   if (dateRange) {
-    whereClause.createdAt = {
+    dateFilter.createdAt = {
       gte: dateRange.from,
       lte: dateRange.to,
     }
   }
 
-  // Get all completed payments with settlement info
-  const payments = await prisma.payment.findMany({
-    where: whereClause,
+  // Get all completed card payments with settlement info
+  const cardPayments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      method: {
+        not: PaymentMethod.CASH, // Exclude cash, handle separately
+      },
+      ...dateFilter,
+    },
     include: {
       transaction: true,
       transactionCost: {
@@ -87,6 +95,22 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     },
   })
 
+  // Get CASH payments separately (instant settlement, 0 fees)
+  // Only show cash collected SINCE the last closeout (corte de caja)
+  const lastCloseout = await getLastCloseoutDate(venueId)
+  const cashPayments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      method: PaymentMethod.CASH,
+      createdAt: { gt: lastCloseout }, // Only cash since last closeout
+      ...dateFilter,
+    },
+    select: {
+      amount: true,
+    },
+  })
+
   // Calculate totals
   let totalSales = 0
   let totalFees = 0
@@ -94,7 +118,8 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   let pendingSettlement = 0
   const upcomingSettlements: { date: Date; amount: number }[] = []
 
-  for (const payment of payments) {
+  // Process card payments
+  for (const payment of cardPayments) {
     const amount = Number(payment.amount)
     const fees = payment.transactionCost ? Number(payment.transactionCost.venueChargeAmount) : 0
     const netAmount = amount - fees
@@ -124,6 +149,12 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
       pendingSettlement += netAmount
     }
   }
+
+  // Add CASH payments (instant settlement, 0 fees, 100% available)
+  const cashTotal = cashPayments.reduce((sum, p) => sum + Number(p.amount), 0)
+  totalSales += cashTotal
+  // Cash has 0 fees, so no totalFees increment
+  availableNow += cashTotal // Cash is immediately available
 
   // Find next settlement date and amount
   let estimatedNextSettlement: { date: Date | null; amount: number } = {
@@ -157,6 +188,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     totalSales,
     availableNow,
     pendingSettlement,
+    cashTotal,
   })
 
   return {
@@ -173,29 +205,30 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
  *
  * @param venueId - Venue ID
  * @param dateRange - Optional date range filter
- * @returns Array of card type breakdowns
+ * @returns Array of card type breakdowns (includes CASH as synthetic type)
  */
 export async function getBalanceByCardType(venueId: string, dateRange?: { from: Date; to: Date }): Promise<CardTypeBreakdown[]> {
   logger.info('Fetching balance by card type', { venueId, dateRange })
 
-  // Build where clause
-  const whereClause: any = {
-    venueId,
-    transactionCost: {
-      isNot: null, // Must have transaction cost
-    },
-  }
-
+  // Build base where clause for date range
+  const dateFilter: any = {}
   if (dateRange) {
-    whereClause.createdAt = {
+    dateFilter.createdAt = {
       gte: dateRange.from,
       lte: dateRange.to,
     }
   }
 
-  // Get payments with transaction costs
-  const payments = await prisma.payment.findMany({
-    where: whereClause,
+  // Get card payments with transaction costs
+  const cardPayments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      transactionCost: {
+        isNot: null, // Must have transaction cost
+      },
+      ...dateFilter,
+    },
     include: {
       transaction: true,
       transactionCost: {
@@ -208,9 +241,27 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     },
   })
 
-  // Group by card type
+  // Get CASH payments separately (no transaction cost)
+  // Only show cash collected SINCE the last closeout (corte de caja)
+  const lastCloseoutForCash = await getLastCloseoutDate(venueId)
+  const cashPayments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      method: PaymentMethod.CASH,
+      createdAt: { gt: lastCloseoutForCash }, // Only cash since last closeout
+      ...dateFilter,
+    },
+    select: {
+      id: true,
+      amount: true,
+      createdAt: true,
+    },
+  })
+
+  // Group card payments by card type
   const byCardType = new Map<
-    TransactionCardType,
+    ExtendedCardType,
     {
       totalSales: number
       fees: number
@@ -221,7 +272,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     }
   >()
 
-  for (const payment of payments) {
+  for (const payment of cardPayments) {
     if (!payment.transactionCost) continue
 
     const cardType = payment.transactionCost.transactionType
@@ -264,6 +315,19 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     } else {
       entry.pendingAmount += netAmount
     }
+  }
+
+  // Add CASH payments as synthetic card type (instant settlement, 0 fees)
+  if (cashPayments.length > 0) {
+    const cashTotalSales = cashPayments.reduce((sum, p) => sum + Number(p.amount), 0)
+    byCardType.set('CASH', {
+      totalSales: cashTotalSales,
+      fees: 0, // Cash has no processing fees
+      pendingAmount: 0, // Cash is never pending
+      settledAmount: cashTotalSales, // Cash is always immediately settled
+      transactionCount: cashPayments.length,
+      settlementDays: [0], // Instant settlement
+    })
   }
 
   // Convert map to array
@@ -385,10 +449,16 @@ export async function simulateTransaction(
     transactionTime?: string
   },
 ): Promise<{
+  grossAmount: number
   estimatedSettlementDate: Date | null
   netAmount: number
   fees: number
   settlementDays: number | null
+  configuration: {
+    settlementDays: number
+    settlementDayType: string
+    cutoffTime: string
+  } | null
 }> {
   logger.info('Simulating transaction', { venueId, params })
 
@@ -414,10 +484,12 @@ export async function simulateTransaction(
     })
 
     return {
+      grossAmount: params.amount,
       estimatedSettlementDate: null,
       netAmount: params.amount,
       fees: 0,
       settlementDays: null,
+      configuration: null,
     }
   }
 
@@ -464,10 +536,16 @@ export async function simulateTransaction(
   logger.info('Transaction simulation completed', { simulationId: simulation.id })
 
   return {
+    grossAmount: params.amount,
     estimatedSettlementDate,
     netAmount,
     fees,
     settlementDays,
+    configuration: {
+      settlementDays: config.settlementDays,
+      settlementDayType: config.settlementDayType,
+      cutoffTime: config.cutoffTime,
+    },
   }
 }
 
@@ -477,6 +555,8 @@ export async function simulateTransaction(
  * This shows exactly how much money will be deposited each day.
  * Example: If Amex transaction on Nov 1 settles on Nov 3, and Visa transaction
  * on Nov 2 also settles on Nov 3, both amounts are grouped together for Nov 3.
+ *
+ * CASH payments are shown on their transaction date as instantly settled.
  *
  * @param venueId - Venue ID
  * @param dateRange - Date range of settlement dates to query
@@ -492,7 +572,7 @@ export async function getSettlementCalendar(
     transactionCount: number
     status: SettlementStatus
     byCardType: Array<{
-      cardType: TransactionCardType
+      cardType: ExtendedCardType
       netAmount: number
       transactionCount: number
     }>
@@ -500,11 +580,14 @@ export async function getSettlementCalendar(
 > {
   logger.info('Fetching settlement calendar', { venueId, dateRange })
 
-  // Get all payments with transactions that have settlement dates in range
-  const payments = await prisma.payment.findMany({
+  // Get card payments with transactions that have settlement dates in range
+  const cardPayments = await prisma.payment.findMany({
     where: {
       venueId,
       status: 'COMPLETED',
+      method: {
+        not: PaymentMethod.CASH,
+      },
       transaction: {
         estimatedSettlementDate: {
           gte: dateRange.from,
@@ -527,6 +610,29 @@ export async function getSettlementCalendar(
     },
   })
 
+  // Get CASH payments in date range (instant settlement on transaction date)
+  // Only show cash collected SINCE the last closeout (corte de caja)
+  const lastCloseoutForCalendar = await getLastCloseoutDate(venueId)
+  const cashPayments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      method: PaymentMethod.CASH,
+      createdAt: {
+        gt: lastCloseoutForCalendar, // Only cash since last closeout
+        gte: dateRange.from,
+        lte: dateRange.to,
+      },
+    },
+    select: {
+      amount: true,
+      createdAt: true,
+    },
+    orderBy: {
+      createdAt: 'asc',
+    },
+  })
+
   // Group by settlement date
   const calendarMap = new Map<
     string,
@@ -536,7 +642,7 @@ export async function getSettlementCalendar(
       transactionCount: number
       status: SettlementStatus
       byCardType: Map<
-        TransactionCardType,
+        ExtendedCardType,
         {
           netAmount: number
           transactionCount: number
@@ -545,7 +651,8 @@ export async function getSettlementCalendar(
     }
   >()
 
-  for (const payment of payments) {
+  // Process card payments
+  for (const payment of cardPayments) {
     if (!payment.transaction?.estimatedSettlementDate) continue
 
     const settlementDate = payment.transaction.estimatedSettlementDate
@@ -583,6 +690,39 @@ export async function getSettlementCalendar(
     if (payment.transaction.status === SettlementStatus.SETTLED) {
       entry.status = SettlementStatus.SETTLED
     }
+  }
+
+  // Process CASH payments (instant settlement - show on transaction date)
+  for (const payment of cashPayments) {
+    const settlementDate = payment.createdAt
+    const dateKey = settlementDate.toISOString().split('T')[0]
+    const netAmount = Number(payment.amount) // Cash has no fees
+
+    if (!calendarMap.has(dateKey)) {
+      calendarMap.set(dateKey, {
+        settlementDate,
+        totalNetAmount: 0,
+        transactionCount: 0,
+        status: SettlementStatus.SETTLED, // Cash is always settled
+        byCardType: new Map(),
+      })
+    }
+
+    const entry = calendarMap.get(dateKey)!
+    entry.totalNetAmount += netAmount
+    entry.transactionCount += 1
+
+    // Add to CASH card type
+    if (!entry.byCardType.has('CASH')) {
+      entry.byCardType.set('CASH', {
+        netAmount: 0,
+        transactionCount: 0,
+      })
+    }
+
+    const cashEntry = entry.byCardType.get('CASH')!
+    cashEntry.netAmount += netAmount
+    cashEntry.transactionCount += 1
   }
 
   // Convert map to array
