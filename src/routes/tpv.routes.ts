@@ -17,6 +17,8 @@ import {
   recordPaymentParamsSchema,
   recordFastPaymentParamsSchema,
   recordPaymentBodySchema,
+  sendReceiptParamsSchema,
+  sendReceiptBodySchema,
   paymentRouteSchema,
   tableParamsSchema,
   assignTableSchema,
@@ -41,6 +43,7 @@ import {
   createSaleVerificationSchema,
   listSaleVerificationsSchema,
   getSaleVerificationSchema,
+  tpvFeedbackSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
@@ -60,10 +63,13 @@ import * as customerController from '../controllers/tpv/customer.tpv.controller'
 import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
 import * as productService from '../services/dashboard/product.dashboard.service'
+import emailService from '../services/email.service'
 import AppError from '../errors/AppError'
 import logger from '../config/logger'
 import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '../utils/prismaClient'
+import { DEFAULT_PERMISSIONS, resolvePermissions, expandWildcards } from '../lib/permissions'
+import * as rolePermissionService from '../services/dashboard/rolePermission.service'
 
 const router = express.Router()
 
@@ -2173,6 +2179,114 @@ router.post('/auth/logout', validateRequest(logoutSchema), authController.staffL
 
 /**
  * @openapi
+ * /tpv/auth/permissions:
+ *   get:
+ *     tags: [TPV - Authentication]
+ *     summary: Get current staff permissions
+ *     description: |
+ *       Retrieves the complete list of resolved permissions for the authenticated staff member.
+ *
+ *       **Permission Resolution:**
+ *       1. Fetches base permissions for the staff role from DEFAULT_PERMISSIONS
+ *       2. Fetches custom permissions assigned via dashboard (if any)
+ *       3. Merges base + custom permissions
+ *       4. Resolves implicit permission dependencies
+ *       5. Returns deduplicated set of all permissions
+ *
+ *       **Use Cases:**
+ *       - TPV UI: Show/hide features based on permissions
+ *       - Client-side authorization before API calls
+ *       - Permission caching in mobile app
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Permissions retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     staffId:
+ *                       type: string
+ *                       description: Staff member ID
+ *                     venueId:
+ *                       type: string
+ *                       description: Venue ID
+ *                     role:
+ *                       type: string
+ *                       enum: [SUPERADMIN, OWNER, ADMIN, MANAGER, CASHIER, WAITER, KITCHEN, HOST, VIEWER]
+ *                       description: Staff member role
+ *                     permissions:
+ *                       type: array
+ *                       items:
+ *                         type: string
+ *                       description: Resolved permissions array (includes base, custom, and implicit dependencies)
+ *                       example: ["home:read", "orders:read", "orders:create", "payments:read", "tpv-terminal:settings", "tpv-orders:comp"]
+ *       401:
+ *         description: Unauthorized - Missing or invalid access token
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/auth/permissions', authenticateTokenMiddleware, async (req: Request, res: Response) => {
+  try {
+    // Get authenticated user from authContext (set by authenticateTokenMiddleware)
+    const authContext = req.authContext
+    if (!authContext) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized - Missing auth context',
+      })
+    }
+
+    const { venueId, role } = authContext
+    const staffId = authContext.userId
+
+    // 1. Get base permissions for this role
+    const basePermissions = DEFAULT_PERMISSIONS[role as keyof typeof DEFAULT_PERMISSIONS] || []
+
+    // 2. Get custom permissions (if any) from VenueRolePermission table
+    const customPerms = await rolePermissionService.getRolePermissions(venueId, role)
+
+    // 3. Merge base + custom permissions
+    const allPermissions = customPerms ? [...basePermissions, ...customPerms.permissions] : basePermissions
+
+    // 4. Resolve implicit dependencies
+    const resolvedPermissionsSet = resolvePermissions(allPermissions)
+    const resolvedPermissions = Array.from(resolvedPermissionsSet)
+
+    // 5. Expand wildcards to individual permissions (for TPV client)
+    // This ensures SUPERADMIN/OWNER/ADMIN get full permission list instead of ['*:*']
+    const expandedPermissions = expandWildcards(resolvedPermissions)
+
+    logger.info(`[TPV] Permissions fetched for staff ${staffId} (${role}): ${expandedPermissions.length} permissions`)
+
+    return res.json({
+      success: true,
+      data: {
+        staffId,
+        venueId,
+        role,
+        permissions: expandedPermissions,
+      },
+    })
+  } catch (error) {
+    logger.error('[TPV] Error fetching staff permissions:', error)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch permissions',
+    })
+  }
+})
+
+/**
+ * @openapi
  * /tpv/venues/{venueId}/orders/{orderId}:
  *   post:
  *     tags: [TPV - Payments]
@@ -2410,6 +2524,86 @@ router.post(
 )
 
 // ==========================================
+// SEND RECEIPT BY EMAIL
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/payments/{paymentId}/send-receipt:
+ *   post:
+ *     summary: Send a payment receipt by email
+ *     description: |
+ *       Sends the payment receipt to the specified email address.
+ *       Uses the same template as the dashboard receipt email.
+ *
+ *       **Flow:**
+ *       1. TPV app displays email input dialog
+ *       2. User enters customer email
+ *       3. TPV calls this endpoint
+ *       4. Backend generates receipt (if not exists) and sends email
+ *       5. TPV shows confirmation toast
+ *     tags:
+ *       - TPV - Payments
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: Venue ID
+ *       - in: path
+ *         name: paymentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: Payment ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - recipientEmail
+ *             properties:
+ *               recipientEmail:
+ *                 type: string
+ *                 format: email
+ *                 description: Email address to send the receipt to
+ *     responses:
+ *       200:
+ *         description: Receipt sent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 receiptId:
+ *                   type: string
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: Invalid email format
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Payment not found
+ */
+router.post(
+  '/venues/:venueId/payments/:paymentId/send-receipt',
+  authenticateTokenMiddleware,
+  validateRequest(sendReceiptParamsSchema),
+  validateRequest(sendReceiptBodySchema),
+  paymentController.sendPaymentReceipt,
+)
+
+// ==========================================
 // REFUND ROUTES
 // ==========================================
 
@@ -2523,13 +2717,25 @@ router.post('/time-entries/:timeEntryId/break/start', authenticateTokenMiddlewar
 router.post('/time-entries/:timeEntryId/break/end', authenticateTokenMiddleware, timeEntryController.endBreak)
 
 /**
- * Get time entries for a venue
+ * Get time entries for a venue (requires shifts:manage permission)
  */
 router.get(
   '/venues/:venueId/time-entries',
   authenticateTokenMiddleware,
   checkPermission('shifts:manage'),
   timeEntryController.getTimeEntries,
+)
+
+/**
+ * Get MY time entries (self-service, no special permissions)
+ * Used by TimeclockScreen to show the current clock-in status for the logged-in user.
+ * Staff can always see their own clock-in/out history.
+ */
+router.get(
+  '/venues/:venueId/staff/:staffId/time-entries',
+  authenticateTokenMiddleware,
+  // No permission check - staff can always see their OWN entries
+  timeEntryController.getMyTimeEntries,
 )
 
 /**
@@ -4330,5 +4536,137 @@ router.post(
     }
   },
 )
+
+/**
+ * @openapi
+ * /api/v1/tpv/feedback:
+ *   post:
+ *     tags:
+ *       - TPV Feedback
+ *     summary: Send feedback from TPV (bug report or feature suggestion)
+ *     description: Sends an email to hola@avoqado.io with bug reports or feature suggestions from TPV terminals
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - feedbackType
+ *               - message
+ *               - venueSlug
+ *               - appVersion
+ *               - buildVersion
+ *               - androidVersion
+ *               - deviceModel
+ *               - deviceManufacturer
+ *             properties:
+ *               feedbackType:
+ *                 type: string
+ *                 enum: [bug, feature]
+ *               message:
+ *                 type: string
+ *                 minLength: 10
+ *               venueSlug:
+ *                 type: string
+ *               appVersion:
+ *                 type: string
+ *               buildVersion:
+ *                 type: string
+ *               androidVersion:
+ *                 type: string
+ *               deviceModel:
+ *                 type: string
+ *               deviceManufacturer:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Feedback sent successfully
+ *       400:
+ *         description: Invalid request body
+ *       500:
+ *         description: Server error
+ */
+router.post('/feedback', validateRequest(tpvFeedbackSchema), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { feedbackType, message, venueSlug, appVersion, buildVersion, androidVersion, deviceModel, deviceManufacturer } = req.body
+
+    logger.info(`📧 [TPV Feedback] Saving and sending ${feedbackType} feedback from ${venueSlug}`, {
+      correlationId: req.correlationId,
+      venueSlug,
+      feedbackType,
+    })
+
+    // Save feedback to database first
+    const feedbackRecord = await prisma.tpvFeedback.create({
+      data: {
+        feedbackType: feedbackType.toUpperCase() as 'BUG' | 'FEATURE',
+        message,
+        venueSlug,
+        appVersion,
+        buildVersion,
+        androidVersion,
+        deviceModel,
+        deviceManufacturer,
+      },
+    })
+
+    logger.info(`💾 [TPV Feedback] Saved to database with ID: ${feedbackRecord.id}`, {
+      correlationId: req.correlationId,
+      feedbackId: feedbackRecord.id,
+    })
+
+    // Send email
+    const emailSent = await emailService.sendTpvFeedbackEmail({
+      feedbackType,
+      message,
+      venueSlug,
+      appVersion,
+      buildVersion,
+      androidVersion,
+      deviceModel,
+      deviceManufacturer,
+    })
+
+    // Update email status
+    if (emailSent) {
+      await prisma.tpvFeedback.update({
+        where: { id: feedbackRecord.id },
+        data: {
+          emailSent: true,
+          emailSentAt: new Date(),
+        },
+      })
+
+      logger.info(`✅ [TPV Feedback] Email sent successfully`, {
+        correlationId: req.correlationId,
+        feedbackId: feedbackRecord.id,
+        venueSlug,
+        feedbackType,
+      })
+    } else {
+      logger.warn(`⚠️ [TPV Feedback] Failed to send email, but feedback saved to database`, {
+        correlationId: req.correlationId,
+        feedbackId: feedbackRecord.id,
+        venueSlug,
+        feedbackType,
+      })
+      // Don't throw error - feedback is saved even if email fails
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Feedback enviado correctamente',
+      correlationId: req.correlationId,
+      feedbackId: feedbackRecord.id,
+    })
+  } catch (error) {
+    logger.error(`❌ [TPV Feedback] Error processing feedback`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
 
 export default router

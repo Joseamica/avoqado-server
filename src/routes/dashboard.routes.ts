@@ -19,6 +19,8 @@ import * as assistantController from '../controllers/dashboard/assistant.dashboa
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
 import * as availableBalanceController from '../controllers/dashboard/availableBalance.dashboard.controller'
 import * as settlementIncidentController from '../controllers/dashboard/settlementIncident.dashboard.controller'
+import * as cashCloseoutController from '../controllers/dashboard/cashCloseout.dashboard.controller'
+import * as creditOfferController from '../controllers/dashboard/creditOffer.dashboard.controller'
 import * as featureController from '../controllers/dashboard/feature.controller'
 import * as generalStatsController from '../controllers/dashboard/generalStats.dashboard.controller'
 import * as googleOAuthController from '../controllers/dashboard/googleOAuth.controller'
@@ -55,7 +57,13 @@ import {
   simulateTransactionSchema,
   balanceProjectionQuerySchema,
 } from '../schemas/dashboard/availableBalance.schema'
-import { incidentListQuerySchema, confirmIncidentSchema, escalateIncidentSchema } from '../schemas/dashboard/settlementIncident.schema'
+import {
+  incidentListQuerySchema,
+  confirmIncidentSchema,
+  escalateIncidentSchema,
+  bulkConfirmIncidentSchema,
+} from '../schemas/dashboard/settlementIncident.schema'
+import { createCloseoutSchema, closeoutHistoryQuerySchema } from '../schemas/dashboard/cashCloseout.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
@@ -3110,6 +3118,153 @@ router.post(
   checkPermission('settlements:write'),
   validateRequest(confirmIncidentSchema),
   settlementIncidentController.confirmIncident,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/settlement-incidents/bulk-confirm:
+ *   post:
+ *     tags: [Settlement Incidents]
+ *     summary: Bulk confirm multiple settlement incidents
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: uuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [incidentIds, settlementArrived]
+ *             properties:
+ *               incidentIds: { type: array, items: { type: string, format: uuid }, minItems: 1, maxItems: 100 }
+ *               settlementArrived: { type: boolean }
+ *               actualDate: { type: string, format: date-time }
+ *               notes: { type: string, maxLength: 1000 }
+ *     responses:
+ *       200:
+ *         description: Bulk confirmation result
+ *       400: { $ref: '#/components/responses/ValidationError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/settlement-incidents/bulk-confirm',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:write'),
+  validateRequest(bulkConfirmIncidentSchema),
+  settlementIncidentController.bulkConfirmIncidents,
+)
+
+// ==========================================
+// CASH CLOSEOUT (CORTES DE CAJA) ROUTES
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/cash-closeouts/expected:
+ *   get:
+ *     tags: [Cash Closeout]
+ *     summary: Get expected cash amount since last closeout
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Expected cash amount and period info
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/cash-closeouts/expected',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  cashCloseoutController.getExpectedCash,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/cash-closeouts:
+ *   post:
+ *     tags: [Cash Closeout]
+ *     summary: Create a new cash closeout
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [actualAmount, depositMethod]
+ *             properties:
+ *               actualAmount: { type: number, minimum: 0 }
+ *               depositMethod: { type: string, enum: [BANK_DEPOSIT, SAFE, OWNER_WITHDRAWAL, NEXT_SHIFT] }
+ *               bankReference: { type: string, maxLength: 100 }
+ *               notes: { type: string, maxLength: 1000 }
+ *     responses:
+ *       201:
+ *         description: Cash closeout created successfully
+ *       400: { $ref: '#/components/responses/ValidationError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/cash-closeouts',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:write'),
+  validateRequest(createCloseoutSchema),
+  cashCloseoutController.createCloseout,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/cash-closeouts:
+ *   get:
+ *     tags: [Cash Closeout]
+ *     summary: Get closeout history with pagination
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: page, in: query, schema: { type: integer, default: 1 } }
+ *       - { name: pageSize, in: query, schema: { type: integer, default: 10 } }
+ *     responses:
+ *       200:
+ *         description: Paginated closeout history
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/cash-closeouts',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  validateRequest(closeoutHistoryQuerySchema),
+  cashCloseoutController.getHistory,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/cash-closeouts/{closeoutId}:
+ *   get:
+ *     tags: [Cash Closeout]
+ *     summary: Get a single closeout by ID
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: closeoutId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Closeout details
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/cash-closeouts/:closeoutId',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  cashCloseoutController.getCloseoutById,
 )
 
 /**
@@ -9363,6 +9518,116 @@ router.put(
   checkPermission('venue:update'),
   validateRequest(UpdateTpvSettingsSchema),
   venueSettingsController.updateTpvSettings,
+)
+
+// ============================================================
+// CREDIT OFFER ROUTES (Client-facing)
+// ============================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/credit-offer:
+ *   get:
+ *     tags: [Credit Offers]
+ *     summary: Get pending credit offer for venue
+ *     description: Returns any pending credit offer for the venue. Does NOT expose credit scores.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Credit offer status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 hasOffer: { type: boolean }
+ *                 offer:
+ *                   type: object
+ *                   nullable: true
+ *                   properties:
+ *                     id: { type: string }
+ *                     offerAmount: { type: number }
+ *                     factorRate: { type: number }
+ *                     totalRepayment: { type: number }
+ *                     repaymentPercent: { type: number }
+ *                     estimatedTermDays: { type: integer }
+ *                     expiresAt: { type: string, format: date-time }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/credit-offer',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  creditOfferController.getPendingOffer,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/credit-offer/{offerId}/interest:
+ *   post:
+ *     tags: [Credit Offers]
+ *     summary: Express interest in credit offer
+ *     description: Registers venue's interest in the credit offer. Triggers follow-up process.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: offerId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Interest registered
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/credit-offer/:offerId/interest',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:write'),
+  creditOfferController.expressInterest,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/credit-offer/{offerId}/decline:
+ *   post:
+ *     tags: [Credit Offers]
+ *     summary: Decline credit offer
+ *     description: Declines the credit offer. Venue can receive new offers in the future.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: offerId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason: { type: string, description: Optional reason for declining }
+ *     responses:
+ *       200:
+ *         description: Offer declined
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/credit-offer/:offerId/decline',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:write'),
+  creditOfferController.declineOffer,
 )
 
 export default router

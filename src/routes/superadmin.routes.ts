@@ -13,6 +13,7 @@ import providerCostStructureRoutes from './superadmin/providerCostStructure.rout
 import venuePricingRoutes from './superadmin/venuePricing.routes'
 import webhookRoutes from './superadmin/webhook.routes'
 import terminalRoutes from './superadmin/terminal.routes'
+import creditAssessmentRoutes from './superadmin/creditAssessment.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -29,5 +30,6 @@ router.use('/payment-analytics', paymentAnalyticsRoutes)
 router.use('/cost-structures', providerCostStructureRoutes)
 router.use('/venue-pricing', venuePricingRoutes)
 router.use('/webhooks', webhookRoutes)
+router.use('/credit', creditAssessmentRoutes)
 
 export default router
