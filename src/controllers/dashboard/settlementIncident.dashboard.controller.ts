@@ -99,6 +99,49 @@ export async function confirmIncident(
 }
 
 /**
+ * POST /dashboard/venues/:venueId/settlement-incidents/bulk-confirm
+ * Bulk confirm multiple settlement incidents
+ */
+export async function bulkConfirmIncidents(
+  req: Request<
+    { venueId: string },
+    {},
+    {
+      incidentIds: string[]
+      settlementArrived: boolean
+      actualDate?: string
+      notes?: string
+    }
+  >,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { incidentIds, settlementArrived, actualDate, notes } = req.body
+    const userId = (req as any).user?.id || 'unknown'
+
+    const result = await settlementIncidentService.bulkConfirmSettlementIncidents(
+      venueId,
+      incidentIds,
+      userId,
+      settlementArrived,
+      actualDate ? new Date(actualDate) : undefined,
+      notes,
+    )
+
+    res.status(200).json({
+      success: true,
+      data: result,
+      message: `${result.confirmed} incidents confirmed${result.failed > 0 ? `, ${result.failed} failed` : ''}`,
+    })
+  } catch (error) {
+    logger.error('Error bulk confirming incidents', { error })
+    next(error)
+  }
+}
+
+/**
  * POST /dashboard/superadmin/settlement-incidents/:incidentId/escalate
  * Escalate an incident to SuperAdmin (SuperAdmin only)
  */

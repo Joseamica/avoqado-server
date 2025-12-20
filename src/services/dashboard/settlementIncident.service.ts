@@ -298,6 +298,76 @@ export async function escalateIncident(incidentId: string, notes?: string) {
 }
 
 /**
+ * Bulk confirm multiple settlement incidents
+ */
+export async function bulkConfirmSettlementIncidents(
+  venueId: string,
+  incidentIds: string[],
+  confirmedBy: string,
+  settlementArrived: boolean,
+  actualDate?: Date,
+  notes?: string,
+): Promise<{
+  confirmed: number
+  failed: number
+  results: Array<{
+    incidentId: string
+    success: boolean
+    error?: string
+  }>
+}> {
+  const results: Array<{
+    incidentId: string
+    success: boolean
+    error?: string
+  }> = []
+
+  // First, verify all incidents belong to the venue
+  const incidents = await prisma.settlementIncident.findMany({
+    where: {
+      id: { in: incidentIds },
+      venueId,
+    },
+    select: { id: true },
+  })
+
+  const validIncidentIds = new Set(incidents.map(i => i.id))
+
+  // Mark invalid incident IDs as failed
+  for (const incidentId of incidentIds) {
+    if (!validIncidentIds.has(incidentId)) {
+      results.push({
+        incidentId,
+        success: false,
+        error: 'Incident not found or does not belong to this venue',
+      })
+    }
+  }
+
+  // Process valid incidents
+  for (const incidentId of validIncidentIds) {
+    try {
+      await confirmSettlementIncident(incidentId, confirmedBy, settlementArrived, actualDate, notes)
+      results.push({ incidentId, success: true })
+    } catch (error) {
+      logger.error(`Failed to confirm incident ${incidentId}:`, error)
+      results.push({
+        incidentId,
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+    }
+  }
+
+  const confirmed = results.filter(r => r.success).length
+  const failed = results.filter(r => !r.success).length
+
+  logger.info(`Bulk confirm completed: ${confirmed} confirmed, ${failed} failed`)
+
+  return { confirmed, failed, results }
+}
+
+/**
  * Get incident statistics for a venue or globally
  */
 export async function getIncidentStats(venueId?: string) {

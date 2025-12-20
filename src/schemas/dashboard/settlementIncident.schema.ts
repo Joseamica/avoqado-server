@@ -37,3 +37,21 @@ export const escalateIncidentSchema = z.object({
     notes: z.string().max(1000, 'Notes cannot exceed 1000 characters').optional(),
   }),
 })
+
+/**
+ * Body schema for bulk confirming multiple incidents
+ */
+export const bulkConfirmIncidentSchema = z.object({
+  body: z.object({
+    incidentIds: z
+      .array(z.string().cuid('Each incidentId must be a valid CUID'))
+      .min(1, 'At least one incidentId is required')
+      .max(100, 'Cannot confirm more than 100 incidents at once'),
+    settlementArrived: z.boolean({
+      required_error: 'settlementArrived is required',
+      invalid_type_error: 'settlementArrived must be a boolean',
+    }),
+    actualDate: z.string().datetime({ message: 'actualDate must be a valid ISO 8601 datetime' }).optional(),
+    notes: z.string().max(1000, 'Notes cannot exceed 1000 characters').optional(),
+  }),
+})
