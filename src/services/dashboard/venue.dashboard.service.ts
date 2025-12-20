@@ -125,6 +125,7 @@ export async function getVenueById(orgId: string, venueId: string, options?: { s
       transactions: true,
       reviews: true,
       features: true,
+      settings: true, // VenueSettings with enableShifts, autoCloseShifts, etc.
     },
   })
   if (!venue) {

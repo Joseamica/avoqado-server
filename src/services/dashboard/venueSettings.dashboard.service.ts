@@ -25,6 +25,7 @@ export const DEFAULT_VENUE_SETTINGS = {
   // Operations
   autoCloseShifts: false,
   shiftDuration: 8,
+  enableShifts: true, // Enable/disable shift system for venue
   requirePinLogin: true,
 
   // Reviews
@@ -114,6 +115,7 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     venueId,
     autoCloseShifts: DEFAULT_VENUE_SETTINGS.autoCloseShifts,
     shiftDuration: DEFAULT_VENUE_SETTINGS.shiftDuration,
+    enableShifts: DEFAULT_VENUE_SETTINGS.enableShifts,
     requirePinLogin: DEFAULT_VENUE_SETTINGS.requirePinLogin,
     autoReplyReviews: DEFAULT_VENUE_SETTINGS.autoReplyReviews,
     notifyBadReviews: DEFAULT_VENUE_SETTINGS.notifyBadReviews,

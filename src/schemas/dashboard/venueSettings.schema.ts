@@ -34,7 +34,9 @@ export const UpdateVenueSettingsSchema = z.object({
     // Operations
     autoCloseShifts: z.boolean().optional(),
     shiftDuration: z.number().int().min(1).max(24).optional(),
+    enableShifts: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),
+    requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
 
     // Reviews
     autoReplyReviews: z.boolean().optional(),
