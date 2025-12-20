@@ -26,6 +26,7 @@ import { ConnectionController } from '../controllers/connection.controller'
 import { tpvCommandExecutionService } from '../../../services/tpv/command-execution.service'
 import { RoomController } from '../controllers/room.controller'
 import { BusinessEventController } from '../controllers/businessEvent.controller'
+import { ObservabilityController } from '../controllers/observability.controller'
 
 /**
  * Main Socket Manager
@@ -44,6 +45,7 @@ export class SocketManager implements ISocketManager {
   private connectionController: ConnectionController
   private roomController: RoomController
   private businessEventController: BusinessEventController
+  private observabilityController: ObservabilityController
 
   constructor(config?: Partial<SocketServerConfig>) {
     this.config = { ...socketConfig, ...config }
@@ -53,6 +55,7 @@ export class SocketManager implements ISocketManager {
     this.connectionController = new ConnectionController(this.roomManager)
     this.roomController = new RoomController(this.roomManager)
     this.businessEventController = new BusinessEventController(this.roomManager)
+    this.observabilityController = new ObservabilityController(this.roomManager)
   }
 
   /**
@@ -86,6 +89,7 @@ export class SocketManager implements ISocketManager {
     this.connectionController.setBroadcastingService(this.broadcastingService)
     this.roomController.setBroadcastingService(this.broadcastingService)
     this.businessEventController.setBroadcastingService(this.broadcastingService)
+    this.observabilityController.setBroadcastingService(this.broadcastingService)
 
     logger.info('✅ Socket.io server ready')
 
@@ -225,6 +229,15 @@ export class SocketManager implements ISocketManager {
     // System events
     socket.on(SocketEventType.SYSTEM_ALERT, (payload, callback) => {
       this.businessEventController.handleSystemAlert(socket, payload, callback)
+    })
+
+    // Observability events (Terminal → Server)
+    socket.on('tpv:log', (payload, callback) => {
+      this.observabilityController.handleTerminalLog(socket, payload, callback)
+    })
+
+    socket.on('tpv:heartbeat', (payload, callback) => {
+      this.observabilityController.handleTerminalHeartbeat(socket, payload, callback)
     })
 
     // TPV Command Events (Terminal → Server)
