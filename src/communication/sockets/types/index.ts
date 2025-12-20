@@ -122,6 +122,10 @@ export enum SocketEventType {
   CARD_READER_STATUS = 'card_reader_status',
   PERIPHERAL_ERROR = 'peripheral_error',
 
+  // Business Events - Terminal Observability
+  TERMINAL_LOG = 'terminal:log',
+  TERMINAL_HEARTBEAT = 'terminal:heartbeat',
+
   // Business Events - Menu & Products (Real-time)
   MENU_UPDATED = 'menu_updated',
   MENU_ITEM_CREATED = 'menu_item_created',
