@@ -12,7 +12,6 @@ import mainApiRouter from './routes' // Esto importa el 'router' exportado por d
 
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
-import orderRoutes from './routes/orders.routes'
 import webhookRoutes from './routes/webhook.routes'
 
 // Types (could be moved to a central types file)
@@ -39,7 +38,6 @@ setupSwaggerUI(app)
 
 // --- Application Routes ---
 app.use('/api/v1/venues/:venueId/public-menu', publicMenuRoutes)
-app.use('/api/v1/secure', orderRoutes) // Consider renaming '/secure' if it's for orders specifically
 
 // --- Legacy QR Code Redirects ---
 // Redirects for obsolete merchandise QR codes (https://api.demo.avoqado.io/v1/demo/generate)
