@@ -120,6 +120,20 @@ export const recordFastPaymentParamsSchema = z.object({
   }),
 })
 
+// Schema for send receipt endpoint
+export const sendReceiptParamsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    paymentId: z.string().cuid({ message: 'El ID del payment debe ser un CUID válido.' }),
+  }),
+})
+
+export const sendReceiptBodySchema = z.object({
+  body: z.object({
+    recipientEmail: z.string().email({ message: 'El email debe ser válido.' }),
+  }),
+})
+
 export const recordPaymentBodySchema = z.object({
   body: z
     .object({
@@ -584,5 +598,19 @@ export const getSaleVerificationSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
     verificationId: z.string().cuid({ message: 'El ID de la verificación debe ser un CUID válido.' }),
+  }),
+})
+
+/** Schema for TPV feedback (bug reports and feature suggestions) */
+export const tpvFeedbackSchema = z.object({
+  body: z.object({
+    feedbackType: z.enum(['bug', 'feature'], { message: 'El tipo de feedback debe ser "bug" o "feature".' }),
+    message: z.string().min(10, { message: 'El mensaje debe tener al menos 10 caracteres.' }),
+    venueSlug: z.string().min(1, { message: 'El venueSlug es requerido.' }),
+    appVersion: z.string().min(1, { message: 'La versión de la app es requerida.' }),
+    buildVersion: z.string().min(1, { message: 'La versión del build es requerida.' }),
+    androidVersion: z.string().min(1, { message: 'La versión de Android es requerida.' }),
+    deviceModel: z.string().min(1, { message: 'El modelo del dispositivo es requerido.' }),
+    deviceManufacturer: z.string().min(1, { message: 'El fabricante del dispositivo es requerido.' }),
   }),
 })

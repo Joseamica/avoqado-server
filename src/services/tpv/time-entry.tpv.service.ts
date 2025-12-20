@@ -7,6 +7,7 @@ interface ClockInParams {
   staffId: string
   pin: string
   jobRole?: string
+  checkInPhotoUrl?: string // Firebase Storage URL of check-in photo (anti-fraud)
 }
 
 interface ClockOutParams {
@@ -78,7 +79,7 @@ function calculateTotalBreakMinutes(breaks: Array<{ startTime: Date; endTime: Da
  * Clock in a staff member
  */
 export async function clockIn(params: ClockInParams) {
-  const { venueId, staffId, pin, jobRole } = params
+  const { venueId, staffId, pin, jobRole, checkInPhotoUrl } = params
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
@@ -108,6 +109,7 @@ export async function clockIn(params: ClockInParams) {
       venueId,
       clockInTime: new Date(),
       jobRole,
+      checkInPhotoUrl, // Store anti-fraud photo URL if provided
       status: TimeEntryStatus.CLOCKED_IN,
       breakMinutes: 0,
     },
