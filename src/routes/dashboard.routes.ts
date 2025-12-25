@@ -114,6 +114,7 @@ import {
   CustomerParamsSchema,
   VenueIdParamsSchema as CustomerVenueIdParamsSchema,
 } from '../schemas/dashboard/customer.schema'
+import { SettleOrderSchema } from '../schemas/dashboard/order.schema'
 import {
   CreateCustomerGroupSchema,
   UpdateCustomerGroupSchema,
@@ -197,6 +198,7 @@ import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
+import reportsRoutes from './dashboard/reports.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -2787,6 +2789,64 @@ router.delete(
   checkPermission('orders:delete'),
   orderController.deleteOrder,
 )
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/orders/{orderId}/settle:
+ *   post:
+ *     summary: Settle a single order's pending balance
+ *     description: Marks a pay-later order as paid and creates a payment record
+ *     tags:
+ *       - Dashboard - Orders
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: orderId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notes:
+ *                 type: string
+ *                 description: Optional notes about the settlement
+ *     responses:
+ *       200:
+ *         description: Order settled successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 orderId:
+ *                   type: string
+ *                 orderNumber:
+ *                   type: string
+ *                 settledAmount:
+ *                   type: number
+ *                 message:
+ *                   type: string
+ *       404:
+ *         description: Order not found
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/settle',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'), // Same permission as updating orders
+  validateRequest(SettleOrderSchema),
+  orderController.settleOrder,
+)
+
 router.get(
   '/venues/:venueId/payments/:paymentId',
   authenticateTokenMiddleware,
@@ -3348,6 +3408,9 @@ router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, 
 
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
+
+// Reports routes (ADMIN and OWNER)
+router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
 
 /**
  * @openapi
@@ -7610,10 +7673,26 @@ router.get(
  *       - name: customerGroupId
  *         in: query
  *         schema: { type: string }
+ *       - name: noGroup
+ *         in: query
+ *         schema: { type: boolean }
+ *         description: Filter customers without a group
  *       - name: tags
  *         in: query
  *         schema: { type: string }
  *         description: Comma-separated tags
+ *       - name: sortBy
+ *         in: query
+ *         schema: { type: string, enum: [createdAt, totalSpent, visitCount, lastVisit] }
+ *         description: Field to sort by
+ *       - name: sortOrder
+ *         in: query
+ *         schema: { type: string, enum: [asc, desc], default: desc }
+ *         description: Sort order (ascending or descending)
+ *       - name: hasPendingBalance
+ *         in: query
+ *         schema: { type: boolean }
+ *         description: Filter customers with pending pay-later orders
  *     responses:
  *       200:
  *         description: A paginated list of customers
@@ -7808,6 +7887,62 @@ router.delete(
   checkPermission('customers:delete'),
   validateRequest(CustomerParamsSchema),
   customerController.deleteCustomer,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/settle-balance:
+ *   post:
+ *     tags: [Customer Management]
+ *     summary: Settle pending balance for a customer
+ *     description: |
+ *       Marks all pay-later orders for this customer as paid.
+ *       Use this when the customer pays their outstanding balance via cash, bank transfer, or deposit.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notes:
+ *                 type: string
+ *                 description: Optional notes about the settlement (e.g., "Paid in cash", "Bank transfer received")
+ *     responses:
+ *       200:
+ *         description: Balance settled successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 settledOrderCount:
+ *                   type: number
+ *                   description: Number of orders that were settled
+ *                 settledAmount:
+ *                   type: number
+ *                   description: Total amount that was settled
+ *                 message:
+ *                   type: string
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/settle-balance',
+  authenticateTokenMiddleware,
+  checkPermission('customers:settle-balance'),
+  validateRequest(CustomerParamsSchema),
+  customerController.settleCustomerBalance,
 )
 
 // ============================================================================

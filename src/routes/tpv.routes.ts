@@ -548,6 +548,54 @@ router.get(
 
 /**
  * @openapi
+ * /tpv/venues/{venueId}/orders/pay-later:
+ *   get:
+ *     tags:
+ *       - TPV - Orders
+ *     summary: Get pay-later orders
+ *     description: Get all orders marked as "pay later" (orders with customer linkage and pending payment status). Used by TPV to display "Pendientes de Pago" filter.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The ID of the venue
+ *     responses:
+ *       200:
+ *         description: Pay-later orders retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     description: Order with customer information
+ *       401:
+ *         description: Unauthorized - missing or invalid token
+ *       403:
+ *         description: Forbidden - insufficient permissions
+ *       500:
+ *         description: Internal server error
+ */
+router.get(
+  '/venues/:venueId/orders/pay-later',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'), // Reuse existing permission
+  validateRequest(venueIdParamSchema),
+  orderController.getPayLaterOrders,
+)
+
+/**
+ * @openapi
  * /tpv/venues/{venueId}/orders:
  *   post:
  *     tags:

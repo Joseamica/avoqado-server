@@ -19,7 +19,7 @@ import * as customerService from '@/services/dashboard/customer.dashboard.servic
 export async function getCustomers(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    const { page, pageSize, search, customerGroupId, noGroup, tags } = req.query
+    const { page, pageSize, search, customerGroupId, noGroup, tags, sortBy, sortOrder, hasPendingBalance } = req.query
 
     const result = await customerService.getCustomers(
       venueId,
@@ -27,8 +27,11 @@ export async function getCustomers(req: Request, res: Response, next: NextFuncti
       pageSize ? Number(pageSize) : undefined,
       search as string | undefined,
       customerGroupId as string | undefined,
-      noGroup === 'true',
+      noGroup as boolean | undefined,
       tags as string | undefined,
+      sortBy as 'createdAt' | 'totalSpent' | 'visitCount' | 'lastVisit' | undefined,
+      sortOrder as 'asc' | 'desc' | undefined,
+      hasPendingBalance as boolean | undefined,
     )
 
     res.status(200).json(result)
@@ -120,6 +123,23 @@ export async function getCustomerStats(req: Request, res: Response, next: NextFu
     const stats = await customerService.getCustomerStats(venueId)
 
     res.status(200).json(stats)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/dashboard/:venueId/customers/:customerId/settle-balance
+ * Settle pending balance for a customer (mark pay-later orders as paid)
+ */
+export async function settleCustomerBalance(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, customerId } = req.params
+    const { notes } = req.body
+
+    const result = await customerService.settleCustomerBalance(venueId, customerId, notes)
+
+    res.status(200).json(result)
   } catch (error) {
     next(error)
   }

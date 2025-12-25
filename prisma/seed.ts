@@ -2225,6 +2225,61 @@ async function main() {
       }
 
       // ==========================================
+      // PAY LATER ORDER (Completed but unpaid)
+      // ==========================================
+      console.log('      - 💳 Creating pay-later order (completed but pending payment)...')
+
+      // Create a completed order with pending payment (pay-later)
+      const payLaterTotal = 250.0
+      const payLaterOrder = await prisma.order.create({
+        data: {
+          venueId: venue.id,
+          orderNumber: `PL-${Math.floor(Math.random() * 10000)}`,
+          type: OrderType.DINE_IN,
+          status: OrderStatus.COMPLETED, // ✅ Order is completed (food served)
+          paymentStatus: PaymentStatus.PENDING, // ❌ Payment is pending
+          kitchenStatus: KitchenStatus.SERVED, // Kitchen completed service
+          subtotal: payLaterTotal,
+          discountAmount: 0,
+          taxAmount: 0,
+          total: payLaterTotal,
+          paidAmount: 0, // No payment yet
+          remainingBalance: payLaterTotal, // Full amount outstanding
+          version: 1,
+          createdAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000), // 5 days ago (for aging report)
+        },
+      })
+
+      // Add items to pay-later order
+      const payLaterProducts = products.slice(0, 3) // First 3 products
+      for (const product of payLaterProducts) {
+        await prisma.orderItem.create({
+          data: {
+            orderId: payLaterOrder.id,
+            productId: product.id,
+            quantity: 1,
+            unitPrice: product.price,
+            taxAmount: 0,
+            total: product.price,
+          },
+        })
+      }
+
+      // Associate customer to make it a pay-later order
+      if (customers.length > 0) {
+        await prisma.orderCustomer.create({
+          data: {
+            orderId: payLaterOrder.id,
+            customerId: customers[0].id, // Primary customer
+            isPrimary: true,
+          },
+        })
+        console.log(
+          `        * Pay-Later Order ${payLaterOrder.orderNumber}: $${payLaterTotal} - Customer: ${customers[0].firstName} ${customers[0].lastName} - 5 days overdue`,
+        )
+      }
+
+      // ==========================================
       // INVENTORY MANAGEMENT SEEDING (Avoqado Full ONLY)
       // ==========================================
       if (venue.name === 'Avoqado Full') {

@@ -45,3 +45,24 @@ export async function deleteOrder(req: Request<{ orderId: string }>, res: Respon
     next(error)
   }
 }
+
+/**
+ * POST /api/dashboard/:venueId/orders/:orderId/settle
+ * Settle a single order's pending balance (mark pay-later order as paid)
+ */
+export async function settleOrder(
+  req: Request<{ venueId: string; orderId: string }, {}, { notes?: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, orderId } = req.params
+    const { notes } = req.body
+
+    const result = await orderDashboardService.settleOrder(venueId, orderId, notes)
+
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}

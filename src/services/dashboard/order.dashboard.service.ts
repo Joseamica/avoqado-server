@@ -51,6 +51,19 @@ export async function getOrders(venueId: string, page: number, pageSize: number)
         createdBy: true, // Quien creó la orden (equivale al mesero)
         servedBy: true, // Quien atendió la orden
         table: true, // Para obtener el número de la mesa
+        orderCustomers: {
+          // Para identificar órdenes pay-later
+          include: {
+            customer: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                phone: true,
+              },
+            },
+          },
+        },
       },
       orderBy: { updatedAt: 'desc' },
       skip,
@@ -231,4 +244,100 @@ export async function deleteOrder(orderId: string) {
       status: 'CANCELLED',
     },
   })
+}
+
+/**
+ * Settle a single order's pending balance (mark pay-later order as paid)
+ * Used for cash/deposit payments received outside the system
+ *
+ * @param venueId - Venue ID (multi-tenant filter)
+ * @param orderId - Order ID to settle
+ * @param notes - Optional notes about the settlement (e.g., "Paid in cash", "Bank transfer received")
+ * @returns Settlement result with amount settled
+ */
+export async function settleOrder(
+  venueId: string,
+  orderId: string,
+  notes?: string,
+): Promise<{
+  orderId: string
+  orderNumber: string
+  settledAmount: number
+  message: string
+}> {
+  // Verify order exists and belongs to this venue
+  const order = await prisma.order.findFirst({
+    where: {
+      id: orderId,
+      venueId, // ✅ CRITICAL: Multi-tenant filter
+    },
+    select: {
+      id: true,
+      orderNumber: true,
+      total: true,
+      remainingBalance: true,
+      paymentStatus: true,
+    },
+  })
+
+  if (!order) {
+    throw new NotFoundError(`Order with ID ${orderId} not found`)
+  }
+
+  const remainingBalance = Number(order.remainingBalance)
+
+  // Check if order has pending balance
+  if (remainingBalance <= 0 || order.paymentStatus === 'PAID') {
+    return {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      settledAmount: 0,
+      message: 'Order has no pending balance to settle',
+    }
+  }
+
+  // Update order and create payment record in a transaction
+  await prisma.$transaction(async tx => {
+    // Update order payment status
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        paymentStatus: 'PAID',
+        paidAmount: order.total,
+        remainingBalance: 0,
+      },
+    })
+
+    // Create a payment record to track the settlement
+    await tx.payment.create({
+      data: {
+        venueId,
+        orderId,
+        amount: remainingBalance,
+        tipAmount: 0,
+        method: 'CASH', // Default to cash for manual settlements
+        status: 'COMPLETED',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: remainingBalance,
+        source: 'OTHER',
+        processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
+      },
+    })
+  })
+
+  logger.info(`Order settled: ${orderId}`, {
+    venueId,
+    orderId,
+    orderNumber: order.orderNumber,
+    settledAmount: remainingBalance,
+    notes,
+  })
+
+  return {
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    settledAmount: remainingBalance,
+    message: `Successfully settled order ${order.orderNumber} for ${remainingBalance}`,
+  }
 }

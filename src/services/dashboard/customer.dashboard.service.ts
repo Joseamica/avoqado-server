@@ -10,6 +10,7 @@
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
+import { PaymentStatus } from '@prisma/client'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -34,6 +35,8 @@ interface CustomerListItem {
   tags: string[]
   active: boolean
   createdAt: Date
+  pendingOrderCount: number // Count of pay-later orders
+  pendingBalance: number // Total balance pending
 }
 
 interface PaginatedCustomersResponse {
@@ -113,8 +116,22 @@ export async function getCustomers(
   customerGroupId?: string,
   noGroup?: boolean,
   tags?: string,
+  sortBy: 'createdAt' | 'totalSpent' | 'visitCount' | 'lastVisit' = 'createdAt',
+  sortOrder: 'asc' | 'desc' = 'desc',
+  hasPendingBalance?: boolean,
 ): Promise<PaginatedCustomersResponse> {
   const skip = (page - 1) * pageSize
+
+  // Map sortBy to Prisma field names (with fallback for undefined)
+  const sortFieldMap: Record<string, string> = {
+    createdAt: 'createdAt',
+    totalSpent: 'totalSpent',
+    visitCount: 'totalVisits',
+    lastVisit: 'lastVisitAt',
+  }
+  const effectiveSortBy = sortBy || 'createdAt'
+  const effectiveSortOrder = sortOrder || 'desc'
+  const orderByField = sortFieldMap[effectiveSortBy] || 'createdAt'
 
   // Build search conditions
   const searchConditions = search
@@ -140,11 +157,26 @@ export async function getCustomers(
   // Build group filter (customerGroupId takes precedence over noGroup)
   const groupFilter = customerGroupId ? { customerGroupId } : noGroup ? { customerGroupId: null } : {}
 
+  // Build pending balance filter (only customers with pay-later orders)
+  const pendingBalanceFilter = hasPendingBalance
+    ? {
+        orderAssociations: {
+          some: {
+            order: {
+              paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
+              remainingBalance: { gt: 0 },
+            },
+          },
+        },
+      }
+    : {}
+
   const whereCondition = {
     venueId, // ✅ CRITICAL: Multi-tenant filter
     ...groupFilter,
     ...tagFilter,
     ...searchConditions,
+    ...pendingBalanceFilter,
   }
 
   const [customers, totalCount] = await prisma.$transaction([
@@ -152,7 +184,7 @@ export async function getCustomers(
       where: whereCondition,
       skip,
       take: pageSize,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { [orderByField]: effectiveSortOrder },
       select: {
         id: true,
         email: true,
@@ -174,6 +206,22 @@ export async function getCustomers(
         tags: true,
         active: true,
         createdAt: true,
+        orderAssociations: {
+          where: {
+            order: {
+              paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+              remainingBalance: { gt: 0 },
+            },
+          },
+          include: {
+            order: {
+              select: {
+                id: true,
+                remainingBalance: true,
+              },
+            },
+          },
+        },
       },
     }),
     prisma.customer.count({ where: whereCondition }),
@@ -186,6 +234,12 @@ export async function getCustomers(
       ...customer,
       totalSpent: customer.totalSpent.toNumber(),
       averageOrderValue: customer.averageOrderValue.toNumber(),
+      // Map backend field names to frontend expected names
+      visitCount: customer.totalVisits,
+      lastVisit: customer.lastVisitAt,
+      pendingOrderCount: customer.orderAssociations?.length || 0,
+      pendingBalance: customer.orderAssociations?.reduce((sum, oc) => sum + Number(oc.order.remainingBalance), 0) || 0,
+      orderAssociations: undefined, // Remove from response to keep it clean
     })),
     meta: {
       totalCount,
@@ -231,7 +285,12 @@ export async function getCustomerById(venueId: string, customerId: string) {
     throw new NotFoundError(`Customer with ID ${customerId} not found`)
   }
 
-  return customer
+  // Map backend field names to frontend expected names
+  return {
+    ...customer,
+    visitCount: customer.totalVisits,
+    lastVisit: customer.lastVisitAt,
+  }
 }
 
 /**
@@ -502,6 +561,118 @@ export async function getCustomerStats(venueId: string): Promise<CustomerStatsRe
       totalSpent: c.totalSpent.toNumber(),
       totalVisits: c.totalVisits,
     })),
+  }
+}
+
+/**
+ * Settle pending balance for a customer
+ * Marks all pay-later orders as paid (for cash/deposit payments received outside the system)
+ *
+ * @param venueId - Venue ID (multi-tenant filter)
+ * @param customerId - Customer ID
+ * @param notes - Optional notes about the settlement (e.g., "Paid in cash", "Bank transfer received")
+ * @returns Settlement result with settled orders count and total amount
+ */
+export async function settleCustomerBalance(
+  venueId: string,
+  customerId: string,
+  notes?: string,
+): Promise<{
+  settledOrderCount: number
+  settledAmount: number
+  message: string
+}> {
+  // Verify customer exists and belongs to this venue
+  const customer = await prisma.customer.findFirst({
+    where: {
+      id: customerId,
+      venueId, // ✅ CRITICAL: Multi-tenant filter
+    },
+    include: {
+      orderAssociations: {
+        where: {
+          order: {
+            paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+            remainingBalance: { gt: 0 },
+          },
+        },
+        include: {
+          order: {
+            select: {
+              id: true,
+              orderNumber: true,
+              remainingBalance: true,
+              total: true,
+            },
+          },
+        },
+      },
+    },
+  })
+
+  if (!customer) {
+    throw new NotFoundError(`Customer with ID ${customerId} not found`)
+  }
+
+  const pendingOrders = customer.orderAssociations || []
+
+  if (pendingOrders.length === 0) {
+    return {
+      settledOrderCount: 0,
+      settledAmount: 0,
+      message: 'No pending balance to settle',
+    }
+  }
+
+  // Calculate total amount being settled
+  const totalSettledAmount = pendingOrders.reduce((sum, oc) => sum + Number(oc.order.remainingBalance), 0)
+
+  // Update all pending orders to mark them as paid and create payment records
+  await prisma.$transaction(async tx => {
+    for (const oc of pendingOrders) {
+      const remainingBalance = Number(oc.order.remainingBalance)
+
+      // Update order payment status
+      await tx.order.update({
+        where: { id: oc.order.id },
+        data: {
+          paymentStatus: 'PAID',
+          paidAmount: oc.order.total,
+          remainingBalance: 0,
+        },
+      })
+
+      // Create a payment record to track the settlement
+      await tx.payment.create({
+        data: {
+          venueId,
+          orderId: oc.order.id,
+          amount: remainingBalance,
+          tipAmount: 0,
+          method: 'CASH', // Default to cash for manual settlements
+          status: 'COMPLETED',
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: remainingBalance,
+          source: 'OTHER',
+          processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
+        },
+      })
+    }
+  })
+
+  logger.info(`Customer balance settled: ${customerId}`, {
+    venueId,
+    customerId,
+    settledOrderCount: pendingOrders.length,
+    settledAmount: totalSettledAmount,
+    notes,
+  })
+
+  return {
+    settledOrderCount: pendingOrders.length,
+    settledAmount: totalSettledAmount,
+    message: `Successfully settled ${pendingOrders.length} order(s) totaling ${totalSettledAmount}`,
   }
 }
 

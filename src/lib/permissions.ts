@@ -316,10 +316,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
 
   // Payments - TPV-specific
   'tpv-payments:send-receipt': ['tpv-payments:send-receipt', 'payments:read'],
+  'tpv-payments:pay-later': ['tpv-payments:pay-later', 'orders:read', 'orders:create', 'customers:read', 'payments:create'],
 
   // Reports
   'tpv-reports:read': ['tpv-reports:read', 'payments:read', 'orders:read', 'analytics:read'],
   'tpv-reports:export': ['tpv-reports:export', 'tpv-reports:read'],
+  'tpv-reports:pay-later-aging': ['tpv-reports:pay-later-aging', 'tpv-reports:read', 'customers:read', 'orders:read'],
 
   // Products (Barcode / Scan & Go)
   'tpv-products:read': ['tpv-products:read', 'products:read'],
@@ -439,6 +441,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // TPV-specific permissions
     'tpv-tables:assign', // Can assign tables to orders
     'tpv-time-entries:write', // Can clock in/out, take breaks
+    'tpv-payments:pay-later', // Can create pay-later orders
   ],
 
   /**
@@ -465,6 +468,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-tables:assign', // Can assign tables
     'tpv-time-entries:write', // Can clock in/out
     'tpv-products:read', // Can search products by barcode
+    'tpv-payments:pay-later', // Can create pay-later orders
   ],
 
   /**
@@ -532,10 +536,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-time-entries:read', // Can view time entries
     'tpv-time-entries:write',
     'tpv-payments:send-receipt',
+    'tpv-payments:pay-later', // Can create pay-later orders
     'tpv-products:read',
     'tpv-products:write', // Can create products on-the-fly (Scan & Go)
+    'tpv-reports:pay-later-aging', // Can view pay-later aging report
     // NO: tpv-terminal:settings (ADMIN+ only)
-    // NO: tpv-reports (ADMIN+ only)
+    // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
     // NO: tpv-factory-reset (OWNER only)
   ],
 
@@ -582,6 +588,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-payments:send-receipt',
     'tpv-reports:read', // Can view reports
     'tpv-reports:export', // Can export data
+    'tpv-reports:pay-later-aging', // Can view pay-later aging report
     'tpv-products:read',
     'tpv-products:write',
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
@@ -630,6 +637,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-payments:send-receipt',
     'tpv-reports:read',
     'tpv-reports:export',
+    'tpv-reports:pay-later-aging', // Can view pay-later aging report
     'tpv-products:read',
     'tpv-products:write',
     'tpv-factory-reset:execute', // ⚠️ CRITICAL: Can factory reset terminal (destructive)
@@ -950,7 +958,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],
-  customers: ['customers:read', 'customers:create', 'customers:update', 'customers:delete'],
+  customers: ['customers:read', 'customers:create', 'customers:update', 'customers:delete', 'customers:settle-balance'],
   'customer-groups': ['customer-groups:read', 'customer-groups:create', 'customer-groups:update', 'customer-groups:delete'],
   loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust'],
   discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete'],
@@ -961,13 +969,13 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // TPV-specific permissions (granular features)
   'tpv-terminal': ['tpv-terminal:settings'],
   'tpv-orders': ['tpv-orders:comp', 'tpv-orders:void', 'tpv-orders:discount'],
-  'tpv-payments': ['tpv-payments:send-receipt'],
+  'tpv-payments': ['tpv-payments:send-receipt', 'tpv-payments:pay-later'],
   'tpv-shifts': ['tpv-shifts:create', 'tpv-shifts:close'],
   'tpv-tables': ['tpv-tables:assign', 'tpv-tables:write', 'tpv-tables:delete'],
   'tpv-floor-elements': ['tpv-floor-elements:read', 'tpv-floor-elements:write', 'tpv-floor-elements:delete'],
   'tpv-customers': ['tpv-customers:read', 'tpv-customers:create'],
   'tpv-time-entries': ['tpv-time-entries:read', 'tpv-time-entries:write'],
-  'tpv-reports': ['tpv-reports:read', 'tpv-reports:export'],
+  'tpv-reports': ['tpv-reports:read', 'tpv-reports:export', 'tpv-reports:pay-later-aging'],
   'tpv-products': ['tpv-products:read', 'tpv-products:write'],
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
 }

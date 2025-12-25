@@ -27,8 +27,17 @@ export const CustomersQuerySchema = z.object({
     pageSize: z.coerce.number().int().min(1).max(100).default(20),
     search: z.string().optional(),
     customerGroupId: z.string().cuid().optional(),
-    noGroup: z.coerce.boolean().optional(), // Filter customers without a group
+    noGroup: z
+      .string()
+      .optional()
+      .transform(val => val === 'true'), // Query params are strings, convert properly
     tags: z.string().optional(), // Comma-separated tags
+    sortBy: z.enum(['createdAt', 'totalSpent', 'visitCount', 'lastVisit']).optional(),
+    sortOrder: z.enum(['asc', 'desc']).optional(),
+    hasPendingBalance: z
+      .string()
+      .optional()
+      .transform(val => val === 'true'), // Query params are strings, convert properly
   }),
 })
 

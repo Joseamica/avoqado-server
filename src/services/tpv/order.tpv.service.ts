@@ -42,16 +42,37 @@ function flattenOrderModifiers(order: any): any {
  * Get all open orders (orders) for a venue
  * @param orgId Organization ID (for future authorization)
  * @param venueId Venue ID
+ * @param options Optional filtering options for pay-later orders
  * @returns Array of orders with payment status PENDING or PARTIAL
  */
-export async function getOrders(venueId: string, _orgId?: string): Promise<(Order & { tableName: string | null })[]> {
-  const orders = await prisma.order.findMany({
-    where: {
-      venueId,
-      paymentStatus: {
-        in: ['PENDING', 'PARTIAL'], // Equivalent to legacy 'OPEN' status
-      },
+export async function getOrders(
+  venueId: string,
+  _orgId?: string,
+  options?: {
+    includePayLater?: boolean // If true, include pay-later orders
+    onlyPayLater?: boolean // If true, ONLY return pay-later orders
+  },
+): Promise<(Order & { tableName: string | null })[]> {
+  const where: any = {
+    venueId,
+    paymentStatus: {
+      in: ['PENDING', 'PARTIAL'], // Equivalent to legacy 'OPEN' status
     },
+  }
+
+  // Pay-later filtering logic
+  // Pay-later orders = orders with customer linkage (OrderCustomer relationship)
+  if (options?.onlyPayLater) {
+    // Only return pay-later orders (has OrderCustomer)
+    where.orderCustomers = { some: {} }
+  } else if (!options?.includePayLater) {
+    // Default behavior: EXCLUDE pay-later orders (no OrderCustomer)
+    where.orderCustomers = { none: {} }
+  }
+  // If includePayLater is true, no filter is added (returns all)
+
+  const orders = await prisma.order.findMany({
+    where,
     include: {
       items: {
         include: {
@@ -92,6 +113,19 @@ export async function getOrders(venueId: string, _orgId?: string): Promise<(Orde
         select: {
           id: true,
           number: true,
+        },
+      },
+      orderCustomers: {
+        include: {
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              email: true,
+            },
+          },
         },
       },
     },
@@ -1297,6 +1331,14 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   const currentPaidAmount = Number(order.paidAmount || 0)
   const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
 
+  // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
+  // When 0 items remain, order should be cancelled and removed from active list
+  const isVoidingAllItems = remainingItems.length === 0
+
+  if (isVoidingAllItems) {
+    logger.info(`🚫 [ORDER SERVICE] Voiding ALL items - auto-closing order ${orderId}`)
+  }
+
   // Update order with new totals and increment version
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
@@ -1304,6 +1346,11 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       subtotal: newSubtotal,
       total: newTotal,
       remainingBalance: newRemainingBalance,
+      // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
+      ...(isVoidingAllItems && {
+        status: 'CANCELLED',
+        paymentStatus: 'PENDING', // Keep PENDING (order was never paid)
+      }),
       version: {
         increment: 1,
       },
@@ -1353,6 +1400,18 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     },
   })
 
+  // ⭐ If voided all items, remove customer linkages (pay-later orders)
+  // No point keeping "cuenta por cobrar" for $0.00 order with 0 items (Toast/Square pattern)
+  if (isVoidingAllItems) {
+    const deletedCustomers = await prisma.orderCustomer.deleteMany({
+      where: { orderId },
+    })
+
+    if (deletedCustomers.count > 0) {
+      logger.info(`  👥 Removed ${deletedCustomers.count} customer linkage(s) from voided order`)
+    }
+  }
+
   // Create audit trail
   await prisma.orderAction.create({
     data: {
@@ -1366,6 +1425,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         itemCount: itemsToVoid.length,
         itemNames: itemsToVoid.map(item => item.product.name),
         sentToKitchen: sentToKitchen.length > 0,
+        voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
       },
     },
   })
@@ -1385,6 +1445,12 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       subtotal: Number(updatedOrder.subtotal),
       total: Number(updatedOrder.total),
       version: updatedOrder.version,
+      // ⭐ If voided all items, notify clients that order was auto-closed
+      ...(isVoidingAllItems && {
+        voidedAllItems: true,
+        status: updatedOrder.status, // CANCELLED
+        paymentStatus: updatedOrder.paymentStatus, // PENDING
+      }),
     })
   }
 

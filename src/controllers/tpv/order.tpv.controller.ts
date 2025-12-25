@@ -7,8 +7,15 @@ export async function getOrders(req: Request<{ venueId: string }>, res: Response
     const orgId = req.authContext?.orgId // 1. Extract from req (Controller)
     const venueId: string = req.params.venueId // 3. Extract from req (Controller, already validated)
 
+    // Read query parameters for pay-later filtering
+    const includePayLater = req.query.includePayLater === 'true'
+    const onlyPayLater = req.query.onlyPayLater === 'true'
+
     // 4. Call service with clean data (Controller delegates)
-    const orders = await orderTpvService.getOrders(venueId, orgId)
+    const orders = await orderTpvService.getOrders(venueId, orgId, {
+      includePayLater,
+      onlyPayLater,
+    })
 
     // 5. Send HTTP response wrapped in standard format (Controller)
     res.status(200).json({
@@ -17,6 +24,27 @@ export async function getOrders(req: Request<{ venueId: string }>, res: Response
     })
   } catch (error) {
     next(error) // 6. HTTP error handling (Controller)
+  }
+}
+
+/**
+ * Get pay-later orders (orders with customer linkage and pending payment)
+ * Used by TPV to display "Pendientes de Pago" filter
+ */
+export async function getPayLaterOrders(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    const venueId: string = req.params.venueId
+
+    // Call service with onlyPayLater flag
+    const orders = await orderTpvService.getOrders(venueId, orgId, { onlyPayLater: true })
+
+    res.status(200).json({
+      success: true,
+      data: orders,
+    })
+  } catch (error) {
+    next(error)
   }
 }
 
