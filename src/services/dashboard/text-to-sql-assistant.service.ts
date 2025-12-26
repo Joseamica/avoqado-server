@@ -320,16 +320,38 @@ class TextToSqlAssistantService {
 - Key fields: id, name, currency, organizationId, active
 - Use for: venue information, filtering by venue
 
+### Customer Table (CLIENTES)
+- Table: Customer
+- Key fields: id, venueId, email, phone, firstName, lastName, birthDate, gender
+- Tracking fields: totalSpent (Decimal), totalVisits (Int), lastVisitAt (DateTime), firstVisitAt (DateTime), averageOrderValue (Decimal), loyaltyPoints (Int)
+- Additional: notes, tags (array), marketingConsent, active
+- Relations: orders (Order[]), orderAssociations (OrderCustomer[])
+- Use for: customer analysis, loyalty tracking, churn detection, VIP identification
+
+### OrderCustomer Junction Table
+- Table: OrderCustomer
+- Key fields: id, orderId, customerId, isPrimary (Boolean), addedAt
+- Relations: order (Order), customer (Customer)
+- Use for: linking customers to orders (many-to-many), identifying primary customer per order
+
 ## SEMANTIC MAPPING (CRITICAL FOR SPANISH QUERIES):
 **TURNOS/SHIFTS = Staff Work Periods (Shift table)**
 - "turnos", "shifts", "turnos abiertos", "shifts open" → Query Shift table with status = 'OPEN'
 - "cuantos turnos", "how many shifts" → COUNT(*) FROM "Shift" WHERE status = 'OPEN'
 - "turnos cerrados", "closed shifts" → Query Shift table with status = 'CLOSED'
 
-**ÓRDENES/PEDIDOS = Customer Orders (Order table)**  
+**ÓRDENES/PEDIDOS = Customer Orders (Order table)**
 - "órdenes", "pedidos", "orders" → Query Order table
 - "órdenes abiertas", "open orders" → Query Order table with status IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY')
 - "pedidos completados", "completed orders" → Query Order table with status = 'COMPLETED'
+
+**CLIENTES/CUSTOMERS = Customer Analysis (Customer table)**
+- "cliente", "clientes", "customers" → Query Customer table
+- "mejor cliente", "best customer", "VIP" → ORDER BY "totalSpent" DESC LIMIT 1
+- "dejó de venir", "stopped coming", "churn" → WHERE "lastVisitAt" < NOW() - INTERVAL '30 days' (hasn't visited in 30+ days)
+- "clientes frecuentes", "frequent customers" → ORDER BY "totalVisits" DESC
+- "clientes nuevos", "new customers" → WHERE "firstVisitAt" >= NOW() - INTERVAL '30 days'
+- "clientes perdidos", "lost customers" → WHERE "lastVisitAt" < NOW() - INTERVAL '60 days' AND "totalVisits" > 3
 
 ## Important Rules:
 1. ALWAYS filter by "venueId" = '{venueId}' for data isolation (use double quotes around column names)
@@ -368,6 +390,9 @@ These match the dashboard filters: "Hoy", "Últimos 7 días", "Últimos 30 días
 - Staff sales (waiter/mesero): SELECT s."firstName", s."lastName", SUM(o."total") as total_sales FROM "Order" o JOIN "Staff" s ON o."createdById" = s.id WHERE o."venueId" = '{venueId}' GROUP BY s.id, s."firstName", s."lastName" ORDER BY total_sales DESC
 - Open shifts: SELECT COUNT(*) FROM "Shift" WHERE "venueId" = '{venueId}' AND "status" = 'OPEN'
 - Active orders: SELECT COUNT(*) FROM "Order" WHERE "venueId" = '{venueId}' AND "status" IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY')
+- Best customer (by spending): SELECT "firstName", "lastName", "email", "totalSpent", "totalVisits", "lastVisitAt" FROM "Customer" WHERE "venueId" = '{venueId}' AND "active" = true ORDER BY "totalSpent" DESC LIMIT 5
+- Lost/churned customers: SELECT "firstName", "lastName", "email", "totalSpent", "totalVisits", "lastVisitAt" FROM "Customer" WHERE "venueId" = '{venueId}' AND "lastVisitAt" < NOW() - INTERVAL '30 days' AND "totalVisits" >= 2 ORDER BY "totalSpent" DESC
+- Customer churn analysis: SELECT "firstName", "lastName", "totalSpent", "lastVisitAt", NOW() - "lastVisitAt" as days_since_visit FROM "Customer" WHERE "venueId" = '{venueId}' AND "lastVisitAt" IS NOT NULL ORDER BY "lastVisitAt" ASC LIMIT 10
 
 CRITICAL: 
 - All table names in PostgreSQL must be quoted with double quotes: "Review", "Payment", etc.
@@ -1145,17 +1170,32 @@ Ejemplos de respuestas CORRECTAS:
 
           switch (intentClassification.intent) {
             case 'sales': {
-              const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, dateRange)
-              const formattedRevenue = new Intl.NumberFormat('es-MX', {
-                style: 'currency',
-                currency: salesData.currency,
-              }).format(salesData.totalRevenue)
+              // If visualization requested, use time series data for charting
+              if (query.includeVisualization) {
+                const timeSeries = await SharedQueryService.getSalesTimeSeries(query.venueId, dateRange)
+                const formattedRevenue = new Intl.NumberFormat('es-MX', {
+                  style: 'currency',
+                  currency: timeSeries.currency,
+                }).format(timeSeries.totalRevenue)
 
-              // PHASE 3 UX: Add automatic comparison with previous period
-              const trend = await this.getSalesComparison(query.venueId, dateRange, salesData.totalRevenue)
+                const trend = await this.getSalesComparison(query.venueId, dateRange, timeSeries.totalRevenue)
+                const granularityText = timeSeries.granularity === 'hour' ? 'por hora' : 'por día'
 
-              naturalResponse = `En ${this.formatDateRangeName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: salesData.currency }).format(salesData.averageTicket)}.`
-              serviceResult = salesData
+                naturalResponse = `En ${this.formatDateRangeName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${timeSeries.totalOrders} órdenes. Aquí tienes la gráfica de ventas ${granularityText}.`
+                serviceResult = timeSeries
+              } else {
+                // Standard summary without visualization
+                const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, dateRange)
+                const formattedRevenue = new Intl.NumberFormat('es-MX', {
+                  style: 'currency',
+                  currency: salesData.currency,
+                }).format(salesData.totalRevenue)
+
+                const trend = await this.getSalesComparison(query.venueId, dateRange, salesData.totalRevenue)
+
+                naturalResponse = `En ${this.formatDateRangeName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: salesData.currency }).format(salesData.averageTicket)}.`
+                serviceResult = salesData
+              }
               break
             }
 
@@ -2036,6 +2076,37 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
               ],
             },
           }
+        }
+
+        case 'sales': {
+          // Sales can come as time series (dataPoints) or summary (totalRevenue)
+          if (data.dataPoints && Array.isArray(data.dataPoints) && data.dataPoints.length > 0) {
+            // Time series data - perfect for charting
+            const granularityLabel = data.granularity === 'hour' ? 'Hora' : 'Fecha'
+            return {
+              type: 'area',
+              title: 'Ventas',
+              description: dateRange ? `Período: ${this.formatDateRangeName(dateRange)}` : undefined,
+              data: data.dataPoints.map((p: any) => ({
+                date: p.date,
+                revenue: p.revenue,
+                orders: p.orderCount,
+              })),
+              config: {
+                xAxis: { key: 'date', label: granularityLabel },
+                yAxis: { key: 'revenue', label: 'Ventas ($)' },
+                dataKeys: [
+                  { key: 'revenue', label: 'Ventas', color: '#10b981' },
+                  { key: 'orders', label: 'Órdenes', color: '#3b82f6' },
+                ],
+              },
+            }
+          }
+          // Scalar summary - not ideal for charting but provide useful message
+          if (data.totalRevenue !== undefined) {
+            return { skipped: true, reason: 'Para ver una gráfica de ventas, especifica un período más largo como "ventas de la semana" o "ventas del mes".' }
+          }
+          return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INSUFFICIENT_DATA }
         }
 
         default:

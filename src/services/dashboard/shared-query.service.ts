@@ -68,6 +68,28 @@ export interface SalesSummary {
 }
 
 /**
+ * Sales data point for time series visualization
+ */
+export interface SalesDataPoint {
+  date: string // ISO date string (YYYY-MM-DD) or hour (HH:00)
+  revenue: number
+  orderCount: number
+  averageTicket: number
+}
+
+/**
+ * Sales time series for charting
+ */
+export interface SalesTimeSeries {
+  dataPoints: SalesDataPoint[]
+  totalRevenue: number
+  totalOrders: number
+  currency: string
+  period: RelativeDateRange | 'custom'
+  granularity: 'hour' | 'day'
+}
+
+/**
  * Top product with sales metrics
  */
 export interface TopProduct {
@@ -287,6 +309,96 @@ export class SharedQueryService {
       currency: venue.currency,
       period: periodName,
       dateRange: { from, to },
+    }
+  }
+
+  /**
+   * Get sales time series data for charting
+   *
+   * Used by:
+   * - AI Chatbot for "dame una gráfica de ventas" queries
+   * - Dashboard charts
+   *
+   * Automatically selects granularity:
+   * - 'hour' for 'today' or 'yesterday'
+   * - 'day' for longer periods
+   *
+   * @param venueId - Venue ID
+   * @param period - Date range
+   * @param timezone - Venue timezone
+   * @returns Sales time series with data points for charting
+   *
+   * @example
+   * const series = await SharedQueryService.getSalesTimeSeries(venueId, 'last7days')
+   * // Returns: { dataPoints: [{ date: '2025-12-20', revenue: 5000, ... }, ...] }
+   */
+  static async getSalesTimeSeries(venueId: string, period: DateRangeSpec, timezone?: string): Promise<SalesTimeSeries> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true, currency: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const venueTimezone = timezone || venue.timezone
+    const { from, to, periodName } = this.getDateRange(period, venueTimezone)
+
+    // Determine granularity based on period
+    const isShortPeriod = periodName === 'today' || periodName === 'yesterday'
+    const granularity: 'hour' | 'day' = isShortPeriod ? 'hour' : 'day'
+
+    // SECURITY: Sanitize timezone to prevent SQL injection
+    // Only allow valid IANA timezone format (e.g., 'America/Mexico_City')
+    const sanitizedTimezone = venueTimezone.replace(/[^a-zA-Z0-9_\/\-+:]/g, '')
+    if (sanitizedTimezone !== venueTimezone) {
+      throw new Error(`Invalid timezone format: ${venueTimezone}`)
+    }
+
+    // SQL for grouping by date or hour
+    const dateGroupSql = granularity === 'hour'
+      ? `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'HH24:00')`
+      : `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'YYYY-MM-DD')`
+
+    const dataPoints = await prisma.$queryRaw<Array<{
+      date: string
+      revenue: number
+      orderCount: bigint
+    }>>`
+      SELECT
+        ${Prisma.raw(dateGroupSql)} as date,
+        COALESCE(SUM("amount")::numeric, 0) as revenue,
+        COUNT(DISTINCT "orderId")::bigint as "orderCount"
+      FROM "Payment"
+      WHERE "venueId" = ${venueId}
+        AND "createdAt" >= ${from}
+        AND "createdAt" <= ${to}
+        AND "status" = 'COMPLETED'
+      GROUP BY ${Prisma.raw(dateGroupSql)}
+      ORDER BY date ASC
+    `
+
+    // Transform to proper types
+    const transformedPoints: SalesDataPoint[] = dataPoints.map(point => ({
+      date: point.date,
+      revenue: Number(point.revenue) || 0,
+      orderCount: Number(point.orderCount) || 0,
+      averageTicket: Number(point.orderCount) > 0
+        ? Number(point.revenue) / Number(point.orderCount)
+        : 0,
+    }))
+
+    const totalRevenue = transformedPoints.reduce((sum, p) => sum + p.revenue, 0)
+    const totalOrders = transformedPoints.reduce((sum, p) => sum + p.orderCount, 0)
+
+    return {
+      dataPoints: transformedPoints,
+      totalRevenue,
+      totalOrders,
+      currency: venue.currency,
+      period: periodName,
+      granularity,
     }
   }
 
