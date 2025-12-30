@@ -1,11 +1,14 @@
 import { z } from 'zod'
 import { StaffRole } from '@prisma/client'
 
-// Helper: Accept both CUID and UUID formats (for legacy data compatibility)
+// Helper: Accept CUID, CUID2, and UUID formats (for legacy data compatibility)
+// CUID: starts with 'c', 25 chars total
+// CUID2: starts with 'c', variable length (typically 21-25 chars)
+// UUID: standard format with dashes
 const cuidOrUuid = z
   .string()
-  .refine(val => /^c[a-z0-9]{24,}$/.test(val) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val), {
-    message: 'Invalid id format (must be CUID or UUID)',
+  .refine(val => /^c[a-z0-9]{19,}$/.test(val) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val), {
+    message: 'Invalid id format (must be CUID, CUID2, or UUID)',
   })
 
 // Parameter schemas
