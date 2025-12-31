@@ -29,6 +29,8 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { SharedQueryService } from './shared-query.service'
 import type { RelativeDateRange } from '@/utils/datetime'
+// Configuration-driven schema registry for valid table names
+import { getSchemaRegistry } from '@/config/chatbot'
 
 /**
  * Validation result with detailed error information
@@ -59,72 +61,15 @@ interface _SchemaValidation {
 export class SqlValidationService {
   /**
    * Valid tables in Avoqado schema
+   *
+   * Now dynamically loaded from the configuration-driven schema registry.
+   * This allows industry-specific table filtering and centralized schema management.
+   *
+   * @see src/config/chatbot/ for table definitions
    */
-  private static readonly VALID_TABLES = [
-    // Core entities
-    'Venue',
-    'Staff',
-    'StaffVenue',
-    'Organization',
-    'Customer',
-
-    // Orders & Payments
-    'Order',
-    'OrderItem',
-    'OrderItemModifier',
-    'Payment',
-    'PaymentAllocation',
-
-    // Menu & Products
-    'Menu',
-    'MenuCategory',
-    'MenuCategoryAssignment',
-    'Product',
-    'ProductModifierGroup',
-    'Modifier',
-    'ModifierGroup',
-
-    // Inventory & Raw Materials
-    'Inventory',
-    'InventoryMovement',
-    'RawMaterial',
-    'RawMaterialMovement',
-    'StockBatch',
-    'Recipe',
-    'RecipeLine',
-    'PurchaseOrder',
-    'PurchaseOrderItem',
-    'Supplier',
-    'SupplierPricing',
-
-    // Reviews & Feedback
-    'Review',
-    'ChatFeedback',
-    'ChatTrainingData',
-
-    // Restaurant Operations
-    'Table',
-    'Area',
-    'Shift',
-    'TimeEntry',
-    'TimeEntryBreak',
-    'TPV',
-    'Terminal',
-
-    // Features & Settings
-    'Feature',
-    'VenueFeature',
-    'VenueSettings',
-    'VenueRolePermission',
-
-    // Notifications
-    'Notification',
-    'NotificationPreference',
-
-    // Analytics
-    'MonthlyVenueProfit',
-    'ActivityLog',
-  ] as const
+  private static get VALID_TABLES(): string[] {
+    return getSchemaRegistry().getValidTableNames()
+  }
 
   /**
    * Dangerous SQL patterns that should never be generated
@@ -192,8 +137,8 @@ export class SqlValidationService {
       })
       .filter((table): table is string => table !== null && table !== undefined)
 
-    // Check if tables exist
-    const missingTables = referencedTables.filter(table => !this.VALID_TABLES.includes(table as any) && table.toLowerCase() !== 'unnest')
+    // Check if tables exist (uses configuration-driven schema registry)
+    const missingTables = referencedTables.filter(table => !this.VALID_TABLES.includes(table) && table.toLowerCase() !== 'unnest')
 
     if (missingTables.length > 0) {
       errors.push(`Invalid tables: ${missingTables.join(', ')}`)

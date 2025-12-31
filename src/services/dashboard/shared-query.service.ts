@@ -357,15 +357,18 @@ export class SharedQueryService {
     }
 
     // SQL for grouping by date or hour
-    const dateGroupSql = granularity === 'hour'
-      ? `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'HH24:00')`
-      : `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'YYYY-MM-DD')`
+    const dateGroupSql =
+      granularity === 'hour'
+        ? `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'HH24:00')`
+        : `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'YYYY-MM-DD')`
 
-    const dataPoints = await prisma.$queryRaw<Array<{
-      date: string
-      revenue: number
-      orderCount: bigint
-    }>>`
+    const dataPoints = await prisma.$queryRaw<
+      Array<{
+        date: string
+        revenue: number
+        orderCount: bigint
+      }>
+    >`
       SELECT
         ${Prisma.raw(dateGroupSql)} as date,
         COALESCE(SUM("amount")::numeric, 0) as revenue,
@@ -384,9 +387,7 @@ export class SharedQueryService {
       date: point.date,
       revenue: Number(point.revenue) || 0,
       orderCount: Number(point.orderCount) || 0,
-      averageTicket: Number(point.orderCount) > 0
-        ? Number(point.revenue) / Number(point.orderCount)
-        : 0,
+      averageTicket: Number(point.orderCount) > 0 ? Number(point.revenue) / Number(point.orderCount) : 0,
     }))
 
     const totalRevenue = transformedPoints.reduce((sum, p) => sum + p.revenue, 0)
@@ -1074,6 +1075,225 @@ export class SharedQueryService {
       difference,
       differencePercent,
       tolerance,
+    }
+  }
+
+  // ============================================
+  // CUSTOMER ANALYTICS
+  // ============================================
+
+  /**
+   * Get top customers by spending (VIP customers)
+   *
+   * Returns customers ranked by total spending with visit stats.
+   * Used for "mejor cliente", "clientes VIP", "top cliente" queries.
+   *
+   * @param venueId - Venue ID
+   * @param limit - Number of customers to return (default: 10)
+   * @returns Array of top customers with spending and visit data
+   */
+  static async getTopCustomers(
+    venueId: string,
+    limit: number = 10,
+  ): Promise<{
+    customers: Array<{
+      id: string
+      firstName: string | null
+      lastName: string | null
+      email: string | null
+      totalSpent: number
+      totalVisits: number
+      lastVisitAt: Date | null
+      averageOrderValue: number
+    }>
+    totalCustomers: number
+  }> {
+    const customers = await prisma.customer.findMany({
+      where: {
+        venueId,
+        active: true,
+        totalSpent: { gt: 0 },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        totalSpent: true,
+        totalVisits: true,
+        lastVisitAt: true,
+        averageOrderValue: true,
+      },
+      orderBy: {
+        totalSpent: 'desc',
+      },
+      take: limit,
+    })
+
+    const totalCustomers = await prisma.customer.count({
+      where: { venueId, active: true },
+    })
+
+    return {
+      customers: customers.map(c => ({
+        id: c.id,
+        firstName: c.firstName,
+        lastName: c.lastName,
+        email: c.email,
+        totalSpent: c.totalSpent?.toNumber() || 0,
+        totalVisits: c.totalVisits,
+        lastVisitAt: c.lastVisitAt,
+        averageOrderValue: c.averageOrderValue?.toNumber() || 0,
+      })),
+      totalCustomers,
+    }
+  }
+
+  /**
+   * Get churning/lost customers (customers who stopped visiting)
+   *
+   * Returns customers who haven't visited in X days but had multiple visits.
+   * Used for "dejó de venir", "cliente perdido", "clientes inactivos" queries.
+   *
+   * @param venueId - Venue ID
+   * @param inactiveDays - Days since last visit to consider churned (default: 30)
+   * @param minVisits - Minimum visits to be considered a churned customer (default: 2)
+   * @param limit - Number of customers to return (default: 20)
+   * @returns Array of churning customers with last visit and spending data
+   */
+  static async getChurningCustomers(
+    venueId: string,
+    inactiveDays: number = 30,
+    minVisits: number = 2,
+    limit: number = 20,
+  ): Promise<{
+    customers: Array<{
+      id: string
+      firstName: string | null
+      lastName: string | null
+      email: string | null
+      totalSpent: number
+      totalVisits: number
+      lastVisitAt: Date | null
+      daysSinceLastVisit: number
+    }>
+    totalChurning: number
+    cutoffDate: Date
+  }> {
+    const cutoffDate = new Date()
+    cutoffDate.setDate(cutoffDate.getDate() - inactiveDays)
+
+    const customers = await prisma.customer.findMany({
+      where: {
+        venueId,
+        active: true,
+        totalVisits: { gte: minVisits },
+        lastVisitAt: { lt: cutoffDate },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        totalSpent: true,
+        totalVisits: true,
+        lastVisitAt: true,
+      },
+      orderBy: {
+        totalSpent: 'desc', // Show highest value lost customers first
+      },
+      take: limit,
+    })
+
+    const totalChurning = await prisma.customer.count({
+      where: {
+        venueId,
+        active: true,
+        totalVisits: { gte: minVisits },
+        lastVisitAt: { lt: cutoffDate },
+      },
+    })
+
+    return {
+      customers: customers.map(c => {
+        const daysSince = c.lastVisitAt ? Math.floor((Date.now() - c.lastVisitAt.getTime()) / (1000 * 60 * 60 * 24)) : 999
+        return {
+          id: c.id,
+          firstName: c.firstName,
+          lastName: c.lastName,
+          email: c.email,
+          totalSpent: c.totalSpent?.toNumber() || 0,
+          totalVisits: c.totalVisits,
+          lastVisitAt: c.lastVisitAt,
+          daysSinceLastVisit: daysSince,
+        }
+      }),
+      totalChurning,
+      cutoffDate,
+    }
+  }
+
+  /**
+   * Get new customer registrations
+   *
+   * Returns count and list of new customers for a period.
+   * Used for "clientes nuevos", "nuevos registros" queries.
+   *
+   * @param venueId - Venue ID
+   * @param period - Date range specification
+   * @param timezone - Venue timezone
+   * @returns New customer stats with list
+   */
+  static async getNewCustomers(
+    venueId: string,
+    period: DateRangeSpec,
+    timezone?: string,
+  ): Promise<{
+    count: number
+    customers: Array<{
+      id: string
+      firstName: string | null
+      lastName: string | null
+      createdAt: Date
+    }>
+    periodLabel: string
+  }> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true },
+    })
+
+    const venueTimezone = timezone || venue?.timezone || 'America/Mexico_City'
+    const { from, to, periodName } = this.getDateRange(period, venueTimezone)
+
+    const customers = await prisma.customer.findMany({
+      where: {
+        venueId,
+        createdAt: { gte: from, lte: to },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      take: 50,
+    })
+
+    const count = await prisma.customer.count({
+      where: {
+        venueId,
+        createdAt: { gte: from, lte: to },
+      },
+    })
+
+    return {
+      count,
+      customers,
+      periodLabel: periodName,
     }
   }
 }
