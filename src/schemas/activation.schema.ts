@@ -9,8 +9,8 @@ export const generateActivationCodeSchema = z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
     terminalId: z.string().refine(
       val => {
-        // Accept both CUID (newer terminals) and UUID (legacy terminals)
-        const isCuid = /^c[a-z0-9]{24,}$/.test(val)
+        // Accept CUID, CUID2 (variable length 20-25 chars), and UUID (legacy terminals)
+        const isCuid = /^c[a-z0-9]{19,}$/.test(val)
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val)
         return isCuid || isUuid
       },

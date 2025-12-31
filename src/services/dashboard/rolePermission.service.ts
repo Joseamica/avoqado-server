@@ -177,7 +177,10 @@ export async function updateRolePermissions(
     const validationError = validatePermissionFormat(p)
     if (validationError) {
       // Check if it's a format error or just unknown permission
-      if (p.split(':').length !== 2 || !p.split(':')[0] || !p.split(':')[1]) {
+      // Valid formats: "resource:action" (2 parts) or "resource:action:subaction" (3 parts)
+      const parts = p.split(':')
+      const hasValidFormat = (parts.length === 2 || parts.length === 3) && parts.every(part => part.length > 0)
+      if (!hasValidFormat) {
         invalidPermissions.push(p)
       } else {
         unknownPermissions.push(p)
@@ -187,7 +190,7 @@ export async function updateRolePermissions(
 
   // Block invalid formats (critical error)
   if (invalidPermissions.length > 0) {
-    throw new BadRequestError(`Invalid permission format: ${invalidPermissions.join(', ')}. Expected format: "resource:action"`)
+    throw new BadRequestError(`Invalid permission format: ${invalidPermissions.join(', ')}. Expected format: "resource:action" or "resource:action:subaction"`)
   }
 
   // Warn about unknown permissions (may be typos, but don't block)
