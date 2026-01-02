@@ -190,7 +190,9 @@ export async function updateRolePermissions(
 
   // Block invalid formats (critical error)
   if (invalidPermissions.length > 0) {
-    throw new BadRequestError(`Invalid permission format: ${invalidPermissions.join(', ')}. Expected format: "resource:action" or "resource:action:subaction"`)
+    throw new BadRequestError(
+      `Invalid permission format: ${invalidPermissions.join(', ')}. Expected format: "resource:action" or "resource:action:subaction"`,
+    )
   }
 
   // Warn about unknown permissions (may be typos, but don't block)
