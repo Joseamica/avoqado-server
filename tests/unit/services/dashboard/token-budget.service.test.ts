@@ -12,7 +12,12 @@ const TOKEN_CONFIG = {
   DEFAULT_AUTO_RECHARGE_AMOUNT: 10000,
 }
 
-// Helper to create mock budget with future dates
+// Helper to get a future date (always 1 month from now)
+const getFuturePeriodEnd = () => {
+  const now = new Date()
+  return new Date(now.getFullYear(), now.getMonth() + 1, 1)
+}
+
 const createMockBudget = (overrides: Record<string, any> = {}) => ({
   id: 'budget-123',
   venueId: 'venue-123',
@@ -23,8 +28,8 @@ const createMockBudget = (overrides: Record<string, any> = {}) => ({
   totalTokensUsed: BigInt(0),
   totalTokensPurchased: BigInt(0),
   totalAmountSpent: 0,
-  currentPeriodStart: new Date('2025-11-01'),
-  currentPeriodEnd: new Date('2025-12-31'), // Future date to prevent reset
+  currentPeriodStart: new Date(),
+  currentPeriodEnd: getFuturePeriodEnd(), // Always future date to prevent reset
   autoRechargeEnabled: false,
   autoRechargeThreshold: 1000,
   autoRechargeAmount: 10000,
