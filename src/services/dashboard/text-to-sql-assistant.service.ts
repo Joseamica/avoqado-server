@@ -2104,7 +2104,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           }
           // Scalar summary - not ideal for charting but provide useful message
           if (data.totalRevenue !== undefined) {
-            return { skipped: true, reason: 'Para ver una gráfica de ventas, especifica un período más largo como "ventas de la semana" o "ventas del mes".' }
+            return {
+              skipped: true,
+              reason: 'Para ver una gráfica de ventas, especifica un período más largo como "ventas de la semana" o "ventas del mes".',
+            }
           }
           return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.INSUFFICIENT_DATA }
         }
