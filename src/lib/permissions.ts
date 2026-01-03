@@ -296,6 +296,9 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // Terminal Configuration
   'tpv-terminal:settings': ['tpv-terminal:settings', 'tpv:read'],
 
+  // Kiosk Mode (Self-service terminal)
+  'tpv-kiosk:enable': ['tpv-kiosk:enable', 'tpv:read', 'tpv-terminal:settings'],
+
   // Orders - TPV-specific actions
   'tpv-orders:comp': ['tpv-orders:comp', 'orders:read', 'orders:update'],
   'tpv-orders:void': ['tpv-orders:void', 'orders:read', 'orders:update'],
@@ -574,6 +577,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (all except factory-reset)
     'tpv-terminal:settings', // Can modify terminal configuration
+    'tpv-kiosk:enable', // Can enable/disable kiosk mode
     'tpv-orders:comp',
     'tpv-orders:void',
     'tpv-orders:discount',
@@ -623,6 +627,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (ALL including factory-reset)
     'tpv-terminal:settings',
+    'tpv-kiosk:enable', // Can enable/disable kiosk mode
     'tpv-orders:comp',
     'tpv-orders:void',
     'tpv-orders:discount',
@@ -968,6 +973,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'role-config': ['role-config:read', 'role-config:update'], // Custom role display names
   // TPV-specific permissions (granular features)
   'tpv-terminal': ['tpv-terminal:settings'],
+  'tpv-kiosk': ['tpv-kiosk:enable'], // Kiosk/self-service mode
   'tpv-orders': ['tpv-orders:comp', 'tpv-orders:void', 'tpv-orders:discount'],
   'tpv-payments': ['tpv-payments:send-receipt', 'tpv-payments:pay-later'],
   'tpv-shifts': ['tpv-shifts:create', 'tpv-shifts:close'],
