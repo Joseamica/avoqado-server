@@ -2,19 +2,18 @@
 
 ## Resumen Ejecutivo
 
-| Métrica | Valor |
-|---------|-------|
-| **Fases totales** | 7 |
-| **Tiempo estimado** | 26-34 horas (~4-5 días) |
-| **Impacto en existentes** | NINGUNO |
-| **Cliente inicial** | PlayTelecom |
+| Métrica                   | Valor                   |
+| ------------------------- | ----------------------- |
+| **Fases totales**         | 7                       |
+| **Tiempo estimado**       | 26-34 horas (~4-5 días) |
+| **Impacto en existentes** | NINGUNO                 |
+| **Cliente inicial**       | PlayTelecom             |
 
 ---
 
 ## Fase 1: Configuration System (Backend)
 
-**Tiempo:** 2-3 horas
-**Prioridad:** CRÍTICA (base para todo lo demás)
+**Tiempo:** 2-3 horas **Prioridad:** CRÍTICA (base para todo lo demás)
 
 ### Tareas
 
@@ -54,8 +53,7 @@ expect(config.attendance.requirePhoto).toBe(true)
 
 ## Fase 2: Attendance con Foto/GPS (Backend)
 
-**Tiempo:** 3-4 horas
-**Dependencia:** Fase 1
+**Tiempo:** 3-4 horas **Dependencia:** Fase 1
 
 ### Tareas
 
@@ -95,8 +93,7 @@ curl -X POST /tpv/venues/telecom/time-entries/clock-in \
 
 ## Fase 3: Balance y Depósitos (Backend)
 
-**Tiempo:** 4-5 horas
-**Dependencia:** Fase 1
+**Tiempo:** 4-5 horas **Dependencia:** Fase 1
 
 ### Tareas
 
@@ -160,8 +157,7 @@ curl -X PATCH /dashboard/venues/x/deposits/z \
 
 ## Fase 4: Scope Jerárquico Manager (Backend)
 
-**Tiempo:** 2-3 horas
-**Dependencia:** Fase 1
+**Tiempo:** 2-3 horas **Dependencia:** Fase 1
 
 ### Tareas
 
@@ -194,8 +190,7 @@ curl -H "Authorization: Bearer <manager_token>" \
 
 ## Fase 5: Foto/GPS en Check-in (TPV Android)
 
-**Tiempo:** 5-6 horas
-**Dependencia:** Fase 2
+**Tiempo:** 5-6 horas **Dependencia:** Fase 2
 
 ### Tareas
 
@@ -247,8 +242,7 @@ MODIFICAR:
 
 ## Fase 6: Saldo y Depósitos (TPV Android)
 
-**Tiempo:** 4-5 horas
-**Dependencia:** Fase 3
+**Tiempo:** 4-5 horas **Dependencia:** Fase 3
 
 ### Tareas
 
@@ -303,8 +297,7 @@ MODIFICAR:
 
 ## Fase 7: UI Admin (Dashboard Web)
 
-**Tiempo:** 6-8 horas
-**Dependencia:** Fases 1-4
+**Tiempo:** 6-8 horas **Dependencia:** Fases 1-4
 
 ### Tareas
 
@@ -332,12 +325,12 @@ MODIFICAR:
 
 ### Visibilidad por Rol
 
-| Página | OWNER | ADMIN | MANAGER |
-|--------|-------|-------|---------|
-| IndustryConfig | ✅ | ❌ | ❌ |
-| AttendanceReport | ✅ | ✅ | ✅ (sus tiendas) |
-| BalanceList | ✅ | ✅ | ✅ (sus promotores) |
-| DepositValidation | ✅ | ✅ | ❌ |
+| Página            | OWNER | ADMIN | MANAGER             |
+| ----------------- | ----- | ----- | ------------------- |
+| IndustryConfig    | ✅    | ❌    | ❌                  |
+| AttendanceReport  | ✅    | ✅    | ✅ (sus tiendas)    |
+| BalanceList       | ✅    | ✅    | ✅ (sus promotores) |
+| DepositValidation | ✅    | ✅    | ❌                  |
 
 ---
 

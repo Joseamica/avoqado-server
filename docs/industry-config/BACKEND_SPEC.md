@@ -115,7 +115,7 @@ export interface AttendanceConfig {
   requirePhoto: boolean
   requireGPS: boolean
   notifyManager: boolean
-  geofenceRadius?: number  // metros (opcional, para validar distancia)
+  geofenceRadius?: number // metros (opcional, para validar distancia)
 }
 
 export interface BalanceConfig {
@@ -197,7 +197,7 @@ export const TELECOM_CONFIG: IndustryConfig = {
     requirePhoto: true,
     requireGPS: true,
     notifyManager: true,
-    geofenceRadius: 100,  // 100 metros
+    geofenceRadius: 100, // 100 metros
   },
   balance: {
     enabled: true,
@@ -238,15 +238,10 @@ const INDUSTRY_CONFIGS: Partial<Record<VenueType, IndustryConfig>> = {
   // ... otros tipos
 }
 
-export function getIndustryConfig(
-  venue: { type: VenueType; settings?: { industryConfig?: any } | null }
-): IndustryConfig {
+export function getIndustryConfig(venue: { type: VenueType; settings?: { industryConfig?: any } | null }): IndustryConfig {
   // 1. Prioridad: Config custom del venue
   if (venue.settings?.industryConfig) {
-    return mergeDeep(
-      INDUSTRY_CONFIGS[venue.type] || DEFAULT_CONFIG,
-      venue.settings.industryConfig
-    )
+    return mergeDeep(INDUSTRY_CONFIGS[venue.type] || DEFAULT_CONFIG, venue.settings.industryConfig)
   }
 
   // 2. Fallback: Config default por tipo
@@ -362,31 +357,31 @@ Response: {
 // src/lib/permissions.ts
 
 // Attendance
-'attendance:read'    // Ver registros de asistencia
-'attendance:create'  // Registrar check-in (TPV)
+'attendance:read' // Ver registros de asistencia
+'attendance:create' // Registrar check-in (TPV)
 
 // Balance
-'balance:read'       // Ver saldos
-'balance:update'     // Modificar saldos manualmente
+'balance:read' // Ver saldos
+'balance:update' // Modificar saldos manualmente
 
 // Deposits
-'deposits:read'      // Ver depósitos
-'deposits:create'    // Subir comprobante (TPV)
-'deposits:validate'  // Aprobar/rechazar depósitos
+'deposits:read' // Ver depósitos
+'deposits:create' // Subir comprobante (TPV)
+'deposits:validate' // Aprobar/rechazar depósitos
 
 // Industry Config
-'industry:read'      // Ver configuración de industria
-'industry:update'    // Modificar configuración (OWNER/SUPERADMIN)
+'industry:read' // Ver configuración de industria
+'industry:update' // Modificar configuración (OWNER/SUPERADMIN)
 ```
 
 ### Permisos por Rol
 
-| Rol | attendance | balance | deposits | industry |
-|-----|------------|---------|----------|----------|
-| OWNER | ✅ all | ✅ all | ✅ all | ✅ all |
-| ADMIN | ✅ all | ✅ all | ✅ all | ❌ |
-| MANAGER | read | read | read | ❌ |
-| WAITER | create | read (propio) | create | ❌ |
+| Rol     | attendance | balance       | deposits | industry |
+| ------- | ---------- | ------------- | -------- | -------- |
+| OWNER   | ✅ all     | ✅ all        | ✅ all   | ✅ all   |
+| ADMIN   | ✅ all     | ✅ all        | ✅ all   | ❌       |
+| MANAGER | read       | read          | read     | ❌       |
+| WAITER  | create     | read (propio) | create   | ❌       |
 
 ---
 
@@ -399,11 +394,7 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import { getIndustryConfig } from '@/config/industry'
 
-export async function applyHierarchyScope(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
+export async function applyHierarchyScope(req: Request, res: Response, next: NextFunction) {
   const authContext = (req as any).authContext
   if (!authContext) return next()
 
@@ -415,7 +406,7 @@ export async function applyHierarchyScope(
   try {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      include: { settings: true }
+      include: { settings: true },
     })
 
     if (!venue) return next()
@@ -426,7 +417,7 @@ export async function applyHierarchyScope(
       // Obtener venues asignados a este manager
       const assignedVenues = await prisma.staffVenue.findMany({
         where: { staffId, role: 'MANAGER' },
-        select: { venueId: true }
+        select: { venueId: true },
       })
 
       // Agregar al authContext para uso en queries
@@ -468,7 +459,7 @@ await prisma.venueSettings.update({
       attendance: { enabled: true, requirePhoto: true, requireGPS: true },
       balance: { enabled: true, requireDepositValidation: true },
       // ...
-    }
-  }
+    },
+  },
 })
 ```

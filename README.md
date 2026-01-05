@@ -1,8 +1,9 @@
 # Avoqado Backend Server
 
-Backend para Avoqado, una plataforma tecnológica integral multi-sector para la gestión y operación de negocios (restaurantes, hoteles, gimnasios, retail, servicios, entretenimiento y más). Este servidor maneja la lógica de
-negocio, la autenticación, la interacción con la base de datos y la comunicación en tiempo real para las diferentes interfaces de Avoqado,
-incluyendo el Dashboard de Administración, la Terminal Portátil (TPV) para el personal y la Plataforma Web Móvil para Clientes (QR).
+Backend para Avoqado, una plataforma tecnológica integral multi-sector para la gestión y operación de negocios (restaurantes, hoteles,
+gimnasios, retail, servicios, entretenimiento y más). Este servidor maneja la lógica de negocio, la autenticación, la interacción con la
+base de datos y la comunicación en tiempo real para las diferentes interfaces de Avoqado, incluyendo el Dashboard de Administración, la
+Terminal Portátil (TPV) para el personal y la Plataforma Web Móvil para Clientes (QR).
 
 ## ✨ Características Principales (Backend)
 

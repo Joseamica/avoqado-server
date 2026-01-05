@@ -2,18 +2,19 @@
 
 ## Overview
 
-Este documento describe la arquitectura que permite a Avoqado servir múltiples industrias (Telecom, Retail, Restaurantes) con un único codebase, sin código específico por cliente.
+Este documento describe la arquitectura que permite a Avoqado servir múltiples industrias (Telecom, Retail, Restaurantes) con un único
+codebase, sin código específico por cliente.
 
 ---
 
 ## Patrones de Referencia (Industria)
 
-| Empresa | Patrón | Cómo lo usan |
-|---------|--------|--------------|
-| **Salesforce** | Metadata-Driven | Custom fields/objects por tenant |
-| **Shopify** | Metafields | Key-value pairs por merchant |
-| **Square** | Industry Modes | Una app, múltiples modos por industria |
-| **Toast** | Multi-Location Config | Configuración por ubicación |
+| Empresa        | Patrón                | Cómo lo usan                           |
+| -------------- | --------------------- | -------------------------------------- |
+| **Salesforce** | Metadata-Driven       | Custom fields/objects por tenant       |
+| **Shopify**    | Metafields            | Key-value pairs por merchant           |
+| **Square**     | Industry Modes        | Una app, múltiples modos por industria |
+| **Toast**      | Multi-Location Config | Configuración por ubicación            |
 
 **Avoqado usa:** Configuration-Driven (similar a Square) + campos opcionales
 
@@ -128,13 +129,13 @@ model StaffVenue {
 
 ```tsx
 // En Sidebar
-{config.attendance.enabled && (
-  <NavItem to="/attendance">Asistencia</NavItem>
-)}
+{
+  config.attendance.enabled && <NavItem to="/attendance">Asistencia</NavItem>
+}
 
-{config.balance.enabled && (
-  <NavItem to="/balance">Saldos</NavItem>
-)}
+{
+  config.balance.enabled && <NavItem to="/balance">Saldos</NavItem>
+}
 ```
 
 **Impacto en venues existentes:** NINGUNO (no renderiza si disabled)
@@ -184,7 +185,7 @@ async function clockIn(params: ClockInParams) {
       checkInPhotoUrl: params.photoUrl || null,
       checkInLatitude: params.latitude || null,
       checkInLongitude: params.longitude || null,
-    }
+    },
   })
 }
 ```
@@ -213,7 +214,7 @@ export async function applyHierarchyScope(req, res, next) {
     // Obtener solo venues asignados a este manager
     const assignedVenues = await prisma.staffVenue.findMany({
       where: { staffId, role: 'MANAGER' },
-      select: { venueId: true }
+      select: { venueId: true },
     })
     req.authContext.scopedVenueIds = assignedVenues.map(v => v.venueId)
   }
@@ -227,9 +228,7 @@ export async function applyHierarchyScope(req, res, next) {
 ```typescript
 // En cualquier servicio que liste datos
 const whereClause = {
-  venueId: req.authContext.scopedVenueIds
-    ? { in: req.authContext.scopedVenueIds }
-    : req.authContext.venueId
+  venueId: req.authContext.scopedVenueIds ? { in: req.authContext.scopedVenueIds } : req.authContext.venueId,
 }
 ```
 
@@ -237,15 +236,15 @@ const whereClause = {
 
 ## Verificación de No-Impacto
 
-| Criterio | Status |
-|----------|--------|
-| Sin `if (venueId === 'xxx')` | ✅ |
-| Campos opcionales/nullable | ✅ |
-| Defaults que no rompen existentes | ✅ |
-| Config en JSON, no hardcoded | ✅ |
-| UI condicional por config | ✅ |
-| Endpoints adicionales | ✅ |
-| Mismo código para futuros clientes | ✅ |
+| Criterio                           | Status |
+| ---------------------------------- | ------ |
+| Sin `if (venueId === 'xxx')`       | ✅     |
+| Campos opcionales/nullable         | ✅     |
+| Defaults que no rompen existentes  | ✅     |
+| Config en JSON, no hardcoded       | ✅     |
+| UI condicional por config          | ✅     |
+| Endpoints adicionales              | ✅     |
+| Mismo código para futuros clientes | ✅     |
 
 ---
 

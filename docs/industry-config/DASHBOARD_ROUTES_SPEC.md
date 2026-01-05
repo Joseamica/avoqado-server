@@ -94,25 +94,25 @@ El sidebar actual filtra por `permission`. Ahora también filtrará por `industr
 ```typescript
 const allItems = [
   // Items existentes (siempre visibles según permiso)
-  { title: 'Inicio',     permission: 'home:read' },
-  { title: 'Analytics',  permission: 'analytics:read' },
-  { title: 'Pagos',      permission: 'payments:read' },
+  { title: 'Inicio', permission: 'home:read' },
+  { title: 'Analytics', permission: 'analytics:read' },
+  { title: 'Pagos', permission: 'payments:read' },
 
   // NUEVOS (solo visibles si industryConfig los habilita)
   {
     title: 'Asistencia',
     permission: 'attendance:read',
-    industryFeature: 'attendance.enabled'    // ← NUEVO
+    industryFeature: 'attendance.enabled', // ← NUEVO
   },
   {
     title: 'Saldos',
     permission: 'balance:read',
-    industryFeature: 'balance.enabled'       // ← NUEVO
+    industryFeature: 'balance.enabled', // ← NUEVO
   },
   {
     title: 'Depósitos',
     permission: 'deposits:validate',
-    industryFeature: 'balance.requireDepositValidation'  // ← NUEVO
+    industryFeature: 'balance.requireDepositValidation', // ← NUEVO
   },
 ]
 ```
@@ -320,21 +320,21 @@ src/pages/
 
 ```typescript
 // Attendance
-'attendance:read'      // Ver registros de asistencia
-'attendance:create'    // Registrar check-in (solo TPV)
+'attendance:read' // Ver registros de asistencia
+'attendance:create' // Registrar check-in (solo TPV)
 
 // Balance
-'balance:read'         // Ver saldos de staff
-'balance:update'       // Modificar saldos manualmente
+'balance:read' // Ver saldos de staff
+'balance:update' // Modificar saldos manualmente
 
 // Deposits
-'deposits:read'        // Ver lista de depósitos
-'deposits:create'      // Subir comprobante (solo TPV)
-'deposits:validate'    // Aprobar/rechazar depósitos
+'deposits:read' // Ver lista de depósitos
+'deposits:create' // Subir comprobante (solo TPV)
+'deposits:validate' // Aprobar/rechazar depósitos
 
 // Industry Config
-'industry:read'        // Ver configuración de industria
-'industry:update'      // Modificar configuración
+'industry:read' // Ver configuración de industria
+'industry:update' // Modificar configuración
 ```
 
 ### Matriz de Permisos por Rol
@@ -426,6 +426,7 @@ Hotel:
 ```
 
 El patrón es siempre el mismo:
+
 1. Agregar config en `industryConfig`
 2. Agregar `industryFeature` al sidebar item
 3. Crear componentes y rutas
@@ -433,4 +434,4 @@ El patrón es siempre el mismo:
 
 ---
 
-*Documento preparado para implementación de Dashboard - Avoqado*
+_Documento preparado para implementación de Dashboard - Avoqado_

@@ -2,9 +2,7 @@
 
 ## Cliente
 
-**Nombre:** PlayTelecom
-**Industria:** Telecomunicaciones / Retail
-**Tipo en sistema:** `VenueType.ELECTRONICS`
+**Nombre:** PlayTelecom **Industria:** Telecomunicaciones / Retail **Tipo en sistema:** `VenueType.ELECTRONICS`
 
 ---
 
@@ -50,12 +48,12 @@
 
 ## Mapeo de Roles
 
-| PlayTelecom | Avoqado | Notas |
-|-------------|---------|-------|
-| Super Admin | `OWNER` | Dueño de la organización |
-| Admin | `ADMIN` | Equipo de operaciones |
-| Gerente | `MANAGER` | Scope limitado a sus tiendas |
-| Promotor | `WAITER` | Etiqueta personalizada |
+| PlayTelecom | Avoqado   | Notas                        |
+| ----------- | --------- | ---------------------------- |
+| Super Admin | `OWNER`   | Dueño de la organización     |
+| Admin       | `ADMIN`   | Equipo de operaciones        |
+| Gerente     | `MANAGER` | Scope limitado a sus tiendas |
+| Promotor    | `WAITER`  | Etiqueta personalizada       |
 
 ---
 
@@ -63,10 +61,10 @@
 
 ### 1. Check-in con Verificación
 
-**Actor:** Promotor
-**Plataforma:** TPV Android
+**Actor:** Promotor **Plataforma:** TPV Android
 
 **Flujo:**
+
 1. Promotor abre TPV al inicio del turno
 2. Ingresa su PIN
 3. Sistema solicita foto (selfie o de la tienda)
@@ -75,21 +73,23 @@
 6. Gerente recibe notificación push
 
 **Reglas:**
+
 - Foto OBLIGATORIA (configurable)
 - GPS OBLIGATORIO (configurable)
 - Validar que GPS esté dentro del radio de la tienda (opcional, geofencing)
 
 ### 2. Tracking de Saldos
 
-**Actor:** Promotor, Admin
-**Plataforma:** TPV (ver), Dashboard (gestionar)
+**Actor:** Promotor, Admin **Plataforma:** TPV (ver), Dashboard (gestionar)
 
 **Campos a trackear:**
+
 - `cashBalance` - Efectivo recaudado
 - `cardBalance` - Procesado por tarjeta
 - `pendingDeposit` - Monto que debe depositar
 
 **Actualización:**
+
 - Cuando se procesa venta en efectivo → `cashBalance += amount`
 - Cuando se procesa venta con tarjeta → `cardBalance += amount`
 - `pendingDeposit = cashBalance` (efectivo pendiente de depositar)
@@ -128,11 +128,13 @@
 **Requisito:** Un Gerente solo puede ver datos de las tiendas asignadas a él.
 
 **Implementación:**
+
 - Gerente tiene múltiples `StaffVenue` con `role: MANAGER`
 - Cada `StaffVenue` corresponde a una tienda
 - Queries filtran por `venueId IN (tiendas_asignadas)`
 
 **Ejemplo:**
+
 ```
 Gerente "Juan" asignado a:
 - Tienda Centro (venue_001)
@@ -146,25 +148,26 @@ Cuando Juan entra al dashboard:
 
 ### 5. Notificaciones de Check-in
 
-**Trigger:** Promotor hace check-in exitoso
-**Destinatario:** Gerente(s) de esa tienda
-**Canal:** Push notification
-**Contenido:** "🕐 {Promotor} registró entrada en {Tienda} - {hora}"
+**Trigger:** Promotor hace check-in exitoso **Destinatario:** Gerente(s) de esa tienda **Canal:** Push notification **Contenido:** "🕐
+{Promotor} registró entrada en {Tienda} - {hora}"
 
 ---
 
 ## Requisitos No Funcionales
 
 ### Seguridad
+
 - PIN único por promotor por tienda
 - Fotos almacenadas en Firebase Storage con URLs firmadas
 - GPS no falsificable (validación en backend si hay discrepancia)
 
 ### Performance
+
 - Check-in debe completarse en <3 segundos
 - Upload de foto <5 segundos (compresión al 85% JPEG)
 
 ### UX
+
 - Flujo de check-in intuitivo (máximo 4 pasos)
 - Mensajes de error claros
 - Indicador de progreso durante upload
@@ -204,23 +207,24 @@ Cuando Juan entra al dashboard:
 
 ### Permisos por Rol
 
-| Permiso | OWNER | ADMIN | MANAGER | WAITER |
-|---------|-------|-------|---------|--------|
-| `attendance:read` | ✅ | ✅ | ✅ | ❌ |
-| `attendance:create` | ❌ | ❌ | ❌ | ✅ |
-| `balance:read` | ✅ | ✅ | ✅ | ✅* |
-| `balance:update` | ✅ | ✅ | ❌ | ❌ |
-| `deposits:read` | ✅ | ✅ | ✅ | ✅* |
-| `deposits:create` | ❌ | ❌ | ❌ | ✅ |
-| `deposits:validate` | ✅ | ✅ | ❌ | ❌ |
+| Permiso             | OWNER | ADMIN | MANAGER | WAITER |
+| ------------------- | ----- | ----- | ------- | ------ |
+| `attendance:read`   | ✅    | ✅    | ✅      | ❌     |
+| `attendance:create` | ❌    | ❌    | ❌      | ✅     |
+| `balance:read`      | ✅    | ✅    | ✅      | ✅\*   |
+| `balance:update`    | ✅    | ✅    | ❌      | ❌     |
+| `deposits:read`     | ✅    | ✅    | ✅      | ✅\*   |
+| `deposits:create`   | ❌    | ❌    | ❌      | ✅     |
+| `deposits:validate` | ✅    | ✅    | ❌      | ❌     |
 
-*Solo su propio saldo/depósitos
+\*Solo su propio saldo/depósitos
 
 ---
 
 ## Entregables
 
 ### Fase 1 - Backend
+
 - [ ] Modelo `StaffDeposit`
 - [ ] Campos en `TimeEntry` (foto/GPS)
 - [ ] Campos en `StaffVenue` (balance)
@@ -228,11 +232,13 @@ Cuando Juan entra al dashboard:
 - [ ] Middleware de scope jerárquico
 
 ### Fase 2 - TPV Android
+
 - [ ] Check-in con foto y GPS
 - [ ] Pantalla "Mi Saldo"
 - [ ] Pantalla "Subir Comprobante"
 
 ### Fase 3 - Dashboard
+
 - [ ] Reporte de Asistencia (con fotos)
 - [ ] Lista de Saldos
 - [ ] Validación de Depósitos
@@ -242,12 +248,12 @@ Cuando Juan entra al dashboard:
 
 ## Métricas de Éxito
 
-| Métrica | Target |
-|---------|--------|
-| Tiempo de check-in | <30 segundos |
-| Tasa de éxito upload foto | >99% |
-| Precisión GPS | ±10 metros |
-| Tiempo validación depósito | <24 horas |
+| Métrica                    | Target       |
+| -------------------------- | ------------ |
+| Tiempo de check-in         | <30 segundos |
+| Tasa de éxito upload foto  | >99%         |
+| Precisión GPS              | ±10 metros   |
+| Tiempo validación depósito | <24 horas    |
 
 ---
 

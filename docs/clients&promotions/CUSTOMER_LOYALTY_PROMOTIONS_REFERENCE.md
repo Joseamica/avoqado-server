@@ -1,7 +1,6 @@
 # Customer, Loyalty & Promotions - Complete Reference
 
-**Last Updated:** 2025-12-10
-**Status:** Production Ready (Phase 1 Complete, Phase 2 In Progress)
+**Last Updated:** 2025-12-10 **Status:** Production Ready (Phase 1 Complete, Phase 2 In Progress)
 
 ---
 
@@ -22,18 +21,19 @@
 
 ### What We're Building
 
-A comprehensive customer relationship, loyalty, and promotions system for Avoqado POS that matches industry leaders like Toast, Square, Clover, and Stripe.
+A comprehensive customer relationship, loyalty, and promotions system for Avoqado POS that matches industry leaders like Toast, Square,
+Clover, and Stripe.
 
 ### Key Features
 
-| Feature | Status | Description |
-|---------|--------|-------------|
+| Feature                 | Status      | Description                               |
+| ----------------------- | ----------- | ----------------------------------------- |
 | **Customer Management** | ✅ Complete | Full CRM with customer profiles, tracking |
-| **Customer Groups** | ✅ Complete | Segmentation for targeted promotions |
-| **Loyalty Program** | ✅ Complete | Points-based rewards system |
-| **Discounts** | 🔄 55% | Automatic, manual, BOGO discounts |
-| **Coupon Codes** | 🔄 55% | Promotional codes with validation |
-| **Comps/Cortesías** | ✅ Complete | Manager-approved complimentary items |
+| **Customer Groups**     | ✅ Complete | Segmentation for targeted promotions      |
+| **Loyalty Program**     | ✅ Complete | Points-based rewards system               |
+| **Discounts**           | 🔄 55%      | Automatic, manual, BOGO discounts         |
+| **Coupon Codes**        | 🔄 55%      | Promotional codes with validation         |
+| **Comps/Cortesías**     | ✅ Complete | Manager-approved complimentary items      |
 
 ---
 
@@ -42,20 +42,22 @@ A comprehensive customer relationship, loyalty, and promotions system for Avoqad
 ### 2.1 Customer Management Comparison
 
 #### Square Customers API
+
 **Source:** [Square Customers API](https://developer.squareup.com/docs/customers-api/what-it-does)
 
-| Feature | Square | Avoqado | Notes |
-|---------|--------|---------|-------|
-| Customer Profile | ✅ | ✅ | Name, email, phone, address |
-| Instant Profiles | ✅ | ❌ | Auto-create from payment |
-| Customer Groups | ✅ (explicit) | ✅ | Manual group assignment |
-| Customer Segments | ✅ (dynamic) | ❌ | Rule-based auto-assignment |
-| Custom Attributes | ✅ | ✅ (via tags) | Extensible metadata |
-| Version Control | ✅ | ❌ | Optimistic concurrency |
-| Duplicate Prevention | Manual | Manual | No auto-dedup |
-| Cards on File | ✅ | ❌ | Saved payment methods |
+| Feature              | Square        | Avoqado       | Notes                       |
+| -------------------- | ------------- | ------------- | --------------------------- |
+| Customer Profile     | ✅            | ✅            | Name, email, phone, address |
+| Instant Profiles     | ✅            | ❌            | Auto-create from payment    |
+| Customer Groups      | ✅ (explicit) | ✅            | Manual group assignment     |
+| Customer Segments    | ✅ (dynamic)  | ❌            | Rule-based auto-assignment  |
+| Custom Attributes    | ✅            | ✅ (via tags) | Extensible metadata         |
+| Version Control      | ✅            | ❌            | Optimistic concurrency      |
+| Duplicate Prevention | Manual        | Manual        | No auto-dedup               |
+| Cards on File        | ✅            | ❌            | Saved payment methods       |
 
 **Key Square Pattern:**
+
 ```
 CustomerGroup = Explicit membership (manual assignment)
 CustomerSegment = Dynamic membership (filter criteria auto-applied)
@@ -64,45 +66,49 @@ CustomerSegment = Dynamic membership (filter criteria auto-applied)
 **Recommendation:** Consider adding CustomerSegments with auto-assign rules for dynamic grouping (e.g., "Customers who spent >$500/month").
 
 #### Toast Customers
+
 **Source:** Toast Developer Guide
 
-| Feature | Toast | Avoqado | Notes |
-|---------|-------|---------|-------|
-| Customer Profile | ✅ | ✅ | Basic CRM |
+| Feature             | Toast          | Avoqado     | Notes                           |
+| ------------------- | -------------- | ----------- | ------------------------------- |
+| Customer Profile    | ✅             | ✅          | Basic CRM                       |
 | Loyalty Integration | ✅ (3rd party) | ✅ (native) | Toast uses partner integrations |
-| Marketing Consent | ✅ | ✅ | GDPR/CCPA compliant |
+| Marketing Consent   | ✅             | ✅          | GDPR/CCPA compliant             |
 
 **Toast Pattern:** Toast relies on loyalty partner integrations rather than native loyalty. Avoqado has advantage of native implementation.
 
 #### Stripe Customers
+
 **Source:** [Stripe Billing Customers](https://docs.stripe.com/billing/customer)
 
-| Feature | Stripe | Avoqado | Notes |
-|---------|--------|---------|-------|
-| Customer Profile | ✅ | ✅ | Core entity |
-| Tax IDs | ✅ | ❌ | VAT, RFC storage |
-| Billing Address | ✅ | ✅ | Via order |
-| Invoice Settings | ✅ | ❌ | Per-customer defaults |
-| Metadata | ✅ | ✅ (tags) | Key-value storage |
-| Multi-currency | ✅ | ✅ | Per-venue currency |
+| Feature          | Stripe | Avoqado   | Notes                 |
+| ---------------- | ------ | --------- | --------------------- |
+| Customer Profile | ✅     | ✅        | Core entity           |
+| Tax IDs          | ✅     | ❌        | VAT, RFC storage      |
+| Billing Address  | ✅     | ✅        | Via order             |
+| Invoice Settings | ✅     | ❌        | Per-customer defaults |
+| Metadata         | ✅     | ✅ (tags) | Key-value storage     |
+| Multi-currency   | ✅     | ✅        | Per-venue currency    |
 
 ### 2.2 Loyalty Program Comparison
 
 #### Square Loyalty API
+
 **Source:** [Square Loyalty API](https://developer.squareup.com/docs/loyalty-api/overview)
 
-| Feature | Square | Avoqado | Notes |
-|---------|--------|---------|-------|
-| Points Accrual Types | 4 | 2 | SPEND, VISIT (CATEGORY, ITEM_VARIATION pending) |
-| Reward Tiers | ✅ | ❌ | Multiple reward levels |
-| Promotions (bonus points) | ✅ | ❌ | 2x, 3x point events |
-| Tax Handling | Pre/Post tax | Pre-tax | Configurable |
-| Tip Exclusion | ✅ | ✅ | Points before tip |
-| Multi-reward per order | ✅ | ❌ | One reward per tier |
-| Point Expiration | ✅ | ✅ | Configurable days |
-| Transaction History | ✅ | ✅ | EARN, REDEEM, EXPIRE, ADJUST |
+| Feature                   | Square       | Avoqado | Notes                                           |
+| ------------------------- | ------------ | ------- | ----------------------------------------------- |
+| Points Accrual Types      | 4            | 2       | SPEND, VISIT (CATEGORY, ITEM_VARIATION pending) |
+| Reward Tiers              | ✅           | ❌      | Multiple reward levels                          |
+| Promotions (bonus points) | ✅           | ❌      | 2x, 3x point events                             |
+| Tax Handling              | Pre/Post tax | Pre-tax | Configurable                                    |
+| Tip Exclusion             | ✅           | ✅      | Points before tip                               |
+| Multi-reward per order    | ✅           | ❌      | One reward per tier                             |
+| Point Expiration          | ✅           | ✅      | Configurable days                               |
+| Transaction History       | ✅           | ✅      | EARN, REDEEM, EXPIRE, ADJUST                    |
 
 **Square Accrual Rule Types:**
+
 ```
 SPEND       → 1 point per $1 spent
 VISIT       → X points per visit (min purchase threshold)
@@ -111,6 +117,7 @@ ITEM_VARIATION → Extra points for specific items
 ```
 
 **Avoqado Current:**
+
 ```
 SPEND       → pointsPerDollar (configurable)
 VISIT       → pointsPerVisit (bonus per order)
@@ -119,17 +126,18 @@ VISIT       → pointsPerVisit (bonus per order)
 **Recommendation:** Add CATEGORY and ITEM_VARIATION accrual rules for targeted promotions.
 
 #### Toast Loyalty Integration
+
 **Source:** [Toast Loyalty API](https://doc.toasttab.com/doc/devguide/apiLoyaltyProgramIntegrationOverview.html)
 
 Toast uses a **provider integration model** where external loyalty providers implement Toast's API:
 
-| Transaction Type | Description | Avoqado Equivalent |
-|-----------------|-------------|-------------------|
-| `LOYALTY_SEARCH` | Find customer accounts | `searchCustomers()` |
-| `LOYALTY_INQUIRE` | Get available rewards | `getCustomerPointsBalance()` |
-| `LOYALTY_REDEEM` | Apply reward at payment | `redeemPoints()` |
-| `LOYALTY_ACCRUE` | Add points post-payment | `earnPoints()` |
-| `LOYALTY_REVERSE` | Undo transaction | `adjustPoints()` |
+| Transaction Type  | Description             | Avoqado Equivalent           |
+| ----------------- | ----------------------- | ---------------------------- |
+| `LOYALTY_SEARCH`  | Find customer accounts  | `searchCustomers()`          |
+| `LOYALTY_INQUIRE` | Get available rewards   | `getCustomerPointsBalance()` |
+| `LOYALTY_REDEEM`  | Apply reward at payment | `redeemPoints()`             |
+| `LOYALTY_ACCRUE`  | Add points post-payment | `earnPoints()`               |
+| `LOYALTY_REVERSE` | Undo transaction        | `adjustPoints()`             |
 
 **Toast Pattern:** Idempotent operations via `Toast-Transaction-GUID` header.
 
@@ -138,29 +146,32 @@ Toast uses a **provider integration model** where external loyalty providers imp
 ### 2.3 Discount & Promotions Comparison
 
 #### Toast Discounts
+
 **Source:** [Toast Orders API - Discounts](https://doc.toasttab.com/doc/devguide/apiDiscountingOrders.html)
 
-| Discount Type | Toast | Avoqado | Notes |
-|--------------|-------|---------|-------|
-| Fixed Percentage | ✅ | ✅ | X% off |
-| Fixed Amount | ✅ | ✅ | $X off |
-| Open Percentage | ✅ | ❌ | Manual % entry at POS |
-| Open Amount | ✅ | ✅ | Manual $ entry |
-| BOGO | ✅ | ✅ | Buy X Get Y |
-| Combo | ✅ | ❌ | Bundle pricing |
-| Comp (100% off) | ✅ | ✅ | Complimentary items |
+| Discount Type    | Toast | Avoqado | Notes                 |
+| ---------------- | ----- | ------- | --------------------- |
+| Fixed Percentage | ✅    | ✅      | X% off                |
+| Fixed Amount     | ✅    | ✅      | $X off                |
+| Open Percentage  | ✅    | ❌      | Manual % entry at POS |
+| Open Amount      | ✅    | ✅      | Manual $ entry        |
+| BOGO             | ✅    | ✅      | Buy X Get Y           |
+| Combo            | ✅    | ❌      | Bundle pricing        |
+| Comp (100% off)  | ✅    | ✅      | Complimentary items   |
 
 **Toast Discount Scope:**
+
 ```
 CHECK level   → Applies to entire order
 ITEM level    → Applies to specific items
 ```
 
 **Toast BOGO Pattern:**
+
 ```json
 {
   "discount": { "guid": "bogo-discount" },
-  "triggers": ["buy-item-guid"],  // Items that triggered BOGO
+  "triggers": ["buy-item-guid"], // Items that triggered BOGO
   "comboItems": ["get-item-guid"] // Items receiving discount
 }
 ```
@@ -168,65 +179,72 @@ ITEM level    → Applies to specific items
 **Toast Key Rule:** "Only one discount can apply to each line item"
 
 #### Square Catalog Discounts
+
 **Source:** [Square CatalogDiscount](https://developer.squareup.com/reference/square/objects/CatalogDiscount)
 
-| Feature | Square | Avoqado | Notes |
-|---------|--------|---------|-------|
-| FIXED_PERCENTAGE | ✅ | ✅ | Percentage off |
-| FIXED_AMOUNT | ✅ | ✅ | Amount off |
-| VARIABLE_PERCENTAGE | ✅ | ❌ | Entry at sale |
-| VARIABLE_AMOUNT | ✅ | ✅ | Entry at sale |
-| Max Discount Cap | ✅ | ✅ | Limit savings |
-| PIN Required | ✅ | 🔄 | Via requiresApproval |
-| Tax Basis Modify | ✅ | ✅ | Before/after tax |
-| Label Color | ✅ | ❌ | UI customization |
+| Feature             | Square | Avoqado | Notes                |
+| ------------------- | ------ | ------- | -------------------- |
+| FIXED_PERCENTAGE    | ✅     | ✅      | Percentage off       |
+| FIXED_AMOUNT        | ✅     | ✅      | Amount off           |
+| VARIABLE_PERCENTAGE | ✅     | ❌      | Entry at sale        |
+| VARIABLE_AMOUNT     | ✅     | ✅      | Entry at sale        |
+| Max Discount Cap    | ✅     | ✅      | Limit savings        |
+| PIN Required        | ✅     | 🔄      | Via requiresApproval |
+| Tax Basis Modify    | ✅     | ✅      | Before/after tax     |
+| Label Color         | ✅     | ❌      | UI customization     |
 
 **Square Pricing Rules (Automatic Discounts):**
+
 ```
 Pricing Rule + Product Set + Time Period = Automatic Discount
 ```
 
 **Square Supports:**
+
 - Volume discounts (BOGO)
 - Minimum order discounts
 - Time-based discounts (Happy Hour)
 - Category bundle discounts
 
 **Avoqado Already Has:**
+
 - Time-based (`validFrom`, `validUntil`, `daysOfWeek`, `timeFrom`, `timeUntil`)
 - Minimum purchase (`minPurchaseAmount`)
 - BOGO (`buyQuantity`, `getQuantity`, `buyItemIds`, `getItemIds`)
 - Category targeting (`targetCategoryIds`)
 
 #### Clover Discounts
+
 **Source:** [Clover Inventory API](https://docs.clover.com/dev/reference/inventorycreatediscount)
 
-| Feature | Clover | Avoqado | Notes |
-|---------|--------|---------|-------|
-| Percentage Discount | ✅ | ✅ | `percentage` field |
-| Amount Discount | ✅ | ✅ | Negative `amount` |
-| Custom Discount | ✅ | ✅ | Via manual entry |
-| Line Item Discount | ✅ | ✅ | Item scope |
-| Order Discount | ✅ | ✅ | Order scope |
+| Feature             | Clover | Avoqado | Notes              |
+| ------------------- | ------ | ------- | ------------------ |
+| Percentage Discount | ✅     | ✅      | `percentage` field |
+| Amount Discount     | ✅     | ✅      | Negative `amount`  |
+| Custom Discount     | ✅     | ✅      | Via manual entry   |
+| Line Item Discount  | ✅     | ✅      | Item scope         |
+| Order Discount      | ✅     | ✅      | Order scope        |
 
 **Clover Pattern:** Discount amounts are stored as **negative values** to indicate subtraction.
 
 #### Stripe Coupons & Promotion Codes
+
 **Source:** [Stripe Coupons](https://docs.stripe.com/billing/subscriptions/coupons)
 
-| Feature | Stripe | Avoqado | Notes |
-|---------|--------|---------|-------|
-| Percent Off | ✅ | ✅ | Percentage discount |
-| Amount Off | ✅ | ✅ | Fixed amount |
-| Duration | ✅ | ✅ | once, forever, repeating |
-| Max Redemptions | ✅ | ✅ | Global limit |
-| Redeem By Date | ✅ | ✅ | Expiration |
-| Customer Restriction | ✅ | ✅ | Per-customer limit |
-| First Purchase Only | ✅ | ❌ | First-time restriction |
-| Minimum Amount | ✅ | ✅ | Min purchase requirement |
-| Product Restriction | ✅ | ✅ | Applies to specific products |
+| Feature              | Stripe | Avoqado | Notes                        |
+| -------------------- | ------ | ------- | ---------------------------- |
+| Percent Off          | ✅     | ✅      | Percentage discount          |
+| Amount Off           | ✅     | ✅      | Fixed amount                 |
+| Duration             | ✅     | ✅      | once, forever, repeating     |
+| Max Redemptions      | ✅     | ✅      | Global limit                 |
+| Redeem By Date       | ✅     | ✅      | Expiration                   |
+| Customer Restriction | ✅     | ✅      | Per-customer limit           |
+| First Purchase Only  | ✅     | ❌      | First-time restriction       |
+| Minimum Amount       | ✅     | ✅      | Min purchase requirement     |
+| Product Restriction  | ✅     | ✅      | Applies to specific products |
 
 **Stripe Coupon → Promotion Code Pattern:**
+
 ```
 Coupon (internal) ─── 1:N ──► Promotion Codes (customer-facing)
 
@@ -235,6 +253,7 @@ Example:
 ```
 
 **Avoqado Equivalent:**
+
 ```
 Discount (internal) ─── 1:N ──► CouponCodes (customer-facing)
 ```
@@ -242,14 +261,16 @@ Discount (internal) ─── 1:N ──► CouponCodes (customer-facing)
 ### 2.4 Comp/Void Comparison
 
 #### Industry Standard (Toast, Square)
+
 **Source:** [Restaurant Comps](https://pos.toasttab.com/blog/on-the-line/comped-meal)
 
-| Concept | Definition | Avoqado Implementation |
-|---------|-----------|----------------------|
+| Concept  | Definition                        | Avoqado Implementation         |
+| -------- | --------------------------------- | ------------------------------ |
 | **Comp** | Item made & delivered, given free | `DiscountType.COMP` (100% off) |
-| **Void** | Item cancelled before made | Order item deletion with audit |
+| **Void** | Item cancelled before made        | Order item deletion with audit |
 
 **Comp Flow (Standard):**
+
 ```
 1. Staff selects item(s) to comp
 2. Staff enters reason (required)
@@ -259,6 +280,7 @@ Discount (internal) ─── 1:N ──► CouponCodes (customer-facing)
 ```
 
 **Avoqado Comp Implementation:**
+
 ```typescript
 Discount {
   type: "COMP"
@@ -345,29 +367,29 @@ Order
 
 ### 3.3 Implementation Status
 
-| Component | Files | Status | Tests |
-|-----------|-------|--------|-------|
-| **Customer System** | | | |
-| Schema | `prisma/schema.prisma` | ✅ | - |
-| Dashboard Service | `customer.dashboard.service.ts` | ✅ | 124 |
-| TPV Service | `customer.tpv.service.ts` | ✅ | 30 |
-| Controller | `customer.dashboard.controller.ts` | ✅ | - |
-| **Customer Groups** | | | |
-| Dashboard Service | `customerGroup.dashboard.service.ts` | ✅ | ✅ |
-| Controller | `customerGroup.dashboard.controller.ts` | ✅ | - |
-| **Loyalty** | | | |
-| Config | `LoyaltyConfig` model | ✅ | - |
-| Dashboard Service | `loyalty.dashboard.service.ts` | ✅ | ✅ |
-| Controller | `loyalty.dashboard.controller.ts` | ✅ | - |
-| Payment Integration | `payment.tpv.service.ts` | ✅ | - |
-| **Discounts** | | | |
-| Dashboard Service | `discount.dashboard.service.ts` | ✅ | 🔄 |
-| TPV Service | `discount.tpv.service.ts` | ✅ | 🔄 |
-| Discount Engine | `discountEngine.service.ts` | ✅ | 🔄 |
-| Controller | `discount.dashboard.controller.ts` | ✅ | - |
-| **Coupons** | | | |
-| Dashboard Service | `coupon.dashboard.service.ts` | ✅ | 🔄 |
-| Controller | `coupon.dashboard.controller.ts` | ✅ | - |
+| Component           | Files                                   | Status | Tests |
+| ------------------- | --------------------------------------- | ------ | ----- |
+| **Customer System** |                                         |        |       |
+| Schema              | `prisma/schema.prisma`                  | ✅     | -     |
+| Dashboard Service   | `customer.dashboard.service.ts`         | ✅     | 124   |
+| TPV Service         | `customer.tpv.service.ts`               | ✅     | 30    |
+| Controller          | `customer.dashboard.controller.ts`      | ✅     | -     |
+| **Customer Groups** |                                         |        |       |
+| Dashboard Service   | `customerGroup.dashboard.service.ts`    | ✅     | ✅    |
+| Controller          | `customerGroup.dashboard.controller.ts` | ✅     | -     |
+| **Loyalty**         |                                         |        |       |
+| Config              | `LoyaltyConfig` model                   | ✅     | -     |
+| Dashboard Service   | `loyalty.dashboard.service.ts`          | ✅     | ✅    |
+| Controller          | `loyalty.dashboard.controller.ts`       | ✅     | -     |
+| Payment Integration | `payment.tpv.service.ts`                | ✅     | -     |
+| **Discounts**       |                                         |        |       |
+| Dashboard Service   | `discount.dashboard.service.ts`         | ✅     | 🔄    |
+| TPV Service         | `discount.tpv.service.ts`               | ✅     | 🔄    |
+| Discount Engine     | `discountEngine.service.ts`             | ✅     | 🔄    |
+| Controller          | `discount.dashboard.controller.ts`      | ✅     | -     |
+| **Coupons**         |                                         |        |       |
+| Dashboard Service   | `coupon.dashboard.service.ts`           | ✅     | 🔄    |
+| Controller          | `coupon.dashboard.controller.ts`        | ✅     | -     |
 
 ---
 
@@ -434,6 +456,7 @@ model LoyaltyConfig {
 ```
 
 **Calculation Examples:**
+
 ```
 Purchase $50 → 50 points (if pointsPerDollar = 1)
 100 points → $1 discount (if redemptionRate = 0.01)
@@ -944,11 +967,13 @@ const isDiscountValidNow = (discount: Discount): boolean => {
 ### 8.1 High Priority Improvements
 
 #### 1. Customer Segments (Dynamic Groups)
+
 **Inspired by:** Square Customer Segments
 
 **Problem:** Current groups are manual-only. No automatic customer assignment.
 
 **Solution:**
+
 ```prisma
 model CustomerSegment {
   id          String   @id @default(cuid())
@@ -966,21 +991,21 @@ model CustomerSegment {
 ```
 
 **Example Rules:**
+
 ```json
 {
-  "and": [
-    { "totalSpent": { "gte": 500 } },
-    { "lastVisitAt": { "gte": "30daysAgo" } }
-  ]
+  "and": [{ "totalSpent": { "gte": 500 } }, { "lastVisitAt": { "gte": "30daysAgo" } }]
 }
 ```
 
 #### 2. Loyalty Promotions (Bonus Points)
+
 **Inspired by:** Square Loyalty Promotions
 
 **Problem:** No way to offer 2x, 3x point events.
 
 **Solution:**
+
 ```prisma
 model LoyaltyPromotion {
   id          String   @id @default(cuid())
@@ -1006,11 +1031,13 @@ model LoyaltyPromotion {
 ```
 
 #### 3. First Purchase Restriction for Coupons
+
 **Inspired by:** Stripe `first_time_transaction`
 
 **Problem:** Cannot restrict coupons to new customers only.
 
 **Solution:** Add to CouponCode:
+
 ```prisma
 model CouponCode {
   // ... existing fields
@@ -1019,10 +1046,11 @@ model CouponCode {
 ```
 
 Validation logic:
+
 ```typescript
 if (coupon.firstPurchaseOnly) {
   const previousOrders = await prisma.order.count({
-    where: { customerId, paymentStatus: 'PAID' }
+    where: { customerId, paymentStatus: 'PAID' },
   })
   if (previousOrders > 0) {
     return { valid: false, error: 'Coupon valid for first purchase only' }
@@ -1033,11 +1061,13 @@ if (coupon.firstPurchaseOnly) {
 ### 8.2 Medium Priority Improvements
 
 #### 4. Combo Discounts
+
 **Inspired by:** Toast Combo Discounts
 
 **Problem:** Can't create "Coffee + Bagel = $5" bundles.
 
 **Solution:**
+
 ```prisma
 model ComboDiscount {
   id          String   @id @default(cuid())
@@ -1057,11 +1087,13 @@ model ComboDiscount {
 ```
 
 #### 5. Category-Based Point Accrual
+
 **Inspired by:** Square CATEGORY accrual rule
 
 **Problem:** Cannot give extra points for specific categories.
 
 **Solution:** Add to LoyaltyConfig or create LoyaltyAccrualRule:
+
 ```prisma
 model LoyaltyAccrualRule {
   id          String   @id @default(cuid())
@@ -1084,11 +1116,13 @@ model LoyaltyAccrualRule {
 ```
 
 #### 6. Open Discounts (Variable at POS)
+
 **Inspired by:** Square VARIABLE_PERCENTAGE, Toast Open Discounts
 
 **Problem:** Manual discounts require exact value. Can't have "Open 10-50%" slider.
 
 **Solution:**
+
 ```prisma
 model Discount {
   // ... existing fields
@@ -1103,50 +1137,54 @@ model Discount {
 ### 8.3 Low Priority / Future Considerations
 
 #### 7. Reward Tiers (Square Style)
+
 Multiple reward options at different point levels.
 
 #### 8. Cards on File
+
 Save customer payment methods for faster checkout.
 
 #### 9. Customer Merge
+
 Handle duplicate customer records.
 
 #### 10. A/B Testing for Discounts
+
 Test different discounts with customer subsets.
 
 ---
 
 ## Appendix A: Comparison Matrix
 
-| Feature | Toast | Square | Clover | Stripe | Avoqado |
-|---------|-------|--------|--------|--------|---------|
-| **Customer Management** |
-| Customer Profiles | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Customer Groups (Manual) | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Customer Segments (Dynamic) | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Customer Tags | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Loyalty** |
-| Points-Based | 3rd Party | ✅ | 3rd Party | ❌ | ✅ |
-| Visit-Based | 3rd Party | ✅ | 3rd Party | ❌ | ✅ |
-| Category Bonus | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Point Multipliers | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Reward Tiers | ❌ | ✅ | ❌ | ❌ | ❌ |
-| **Discounts** |
-| Percentage | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Fixed Amount | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Open/Variable | ✅ | ✅ | ✅ | ❌ | ❌ |
-| BOGO | ✅ | ✅ | ❌ | ❌ | ✅ |
-| Combo | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Time-Based | ✅ | ✅ | ✅ | ❌ | ✅ |
-| **Coupons** |
-| Promo Codes | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Bulk Generation | ✅ | ❌ | ❌ | ❌ | ✅ |
-| First Purchase Only | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Customer-Specific | ✅ | ✅ | ❌ | ✅ | ✅ |
-| **Comps** |
-| Item-Level Comp | ✅ | ✅ | ✅ | N/A | ✅ |
-| Manager Authorization | ✅ | ✅ | ✅ | N/A | ✅ |
-| Comp Reasons | ✅ | ✅ | ✅ | N/A | ✅ |
+| Feature                     | Toast     | Square | Clover    | Stripe | Avoqado |
+| --------------------------- | --------- | ------ | --------- | ------ | ------- |
+| **Customer Management**     |
+| Customer Profiles           | ✅        | ✅     | ✅        | ✅     | ✅      |
+| Customer Groups (Manual)    | ✅        | ✅     | ✅        | ❌     | ✅      |
+| Customer Segments (Dynamic) | ❌        | ✅     | ❌        | ❌     | ❌      |
+| Customer Tags               | ✅        | ✅     | ✅        | ✅     | ✅      |
+| **Loyalty**                 |
+| Points-Based                | 3rd Party | ✅     | 3rd Party | ❌     | ✅      |
+| Visit-Based                 | 3rd Party | ✅     | 3rd Party | ❌     | ✅      |
+| Category Bonus              | ❌        | ✅     | ❌        | ❌     | ❌      |
+| Point Multipliers           | ❌        | ✅     | ❌        | ❌     | ❌      |
+| Reward Tiers                | ❌        | ✅     | ❌        | ❌     | ❌      |
+| **Discounts**               |
+| Percentage                  | ✅        | ✅     | ✅        | ✅     | ✅      |
+| Fixed Amount                | ✅        | ✅     | ✅        | ✅     | ✅      |
+| Open/Variable               | ✅        | ✅     | ✅        | ❌     | ❌      |
+| BOGO                        | ✅        | ✅     | ❌        | ❌     | ✅      |
+| Combo                       | ✅        | ✅     | ❌        | ❌     | ❌      |
+| Time-Based                  | ✅        | ✅     | ✅        | ❌     | ✅      |
+| **Coupons**                 |
+| Promo Codes                 | ✅        | ✅     | ✅        | ✅     | ✅      |
+| Bulk Generation             | ✅        | ❌     | ❌        | ❌     | ✅      |
+| First Purchase Only         | ❌        | ❌     | ❌        | ✅     | ❌      |
+| Customer-Specific           | ✅        | ✅     | ❌        | ✅     | ✅      |
+| **Comps**                   |
+| Item-Level Comp             | ✅        | ✅     | ✅        | N/A    | ✅      |
+| Manager Authorization       | ✅        | ✅     | ✅        | N/A    | ✅      |
+| Comp Reasons                | ✅        | ✅     | ✅        | N/A    | ✅      |
 
 ---
 

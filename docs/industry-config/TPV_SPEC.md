@@ -3,6 +3,7 @@
 ## Overview
 
 Modificaciones al TPV Android (AvoqadoPOS) para soportar:
+
 1. Check-in con foto y GPS
 2. Ver saldo del promotor
 3. Subir comprobante de depósito
@@ -11,12 +12,12 @@ Modificaciones al TPV Android (AvoqadoPOS) para soportar:
 
 ## Estado Actual
 
-| Componente | Estado | Archivo |
-|------------|--------|---------|
-| Clock-in/out UI | ✅ Existe | `features/timeclock/` |
-| CameraX | ✅ Integrado | `core/presentation/QrScannerScreen.kt` |
-| Permisos GPS | ✅ Declarados | `AndroidManifest.xml` |
-| Clean Architecture | ✅ Clara | `features/` pattern |
+| Componente         | Estado        | Archivo                                |
+| ------------------ | ------------- | -------------------------------------- |
+| Clock-in/out UI    | ✅ Existe     | `features/timeclock/`                  |
+| CameraX            | ✅ Integrado  | `core/presentation/QrScannerScreen.kt` |
+| Permisos GPS       | ✅ Declarados | `AndroidManifest.xml`                  |
+| Clean Architecture | ✅ Clara      | `features/` pattern                    |
 
 ---
 
@@ -666,12 +667,14 @@ Agregar runtime permission request en las pantallas correspondientes.
 ## Dependencias
 
 Ya incluidas en el proyecto:
+
 - CameraX 1.3.1
 - ML Kit (para QR, reutilizable)
 - Retrofit 2 (API calls)
 - Coil (AsyncImage)
 
 Agregar si no existe:
+
 ```gradle
 implementation 'com.google.android.gms:play-services-location:21.0.1'
 ```

@@ -1,6 +1,7 @@
 # Industry Configuration System
 
-Sistema de configuración por industria que permite personalizar el comportamiento de Avoqado para diferentes tipos de negocio (Telecom, Retail, Restaurantes) **sin código específico por cliente**.
+Sistema de configuración por industria que permite personalizar el comportamiento de Avoqado para diferentes tipos de negocio (Telecom,
+Retail, Restaurantes) **sin código específico por cliente**.
 
 ---
 
@@ -19,13 +20,13 @@ if (config.attendance.requirePhoto) { ... }
 
 ## Documentación
 
-| Documento | Descripción |
-|-----------|-------------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Arquitectura Configuration-Driven y patrones |
-| [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) | Plan de implementación fase por fase |
-| [BACKEND_SPEC.md](./BACKEND_SPEC.md) | Especificaciones técnicas del backend |
-| [TPV_SPEC.md](./TPV_SPEC.md) | Especificaciones del TPV Android |
-| [REQUIREMENTS_TELECOM.md](./REQUIREMENTS_TELECOM.md) | Requisitos específicos de PlayTelecom |
+| Documento                                            | Descripción                                  |
+| ---------------------------------------------------- | -------------------------------------------- |
+| [ARCHITECTURE.md](./ARCHITECTURE.md)                 | Arquitectura Configuration-Driven y patrones |
+| [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)   | Plan de implementación fase por fase         |
+| [BACKEND_SPEC.md](./BACKEND_SPEC.md)                 | Especificaciones técnicas del backend        |
+| [TPV_SPEC.md](./TPV_SPEC.md)                         | Especificaciones del TPV Android             |
+| [REQUIREMENTS_TELECOM.md](./REQUIREMENTS_TELECOM.md) | Requisitos específicos de PlayTelecom        |
 
 ---
 
@@ -68,12 +69,12 @@ if (config.attendance.requirePhoto) { ... }
 
 ### Mapeo de Roles
 
-| Telecom (diagrama) | Avoqado | Permisos |
-|--------------------|---------|----------|
-| Super Admin | `OWNER` | CRUD total, reportes |
-| Admin | `ADMIN` | Validar depósitos, gestión |
-| Gerente | `MANAGER` | Solo lectura, sus tiendas |
-| Promotor | `WAITER` | TPV: check-in, ventas, saldo |
+| Telecom (diagrama) | Avoqado   | Permisos                     |
+| ------------------ | --------- | ---------------------------- |
+| Super Admin        | `OWNER`   | CRUD total, reportes         |
+| Admin              | `ADMIN`   | Validar depósitos, gestión   |
+| Gerente            | `MANAGER` | Solo lectura, sus tiendas    |
+| Promotor           | `WAITER`  | TPV: check-in, ventas, saldo |
 
 ---
 

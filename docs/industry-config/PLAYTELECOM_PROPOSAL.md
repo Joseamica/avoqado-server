@@ -15,12 +15,12 @@ Avoqado adaptará su plataforma POS para cubrir las necesidades operativas de Pl
 
 ## Mapeo de Roles
 
-| Rol en PlayTelecom | Rol en Avoqado | Acceso |
-|--------------------|----------------|--------|
-| **Super Admin** | Owner | Dashboard Web - Control total |
-| **Admin (Operaciones)** | Admin | Dashboard Web - Gestión y validación |
-| **Gerente** | Manager | Dashboard Web - Solo lectura, sus tiendas |
-| **Promotor** | Staff | TPV Android - Operación en punto de venta |
+| Rol en PlayTelecom      | Rol en Avoqado | Acceso                                    |
+| ----------------------- | -------------- | ----------------------------------------- |
+| **Super Admin**         | Owner          | Dashboard Web - Control total             |
+| **Admin (Operaciones)** | Admin          | Dashboard Web - Gestión y validación      |
+| **Gerente**             | Manager        | Dashboard Web - Solo lectura, sus tiendas |
+| **Promotor**            | Staff          | TPV Android - Operación en punto de venta |
 
 ---
 
@@ -30,12 +30,12 @@ Avoqado adaptará su plataforma POS para cubrir las necesidades operativas de Pl
 
 **Plataforma:** Dashboard Web
 
-| Funcionalidad | Descripción |
-|---------------|-------------|
-| Gestión de usuarios | Crear/editar Admins, Gerentes, Promotores |
-| Vista global | Todas las tiendas, todos los promotores |
-| Reportes | Métricas de ventas, asistencia, depósitos |
-| Configuración | Activar/desactivar módulos, ajustar reglas |
+| Funcionalidad       | Descripción                                |
+| ------------------- | ------------------------------------------ |
+| Gestión de usuarios | Crear/editar Admins, Gerentes, Promotores  |
+| Vista global        | Todas las tiendas, todos los promotores    |
+| Reportes            | Métricas de ventas, asistencia, depósitos  |
+| Configuración       | Activar/desactivar módulos, ajustar reglas |
 
 ---
 
@@ -43,14 +43,15 @@ Avoqado adaptará su plataforma POS para cubrir las necesidades operativas de Pl
 
 **Plataforma:** Dashboard Web
 
-| Funcionalidad | Descripción |
-|---------------|-------------|
-| Gestión de personal | Asignar gerentes a tiendas, crear promotores |
-| Validación de depósitos | Ver comprobantes, aprobar o rechazar |
-| Monitoreo de saldos | Ver saldos de todos los promotores |
-| Reportes de asistencia | Ver check-ins con foto, hora y ubicación |
+| Funcionalidad           | Descripción                                  |
+| ----------------------- | -------------------------------------------- |
+| Gestión de personal     | Asignar gerentes a tiendas, crear promotores |
+| Validación de depósitos | Ver comprobantes, aprobar o rechazar         |
+| Monitoreo de saldos     | Ver saldos de todos los promotores           |
+| Reportes de asistencia  | Ver check-ins con foto, hora y ubicación     |
 
 **Flujo de validación de depósitos:**
+
 ```
 Promotor sube foto de voucher
        ↓
@@ -68,12 +69,12 @@ Admin revisa foto y monto
 
 **Plataforma:** Dashboard Web
 
-| Funcionalidad | Descripción |
-|---------------|-------------|
-| Vista limitada | Solo ve las tiendas asignadas a él |
-| Métricas | Día/semana/mes de sus tiendas |
-| Lista de promotores | Solo los de sus tiendas |
-| Notificaciones | Alerta cuando un promotor hace check-in |
+| Funcionalidad       | Descripción                             |
+| ------------------- | --------------------------------------- |
+| Vista limitada      | Solo ve las tiendas asignadas a él      |
+| Métricas            | Día/semana/mes de sus tiendas           |
+| Lista de promotores | Solo los de sus tiendas                 |
+| Notificaciones      | Alerta cuando un promotor hace check-in |
 
 **Importante:** El gerente NO puede editar ni validar, solo consultar.
 
@@ -83,12 +84,12 @@ Admin revisa foto y monto
 
 **Plataforma:** TPV Android (tablet/celular)
 
-| Funcionalidad | Descripción |
-|---------------|-------------|
-| **Check-in** | Registro de entrada con foto y ubicación |
-| **Ventas** | Registro de ventas (efectivo/tarjeta) |
-| **Mi saldo** | Ver efectivo recaudado y pendiente de depositar |
-| **Subir comprobante** | Foto del voucher de depósito bancario |
+| Funcionalidad         | Descripción                                     |
+| --------------------- | ----------------------------------------------- |
+| **Check-in**          | Registro de entrada con foto y ubicación        |
+| **Ventas**            | Registro de ventas (efectivo/tarjeta)           |
+| **Mi saldo**          | Ver efectivo recaudado y pendiente de depositar |
+| **Subir comprobante** | Foto del voucher de depósito bancario           |
 
 ---
 
@@ -126,6 +127,7 @@ Admin revisa foto y monto
 ```
 
 **Datos capturados:**
+
 - Foto del promotor o punto de venta
 - Coordenadas GPS
 - Fecha y hora exacta
@@ -254,13 +256,13 @@ El promotor puede ver su saldo en cualquier momento:
 
 El Owner puede ajustar estas opciones sin necesidad de desarrollo:
 
-| Opción | Descripción | Default |
-|--------|-------------|---------|
-| Requerir foto en check-in | Obligar captura de foto | ✅ Sí |
-| Requerir GPS en check-in | Obligar captura de ubicación | ✅ Sí |
-| Notificar a gerente | Enviar push cuando promotor hace check-in | ✅ Sí |
-| Validación de depósitos | Admin debe aprobar depósitos | ✅ Sí |
-| Radio de geofencing | Distancia máxima del punto de venta | 100m |
+| Opción                    | Descripción                               | Default |
+| ------------------------- | ----------------------------------------- | ------- |
+| Requerir foto en check-in | Obligar captura de foto                   | ✅ Sí   |
+| Requerir GPS en check-in  | Obligar captura de ubicación              | ✅ Sí   |
+| Notificar a gerente       | Enviar push cuando promotor hace check-in | ✅ Sí   |
+| Validación de depósitos   | Admin debe aprobar depósitos              | ✅ Sí   |
+| Radio de geofencing       | Distancia máxima del punto de venta       | 100m    |
 
 **Estos ajustes se pueden cambiar en cualquier momento desde el dashboard.**
 
@@ -270,58 +272,60 @@ El Owner puede ajustar estas opciones sin necesidad de desarrollo:
 
 En la interfaz, los roles se mostrarán con los nombres que PlayTelecom usa:
 
-| Rol técnico | Se muestra como |
-|-------------|-----------------|
-| Staff | **Promotor** |
-| Manager | **Gerente** |
-| Admin | **Administrador** |
+| Rol técnico | Se muestra como   |
+| ----------- | ----------------- |
+| Staff       | **Promotor**      |
+| Manager     | **Gerente**       |
+| Admin       | **Administrador** |
 
 ---
 
 ## Plataformas
 
-| Rol | Plataforma | Dispositivo |
-|-----|------------|-------------|
-| Owner | Dashboard Web | PC/Mac/Tablet |
-| Admin | Dashboard Web | PC/Mac/Tablet |
-| Gerente | Dashboard Web | PC/Mac/Tablet |
-| Promotor | TPV Android | Tablet Android |
+| Rol      | Plataforma    | Dispositivo    |
+| -------- | ------------- | -------------- |
+| Owner    | Dashboard Web | PC/Mac/Tablet  |
+| Admin    | Dashboard Web | PC/Mac/Tablet  |
+| Gerente  | Dashboard Web | PC/Mac/Tablet  |
+| Promotor | TPV Android   | Tablet Android |
 
 ---
 
 ## Seguridad
 
-| Aspecto | Implementación |
-|---------|----------------|
-| Acceso | PIN único por promotor por tienda |
-| Fotos | Almacenadas en la nube con acceso restringido |
-| GPS | Validación de proximidad al punto de venta |
-| Datos | Aislamiento completo entre organizaciones |
+| Aspecto | Implementación                                |
+| ------- | --------------------------------------------- |
+| Acceso  | PIN único por promotor por tienda             |
+| Fotos   | Almacenadas en la nube con acceso restringido |
+| GPS     | Validación de proximidad al punto de venta    |
+| Datos   | Aislamiento completo entre organizaciones     |
 
 ---
 
 ## Tiempo de Implementación
 
-| Fase | Descripción | Duración |
-|------|-------------|----------|
-| 1 | Configuración backend | 1-2 días |
-| 2 | Check-in con foto/GPS | 1-2 días |
-| 3 | Sistema de saldos y depósitos | 2 días |
-| 4 | TPV Android (promotor) | 2-3 días |
-| 5 | Dashboard (admin/gerente) | 2-3 días |
-| **Total** | | **~8-12 días** |
+| Fase      | Descripción                   | Duración       |
+| --------- | ----------------------------- | -------------- |
+| 1         | Configuración backend         | 1-2 días       |
+| 2         | Check-in con foto/GPS         | 1-2 días       |
+| 3         | Sistema de saldos y depósitos | 2 días         |
+| 4         | TPV Android (promotor)        | 2-3 días       |
+| 5         | Dashboard (admin/gerente)     | 2-3 días       |
+| **Total** |                               | **~8-12 días** |
 
 ---
 
 ## Entregables
 
 1. **TPV Android** con:
+
    - Check-in verificado (foto + GPS)
    - Registro de ventas
    - Vista de saldo
    - Subida de comprobantes
 
 2. **Dashboard Web** con:
+
    - Gestión de usuarios
    - Validación de depósitos
    - Reportes de asistencia
@@ -345,5 +349,4 @@ En la interfaz, los roles se mostrarán con los nombres que PlayTelecom usa:
 
 ---
 
-*Documento preparado para PlayTelecom*
-*Avoqado - Sistema POS Multi-Industria*
+_Documento preparado para PlayTelecom_ _Avoqado - Sistema POS Multi-Industria_

@@ -52,35 +52,29 @@ POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliabi
 
 ### Blumon MCC & Provider Cost Rates
 
-**What is MCC Anexo 53?**
-Blumon's official document (AN53.pdf) that maps 700+ business types to MCC codes and "Familias" (categories).
-Each Familia has specific processing rates that Blumon charges.
+**What is MCC Anexo 53?** Blumon's official document (AN53.pdf) that maps 700+ business types to MCC codes and "Familias" (categories). Each
+Familia has specific processing rates that Blumon charges.
 
 **Rate Flow:**
+
 ```
 VenueType (RESTAURANT) → MCC Lookup → Familia (Restaurantes) → Provider Rates
                                                               ↓
                                            { credito: 2.30%, debito: 1.68%, intl: 3.30%, amex: 3.00% }
 ```
 
-**Data Files:**
-| File | Description |
-|------|-------------|
-| `src/data/blumon-pricing/familias-tasas.json` | 29 Familias with Blumon's rates (from AN53) |
-| `src/data/blumon-pricing/business-synonyms.json` | 185+ business name → MCC/Familia mappings |
+**Data Files:** | File | Description | |------|-------------| | `src/data/blumon-pricing/familias-tasas.json` | 29 Familias with Blumon's
+rates (from AN53) | | `src/data/blumon-pricing/business-synonyms.json` | 185+ business name → MCC/Familia mappings |
 
-**Service:**
-| File | Function |
-|------|----------|
-| `src/services/pricing/blumon-mcc-lookup.service.ts` | `lookupRatesByBusinessName()` - Fuzzy match business name to rates |
+**Service:** | File | Function | |------|----------| | `src/services/pricing/blumon-mcc-lookup.service.ts` | `lookupRatesByBusinessName()` -
+Fuzzy match business name to rates |
 
-**Cost Structure Relationship:**
-| Model | What it represents | Example |
-|-------|-------------------|---------|
-| `ProviderCostStructure` | What Blumon charges Avoqado | 2.30% credit (from MCC lookup) |
-| `VenuePricingStructure` | What Avoqado charges venue | 2.50% credit (includes ~0.20% margin) |
+**Cost Structure Relationship:** | Model | What it represents | Example | |-------|-------------------|---------| | `ProviderCostStructure`
+| What Blumon charges Avoqado | 2.30% credit (from MCC lookup) | | `VenuePricingStructure` | What Avoqado charges venue | 2.50% credit
+(includes ~0.20% margin) |
 
 **Usage Example:**
+
 ```typescript
 import { lookupRatesByBusinessName } from '@/services/pricing/blumon-mcc-lookup.service'
 
@@ -123,23 +117,24 @@ const result = lookupRatesByBusinessName('Gimnasio')
 
 ### Implementation Plans (In Progress)
 
-| Document                                                          | Description                                |
-| ----------------------------------------------------------------- | ------------------------------------------ |
-| `docs/clients&promotions/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md` | Customer + Discounts (Phase 1: 85%)        |
-| `docs/clients&promotions/CUSTOMER_LOYALTY_PROMOTIONS_REFERENCE.md` | Complete reference for customers & promos  |
+| Document                                                           | Description                               |
+| ------------------------------------------------------------------ | ----------------------------------------- |
+| `docs/clients&promotions/CUSTOMER_DISCOUNT_IMPLEMENTATION_PLAN.md` | Customer + Discounts (Phase 1: 85%)       |
+| `docs/clients&promotions/CUSTOMER_LOYALTY_PROMOTIONS_REFERENCE.md` | Complete reference for customers & promos |
 
 ### Industry Configuration (Multi-Vertical Support)
 
-| Document                                      | Description                                           |
-| --------------------------------------------- | ----------------------------------------------------- |
-| `docs/industry-config/README.md`              | Overview and index for industry configuration system  |
-| `docs/industry-config/ARCHITECTURE.md`        | Configuration-driven architecture patterns            |
-| `docs/industry-config/IMPLEMENTATION_PLAN.md` | Phase-by-phase implementation plan                    |
-| `docs/industry-config/BACKEND_SPEC.md`        | Backend technical specifications                      |
-| `docs/industry-config/TPV_SPEC.md`            | TPV Android specifications                            |
-| `docs/industry-config/REQUIREMENTS_TELECOM.md`| PlayTelecom client requirements                       |
+| Document                                       | Description                                          |
+| ---------------------------------------------- | ---------------------------------------------------- |
+| `docs/industry-config/README.md`               | Overview and index for industry configuration system |
+| `docs/industry-config/ARCHITECTURE.md`         | Configuration-driven architecture patterns           |
+| `docs/industry-config/IMPLEMENTATION_PLAN.md`  | Phase-by-phase implementation plan                   |
+| `docs/industry-config/BACKEND_SPEC.md`         | Backend technical specifications                     |
+| `docs/industry-config/TPV_SPEC.md`             | TPV Android specifications                           |
+| `docs/industry-config/REQUIREMENTS_TELECOM.md` | PlayTelecom client requirements                      |
 
-**Key Concept:** Configuration-driven architecture allows serving multiple industries (Telecom, Retail, Restaurant) with a single codebase. No client-specific code.
+**Key Concept:** Configuration-driven architecture allows serving multiple industries (Telecom, Retail, Restaurant) with a single codebase.
+No client-specific code.
 
 ```typescript
 // NEVER do this:

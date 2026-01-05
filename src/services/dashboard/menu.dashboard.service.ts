@@ -1025,222 +1025,222 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
   await prisma.$transaction(
     async tx => {
       // REPLACE MODE: Delete all existing menu data (Toast/Square pattern)
-    // With SET NULL FK constraints, order history preserves denormalized product/modifier names
-    if (data.mode === 'replace') {
-      // Delete in correct order due to foreign keys
-      // 1. Remove product-modifier links first
-      await tx.productModifierGroup.deleteMany({ where: { product: { venueId } } })
+      // With SET NULL FK constraints, order history preserves denormalized product/modifier names
+      if (data.mode === 'replace') {
+        // Delete in correct order due to foreign keys
+        // 1. Remove product-modifier links first
+        await tx.productModifierGroup.deleteMany({ where: { product: { venueId } } })
 
-      // 2. Delete ALL modifiers - SET NULL FK will preserve order history
-      // OrderItemModifier.modifierId becomes NULL, but denormalized 'name' field remains
-      await tx.modifier.deleteMany({
-        where: { group: { venueId } },
+        // 2. Delete ALL modifiers - SET NULL FK will preserve order history
+        // OrderItemModifier.modifierId becomes NULL, but denormalized 'name' field remains
+        await tx.modifier.deleteMany({
+          where: { group: { venueId } },
+        })
+
+        // 3. Delete ALL modifier groups
+        await tx.modifierGroup.deleteMany({
+          where: { venueId },
+        })
+
+        // 4. Delete ALL products - SET NULL FK will preserve order history
+        // OrderItem.productId becomes NULL, but denormalized productName/productSku/categoryName remain
+        await tx.product.deleteMany({
+          where: { venueId },
+        })
+
+        // 5. Delete menu structure
+        await tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
+
+        // Delete ALL categories
+        await tx.menuCategory.deleteMany({
+          where: { venueId },
+        })
+
+        // Delete ALL menus
+        await tx.menu.deleteMany({
+          where: { venueId },
+        })
+      }
+
+      // Get or create default menu for imported items
+      let defaultMenu = await tx.menu.findFirst({
+        where: { venueId, name: 'Main Menu' },
       })
 
-      // 3. Delete ALL modifier groups
-      await tx.modifierGroup.deleteMany({
-        where: { venueId },
-      })
-
-      // 4. Delete ALL products - SET NULL FK will preserve order history
-      // OrderItem.productId becomes NULL, but denormalized productName/productSku/categoryName remain
-      await tx.product.deleteMany({
-        where: { venueId },
-      })
-
-      // 5. Delete menu structure
-      await tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
-
-      // Delete ALL categories
-      await tx.menuCategory.deleteMany({
-        where: { venueId },
-      })
-
-      // Delete ALL menus
-      await tx.menu.deleteMany({
-        where: { venueId },
-      })
-    }
-
-    // Get or create default menu for imported items
-    let defaultMenu = await tx.menu.findFirst({
-      where: { venueId, name: 'Main Menu' },
-    })
-
-    if (!defaultMenu) {
-      defaultMenu = await tx.menu.create({
-        data: {
-          venueId,
-          name: 'Main Menu',
-          description: 'Imported menu',
-          active: true,
-          displayOrder: 0,
-        },
-      })
-    }
-
-    // Process categories and products
-    for (const [catIndex, categoryData] of data.categories.entries()) {
-      // Check if category exists by name
-      let category = await tx.menuCategory.findFirst({
-        where: { venueId, name: categoryData.name },
-      })
-
-      if (!category) {
-        // Create new category
-        category = await tx.menuCategory.create({
+      if (!defaultMenu) {
+        defaultMenu = await tx.menu.create({
           data: {
             venueId,
-            name: categoryData.name,
-            slug: categoryData.slug,
-            displayOrder: catIndex,
-          },
-        })
-        categoriesCreated++
-
-        // Assign category to default menu
-        await tx.menuCategoryAssignment.create({
-          data: {
-            menuId: defaultMenu.id,
-            categoryId: category.id,
-            displayOrder: catIndex,
+            name: 'Main Menu',
+            description: 'Imported menu',
+            active: true,
+            displayOrder: 0,
           },
         })
       }
 
-      // Process products in this category
-      for (const [prodIndex, productData] of categoryData.products.entries()) {
-        // Check if product exists by SKU (merge mode)
-        const existingProduct = await tx.product.findFirst({
-          where: { venueId, sku: productData.sku },
+      // Process categories and products
+      for (const [catIndex, categoryData] of data.categories.entries()) {
+        // Check if category exists by name
+        let category = await tx.menuCategory.findFirst({
+          where: { venueId, name: categoryData.name },
         })
 
-        let product
-        if (existingProduct) {
-          // Update existing product
-          product = await tx.product.update({
-            where: { id: existingProduct.id },
-            data: {
-              name: productData.name,
-              price: Math.round(productData.price * 100), // Convert to cents
-              cost: productData.cost ? Math.round(productData.cost * 100) : null,
-              description: productData.description || null,
-              type: productData.type || 'FOOD',
-              categoryId: category.id,
-              displayOrder: prodIndex,
-              tags: productData.tags || [],
-              allergens: productData.allergens || [],
-            },
-          })
-          productsUpdated++
-        } else {
-          // Create new product
-          product = await tx.product.create({
+        if (!category) {
+          // Create new category
+          category = await tx.menuCategory.create({
             data: {
               venueId,
-              name: productData.name,
-              sku: productData.sku,
-              price: Math.round(productData.price * 100), // Convert to cents
-              cost: productData.cost ? Math.round(productData.cost * 100) : null,
-              description: productData.description || null,
-              type: productData.type || 'FOOD',
-              categoryId: category.id,
-              displayOrder: prodIndex,
-              tags: productData.tags || [],
-              allergens: productData.allergens || [],
+              name: categoryData.name,
+              slug: categoryData.slug,
+              displayOrder: catIndex,
             },
           })
-          productsCreated++
+          categoriesCreated++
+
+          // Assign category to default menu
+          await tx.menuCategoryAssignment.create({
+            data: {
+              menuId: defaultMenu.id,
+              categoryId: category.id,
+              displayOrder: catIndex,
+            },
+          })
         }
 
-        // Handle inventory tracking if specified
-        if (productData.trackInventory) {
-          const existingInventory = await tx.inventory.findFirst({
-            where: { productId: product.id },
+        // Process products in this category
+        for (const [prodIndex, productData] of categoryData.products.entries()) {
+          // Check if product exists by SKU (merge mode)
+          const existingProduct = await tx.product.findFirst({
+            where: { venueId, sku: productData.sku },
           })
 
-          if (existingInventory) {
-            // Update existing inventory
-            await tx.inventory.update({
-              where: { id: existingInventory.id },
+          let product
+          if (existingProduct) {
+            // Update existing product
+            product = await tx.product.update({
+              where: { id: existingProduct.id },
               data: {
-                currentStock: productData.currentStock || 0,
-                minimumStock: productData.minStock || 0,
+                name: productData.name,
+                price: Math.round(productData.price * 100), // Convert to cents
+                cost: productData.cost ? Math.round(productData.cost * 100) : null,
+                description: productData.description || null,
+                type: productData.type || 'FOOD',
+                categoryId: category.id,
+                displayOrder: prodIndex,
+                tags: productData.tags || [],
+                allergens: productData.allergens || [],
               },
             })
+            productsUpdated++
           } else {
-            // Create new inventory entry
-            await tx.inventory.create({
+            // Create new product
+            product = await tx.product.create({
               data: {
-                productId: product.id,
                 venueId,
-                currentStock: productData.currentStock || 0,
-                minimumStock: productData.minStock || 0,
+                name: productData.name,
+                sku: productData.sku,
+                price: Math.round(productData.price * 100), // Convert to cents
+                cost: productData.cost ? Math.round(productData.cost * 100) : null,
+                description: productData.description || null,
+                type: productData.type || 'FOOD',
+                categoryId: category.id,
+                displayOrder: prodIndex,
+                tags: productData.tags || [],
+                allergens: productData.allergens || [],
               },
             })
+            productsCreated++
           }
-        }
 
-        // Handle modifier groups
-        if (productData.modifierGroups && productData.modifierGroups.length > 0) {
-          // Remove existing modifier group assignments for this product
-          await tx.productModifierGroup.deleteMany({
-            where: { productId: product.id },
-          })
-
-          for (const [groupIndex, groupData] of productData.modifierGroups.entries()) {
-            // Check if modifier group exists by name
-            let modifierGroup = await tx.modifierGroup.findFirst({
-              where: { venueId, name: groupData.name },
+          // Handle inventory tracking if specified
+          if (productData.trackInventory) {
+            const existingInventory = await tx.inventory.findFirst({
+              where: { productId: product.id },
             })
 
-            if (!modifierGroup) {
-              // Create new modifier group
-              modifierGroup = await tx.modifierGroup.create({
+            if (existingInventory) {
+              // Update existing inventory
+              await tx.inventory.update({
+                where: { id: existingInventory.id },
                 data: {
-                  venueId,
-                  name: groupData.name,
-                  required: groupData.required,
-                  allowMultiple: groupData.allowMultiple,
-                  minSelections: groupData.minSelections,
-                  maxSelections: groupData.maxSelections,
+                  currentStock: productData.currentStock || 0,
+                  minimumStock: productData.minStock || 0,
                 },
               })
-              modifierGroupsCreated++
+            } else {
+              // Create new inventory entry
+              await tx.inventory.create({
+                data: {
+                  productId: product.id,
+                  venueId,
+                  currentStock: productData.currentStock || 0,
+                  minimumStock: productData.minStock || 0,
+                },
+              })
             }
+          }
 
-            // Assign modifier group to product
-            await tx.productModifierGroup.create({
-              data: {
-                productId: product.id,
-                groupId: modifierGroup.id,
-                displayOrder: groupIndex,
-              },
+          // Handle modifier groups
+          if (productData.modifierGroups && productData.modifierGroups.length > 0) {
+            // Remove existing modifier group assignments for this product
+            await tx.productModifierGroup.deleteMany({
+              where: { productId: product.id },
             })
 
-            // Handle modifiers
-            for (const modifierData of groupData.modifiers) {
-              // Check if modifier exists by name in this group
-              const existingModifier = await tx.modifier.findFirst({
-                where: { groupId: modifierGroup.id, name: modifierData.name },
+            for (const [groupIndex, groupData] of productData.modifierGroups.entries()) {
+              // Check if modifier group exists by name
+              let modifierGroup = await tx.modifierGroup.findFirst({
+                where: { venueId, name: groupData.name },
               })
 
-              if (!existingModifier) {
-                // Create new modifier
-                await tx.modifier.create({
+              if (!modifierGroup) {
+                // Create new modifier group
+                modifierGroup = await tx.modifierGroup.create({
                   data: {
-                    groupId: modifierGroup.id,
-                    name: modifierData.name,
-                    price: Math.round(modifierData.price * 100), // Convert to cents
+                    venueId,
+                    name: groupData.name,
+                    required: groupData.required,
+                    allowMultiple: groupData.allowMultiple,
+                    minSelections: groupData.minSelections,
+                    maxSelections: groupData.maxSelections,
                   },
                 })
-                modifiersCreated++
+                modifierGroupsCreated++
+              }
+
+              // Assign modifier group to product
+              await tx.productModifierGroup.create({
+                data: {
+                  productId: product.id,
+                  groupId: modifierGroup.id,
+                  displayOrder: groupIndex,
+                },
+              })
+
+              // Handle modifiers
+              for (const modifierData of groupData.modifiers) {
+                // Check if modifier exists by name in this group
+                const existingModifier = await tx.modifier.findFirst({
+                  where: { groupId: modifierGroup.id, name: modifierData.name },
+                })
+
+                if (!existingModifier) {
+                  // Create new modifier
+                  await tx.modifier.create({
+                    data: {
+                      groupId: modifierGroup.id,
+                      name: modifierData.name,
+                      price: Math.round(modifierData.price * 100), // Convert to cents
+                    },
+                  })
+                  modifiersCreated++
+                }
               }
             }
           }
         }
       }
-    }
     },
     {
       // Extended timeout for large menu imports (2 minutes)
