@@ -1022,8 +1022,9 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
   let modifierGroupsCreated = 0
   let modifiersCreated = 0
 
-  await prisma.$transaction(async tx => {
-    // REPLACE MODE: Delete all existing menu data (Toast/Square pattern)
+  await prisma.$transaction(
+    async tx => {
+      // REPLACE MODE: Delete all existing menu data (Toast/Square pattern)
     // With SET NULL FK constraints, order history preserves denormalized product/modifier names
     if (data.mode === 'replace') {
       // Delete in correct order due to foreign keys
@@ -1240,7 +1241,13 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
         }
       }
     }
-  })
+    },
+    {
+      // Extended timeout for large menu imports (2 minutes)
+      timeout: 120000,
+      maxWait: 130000,
+    },
+  )
 
   return {
     success: true,
