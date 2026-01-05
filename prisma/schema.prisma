@@ -1644,8 +1644,13 @@ model OrderItem {
   id        String  @id @default(cuid())
   orderId   String
   order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  productId String
-  product   Product @relation(fields: [productId], references: [id])
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  // Denormalized product data - preserved when product is deleted (Toast/Square pattern)
+  productName     String?
+  productSku      String?
+  categoryName    String?
 
   quantity       Int
   unitPrice      Decimal @db.Decimal(10, 2)
@@ -1766,8 +1771,11 @@ model OrderItemModifier {
   id          String    @id @default(cuid())
   orderItemId String
   orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
-  modifierId  String
-  modifier    Modifier  @relation(fields: [modifierId], references: [id])
+  modifierId  String?
+  modifier    Modifier? @relation(fields: [modifierId], references: [id], onDelete: SetNull)
+
+  // Denormalized modifier data - preserved when modifier is deleted
+  name String?
 
   quantity Int     @default(1)
   price    Decimal @db.Decimal(10, 2)

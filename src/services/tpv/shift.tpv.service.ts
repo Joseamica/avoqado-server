@@ -1078,6 +1078,7 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
     select: {
       id: true,
       quantity: true,
+      productName: true, // Denormalized field for deleted products
       product: {
         select: {
           name: true,
@@ -1196,9 +1197,9 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
     },
     products: {
       totalSold: totalProductsSold,
-      uniqueProducts: new Set(orderItems.map(item => item.product.name)).size,
+      uniqueProducts: new Set(orderItems.map(item => item.product?.name || item.productName || 'Unknown')).size,
       items: orderItems.map(item => ({
-        name: item.product.name,
+        name: item.product?.name || item.productName || 'Unknown',
         quantity: item.quantity,
       })),
     },

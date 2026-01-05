@@ -213,7 +213,13 @@ async function validatePreFlightInventory(
     id: string
     venueId: string
     total: any
-    items: Array<{ productId: string; product: { name: string }; quantity: number; paymentAllocations?: any[] }>
+    items: Array<{
+      productId: string | null
+      product: { name: string } | null
+      productName?: string | null
+      quantity: number
+      paymentAllocations?: any[]
+    }>
     payments: Array<{ amount: any; tipAmount: any }>
   },
   paymentAmount: number,
@@ -237,6 +243,11 @@ async function validatePreFlightInventory(
     // Their inventory will be deducted when the order is completed
     const unpaidItems = order.items.filter(item => !item.paymentAllocations || item.paymentAllocations.length === 0)
 
+    // Filter out items with deleted products (null productId) - they can't be validated for inventory
+    const itemsToValidate = unpaidItems.filter(
+      (item): item is typeof item & { productId: string; product: { name: string } } => item.productId !== null && item.product !== null,
+    )
+
     logger.info('🔍 PRE-FLIGHT: Checking inventory before creating payment', {
       orderId: order.id,
       venueId: order.venueId,
@@ -245,10 +256,12 @@ async function validatePreFlightInventory(
       originalTotal,
       totalItems: order.items.length,
       unpaidItems: unpaidItems.length,
+      itemsToValidate: itemsToValidate.length,
+      skippedDeletedProducts: unpaidItems.length - itemsToValidate.length,
       paidItems: order.items.length - unpaidItems.length,
     })
 
-    const validation = await validateOrderInventoryAvailability(order.venueId, unpaidItems)
+    const validation = await validateOrderInventoryAvailability(order.venueId, itemsToValidate)
 
     if (!validation.available) {
       logger.error('❌ PRE-FLIGHT FAILED: Insufficient inventory - Payment rejected', {
@@ -355,7 +368,10 @@ async function updateOrderTotalsForStandalonePayment(
   if (isFullyPaid) {
     // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
     // Items with paymentAllocations have already been "claimed" by a previous split payment
-    const unpaidItems = order.items.filter((item: any) => !item.paymentAllocations || item.paymentAllocations.length === 0)
+    // Also skip items with deleted products (productId is null - Toast/Square pattern)
+    const unpaidItems = order.items.filter(
+      (item: any) => item.productId && (!item.paymentAllocations || item.paymentAllocations.length === 0),
+    )
 
     logger.info('🔍 Pre-flight validation: Checking inventory availability before completing order', {
       orderId,
@@ -365,7 +381,10 @@ async function updateOrderTotalsForStandalonePayment(
       paidItems: order.items.length - unpaidItems.length,
     })
 
-    const validation = await validateOrderInventoryAvailability(order.venueId, unpaidItems)
+    const validation = await validateOrderInventoryAvailability(
+      order.venueId,
+      unpaidItems as { productId: string; product: { name: string }; quantity: number; modifiers?: any[] }[],
+    )
 
     if (!validation.available) {
       logger.error('❌ Pre-flight validation failed: Insufficient inventory', {
@@ -459,21 +478,33 @@ async function updateOrderTotalsForStandalonePayment(
 
     // Deduct stock for each product in the order
     for (const item of updatedOrder.items) {
+      // Skip items where product was deleted (Toast/Square pattern)
+      if (!item.productId) {
+        logger.info('⏭️ Skipping inventory deduction for deleted product', {
+          orderId,
+          productName: item.productName,
+        })
+        continue
+      }
+
       try {
         // ✅ Transform order item modifiers to inventory format
+        // Skip modifiers where the modifier was deleted (Toast/Square pattern)
         const orderModifiers: OrderModifierForInventory[] =
-          item.modifiers?.map(m => ({
-            quantity: m.quantity,
-            modifier: {
-              id: m.modifier.id,
-              name: m.modifier.name,
-              groupId: m.modifier.groupId,
-              rawMaterialId: m.modifier.rawMaterialId,
-              quantityPerUnit: m.modifier.quantityPerUnit,
-              unit: m.modifier.unit,
-              inventoryMode: m.modifier.inventoryMode,
-            },
-          })) || []
+          item.modifiers
+            ?.filter(m => m.modifier)
+            .map(m => ({
+              quantity: m.quantity,
+              modifier: {
+                id: m.modifier!.id,
+                name: m.modifier!.name,
+                groupId: m.modifier!.groupId,
+                rawMaterialId: m.modifier!.rawMaterialId,
+                quantityPerUnit: m.modifier!.quantityPerUnit,
+                unit: m.modifier!.unit,
+                inventoryMode: m.modifier!.inventoryMode,
+              },
+            })) || []
 
         await deductInventoryForProduct(
           updatedOrder.venueId,
@@ -487,7 +518,7 @@ async function updateOrderTotalsForStandalonePayment(
         logger.info('✅ Stock deducted successfully for product', {
           orderId,
           productId: item.productId,
-          productName: item.product.name,
+          productName: item.product?.name || item.productName,
           quantity: item.quantity,
           modifiersCount: orderModifiers.length,
         })
@@ -504,7 +535,7 @@ async function updateOrderTotalsForStandalonePayment(
         logger.error('❌ Failed to deduct stock for product', {
           orderId,
           productId: item.productId,
-          productName: item.product.name,
+          productName: item.product?.name || item.productName,
           quantity: item.quantity,
           error: deductionError.message,
           reason: errorReason,
@@ -514,8 +545,8 @@ async function updateOrderTotalsForStandalonePayment(
         // Skip NO_RECIPE errors for products without inventory tracking
         if (errorReason === 'INSUFFICIENT_STOCK' || errorReason === 'CONCURRENT_TRANSACTION') {
           deductionErrors.push({
-            productId: item.productId,
-            productName: item.product.name,
+            productId: item.productId!,
+            productName: item.product?.name || item.productName || 'Unknown',
             error: deductionError.message,
           })
         }
