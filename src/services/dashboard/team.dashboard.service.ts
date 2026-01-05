@@ -458,9 +458,9 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     if (updates.pin === null || updates.pin === '') {
       pinToStore = null
     } else {
-      // Validate PIN format (4 digits)
-      if (!/^\d{4}$/.test(updates.pin)) {
-        throw new BadRequestError('PIN must be exactly 4 digits')
+      // Validate PIN format (4-10 digits)
+      if (!/^\d{4,10}$/.test(updates.pin)) {
+        throw new BadRequestError('PIN must be between 4 and 10 digits')
       }
 
       // Check if PIN is already used by another team member in this venue

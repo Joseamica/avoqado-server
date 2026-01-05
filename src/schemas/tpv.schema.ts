@@ -1,9 +1,8 @@
 import { z } from 'zod'
 
 // Authentication schemas
-// NOTE: Allows 4-6 digits for backward compatibility with existing PINs
-// SECURITY: 6 digits (1M combinations) is STRONGLY RECOMMENDED over 4 digits (10K combinations)
-// TODO: Migrate all existing PINs to 6 digits and enforce .length(6) validation
+// NOTE: Allows 4-10 digits for flexible PIN length
+// SECURITY: Longer PINs are more secure (10 digits = 10 billion combinations)
 export const pinLoginSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
@@ -12,8 +11,8 @@ export const pinLoginSchema = z.object({
     pin: z
       .string()
       .min(4, { message: 'El PIN debe tener al menos 4 dígitos.' })
-      .max(6, { message: 'El PIN no puede tener más de 6 dígitos.' })
-      .regex(/^\d{4,6}$/, { message: 'El PIN debe contener solo números (4-6 dígitos).' }),
+      .max(10, { message: 'El PIN no puede tener más de 10 dígitos.' })
+      .regex(/^\d{4,10}$/, { message: 'El PIN debe contener solo números (4-10 dígitos).' }),
     serialNumber: z
       .string()
       .min(1, { message: 'El número de serie es requerido.' })

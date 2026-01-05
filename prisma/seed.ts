@@ -3934,10 +3934,12 @@ async function main() {
             })
 
             // For ~30% of orders with customers, add a second customer (party of 2+)
+            let secondCustomerId: string | null = null
             if (Math.random() < 0.3 && customers.length > 1) {
               // Pick a different customer
               const secondCustomer = customers.find(c => c.id !== customer.id) || customers[0]
               if (secondCustomer && secondCustomer.id !== customer.id) {
+                secondCustomerId = secondCustomer.id
                 await prisma.orderCustomer.create({
                   data: {
                     orderId: order.id,
@@ -3951,7 +3953,7 @@ async function main() {
 
             // For ~10% of orders, add a third customer (larger party)
             if (Math.random() < 0.1 && customers.length > 2) {
-              const thirdCustomer = customers.find(c => c.id !== customer.id && c.email !== customer.email)
+              const thirdCustomer = customers.find(c => c.id !== customer.id && c.id !== secondCustomerId)
               if (thirdCustomer) {
                 await prisma.orderCustomer.create({
                   data: {

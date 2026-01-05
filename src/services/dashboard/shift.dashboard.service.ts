@@ -171,6 +171,92 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
         select: {
           id: true,
           name: true,
+          timezone: true,
+        },
+      },
+      // Include payments with processor data for card brand breakdown
+      payments: {
+        where: {
+          status: 'COMPLETED',
+        },
+        select: {
+          id: true,
+          amount: true,
+          tipAmount: true,
+          method: true,
+          cardBrand: true,
+          maskedPan: true,
+          processorData: true,
+          processedById: true,
+          processedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          orderId: true,
+          createdAt: true,
+        },
+        orderBy: {
+          createdAt: 'desc',
+        },
+      },
+      // Include orders with items for product breakdown
+      orders: {
+        where: {
+          status: {
+            in: ['COMPLETED', 'CONFIRMED'],
+          },
+        },
+        select: {
+          id: true,
+          orderNumber: true,
+          total: true,
+          subtotal: true,
+          status: true,
+          table: {
+            select: {
+              id: true,
+              number: true,
+            },
+          },
+          createdAt: true,
+          servedById: true,
+          servedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          items: {
+            select: {
+              id: true,
+              quantity: true,
+              unitPrice: true,
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+            },
+          },
+          payments: {
+            where: {
+              status: 'COMPLETED',
+            },
+            select: {
+              id: true,
+              method: true,
+              cardBrand: true,
+              maskedPan: true,
+            },
+          },
+        },
+        orderBy: {
+          createdAt: 'desc',
         },
       },
     },
@@ -184,21 +270,259 @@ export async function getShiftById(venueId: string, shiftId: string): Promise<an
   const now = new Date()
   const effectiveStatus = shift.endTime && shift.endTime < now ? 'CLOSED' : shift.status
 
+  // ============================================================
+  // Calculate Payment Method Breakdown
+  // ============================================================
+  const paymentMethodMap = new Map<string, { total: number; tips: number; count: number }>()
+  const cardBrandMap = new Map<string, { total: number; count: number }>()
+
+  let calculatedTotalSales = 0
+  let calculatedTotalTips = 0
+
+  for (const payment of shift.payments) {
+    const amount = Number(payment.amount || 0)
+    const tipAmount = Number(payment.tipAmount || 0)
+
+    calculatedTotalSales += amount
+    calculatedTotalTips += tipAmount
+
+    // Group by payment method (CASH vs CARD)
+    const methodKey = payment.method === 'CASH' ? 'CASH' : 'CARD'
+    if (paymentMethodMap.has(methodKey)) {
+      const existing = paymentMethodMap.get(methodKey)!
+      existing.total += amount
+      existing.tips += tipAmount
+      existing.count += 1
+    } else {
+      paymentMethodMap.set(methodKey, { total: amount, tips: tipAmount, count: 1 })
+    }
+
+    // Group by card brand (only for card payments)
+    if (payment.method !== 'CASH') {
+      // Get card brand from cardBrand field or processorData
+      const cardBrand =
+        payment.cardBrand || (payment.processorData as any)?.cardBrand || (payment.processorData as any)?.card_brand || 'OTHER'
+
+      const normalizedBrand = cardBrand.toUpperCase()
+
+      if (cardBrandMap.has(normalizedBrand)) {
+        const existing = cardBrandMap.get(normalizedBrand)!
+        existing.total += amount
+        existing.count += 1
+      } else {
+        cardBrandMap.set(normalizedBrand, { total: amount, count: 1 })
+      }
+    }
+  }
+
+  // Convert payment method map to array with percentages
+  const totalPayments = calculatedTotalSales || 1 // Avoid division by zero
+  const paymentMethodBreakdown = Array.from(paymentMethodMap.entries())
+    .map(([method, data]) => ({
+      method,
+      total: Number(data.total.toFixed(2)),
+      tips: Number(data.tips.toFixed(2)),
+      count: data.count,
+      percentage: Number(((data.total / totalPayments) * 100).toFixed(1)),
+    }))
+    .sort((a, b) => b.total - a.total)
+
+  // Convert card brand map to array with percentages
+  const totalCardPayments = paymentMethodMap.get('CARD')?.total || 1
+  const cardBrandBreakdown = Array.from(cardBrandMap.entries())
+    .map(([brand, data]) => ({
+      brand,
+      total: Number(data.total.toFixed(2)),
+      count: data.count,
+      percentage: Number(((data.total / totalCardPayments) * 100).toFixed(1)),
+    }))
+    .sort((a, b) => b.total - a.total)
+
+  // ============================================================
+  // Calculate Staff Breakdown (sales per employee)
+  // ============================================================
+  const staffMap = new Map<
+    string,
+    {
+      staffId: string
+      name: string
+      sales: number
+      tips: number
+      ordersCount: number
+      paymentsCount: number
+    }
+  >()
+
+  // Process payments to get sales and tips per staff
+  for (const payment of shift.payments) {
+    const staffId = payment.processedById
+    if (!staffId) continue
+
+    const staffName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Sin asignar'
+    const amount = Number(payment.amount || 0)
+    const tipAmount = Number(payment.tipAmount || 0)
+
+    if (staffMap.has(staffId)) {
+      const existing = staffMap.get(staffId)!
+      existing.sales += amount
+      existing.tips += tipAmount
+      existing.paymentsCount += 1
+    } else {
+      staffMap.set(staffId, {
+        staffId,
+        name: staffName,
+        sales: amount,
+        tips: tipAmount,
+        ordersCount: 0,
+        paymentsCount: 1,
+      })
+    }
+  }
+
+  // Process orders to get order count per staff
+  for (const order of shift.orders) {
+    const staffId = order.servedById
+    if (!staffId) continue
+
+    const staffName = order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}` : 'Sin asignar'
+
+    if (staffMap.has(staffId)) {
+      const existing = staffMap.get(staffId)!
+      existing.ordersCount += 1
+    } else {
+      staffMap.set(staffId, {
+        staffId,
+        name: staffName,
+        sales: 0,
+        tips: 0,
+        ordersCount: 1,
+        paymentsCount: 0,
+      })
+    }
+  }
+
+  const staffBreakdown = Array.from(staffMap.values())
+    .map(staff => ({
+      ...staff,
+      sales: Number(staff.sales.toFixed(2)),
+      tips: Number(staff.tips.toFixed(2)),
+      tipPercentage: staff.sales > 0 ? Number(((staff.tips / staff.sales) * 100).toFixed(1)) : 0,
+    }))
+    .sort((a, b) => b.sales - a.sales)
+
+  // ============================================================
+  // Calculate Top Products
+  // ============================================================
+  const productMap = new Map<string, { name: string; quantity: number; revenue: number }>()
+
+  for (const order of shift.orders) {
+    for (const item of order.items) {
+      const productName = item.product?.name || 'Unknown Product'
+      const quantity = item.quantity || 1
+      const price = Number(item.unitPrice || 0)
+
+      if (productMap.has(productName)) {
+        const existing = productMap.get(productName)!
+        existing.quantity += quantity
+        existing.revenue += price * quantity
+      } else {
+        productMap.set(productName, {
+          name: productName,
+          quantity,
+          revenue: price * quantity,
+        })
+      }
+    }
+  }
+
+  const topProducts = Array.from(productMap.values())
+    .map(product => ({
+      ...product,
+      revenue: Number(product.revenue.toFixed(2)),
+    }))
+    .sort((a, b) => b.quantity - a.quantity)
+    .slice(0, 20) // Top 20 products
+
+  // ============================================================
+  // Format orders for response (with payment method info)
+  // ============================================================
+  const formattedOrders = shift.orders.slice(0, 50).map(order => {
+    const orderPayment = order.payments[0] // Get first payment for display
+    return {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      total: Number(order.total || 0),
+      subtotal: Number(order.subtotal || 0),
+      tableName: order.table?.number ? `${order.table.number}` : null,
+      staffName: order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}` : null,
+      staffId: order.servedById,
+      paymentMethod: orderPayment?.method || null,
+      cardBrand: orderPayment?.cardBrand || null,
+      cardLast4: orderPayment?.maskedPan ? orderPayment.maskedPan.slice(-4) : null,
+      createdAt: order.createdAt,
+      itemsCount: order.items.reduce((sum, item) => sum + item.quantity, 0),
+      items: order.items.map(item => ({
+        name: item.product?.name || 'Unknown Product',
+        quantity: item.quantity,
+        price: Number(item.unitPrice || 0),
+      })),
+    }
+  })
+
+  // ============================================================
+  // Format payments for response
+  // ============================================================
+  const formattedPayments = shift.payments.map(payment => ({
+    id: payment.id,
+    amount: Number(payment.amount || 0),
+    tipAmount: Number(payment.tipAmount || 0),
+    total: Number(payment.amount || 0) + Number(payment.tipAmount || 0),
+    method: payment.method,
+    cardBrand: payment.cardBrand || (payment.processorData as any)?.cardBrand || null,
+    cardLast4: payment.maskedPan ? payment.maskedPan.slice(-4) : null,
+    staffName: payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : null,
+    staffId: payment.processedById,
+    orderId: payment.orderId,
+    createdAt: payment.createdAt,
+  }))
+
+  // Use calculated totals if they're more accurate than stored values
+  const finalTotalSales = calculatedTotalSales > 0 ? calculatedTotalSales : Number(shift.totalSales)
+  const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
+
   return {
     id: shift.id,
     venueId: shift.venueId,
     staffId: shift.staffId,
+    turnId: (shift as any).turnId,
     startTime: shift.startTime,
     endTime: shift.endTime,
     startingCash: Number(shift.startingCash),
     endingCash: shift.endingCash ? Number(shift.endingCash) : null,
     cashDifference: shift.cashDifference ? Number(shift.cashDifference) : null,
-    totalSales: Number(shift.totalSales),
-    totalTips: Number(shift.totalTips),
-    totalOrders: shift.totalOrders,
+    totalSales: finalTotalSales,
+    totalTips: finalTotalTips,
+    totalOrders: shift.orders.length,
     status: effectiveStatus,
     staff: shift.staff,
     venue: shift.venue,
+    createdAt: (shift as any).createdAt,
+    updatedAt: (shift as any).updatedAt,
+    // NEW: Detailed breakdowns
+    payments: formattedPayments,
+    orders: formattedOrders,
+    paymentMethodBreakdown,
+    cardBrandBreakdown,
+    staffBreakdown,
+    topProducts,
+    // Summary stats
+    stats: {
+      totalPayments: shift.payments.length,
+      totalOrders: shift.orders.length,
+      totalProducts: topProducts.reduce((sum, p) => sum + p.quantity, 0),
+      avgOrderValue: shift.orders.length > 0 ? Number((finalTotalSales / shift.orders.length).toFixed(2)) : 0,
+      avgTipPercentage: finalTotalSales > 0 ? Number(((finalTotalTips / finalTotalSales) * 100).toFixed(1)) : 0,
+    },
   }
 }
 
