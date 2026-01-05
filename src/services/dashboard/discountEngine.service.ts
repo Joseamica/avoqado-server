@@ -583,24 +583,29 @@ export async function evaluateAutomaticDiscounts(orderId: string): Promise<Disco
   }
 
   // Build order context
+  // Note: productId and product can be null if the product was deleted (Toast/Square pattern)
   const context: OrderContext = {
     orderId: order.id,
     venueId: order.venueId,
     customerId: order.customerId ?? undefined,
     subtotal: Number(order.subtotal),
-    items: order.items.map(item => ({
-      id: item.id,
-      productId: item.productId,
-      categoryId: item.product.categoryId,
-      quantity: item.quantity,
-      unitPrice: Number(item.unitPrice),
-      total: Number(item.total),
-      modifiers: item.modifiers.map(m => ({
-        id: m.modifier.id,
-        modifierGroupId: m.modifier.groupId, // Use groupId from Modifier model
-        price: Number(m.modifier.price),
+    items: order.items
+      .filter(item => item.productId && item.product) // Skip items with deleted products
+      .map(item => ({
+        id: item.id,
+        productId: item.productId!,
+        categoryId: item.product!.categoryId,
+        quantity: item.quantity,
+        unitPrice: Number(item.unitPrice),
+        total: Number(item.total),
+        modifiers: item.modifiers
+          .filter(m => m.modifier) // Skip modifiers that were deleted
+          .map(m => ({
+            id: m.modifier!.id,
+            modifierGroupId: m.modifier!.groupId,
+            price: Number(m.modifier!.price),
+          })),
       })),
-    })),
     appliedDiscounts: order.orderDiscounts.map(od => ({
       discountId: od.discountId ?? '',
       amount: Number(od.amount),

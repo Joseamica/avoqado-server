@@ -88,7 +88,7 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
           itemCount: table.currentOrder.items.length,
           items: table.currentOrder.items.map(item => ({
             id: item.id,
-            productName: item.product.name,
+            productName: item.product?.name || item.productName || 'Unknown',
             quantity: item.quantity,
             unitPrice: Number(item.unitPrice),
             total: Number(item.total),
@@ -555,7 +555,7 @@ export async function updateTable(
           itemCount: updatedTable.currentOrder.items.length,
           items: updatedTable.currentOrder.items.map(item => ({
             id: item.id,
-            productName: item.product.name,
+            productName: item.product?.name || item.productName || 'Unknown',
             quantity: item.quantity,
             unitPrice: Number(item.unitPrice),
             total: Number(item.total),

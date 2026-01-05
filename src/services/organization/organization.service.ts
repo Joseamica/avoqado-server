@@ -787,8 +787,8 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
     take: limit,
   })
 
-  // Get product details for top items
-  const productIds = orderItems.map(item => item.productId)
+  // Get product details for top items (filter out null productIds from deleted products)
+  const productIds = orderItems.map(item => item.productId).filter((id): id is string => id !== null)
   const products = await prisma.product.findMany({
     where: { id: { in: productIds } },
     select: {
@@ -805,13 +805,13 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
   const productMap = new Map(products.map(p => [p.id, p]))
 
   return orderItems.map((item, index) => {
-    const product = productMap.get(item.productId)
+    const product = item.productId ? productMap.get(item.productId) : null
     const quantitySold = item._sum?.quantity || 0
     const totalRevenue = item._sum?.total?.toNumber() || 0
 
     return {
-      productId: item.productId,
-      productName: product?.name || 'Unknown Product',
+      productId: item.productId || 'deleted',
+      productName: product?.name || 'Deleted Product',
       categoryName: product?.category?.name || 'Uncategorized',
       quantitySold,
       totalRevenue: Math.round(totalRevenue * 100) / 100,

@@ -221,12 +221,12 @@ export async function getOrder(
   // 🐛 DEBUG: Log raw Prisma response to see if modifiers are included
   logger.info(`🔍 [GET ORDER] Order ${orderId} - Items count: ${order.items.length}`)
   order.items.forEach((item, idx) => {
-    logger.info(`   Item ${idx + 1}: ${item.product.name}`)
+    logger.info(`   Item ${idx + 1}: ${item.product?.name || item.productName || 'DELETED'}`)
     logger.info(`      Modifiers count: ${item.modifiers?.length || 0}`)
     if (item.modifiers && item.modifiers.length > 0) {
       item.modifiers.forEach((om: any) => {
         logger.info(`         - OrderItemModifier ID: ${om.id}`)
-        logger.info(`         - Modifier: ${om.modifier?.name || 'NULL'} (${om.modifier?.price || 'NULL'})`)
+        logger.info(`         - Modifier: ${om.modifier?.name || om.name || 'NULL'} (${om.modifier?.price || om.price || 'NULL'})`)
       })
     }
   })
@@ -440,6 +440,11 @@ export async function addItemsToOrder(
       id: { in: uniqueProductIds },
       venueId,
     },
+    include: {
+      category: {
+        select: { name: true },
+      },
+    },
   })
 
   if (products.length !== uniqueProductIds.length) {
@@ -559,10 +564,15 @@ export async function addItemsToOrder(
       }
 
       // Create NEW order item with modifiers (original behavior)
+      // ✅ Toast/Square pattern: Denormalize product data for order history preservation
       const createdItem = await prisma.orderItem.create({
         data: {
           orderId: order.id,
           productId: item.productId,
+          // Denormalized fields - preserved even if product is later deleted
+          productName: product.name,
+          productSku: product.sku,
+          categoryName: product.category?.name || null,
           quantity: item.quantity,
           unitPrice: product.price,
           discountAmount: 0,
@@ -575,6 +585,8 @@ export async function addItemsToOrder(
               logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
               return {
                 modifierId,
+                // Denormalized modifier name - preserved even if modifier is later deleted
+                name: modifier.name,
                 quantity: 1,
                 price: modifier.price,
               }
@@ -720,9 +732,9 @@ export async function addItemsToOrder(
   updatedOrder.items.forEach(item => {
     const modifierCount = item.modifiers?.length || 0
     if (modifierCount > 0) {
-      logger.info(`  📦 [RESPONSE] OrderItem ${item.product.name} has ${modifierCount} modifiers in response`)
+      logger.info(`  📦 [RESPONSE] OrderItem ${item.product?.name || item.productName} has ${modifierCount} modifiers in response`)
       item.modifiers?.forEach(om => {
-        logger.info(`     - ${om.modifier.name}: $${om.price}`)
+        logger.info(`     - ${om.modifier?.name || om.name}: $${om.price}`)
       })
     }
   })
@@ -737,7 +749,7 @@ export async function addItemsToOrder(
       newItems: newOrderItems.map(item => ({
         id: item.id,
         productId: item.productId,
-        productName: item.product.name,
+        productName: item.product?.name || item.productName || '',
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
@@ -932,7 +944,7 @@ export async function removeOrderItem(
     where: { id: orderItemId },
   })
 
-  logger.info(`✅ [ORDER SERVICE] Deleted item: ${itemToRemove.product.name} (${itemToRemove.id})`)
+  logger.info(`✅ [ORDER SERVICE] Deleted item: ${itemToRemove.product?.name || itemToRemove.productName} (${itemToRemove.id})`)
 
   // Calculate new totals
   const remainingItems = order.items.filter(item => item.id !== orderItemId)
@@ -1423,7 +1435,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         itemIds: input.itemIds,
         voidAmount,
         itemCount: itemsToVoid.length,
-        itemNames: itemsToVoid.map(item => item.product.name),
+        itemNames: itemsToVoid.map(item => item.product?.name || item.productName),
         sentToKitchen: sentToKitchen.length > 0,
         voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
       },

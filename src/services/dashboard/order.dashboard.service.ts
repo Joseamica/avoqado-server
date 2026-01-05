@@ -190,13 +190,22 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
 
       // Deduct stock for each product in the order
       for (const item of updatedOrder.items) {
+        // Skip items where product was deleted (Toast/Square pattern)
+        if (!item.productId) {
+          logger.info('⏭️ Skipping stock deduction for deleted product', {
+            orderId,
+            productName: item.productName, // Use denormalized name
+          })
+          continue
+        }
+
         try {
           await deductStockForRecipe(updatedOrder.venueId, item.productId, item.quantity, orderId)
 
           logger.info('✅ Stock deducted successfully for product (dashboard)', {
             orderId,
             productId: item.productId,
-            productName: item.product.name,
+            productName: item.product?.name || item.productName,
             quantity: item.quantity,
           })
         } catch (deductionError: any) {
@@ -204,7 +213,7 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
           logger.warn('⚠️ Failed to deduct stock for product - continuing with order (dashboard)', {
             orderId,
             productId: item.productId,
-            productName: item.product.name,
+            productName: item.product?.name || item.productName,
             quantity: item.quantity,
             error: deductionError.message,
             reason: deductionError.message.includes('does not have a recipe')

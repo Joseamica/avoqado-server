@@ -1023,16 +1023,42 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
   let modifiersCreated = 0
 
   await prisma.$transaction(async tx => {
-    // REPLACE MODE: Delete all existing menu data
+    // REPLACE MODE: Delete all existing menu data (Toast/Square pattern)
+    // With SET NULL FK constraints, order history preserves denormalized product/modifier names
     if (data.mode === 'replace') {
       // Delete in correct order due to foreign keys
+      // 1. Remove product-modifier links first
       await tx.productModifierGroup.deleteMany({ where: { product: { venueId } } })
-      await tx.modifier.deleteMany({ where: { group: { venueId } } })
-      await tx.modifierGroup.deleteMany({ where: { venueId } })
-      await tx.product.deleteMany({ where: { venueId } })
+
+      // 2. Delete ALL modifiers - SET NULL FK will preserve order history
+      // OrderItemModifier.modifierId becomes NULL, but denormalized 'name' field remains
+      await tx.modifier.deleteMany({
+        where: { group: { venueId } },
+      })
+
+      // 3. Delete ALL modifier groups
+      await tx.modifierGroup.deleteMany({
+        where: { venueId },
+      })
+
+      // 4. Delete ALL products - SET NULL FK will preserve order history
+      // OrderItem.productId becomes NULL, but denormalized productName/productSku/categoryName remain
+      await tx.product.deleteMany({
+        where: { venueId },
+      })
+
+      // 5. Delete menu structure
       await tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
-      await tx.menuCategory.deleteMany({ where: { venueId } })
-      await tx.menu.deleteMany({ where: { venueId } })
+
+      // Delete ALL categories
+      await tx.menuCategory.deleteMany({
+        where: { venueId },
+      })
+
+      // Delete ALL menus
+      await tx.menu.deleteMany({
+        where: { venueId },
+      })
     }
 
     // Get or create default menu for imported items

@@ -118,6 +118,9 @@ export async function getModifierUsageStats(
   const usageMap = new Map<string, ModifierUsageStats>()
 
   for (const usage of modifierUsages) {
+    // Skip if modifier was deleted (Toast/Square pattern - denormalized data preserves history)
+    if (!usage.modifier) continue
+
     const mod = usage.modifier
     const existing = usageMap.get(mod.id)
 
