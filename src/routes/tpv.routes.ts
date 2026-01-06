@@ -1655,7 +1655,7 @@ router.get(
 router.get(
   '/venues/:venueId/reports/historical',
   authenticateTokenMiddleware,
-  checkPermission('reports:read'),
+  checkPermission('tpv-reports:read'),
   reportsController.getHistoricalReports,
 )
 
@@ -2129,10 +2129,10 @@ router.post('/venues/:venueId/auth', pinLoginRateLimiter, validateRequest(pinLog
 
 /**
  * @openapi
- * /tpv/auth/refresh:
+ * /tpv/venues/{venueId}/auth/refresh:
  *   post:
  *     tags: [TPV - Authentication]
- *     summary: Refresh access token
+ *     summary: Refresh access token (venue-scoped)
  *     description: Generate a new access token using a valid refresh token. This allows users to maintain their session without re-entering their PIN.
  *     requestBody:
  *       required: true
@@ -2178,11 +2178,14 @@ router.post('/venues/:venueId/auth', pinLoginRateLimiter, validateRequest(pinLog
  *       500:
  *         description: Internal server error
  */
+// ✅ Venue-scoped refresh (used by Android TPV)
+router.post('/venues/:venueId/auth/refresh', validateRequest(refreshTokenSchema), authController.refreshAccessToken)
+// 🔧 Legacy route (kept for backward compatibility)
 router.post('/auth/refresh', validateRequest(refreshTokenSchema), authController.refreshAccessToken)
 
 /**
  * @openapi
- * /tpv/auth/logout:
+ * /tpv/venues/{venueId}/auth/logout:
  *   post:
  *     tags: [TPV - Authentication]
  *     summary: Logout staff member (Cambio de usuario)
@@ -2223,6 +2226,9 @@ router.post('/auth/refresh', validateRequest(refreshTokenSchema), authController
  *       500:
  *         description: Internal server error
  */
+// ✅ Venue-scoped logout (used by Android TPV)
+router.post('/venues/:venueId/auth/logout', validateRequest(logoutSchema), authController.staffLogout)
+// 🔧 Legacy route (kept for backward compatibility)
 router.post('/auth/logout', validateRequest(logoutSchema), authController.staffLogout)
 
 /**

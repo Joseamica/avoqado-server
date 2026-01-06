@@ -3345,7 +3345,7 @@ router.get(
 router.get(
   '/superadmin/settlement-incidents',
   authenticateTokenMiddleware,
-  checkPermission('system:admin'),
+  checkPermission('system:manage'),
   validateRequest(incidentListQuerySchema),
   settlementIncidentController.getAllIncidents,
 )
@@ -3366,7 +3366,7 @@ router.get(
 router.get(
   '/superadmin/settlement-incidents/stats',
   authenticateTokenMiddleware,
-  checkPermission('system:admin'),
+  checkPermission('system:manage'),
   settlementIncidentController.getGlobalIncidentStats,
 )
 
@@ -3395,7 +3395,7 @@ router.get(
 router.post(
   '/superadmin/settlement-incidents/:incidentId/escalate',
   authenticateTokenMiddleware,
-  checkPermission('system:admin'),
+  checkPermission('system:manage'),
   validateRequest(escalateIncidentSchema),
   settlementIncidentController.escalateIncident,
 )
@@ -9539,7 +9539,7 @@ router.delete(
 router.get(
   '/venues/:venueId/settings',
   authenticateTokenMiddleware,
-  checkPermission('venue:read'),
+  checkPermission('venues:read'),
   venueSettingsController.getVenueSettings,
 )
 
@@ -9576,7 +9576,7 @@ router.get(
 router.put(
   '/venues/:venueId/settings',
   authenticateTokenMiddleware,
-  checkPermission('venue:update'),
+  checkPermission('venues:update'),
   validateRequest(UpdateVenueSettingsSchema),
   venueSettingsController.updateVenueSettings,
 )
@@ -9613,7 +9613,7 @@ router.put(
 router.get(
   '/venues/:venueId/settings/tpv',
   authenticateTokenMiddleware,
-  checkPermission('venue:read'),
+  checkPermission('venues:read'),
   venueSettingsController.getTpvSettings,
 )
 
@@ -9650,7 +9650,7 @@ router.get(
 router.put(
   '/venues/:venueId/settings/tpv',
   authenticateTokenMiddleware,
-  checkPermission('venue:update'),
+  checkPermission('venues:update'),
   validateRequest(UpdateTpvSettingsSchema),
   venueSettingsController.updateTpvSettings,
 )

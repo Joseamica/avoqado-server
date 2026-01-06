@@ -244,7 +244,7 @@ export async function getOrder(
   // 🐛 DEBUG: Log flattened response to verify flattening worked
   logger.info(`🔍 [GET ORDER] After flattening - Items count: ${flattenedOrder.items.length}`)
   flattenedOrder.items.forEach((item: any, idx: number) => {
-    logger.info(`   Item ${idx + 1}: ${item.product.name}`)
+    logger.info(`   Item ${idx + 1}: ${item.product?.name || item.productName || 'DELETED'}`)
     logger.info(`      Flattened modifiers count: ${item.modifiers?.length || 0}`)
     if (item.modifiers && item.modifiers.length > 0) {
       item.modifiers.forEach((mod: any) => {

@@ -258,6 +258,11 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'settings:manage': ['settings:read', 'settings:manage'],
 
   // ===========================
+  // NOTIFICATIONS
+  // ===========================
+  'notifications:send': ['notifications:send', 'teams:read'],
+
+  // ===========================
   // DISCOUNTS (Phase 2)
   // ===========================
   'discounts:read': [
@@ -543,6 +548,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:read',
     'tpv-products:write', // Can create products on-the-fly (Scan & Go)
     'tpv-reports:pay-later-aging', // Can view pay-later aging report
+    'notifications:send', // Can send push notifications to staff
     // NO: tpv-terminal:settings (ADMIN+ only)
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
     // NO: tpv-factory-reset (OWNER only)
@@ -567,6 +573,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
     'features:*',
+    'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
     'tables:*',
@@ -617,6 +624,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
     'features:*',
+    'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
     'tables:*',
@@ -969,6 +977,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete'],
   coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete'],
   features: ['features:read', 'features:update'],
+  notifications: ['notifications:send'],
   products: ['products:read', 'products:create', 'products:update', 'products:delete'],
   'role-config': ['role-config:read', 'role-config:update'], // Custom role display names
   // TPV-specific permissions (granular features)

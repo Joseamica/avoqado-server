@@ -315,12 +315,14 @@ function mapPaymentSource(source?: string): PaymentSource {
  * Update order totals directly in backend for standalone mode
  * @param orderId Order ID to update
  * @param paymentAmount Total payment amount (including tip)
+ * @param tipAmount Tip amount from this payment (to calculate cumulative order.tipAmount)
  * @param currentPaymentId Current payment ID to exclude from calculation
  * @param staffId Optional staff ID who processed the payment (for loyalty points)
  */
 async function updateOrderTotalsForStandalonePayment(
   orderId: string,
   paymentAmount: number,
+  tipAmount: number, // ✅ FIX: Pass tip separately to update order.tipAmount
   currentPaymentId?: string,
   staffId?: string,
 ): Promise<void> {
@@ -357,10 +359,19 @@ async function updateOrderTotalsForStandalonePayment(
     0,
   )
   const totalPaid = previousPayments + paymentAmount
-  const originalTotal = parseFloat(order.total.toString())
 
-  // Calculate remaining amount
-  const remainingAmount = Math.max(0, originalTotal - totalPaid)
+  // ✅ FIX: Use subtotal as base (doesn't include tips), not order.total (which may already include tips from previous payments)
+  const orderSubtotal = parseFloat(order.subtotal.toString())
+
+  // ✅ FIX: Calculate cumulative tip from all completed payments + current tip
+  const previousTips = order.payments.reduce((sum, payment) => sum + parseFloat(payment.tipAmount.toString()), 0)
+  const totalTip = previousTips + tipAmount
+
+  // ✅ FIX: Calculate new total including tips (consistent with fast payments)
+  const newTotal = orderSubtotal + totalTip
+
+  // Calculate remaining amount (based on new total)
+  const remainingAmount = Math.max(0, newTotal - totalPaid)
   const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
 
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
@@ -425,6 +436,10 @@ async function updateOrderTotalsForStandalonePayment(
       // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
       paidAmount: totalPaid,
       remainingBalance: remainingAmount,
+      // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
+      tipAmount: totalTip,
+      // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
+      total: newTotal,
       ...(isFullyPaid && {
         status: 'COMPLETED',
         completedAt: new Date(),
@@ -457,8 +472,11 @@ async function updateOrderTotalsForStandalonePayment(
 
   logger.info('Order totals updated for standalone payment', {
     orderId,
-    originalTotal,
+    orderSubtotal,
+    newTotal, // ✅ Subtotal + cumulative tips
     paymentAmount,
+    tipAmount,
+    totalTip, // ✅ Cumulative tip from all payments
     totalPaid,
     remainingAmount,
     isFullyPaid,
@@ -1641,7 +1659,8 @@ export async function recordOrderPayment(
     try {
       // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
       // ⭐ LOYALTY: Pass staffId for loyalty points attribution
-      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, payment.id, validatedStaffId)
+      // ✅ FIX: Pass tipAmount separately to update order.tipAmount
+      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId)
 
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
         paymentId: payment.id,
@@ -1862,9 +1881,13 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         source: 'TPV',
         status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
         completedAt: new Date(),
-        subtotal: paymentData.amount / 100, // Convert to decimal
+        subtotal: totalAmount, // Base amount (without tip)
         taxAmount: 0, // No tax for fast payments
-        total: paymentData.amount / 100, // Convert to decimal
+        total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
+        // ✅ FIX: Include tip and paid amounts for fast orders
+        tipAmount, // Tip amount from this payment
+        paidAmount: totalAmount + tipAmount, // Total paid (base + tip)
+        remainingBalance: 0, // Fast payments are always fully paid
         paymentStatus: 'PAID',
         splitType: paymentData.splitType as any, // Set splitType for fast orders
         createdById: validatedStaffId, // Track which staff created the fast order
