@@ -1,6 +1,6 @@
 # Plan de Implementación: Customer System + Discounts
 
-**Fecha de inicio:** 2025-11-26 **Última actualización:** 2025-11-26 **Estado:** Phase 1 COMPLETO, Phase 2 iniciando
+**Fecha de inicio:** 2025-11-26 **Última actualización:** 2026-01-06 **Estado:** Phase 1 COMPLETO, Phase 2 ~90% COMPLETO
 
 > **IMPORTANTE:** Este archivo se elimina al completar la implementación. Actualizar con cada cambio significativo.
 
@@ -11,7 +11,7 @@
 | Phase       | Descripción            | Progreso | Estimado               |
 | ----------- | ---------------------- | -------- | ---------------------- |
 | **Phase 1** | Customer System        | **100%** | ✅ COMPLETADO          |
-| **Phase 2** | Discount System        | **55%**  | En progreso            |
+| **Phase 2** | Discount System        | **~90%** | Solo faltan API tests  |
 | **Phase 3** | Inventory Enhancements | **0%**   | 2-3 semanas (opcional) |
 
 ---
@@ -178,13 +178,19 @@ WHERE c.id = sub."customerId";
 | Coupon Controller   | `src/controllers/dashboard/coupon.dashboard.controller.ts`   | ✅     |
 | Coupon Routes       | `src/routes/dashboard.routes.ts` (10 endpoints)              | ✅     |
 
-### 🔄 En Progreso Phase 2
+### ✅ Completado Phase 2 (adicional - actualizado 2026-01-06)
+
+| Componente      | Archivo                                            | Estado |
+| --------------- | -------------------------------------------------- | ------ |
+| Discount Engine | `src/services/dashboard/discountEngine.service.ts` | ✅     |
+| TPV Integration | `src/services/tpv/discount.tpv.service.ts`         | ✅     |
+| Unit Tests      | `tests/unit/services/dashboard/discount*.test.ts`  | ✅     |
+| Unit Tests      | `tests/unit/services/dashboard/coupon*.test.ts`    | ✅     |
+
+### 🔄 Pendiente Phase 2
 
 | Componente      | Archivo                                            | Estado    |
 | --------------- | -------------------------------------------------- | --------- |
-| Discount Engine | `src/services/dashboard/discountEngine.service.ts` | Pendiente |
-| TPV Integration | `src/services/tpv/discount.tpv.service.ts`         | Pendiente |
-| Unit Tests      | `tests/unit/services/dashboard/discount*.test.ts`  | Pendiente |
 | API Tests       | `tests/api-tests/dashboard/discount*.test.ts`      | Pendiente |
 
 ### Objetivos

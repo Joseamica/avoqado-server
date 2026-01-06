@@ -4,6 +4,27 @@ This file is the **index** for Claude Code. It provides quick context and points
 
 ---
 
+## 🔴 MANDATORY: Documentation Update Rule (READ FIRST)
+
+**When implementing or modifying ANY feature, you MUST:**
+
+1. **Check if documentation exists** for the feature/area you're modifying
+2. **Update the documentation** if your changes affect documented behavior
+3. **Create new documentation** if implementing a new significant feature
+4. **Update `docs/README.md`** index if creating new docs
+5. **Update references in this CLAUDE.md** if you add new doc files
+
+**This is NOT optional.** Documentation debt causes confusion and bugs.
+
+```
+✅ DO: Implement feature → Update docs → Commit both together
+❌ DON'T: Implement feature → "I'll document it later" → Never document it
+```
+
+**Central hub:** `docs/README.md` is the master index for ALL cross-repo documentation.
+
+---
+
 ## 1. CRITICAL: Blumon Has TWO Separate Integrations
 
 **BEFORE working on anything Blumon**, identify which integration:
@@ -38,6 +59,7 @@ POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliabi
 | `docs/ARCHITECTURE_OVERVIEW.md` | Layered architecture, multi-tenant, control/application plane |
 | `docs/PERMISSIONS_SYSTEM.md`    | Permission system, RBAC, override vs merge modes              |
 | `docs/DATABASE_SCHEMA.md`       | Complete database schema reference                            |
+| `docs/BUSINESS_TYPES.md`        | VenueType enum, BusinessCategory, MCC mapping, industry standards |
 
 ### Payments
 
@@ -283,6 +305,40 @@ app.use(express.json()) // After webhooks
 
 ## 8. Documentation Policy
 
+### Central Documentation Hub
+
+**This repo (`avoqado-server/docs/`) is the SINGLE SOURCE OF TRUTH for cross-repo documentation.**
+
+**Master Index:** [`docs/README.md`](docs/README.md)
+
+```
+avoqado-server/docs/           ← CENTRAL HUB (this repo)
+├── README.md                  ← Master index of ALL documentation
+├── architecture/              ← Cross-repo architecture
+├── features/                  ← Cross-repo features
+├── blumon-tpv/               ← Blumon TPV integration
+├── blumon-ecommerce/         ← Blumon E-commerce integration
+└── ...
+
+avoqado-web-dashboard/docs/    ← Frontend-specific ONLY
+├── architecture/             ← React routing, overview
+├── features/                 ← i18n, theme, inventory UI
+└── guides/                   ← UI patterns, performance
+
+avoqado-tpv/docs/              ← Android-specific ONLY
+├── android/                  ← Kotlin/Compose patterns
+└── devices/                  ← PAX hardware guides
+```
+
+### What goes where
+
+| Type | Location |
+|------|----------|
+| Cross-repo features (payments, inventory logic) | `docs/features/` |
+| Architecture, DB schema, API | `docs/` |
+| React/UI patterns | `avoqado-web-dashboard/docs/` |
+| Android/Kotlin patterns | `avoqado-tpv/docs/` |
+
 ### What goes in CLAUDE.md (this file)
 
 - Critical warnings (Blumon distinction)
@@ -304,6 +360,22 @@ app.use(express.json()) // After webhooks
 2. Tests are living documentation
 3. If code + tests explain it clearly → don't document
 4. ALL new docs go in `docs/` directory, never in root
+5. **Cross-repo features** → Document in `docs/features/`
+
+### Documentation Update Checklist
+
+> **See "🔴 MANDATORY: Documentation Update Rule" at the top of this file.**
+
+**Checklist before committing:**
+- [ ] Does this change affect any existing documentation?
+- [ ] Did I update line number references if file structure changed?
+- [ ] Did I update progress percentages if completing phases?
+- [ ] Did I add new documentation if this is a new feature?
+
+**Avoid fragile line number references.** Instead of `"See file.ts lines 100-200"`, use:
+- Function/class names: `"See createOrder() in order.service.ts"`
+- Section headers: `"See ## Authentication section in AUTH.md"`
+- Model names: `"See SettlementIncident model in schema.prisma"`
 
 ---
 
@@ -344,7 +416,9 @@ replaced.
 
 | Need to...                | Go to...                                        |
 | ------------------------- | ----------------------------------------------- |
+| **Browse all docs**       | [`docs/README.md`](docs/README.md)              |
 | Understand architecture   | `docs/ARCHITECTURE_OVERVIEW.md`                 |
+| Add/modify VenueType      | `docs/BUSINESS_TYPES.md`                        |
 | Work on Blumon TPV        | `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`     |
 | Work on Blumon E-commerce | `docs/blumon-ecommerce/REFACTORING_COMPLETE.md` |
 | Work on inventory         | `docs/INVENTORY_REFERENCE.md`                   |
@@ -352,4 +426,5 @@ replaced.
 | Work on Stripe            | `docs/STRIPE_INTEGRATION.md`                    |
 | Work on permissions       | `docs/PERMISSIONS_SYSTEM.md`                    |
 | Work on terminals         | `docs/TERMINAL_IDENTIFICATION.md`               |
+| Work on settlement        | `docs/features/SETTLEMENT_INCIDENTS.md`         |
 | Deploy to production      | `docs/PRODUCTION_READINESS_CHECKLIST.md`        |
