@@ -7,7 +7,7 @@
 
 import { OnboardingType, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { uploadFileToStorage } from '@/services/storage.service'
+import { uploadFileToStorage, buildStoragePath } from '@/services/storage.service'
 import logger from '@/config/logger'
 
 // Types
@@ -295,8 +295,8 @@ export async function uploadKycDocument(
   const extension = file.originalname.split('.').pop()?.toLowerCase() || 'pdf'
   const cleanName = DOCUMENT_KEY_TO_NAME[documentKey] || documentKey
 
-  // Upload to Firebase Storage (path: onboarding/{organizationId}/kyc/{documentName}.{ext})
-  const filePath = `onboarding/${organizationId}/kyc/${cleanName}.${extension}`
+  // Upload to Firebase Storage (path: {env}/onboarding/{organizationId}/kyc/{documentName}.{ext})
+  const filePath = buildStoragePath(`onboarding/${organizationId}/kyc/${cleanName}.${extension}`)
   const downloadUrl = await uploadFileToStorage(file.buffer, filePath, file.mimetype)
 
   logger.info(`📄 Uploaded KYC document for onboarding: ${organizationId} - ${documentKey}`)

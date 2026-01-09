@@ -1039,6 +1039,11 @@ interface PaymentCreationData {
   // This allows refunds to work WITHOUT waiting for Blumon webhook
   // Example: 12945658 (fits in number, unlike the 12-digit referenceNumber string)
   blumonOperationNumber?: number
+
+  // ⭐ Device Serial Number for Terminal attribution (2026-01-08)
+  // Links payment to the Terminal that processed it (for device-based reporting)
+  // This is the Terminal.serialNumber (e.g., "AVQD-2841548417"), NOT blumonSerialNumber
+  deviceSerialNumber?: string
 }
 
 /**
@@ -1086,6 +1091,50 @@ async function resolveBlumonSerialToMerchantId(venueId: string, blumonSerialNumb
   } catch (error) {
     logger.error(`❌ Error resolving blumonSerialNumber ${blumonSerialNumber}:`, error)
     return undefined
+  }
+}
+
+/**
+ * ⭐ Helper: Resolve Terminal ID from device serial number
+ *
+ * **Purpose:** Auto-link payments/orders to the Terminal that processed them
+ * using the device's unique serial number (e.g., "AVQD-2841548417")
+ *
+ * **Logic:**
+ * 1. Find Terminal by serialNumber (unique field)
+ * 2. Verify it belongs to the venue (security)
+ * 3. Return terminal.id for foreign key assignment
+ *
+ * **Example:**
+ * ```typescript
+ * const terminalId = await resolveTerminalIdFromSerial('venue_123', 'AVQD-2841548417')
+ * // Returns: 'cmhtgsr3100gi9k1we6pyr777' (Terminal.id)
+ * ```
+ *
+ * @param venueId Venue ID to validate ownership
+ * @param deviceSerialNumber Terminal serial number (e.g., "AVQD-2841548417")
+ * @returns Terminal ID or null if not found
+ */
+async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: string): Promise<string | null> {
+  try {
+    const terminal = await prisma.terminal.findFirst({
+      where: {
+        serialNumber: deviceSerialNumber,
+        venueId, // Security: ensure terminal belongs to this venue
+      },
+      select: { id: true },
+    })
+
+    if (terminal) {
+      logger.debug(`✅ Resolved deviceSerialNumber ${deviceSerialNumber} → terminalId ${terminal.id}`)
+      return terminal.id
+    }
+
+    logger.warn(`⚠️ Could not resolve deviceSerialNumber ${deviceSerialNumber} for venue ${venueId}`)
+    return null
+  } catch (error) {
+    logger.error(`❌ Error resolving deviceSerialNumber ${deviceSerialNumber}:`, error)
+    return null
   }
 }
 
@@ -1315,6 +1364,13 @@ export async function recordOrderPayment(
     }
   }
 
+  // ⭐ TERMINAL ATTRIBUTION: Resolve terminalId from device serial number
+  // Links payment to the Terminal that processed it (for device-based reporting)
+  let terminalId: string | null = null
+  if (paymentData.deviceSerialNumber) {
+    terminalId = await resolveTerminalIdFromSerial(venueId, paymentData.deviceSerialNumber)
+  }
+
   // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const payment = await prisma.$transaction(async tx => {
@@ -1353,6 +1409,8 @@ export async function recordOrderPayment(
         entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
         // ⭐ Provider-agnostic merchant account tracking
         merchantAccountId,
+        // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+        terminalId,
         processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
         shiftId: currentShift?.id,
         feePercentage: 0, // TODO: Calculate based on payment processor
@@ -1863,6 +1921,13 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
   }
 
+  // ⭐ TERMINAL ATTRIBUTION: Resolve terminalId from device serial number
+  // Links order and payment to the Terminal that processed them (for device-based reporting)
+  let terminalId: string | null = null
+  if (paymentData.deviceSerialNumber) {
+    terminalId = await resolveTerminalIdFromSerial(venueId, paymentData.deviceSerialNumber)
+  }
+
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const { payment, fastOrder } = await prisma.$transaction(async tx => {
@@ -1879,6 +1944,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         orderNumber,
         type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
         source: 'TPV',
+        // ⭐ Terminal that created this order (resolved from deviceSerialNumber)
+        terminalId,
         status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
         completedAt: new Date(),
         subtotal: totalAmount, // Base amount (without tip)
@@ -1930,6 +1997,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
         // ⭐ Provider-agnostic merchant account tracking
         merchantAccountId,
+        // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+        terminalId,
         processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
         shiftId: currentShift?.id,
         feePercentage: 0, // TODO: Calculate based on payment processor

@@ -8,12 +8,19 @@ interface ClockInParams {
   pin: string
   jobRole?: string
   checkInPhotoUrl?: string // Firebase Storage URL of check-in photo (anti-fraud)
+  latitude?: number // GPS latitude at clock-in
+  longitude?: number // GPS longitude at clock-in
+  accuracy?: number // GPS accuracy in meters at clock-in
 }
 
 interface ClockOutParams {
   venueId: string
   staffId: string
   pin: string
+  checkOutPhotoUrl?: string // Firebase Storage URL of check-out photo (anti-fraud)
+  latitude?: number // GPS latitude at clock-out
+  longitude?: number // GPS longitude at clock-out
+  accuracy?: number // GPS accuracy in meters at clock-out
 }
 
 interface BreakParams {
@@ -79,7 +86,7 @@ function calculateTotalBreakMinutes(breaks: Array<{ startTime: Date; endTime: Da
  * Clock in a staff member
  */
 export async function clockIn(params: ClockInParams) {
-  const { venueId, staffId, pin, jobRole, checkInPhotoUrl } = params
+  const { venueId, staffId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy } = params
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
@@ -102,7 +109,7 @@ export async function clockIn(params: ClockInParams) {
     throw new BadRequestError('Staff member is already clocked in. Please clock out first.')
   }
 
-  // Create new time entry
+  // Create new time entry with photo and GPS data
   const timeEntry = await prisma.timeEntry.create({
     data: {
       staffId,
@@ -110,6 +117,9 @@ export async function clockIn(params: ClockInParams) {
       clockInTime: new Date(),
       jobRole,
       checkInPhotoUrl, // Store anti-fraud photo URL if provided
+      clockInLatitude: latitude, // GPS latitude
+      clockInLongitude: longitude, // GPS longitude
+      clockInAccuracy: accuracy, // GPS accuracy in meters
       status: TimeEntryStatus.CLOCKED_IN,
       breakMinutes: 0,
     },
@@ -132,7 +142,7 @@ export async function clockIn(params: ClockInParams) {
  * Clock out a staff member
  */
 export async function clockOut(params: ClockOutParams) {
-  const { venueId, staffId, pin } = params
+  const { venueId, staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy } = params
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
@@ -176,7 +186,7 @@ export async function clockOut(params: ClockOutParams) {
   const clockOutTime = new Date()
   const totalHours = calculateHours(timeEntry.clockInTime, clockOutTime, totalBreakMinutes)
 
-  // Update time entry
+  // Update time entry with photo and GPS data
   const updatedTimeEntry = await prisma.timeEntry.update({
     where: { id: timeEntry.id },
     data: {
@@ -184,6 +194,10 @@ export async function clockOut(params: ClockOutParams) {
       totalHours,
       breakMinutes: Math.round(totalBreakMinutes),
       status: TimeEntryStatus.CLOCKED_OUT,
+      checkOutPhotoUrl, // Store anti-fraud photo URL if provided
+      clockOutLatitude: latitude, // GPS latitude
+      clockOutLongitude: longitude, // GPS longitude
+      clockOutAccuracy: accuracy, // GPS accuracy in meters
     },
     include: {
       staff: {
@@ -310,6 +324,11 @@ export async function endBreak(params: BreakParams) {
 
 /**
  * Get time entries with filtering
+ *
+ * IMPORTANT: When filtering by date range, we always include active entries
+ * (CLOCKED_IN or ON_BREAK) regardless of their clockInTime. This ensures
+ * that if someone clocked in yesterday and hasn't clocked out, their active
+ * entry appears in today's query so the UI can show the correct state.
  */
 export async function getTimeEntries(params: TimeEntriesQueryParams) {
   const { venueId, staffId, startDate, endDate, status, limit = 50, offset = 0 } = params
@@ -324,7 +343,22 @@ export async function getTimeEntries(params: TimeEntriesQueryParams) {
     where.status = status
   }
 
-  if (startDate || endDate) {
+  // When filtering by date range AND staffId, use OR logic to:
+  // 1. Include entries within the date range
+  // 2. ALWAYS include active entries (CLOCKED_IN/ON_BREAK) regardless of date
+  // This prevents the bug where someone clocked in yesterday doesn't show as active today
+  if ((startDate || endDate) && staffId && !status) {
+    const dateFilter: any = {}
+    if (startDate) {
+      dateFilter.gte = new Date(startDate)
+    }
+    if (endDate) {
+      dateFilter.lte = new Date(endDate)
+    }
+
+    where.OR = [{ clockInTime: dateFilter }, { status: { in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK] } }]
+  } else if (startDate || endDate) {
+    // Without staffId, just filter by date normally (for manager views)
     where.clockInTime = {}
     if (startDate) {
       where.clockInTime.gte = new Date(startDate)

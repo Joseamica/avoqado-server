@@ -79,8 +79,8 @@ model Venue {
   // ✅ NEW: Venue operational status (replaces active boolean logic)
   // Mexican law requires data retention - venues cannot be hard deleted
   status           VenueStatus @default(ONBOARDING)
-  statusChangedAt  DateTime?   // When status was last changed
-  statusChangedBy  String?     // Staff ID who changed the status
+  statusChangedAt  DateTime? // When status was last changed
+  statusChangedBy  String? // Staff ID who changed the status
   suspensionReason String?     @db.Text // Reason for suspension (for audit trail)
 
   // NOTE: isOnboardingDemo and isLiveDemo fields were REMOVED on 2024-12-08
@@ -147,28 +147,28 @@ model Venue {
   settings VenueSettings?
 
   // Relations
-  posCommands         PosCommand[]
-  posConnectionStatus PosConnectionStatus?
-  invitations         Invitation[]
-  staff               StaffVenue[]
-  rolePermissions     VenueRolePermission[]
-  roleConfigs         VenueRoleConfig[]
-  menuCategories      MenuCategory[]
-  menus               Menu[]
-  products            Product[]
-  modifierGroups      ModifierGroup[]
-  inventories         Inventory[]
-  tables              Table[]
-  areas               Area[]
-  floorElements       FloorElement[]
-  shifts              Shift[]
-  timeEntries         TimeEntry[]
-  orders              Order[]
-  payments            Payment[]
-  transactions        VenueTransaction[]
-  reviews             Review[]
-  terminals           Terminal[]
-  terminalLogs        TerminalLog[]
+  posCommands           PosCommand[]
+  posConnectionStatus   PosConnectionStatus?
+  invitations           Invitation[]
+  staff                 StaffVenue[]
+  rolePermissions       VenueRolePermission[]
+  roleConfigs           VenueRoleConfig[]
+  menuCategories        MenuCategory[]
+  menus                 Menu[]
+  products              Product[]
+  modifierGroups        ModifierGroup[]
+  inventories           Inventory[]
+  tables                Table[]
+  areas                 Area[]
+  floorElements         FloorElement[]
+  shifts                Shift[]
+  timeEntries           TimeEntry[]
+  orders                Order[]
+  payments              Payment[]
+  transactions          VenueTransaction[]
+  reviews               Review[]
+  terminals             Terminal[]
+  terminalLogs          TerminalLog[]
   terminalHealthMetrics TerminalHealth[]
 
   // Customer Management (Phase 1)
@@ -224,6 +224,13 @@ model Venue {
   bulkCommandOperations BulkCommandOperation[]
   scheduledCommands     ScheduledCommand[]
   geofenceRules         GeofenceRule[]
+
+  // ==========================================
+  // MODULE SYSTEM - Multi-tenant feature management
+  // ==========================================
+  venueModules    VenueModule[] // Modules enabled for this venue
+  itemCategories  ItemCategory[] // Categories for serialized items
+  serializedItems SerializedItem[] // Items with unique barcodes (SIMs, etc.)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -325,7 +332,7 @@ model Staff {
   // Authentication
   // NOTE: email is GLOBALLY UNIQUE (industry standard: Stripe, Shopify, Toast)
   // One person = one Staff account, can be member of multiple orgs via StaffVenue
-  email    String   @unique
+  email    String  @unique
   password String? // Null for PIN-only users or OAuth users
   googleId String? @unique // Google OAuth ID
   // pin      String? // ❌ REMOVER - Se mueve a StaffVenue
@@ -493,10 +500,10 @@ model VenueRoleConfig {
   venueId     String
   venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
   role        StaffRole // Internal enum (never changes)
-  displayName String    // Custom name shown to users (e.g., "Promotor")
-  description String?   // Optional description for this role
-  icon        String?   // Optional icon name (e.g., "ticket", "users")
-  color       String?   // Optional hex color for UI badges (e.g., "#7C3AED")
+  displayName String // Custom name shown to users (e.g., "Promotor")
+  description String? // Optional description for this role
+  icon        String? // Optional icon name (e.g., "ticket", "users")
+  color       String? // Optional hex color for UI badges (e.g., "#7C3AED")
   isActive    Boolean   @default(true) // Can hide unused roles
   sortOrder   Int       @default(0) // Custom ordering in UI
 
@@ -958,9 +965,9 @@ model RecipeLine {
   // ✅ VARIABLE INGREDIENT SUPPORT (Toast/Square pattern)
   // When true, this ingredient can be substituted by a modifier from linkedModifierGroup
   // Example: "Whole Milk" (150ml) can be substituted by "Almond Milk" from "Milk Type" group
-  isVariable              Boolean        @default(false)
-  linkedModifierGroupId   String?        // The modifier group that can substitute this ingredient
-  linkedModifierGroup     ModifierGroup? @relation(fields: [linkedModifierGroupId], references: [id])
+  isVariable            Boolean        @default(false)
+  linkedModifierGroupId String? // The modifier group that can substitute this ingredient
+  linkedModifierGroup   ModifierGroup? @relation(fields: [linkedModifierGroupId], references: [id])
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -1502,7 +1509,16 @@ model TimeEntry {
   editedBy String? // Admin who modified if applicable
 
   // Check-in verification (anti-fraud photo capture)
-  checkInPhotoUrl String? // Firebase Storage URL of check-in photo
+  checkInPhotoUrl  String? // Firebase Storage URL of check-in photo
+  clockInLatitude  Float? // GPS latitude at clock-in
+  clockInLongitude Float? // GPS longitude at clock-in
+  clockInAccuracy  Float? // GPS accuracy in meters at clock-in
+
+  // Check-out verification
+  checkOutPhotoUrl  String? // Firebase Storage URL of check-out photo
+  clockOutLatitude  Float? // GPS latitude at clock-out
+  clockOutLongitude Float? // GPS longitude at clock-out
+  clockOutAccuracy  Float? // GPS accuracy in meters at clock-out
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1537,6 +1553,10 @@ model Order {
   orderNumber String
   type        OrderType   @default(DINE_IN)
   source      OrderSource @default(TPV)
+
+  // Terminal that created this order (for sales attribution by device)
+  terminalId String?
+  terminal   Terminal? @relation("OrderTerminal", fields: [terminalId], references: [id], onDelete: SetNull)
 
   // Relations
   tableId      String?
@@ -1618,6 +1638,7 @@ model Order {
   @@index([status])
   @@index([createdAt])
   @@index([customerId])
+  @@index([terminalId])
   @@index([venueId, tableId, paymentStatus])
   @@index([venueId, customerIdentifier, paymentStatus])
 }
@@ -1641,16 +1662,16 @@ model OrderCustomer {
 }
 
 model OrderItem {
-  id        String  @id @default(cuid())
+  id        String   @id @default(cuid())
   orderId   String
-  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId String?
   product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   // Denormalized product data - preserved when product is deleted (Toast/Square pattern)
-  productName     String?
-  productSku      String?
-  categoryName    String?
+  productName  String?
+  productSku   String?
+  categoryName String?
 
   quantity       Int
   unitPrice      Decimal @db.Decimal(10, 2)
@@ -1674,6 +1695,15 @@ model OrderItem {
   // Kitchen
   sentToKitchenAt DateTime?
   preparedAt      DateTime?
+
+  // ==========================================
+  // SERIALIZED ITEM - Relation for unique barcode items
+  // An OrderItem has Product OR SerializedItem, never both.
+  // When it's SerializedItem, price comes from unitPrice (captured at sale).
+  // productName should be filled from ItemCategory.name
+  // productSku should be filled from SerializedItem.serialNumber
+  // ==========================================
+  serializedItem SerializedItem?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt // ✅ NUEVO
@@ -1735,12 +1765,12 @@ model Modifier {
 
   // ✅ INVENTORY TRACKING (Toast/Square pattern)
   // Link modifier to a raw material for inventory deduction
-  rawMaterialId   String?                 // Optional: only if this modifier affects inventory
-  rawMaterial     RawMaterial?            @relation(fields: [rawMaterialId], references: [id])
-  quantityPerUnit Decimal?                @db.Decimal(12, 3) // Amount to deduct per modifier selection
-  unit            Unit?                   // Unit of measurement (must match rawMaterial.unit or be convertible)
-  inventoryMode   ModifierInventoryMode   @default(ADDITION) // ADDITION (extra) or SUBSTITUTION (replace)
-  cost            Decimal?                @db.Decimal(10, 4) // Auto-calculated: rawMaterial.avgCostPerUnit × quantityPerUnit
+  rawMaterialId   String? // Optional: only if this modifier affects inventory
+  rawMaterial     RawMaterial?          @relation(fields: [rawMaterialId], references: [id])
+  quantityPerUnit Decimal?              @db.Decimal(12, 3) // Amount to deduct per modifier selection
+  unit            Unit? // Unit of measurement (must match rawMaterial.unit or be convertible)
+  inventoryMode   ModifierInventoryMode @default(ADDITION) // ADDITION (extra) or SUBSTITUTION (replace)
+  cost            Decimal?              @db.Decimal(10, 4) // Auto-calculated: rawMaterial.avgCostPerUnit × quantityPerUnit
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -1834,6 +1864,10 @@ model Payment {
   merchantAccountId String?
   merchantAccount   MerchantAccount? @relation(fields: [merchantAccountId], references: [id], onDelete: Restrict)
 
+  // Terminal that processed this payment (for payment reconciliation by device)
+  terminalId String?
+  terminal   Terminal? @relation("PaymentTerminal", fields: [terminalId], references: [id], onDelete: SetNull)
+
   // Amounts
   amount    Decimal @db.Decimal(12, 2)
   tipAmount Decimal @default(0) @db.Decimal(10, 2)
@@ -1891,6 +1925,7 @@ model Payment {
   @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
   @@index([cardBrand]) // ✅ NUEVO ÍNDICE
   @@index([merchantAccountId]) // ⭐ NUEVO: Provider-agnostic merchant tracking
+  @@index([terminalId]) // ⭐ NUEVO: Device sales attribution tracking
   @@index([venueId])
   @@index([orderId])
   @@index([shiftId])
@@ -1952,13 +1987,13 @@ model DigitalReceipt {
 // Used by retail/telecommunications venues to capture evidence
 // of sales (photos + barcodes) for audit and inventory deduction
 model SaleVerification {
-  id        String @id @default(cuid())
+  id        String  @id @default(cuid())
   venueId   String
-  venue     Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  paymentId String @unique // One verification per payment
+  venue     Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  paymentId String  @unique // One verification per payment
   payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
   staffId   String
-  staff     Staff  @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Restrict)
 
   // Photo URLs (Firebase Storage paths)
   photos String[] // Array of URLs: venues/{venueId}/verificaciones/{paymentId}/*.jpg
@@ -1972,8 +2007,8 @@ model SaleVerification {
   inventoryDeducted Boolean                @default(false) // Whether stock was deducted
 
   // Metadata
-  deviceId   String? // TPV device that captured the verification
-  notes      String? // Optional notes from staff
+  deviceId String? // TPV device that captured the verification
+  notes    String? // Optional notes from staff
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2271,6 +2306,11 @@ model Terminal {
 
   reviews Review[] // ✅ LÍNEA AGREGADA
 
+  // 🆕 Sales Attribution Relations (2026-01-08)
+  // Orders and payments processed by this terminal for sales reports
+  orders   Order[]   @relation("OrderTerminal")
+  payments Payment[] @relation("PaymentTerminal")
+
   // 🆕 Remote Command System (2025-11-30)
   // Device lock state for remote lock/unlock commands
   isLocked    Boolean   @default(false)
@@ -2348,34 +2388,34 @@ model TerminalHealth {
   healthScore Int // 0-100 (100 = perfect health)
 
   // Memory
-  memoryTotalMB     Int
-  memoryAvailableMB Int
+  memoryTotalMB      Int
+  memoryAvailableMB  Int
   memoryUsagePercent Int
-  lowMemory         Boolean @default(false)
+  lowMemory          Boolean @default(false)
 
   // Storage
-  storageTotalMB     Int
-  storageAvailableMB Int
+  storageTotalMB      Int
+  storageAvailableMB  Int
   storageUsagePercent Int
-  lowStorage         Boolean @default(false)
+  lowStorage          Boolean @default(false)
 
   // Battery
-  batteryLevel      Int? // 0-100 percentage
-  batteryCharging   Boolean @default(false)
+  batteryLevel       Int? // 0-100 percentage
+  batteryCharging    Boolean @default(false)
   batteryTemperature Float? // Celsius
-  lowBattery        Boolean @default(false)
+  lowBattery         Boolean @default(false)
 
   // Connectivity
   socketConnected Boolean
   online          Boolean
 
   // Device Info (for diagnostics)
-  manufacturer  String
-  model         String
-  osVersion     String
-  appVersion    String
+  manufacturer   String
+  model          String
+  osVersion      String
+  appVersion     String
   appVersionCode Int
-  blumonEnv     String
+  blumonEnv      String
 
   // Uptime
   uptimeMinutes Int
@@ -3277,10 +3317,10 @@ model Customer {
   // Multi-customer support (N:N relationship with orders)
   orderAssociations OrderCustomer[]
 
-  @@index([venueId])
-  @@index([customerGroupId])
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
+  @@index([venueId])
+  @@index([customerGroupId])
 }
 
 model CustomerGroup {
@@ -3734,52 +3774,52 @@ enum PaymentSource {
 /// See: src/utils/businessCategory.ts
 enum BusinessType {
   // === FOOD_SERVICE Category ===
-  RESTAURANT           // Full-service restaurant
-  BAR                  // Bar, pub, cantina
-  CAFE                 // Coffee shop, cafetería
-  BAKERY               // Panadería, pastelería
-  FOOD_TRUCK           // Food truck, puesto móvil
-  FAST_FOOD            // Quick service restaurant
-  CATERING             // Catering service
-  CLOUD_KITCHEN        // Virtual kitchen, delivery only
+  RESTAURANT // Full-service restaurant
+  BAR // Bar, pub, cantina
+  CAFE // Coffee shop, cafetería
+  BAKERY // Panadería, pastelería
+  FOOD_TRUCK // Food truck, puesto móvil
+  FAST_FOOD // Quick service restaurant
+  CATERING // Catering service
+  CLOUD_KITCHEN // Virtual kitchen, delivery only
 
   // === RETAIL Category ===
-  RETAIL_STORE         // General retail store
-  JEWELRY              // Joyería
-  CLOTHING             // Tienda de ropa, boutique
-  ELECTRONICS          // Electrónica, celulares
-  PHARMACY             // Farmacia
-  CONVENIENCE_STORE    // Tienda de conveniencia, OXXO-style
-  SUPERMARKET          // Supermercado, grocery
-  LIQUOR_STORE         // Licorería, vinatería
-  FURNITURE            // Mueblería
-  HARDWARE             // Ferretería
-  BOOKSTORE            // Librería
-  PET_STORE            // Tienda de mascotas
+  RETAIL_STORE // General retail store
+  JEWELRY // Joyería
+  CLOTHING // Tienda de ropa, boutique
+  ELECTRONICS // Electrónica, celulares
+  PHARMACY // Farmacia
+  CONVENIENCE_STORE // Tienda de conveniencia, OXXO-style
+  SUPERMARKET // Supermercado, grocery
+  LIQUOR_STORE // Licorería, vinatería
+  FURNITURE // Mueblería
+  HARDWARE // Ferretería
+  BOOKSTORE // Librería
+  PET_STORE // Tienda de mascotas
 
   // === SERVICES Category ===
-  SALON                // Hair salon, barbería
-  SPA                  // Spa, wellness center
-  FITNESS              // Gym, fitness studio
-  CLINIC               // Clínica médica, dental
-  VETERINARY           // Veterinaria
-  AUTO_SERVICE         // Taller mecánico, autolavado
-  LAUNDRY              // Lavandería, tintorería
-  REPAIR_SHOP          // Reparación general
+  SALON // Hair salon, barbería
+  SPA // Spa, wellness center
+  FITNESS // Gym, fitness studio
+  CLINIC // Clínica médica, dental
+  VETERINARY // Veterinaria
+  AUTO_SERVICE // Taller mecánico, autolavado
+  LAUNDRY // Lavandería, tintorería
+  REPAIR_SHOP // Reparación general
 
   // === HOSPITALITY Category ===
-  HOTEL                // Hotel
-  HOSTEL               // Hostel
-  RESORT               // Resort, vacation property
+  HOTEL // Hotel
+  HOSTEL // Hostel
+  RESORT // Resort, vacation property
 
   // === ENTERTAINMENT Category ===
-  CINEMA               // Cine
-  ARCADE               // Arcade, game center
-  EVENT_VENUE          // Salón de eventos
-  NIGHTCLUB            // Antro, club nocturno
-  BOWLING              // Boliche
+  CINEMA // Cine
+  ARCADE // Arcade, game center
+  EVENT_VENUE // Salón de eventos
+  NIGHTCLUB // Antro, club nocturno
+  BOWLING // Boliche
 
-  OTHER                // Catch-all for unlisted types
+  OTHER // Catch-all for unlisted types
 }
 
 enum EntityType {
@@ -4119,11 +4159,11 @@ enum SyncStatus {
 }
 
 enum SaleVerificationStatus {
-  PENDING    // Just created, awaiting processing
+  PENDING // Just created, awaiting processing
   PROCESSING // Processing inventory deduction
-  COMPLETED  // Successfully processed
-  FAILED     // Failed to process
-  SKIPPED    // User skipped verification
+  COMPLETED // Successfully processed
+  FAILED // Failed to process
+  SKIPPED // User skipped verification
 }
 
 enum InvitationType {
@@ -4784,9 +4824,9 @@ model TpvCommandQueue {
 // ==========================================
 
 model TpvCommandHistory {
-  id             String            @id @default(cuid())
+  id             String           @id @default(cuid())
   commandQueueId String?
-  commandQueue   TpvCommandQueue?  @relation(fields: [commandQueueId], references: [id], onDelete: SetNull)
+  commandQueue   TpvCommandQueue? @relation(fields: [commandQueueId], references: [id], onDelete: SetNull)
 
   // Terminal Info (denormalized for historical accuracy)
   terminalId     String
@@ -4893,7 +4933,7 @@ model ScheduledCommand {
   // Schedule
   scheduleType   ScheduleType
   cronExpression String? // For CRON type
-  timezone       String   @default("America/Mexico_City")
+  timezone       String       @default("America/Mexico_City")
   nextExecution  DateTime
   lastExecution  DateTime?
 
@@ -5201,34 +5241,34 @@ model VenueCreditAssessment {
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // ===== OVERALL SCORE (0-100) =====
-  creditScore       Int                @default(0) // 0-100 score
-  creditGrade       CreditGrade        @default(D) // A, B, C, D grade
-  eligibilityStatus CreditEligibility  @default(INELIGIBLE)
+  creditScore       Int               @default(0) // 0-100 score
+  creditGrade       CreditGrade       @default(D) // A, B, C, D grade
+  eligibilityStatus CreditEligibility @default(INELIGIBLE)
 
   // ===== VOLUME METRICS (30% of score) =====
   // Annual and monthly transaction volumes
-  annualVolume       Decimal @default(0) @db.Decimal(14, 2) // Total volume last 12 months
-  monthlyAverage     Decimal @default(0) @db.Decimal(12, 2) // Average monthly volume
-  currentMonthVolume Decimal @default(0) @db.Decimal(12, 2) // Current month volume
+  annualVolume        Decimal @default(0) @db.Decimal(14, 2) // Total volume last 12 months
+  monthlyAverage      Decimal @default(0) @db.Decimal(12, 2) // Average monthly volume
+  currentMonthVolume  Decimal @default(0) @db.Decimal(12, 2) // Current month volume
   transactionCount12m Int     @default(0) // Transaction count last 12 months
 
   // ===== GROWTH METRICS (20% of score) =====
-  yoyGrowthPercent Decimal @default(0) @db.Decimal(6, 2) // Year-over-year growth %
-  momGrowthPercent Decimal @default(0) @db.Decimal(6, 2) // Month-over-month growth %
+  yoyGrowthPercent Decimal        @default(0) @db.Decimal(6, 2) // Year-over-year growth %
+  momGrowthPercent Decimal        @default(0) @db.Decimal(6, 2) // Month-over-month growth %
   trendDirection   TrendDirection @default(FLAT) // GROWING, FLAT, DECLINING
 
   // ===== STABILITY METRICS (25% of score) =====
-  revenueVariance      Decimal @default(0) @db.Decimal(6, 4) // Standard deviation / mean (lower = more stable)
-  consistencyScore     Decimal @default(0) @db.Decimal(5, 2) // 0-100 consistency rating
-  daysSinceLastTx      Int     @default(0) // Days since last transaction
-  operatingDaysRatio   Decimal @default(0) @db.Decimal(4, 2) // Active days / total days (0-1)
-  averageTicket        Decimal @default(0) @db.Decimal(10, 2) // Average transaction amount
+  revenueVariance    Decimal @default(0) @db.Decimal(6, 4) // Standard deviation / mean (lower = more stable)
+  consistencyScore   Decimal @default(0) @db.Decimal(5, 2) // 0-100 consistency rating
+  daysSinceLastTx    Int     @default(0) // Days since last transaction
+  operatingDaysRatio Decimal @default(0) @db.Decimal(4, 2) // Active days / total days (0-1)
+  averageTicket      Decimal @default(0) @db.Decimal(10, 2) // Average transaction amount
 
   // ===== RISK METRICS (25% of score) =====
-  chargebackRate    Decimal @default(0) @db.Decimal(6, 4) // Chargebacks / total transactions
-  refundRate        Decimal @default(0) @db.Decimal(6, 4) // Refunds / total transactions
-  chargebackCount   Int     @default(0) // Total chargebacks last 12m
-  paymentMethodMix  Json?   // % breakdown by method (diversification indicator)
+  chargebackRate   Decimal @default(0) @db.Decimal(6, 4) // Chargebacks / total transactions
+  refundRate       Decimal @default(0) @db.Decimal(6, 4) // Refunds / total transactions
+  chargebackCount  Int     @default(0) // Total chargebacks last 12m
+  paymentMethodMix Json? // % breakdown by method (diversification indicator)
 
   // ===== CREDIT RECOMMENDATION =====
   recommendedCreditLimit Decimal @default(0) @db.Decimal(12, 2) // Suggested max loan amount
@@ -5236,8 +5276,8 @@ model VenueCreditAssessment {
   maxRepaymentPercent    Decimal @default(0.15) @db.Decimal(4, 2) // Max % of daily sales for repayment
 
   // ===== ALERTS & FLAGS =====
-  alerts    String[] // Array of alert codes: "HIGH_CHARGEBACK", "DECLINING_REVENUE", etc.
-  flags     Json?    // Additional structured flags
+  alerts String[] // Array of alert codes: "HIGH_CHARGEBACK", "DECLINING_REVENUE", etc.
+  flags  Json? // Additional structured flags
 
   // ===== TIMESTAMPS =====
   calculatedAt DateTime @default(now()) // When score was last calculated
@@ -5257,16 +5297,16 @@ model VenueCreditAssessment {
 
 /// Historical snapshots of credit assessments for trend analysis
 model CreditAssessmentHistory {
-  id           String @id @default(cuid())
+  id           String                @id @default(cuid())
   assessmentId String
   assessment   VenueCreditAssessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
 
   // Snapshot data
   creditScore   Int
   creditGrade   CreditGrade
-  annualVolume  Decimal @db.Decimal(14, 2)
-  monthlyVolume Decimal @db.Decimal(12, 2)
-  growthPercent Decimal @db.Decimal(6, 2)
+  annualVolume  Decimal     @db.Decimal(14, 2)
+  monthlyVolume Decimal     @db.Decimal(12, 2)
+  growthPercent Decimal     @db.Decimal(6, 2)
 
   snapshotDate DateTime @default(now())
 
@@ -5276,35 +5316,35 @@ model CreditAssessmentHistory {
 
 /// Credit offers extended to venues (for SOFOM integration)
 model CreditOffer {
-  id           String @id @default(cuid())
+  id           String                @id @default(cuid())
   assessmentId String
   assessment   VenueCreditAssessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
   venueId      String
-  venue        Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venue        Venue                 @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // Offer details
-  offerAmount     Decimal @db.Decimal(12, 2) // Principal amount offered
-  factorRate      Decimal @db.Decimal(4, 2)  // e.g., 1.12 = 12% fee
-  totalRepayment  Decimal @db.Decimal(12, 2) // offerAmount * factorRate
-  repaymentPercent Decimal @db.Decimal(4, 2) // % of daily sales for repayment
-  estimatedTermDays Int    // Estimated repayment period in days
+  offerAmount       Decimal @db.Decimal(12, 2) // Principal amount offered
+  factorRate        Decimal @db.Decimal(4, 2) // e.g., 1.12 = 12% fee
+  totalRepayment    Decimal @db.Decimal(12, 2) // offerAmount * factorRate
+  repaymentPercent  Decimal @db.Decimal(4, 2) // % of daily sales for repayment
+  estimatedTermDays Int // Estimated repayment period in days
 
   // Offer status
-  status       CreditOfferStatus @default(PENDING)
-  expiresAt    DateTime // Offer expiration date
+  status    CreditOfferStatus @default(PENDING)
+  expiresAt DateTime // Offer expiration date
 
   // If accepted
   acceptedAt   DateTime?
   acceptedById String?
-  acceptedBy   Staff? @relation(fields: [acceptedById], references: [id])
+  acceptedBy   Staff?    @relation(fields: [acceptedById], references: [id])
 
   // If rejected
-  rejectedAt     DateTime?
+  rejectedAt      DateTime?
   rejectionReason String?
 
   // Audit trail
   createdById String?
-  createdBy   Staff? @relation("CreditOfferCreatedBy", fields: [createdById], references: [id])
+  createdBy   Staff?  @relation("CreditOfferCreatedBy", fields: [createdById], references: [id])
   notes       String? @db.Text
 
   createdAt DateTime @default(now())
@@ -5313,6 +5353,132 @@ model CreditOffer {
   @@index([venueId])
   @@index([assessmentId])
   @@index([status])
+}
+
+// ==========================================
+// MODULE SYSTEM - Multi-tenant feature management
+// Enables/disables functionality per venue without hardcoded conditionals
+// ==========================================
+
+/// Module definitions available in the system.
+/// Modules are GENERIC - they work for any industry.
+/// Customization comes from configuration, not code.
+model Module {
+  id          String  @id @default(cuid())
+  code        String  @unique // 'SERIALIZED_INVENTORY', 'ATTENDANCE_TRACKING', etc.
+  name        String // "Inventario Serializado"
+  description String?
+
+  // Schema JSON for validating configuration
+  configSchema Json? // JSON Schema
+
+  // Default configuration (labels, behavior)
+  defaultConfig Json // { labels: { item: "Item", barcode: "Barcode" }, ... }
+
+  // Presets by industry (for quick setup)
+  presets Json? // { telecom: { labels: { item: "SIM" } }, jewelry: { labels: { item: "Piedra" } } }
+
+  // State
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  venueModules VenueModule[]
+}
+
+/// Enables a module for a specific venue.
+/// DIFFERENT from VenueFeature which is for billing/Stripe.
+model VenueModule {
+  id       String @id @default(cuid())
+  venueId  String
+  venue    Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  moduleId String
+  module   Module @relation(fields: [moduleId], references: [id])
+
+  // State
+  enabled Boolean @default(true)
+
+  // Custom configuration (merged with Module.defaultConfig)
+  // Example: { labels: { item: "SIM", barcode: "ICCID" } }
+  config Json?
+
+  // Audit
+  enabledBy String // Staff ID that enabled the module
+  enabledAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, moduleId])
+  @@index([venueId])
+}
+
+/// Categories for SerializedItems (NOT to be confused with MenuCategory).
+/// Represents sales channels, types, or classifications.
+model ItemCategory {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  name        String // "Negra", "Blanca", "Roja" or "Diamante", "Rubí"
+  description String?
+  color       String? // For UI
+  sortOrder   Int     @default(0)
+
+  // Does it require pre-registration of stock?
+  requiresPreRegistration Boolean @default(true)
+
+  // Suggested price (optional, cashier can change it)
+  suggestedPrice Decimal? @db.Decimal(10, 2)
+
+  // Regex to auto-categorize barcodes (optional)
+  barcodePattern String?
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  serializedItems SerializedItem[]
+
+  @@unique([venueId, name])
+  @@index([venueId])
+}
+
+/// Product with UNIQUE barcode.
+/// DOES NOT HAVE PRICE - price is defined at the moment of sale.
+/// Applies to: SIMs, jewelry, electronics, etc.
+model SerializedItem {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Category
+  categoryId String
+  category   ItemCategory @relation(fields: [categoryId], references: [id])
+
+  // Unique identification
+  serialNumber String // Barcode, ICCID, certificate, etc.
+
+  // Status
+  status SerializedItemStatus @default(AVAILABLE)
+
+  // Sale tracking (when status=SOLD)
+  soldAt      DateTime?
+  orderItemId String?    @unique
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
+  // Audit
+  createdAt DateTime @default(now())
+  createdBy String // Staff ID that registered the item
+
+  @@unique([venueId, serialNumber])
+  @@index([venueId, categoryId])
+  @@index([venueId, status])
+  @@index([serialNumber])
 }
 
 // ===== CREDIT ASSESSMENT ENUMS =====
@@ -5325,23 +5491,34 @@ enum CreditGrade {
 }
 
 enum CreditEligibility {
-  ELIGIBLE       // Ready for offer
+  ELIGIBLE // Ready for offer
   REVIEW_REQUIRED // Needs manual review
-  INELIGIBLE     // Does not meet criteria
-  OFFER_PENDING  // Has active offer waiting response
-  ACTIVE_LOAN    // Currently has active loan
+  INELIGIBLE // Does not meet criteria
+  OFFER_PENDING // Has active offer waiting response
+  ACTIVE_LOAN // Currently has active loan
 }
 
 enum TrendDirection {
-  GROWING   // Positive growth trend
-  FLAT      // Stable, no significant change
+  GROWING // Positive growth trend
+  FLAT // Stable, no significant change
   DECLINING // Negative growth trend
 }
 
 enum CreditOfferStatus {
-  PENDING   // Offer created, waiting for venue response
-  ACCEPTED  // Venue accepted the offer
-  REJECTED  // Venue rejected the offer
-  EXPIRED   // Offer expired without response
+  PENDING // Offer created, waiting for venue response
+  ACCEPTED // Venue accepted the offer
+  REJECTED // Venue rejected the offer
+  EXPIRED // Offer expired without response
   WITHDRAWN // SOFOM withdrew the offer
+}
+
+// ==========================================
+// SERIALIZED INVENTORY - Status for items with unique barcodes
+// Used by Module System for venues with serialized inventory
+// ==========================================
+enum SerializedItemStatus {
+  AVAILABLE // Disponible para venta
+  SOLD // Ya vendido
+  RETURNED // Devuelto
+  DAMAGED // Dañado o perdido
 }

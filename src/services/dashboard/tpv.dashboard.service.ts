@@ -341,6 +341,12 @@ export interface TpvSettings {
   showVerificationScreen: boolean
   requireVerificationPhoto: boolean
   requireVerificationBarcode: boolean
+  // Attendance verification (clock-in/out with photo + GPS)
+  requireClockInPhoto: boolean // When true, GPS captured automatically with photo
+  requireClockOutPhoto: boolean // When true, GPS captured automatically with photo
+  requireClockInToLogin: boolean // When true, staff must have active clock-in to login
+  // Kiosk Mode
+  kioskModeEnabled: boolean // When true, terminal can enter self-service kiosk mode
 }
 
 /**
@@ -357,6 +363,12 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showVerificationScreen: false,
   requireVerificationPhoto: false,
   requireVerificationBarcode: false,
+  // Attendance verification disabled by default
+  requireClockInPhoto: false,
+  requireClockOutPhoto: false,
+  requireClockInToLogin: false,
+  // Kiosk Mode disabled by default
+  kioskModeEnabled: false,
 }
 
 /**

@@ -68,19 +68,20 @@ export async function getOrder(req: Request<{ venueId: string; orderId: string }
 }
 
 export async function createOrder(
-  req: Request<{ venueId: string }, any, { tableId?: string; covers?: number; waiterId?: string; orderType?: string }>,
+  req: Request<{ venueId: string }, any, { tableId?: string; covers?: number; waiterId?: string; orderType?: string; terminalId?: string }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
     const venueId: string = req.params.venueId
-    const { tableId, covers, waiterId, orderType } = req.body
+    const { tableId, covers, waiterId, orderType, terminalId } = req.body
 
     const order = await orderTpvService.createOrder(venueId, {
       tableId,
       covers,
       waiterId,
       orderType: orderType as 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP',
+      terminalId, // Track which terminal created this order
     })
 
     res.status(201).json({

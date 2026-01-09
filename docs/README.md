@@ -16,6 +16,7 @@
 | Add a new VenueType | [BUSINESS_TYPES.md](./BUSINESS_TYPES.md) |
 | Understand the database | [DATABASE_SCHEMA.md](./DATABASE_SCHEMA.md) |
 | Work on inventory | [INVENTORY_REFERENCE.md](./INVENTORY_REFERENCE.md) |
+| Work on serialized inventory | [features/SERIALIZED_INVENTORY.md](./features/SERIALIZED_INVENTORY.md) |
 | Work on auto-reorder | [features/AUTO_REORDER.md](./features/AUTO_REORDER.md) |
 | Work on suppliers | [features/SUPPLIER_MANAGEMENT.md](./features/SUPPLIER_MANAGEMENT.md) |
 | Work on discounts | [features/DISCOUNT_ENGINE.md](./features/DISCOUNT_ENGINE.md) |
@@ -92,6 +93,7 @@
 |----------|-------------|
 | [INVENTORY_REFERENCE.md](./INVENTORY_REFERENCE.md) | FIFO batch system, stock deduction, recipes |
 | [INVENTORY_TESTING.md](./INVENTORY_TESTING.md) | Integration tests, critical bugs fixed |
+| [features/SERIALIZED_INVENTORY.md](./features/SERIALIZED_INVENTORY.md) | Unique barcode items (SIMs, jewelry), module system, mixed carts |
 | [features/AUTO_REORDER.md](./features/AUTO_REORDER.md) | Auto-reorder suggestions, demand forecasting, urgency levels |
 | [features/SUPPLIER_MANAGEMENT.md](./features/SUPPLIER_MANAGEMENT.md) | Supplier CRUD, pricing, recommendations, performance metrics |
 

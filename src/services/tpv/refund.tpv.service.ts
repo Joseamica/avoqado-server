@@ -21,6 +21,7 @@ interface RefundRequestData {
   staffId: string
   shiftId?: string | null
   merchantAccountId?: string | null
+  tpvId?: string | null // Terminal that processed this refund (for sales attribution)
   blumonSerialNumber: string
   authorizationNumber: string
   referenceNumber: string
@@ -169,6 +170,8 @@ export async function recordRefund(
         shiftId: shiftId || undefined,
         processedById: refundData.staffId,
         merchantAccountId: refundData.merchantAccountId || originalPayment.merchantAccountId,
+        // ⭐ Terminal that processed this refund (use provided tpvId or inherit from original payment)
+        terminalId: refundData.tpvId || originalPayment.terminalId || null,
 
         // Negative amount to represent refund
         amount: new Decimal(-refundAmountInPesos),

@@ -34,11 +34,11 @@ export async function getTables(req: Request, res: Response): Promise<void> {
 export async function assignTable(req: Request, res: Response): Promise<void> {
   try {
     const { venueId } = req.params
-    const { tableId, staffId, covers } = req.body
+    const { tableId, staffId, covers, terminalId } = req.body
 
-    logger.info(`[TABLE CONTROLLER] POST /tpv/venues/${venueId}/tables/assign - Table: ${tableId}, Staff: ${staffId}, Covers: ${covers}`)
+    logger.info(`[TABLE CONTROLLER] POST /tpv/venues/${venueId}/tables/assign - Table: ${tableId}, Staff: ${staffId}, Covers: ${covers}, Terminal: ${terminalId || 'none'}`)
 
-    const result = await tableService.assignTable(venueId, tableId, staffId, covers)
+    const result = await tableService.assignTable(venueId, tableId, staffId, covers, terminalId)
 
     res.status(result.isNewOrder ? 201 : 200).json({
       success: true,

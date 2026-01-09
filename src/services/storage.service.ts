@@ -2,6 +2,28 @@
 import { getStorageBucket } from '../config/firebase'
 import logger from '../config/logger'
 import { v4 as uuidv4 } from 'uuid'
+import { env } from '../config/env'
+
+/**
+ * Get the storage prefix based on environment
+ * - production → 'prod'
+ * - everything else → 'dev'
+ */
+export function getStorageEnvPrefix(): 'prod' | 'dev' {
+  return env.NODE_ENV === 'production' ? 'prod' : 'dev'
+}
+
+/**
+ * Build a storage path with environment prefix
+ * @param path - Path without env prefix (e.g., 'venues/my-venue/kyc/file.pdf')
+ * @returns Path with env prefix (e.g., 'prod/venues/my-venue/kyc/file.pdf')
+ */
+export function buildStoragePath(path: string): string {
+  const prefix = getStorageEnvPrefix()
+  // Remove leading slash if present
+  const cleanPath = path.startsWith('/') ? path.slice(1) : path
+  return `${prefix}/${cleanPath}`
+}
 
 /**
  * Extract file path from Firebase Storage URL
@@ -154,7 +176,7 @@ export async function deleteVenueFolder(venueSlug: string): Promise<boolean> {
       return false
     }
 
-    const folderPath = `venues/${venueSlug}/`
+    const folderPath = buildStoragePath(`venues/${venueSlug}/`)
 
     logger.info(`🗑️  Deleting entire venue folder: ${folderPath}`)
 

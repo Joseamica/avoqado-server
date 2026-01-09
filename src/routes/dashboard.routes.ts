@@ -199,6 +199,8 @@ import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 import reportsRoutes from './dashboard/reports.routes'
+// @temporary - Serialized inventory demo routes (delete after final implementation)
+import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3408,6 +3410,10 @@ router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, 
 
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
+
+// @temporary - Serialized Inventory Demo routes (delete after final implementation)
+// For PlayTelecom SIM sales visualization demo
+router.use('/venues/:venueId/serialized-inventory', authenticateTokenMiddleware, serializedInventoryRoutes)
 
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)

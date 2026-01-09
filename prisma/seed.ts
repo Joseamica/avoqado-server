@@ -3860,7 +3860,7 @@ async function main() {
                 productId: product.id,
                 quantity,
                 unitPrice: product.price,
-                taxAmount: itemTotal * 0.16,
+                taxAmount: itemTotal - itemTotal / 1.16, // Mexico: IVA already included in price
                 total: itemTotal,
                 createdAt: orderCreatedAt,
               },
@@ -3890,7 +3890,10 @@ async function main() {
             })
           }
 
-          const taxAmount = subtotal * 0.16
+          // Mexico model: prices INCLUDE IVA (16%)
+          // taxAmount is the IVA portion already included in subtotal, NOT added on top
+          // Formula: taxAmount = subtotal - (subtotal / 1.16)
+          const taxAmount = subtotal - subtotal / 1.16
 
           // Generate realistic tip based on customer cohort and service quality
           let tipAmount = 0
@@ -3913,7 +3916,8 @@ async function main() {
             tipAmount = subtotal * Math.min(finalTipPercent, 0.3) // Cap at 30%
           }
 
-          const total = subtotal + taxAmount + tipAmount
+          // Mexico: total = subtotal + tip (taxAmount is already included in subtotal)
+          const total = subtotal + tipAmount
 
           await prisma.order.update({
             where: { id: order.id },

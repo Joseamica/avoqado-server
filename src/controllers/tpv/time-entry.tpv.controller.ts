@@ -8,9 +8,11 @@ import logger from '../../config/logger'
 export async function clockIn(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const { staffId, pin, jobRole, checkInPhotoUrl } = req.body
+    const { staffId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy } = req.body
 
-    logger.info(`Clock-in request: venueId=${venueId}, staffId=${staffId}, hasPhoto=${!!checkInPhotoUrl}`)
+    logger.info(
+      `Clock-in request: venueId=${venueId}, staffId=${staffId}, hasPhoto=${!!checkInPhotoUrl}, hasGps=${!!(latitude && longitude)}`,
+    )
 
     const timeEntry = await timeEntryService.clockIn({
       venueId,
@@ -18,6 +20,9 @@ export async function clockIn(req: Request, res: Response, next: NextFunction) {
       pin,
       jobRole,
       checkInPhotoUrl,
+      latitude,
+      longitude,
+      accuracy,
     })
 
     res.status(201).json({
@@ -35,14 +40,20 @@ export async function clockIn(req: Request, res: Response, next: NextFunction) {
 export async function clockOut(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const { staffId, pin } = req.body
+    const { staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy } = req.body
 
-    logger.info(`Clock-out request: venueId=${venueId}, staffId=${staffId}`)
+    logger.info(
+      `Clock-out request: venueId=${venueId}, staffId=${staffId}, hasPhoto=${!!checkOutPhotoUrl}, hasGps=${!!(latitude && longitude)}`,
+    )
 
     const timeEntry = await timeEntryService.clockOut({
       venueId,
       staffId,
       pin,
+      checkOutPhotoUrl,
+      latitude,
+      longitude,
+      accuracy,
     })
 
     res.status(200).json({

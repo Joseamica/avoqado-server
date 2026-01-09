@@ -450,6 +450,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-tables:assign', // Can assign tables to orders
     'tpv-time-entries:write', // Can clock in/out, take breaks
     'tpv-payments:pay-later', // Can create pay-later orders
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
   ],
 
   /**
@@ -477,6 +479,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-time-entries:write', // Can clock in/out
     'tpv-products:read', // Can search products by barcode
     'tpv-payments:pay-later', // Can create pay-later orders
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
   ],
 
   /**
@@ -549,6 +553,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:write', // Can create products on-the-fly (Scan & Go)
     'tpv-reports:pay-later-aging', // Can view pay-later aging report
     'notifications:send', // Can send push notifications to staff
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
+    'serialized-inventory:create', // Can register (Alta de Productos)
     // NO: tpv-terminal:settings (ADMIN+ only)
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
     // NO: tpv-factory-reset (OWNER only)
@@ -572,6 +579,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
+    'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
     'features:*',
     'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
@@ -993,6 +1001,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tpv-reports': ['tpv-reports:read', 'tpv-reports:export', 'tpv-reports:pay-later-aging'],
   'tpv-products': ['tpv-products:read', 'tpv-products:write'],
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
+  // Serialized Inventory (SIMs, jewelry, etc.)
+  'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],
 }
 
 /**

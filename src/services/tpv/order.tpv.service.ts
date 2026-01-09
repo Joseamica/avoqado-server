@@ -4,6 +4,8 @@ import { NotFoundError, BadRequestError, ConflictError } from '../../errors/AppE
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
+import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
+import { moduleService, MODULE_CODES } from '../modules/module.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -279,6 +281,7 @@ interface CreateOrderInput {
   covers?: number
   waiterId?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
+  terminalId?: string | null // Terminal that created this order (for sales attribution)
 }
 
 /**
@@ -315,6 +318,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
       orderNumber,
       servedById: input.waiterId || null,
       createdById: input.waiterId || null,
+      terminalId: input.terminalId || null, // Track which terminal created this order
       status: 'PENDING',
       paymentStatus: 'PENDING',
       kitchenStatus: 'PENDING',
@@ -2015,4 +2019,300 @@ export async function createAndAddCustomerToOrder(
 
   // Return updated list of order customers
   return getOrderCustomers(venueId, orderId)
+}
+
+// ==========================================
+// SERIALIZED INVENTORY - Mixed Cart Support
+// For items with unique barcodes (SIMs, jewelry, electronics)
+// ==========================================
+
+interface AddSerializedItemInput {
+  serialNumber: string
+  categoryId?: string // Required if item not registered
+  price: number // Cashier-entered price (SerializedItem has no price field)
+  notes?: string | null
+}
+
+/**
+ * Add a serialized item to an existing order (mixed cart support).
+ * Handles both registered and unregistered items.
+ *
+ * @param venueId Venue ID
+ * @param orderId Order ID
+ * @param input Serialized item details
+ * @param expectedVersion Expected order version for optimistic locking
+ * @param staffId Staff ID performing the action
+ */
+export async function addSerializedItemToOrder(
+  venueId: string,
+  orderId: string,
+  input: AddSerializedItemInput,
+  expectedVersion: number,
+  staffId: string,
+): Promise<Order & { tableName: string | null }> {
+  logger.info(`📦 [ORDER SERVICE] Adding serialized item ${input.serialNumber} to order ${orderId}`)
+
+  // Verify module is enabled for this venue
+  const isEnabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+  if (!isEnabled) {
+    throw new BadRequestError('Serialized inventory module is not enabled for this venue')
+  }
+
+  // Scan to check item status
+  const scanResult = await serializedInventoryService.scan(venueId, input.serialNumber)
+
+  if (scanResult.status === 'already_sold') {
+    throw new BadRequestError(`Item ${input.serialNumber} ya fue vendido`)
+  }
+
+  if (scanResult.status === 'module_disabled') {
+    throw new BadRequestError('Módulo de inventario serializado no habilitado')
+  }
+
+  // Get the order with optimistic locking check
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      version: true,
+      subtotal: true,
+      total: true,
+      discountAmount: true,
+      paymentStatus: true,
+    },
+  })
+
+  if (!order) {
+    throw new NotFoundError('Order not found')
+  }
+
+  if (order.version !== expectedVersion) {
+    throw new ConflictError('Order was modified by another user. Please refresh and try again.')
+  }
+
+  if (order.paymentStatus === 'PAID') {
+    throw new BadRequestError('Cannot add items to a paid order')
+  }
+
+  // Use transaction to ensure atomicity
+  const result = await prisma.$transaction(async tx => {
+    let serializedItemWithCategory: Awaited<ReturnType<typeof serializedInventoryService.getItemBySerialNumber>>
+
+    if (scanResult.found && scanResult.item) {
+      // Item exists - use it
+      serializedItemWithCategory = scanResult.item
+    } else {
+      // Item doesn't exist - register it
+      if (!input.categoryId) {
+        throw new BadRequestError('categoryId is required for unregistered items')
+      }
+
+      serializedItemWithCategory = await serializedInventoryService.register({
+        venueId,
+        categoryId: input.categoryId,
+        serialNumber: input.serialNumber,
+        createdBy: staffId,
+      })
+    }
+
+    // Build OrderItem data with proper snapshot fields
+    const orderItemData = serializedInventoryService.buildOrderItemData(serializedItemWithCategory!, input.price)
+
+    // Create OrderItem
+    const orderItem = await tx.orderItem.create({
+      data: {
+        orderId,
+        ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
+        notes: input.notes,
+      },
+    })
+
+    // Mark serialized item as sold (must use tx to reference the OrderItem created in this transaction)
+    await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItem.id, tx)
+
+    // Calculate new totals
+    const newSubtotal = Number(order.subtotal) + input.price
+    const newTotal = newSubtotal - Number(order.discountAmount)
+
+    // Update order totals and increment version
+    const updatedOrder = await tx.order.update({
+      where: { id: orderId },
+      data: {
+        subtotal: newSubtotal,
+        total: newTotal,
+        remainingBalance: newTotal,
+        version: { increment: 1 },
+      },
+      include: {
+        items: {
+          include: {
+            product: { select: { id: true, name: true, price: true } },
+            modifiers: { include: { modifier: true } },
+          },
+        },
+        payments: { include: { allocations: true } },
+        table: { select: { id: true, number: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        servedBy: { select: { id: true, firstName: true, lastName: true } },
+      },
+    })
+
+    return updatedOrder
+  })
+
+  logger.info(`✅ [ORDER SERVICE] Added serialized item ${input.serialNumber} to order ${order.orderNumber}. New total: $${result.total}`)
+
+  // Emit Socket.IO event for real-time updates
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
+      orderId: result.id,
+      orderNumber: result.orderNumber,
+      tableId: result.tableId,
+      subtotal: Number(result.subtotal),
+      total: Number(result.total),
+      version: result.version,
+    })
+  }
+
+  const tableName = result.table ? `Mesa ${result.table.number}` : null
+  return { ...flattenOrderModifiers(result), tableName }
+}
+
+interface SellSerializedItemInput {
+  serialNumber: string
+  categoryId?: string // Required if item not registered
+  price: number // Cashier-entered price
+  paymentMethodId?: string // Optional: if paying immediately
+  notes?: string | null
+  terminalId?: string | null // Terminal that created this order (for sales attribution)
+}
+
+/**
+ * Quick sell a single serialized item (creates new order + item in one shot).
+ * For fast checkout of serialized items without an existing order.
+ *
+ * @param venueId Venue ID
+ * @param input Serialized item and payment details
+ * @param staffId Staff ID performing the sale
+ */
+export async function sellSerializedItem(
+  venueId: string,
+  input: SellSerializedItemInput,
+  staffId: string,
+): Promise<Order & { tableName: string | null }> {
+  logger.info(`💵 [ORDER SERVICE] Quick sell serialized item ${input.serialNumber}`)
+
+  // Verify module is enabled for this venue
+  const isEnabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+  if (!isEnabled) {
+    throw new BadRequestError('Serialized inventory module is not enabled for this venue')
+  }
+
+  // Scan to check item status
+  const scanResult = await serializedInventoryService.scan(venueId, input.serialNumber)
+
+  if (scanResult.status === 'already_sold') {
+    throw new BadRequestError(`Item ${input.serialNumber} ya fue vendido`)
+  }
+
+  if (scanResult.status === 'module_disabled') {
+    throw new BadRequestError('Módulo de inventario serializado no habilitado')
+  }
+
+  // Generate order number
+  const orderCount = await prisma.order.count({ where: { venueId } })
+  const orderNumber = `SN${String(orderCount + 1).padStart(5, '0')}`
+
+  // Use transaction for atomicity
+  const result = await prisma.$transaction(async tx => {
+    let serializedItemWithCategory: Awaited<ReturnType<typeof serializedInventoryService.getItemBySerialNumber>>
+
+    if (scanResult.found && scanResult.item) {
+      serializedItemWithCategory = scanResult.item
+    } else {
+      if (!input.categoryId) {
+        throw new BadRequestError('categoryId is required for unregistered items')
+      }
+
+      serializedItemWithCategory = await serializedInventoryService.register({
+        venueId,
+        categoryId: input.categoryId,
+        serialNumber: input.serialNumber,
+        createdBy: staffId,
+      })
+    }
+
+    // Build OrderItem data with proper snapshot fields
+    const orderItemData = serializedInventoryService.buildOrderItemData(serializedItemWithCategory!, input.price)
+
+    // Create order
+    const order = await tx.order.create({
+      data: {
+        venueId,
+        orderNumber,
+        status: 'COMPLETED', // SerializedItem sales are instant
+        paymentStatus: 'PENDING',
+        subtotal: input.price,
+        taxAmount: 0, // No tax by default for serialized items
+        total: input.price,
+        remainingBalance: input.price,
+        createdById: staffId,
+        servedById: staffId,
+        type: 'DINE_IN', // Default, could be parameterized
+        // ⭐ Terminal that created this order (for sales attribution by device)
+        terminalId: input.terminalId || null,
+        items: {
+          create: {
+            ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
+            notes: input.notes,
+          },
+        },
+      },
+      include: {
+        items: true,
+      },
+    })
+
+    // Mark serialized item as sold (must use tx to reference the OrderItem created in this transaction)
+    const orderItemId = order.items[0].id
+    await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItemId, tx)
+
+    // Fetch full order with all includes
+    const fullOrder = await tx.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: {
+        items: {
+          include: {
+            product: { select: { id: true, name: true, price: true } },
+            modifiers: { include: { modifier: true } },
+          },
+        },
+        payments: { include: { allocations: true } },
+        table: { select: { id: true, number: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        servedBy: { select: { id: true, firstName: true, lastName: true } },
+      },
+    })
+
+    return fullOrder
+  })
+
+  logger.info(`✅ [ORDER SERVICE] Created order ${orderNumber} for serialized item ${input.serialNumber}. Total: $${input.price}`)
+
+  // Emit Socket.IO event
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_CREATED, {
+      orderId: result.id,
+      orderNumber: result.orderNumber,
+      subtotal: Number(result.subtotal),
+      total: Number(result.total),
+      version: result.version,
+    })
+  }
+
+  const tableName = result.table ? `Mesa ${result.table.number}` : null
+  return { ...flattenOrderModifiers(result), tableName }
 }

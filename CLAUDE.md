@@ -6,6 +6,8 @@ This file is the **index** for Claude Code. It provides quick context and points
 
 ## 🔴 MANDATORY: Documentation Update Rule (READ FIRST)
 
+**Be very careful on allucinations of the code.**
+
 **When implementing or modifying ANY feature, you MUST:**
 
 1. **Check if documentation exists** for the feature/area you're modifying
@@ -54,11 +56,11 @@ POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliabi
 
 ### Architecture & Core
 
-| Document                        | Description                                                   |
-| ------------------------------- | ------------------------------------------------------------- |
-| `docs/ARCHITECTURE_OVERVIEW.md` | Layered architecture, multi-tenant, control/application plane |
-| `docs/PERMISSIONS_SYSTEM.md`    | Permission system, RBAC, override vs merge modes              |
-| `docs/DATABASE_SCHEMA.md`       | Complete database schema reference                            |
+| Document                        | Description                                                       |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `docs/ARCHITECTURE_OVERVIEW.md` | Layered architecture, multi-tenant, control/application plane     |
+| `docs/PERMISSIONS_SYSTEM.md`    | Permission system, RBAC, override vs merge modes                  |
+| `docs/DATABASE_SCHEMA.md`       | Complete database schema reference                                |
 | `docs/BUSINESS_TYPES.md`        | VenueType enum, BusinessCategory, MCC mapping, industry standards |
 
 ### Payments
@@ -109,10 +111,33 @@ const result = lookupRatesByBusinessName('Gimnasio')
 
 ### Inventory
 
-| Document                      | Description                                 |
-| ----------------------------- | ------------------------------------------- |
-| `docs/INVENTORY_REFERENCE.md` | FIFO batch system, stock deduction, recipes |
-| `docs/INVENTORY_TESTING.md`   | Integration tests, critical bugs fixed      |
+| Document                                | Description                                             |
+| --------------------------------------- | ------------------------------------------------------- |
+| `docs/INVENTORY_REFERENCE.md`           | FIFO batch system, stock deduction, recipes             |
+| `docs/INVENTORY_TESTING.md`             | Integration tests, critical bugs fixed                  |
+| `docs/features/SERIALIZED_INVENTORY.md` | Unique barcode items (SIMs, jewelry, electronics, etc.) |
+
+### Module System (Multi-Tenant Features)
+
+**Concept:** VenueModule enables/disables behavior per venue. Different from VenueFeature (billing).
+
+```typescript
+// Check if module is enabled for venue
+const enabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+
+// Get config with industry-specific terminology
+const config = await moduleService.getModuleConfig(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+// config.labels.item = "SIM" (telecom) or "Pieza" (jewelry) or "Dispositivo" (electronics)
+```
+
+**Key Files:**
+
+- `src/services/modules/module.service.ts` - Module enable/config/check
+- `src/services/serialized-inventory/serializedInventory.service.ts` - Scan, register, sell
+- `scripts/setup-modules.ts` - Create global modules
+- `scripts/setup-playtelecom.ts` - Example venue setup
+
+**Full docs:** `docs/features/SERIALIZED_INVENTORY.md`
 
 ### AI Chatbot
 
@@ -254,15 +279,43 @@ Routes → Middleware → Controllers → Services → Prisma (Database)
 
 ## 7. Critical Patterns (MUST Follow)
 
-### Authentication
+### Authentication & authContext
+
+**⚠️ CRITICAL: `authContext` Structure**
+
+The `authContext` object is set by `authenticateToken.middleware.ts` and contains ONLY these fields:
 
 ```typescript
-// CORRECT - Use authContext
-const { userId, venueId, orgId, role } = (req as any).authContext
+interface AuthContext {
+  userId: string    // ← Staff member ID (from JWT sub claim)
+  orgId: string     // ← Organization ID
+  venueId: string   // ← Venue ID
+  role: string      // ← User role (ADMIN, MANAGER, CASHIER, etc.)
+}
+```
 
-// WRONG - req.user does NOT exist
+**Common Mistakes:**
+
+```typescript
+// ❌ WRONG - staffId does NOT exist in authContext!
+const { venueId, staffId } = (req as any).authContext  // staffId = undefined!
+
+// ✅ CORRECT - userId IS the staff member ID
+const { venueId, userId } = (req as any).authContext
+
+// ✅ CORRECT - Rename for clarity if needed
+const { venueId, userId: staffId } = (req as any).authContext
+
+// ❌ WRONG - req.user does NOT exist
 const user = (req as any).user // undefined!
 ```
+
+**Why `userId` and not `staffId`?**
+- The JWT token stores the staff ID in the `sub` (subject) claim
+- The middleware names it `userId` because it's the authenticated user's ID
+- In TPV context, `userId` === `staffId` (they're the same person)
+
+**Source:** `src/middlewares/authenticateToken.middleware.ts`
 
 ### Tenant Isolation
 
@@ -301,6 +354,65 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), handler)
 app.use(express.json()) // After webhooks
 ```
 
+### Firebase Storage Paths
+
+**CRITICAL**: All Firebase Storage paths MUST include:
+1. **Environment prefix** (`dev/` or `prod/`) - separates sandbox from production data
+2. **Venue slug** (never venueId) - human-readable paths
+
+**Path Structure:**
+```
+{env}/venues/{venueSlug}/{folder}/{date}/{filename}
+```
+
+**Examples:**
+- `dev/venues/avoqado-full/verifications/2025-12-12/ORDER-12345.jpg`
+- `prod/venues/avoqado-full/clockin/2025-12-12/staff123_1704067200000.jpg`
+- `dev/venues/mi-restaurante/logos/cropped_1704067200000.jpg`
+
+**Backend (avoqado-server)**: Always use `buildStoragePath()`:
+
+```typescript
+import { buildStoragePath } from '@/services/storage.service'
+
+// CORRECT - Use buildStoragePath() with venue.slug
+const path = buildStoragePath(`venues/${venue.slug}/kyc/${documentName}.pdf`)
+// Result: "prod/venues/my-venue/kyc/INE.pdf" (production)
+// Result: "dev/venues/my-venue/kyc/INE.pdf" (development)
+
+// WRONG - Missing environment prefix or using venueId
+const path = `venues/${venue.slug}/kyc/${documentName}.pdf` // NO prefix!
+const path = `venues/${venueId}/kyc/${documentName}.pdf` // NO! Use slug!
+```
+
+**Frontend (avoqado-web-dashboard)**: Use `buildStoragePath()` from firebase.ts:
+
+```typescript
+import { storage, buildStoragePath } from '@/firebase'
+import { ref } from 'firebase/storage'
+
+// CORRECT - Use buildStoragePath() with venueSlug from hook
+const { venueSlug } = useCurrentVenue()
+const storageRef = ref(storage, buildStoragePath(`venues/${venueSlug}/logos/${fileName}`))
+// Result: "prod/venues/my-venue/logos/cropped_123.jpg" (production)
+// Result: "dev/venues/my-venue/logos/cropped_123.jpg" (development)
+
+// WRONG - Missing buildStoragePath or using venue?.slug
+const storageRef = ref(storage, `venues/${venueSlug}/logos/${fileName}`) // NO prefix!
+```
+
+**Android (avoqado-tpv)**: Use `buildStoragePath()` in VerificationUploadManager:
+
+```kotlin
+// CORRECT - Environment prefix is determined by build flavor
+val storagePath = buildStoragePath("venues/$venueSlug/verifications/$dateStr/$fileName")
+// Result: "prod/venues/..." (production flavor)
+// Result: "dev/venues/..." (sandbox flavor)
+
+// WRONG - Missing buildStoragePath
+val storagePath = "venues/$venueSlug/verifications/$dateStr/$fileName" // NO prefix!
+```
+
 ---
 
 ## 8. Documentation Policy
@@ -332,12 +444,12 @@ avoqado-tpv/docs/              ← Android-specific ONLY
 
 ### What goes where
 
-| Type | Location |
-|------|----------|
-| Cross-repo features (payments, inventory logic) | `docs/features/` |
-| Architecture, DB schema, API | `docs/` |
-| React/UI patterns | `avoqado-web-dashboard/docs/` |
-| Android/Kotlin patterns | `avoqado-tpv/docs/` |
+| Type                                            | Location                      |
+| ----------------------------------------------- | ----------------------------- |
+| Cross-repo features (payments, inventory logic) | `docs/features/`              |
+| Architecture, DB schema, API                    | `docs/`                       |
+| React/UI patterns                               | `avoqado-web-dashboard/docs/` |
+| Android/Kotlin patterns                         | `avoqado-tpv/docs/`           |
 
 ### What goes in CLAUDE.md (this file)
 
@@ -367,12 +479,14 @@ avoqado-tpv/docs/              ← Android-specific ONLY
 > **See "🔴 MANDATORY: Documentation Update Rule" at the top of this file.**
 
 **Checklist before committing:**
+
 - [ ] Does this change affect any existing documentation?
 - [ ] Did I update line number references if file structure changed?
 - [ ] Did I update progress percentages if completing phases?
 - [ ] Did I add new documentation if this is a new feature?
 
 **Avoid fragile line number references.** Instead of `"See file.ts lines 100-200"`, use:
+
 - Function/class names: `"See createOrder() in order.service.ts"`
 - Section headers: `"See ## Authentication section in AUTH.md"`
 - Model names: `"See SettlementIncident model in schema.prisma"`

@@ -64,6 +64,9 @@ import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
 import * as productService from '../services/dashboard/product.dashboard.service'
 import emailService from '../services/email.service'
+import { moduleService, MODULE_CODES } from '../services/modules/module.service'
+import { serializedInventoryService } from '../services/serialized-inventory/serializedInventory.service'
+import * as orderTpvService from '../services/tpv/order.tpv.service'
 import AppError from '../errors/AppError'
 import logger from '../config/logger'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -4722,5 +4725,496 @@ router.post('/feedback', validateRequest(tpvFeedbackSchema), async (req: Request
     next(error)
   }
 })
+
+// ==========================================
+// MODULES - Get enabled modules for a venue
+// ==========================================
+
+/**
+ * GET /tpv/v1/modules
+ * Get all enabled modules for a venue.
+ *
+ * Authentication: Semi-public endpoint
+ * - If user is logged in: Uses authContext.venueId
+ * - If no session (pre-login): Uses X-Venue-Id header from activated device
+ *
+ * This allows the TPV to fetch module configuration at app startup (splash screen)
+ * before user login, enabling features like Timeclock to have correct UI from the start.
+ *
+ * Security: Only returns UI configuration (labels, feature flags).
+ * Actual operations (clock-in, sales) still require full authentication.
+ */
+router.get('/modules', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Try to get venueId from auth context first (logged in user)
+    let venueId = (req as any).authContext?.venueId
+
+    // If no auth context, try X-Venue-Id header (activated device, pre-login)
+    if (!venueId) {
+      venueId = req.headers['x-venue-id'] as string
+    }
+
+    if (!venueId) {
+      logger.warn(`⚠️ [TPV MODULES] No venueId provided`, {
+        correlationId: req.correlationId,
+        hasAuthContext: !!(req as any).authContext,
+        hasVenueIdHeader: !!req.headers['x-venue-id'],
+      })
+      return res.status(400).json({
+        error: 'venueId required',
+        message: 'Provide venueId via authentication or X-Venue-Id header',
+      })
+    }
+
+    // Validate that the venue exists (basic security check)
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { id: true, status: true },
+    })
+
+    if (!venue) {
+      logger.warn(`⚠️ [TPV MODULES] Venue not found`, {
+        venueId,
+        correlationId: req.correlationId,
+      })
+      return res.status(404).json({ error: 'Venue not found' })
+    }
+
+    logger.info(`📦 [TPV MODULES] Getting enabled modules`, {
+      venueId,
+      source: (req as any).authContext?.venueId ? 'authContext' : 'header',
+      correlationId: req.correlationId,
+    })
+
+    const modules = await moduleService.getEnabledModules(venueId)
+
+    logger.info(`✅ [TPV MODULES] Found ${modules.length} enabled modules`, {
+      venueId,
+      modules: modules.map(m => m.code),
+      correlationId: req.correlationId,
+    })
+
+    return res.status(200).json({ modules })
+  } catch (error) {
+    logger.error(`❌ [TPV MODULES] Error getting modules`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
+
+// ==========================================
+// SERIALIZED INVENTORY - Barcode-scanned items
+// For SIMs, jewelry, electronics, etc.
+// ==========================================
+
+/**
+ * GET /tpv/v1/serialized-inventory/categories
+ * Get all item categories with stock counts.
+ */
+router.get('/serialized-inventory/categories', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = (req as any).authContext
+
+    logger.info(`📦 [SERIALIZED INV] Getting categories`, {
+      venueId,
+      correlationId: req.correlationId,
+    })
+
+    const categoriesWithStock = await serializedInventoryService.getStockByCategory(venueId)
+
+    // Transform to format expected by TPV Android
+    const data = categoriesWithStock.map(item => ({
+      id: item.category.id,
+      name: item.category.name,
+      description: item.category.description,
+      suggestedPrice: item.category.suggestedPrice?.toString() ?? null,
+      availableCount: item.available,
+    }))
+
+    logger.info(`📦 [SERIALIZED INV] Found ${data.length} categories`, {
+      venueId,
+      correlationId: req.correlationId,
+    })
+
+    return res.status(200).json({ success: true, data })
+  } catch (error) {
+    logger.error(`❌ [SERIALIZED INV] Error getting categories`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
+
+/**
+ * POST /tpv/v1/serialized-inventory/scan
+ * Scan a barcode and get item status.
+ */
+router.post('/serialized-inventory/scan', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = (req as any).authContext
+    const { serialNumber } = req.body
+
+    if (!serialNumber || typeof serialNumber !== 'string') {
+      throw new AppError('serialNumber is required', 400)
+    }
+
+    logger.info(`🔍 [SERIALIZED INV] Scanning barcode`, {
+      venueId,
+      serialNumber,
+      correlationId: req.correlationId,
+    })
+
+    const result = await serializedInventoryService.scan(venueId, serialNumber)
+
+    logger.info(`✅ [SERIALIZED INV] Scan result: ${result.status}`, {
+      venueId,
+      serialNumber,
+      found: result.found,
+      status: result.status,
+      correlationId: req.correlationId,
+    })
+
+    return res.status(200).json(result)
+  } catch (error) {
+    logger.error(`❌ [SERIALIZED INV] Error scanning`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
+
+/**
+ * POST /tpv/v1/serialized-inventory/register-batch
+ * Register multiple items in batch (bulk registration by manager).
+ * Requires serialized-inventory:create permission.
+ */
+router.post(
+  '/serialized-inventory/register-batch',
+  authenticateTokenMiddleware,
+  checkPermission('serialized-inventory:create'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // userId from authContext IS the staffId (authenticated staff member)
+      const { venueId, userId: staffId } = (req as any).authContext
+      const { categoryId, serialNumbers } = req.body
+
+      if (!categoryId || typeof categoryId !== 'string') {
+        throw new AppError('categoryId is required', 400)
+      }
+
+      if (!Array.isArray(serialNumbers) || serialNumbers.length === 0) {
+        throw new AppError('serialNumbers array is required and cannot be empty', 400)
+      }
+
+      logger.info(`📦 [SERIALIZED INV] Batch registration`, {
+        venueId,
+        staffId,
+        categoryId,
+        count: serialNumbers.length,
+        correlationId: req.correlationId,
+      })
+
+      const result = await serializedInventoryService.registerBatch({
+        venueId,
+        categoryId,
+        serialNumbers,
+        createdBy: staffId,
+      })
+
+      logger.info(`✅ [SERIALIZED INV] Batch complete: ${result.created} created, ${result.duplicates.length} duplicates`, {
+        venueId,
+        created: result.created,
+        duplicatesCount: result.duplicates.length,
+        correlationId: req.correlationId,
+      })
+
+      return res.status(200).json({ success: true, data: result })
+    } catch (error) {
+      logger.error(`❌ [SERIALIZED INV] Error in batch registration`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /tpv/v1/serialized-inventory/sell
+ * Quick sell a serialized item (creates order + item in one shot).
+ * Requires serialized-inventory:sell permission.
+ */
+router.post(
+  '/serialized-inventory/sell',
+  authenticateTokenMiddleware,
+  checkPermission('serialized-inventory:sell'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // userId from authContext IS the staffId (authenticated staff member)
+      const { venueId, userId: staffId } = (req as any).authContext
+      const { serialNumber, categoryId, price, paymentMethodId, notes, terminalId } = req.body
+
+      if (!serialNumber || typeof serialNumber !== 'string') {
+        throw new AppError('serialNumber is required', 400)
+      }
+
+      if (typeof price !== 'number' || price < 0) {
+        throw new AppError('price must be a non-negative number', 400)
+      }
+
+      logger.info(`💵 [SERIALIZED INV] Quick sell`, {
+        venueId,
+        staffId,
+        serialNumber,
+        price,
+        correlationId: req.correlationId,
+      })
+
+      const result = await orderTpvService.sellSerializedItem(venueId, { serialNumber, categoryId, price, paymentMethodId, notes, terminalId }, staffId)
+
+      logger.info(`✅ [SERIALIZED INV] Order created: ${result.orderNumber}`, {
+        venueId,
+        orderId: result.id,
+        orderNumber: result.orderNumber,
+        correlationId: req.correlationId,
+      })
+
+      return res.status(201).json(result)
+    } catch (error) {
+      logger.error(`❌ [SERIALIZED INV] Error in quick sell`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /tpv/v1/orders/:orderId/serialized-item
+ * Add a serialized item to an existing order (mixed cart support).
+ * Requires orders:update permission.
+ */
+router.post(
+  '/orders/:orderId/serialized-item',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // userId from authContext IS the staffId (authenticated staff member)
+      const { venueId, userId: staffId } = (req as any).authContext
+      const { orderId } = req.params
+      const { serialNumber, categoryId, price, notes, expectedVersion } = req.body
+
+      if (!serialNumber || typeof serialNumber !== 'string') {
+        throw new AppError('serialNumber is required', 400)
+      }
+
+      if (typeof price !== 'number' || price < 0) {
+        throw new AppError('price must be a non-negative number', 400)
+      }
+
+      if (typeof expectedVersion !== 'number') {
+        throw new AppError('expectedVersion is required', 400)
+      }
+
+      logger.info(`📦 [SERIALIZED INV] Adding to order`, {
+        venueId,
+        staffId,
+        orderId,
+        serialNumber,
+        price,
+        correlationId: req.correlationId,
+      })
+
+      const result = await orderTpvService.addSerializedItemToOrder(
+        venueId,
+        orderId,
+        { serialNumber, categoryId, price, notes },
+        expectedVersion,
+        staffId,
+      )
+
+      logger.info(`✅ [SERIALIZED INV] Added to order: ${result.orderNumber}`, {
+        venueId,
+        orderId: result.id,
+        orderNumber: result.orderNumber,
+        newTotal: result.total,
+        correlationId: req.correlationId,
+      })
+
+      return res.status(200).json(result)
+    } catch (error) {
+      logger.error(`❌ [SERIALIZED INV] Error adding to order`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+// ==============================================
+// GEOLOCATION (Cell ID + WiFi to Coordinates)
+// ==============================================
+
+/**
+ * POST /tpv/v1/geolocation/cell-towers
+ * Convert cell tower + WiFi info to GPS coordinates using Google Geolocation API.
+ * Used by PAX devices for indoor location (no GPS satellite visibility).
+ *
+ * Accuracy:
+ * - Cell towers only: ~100-1000m
+ * - Cell + WiFi: ~20-50m (MUCH BETTER!)
+ *
+ * @requires GOOGLE_GEOLOCATION_API_KEY env variable
+ */
+router.post(
+  '/geolocation/cell-towers',
+  authenticateTokenMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { cellTowers, wifiAccessPoints } = req.body
+
+      // Validate: need at least one of cell towers or WiFi APs
+      const hasCellTowers = Array.isArray(cellTowers) && cellTowers.length > 0
+      const hasWifiAPs = Array.isArray(wifiAccessPoints) && wifiAccessPoints.length > 0
+
+      if (!hasCellTowers && !hasWifiAPs) {
+        throw new AppError('cellTowers or wifiAccessPoints array is required', 400)
+      }
+
+      logger.info(`📍 [GEOLOCATION] Network location request`, {
+        cellTowersCount: cellTowers?.length || 0,
+        wifiAPsCount: wifiAccessPoints?.length || 0,
+        firstTower: cellTowers?.[0],
+        correlationId: req.correlationId,
+      })
+
+      // Call Google Geolocation API
+      const result = await getNetworkLocation(cellTowers || [], wifiAccessPoints || [])
+
+      if (!result) {
+        throw new AppError('Could not determine location from network data', 404)
+      }
+
+      logger.info(`📍 [GEOLOCATION] Location determined`, {
+        latitude: result.latitude,
+        longitude: result.longitude,
+        accuracy: result.accuracy,
+        correlationId: req.correlationId,
+      })
+
+      return res.status(200).json(result)
+    } catch (error) {
+      logger.error(`❌ [GEOLOCATION] Error in network location lookup`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+/**
+ * Call Google Geolocation API to convert cell tower + WiFi info to coordinates.
+ * WiFi dramatically improves accuracy (from km to ~20-50m).
+ * https://developers.google.com/maps/documentation/geolocation/overview
+ */
+async function getNetworkLocation(
+  cellTowers: Array<{
+    radioType: string
+    mobileCountryCode: number
+    mobileNetworkCode: number
+    locationAreaCode: number
+    cellId: number
+  }>,
+  wifiAccessPoints: Array<{
+    macAddress: string
+    signalStrength: number
+    channel: number
+  }>,
+): Promise<{ latitude: number; longitude: number; accuracy: number } | null> {
+  const apiKey = process.env.GOOGLE_GEOLOCATION_API_KEY
+
+  if (!apiKey) {
+    logger.error('📍 [GEOLOCATION] GOOGLE_GEOLOCATION_API_KEY not configured')
+    return null
+  }
+
+  try {
+    // Build request body for Google Geolocation API
+    const requestBody: {
+      cellTowers?: Array<{
+        cellId: number
+        locationAreaCode: number
+        mobileCountryCode: number
+        mobileNetworkCode: number
+        radioType: string
+      }>
+      wifiAccessPoints?: Array<{
+        macAddress: string
+        signalStrength: number
+        channel: number
+      }>
+    } = {}
+
+    // Add cell towers if available
+    if (cellTowers.length > 0) {
+      requestBody.cellTowers = cellTowers.map(tower => ({
+        cellId: tower.cellId,
+        locationAreaCode: tower.locationAreaCode,
+        mobileCountryCode: tower.mobileCountryCode,
+        mobileNetworkCode: tower.mobileNetworkCode,
+        radioType: tower.radioType,
+      }))
+    }
+
+    // Add WiFi access points if available (dramatically improves accuracy!)
+    if (wifiAccessPoints.length > 0) {
+      requestBody.wifiAccessPoints = wifiAccessPoints.map(wifi => ({
+        macAddress: wifi.macAddress,
+        signalStrength: wifi.signalStrength,
+        channel: wifi.channel,
+      }))
+    }
+
+    const response = await fetch(`https://www.googleapis.com/geolocation/v1/geolocate?key=${apiKey}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    })
+
+    if (!response.ok) {
+      const errorBody = await response.text()
+      logger.error(`📍 [GEOLOCATION] Google API error: ${response.status}`, {
+        errorBody,
+      })
+      return null
+    }
+
+    const data = (await response.json()) as {
+      location: { lat: number; lng: number }
+      accuracy: number
+    }
+
+    return {
+      latitude: data.location.lat,
+      longitude: data.location.lng,
+      accuracy: data.accuracy,
+    }
+  } catch (error) {
+    logger.error(`📍 [GEOLOCATION] Failed to call Google API`, {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return null
+  }
+}
 
 export default router
