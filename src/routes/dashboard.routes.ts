@@ -199,6 +199,7 @@ import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 import reportsRoutes from './dashboard/reports.routes'
+import commissionRoutes from './dashboard/commission.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
 
@@ -3417,6 +3418,9 @@ router.use('/venues/:venueId/serialized-inventory', authenticateTokenMiddleware,
 
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
+
+// Commission routes (OWNER/ADMIN for config, STAFF for view own)
+router.use('/commissions', authenticateTokenMiddleware, commissionRoutes)
 
 /**
  * @openapi

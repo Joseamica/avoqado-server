@@ -287,10 +287,10 @@ The `authContext` object is set by `authenticateToken.middleware.ts` and contain
 
 ```typescript
 interface AuthContext {
-  userId: string    // ← Staff member ID (from JWT sub claim)
-  orgId: string     // ← Organization ID
-  venueId: string   // ← Venue ID
-  role: string      // ← User role (ADMIN, MANAGER, CASHIER, etc.)
+  userId: string // ← Staff member ID (from JWT sub claim)
+  orgId: string // ← Organization ID
+  venueId: string // ← Venue ID
+  role: string // ← User role (ADMIN, MANAGER, CASHIER, etc.)
 }
 ```
 
@@ -298,7 +298,7 @@ interface AuthContext {
 
 ```typescript
 // ❌ WRONG - staffId does NOT exist in authContext!
-const { venueId, staffId } = (req as any).authContext  // staffId = undefined!
+const { venueId, staffId } = (req as any).authContext // staffId = undefined!
 
 // ✅ CORRECT - userId IS the staff member ID
 const { venueId, userId } = (req as any).authContext
@@ -311,6 +311,7 @@ const user = (req as any).user // undefined!
 ```
 
 **Why `userId` and not `staffId`?**
+
 - The JWT token stores the staff ID in the `sub` (subject) claim
 - The middleware names it `userId` because it's the authenticated user's ID
 - In TPV context, `userId` === `staffId` (they're the same person)
@@ -357,15 +358,18 @@ app.use(express.json()) // After webhooks
 ### Firebase Storage Paths
 
 **CRITICAL**: All Firebase Storage paths MUST include:
+
 1. **Environment prefix** (`dev/` or `prod/`) - separates sandbox from production data
 2. **Venue slug** (never venueId) - human-readable paths
 
 **Path Structure:**
+
 ```
 {env}/venues/{venueSlug}/{folder}/{date}/{filename}
 ```
 
 **Examples:**
+
 - `dev/venues/avoqado-full/verifications/2025-12-12/ORDER-12345.jpg`
 - `prod/venues/avoqado-full/clockin/2025-12-12/staff123_1704067200000.jpg`
 - `dev/venues/mi-restaurante/logos/cropped_1704067200000.jpg`

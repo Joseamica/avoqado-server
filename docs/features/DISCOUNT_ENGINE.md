@@ -2,11 +2,13 @@
 
 ## Overview
 
-The Discount Engine is the core system for calculating and applying discounts to orders. It supports automatic discounts, BOGO (Buy One Get One), percentage/fixed discounts, comps, and complex eligibility rules including time windows, usage limits, and customer group targeting.
+The Discount Engine is the core system for calculating and applying discounts to orders. It supports automatic discounts, BOGO (Buy One Get
+One), percentage/fixed discounts, comps, and complex eligibility rules including time windows, usage limits, and customer group targeting.
 
 ## Business Context
 
 **Key Use Cases:**
+
 - Happy hour discounts (time-based)
 - Customer loyalty discounts (customer group)
 - BOGO promotions (Buy 2 Get 1 Free)
@@ -15,6 +17,7 @@ The Discount Engine is the core system for calculating and applying discounts to
 - Volume discounts (spend $500, get 10% off)
 
 **Industry Standards:**
+
 - Toast: "Discounts & Comps" with manager approval
 - Square: "Discounts" with automatic rules
 - Clover: "Order-level and item-level discounts"
@@ -196,15 +199,15 @@ model OrderDiscount {
 
 ### Scope-Based Calculation
 
-| Scope | Applicable Base |
-|-------|-----------------|
-| `ORDER` | Entire order subtotal |
-| `ITEM` | Sum of items matching `targetItemIds` |
-| `CATEGORY` | Sum of items in `targetCategoryIds` |
-| `MODIFIER` | Sum of modifiers matching `targetModifierIds` |
-| `MODIFIER_GROUP` | Sum of modifiers in `targetModifierGroupIds` |
-| `CUSTOMER_GROUP` | Entire order (if customer in group) |
-| `QUANTITY` | BOGO calculation (separate logic) |
+| Scope            | Applicable Base                               |
+| ---------------- | --------------------------------------------- |
+| `ORDER`          | Entire order subtotal                         |
+| `ITEM`           | Sum of items matching `targetItemIds`         |
+| `CATEGORY`       | Sum of items in `targetCategoryIds`           |
+| `MODIFIER`       | Sum of modifiers matching `targetModifierIds` |
+| `MODIFIER_GROUP` | Sum of modifiers in `targetModifierGroupIds`  |
+| `CUSTOMER_GROUP` | Entire order (if customer in group)           |
+| `QUANTITY`       | BOGO calculation (separate logic)             |
 
 ## Service Layer
 
@@ -214,47 +217,32 @@ model OrderDiscount {
 
 ```typescript
 // Get all discounts eligible for an order
-export async function getEligibleDiscounts(
-  venueId: string,
-  customerId?: string,
-  orderTotal?: number
-): Promise<DiscountCandidate[]>
+export async function getEligibleDiscounts(venueId: string, customerId?: string, orderTotal?: number): Promise<DiscountCandidate[]>
 
 // Get customer-assigned discounts
-export async function getCustomerDiscounts(
-  venueId: string,
-  customerId: string
-): Promise<DiscountCandidate[]>
+export async function getCustomerDiscounts(venueId: string, customerId: string): Promise<DiscountCandidate[]>
 
 // Calculate discount amount for a discount
-export function calculateDiscountAmount(
-  discount: DiscountCandidate,
-  context: OrderContext
-): DiscountCalculationResult
+export function calculateDiscountAmount(discount: DiscountCandidate, context: OrderContext): DiscountCalculationResult
 
 // Evaluate all automatic discounts for an order
-export async function evaluateAutomaticDiscounts(
-  orderId: string
-): Promise<DiscountCalculationResult[]>
+export async function evaluateAutomaticDiscounts(orderId: string): Promise<DiscountCalculationResult[]>
 
 // Apply a calculated discount to an order
 export async function applyDiscountToOrder(
   orderId: string,
   discount: DiscountCalculationResult,
   appliedById?: string,
-  authorizedById?: string
+  authorizedById?: string,
 ): Promise<ApplyDiscountResult>
 
 // Remove a discount from an order
-export async function removeDiscountFromOrder(
-  orderId: string,
-  orderDiscountId: string
-): Promise<ApplyDiscountResult>
+export async function removeDiscountFromOrder(orderId: string, orderDiscountId: string): Promise<ApplyDiscountResult>
 
 // Apply all eligible automatic discounts
 export async function applyAutomaticDiscounts(
   orderId: string,
-  appliedById?: string
+  appliedById?: string,
 ): Promise<{ applied: DiscountCalculationResult[]; total: number }>
 
 // Apply manual (on-the-fly) discount
@@ -265,7 +253,7 @@ export async function applyManualDiscount(
   name: string,
   appliedById: string,
   authorizedById?: string,
-  compReason?: string
+  compReason?: string,
 ): Promise<ApplyDiscountResult>
 ```
 
@@ -355,6 +343,7 @@ function isWithinTimeWindow(timeFrom: string, timeUntil: string): boolean {
 ### Non-Stackable Discounts
 
 When `isStackable = false`:
+
 - Only one non-stackable discount can apply
 - Higher `stackPriority` wins
 - Non-stackable discounts can't combine with other non-stackables
@@ -362,6 +351,7 @@ When `isStackable = false`:
 ### Stackable Discounts
 
 When `isStackable = true`:
+
 - Can combine with other stackable discounts
 - Applied in order of `priority`
 - Each discount applies to the remaining amount
@@ -374,14 +364,15 @@ For on-the-fly discounts not pre-configured:
 await applyManualDiscount(
   orderId,
   'PERCENTAGE',
-  15,  // 15% off
+  15, // 15% off
   'Customer complaint resolution',
   staffId,
-  managerId  // Optional: for approval
+  managerId, // Optional: for approval
 )
 ```
 
 Manual discounts:
+
 - Don't require a pre-existing `Discount` record
 - Set `isManual = true` on `OrderDiscount`
 - Can be PERCENTAGE, FIXED_AMOUNT, or COMP
@@ -436,28 +427,31 @@ model CustomerDiscount {
 
 ## Error Handling
 
-| Error | Cause | Resolution |
-|-------|-------|------------|
-| `Discount already applied` | Same discount applied twice | Check `orderDiscounts` before applying |
-| `Requires manager approval` | Comp without `authorizedById` | Provide manager authorization |
-| `Percentage must be 0-100` | Invalid percentage value | Validate before applying |
-| `Order not found` | Invalid orderId | Verify order exists |
+| Error                       | Cause                         | Resolution                             |
+| --------------------------- | ----------------------------- | -------------------------------------- |
+| `Discount already applied`  | Same discount applied twice   | Check `orderDiscounts` before applying |
+| `Requires manager approval` | Comp without `authorizedById` | Provide manager authorization          |
+| `Percentage must be 0-100`  | Invalid percentage value      | Validate before applying               |
+| `Order not found`           | Invalid orderId               | Verify order exists                    |
 
 ## Testing Scenarios
 
 ### Manual Testing
 
 1. **Percentage discount:**
+
    - Create 10% order discount
    - Add items totaling $100
    - Verify discount = $10
 
 2. **BOGO:**
+
    - Create "Buy 2 Get 1 Free" discount
    - Add 3 items at $20 each
    - Verify discount = $20 (cheapest free)
 
 3. **Time-based:**
+
    - Create happy hour discount (16:00-19:00)
    - Test at 15:00 → not applied
    - Test at 17:00 → applied
@@ -506,29 +500,32 @@ ORDER BY d.priority DESC;
 ## Related Files
 
 **Backend:**
+
 - `src/services/dashboard/discountEngine.service.ts` - Core discount logic
 - `src/services/dashboard/discount.dashboard.service.ts` - Discount CRUD
 - `src/services/tpv/discount.tpv.service.ts` - TPV discount operations
 - `prisma/schema.prisma` - Discount, OrderDiscount models
 
 **Dashboard:**
+
 - Discount management page
 - Order discount application UI
 - Comp approval workflow
 
 **TPV Android:**
+
 - Discount selection UI
 - Manual discount entry
 - Manager approval flow
 
 ## Industry Standards Reference
 
-| Platform | Feature | Key Differences |
-|----------|---------|-----------------|
-| **Toast** | Discounts & Comps | Requires manager PIN for comps |
-| **Square** | Automatic Discounts | Rules-based engine |
-| **Clover** | Discounts | Item-level and order-level |
-| **Lightspeed** | Promotions | Scheduled campaigns |
+| Platform       | Feature             | Key Differences                |
+| -------------- | ------------------- | ------------------------------ |
+| **Toast**      | Discounts & Comps   | Requires manager PIN for comps |
+| **Square**     | Automatic Discounts | Rules-based engine             |
+| **Clover**     | Discounts           | Item-level and order-level     |
+| **Lightspeed** | Promotions          | Scheduled campaigns            |
 
 ## Future Enhancements
 

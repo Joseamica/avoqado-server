@@ -23,15 +23,7 @@ import prisma from '@/utils/prismaClient'
 
 export type ReportType = 'summary' | 'hours' | 'days' | 'weeks' | 'months' | 'hourlySum' | 'dailySum'
 
-export type GroupByOption =
-  | 'none'
-  | 'category'
-  | 'channel'
-  | 'paymentMethod'
-  | 'device'
-  | 'source'
-  | 'serviceOption'
-  | 'itemType'
+export type GroupByOption = 'none' | 'category' | 'channel' | 'paymentMethod' | 'device' | 'source' | 'serviceOption' | 'itemType'
 
 export interface SalesByItemFilters {
   startDate: string
@@ -41,7 +33,7 @@ export interface SalesByItemFilters {
   timezone?: string
   // Hour range filter (optional) - Format: "HH:mm"
   startHour?: string // e.g. "09:00"
-  endHour?: string   // e.g. "17:00"
+  endHour?: string // e.g. "17:00"
   // Optional filters
   categoryId?: string
   productId?: string
@@ -94,15 +86,7 @@ export interface SalesByItemResponse {
  * Get sales by item for a venue within a date range
  */
 export async function getSalesByItem(venueId: string, filters: SalesByItemFilters): Promise<SalesByItemResponse> {
-  const {
-    startDate,
-    endDate,
-    reportType = 'summary',
-    groupBy = 'none',
-    timezone = 'America/Mexico_City',
-    startHour,
-    endHour,
-  } = filters
+  const { startDate, endDate, reportType = 'summary', groupBy = 'none', timezone = 'America/Mexico_City', startHour, endHour } = filters
 
   // Validate dates
   const parsedStartDate = new Date(startDate)
@@ -246,15 +230,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
   let byPeriod: TimePeriodItemMetrics[] | undefined
 
   if (reportType !== 'summary') {
-    byPeriod = await calculateTimePeriodItemMetrics(
-      venueId,
-      parsedStartDate,
-      parsedEndDate,
-      reportType,
-      timezone,
-      startHour,
-      endHour,
-    )
+    byPeriod = await calculateTimePeriodItemMetrics(venueId, parsedStartDate, parsedEndDate, reportType, timezone, startHour, endHour)
   }
 
   logger.info('Sales by item calculated', {
@@ -380,9 +356,7 @@ async function calculateTimePeriodItemMetrics(
 
   if (allPeriods.length > 0) {
     // Create map for quick lookup
-    const metricsMap = new Map(
-      periodMetrics.map(p => [Number(p.period), p]),
-    )
+    const metricsMap = new Map(periodMetrics.map(p => [Number(p.period), p]))
 
     // Generate result with all periods (filling zeros for missing)
     const result: TimePeriodItemMetrics[] = allPeriods.map(periodValue => {
@@ -543,7 +517,7 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           NULL as source,
           NULL as terminal_id,
         `,
-        groupByFields: 'COALESCE(o.channel, \'POS\')',
+        groupByFields: "COALESCE(o.channel, 'POS')",
         orderByField: 'gross_sales',
       }
 
@@ -561,7 +535,7 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           NULL as source,
           NULL as terminal_id,
         `,
-        groupByFields: 'COALESCE(pay.method::text, \'OTHER\')',
+        groupByFields: "COALESCE(pay.method::text, 'OTHER')",
         orderByField: 'gross_sales',
       }
 
@@ -579,7 +553,7 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           COALESCE(o.source::text, 'TPV') as source,
           NULL as terminal_id,
         `,
-        groupByFields: 'COALESCE(o.source::text, \'TPV\')',
+        groupByFields: "COALESCE(o.source::text, 'TPV')",
         orderByField: 'gross_sales',
       }
 

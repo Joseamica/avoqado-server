@@ -2,19 +2,21 @@
 
 ## Overview
 
-The Cash Closeout system enables venues to track expected vs actual cash amounts when they deposit or store cash. This is an industry-standard feature for restaurants, retail, and hotels, critical for financial reconciliation and loss prevention.
+The Cash Closeout system enables venues to track expected vs actual cash amounts when they deposit or store cash. This is an
+industry-standard feature for restaurants, retail, and hotels, critical for financial reconciliation and loss prevention.
 
 ## Business Context
 
 **Key Use Cases:**
+
 - End-of-shift cash reconciliation (arqueo de caja)
 - Daily cash deposits to bank
 - Cash variance detection and investigation
 - Shift-over handoffs (leaving cash for next shift)
 - Owner/manager cash withdrawals
 
-**Mexican Business Practice:**
-In Mexico, "cortes de caja" are typically done:
+**Mexican Business Practice:** In Mexico, "cortes de caja" are typically done:
+
 - At end of each shift
 - At end of business day
 - Before bank deposits
@@ -24,10 +26,10 @@ In Mexico, "cortes de caja" are typically done:
 
 ### Cash Closeout vs Shift Close
 
-| System | Scope | Purpose |
-|--------|-------|---------|
-| **Cash Closeout** | Cash payments only | Track expected vs actual cash, deposit methods |
-| **Shift Close** | All payments | Full shift report (cash + cards + vouchers), staff performance |
+| System            | Scope              | Purpose                                                        |
+| ----------------- | ------------------ | -------------------------------------------------------------- |
+| **Cash Closeout** | Cash payments only | Track expected vs actual cash, deposit methods                 |
+| **Shift Close**   | All payments       | Full shift report (cash + cards + vouchers), staff performance |
 
 **Cash Closeout** is venue-level and independent of shifts. **Shift Close** is per-staff and includes all payment methods.
 
@@ -83,6 +85,7 @@ enum DepositMethod {
 **File:** `src/services/dashboard/cashCloseout.dashboard.service.ts`
 
 **Exported Functions:**
+
 ```typescript
 export async function getLastCloseoutDate(venueId: string): Promise<Date>
 export async function getExpectedCashAmount(venueId: string): Promise<ExpectedCashResult>
@@ -104,7 +107,7 @@ async function getLastCloseoutDate(venueId: string): Promise<Date> {
   })
 
   if (lastCloseout) {
-    return lastCloseout.periodEnd  // Continue from last closeout
+    return lastCloseout.periodEnd // Continue from last closeout
   }
 
   // No closeouts yet - use venue creation date
@@ -197,9 +200,9 @@ POST /api/v1/dashboard/venues/:venueId/cash-closeouts
   "venueId": "venue_xyz",
   "periodStart": "2025-01-05T06:00:00.000Z",
   "periodEnd": "2025-01-06T22:00:00.000Z",
-  "expectedAmount": 15000.00,
-  "actualAmount": 15250.00,
-  "variance": 250.00,
+  "expectedAmount": 15000.0,
+  "actualAmount": 15250.0,
+  "variance": 250.0,
   "variancePercent": 1.67,
   "depositMethod": "BANK_DEPOSIT",
   "bankReference": "DEP-2025-0106-001",
@@ -215,19 +218,19 @@ POST /api/v1/dashboard/venues/:venueId/cash-closeouts
 
 ## Variance Interpretation
 
-| Variance | Amount | Interpretation | Action Required |
-|----------|--------|----------------|-----------------|
-| Positive | +$50 | Overage - more cash counted | Verify no errors, may indicate pricing issues |
-| Zero | $0 | Perfect match | Ideal outcome |
-| Small Negative | -$10 | Minor shortage | Document, investigate if recurring |
-| Large Negative | -$500 | Significant shortage | Immediate investigation, possible theft |
+| Variance       | Amount | Interpretation              | Action Required                               |
+| -------------- | ------ | --------------------------- | --------------------------------------------- |
+| Positive       | +$50   | Overage - more cash counted | Verify no errors, may indicate pricing issues |
+| Zero           | $0     | Perfect match               | Ideal outcome                                 |
+| Small Negative | -$10   | Minor shortage              | Document, investigate if recurring            |
+| Large Negative | -$500  | Significant shortage        | Immediate investigation, possible theft       |
 
 ### Warning Thresholds (Configurable)
 
 ```typescript
 const VARIANCE_THRESHOLDS = {
-  WARNING: 0.02,   // 2% - Yellow alert
-  CRITICAL: 0.05,  // 5% - Red alert, requires manager approval
+  WARNING: 0.02, // 2% - Yellow alert
+  CRITICAL: 0.05, // 5% - Red alert, requires manager approval
 }
 ```
 
@@ -293,16 +296,19 @@ export async function getCurrentShift(venueId: string): Promise<Shift | null> {
 ### Manual Testing
 
 1. **First closeout (no history):**
+
    - Make cash payments
    - Create closeout
    - Verify periodStart = venue creation date
 
 2. **Subsequent closeout:**
+
    - Make more cash payments
    - Create closeout
    - Verify periodStart = last closeout's periodEnd
 
 3. **Variance scenarios:**
+
    - Enter actual = expected (zero variance)
    - Enter actual > expected (overage)
    - Enter actual < expected (shortage)
@@ -341,6 +347,7 @@ WHERE "venueId" = 'your-venue-id'
 ## Related Files
 
 **Backend:**
+
 - `prisma/schema.prisma` - CashCloseout model, DepositMethod enum
 - `src/services/dashboard/cashCloseout.dashboard.service.ts` - Business logic
 - `src/services/tpv/shift.tpv.service.ts` - Shift management with cash tracking
@@ -348,25 +355,27 @@ WHERE "venueId" = 'your-venue-id'
 - `src/routes/dashboard.routes.ts` - Route definitions
 
 **Dashboard:**
+
 - Cash closeout page with expected amount display
 - Closeout history table with variance highlighting
 
 ## Industry Standards Reference
 
-| Platform | Feature Name | Key Differences |
-|----------|--------------|-----------------|
-| **Toast** | End of Day Drawer Count | Per-drawer, with bill denomination breakdown |
-| **Square** | Cash Drawer Report | Shift-based, supports multiple drawers |
-| **Clover** | Cash Closeout | Supports safe drops during shift |
-| **Lightspeed** | Cash Management | Daily reconciliation with variance alerts |
+| Platform       | Feature Name            | Key Differences                              |
+| -------------- | ----------------------- | -------------------------------------------- |
+| **Toast**      | End of Day Drawer Count | Per-drawer, with bill denomination breakdown |
+| **Square**     | Cash Drawer Report      | Shift-based, supports multiple drawers       |
+| **Clover**     | Cash Closeout           | Supports safe drops during shift             |
+| **Lightspeed** | Cash Management         | Daily reconciliation with variance alerts    |
 
 ## Future Enhancements
 
 1. **Bill denomination counting:**
+
    ```json
    {
      "denominations": {
-       "1000": 5,  // 5 × $1000 bills
+       "1000": 5, // 5 × $1000 bills
        "500": 3,
        "200": 10,
        "100": 5,

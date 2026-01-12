@@ -2,11 +2,14 @@
 
 ## Overview
 
-The Floor Plans system provides visual layout management for venue tables and decorative elements. Tables can be positioned on a canvas, assigned to areas, and track real-time order status. The system supports drag-and-drop positioning, shape customization, and real-time status updates via Socket.IO.
+The Floor Plans system provides visual layout management for venue tables and decorative elements. Tables can be positioned on a canvas,
+assigned to areas, and track real-time order status. The system supports drag-and-drop positioning, shape customization, and real-time
+status updates via Socket.IO.
 
 ## Business Context
 
 **Key Use Cases:**
+
 - Visual restaurant floor plan design
 - Real-time table availability at a glance
 - Table assignment for new orders
@@ -14,6 +17,7 @@ The Floor Plans system provides visual layout management for venue tables and de
 - Capacity management for reservations
 
 **Industry Standards:**
+
 - Toast: "Table Layout" with drag-and-drop
 - Square: "Floor Plan" visual editor
 - Clover: "Tables & Sections" management
@@ -155,6 +159,7 @@ All positions use **normalized coordinates (0.0 - 1.0)** relative to the venue c
 ```
 
 **Why normalized coordinates?**
+
 - Canvas can be any size on different screens
 - Positions scale automatically with canvas resize
 - Consistent across TPV, dashboard, and mobile
@@ -240,20 +245,21 @@ Table status changes broadcast via Socket.IO for real-time floor plan updates:
 ```typescript
 // Event: TABLE_STATUS_CHANGE
 socketManager.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
-  tableId: "table_123",
-  tableNumber: "5",
-  status: "OCCUPIED",
-  orderId: "order_456",
-  orderNumber: "ORD-1704567890123",
+  tableId: 'table_123',
+  tableNumber: '5',
+  status: 'OCCUPIED',
+  orderId: 'order_456',
+  orderNumber: 'ORD-1704567890123',
   covers: 4,
   waiter: {
-    id: "staff_789",
-    name: "Juan García"
-  }
+    id: 'staff_789',
+    name: 'Juan García',
+  },
 })
 ```
 
 **When events fire:**
+
 - `assignTable()` → AVAILABLE → OCCUPIED
 - `clearTable()` → OCCUPIED → AVAILABLE
 
@@ -313,15 +319,15 @@ DELETE /api/v1/dashboard/venues/:venueId/areas/:areaId
       "id": "order_123",
       "orderNumber": "ORD-1704567890123",
       "covers": 3,
-      "total": 450.00,
+      "total": 450.0,
       "itemCount": 5,
       "items": [
         {
           "id": "item_1",
           "productName": "Tacos de Asada",
           "quantity": 2,
-          "unitPrice": 85.00,
-          "total": 170.00
+          "unitPrice": 85.0,
+          "total": 170.0
         }
       ],
       "waiter": {
@@ -405,45 +411,47 @@ DELETE /api/v1/dashboard/venues/:venueId/areas/:areaId
 
 ### Table Validation
 
-| Field | Rule |
-|-------|------|
-| `number` | Must be unique within venue |
-| `capacity` | Must be ≥ 1 |
-| `positionX/Y` | Must be 0.0 - 1.0 |
-| `shape` | Must be SQUARE, ROUND, or RECTANGLE |
-| `areaId` | Must exist in venue if provided |
+| Field         | Rule                                |
+| ------------- | ----------------------------------- |
+| `number`      | Must be unique within venue         |
+| `capacity`    | Must be ≥ 1                         |
+| `positionX/Y` | Must be 0.0 - 1.0                   |
+| `shape`       | Must be SQUARE, ROUND, or RECTANGLE |
+| `areaId`      | Must exist in venue if provided     |
 
 ### Floor Element Validation
 
-| Element Type | Required Fields |
-|--------------|-----------------|
-| `WALL` | positionX, positionY, endX, endY |
-| `BAR_COUNTER` | positionX, positionY, width, height |
+| Element Type   | Required Fields                     |
+| -------------- | ----------------------------------- |
+| `WALL`         | positionX, positionY, endX, endY    |
+| `BAR_COUNTER`  | positionX, positionY, width, height |
 | `SERVICE_AREA` | positionX, positionY, width, height |
-| `LABEL` | positionX, positionY |
-| `DOOR` | positionX, positionY |
+| `LABEL`        | positionX, positionY                |
+| `DOOR`         | positionX, positionY                |
 
 ## Error Handling
 
-| Error | Cause | HTTP Status |
-|-------|-------|-------------|
-| `Table number X already exists` | Duplicate table number | 400 |
-| `Table not found in venue` | Invalid tableId | 404 |
-| `Cannot clear table with unpaid order` | Attempting to clear occupied table | 400 |
-| `Cannot delete table with active order` | Table has open order | 400 |
-| `Invalid coordinates` | Position outside 0-1 range | 400 |
-| `WALL elements require endX and endY` | Missing wall endpoints | 400 |
+| Error                                   | Cause                              | HTTP Status |
+| --------------------------------------- | ---------------------------------- | ----------- |
+| `Table number X already exists`         | Duplicate table number             | 400         |
+| `Table not found in venue`              | Invalid tableId                    | 404         |
+| `Cannot clear table with unpaid order`  | Attempting to clear occupied table | 400         |
+| `Cannot delete table with active order` | Table has open order               | 400         |
+| `Invalid coordinates`                   | Position outside 0-1 range         | 400         |
+| `WALL elements require endX and endY`   | Missing wall endpoints             | 400         |
 
 ## Testing Scenarios
 
 ### Manual Testing
 
 1. **Create floor layout:**
+
    - Create tables at different positions
    - Add walls, bar counter, labels
    - Verify visual representation
 
 2. **Table workflow:**
+
    - Assign table → Creates order, status = OCCUPIED
    - Add items to order
    - Complete payment
@@ -490,6 +498,7 @@ WHERE fe."venueId" = 'your-venue-id'
 ## Related Files
 
 **Backend:**
+
 - `prisma/schema.prisma` - Table, FloorElement, Area models
 - `src/services/tpv/table.tpv.service.ts` - Table operations
 - `src/services/tpv/floor-element.tpv.service.ts` - Floor element operations
@@ -497,11 +506,13 @@ WHERE fe."venueId" = 'your-venue-id'
 - `src/routes/tpv.routes.ts` - Route definitions
 
 **TPV Android:**
+
 - Floor plan canvas component
 - Table drag-and-drop positioning
 - Real-time status visualization
 
 **Dashboard:**
+
 - Floor plan editor page
 - Area management
 - Table CRUD interface

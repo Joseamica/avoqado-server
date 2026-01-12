@@ -189,9 +189,9 @@ WHERE c.id = sub."customerId";
 
 ### 🔄 Pendiente Phase 2
 
-| Componente      | Archivo                                            | Estado    |
-| --------------- | -------------------------------------------------- | --------- |
-| API Tests       | `tests/api-tests/dashboard/discount*.test.ts`      | Pendiente |
+| Componente | Archivo                                       | Estado    |
+| ---------- | --------------------------------------------- | --------- |
+| API Tests  | `tests/api-tests/dashboard/discount*.test.ts` | Pendiente |
 
 ### Objetivos
 

@@ -37,6 +37,9 @@ model Organization {
   onboardingCompletedAt DateTime?
   onboardingStep        Int                 @default(0) // For resuming onboarding
 
+  // Commission System (org-wide configs inherit to venues)
+  commissionConfigs CommissionConfig[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -232,6 +235,16 @@ model Venue {
   itemCategories  ItemCategory[] // Categories for serialized items
   serializedItems SerializedItem[] // Items with unique barcodes (SIMs, etc.)
 
+  // ==========================================
+  // COMMISSION SYSTEM
+  // ==========================================
+  commissionConfigs       CommissionConfig[]
+  commissionOverrides     CommissionOverride[]
+  commissionCalculations  CommissionCalculation[]
+  commissionSummaries     CommissionSummary[]
+  commissionPayouts       CommissionPayout[]
+  milestoneAchievements   MilestoneAchievement[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -398,6 +411,20 @@ model Staff {
   // ✅ NEW: Credit Offers (SOFOM integration)
   creditOffersAccepted CreditOffer[]
   creditOffersCreated  CreditOffer[] @relation("CreditOfferCreatedBy")
+
+  // ==========================================
+  // COMMISSION SYSTEM
+  // ==========================================
+  commissionConfigsCreated    CommissionConfig[]      @relation("CommissionConfigCreatedBy")
+  commissionOverridesCreated  CommissionOverride[]    @relation("CommissionOverrideCreatedBy")
+  commissionOverridesReceived CommissionOverride[]    @relation("CommissionOverrideStaff")
+  commissionCalculations      CommissionCalculation[]
+  commissionSummaries         CommissionSummary[]
+  commissionSummariesApproved CommissionSummary[]     @relation("CommissionSummaryApprovedBy")
+  commissionPayoutsReceived   CommissionPayout[]      @relation("CommissionPayoutStaff")
+  commissionPayoutsProcessed  CommissionPayout[]      @relation("CommissionPayoutProcessedBy")
+  commissionClawbacksCreated  CommissionClawback[]    @relation("CommissionClawbackCreatedBy")
+  milestoneAchievements       MilestoneAchievement[]
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -660,6 +687,9 @@ model MenuCategory {
   products Product[]
   menus    MenuCategoryAssignment[]
 
+  // Commission System
+  commissionMilestones CommissionMilestone[]
+
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
@@ -797,6 +827,9 @@ model Product {
   modifierGroups ProductModifierGroup[]
   recipe         Recipe? // ✅ NEW: Recipe composition
   pricingPolicy  PricingPolicy? // ✅ NEW: Pricing strategy
+
+  // Commission System
+  commissionMilestones CommissionMilestone[]
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -1461,6 +1494,9 @@ model Shift {
   orders   Order[]
   payments Payment[]
 
+  // Commission System
+  commissionCalculations CommissionCalculation[]
+
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
   posRawData   Json?
@@ -1627,6 +1663,9 @@ model Order {
 
   // Multi-customer support (N:N relationship)
   orderCustomers OrderCustomer[]
+
+  // Commission System
+  commissionCalculations CommissionCalculation[]
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -1916,6 +1955,9 @@ model Payment {
   review           Review? // ✅ LÍNEA AGREGADA (en singular porque es 1-a-1)
   transactionCost  TransactionCost?
   saleVerification SaleVerification? // 📸 Step 4 verification evidence
+
+  // Commission System
+  commissionCalculations CommissionCalculation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -5521,4 +5563,516 @@ enum SerializedItemStatus {
   SOLD // Ya vendido
   RETURNED // Devuelto
   DAMAGED // Dañado o perdido
+}
+
+// ==========================================
+// COMMISSION SYSTEM ENUMS
+// Staff bonus/commission system for sales-based rewards
+// ==========================================
+
+/// Who receives the commission for an order/payment
+enum CommissionRecipient {
+  CREATOR // Order.createdById - who created the order
+  SERVER // Order.servedById - who served the table
+  PROCESSOR // Payment.processedById - who processed payment
+}
+
+/// When to calculate commission
+enum CommissionTrigger {
+  PER_PAYMENT // Calculate commission for each Payment
+  PER_ORDER // Calculate commission once per completed Order
+}
+
+/// How to calculate the commission amount
+enum CommissionCalcType {
+  PERCENTAGE // Rate applied to sale amount
+  FIXED // Fixed amount per order/payment
+  TIERED // Rate changes based on volume tiers
+  MILESTONE // Bonus for reaching goals
+  MANUAL // Manually assigned commission
+}
+
+/// What metric is used for tier progression
+enum TierType {
+  BY_QUANTITY // Number of orders/payments
+  BY_AMOUNT // Total sales amount in currency
+}
+
+/// Period for tier calculations and resets
+enum TierPeriod {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+/// What metric is used for milestone targets
+enum MilestoneTargetType {
+  ORDER_QUANTITY // Number of orders
+  SALES_AMOUNT // Total sales amount
+  PRODUCT_QUANTITY // Units of specific product sold
+  CATEGORY_QUANTITY // Units from specific category sold
+  CATEGORY_AMOUNT // Sales from specific category
+}
+
+/// How to calculate milestone bonus
+enum BonusType {
+  FIXED_AMOUNT // Fixed bonus when milestone reached
+  PERCENTAGE_OF_SALES // % of sales during milestone period
+  PERCENTAGE_OF_TARGET // % of target amount as bonus
+}
+
+/// Status of individual commission calculation records
+enum CommissionCalcStatus {
+  CALCULATED // Initial calculation done
+  AGGREGATED // Rolled into a CommissionSummary
+  VOIDED // Cancelled (e.g., due to refund)
+}
+
+/// Status of aggregated commission summaries
+enum CommissionSummaryStatus {
+  DRAFT // Being calculated
+  CALCULATED // Calculation complete
+  PENDING_APPROVAL // Awaiting OWNER/ADMIN approval
+  APPROVED // Approved, ready for payment
+  DISPUTED // Under dispute
+  PAID // Paid out to staff
+}
+
+/// Status of commission payout records
+enum CommissionPayoutStatus {
+  PENDING // Payout created
+  APPROVED // Approved for payment
+  PROCESSING // Payment in progress
+  PAID // Successfully paid
+  FAILED // Payment failed
+  CANCELLED // Cancelled before payment
+}
+
+/// Reason for clawback (post-payout refund handling)
+enum ClawbackReason {
+  REFUND // Original payment was refunded
+  CHARGEBACK // Payment was charged back
+  CORRECTION // Manual correction by admin
+  FRAUD // Fraudulent transaction detected
+}
+
+// ==========================================
+// COMMISSION SYSTEM MODELS
+// ==========================================
+
+/// Main configuration for commission rates at venue level
+/// Uses effectiveFrom/effectiveTo pattern for time-bound configs
+model CommissionConfig {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Organization inheritance (optional)
+  orgId String?
+  org   Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  // Configuration
+  name        String // "Comisiones Meseros Q1 2025"
+  description String?
+  priority    Int    @default(0) // Higher = takes precedence when multiple active
+
+  // Commission rules
+  recipient    CommissionRecipient @default(SERVER)
+  trigger      CommissionTrigger   @default(PER_PAYMENT)
+  calcType     CommissionCalcType  @default(PERCENTAGE)
+  defaultRate  Decimal             @db.Decimal(5, 4) // 0.0300 = 3%
+  minAmount    Decimal?            @db.Decimal(10, 2) // Min commission per transaction
+  maxAmount    Decimal?            @db.Decimal(10, 2) // Max commission per transaction
+
+  // Base calculation settings
+  includeTips     Boolean @default(false) // Tips are already direct bonus, exclude by default
+  includeDiscount Boolean @default(false) // Calculate on pre/post-discount amount
+  includeTax      Boolean @default(false) // Include tax in calculation base
+
+  // Role-based rates (JSON object: { "WAITER": 0.03, "CASHIER": 0.02 })
+  roleRates Json?
+
+  // Time bounds
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+
+  // Status & Audit
+  active    Boolean   @default(true)
+  deletedAt DateTime?
+  deletedBy String?
+
+  createdById String
+  createdBy   Staff  @relation("CommissionConfigCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  overrides    CommissionOverride[]
+  tiers        CommissionTier[]
+  milestones   CommissionMilestone[]
+  calculations CommissionCalculation[]
+
+  @@index([venueId, active])
+  @@index([venueId, effectiveFrom, effectiveTo])
+  @@index([orgId])
+}
+
+/// Override commission rates for specific staff members
+/// Takes priority over config's defaultRate
+model CommissionOverride {
+  id       String           @id @default(cuid())
+  configId String
+  config   CommissionConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  venueId  String
+  venue    Venue            @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  staffId  String
+  staff    Staff            @relation("CommissionOverrideStaff", fields: [staffId], references: [id])
+
+  // Override rate
+  customRate Decimal @db.Decimal(5, 4) // 0.0500 = 5%
+  reason     String? // "Top performer bonus"
+  notes      String? // Additional notes
+
+  // Time bounds
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+
+  // Status
+  active                Boolean @default(true)
+  excludeFromCommissions Boolean @default(false) // Completely exclude this staff from commissions
+
+  // Audit
+  createdById String
+  createdBy   Staff  @relation("CommissionOverrideCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([configId])
+  @@index([staffId, effectiveFrom, effectiveTo])
+  @@index([venueId])
+  @@index([active])
+}
+
+/// Tiered commission rates (higher tiers = higher rates)
+/// Resets based on tierPeriod
+model CommissionTier {
+  id       String           @id @default(cuid())
+  configId String
+  config   CommissionConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+
+  // Tier definition
+  tierLevel  Int // 1, 2, 3... (ordered)
+  tierName   String // "Bronce", "Plata", "Oro"
+  tierType   TierType // BY_QUANTITY or BY_AMOUNT
+  tierPeriod TierPeriod // When tier resets
+
+  // Thresholds
+  minThreshold Decimal @db.Decimal(12, 2) // Min orders/amount to reach this tier
+  maxThreshold Decimal? @db.Decimal(12, 2) // Max before next tier (null = unlimited)
+
+  // Rate at this tier
+  rate Decimal @db.Decimal(5, 4) // Commission rate for this tier
+
+  // Status
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([configId, tierLevel])
+  @@index([configId])
+  @@index([active])
+}
+
+/// Milestone/goal-based bonuses
+/// One-time or recurring bonuses when targets are met
+model CommissionMilestone {
+  id       String           @id @default(cuid())
+  configId String
+  config   CommissionConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+
+  // Milestone definition
+  name        String // "Meta Mensual Enero"
+  description String?
+  targetType  MilestoneTargetType
+  targetValue Decimal             @db.Decimal(12, 2) // Target to achieve
+
+  // Product/category filter (for PRODUCT_* and CATEGORY_* types)
+  productId  String?
+  product    Product?      @relation(fields: [productId], references: [id])
+  categoryId String?
+  category   MenuCategory? @relation(fields: [categoryId], references: [id])
+
+  // Bonus when achieved
+  bonusType   BonusType
+  bonusValue  Decimal   @db.Decimal(10, 2) // Amount or percentage based on bonusType
+
+  // Period
+  period      TierPeriod // DAILY, WEEKLY, MONTHLY, etc.
+  periodStart DateTime
+  periodEnd   DateTime
+  isRecurring Boolean  @default(false)
+
+  // Time bounds for milestone validity
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+
+  // Status
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  achievements MilestoneAchievement[]
+
+  @@index([configId])
+  @@index([periodStart, periodEnd])
+}
+
+/// Tracks staff progress and achievement of milestones
+model MilestoneAchievement {
+  id          String              @id @default(cuid())
+  milestoneId String
+  milestone   CommissionMilestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+  staffId     String
+  staff       Staff               @relation(fields: [staffId], references: [id])
+  venueId     String
+  venue       Venue               @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Period for this achievement (allows same milestone to be tracked across periods)
+  periodStart DateTime
+  periodEnd   DateTime
+
+  // Progress tracking
+  currentValue  Decimal  @db.Decimal(12, 2) // Current progress
+  achievedValue Decimal? @db.Decimal(12, 2) // Value when achieved (snapshot)
+  achieved      Boolean  @default(false)
+  achievedAt    DateTime?
+
+  // Bonus details (when achieved)
+  bonusAmount  Decimal? @db.Decimal(10, 2)
+  bonusPaidAt  DateTime?
+  bonusPaidIn  String? // CommissionSummary ID (legacy)
+
+  // Summary inclusion
+  includedInSummaryId String? // CommissionSummary where this bonus was aggregated
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([milestoneId, staffId, periodStart])
+  @@index([staffId])
+  @@index([venueId])
+  @@index([includedInSummaryId])
+  @@index([periodStart, periodEnd])
+}
+
+/// Individual commission calculation per payment/order
+/// IMMUTABLE after creation (following TransactionCost pattern)
+model CommissionCalculation {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  // Source
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+  orderId   String?
+  order     Order?   @relation(fields: [orderId], references: [id])
+  shiftId   String?
+  shift     Shift?   @relation(fields: [shiftId], references: [id])
+
+  // Config reference
+  configId String
+  config   CommissionConfig @relation(fields: [configId], references: [id])
+
+  // Calculation snapshot (IMMUTABLE - captured at calculation time)
+  baseAmount     Decimal @db.Decimal(12, 2) // Amount used for calculation
+  tipAmount      Decimal @default(0) @db.Decimal(10, 2) // Tips (if included)
+  discountAmount Decimal @default(0) @db.Decimal(10, 2) // Discount (if included)
+  taxAmount      Decimal @default(0) @db.Decimal(10, 2) // Tax (if included)
+
+  // Commission calculation
+  effectiveRate Decimal @db.Decimal(5, 4) // Rate that was applied
+  grossCommission Decimal @db.Decimal(10, 2) // Before any deductions
+  netCommission   Decimal @db.Decimal(10, 2) // Final commission amount
+
+  // Metadata
+  calcType CommissionCalcType
+  tier     Int? // Tier level if tiered
+  tierName String? // Tier name for display
+
+  // Status
+  status       CommissionCalcStatus @default(CALCULATED)
+  aggregatedAt DateTime?
+  summaryId    String? // Link to CommissionSummary when aggregated
+  summary      CommissionSummary?   @relation(fields: [summaryId], references: [id])
+
+  // Voiding
+  voidedAt    DateTime?
+  voidedBy    String?
+  voidReason  String?
+
+  // Timestamps
+  calculatedAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  // Clawbacks
+  clawbacks CommissionClawback[]
+
+  @@index([venueId, staffId])
+  @@index([paymentId])
+  @@index([orderId])
+  @@index([status])
+  @@index([summaryId])
+  @@index([staffId, calculatedAt])
+}
+
+/// Aggregated commission summary per period
+/// Groups CommissionCalculations for approval and payment
+model CommissionSummary {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  // Period
+  periodType  TierPeriod // DAILY, WEEKLY, etc.
+  periodStart DateTime
+  periodEnd   DateTime
+
+  // Aggregated totals
+  totalSales       Decimal @db.Decimal(14, 2) // Total sales in period
+  totalTips        Decimal @default(0) @db.Decimal(12, 2)
+  totalCommissions Decimal @db.Decimal(12, 2) // Sum of all calculations
+  totalBonuses     Decimal @default(0) @db.Decimal(10, 2) // Milestone bonuses
+  totalClawbacks   Decimal @default(0) @db.Decimal(10, 2) // Deducted clawbacks
+  grandTotal       Decimal @db.Decimal(12, 2) // commissions + bonuses - clawbacks
+
+  // Computed amounts (for easier querying)
+  grossAmount      Decimal @default(0) @db.Decimal(12, 2) // totalCommissions + totalBonuses
+  deductionAmount  Decimal @default(0) @db.Decimal(10, 2) // Same as totalClawbacks (alias)
+  netAmount        Decimal @default(0) @db.Decimal(12, 2) // Same as grandTotal (final payout)
+
+  // Statistics
+  orderCount   Int @default(0)
+  paymentCount Int @default(0)
+
+  // Status
+  status CommissionSummaryStatus @default(DRAFT)
+  version Int @default(1) // Optimistic concurrency
+
+  // Approval
+  approvedAt   DateTime?
+  approvedById String?
+  approvedBy   Staff?    @relation("CommissionSummaryApprovedBy", fields: [approvedById], references: [id])
+
+  // Dispute
+  disputedAt     DateTime?
+  disputeReason  String?
+  disputeResolvedAt DateTime?
+
+  // Notes
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  calculations CommissionCalculation[]
+  payouts      CommissionPayout[]
+  clawbacks    CommissionClawback[]
+
+  @@unique([venueId, staffId, periodType, periodStart])
+  @@index([venueId, periodStart])
+  @@index([staffId])
+  @@index([status])
+}
+
+/// Payout records for commission payments
+model CommissionPayout {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Staff receiving the payout (denormalized from summary for faster queries)
+  staffId String
+  staff   Staff  @relation("CommissionPayoutStaff", fields: [staffId], references: [id])
+
+  // What's being paid
+  summaryId String
+  summary   CommissionSummary @relation(fields: [summaryId], references: [id])
+
+  // Payment details
+  amount           Decimal @db.Decimal(12, 2)
+  paymentMethod    String // "CASH", "BANK_TRANSFER", "PAYROLL"
+  reference        String? // Bank reference, check number, etc.
+  paymentReference String? // External payment reference (e.g., bank transaction ID)
+
+  // Status
+  status CommissionPayoutStatus @default(PENDING)
+
+  // Processing
+  processedAt   DateTime?
+  processedById String?
+  processedBy   Staff?    @relation("CommissionPayoutProcessedBy", fields: [processedById], references: [id])
+
+  // Payout completion
+  paidAt DateTime?
+
+  // Error handling
+  failureReason String?
+  retryCount    Int      @default(0)
+
+  // Notes
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([staffId])
+  @@index([summaryId])
+  @@index([status])
+  @@index([paidAt])
+}
+
+/// Clawback records for refunds that occur after payout
+/// Created when a refund affects a commission that was already paid out
+model CommissionClawback {
+  id            String              @id @default(cuid())
+  calculationId String
+  calculation   CommissionCalculation @relation(fields: [calculationId], references: [id])
+  summaryId     String
+  summary       CommissionSummary   @relation(fields: [summaryId], references: [id])
+
+  // Clawback details
+  reason          ClawbackReason
+  amount          Decimal        @db.Decimal(10, 2) // Amount to claw back
+  refundId        String? // Reference to refund payment if applicable (legacy)
+  refundPaymentId String? // Reference to the refund Payment record
+
+  // Status
+  appliedToSummaryId String? // Future summary where this was deducted
+  appliedAt          DateTime?
+
+  // Audit
+  createdById String
+  createdBy   Staff  @relation("CommissionClawbackCreatedBy", fields: [createdById], references: [id])
+  notes       String?
+
+  createdAt DateTime @default(now())
+
+  @@index([calculationId])
+  @@index([summaryId])
+  @@index([refundPaymentId])
 }

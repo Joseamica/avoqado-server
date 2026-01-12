@@ -5,6 +5,7 @@ import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
+import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
 
 /**
  * Refund request data from TPV Android app
@@ -260,6 +261,18 @@ export async function recordRefund(
     // Don't fail the refund if TransactionCost creation fails
     logger.error('Failed to create refund TransactionCost', { error, refundPaymentId: result.id })
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STEP 5b: Create negative CommissionCalculation for refund (non-blocking)
+  // ═══════════════════════════════════════════════════════════════════════════
+  createRefundCommission(result.id, refundData.originalPaymentId).catch(error => {
+    // Don't fail the refund if commission reversal fails
+    logger.error('Failed to create refund commission', {
+      refundPaymentId: result.id,
+      originalPaymentId: refundData.originalPaymentId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 6: Generate digital receipt for refund

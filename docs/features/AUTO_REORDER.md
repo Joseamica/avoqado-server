@@ -2,11 +2,14 @@
 
 ## Overview
 
-The Auto-Reorder system analyzes inventory levels and historical usage patterns to generate intelligent purchase order suggestions. When stock levels fall to or below configured reorder points, the system calculates optimal order quantities, recommends suppliers, and can automatically create purchase orders.
+The Auto-Reorder system analyzes inventory levels and historical usage patterns to generate intelligent purchase order suggestions. When
+stock levels fall to or below configured reorder points, the system calculates optimal order quantities, recommends suppliers, and can
+automatically create purchase orders.
 
 ## Business Context
 
 **Key Use Cases:**
+
 - Proactive inventory replenishment before stockouts
 - Data-driven purchasing decisions based on actual usage
 - Supplier comparison and recommendation
@@ -14,6 +17,7 @@ The Auto-Reorder system analyzes inventory levels and historical usage patterns 
 - Urgency-based prioritization for procurement teams
 
 **Industry Standards:**
+
 - Toast: "Auto-86" for low stock alerts
 - BlueCart: Automated purchasing with par levels
 - MarketMan: Predictive ordering based on sales
@@ -142,12 +146,12 @@ model SupplierPricing {
 
 ### Urgency Levels
 
-| Level | Condition | Action |
-|-------|-----------|--------|
-| `CRITICAL` | currentStock = 0 | Immediate attention - out of stock |
-| `HIGH` | currentStock < 50% of reorderPoint | Order within 24 hours |
-| `MEDIUM` | currentStock < 80% of reorderPoint | Order within 3 days |
-| `LOW` | currentStock ≤ 100% of reorderPoint | Schedule for next order cycle |
+| Level      | Condition                           | Action                             |
+| ---------- | ----------------------------------- | ---------------------------------- |
+| `CRITICAL` | currentStock = 0                    | Immediate attention - out of stock |
+| `HIGH`     | currentStock < 50% of reorderPoint  | Order within 24 hours              |
+| `MEDIUM`   | currentStock < 80% of reorderPoint  | Order within 3 days                |
+| `LOW`      | currentStock ≤ 100% of reorderPoint | Schedule for next order cycle      |
 
 ## Service Layer
 
@@ -161,10 +165,10 @@ export async function getReorderSuggestions(
   venueId: string,
   options?: {
     category?: string
-    includeNearReorder?: boolean  // Include items within 10% of reorder point
+    includeNearReorder?: boolean // Include items within 10% of reorder point
     limit?: number
     offset?: number
-  }
+  },
 ): Promise<ReorderSuggestionsResponse>
 
 // Create POs from selected suggestions
@@ -174,7 +178,7 @@ export async function createPurchaseOrdersFromSuggestions(
   options?: {
     staffId?: string
     autoApprove?: boolean
-  }
+  },
 ): Promise<{ ordersCreated: number; orders: PurchaseOrder[] }>
 ```
 
@@ -183,11 +187,7 @@ export async function createPurchaseOrdersFromSuggestions(
 Uses Exponential Moving Average (EMA) on 90 days of usage data:
 
 ```typescript
-async function calculateSuggestedQuantity(
-  venueId: string,
-  rawMaterialId: string,
-  daysToForecast: number = 30
-): Promise<number> {
+async function calculateSuggestedQuantity(venueId: string, rawMaterialId: string, daysToForecast: number = 30): Promise<number> {
   // 1. Get last 90 days of USAGE movements
   const movements = await prisma.rawMaterialMovement.findMany({
     where: {
@@ -204,7 +204,7 @@ async function calculateSuggestedQuantity(
 
   // 3. Forecast + safety stock
   const forecastedUsage = avgDailyUsage * daysToForecast
-  const safetyStock = forecastedUsage * 0.25  // 25% buffer
+  const safetyStock = forecastedUsage * 0.25 // 25% buffer
   const suggestedQuantity = forecastedUsage + safetyStock
 
   return Math.ceil(suggestedQuantity)
@@ -214,6 +214,7 @@ async function calculateSuggestedQuantity(
 ### Supplier Recommendation
 
 Integrates with `getSupplierRecommendations()` which scores suppliers based on:
+
 - **Price** (40%): Lower price = higher score
 - **Lead time** (25%): Faster delivery = higher score
 - **Rating** (20%): Higher rating = higher score
@@ -298,6 +299,7 @@ Example: PO20250106-001, PO20250106-002
 ### Grouping Logic
 
 When creating POs from suggestions:
+
 1. Group materials by recommended supplier
 2. Create one PO per supplier
 3. Calculate totals per order
@@ -305,11 +307,10 @@ When creating POs from suggestions:
 
 ```typescript
 // Example: Create POs for selected materials
-const result = await createPurchaseOrdersFromSuggestions(
-  venueId,
-  ['rm_abc', 'rm_def', 'rm_ghi'],
-  { staffId: 'staff_123', autoApprove: false }
-)
+const result = await createPurchaseOrdersFromSuggestions(venueId, ['rm_abc', 'rm_def', 'rm_ghi'], {
+  staffId: 'staff_123',
+  autoApprove: false,
+})
 // Returns: { ordersCreated: 2, orders: [...] }
 // (2 orders if materials had different recommended suppliers)
 ```
@@ -347,12 +348,14 @@ if (newStock <= rawMaterial.reorderPoint) {
 ### Manual Testing
 
 1. **Trigger reorder suggestion:**
+
    - Set raw material `reorderPoint = 10`
    - Reduce `currentStock` to 8
    - Call `getReorderSuggestions()`
    - Verify material appears in suggestions
 
 2. **Urgency levels:**
+
    - Stock = 0 → CRITICAL
    - Stock = 4 (40% of 10) → HIGH
    - Stock = 7 (70% of 10) → MEDIUM
@@ -400,6 +403,7 @@ GROUP BY rm.id, rm.name;
 ## Related Files
 
 **Backend:**
+
 - `src/services/dashboard/autoReorder.service.ts` - Main reorder logic
 - `src/services/dashboard/supplier.service.ts` - Supplier recommendations
 - `src/services/dashboard/alert.service.ts` - Low stock alerts
@@ -407,6 +411,7 @@ GROUP BY rm.id, rm.name;
 - `prisma/schema.prisma` - RawMaterial, PurchaseOrder, Supplier models
 
 **Dashboard:**
+
 - Reorder suggestions page
 - Purchase order management
 - Supplier management
@@ -417,10 +422,10 @@ GROUP BY rm.id, rm.name;
 
 ```typescript
 interface ReorderSettings {
-  forecastDays: number        // Default: 30
-  safetyStockPercent: number  // Default: 25
-  autoCreatePO: boolean       // Default: false
-  autoApproveUnder: number    // Auto-approve POs under this amount
+  forecastDays: number // Default: 30
+  safetyStockPercent: number // Default: 25
+  autoCreatePO: boolean // Default: false
+  autoApproveUnder: number // Auto-approve POs under this amount
   defaultLeadTimeDays: number // Fallback if supplier has no lead time
 }
 ```

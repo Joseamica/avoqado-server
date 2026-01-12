@@ -2,11 +2,13 @@
 
 ## Overview
 
-The Refunds system enables processing of full or partial refunds for completed card payments via Blumon TPV terminals. Refunds create negative payment records for accurate financial tracking and generate digital receipts for customer reference.
+The Refunds system enables processing of full or partial refunds for completed card payments via Blumon TPV terminals. Refunds create
+negative payment records for accurate financial tracking and generate digital receipts for customer reference.
 
 ## Business Context
 
 **Key Use Cases:**
+
 - Customer returns merchandise
 - Order cancellation after payment
 - Price adjustments (partial refund)
@@ -14,6 +16,7 @@ The Refunds system enables processing of full or partial refunds for completed c
 - Duplicate payment reversal
 
 **Mexican Market Context:**
+
 - Refunds are processed via card present (TPV terminal)
 - Uses Blumon's `CancelIcc` SDK function
 - Requires original transaction reference for tracking
@@ -110,12 +113,7 @@ enum PaymentType {
 ### Main Function
 
 ```typescript
-export async function recordRefund(
-  venueId: string,
-  refundData: RefundRequestData,
-  userId?: string,
-  orgId?: string,
-): Promise<RefundResponse>
+export async function recordRefund(venueId: string, refundData: RefundRequestData, userId?: string, orgId?: string): Promise<RefundResponse>
 ```
 
 ### Request Interface
@@ -125,14 +123,14 @@ interface RefundRequestData {
   venueId: string
   originalPaymentId: string
   originalOrderId?: string | null
-  amount: number                    // In cents (5000 = $50.00)
-  reason: string                    // RefundReason.name
+  amount: number // In cents (5000 = $50.00)
+  reason: string // RefundReason.name
   staffId: string
   shiftId?: string | null
   merchantAccountId?: string | null // Multi-merchant routing
   blumonSerialNumber: string
-  authorizationNumber: string       // From Blumon CancelIcc
-  referenceNumber: string           // From Blumon CancelIcc
+  authorizationNumber: string // From Blumon CancelIcc
+  referenceNumber: string // From Blumon CancelIcc
   maskedPan?: string | null
   cardBrand?: string | null
   entryMode?: string | null
@@ -147,14 +145,14 @@ interface RefundRequestData {
 interface RefundResponse {
   id: string
   originalPaymentId: string
-  amount: number              // In pesos (positive for display)
+  amount: number // In pesos (positive for display)
   status: string
   authorizationNumber?: string | null
   referenceNumber?: string | null
   digitalReceipt?: {
     id: string
     accessKey: string
-    receiptUrl: string        // Includes ?refund=true flag
+    receiptUrl: string // Includes ?refund=true flag
   } | null
 }
 ```
@@ -188,9 +186,7 @@ const alreadyRefunded = Number(processorData.refundedAmount || 0)
 const remainingRefundable = originalAmountNumber - alreadyRefunded
 
 if (refundAmountInPesos > remainingRefundable) {
-  throw new BadRequestError(
-    `Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${remainingRefundable})`
-  )
+  throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${remainingRefundable})`)
 }
 ```
 
@@ -308,7 +304,7 @@ POST /api/v1/tpv/venues/:venueId/refunds
 {
   "id": "pay_refund_456",
   "originalPaymentId": "pay_abc123",
-  "amount": 150.00,
+  "amount": 150.0,
   "status": "COMPLETED",
   "authorizationNumber": "AUTH123456",
   "referenceNumber": "REF789012",
@@ -330,18 +326,19 @@ merchantAccountId: refundData.merchantAccountId || originalPayment.merchantAccou
 ```
 
 This ensures:
+
 - Card network routing to correct processor
 - Reconciliation with original settlement
 - Compliance with Blumon multi-merchant setup
 
 ## Error Handling
 
-| Error | Cause | HTTP Status |
-|-------|-------|-------------|
-| `Payment not found` | Invalid originalPaymentId | 404 |
-| `Payment does not belong to venue` | Security violation | 400 |
-| `Cannot refund payment with status: X` | Non-completed payment | 400 |
-| `Refund amount exceeds remaining` | Over-refund attempt | 400 |
+| Error                                  | Cause                     | HTTP Status |
+| -------------------------------------- | ------------------------- | ----------- |
+| `Payment not found`                    | Invalid originalPaymentId | 404         |
+| `Payment does not belong to venue`     | Security violation        | 400         |
+| `Cannot refund payment with status: X` | Non-completed payment     | 400         |
+| `Refund amount exceeds remaining`      | Over-refund attempt       | 400         |
 
 ## Refund Reasons
 
@@ -364,11 +361,13 @@ enum RefundReason {
 ### Manual Testing
 
 1. **Full refund:**
+
    - Process $100 payment
    - Refund $100
    - Verify `isFullyRefunded = true`
 
 2. **Partial refund:**
+
    - Process $100 payment
    - Refund $30
    - Verify `refundedAmount = 30`, `remainingRefundable = 70`
@@ -376,6 +375,7 @@ enum RefundReason {
    - Verify `isFullyRefunded = true`
 
 3. **Over-refund prevention:**
+
    - Process $100 payment
    - Try to refund $150
    - Should fail with error
@@ -413,6 +413,7 @@ WHERE p.id = 'original-payment-id';
 ## Related Files
 
 **Backend:**
+
 - `src/services/tpv/refund.tpv.service.ts` - Main refund logic
 - `src/services/payments/transactionCost.service.ts` - `createRefundTransactionCost()`
 - `src/services/tpv/digitalReceipt.tpv.service.ts` - Receipt generation
@@ -420,18 +421,19 @@ WHERE p.id = 'original-payment-id';
 - `src/routes/tpv.routes.ts` - Route definition
 
 **TPV Android:**
+
 - Blumon SDK `CancelIcc` integration
 - Refund flow UI (select payment, enter amount)
 - Receipt printing for refunds
 
 ## Industry Standards Reference
 
-| Platform | Feature | Key Differences |
-|----------|---------|-----------------|
-| **Stripe** | `refund` object | Separate from charges, linked via `charge_id` |
-| **Square** | `refund` | Linked to payment via `payment_id` |
-| **Toast** | Refund | In-order void vs post-settlement refund |
-| **Clover** | Refund | Same pattern - negative payment linked to original |
+| Platform   | Feature         | Key Differences                                    |
+| ---------- | --------------- | -------------------------------------------------- |
+| **Stripe** | `refund` object | Separate from charges, linked via `charge_id`      |
+| **Square** | `refund`        | Linked to payment via `payment_id`                 |
+| **Toast**  | Refund          | In-order void vs post-settlement refund            |
+| **Clover** | Refund          | Same pattern - negative payment linked to original |
 
 ## Future Enhancements
 

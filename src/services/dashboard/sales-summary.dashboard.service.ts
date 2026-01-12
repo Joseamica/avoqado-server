@@ -459,7 +459,10 @@ async function calculateTimePeriodMetrics(
   // Debug logging for dailySum/hourlySum
   if (reportType === 'dailySum' || reportType === 'hourlySum') {
     logger.info(`[SalesSummary] ${reportType} orderMetrics keys:`, Array.from(orderMetricsMap.keys()))
-    logger.info(`[SalesSummary] ${reportType} orderMetrics values:`, orderMetrics.map(o => ({ period: o.period, gross_sales: o.gross_sales })))
+    logger.info(
+      `[SalesSummary] ${reportType} orderMetrics values:`,
+      orderMetrics.map(o => ({ period: o.period, gross_sales: o.gross_sales })),
+    )
   }
 
   // Generate all periods for summary report types (fill zeros for missing periods)

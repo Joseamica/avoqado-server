@@ -171,12 +171,7 @@ export class SerializedInventoryService {
    * PRICE is passed to OrderItem.unitPrice, NOT stored in SerializedItem.
    * @param tx - Optional transaction client (required when called inside a transaction)
    */
-  async markAsSold(
-    venueId: string,
-    serialNumber: string,
-    orderItemId: string,
-    tx?: Prisma.TransactionClient,
-  ): Promise<SerializedItem> {
+  async markAsSold(venueId: string, serialNumber: string, orderItemId: string, tx?: Prisma.TransactionClient): Promise<SerializedItem> {
     const client = tx || this.db
     return client.serializedItem.update({
       where: { venueId_serialNumber: { venueId, serialNumber } },

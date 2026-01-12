@@ -30,18 +30,7 @@ import prisma from '@/utils/prismaClient'
 export async function salesByItemReport(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.authContext!
-    const {
-      startDate,
-      endDate,
-      reportType,
-      groupBy,
-      startHour,
-      endHour,
-      categoryId,
-      productId,
-      channel,
-      paymentMethod,
-    } = req.query
+    const { startDate, endDate, reportType, groupBy, startHour, endHour, categoryId, productId, channel, paymentMethod } = req.query
 
     // Validate required params
     if (!startDate || typeof startDate !== 'string') {

@@ -36,7 +36,9 @@ export async function assignTable(req: Request, res: Response): Promise<void> {
     const { venueId } = req.params
     const { tableId, staffId, covers, terminalId } = req.body
 
-    logger.info(`[TABLE CONTROLLER] POST /tpv/venues/${venueId}/tables/assign - Table: ${tableId}, Staff: ${staffId}, Covers: ${covers}, Terminal: ${terminalId || 'none'}`)
+    logger.info(
+      `[TABLE CONTROLLER] POST /tpv/venues/${venueId}/tables/assign - Table: ${tableId}, Staff: ${staffId}, Covers: ${covers}, Terminal: ${terminalId || 'none'}`,
+    )
 
     const result = await tableService.assignTable(venueId, tableId, staffId, covers, terminalId)
 

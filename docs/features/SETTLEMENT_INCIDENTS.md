@@ -2,11 +2,15 @@
 
 ## Overview
 
-The Settlement Incident Tracking System is designed to monitor payment processor settlement reliability for the SOFOM (Mexican lending institution) partnership. It automatically detects when expected settlements don't arrive on time and enables manual confirmation workflows to track processor performance.
+The Settlement Incident Tracking System is designed to monitor payment processor settlement reliability for the SOFOM (Mexican lending
+institution) partnership. It automatically detects when expected settlements don't arrive on time and enables manual confirmation workflows
+to track processor performance.
 
 ## Business Context
 
-**Critical for SOFOM Partnership**: Avoqado is partnering with a SOFOM that provides credit to venues based on guaranteed future cash flow from settlements. The SOFOM needs:
+**Critical for SOFOM Partnership**: Avoqado is partnering with a SOFOM that provides credit to venues based on guaranteed future cash flow
+from settlements. The SOFOM needs:
+
 - **Precise settlement date projections** to calculate lending capacity
 - **Real-time detection** when processors fail to settle on expected dates
 - **Confidence metrics** on settlement reliability per processor
@@ -17,12 +21,14 @@ The Settlement Incident Tracking System is designed to monitor payment processor
 ### 1. Detection by Absence Strategy
 
 **Daily Cron Job** (9:00 AM Mexico City time):
+
 1. Finds all transactions with `estimatedSettlementDate = yesterday`
 2. Checks if `actualSettlementDate` is still `null`
 3. Creates `SettlementIncident` for each missing settlement
 4. Notifies venue for manual confirmation
 
 **Why this approach?**
+
 - Processors like Blumonpay don't have settlement APIs
 - Bank integration is complex and not always available
 - Manual confirmation builds historical accuracy data
@@ -30,6 +36,7 @@ The Settlement Incident Tracking System is designed to monitor payment processor
 ### 2. Manual Confirmation Workflow
 
 **Venue View** (`/venues/:slug/available-balance`):
+
 - Orange alert appears when pending incidents detected
 - Shows list of expected settlements that haven't arrived
 - Click "Confirm" button opens dialog:
@@ -38,12 +45,14 @@ The Settlement Incident Tracking System is designed to monitor payment processor
   - **NO** → Confirms delay, alerts SOFOM
 
 **Outcome**:
+
 - **If YES**: Transaction marked as SETTLED, incident RESOLVED, variance calculated
 - **If NO**: Incident marked as CONFIRMED_DELAY, SOFOM alerted
 
 ### 3. SuperAdmin Tools
 
 **Endpoints** (permission: `system:admin`):
+
 ```
 GET    /api/v1/dashboard/superadmin/settlement-incidents
 GET    /api/v1/dashboard/superadmin/settlement-incidents/stats
@@ -51,6 +60,7 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
 ```
 
 **Use Cases**:
+
 - View all incidents across all venues
 - See global processor reliability statistics
 - Escalate incidents requiring investigation
@@ -60,6 +70,7 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
 ### Database Models
 
 **SettlementIncident**
+
 ```typescript
 {
   id: string
@@ -67,25 +78,26 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
   venueId: string
   estimatedSettlementDate: DateTime
   actualSettlementDate: DateTime | null
-  delayDays: number | null  // Calculated when resolved
-  processorName: string  // e.g., "Blumonpay", "Menta"
+  delayDays: number | null // Calculated when resolved
+  processorName: string // e.g., "Blumonpay", "Menta"
   cardType: TransactionCardType
   transactionDate: DateTime
   amount: Decimal
-  status: IncidentStatus  // PENDING_CONFIRMATION, CONFIRMED_DELAY, RESOLVED, ESCALATED
+  status: IncidentStatus // PENDING_CONFIRMATION, CONFIRMED_DELAY, RESOLVED, ESCALATED
   notes: string | null
   alertedSOFOM: boolean
 }
 ```
 
 **SettlementConfirmation**
+
 ```typescript
 {
   id: string
   incidentId: string | null
   transactionId: string | null
   venueId: string
-  confirmedBy: string  // Staff ID
+  confirmedBy: string // Staff ID
   confirmationDate: DateTime
   settlementArrived: boolean
   actualDate: DateTime | null
@@ -94,6 +106,7 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
 ```
 
 **ProcessorReliabilityMetric**
+
 ```typescript
 {
   id: string
@@ -105,14 +118,15 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
   onTimeSettlements: number
   delayedSettlements: number
   averageDelayDays: Decimal
-  reliabilityScore: Decimal  // % on-time
-  confidence: ConfidenceLevel  // HIGH, MEDIUM, LOW
+  reliabilityScore: Decimal // % on-time
+  confidence: ConfidenceLevel // HIGH, MEDIUM, LOW
 }
 ```
 
 ### Backend Services
 
 **`settlementIncident.service.ts`** (`src/services/dashboard/`)
+
 ```typescript
 // Core functions:
 detectMissingSettlements()  // Runs daily via cron
@@ -124,6 +138,7 @@ getIncidentStats(venueId?)
 ```
 
 **`settlement-detection.job.ts`** (`src/jobs/`)
+
 ```typescript
 class SettlementDetectionJob {
   constructor() {
@@ -142,12 +157,14 @@ class SettlementDetectionJob {
 ### Frontend Components
 
 **`PendingIncidentsAlert.tsx`**
+
 - Displays orange alert banner when incidents exist
 - Shows list of pending confirmations
 - Total pending amount summary
 - Refetches every 60 seconds
 
 **`ConfirmIncidentDialog.tsx`**
+
 - Modal dialog for confirmation
 - Radio buttons: "Yes, it arrived" / "No, not yet"
 - Date picker if YES selected
@@ -157,6 +174,7 @@ class SettlementDetectionJob {
 ### API Endpoints
 
 **For Venues** (permission: `settlements:read`, `settlements:write`):
+
 ```
 GET    /api/v1/dashboard/venues/:venueId/settlement-incidents
 GET    /api/v1/dashboard/venues/:venueId/settlement-incidents/stats
@@ -164,6 +182,7 @@ POST   /api/v1/dashboard/venues/:venueId/settlement-incidents/:incidentId/confir
 ```
 
 **For SuperAdmin** (permission: `system:admin`):
+
 ```
 GET    /api/v1/dashboard/superadmin/settlement-incidents
 GET    /api/v1/dashboard/superadmin/settlement-incidents/stats
@@ -175,11 +194,13 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
 **Namespaces**: `settlementIncidents`, `common`
 
 **Files**:
+
 - `/src/locales/en/settlementIncidents.json`
 - `/src/locales/es/settlementIncidents.json`
 - `/src/locales/fr/settlementIncidents.json`
 
 **Key Translations**:
+
 ```json
 {
   "pendingAlert.title": "{{count}} Pending Settlement Confirmation",
@@ -192,6 +213,7 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
 ## Example Scenario
 
 **Transaction Flow**:
+
 1. **Oct 29**: Customer pays $5,000 via Blumonpay Visa Debit
 2. **Oct 29**: System calculates `estimatedSettlementDate = Oct 31` (2 business days)
 3. **Nov 1, 9 AM**: Detection job runs, finds settlement didn't arrive Oct 31
@@ -210,17 +232,20 @@ POST   /api/v1/dashboard/superadmin/settlement-incidents/:incidentId/escalate
 ## Permissions
 
 **Required Permissions**:
+
 - `settlements:read` - View incidents and stats
 - `settlements:write` - Confirm incidents
 - `system:admin` - View global stats, escalate incidents
 
 **Default Access**:
+
 - **MANAGER, ADMIN, OWNER** - Can confirm incidents
 - **SUPERADMIN** - Can escalate, view global stats
 
 ## Testing Locally
 
 ### 1. Create Test Transaction with Estimated Settlement Date
+
 ```typescript
 // In seed or via API
 await prisma.venueTransaction.create({
@@ -229,11 +254,12 @@ await prisma.venueTransaction.create({
     actualSettlementDate: null,
     status: 'PENDING',
     // ... other fields
-  }
+  },
 })
 ```
 
 ### 2. Run Detection Job Manually
+
 ```bash
 # In backend console/REPL
 import { settlementDetectionJob } from './src/jobs/settlement-detection.job'
@@ -241,6 +267,7 @@ await settlementDetectionJob.runNow()
 ```
 
 ### 3. Check Results
+
 ```bash
 # Query incidents
 npx prisma studio
@@ -248,6 +275,7 @@ npx prisma studio
 ```
 
 ### 4. Test Frontend
+
 - Navigate to `/venues/:slug/available-balance`
 - Should see orange alert if incidents exist
 - Click "Confirm" to test dialog
@@ -255,17 +283,20 @@ npx prisma studio
 ## Future Enhancements (Phase 2+)
 
 ### Phase 2: SOFOM Risk Dashboard
+
 - **Processor Reliability Scores**: % on-time settlements per processor
 - **Venue Risk Scoring**: Based on transaction volume + processor mix
 - **Lending Capacity Calculator**: Safe credit limit with safety margins
 - **Active Incident Monitoring**: Real-time delays affecting credit decisions
 
 ### Phase 3: Automation
+
 - **Webhook Integration**: When processors add settlement APIs
 - **Bank Integration**: Verify settlements via bank API (Open Banking)
 - **SMS Alerts**: Critical delays notify SOFOM analysts immediately
 
 ### Phase 4: Analytics
+
 - **Seasonal Patterns**: End-of-month, holiday effects
 - **Anomaly Detection**: Unusual processor behavior
 - **ML Predictions**: Improve settlement date accuracy over time
@@ -273,6 +304,7 @@ npx prisma studio
 ## Related Files
 
 **Backend**:
+
 - `prisma/schema.prisma` - Models: `SettlementIncident`, `SettlementConfirmation`, `ProcessorReliabilityMetric`, `HolidayCalendar`
 - `src/services/dashboard/settlementIncident.service.ts` - Business logic
 - `src/controllers/dashboard/settlementIncident.dashboard.controller.ts` - API handlers
@@ -282,6 +314,7 @@ npx prisma studio
 - `src/server.ts` - Job registration (search for `settlementDetectionJob`)
 
 **Frontend**:
+
 - `src/services/settlementIncident.service.ts` - API client
 - `src/components/SettlementIncident/PendingIncidentsAlert.tsx` - Alert banner
 - `src/components/SettlementIncident/ConfirmIncidentDialog.tsx` - Confirmation modal
@@ -294,6 +327,7 @@ npx prisma studio
 **Applied**: `20251031213624_add_settlement_tracking_and_risk_management`
 
 **Changes**:
+
 - Created 4 new tables: `SettlementIncident`, `SettlementConfirmation`, `ProcessorReliabilityMetric`, `HolidayCalendar`
 - Added fields to `VenueTransaction`: `settlementVarianceDays`, `confirmationMethod`
 - Created 4 new enums: `IncidentStatus`, `ConfidenceLevel`, `HolidayType`, `ConfirmationMethod`

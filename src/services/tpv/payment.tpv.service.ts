@@ -13,6 +13,7 @@ import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service
 import { parseDateRange } from '@/utils/datetime'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
+import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -1619,6 +1620,17 @@ export async function recordOrderPayment(
         orderId: activeOrder.id,
         amount: payment.amount,
       })
+
+      // Create commission calculation for this payment (non-blocking)
+      if (payment.type !== 'TEST') {
+        createCommissionForPayment(payment.id).catch(err => {
+          logger.error('Failed to create commission for payment', {
+            paymentId: payment.id,
+            orderId: activeOrder.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+      }
     } else if (payment.status === 'PROCESSING') {
       socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_PROCESSING, paymentPayload)
       logger.info('🔌 PAYMENT_PROCESSING event emitted', {
@@ -2182,6 +2194,17 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         orderId: fastOrder.id,
         amount: payment.amount,
       })
+
+      // Create commission calculation for this fast payment (non-blocking)
+      if (payment.type !== 'TEST') {
+        createCommissionForPayment(payment.id).catch(err => {
+          logger.error('Failed to create commission for fast payment', {
+            paymentId: payment.id,
+            orderId: fastOrder.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+      }
     } else if (payment.status === 'PROCESSING') {
       socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_PROCESSING, paymentPayload)
       logger.info('🔌 PAYMENT_PROCESSING event emitted (fast payment)', {

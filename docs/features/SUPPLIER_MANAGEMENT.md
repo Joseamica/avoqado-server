@@ -2,11 +2,14 @@
 
 ## Overview
 
-The Supplier Management system provides comprehensive vendor relationship management for raw materials procurement. It tracks supplier information, pricing agreements, performance metrics, and integrates with the purchase order system to recommend the best suppliers based on price, lead time, and reliability.
+The Supplier Management system provides comprehensive vendor relationship management for raw materials procurement. It tracks supplier
+information, pricing agreements, performance metrics, and integrates with the purchase order system to recommend the best suppliers based on
+price, lead time, and reliability.
 
 ## Business Context
 
 **Key Use Cases:**
+
 - Vendor information management (contact, payment terms)
 - Price comparison across multiple suppliers
 - Supplier performance tracking
@@ -14,6 +17,7 @@ The Supplier Management system provides comprehensive vendor relationship manage
 - Historical pricing analysis
 
 **Industry Standards:**
+
 - MarketMan: Supplier catalog with price tracking
 - BlueCart: Vendor management with ordering
 - Toast: Supplier integration for inventory
@@ -124,11 +128,11 @@ model SupplierPricing {
 
 ### Scoring Weights
 
-| Factor | Default Weight | Description |
-|--------|----------------|-------------|
-| `priceWeight` | 50% | Lower price = higher score |
-| `leadTimeWeight` | 20% | Faster delivery = higher score |
-| `reliabilityWeight` | 30% | Historical reliability rating |
+| Factor              | Default Weight | Description                    |
+| ------------------- | -------------- | ------------------------------ |
+| `priceWeight`       | 50%            | Lower price = higher score     |
+| `leadTimeWeight`    | 20%            | Faster delivery = higher score |
+| `reliabilityWeight` | 30%            | Historical reliability rating  |
 
 ## Service Layer
 
@@ -138,57 +142,34 @@ model SupplierPricing {
 
 ```typescript
 // CRUD Operations
-export async function getSuppliers(
-  venueId: string,
-  filters?: { active?: boolean; search?: string; rating?: number }
-): Promise<Supplier[]>
+export async function getSuppliers(venueId: string, filters?: { active?: boolean; search?: string; rating?: number }): Promise<Supplier[]>
 
-export async function getSupplier(
-  venueId: string,
-  supplierId: string
-): Promise<Supplier | null>
+export async function getSupplier(venueId: string, supplierId: string): Promise<Supplier | null>
 
-export async function createSupplier(
-  venueId: string,
-  data: CreateSupplierDto
-): Promise<Supplier>
+export async function createSupplier(venueId: string, data: CreateSupplierDto): Promise<Supplier>
 
-export async function updateSupplier(
-  venueId: string,
-  supplierId: string,
-  data: UpdateSupplierDto
-): Promise<Supplier>
+export async function updateSupplier(venueId: string, supplierId: string, data: UpdateSupplierDto): Promise<Supplier>
 
-export async function deleteSupplier(
-  venueId: string,
-  supplierId: string
-): Promise<void>  // Soft delete
+export async function deleteSupplier(venueId: string, supplierId: string): Promise<void> // Soft delete
 
 // Pricing Operations
-export async function createSupplierPricing(
-  venueId: string,
-  supplierId: string,
-  data: PricingData
-): Promise<SupplierPricing>
+export async function createSupplierPricing(venueId: string, supplierId: string, data: PricingData): Promise<SupplierPricing>
 
-export async function getSupplierPricingHistory(
-  venueId: string,
-  rawMaterialId: string
-): Promise<SupplierPricing[]>
+export async function getSupplierPricingHistory(venueId: string, rawMaterialId: string): Promise<SupplierPricing[]>
 
 // Recommendation & Analytics
 export async function getSupplierRecommendations(
   venueId: string,
   rawMaterialId: string,
   quantity: number,
-  weights?: WeightConfig
+  weights?: WeightConfig,
 ): Promise<SupplierRecommendation[]>
 
 export async function getSupplierPerformance(
   venueId: string,
   supplierId: string,
   startDate?: Date,
-  endDate?: Date
+  endDate?: Date,
 ): Promise<PerformanceMetrics>
 ```
 
@@ -202,8 +183,8 @@ interface RecommendationRequest {
   rawMaterialId: string
   quantity: number
   weights?: {
-    priceWeight?: number      // Default: 0.5
-    leadTimeWeight?: number   // Default: 0.2
+    priceWeight?: number // Default: 0.5
+    leadTimeWeight?: number // Default: 0.2
     reliabilityWeight?: number // Default: 0.3
   }
 }
@@ -222,10 +203,7 @@ const leadTimeScore = ((maxLeadTime - supplier.leadTimeDays) / (maxLeadTime - mi
 const reliabilityScore = (supplier.reliabilityScore || 0.5) * 100
 
 // 4. Weighted Total
-const totalScore =
-  priceScore * priceWeight +
-  leadTimeScore * leadTimeWeight +
-  reliabilityScore * reliabilityWeight
+const totalScore = priceScore * priceWeight + leadTimeScore * leadTimeWeight + reliabilityScore * reliabilityWeight
 ```
 
 ### Response Structure
@@ -248,7 +226,7 @@ interface SupplierRecommendation {
     unit: string
     minimumQuantity: number
     bulkDiscount: number | null
-    effectivePrice: number  // After discount
+    effectivePrice: number // After discount
   }
   analysis: {
     quantity: number
@@ -282,13 +260,13 @@ interface SupplierPerformance {
   averageOrderValue: number
 
   // Delivery performance
-  onTimeDeliveryRate: number  // Percentage
+  onTimeDeliveryRate: number // Percentage
   completedOrders: number
   pendingOrders: number
   cancelledOrders: number
 
   // Quality
-  qualityScore: number  // Based on reliabilityScore
+  qualityScore: number // Based on reliabilityScore
 }
 ```
 
@@ -380,7 +358,7 @@ GET    /api/v1/dashboard/venues/:venueId/suppliers/:supplierId/performance
       "reliabilityScore": 0.92
     },
     "pricing": {
-      "pricePerUnit": 45.00,
+      "pricePerUnit": 45.0,
       "unit": "KG",
       "minimumQuantity": 10,
       "bulkDiscount": 0.05,
@@ -388,7 +366,7 @@ GET    /api/v1/dashboard/venues/:venueId/suppliers/:supplierId/performance
     },
     "analysis": {
       "quantity": 50,
-      "totalCost": 2137.50,
+      "totalCost": 2137.5,
       "estimatedDeliveryDays": 2,
       "meetsMinimumOrder": true,
       "scores": {
@@ -408,14 +386,14 @@ GET    /api/v1/dashboard/venues/:venueId/suppliers/:supplierId/performance
       "reliabilityScore": 0.78
     },
     "pricing": {
-      "pricePerUnit": 40.00,
+      "pricePerUnit": 40.0,
       "unit": "KG",
       "minimumQuantity": 20,
-      "effectivePrice": 40.00
+      "effectivePrice": 40.0
     },
     "analysis": {
       "quantity": 50,
-      "totalCost": 2000.00,
+      "totalCost": 2000.0,
       "estimatedDeliveryDays": 1,
       "meetsMinimumOrder": true,
       "scores": {
@@ -469,10 +447,7 @@ Suppliers with purchase order history cannot be hard deleted:
 
 ```typescript
 if (existing.purchaseOrders.length > 0) {
-  throw new AppError(
-    `Cannot delete supplier - it has ${existing.purchaseOrders.length} associated purchase order(s)`,
-    400
-  )
+  throw new AppError(`Cannot delete supplier - it has ${existing.purchaseOrders.length} associated purchase order(s)`, 400)
 }
 
 // Soft delete instead
@@ -492,11 +467,7 @@ The supplier recommendation system integrates with the Auto-Reorder feature:
 
 ```typescript
 // In autoReorder.service.ts
-const recommendations = await getSupplierRecommendations(
-  venueId,
-  rawMaterialId,
-  suggestedQuantity
-)
+const recommendations = await getSupplierRecommendations(venueId, rawMaterialId, suggestedQuantity)
 
 // Best supplier used for reorder suggestion
 const bestSupplier = recommendations[0]
@@ -513,28 +484,31 @@ return {
 
 ## Error Handling
 
-| Error | Cause | HTTP Status |
-|-------|-------|-------------|
-| `Supplier with name X already exists` | Duplicate name in venue | 400 |
-| `Supplier with ID X not found` | Invalid supplierId | 404 |
-| `Cannot delete supplier - has purchase orders` | Delete protection | 400 |
-| `Raw material not found` | Invalid rawMaterialId | 404 |
+| Error                                          | Cause                   | HTTP Status |
+| ---------------------------------------------- | ----------------------- | ----------- |
+| `Supplier with name X already exists`          | Duplicate name in venue | 400         |
+| `Supplier with ID X not found`                 | Invalid supplierId      | 404         |
+| `Cannot delete supplier - has purchase orders` | Delete protection       | 400         |
+| `Raw material not found`                       | Invalid rawMaterialId   | 404         |
 
 ## Testing Scenarios
 
 ### Manual Testing
 
 1. **Create and manage suppliers:**
+
    - Create supplier with full details
    - Update contact information
    - Verify soft delete with PO history
 
 2. **Pricing management:**
+
    - Add pricing for raw material
    - Verify old price deactivated
    - Check pricing history
 
 3. **Recommendations:**
+
    - Request recommendations for material
    - Verify scoring algorithm
    - Test with different weight configurations
@@ -590,6 +564,7 @@ GROUP BY s.id;
 ## Related Files
 
 **Backend:**
+
 - `src/services/dashboard/supplier.service.ts` - Core supplier logic
 - `src/services/dashboard/autoReorder.service.ts` - Reorder integration
 - `src/controllers/dashboard/inventory/supplier.controller.ts` - API handlers
@@ -597,6 +572,7 @@ GROUP BY s.id;
 - `prisma/schema.prisma` - Supplier, SupplierPricing models
 
 **Dashboard:**
+
 - Supplier list and detail pages
 - Price comparison views
 - Performance analytics

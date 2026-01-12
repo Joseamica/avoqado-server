@@ -29,19 +29,21 @@ Avoqado uses a **two-level classification system**:
 
 This is the **industry standard** used by Square, Stripe, and Toast:
 
-| Platform | Stores | Derives |
-|----------|--------|---------|
-| **Square** | MCC (Merchant Category Code) in Locations API | Category for UI grouping |
-| **Stripe** | MCC codes (5812, 7941, etc.) | Category is just for display |
-| **Toast** | Restaurant type + Service model | Category for onboarding UX |
+| Platform   | Stores                                        | Derives                      |
+| ---------- | --------------------------------------------- | ---------------------------- |
+| **Square** | MCC (Merchant Category Code) in Locations API | Category for UI grouping     |
+| **Stripe** | MCC codes (5812, 7941, etc.)                  | Category is just for display |
+| **Toast**  | Restaurant type + Service model               | Category for onboarding UX   |
 
 **Benefits of derived approach:**
+
 - No database migration needed when adding types
 - Single source of truth (VenueType)
 - No data redundancy or sync issues
 - Category automatically correct based on type
 
 **When to store in DB:**
+
 - Only if you need to query `WHERE industryCategory = 'RETAIL'` frequently
 - Current system can use `WHERE type IN ('RETAIL_STORE', 'JEWELRY', ...)`
 
@@ -51,77 +53,77 @@ Location: `/prisma/schema.prisma` (lines ~3817-3870)
 
 ### FOOD_SERVICE (8 types)
 
-| Type | Description | MCC | Blumon Rate (Credit) |
-|------|-------------|-----|----------------------|
-| `RESTAURANT` | Full-service restaurant | 5812 | 2.3% |
-| `BAR` | Bar, cantina, pub | 5813 | 2.3% |
-| `CAFE` | Coffee shop, cafeteria | 5812 | 2.3% |
-| `BAKERY` | Bakery, panaderia | 5462 | 2.3% |
-| `FOOD_TRUCK` | Mobile food service | 5812 | 2.3% |
-| `FAST_FOOD` | Quick service restaurant | 5814 | 1.7% |
-| `CATERING` | Catering services | 5812 | 2.3% |
-| `CLOUD_KITCHEN` | Delivery-only kitchen | 5812 | 2.3% |
+| Type            | Description              | MCC  | Blumon Rate (Credit) |
+| --------------- | ------------------------ | ---- | -------------------- |
+| `RESTAURANT`    | Full-service restaurant  | 5812 | 2.3%                 |
+| `BAR`           | Bar, cantina, pub        | 5813 | 2.3%                 |
+| `CAFE`          | Coffee shop, cafeteria   | 5812 | 2.3%                 |
+| `BAKERY`        | Bakery, panaderia        | 5462 | 2.3%                 |
+| `FOOD_TRUCK`    | Mobile food service      | 5812 | 2.3%                 |
+| `FAST_FOOD`     | Quick service restaurant | 5814 | 1.7%                 |
+| `CATERING`      | Catering services        | 5812 | 2.3%                 |
+| `CLOUD_KITCHEN` | Delivery-only kitchen    | 5812 | 2.3%                 |
 
 ### RETAIL (13 types)
 
-| Type | Description | MCC | Blumon Rate (Credit) |
-|------|-------------|-----|----------------------|
-| `RETAIL_STORE` | General retail | 5999 | 1.53% |
-| `JEWELRY` | Jewelry store | 5944 | 1.53% |
-| `CLOTHING` | Clothing/apparel | 5651 | 1.53% |
-| `ELECTRONICS` | Electronics store | 5732 | 1.53% |
-| `PHARMACY` | Pharmacy/drugstore | 5912 | 1.28% |
-| `CONVENIENCE_STORE` | Convenience store | 5411 | 1.53% |
-| `SUPERMARKET` | Supermarket/grocery | 5411 | 1.53% |
-| `LIQUOR_STORE` | Liquor store | 5921 | 1.53% |
-| `FURNITURE` | Furniture store | 5712 | 1.53% |
-| `HARDWARE` | Hardware store | 5251 | 1.53% |
-| `BOOKSTORE` | Bookstore | 5942 | 1.53% |
-| `PET_STORE` | Pet supplies | 5995 | 1.53% |
-| `TELECOMUNICACIONES` | Telcel/AT&T stores, phone repair | 4812 | 1.53% |
+| Type                 | Description                      | MCC  | Blumon Rate (Credit) |
+| -------------------- | -------------------------------- | ---- | -------------------- |
+| `RETAIL_STORE`       | General retail                   | 5999 | 1.53%                |
+| `JEWELRY`            | Jewelry store                    | 5944 | 1.53%                |
+| `CLOTHING`           | Clothing/apparel                 | 5651 | 1.53%                |
+| `ELECTRONICS`        | Electronics store                | 5732 | 1.53%                |
+| `PHARMACY`           | Pharmacy/drugstore               | 5912 | 1.28%                |
+| `CONVENIENCE_STORE`  | Convenience store                | 5411 | 1.53%                |
+| `SUPERMARKET`        | Supermarket/grocery              | 5411 | 1.53%                |
+| `LIQUOR_STORE`       | Liquor store                     | 5921 | 1.53%                |
+| `FURNITURE`          | Furniture store                  | 5712 | 1.53%                |
+| `HARDWARE`           | Hardware store                   | 5251 | 1.53%                |
+| `BOOKSTORE`          | Bookstore                        | 5942 | 1.53%                |
+| `PET_STORE`          | Pet supplies                     | 5995 | 1.53%                |
+| `TELECOMUNICACIONES` | Telcel/AT&T stores, phone repair | 4812 | 1.53%                |
 
 ### SERVICES (8 types)
 
-| Type | Description | MCC | Blumon Rate (Credit) |
-|------|-------------|-----|----------------------|
-| `SALON` | Hair salon, beauty salon | 7230 | 1.7% |
-| `SPA` | Spa, wellness center | 7298 | 1.7% |
-| `FITNESS` | Gym, fitness center | 7941 | 1.7% |
-| `CLINIC` | Medical clinic | 8011 | 1.7% |
-| `VETERINARY` | Veterinary clinic | 0742 | 1.7% |
-| `AUTO_SERVICE` | Auto repair, car wash | 7538 | 1.7% |
-| `LAUNDRY` | Laundry, dry cleaning | 7210 | 1.7% |
-| `REPAIR_SHOP` | General repair services | 7699 | 1.7% |
+| Type           | Description              | MCC  | Blumon Rate (Credit) |
+| -------------- | ------------------------ | ---- | -------------------- |
+| `SALON`        | Hair salon, beauty salon | 7230 | 1.7%                 |
+| `SPA`          | Spa, wellness center     | 7298 | 1.7%                 |
+| `FITNESS`      | Gym, fitness center      | 7941 | 1.7%                 |
+| `CLINIC`       | Medical clinic           | 8011 | 1.7%                 |
+| `VETERINARY`   | Veterinary clinic        | 0742 | 1.7%                 |
+| `AUTO_SERVICE` | Auto repair, car wash    | 7538 | 1.7%                 |
+| `LAUNDRY`      | Laundry, dry cleaning    | 7210 | 1.7%                 |
+| `REPAIR_SHOP`  | General repair services  | 7699 | 1.7%                 |
 
 ### HOSPITALITY (3 types)
 
-| Type | Description | MCC | Blumon Rate (Credit) |
-|------|-------------|-----|----------------------|
-| `HOTEL` | Hotel | 7011 | 2.1% |
-| `HOSTEL` | Hostel | 7011 | 2.1% |
-| `RESORT` | Resort | 7011 | 2.1% |
+| Type     | Description | MCC  | Blumon Rate (Credit) |
+| -------- | ----------- | ---- | -------------------- |
+| `HOTEL`  | Hotel       | 7011 | 2.1%                 |
+| `HOSTEL` | Hostel      | 7011 | 2.1%                 |
+| `RESORT` | Resort      | 7011 | 2.1%                 |
 
 ### ENTERTAINMENT (5 types)
 
-| Type | Description | MCC | Blumon Rate (Credit) |
-|------|-------------|-----|----------------------|
-| `CINEMA` | Movie theater | 7832 | 1.7% |
-| `ARCADE` | Arcade, game center | 7993 | 1.7% |
-| `EVENT_VENUE` | Event venue, banquet hall | 7941 | 1.7% |
-| `NIGHTCLUB` | Nightclub, disco | 5813 | 2.3% |
-| `BOWLING` | Bowling alley | 7933 | 1.7% |
+| Type          | Description               | MCC  | Blumon Rate (Credit) |
+| ------------- | ------------------------- | ---- | -------------------- |
+| `CINEMA`      | Movie theater             | 7832 | 1.7%                 |
+| `ARCADE`      | Arcade, game center       | 7993 | 1.7%                 |
+| `EVENT_VENUE` | Event venue, banquet hall | 7941 | 1.7%                 |
+| `NIGHTCLUB`   | Nightclub, disco          | 5813 | 2.3%                 |
+| `BOWLING`     | Bowling alley             | 7933 | 1.7%                 |
 
 ### LEGACY (2 types - hidden from onboarding)
 
-| Type | Maps To | Notes |
-|------|---------|-------|
+| Type               | Maps To      | Notes                           |
+| ------------------ | ------------ | ------------------------------- |
 | `HOTEL_RESTAURANT` | FOOD_SERVICE | Use `RESTAURANT` for new venues |
-| `FITNESS_STUDIO` | SERVICES | Use `FITNESS` for new venues |
+| `FITNESS_STUDIO`   | SERVICES     | Use `FITNESS` for new venues    |
 
 ### OTHER (1 type)
 
-| Type | Description |
-|------|-------------|
+| Type    | Description                           |
+| ------- | ------------------------------------- |
 | `OTHER` | Catch-all for unclassified businesses |
 
 ## Code Locations
@@ -178,7 +180,7 @@ Location: `/prisma/schema.prisma` (lines ~3817-3870)
 
 // 1. VenueType → Search Term
 const VENUE_TYPE_TO_SEARCH_TERM: Record<string, string> = {
-  RESTAURANT: 'restaurante',    // → searches business-synonyms.json
+  RESTAURANT: 'restaurante', // → searches business-synonyms.json
   FAST_FOOD: 'comida rapida',
   RETAIL_STORE: 'retail',
   FITNESS: 'fitness',
@@ -196,18 +198,19 @@ const VENUE_TYPE_TO_SEARCH_TERM: Record<string, string> = {
 
 ### Rate Variation by Category (Blumon)
 
-| Familia | Credit | Debit | International | AMEX |
-|---------|--------|-------|---------------|------|
-| Restaurantes | 2.3% | 1.68% | 3.3% | 3.0% |
-| Comida rapida | 1.7% | 1.35% | 3.3% | 3.0% |
-| Ventas al detalle | 1.53% | 1.15% | 3.3% | 3.0% |
-| Farmacias | 1.28% | 1.0% | 3.3% | 3.0% |
-| Hoteles | 2.1% | 1.63% | 3.3% | 3.0% |
-| Entretenimiento | 1.7% | 1.63% | 3.3% | 3.0% |
+| Familia           | Credit | Debit | International | AMEX |
+| ----------------- | ------ | ----- | ------------- | ---- |
+| Restaurantes      | 2.3%   | 1.68% | 3.3%          | 3.0% |
+| Comida rapida     | 1.7%   | 1.35% | 3.3%          | 3.0% |
+| Ventas al detalle | 1.53%  | 1.15% | 3.3%          | 3.0% |
+| Farmacias         | 1.28%  | 1.0%  | 3.3%          | 3.0% |
+| Hoteles           | 2.1%   | 1.63% | 3.3%          | 3.0% |
+| Entretenimiento   | 1.7%   | 1.63% | 3.3%          | 3.0% |
 
 ### Where Rates Are Stored
 
 MCC lookup results are stored in `ProviderCostStructure` table:
+
 - `creditRate`, `debitRate`, `amexRate`, `internationalRate`
 - `notes` field contains MCC metadata for audit
 
@@ -215,14 +218,14 @@ MCC lookup results are stored in `ProviderCostStructure` table:
 
 The system adapts UI labels based on business category:
 
-| Category | Menu | Item | Order | Table |
-|----------|------|------|-------|-------|
-| FOOD_SERVICE | Menu | Platillo | Orden | Mesa |
-| RETAIL | Catalogo | Producto | Venta | Caja |
-| SERVICES | Servicios | Servicio | Cita | Estacion |
-| HOSPITALITY | Servicios | Servicio | Reservacion | Habitacion |
-| ENTERTAINMENT | Eventos | Evento | Entrada | Sala |
-| OTHER | Catalogo | Item | Orden | Ubicacion |
+| Category      | Menu      | Item     | Order       | Table      |
+| ------------- | --------- | -------- | ----------- | ---------- |
+| FOOD_SERVICE  | Menu      | Platillo | Orden       | Mesa       |
+| RETAIL        | Catalogo  | Producto | Venta       | Caja       |
+| SERVICES      | Servicios | Servicio | Cita        | Estacion   |
+| HOSPITALITY   | Servicios | Servicio | Reservacion | Habitacion |
+| ENTERTAINMENT | Eventos   | Evento   | Entrada     | Sala       |
+| OTHER         | Catalogo  | Item     | Orden       | Ubicacion  |
 
 **Usage:**
 
@@ -251,7 +254,7 @@ const VENUE_TYPE_TO_INDUSTRY = {
   JEWELRY: 'retail',
 
   // Special configs
-  TELECOMUNICACIONES: 'telecom',  // PlayTelecom special features
+  TELECOMUNICACIONES: 'telecom', // PlayTelecom special features
   HOTEL: 'hospitality',
   // ...
 }
@@ -272,6 +275,7 @@ enum VenueType {
 ```
 
 Run migration:
+
 ```bash
 npx prisma migrate dev --name add_new_type
 ```
@@ -297,6 +301,7 @@ const VENUE_TYPE_TO_SEARCH_TERM = {
 ```
 
 If needed, add to `/src/data/blumon-pricing/business-synonyms.json`:
+
 ```json
 {
   "new search term": {

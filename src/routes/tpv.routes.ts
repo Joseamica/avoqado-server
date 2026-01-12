@@ -4974,7 +4974,11 @@ router.post(
         correlationId: req.correlationId,
       })
 
-      const result = await orderTpvService.sellSerializedItem(venueId, { serialNumber, categoryId, price, paymentMethodId, notes, terminalId }, staffId)
+      const result = await orderTpvService.sellSerializedItem(
+        venueId,
+        { serialNumber, categoryId, price, paymentMethodId, notes, terminalId },
+        staffId,
+      )
 
       logger.info(`✅ [SERIALIZED INV] Order created: ${result.orderNumber}`, {
         venueId,
@@ -5073,52 +5077,48 @@ router.post(
  *
  * @requires GOOGLE_GEOLOCATION_API_KEY env variable
  */
-router.post(
-  '/geolocation/cell-towers',
-  authenticateTokenMiddleware,
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { cellTowers, wifiAccessPoints } = req.body
+router.post('/geolocation/cell-towers', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { cellTowers, wifiAccessPoints } = req.body
 
-      // Validate: need at least one of cell towers or WiFi APs
-      const hasCellTowers = Array.isArray(cellTowers) && cellTowers.length > 0
-      const hasWifiAPs = Array.isArray(wifiAccessPoints) && wifiAccessPoints.length > 0
+    // Validate: need at least one of cell towers or WiFi APs
+    const hasCellTowers = Array.isArray(cellTowers) && cellTowers.length > 0
+    const hasWifiAPs = Array.isArray(wifiAccessPoints) && wifiAccessPoints.length > 0
 
-      if (!hasCellTowers && !hasWifiAPs) {
-        throw new AppError('cellTowers or wifiAccessPoints array is required', 400)
-      }
-
-      logger.info(`📍 [GEOLOCATION] Network location request`, {
-        cellTowersCount: cellTowers?.length || 0,
-        wifiAPsCount: wifiAccessPoints?.length || 0,
-        firstTower: cellTowers?.[0],
-        correlationId: req.correlationId,
-      })
-
-      // Call Google Geolocation API
-      const result = await getNetworkLocation(cellTowers || [], wifiAccessPoints || [])
-
-      if (!result) {
-        throw new AppError('Could not determine location from network data', 404)
-      }
-
-      logger.info(`📍 [GEOLOCATION] Location determined`, {
-        latitude: result.latitude,
-        longitude: result.longitude,
-        accuracy: result.accuracy,
-        correlationId: req.correlationId,
-      })
-
-      return res.status(200).json(result)
-    } catch (error) {
-      logger.error(`❌ [GEOLOCATION] Error in network location lookup`, {
-        correlationId: req.correlationId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      })
-      next(error)
+    if (!hasCellTowers && !hasWifiAPs) {
+      throw new AppError('cellTowers or wifiAccessPoints array is required', 400)
     }
-  },
-)
+
+    logger.info(`📍 [GEOLOCATION] Network location request`, {
+      cellTowersCount: cellTowers?.length || 0,
+      wifiAPsCount: wifiAccessPoints?.length || 0,
+      firstTower: cellTowers?.[0],
+      correlationId: req.correlationId,
+    })
+
+    // Call Google Geolocation API
+    const result = await getNetworkLocation(cellTowers || [], wifiAccessPoints || [])
+
+    if (!result) {
+      throw new AppError('Could not determine location from network data', 404)
+    }
+
+    logger.info(`📍 [GEOLOCATION] Location determined`, {
+      latitude: result.latitude,
+      longitude: result.longitude,
+      accuracy: result.accuracy,
+      correlationId: req.correlationId,
+    })
+
+    return res.status(200).json(result)
+  } catch (error) {
+    logger.error(`❌ [GEOLOCATION] Error in network location lookup`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
 
 /**
  * Call Google Geolocation API to convert cell tower + WiFi info to coordinates.

@@ -2,11 +2,13 @@
 
 ## Overview
 
-The Digital Receipts system generates and delivers electronic receipts to customers after payment. Receipts are immutable snapshots of the transaction at the moment of creation, accessible via unique URLs and optionally delivered via email.
+The Digital Receipts system generates and delivers electronic receipts to customers after payment. Receipts are immutable snapshots of the
+transaction at the moment of creation, accessible via unique URLs and optionally delivered via email.
 
 ## Business Context
 
 **Key Use Cases:**
+
 - QR code on printed receipt linking to digital version
 - Email receipt to customer for expense tracking
 - Digital-first customers who refuse paper receipts
@@ -14,6 +16,7 @@ The Digital Receipts system generates and delivers electronic receipts to custom
 - Customer review/rating flow integration
 
 **Industry Standards:**
+
 - Toast: "Digital Receipt" via email/SMS
 - Square: "Digital Receipts" with item details
 - Stripe: "Receipt URL" in payment response
@@ -83,11 +86,11 @@ interface ReceiptDataSnapshot {
     status: string
     splitType: string
     cardBrand?: string
-    maskedPan?: string          // e.g., "****1234"
-    entryMode?: string          // CONTACTLESS, CHIP, etc.
+    maskedPan?: string // e.g., "****1234"
+    entryMode?: string // CONTACTLESS, CHIP, etc.
     authorizationNumber?: string
     referenceNumber?: string
-    createdAt: string           // ISO timestamp
+    createdAt: string // ISO timestamp
   }
   venue: {
     id: string
@@ -97,14 +100,14 @@ interface ReceiptDataSnapshot {
     state?: string
     phone?: string
     email?: string
-    logo?: string               // URL to logo
-    primaryColor?: string       // Brand color
+    logo?: string // URL to logo
+    primaryColor?: string // Brand color
   }
   order: {
     id: string
     orderNumber: string
-    type: string                // DINE_IN, TAKEOUT, DELIVERY
-    source: string              // TPV, QR, WEB
+    type: string // DINE_IN, TAKEOUT, DELIVERY
+    source: string // TPV, QR, WEB
     subtotal: number
     taxAmount: number
     tipAmount: number
@@ -131,9 +134,9 @@ interface ReceiptDataSnapshot {
     lastName: string
   }
   receiptInfo: {
-    generatedAt: string         // ISO timestamp
-    currency: string            // "MXN"
-    taxRate: number             // 0.16
+    generatedAt: string // ISO timestamp
+    currency: string // "MXN"
+    taxRate: number // 0.16
   }
 }
 ```
@@ -203,7 +206,7 @@ The TPV app receives receipt URL in payment response:
 {
   "payment": {
     "id": "pay_abc123",
-    "amount": 450.00,
+    "amount": 450.0,
     "status": "COMPLETED"
   },
   "digitalReceipt": {
@@ -246,10 +249,7 @@ The `/receipts/public/:accessKey` endpoint is **unauthenticated** - anyone with 
 
 ```typescript
 // In email.service.ts
-export async function sendReceiptEmail(
-  receiptId: string,
-  recipientEmail: string
-): Promise<void>
+export async function sendReceiptEmail(receiptId: string, recipientEmail: string): Promise<void>
 ```
 
 Uses configured email provider (SendGrid, Postmark, etc.) to deliver formatted receipt.
@@ -257,6 +257,7 @@ Uses configured email provider (SendGrid, Postmark, etc.) to deliver formatted r
 ### Email Template
 
 The receipt email includes:
+
 - Venue branding (logo, colors)
 - Transaction summary
 - Line items breakdown
@@ -273,29 +274,32 @@ accessKey: clrcp_abc123def456
 ```
 
 **Why CUID instead of auto-increment:**
+
 - Cannot enumerate receipts (`/receipts/1`, `/receipts/2`)
 - Unpredictable - attackers can't guess valid URLs
 - URL-safe without encoding
 
 ### Data Privacy
 
-| Data | Visibility | Reason |
-|------|------------|--------|
-| Card Number | Masked (****1234) | PCI compliance |
-| Customer Email | Hidden | Privacy |
-| Staff Name | Visible | Customer service |
-| Transaction ID | Visible | Reference for disputes |
+| Data           | Visibility            | Reason                 |
+| -------------- | --------------------- | ---------------------- |
+| Card Number    | Masked (\*\*\*\*1234) | PCI compliance         |
+| Customer Email | Hidden                | Privacy                |
+| Staff Name     | Visible               | Customer service       |
+| Transaction ID | Visible               | Reference for disputes |
 
 ## Testing Scenarios
 
 ### Manual Testing
 
 1. **Generate receipt:**
+
    - Process a payment
    - Verify `digitalReceipt` in response
    - Access URL in browser
 
 2. **View tracking:**
+
    - Access receipt URL
    - Verify `viewedAt` is updated
    - Verify `status` changes to `VIEWED`
@@ -328,6 +332,7 @@ GROUP BY status;
 ## Related Files
 
 **Backend:**
+
 - `prisma/schema.prisma` - DigitalReceipt model, ReceiptStatus enum
 - `src/services/tpv/digitalReceipt.tpv.service.ts` - Generation logic
 - `src/services/email.service.ts` - Email delivery
@@ -335,20 +340,22 @@ GROUP BY status;
 - `src/controllers/tpv/receipt.tpv.controller.ts` - API handlers
 
 **TPV Android:**
+
 - QR code generation from receipt URL
 - Print receipt with embedded QR
 
 **Dashboard:**
+
 - Public receipt viewer page (`/receipts/public/:accessKey`)
 - Receipt management in payment details
 
 ## Industry Standards Reference
 
-| Platform | Feature | Key Differences |
-|----------|---------|-----------------|
-| **Toast** | Digital Receipt | SMS + Email delivery |
-| **Square** | Digital Receipt | Includes loyalty points |
-| **Stripe** | Receipt URL | Simple, no items list |
+| Platform   | Feature         | Key Differences            |
+| ---------- | --------------- | -------------------------- |
+| **Toast**  | Digital Receipt | SMS + Email delivery       |
+| **Square** | Digital Receipt | Includes loyalty points    |
+| **Stripe** | Receipt URL     | Simple, no items list      |
 | **Clover** | Digital Receipt | Integrates with Clover app |
 
 ## Future Enhancements

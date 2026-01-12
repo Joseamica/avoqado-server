@@ -1,8 +1,10 @@
 # Serialized Inventory Module
 
-Sistema de inventario para productos con identificadores únicos. Cada item tiene un código de barras/serial único y se vende individualmente.
+Sistema de inventario para productos con identificadores únicos. Cada item tiene un código de barras/serial único y se vende
+individualmente.
 
 **Aplica para cualquier industria donde cada unidad es única:**
+
 - **Telecom**: SIMs, tarjetas prepago (ICCID)
 - **Joyería**: Anillos, piedras preciosas (Certificado GIA/IGI)
 - **Electrónica**: Celulares, laptops, tablets (Serial Number)
@@ -33,30 +35,29 @@ Sistema de inventario para productos con identificadores únicos. Cada item tien
 
 ### Module System vs VenueFeature
 
-| Concepto | Propósito | Ejemplo |
-|----------|-----------|---------|
-| **VenueModule** | Habilitar comportamiento/funcionalidad | SERIALIZED_INVENTORY, ATTENDANCE_TRACKING |
-| **VenueFeature** | Control de facturación (Stripe) | BASIC_POS, INVENTORY_MANAGEMENT |
+| Concepto         | Propósito                              | Ejemplo                                   |
+| ---------------- | -------------------------------------- | ----------------------------------------- |
+| **VenueModule**  | Habilitar comportamiento/funcionalidad | SERIALIZED_INVENTORY, ATTENDANCE_TRACKING |
+| **VenueFeature** | Control de facturación (Stripe)        | BASIC_POS, INVENTORY_MANAGEMENT           |
 
-**VenueModule** controla **qué puede hacer** el venue.
-**VenueFeature** controla **qué paga** el venue.
+**VenueModule** controla **qué puede hacer** el venue. **VenueFeature** controla **qué paga** el venue.
 
 ### SerializedItem vs Inventory (FIFO)
 
-| Aspecto | SerializedItem | Inventory (FIFO) |
-|---------|----------------|------------------|
-| **Tracking** | Por unidad única | Por cantidad/batch |
-| **Identificador** | Código de barras único (ICCID, serial) | N/A |
-| **Precio** | Capturado al momento de venta | Definido en Product |
-| **Ejemplo** | SIM: `8901234567890123456` | "5 kg de carne" |
-| **Deducción** | Item se marca como SOLD | FIFO resta de batches |
+| Aspecto           | SerializedItem                         | Inventory (FIFO)      |
+| ----------------- | -------------------------------------- | --------------------- |
+| **Tracking**      | Por unidad única                       | Por cantidad/batch    |
+| **Identificador** | Código de barras único (ICCID, serial) | N/A                   |
+| **Precio**        | Capturado al momento de venta          | Definido en Product   |
+| **Ejemplo**       | SIM: `8901234567890123456`             | "5 kg de carne"       |
+| **Deducción**     | Item se marca como SOLD                | FIFO resta de batches |
 
 ### ItemCategory vs MenuCategory
 
-| Modelo | Uso |
-|--------|-----|
+| Modelo           | Uso                                                  |
+| ---------------- | ---------------------------------------------------- |
 | **ItemCategory** | Para SerializedItems (Negra, Blanca, Roja para SIMs) |
-| **MenuCategory** | Para Products en menú (Bebidas, Entradas, etc.) |
+| **MenuCategory** | Para Products en menú (Bebidas, Entradas, etc.)      |
 
 Son modelos **completamente separados**.
 
@@ -147,18 +148,18 @@ Los presets permiten configuración rápida con terminología apropiada:
 
 ### Casos de Uso por Industria
 
-| Industria | Ejemplo de Items | Identificador Único | Categorías Típicas |
-|-----------|------------------|---------------------|-------------------|
-| **Telecom** | SIMs, tarjetas prepago | ICCID (19-20 dígitos) | Negra, Blanca, Roja |
-| **Joyería** | Anillos, collares, piedras | Certificado GIA/IGI | Diamante, Oro, Plata |
-| **Electrónica** | iPhones, laptops, tablets | Serial number | Nuevo, Reacondicionado |
-| **Armas** | Pistolas, rifles | Serial ATF | Corta, Larga |
-| **Automotriz** | Autos, motos | VIN (17 caracteres) | Nuevo, Seminuevo |
-| **Relojería** | Rolex, Omega, Patek | Serial de fábrica | Por marca |
-| **Coleccionables** | Arte, antigüedades | COA (Certificate of Authenticity) | Época, Material |
-| **Equipo Médico** | Marcapasos, prótesis | UDI (Unique Device ID) | Categoría FDA |
-| **Gift Cards** | Tarjetas prepago | Código único | Denominación ($100, $500) |
-| **Instrumentos** | Guitarras, violines | Serial de fabricante | Tipo, Marca |
+| Industria          | Ejemplo de Items           | Identificador Único               | Categorías Típicas        |
+| ------------------ | -------------------------- | --------------------------------- | ------------------------- |
+| **Telecom**        | SIMs, tarjetas prepago     | ICCID (19-20 dígitos)             | Negra, Blanca, Roja       |
+| **Joyería**        | Anillos, collares, piedras | Certificado GIA/IGI               | Diamante, Oro, Plata      |
+| **Electrónica**    | iPhones, laptops, tablets  | Serial number                     | Nuevo, Reacondicionado    |
+| **Armas**          | Pistolas, rifles           | Serial ATF                        | Corta, Larga              |
+| **Automotriz**     | Autos, motos               | VIN (17 caracteres)               | Nuevo, Seminuevo          |
+| **Relojería**      | Rolex, Omega, Patek        | Serial de fábrica                 | Por marca                 |
+| **Coleccionables** | Arte, antigüedades         | COA (Certificate of Authenticity) | Época, Material           |
+| **Equipo Médico**  | Marcapasos, prótesis       | UDI (Unique Device ID)            | Categoría FDA             |
+| **Gift Cards**     | Tarjetas prepago           | Código único                      | Denominación ($100, $500) |
+| **Instrumentos**   | Guitarras, violines        | Serial de fabricante              | Tipo, Marca               |
 
 ---
 
@@ -306,13 +307,13 @@ Obtener categorías con conteos de stock.
 {
   categories: [
     {
-      id: "cat_123",
-      name: "Negra",
-      color: "#000000",
+      id: 'cat_123',
+      name: 'Negra',
+      color: '#000000',
       requiresPreRegistration: true,
       availableCount: 45,
-      soldCount: 123
-    }
+      soldCount: 123,
+    },
   ]
 }
 ```
@@ -484,6 +485,7 @@ npx ts-node scripts/setup-modules.ts
 ```
 
 Esto crea:
+
 - `SERIALIZED_INVENTORY` con presets: telecom, jewelry, electronics
 - `ATTENDANCE_TRACKING` con presets: strict, flexible
 
@@ -494,6 +496,7 @@ npx ts-node scripts/setup-playtelecom.ts <venueId> <staffId>
 ```
 
 Esto:
+
 1. Habilita `SERIALIZED_INVENTORY` con preset `telecom`
 2. Crea categorías: Negra, Blanca, Roja
 3. Configura terminología (SIM, ICCID, etc.)
@@ -501,6 +504,7 @@ Esto:
 ### 3. Verificar en TPV
 
 Al hacer login en el TPV:
+
 1. App llama `GET /tpv/v1/modules`
 2. Si `SERIALIZED_INVENTORY` está habilitado, mostrar scanner UI
 3. Usar terminología del config (labels)
@@ -558,9 +562,9 @@ if (venue.type === 'TELECOMUNICACIONES') {
 // Anti-patrón 3: Precio en SerializedItem
 const item = await prisma.serializedItem.create({
   data: {
-    serialNumber: "123",
-    price: 150.00  // ❌ NO EXISTE ESTE CAMPO
-  }
+    serialNumber: '123',
+    price: 150.0, // ❌ NO EXISTE ESTE CAMPO
+  },
 })
 ```
 
@@ -568,19 +572,13 @@ const item = await prisma.serializedItem.create({
 
 ```typescript
 // Patrón correcto 1: Verificar módulo habilitado
-const enabled = await moduleService.isModuleEnabled(
-  venueId,
-  MODULE_CODES.SERIALIZED_INVENTORY
-)
+const enabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
 if (enabled) {
   showBarcodeScanner()
 }
 
 // Patrón correcto 2: Obtener config para terminología
-const config = await moduleService.getModuleConfig(
-  venueId,
-  MODULE_CODES.SERIALIZED_INVENTORY
-)
+const config = await moduleService.getModuleConfig(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
 const buttonLabel = config.labels.scan // "Escanear SIM"
 
 // Patrón correcto 3: Precio en OrderItem
@@ -590,9 +588,9 @@ const orderItem = await prisma.orderItem.create({
     serializedItemId: item.id,
     productName: category.name,
     productSku: item.serialNumber,
-    unitPrice: input.price,  // ✅ Precio capturado aquí
-    quantity: 1
-  }
+    unitPrice: input.price, // ✅ Precio capturado aquí
+    quantity: 1,
+  },
 })
 ```
 
@@ -600,15 +598,15 @@ const orderItem = await prisma.orderItem.create({
 
 ## Archivos de Referencia
 
-| Archivo | Descripción |
-|---------|-------------|
-| `prisma/schema.prisma` | Modelos: Module, VenueModule, ItemCategory, SerializedItem |
-| `src/services/modules/module.service.ts` | ModuleService con enable/config/check |
-| `src/services/serialized-inventory/serializedInventory.service.ts` | SerializedInventoryService |
-| `src/services/tpv/order.tpv.service.ts` | `addSerializedItemToOrder`, `sellSerializedItem` |
-| `src/routes/tpv.routes.ts` | Endpoints TPV para módulos y serialized inventory |
-| `scripts/setup-modules.ts` | Crear módulos globales |
-| `scripts/setup-playtelecom.ts` | Habilitar para venue telecom |
+| Archivo                                                            | Descripción                                                |
+| ------------------------------------------------------------------ | ---------------------------------------------------------- |
+| `prisma/schema.prisma`                                             | Modelos: Module, VenueModule, ItemCategory, SerializedItem |
+| `src/services/modules/module.service.ts`                           | ModuleService con enable/config/check                      |
+| `src/services/serialized-inventory/serializedInventory.service.ts` | SerializedInventoryService                                 |
+| `src/services/tpv/order.tpv.service.ts`                            | `addSerializedItemToOrder`, `sellSerializedItem`           |
+| `src/routes/tpv.routes.ts`                                         | Endpoints TPV para módulos y serialized inventory          |
+| `scripts/setup-modules.ts`                                         | Crear módulos globales                                     |
+| `scripts/setup-playtelecom.ts`                                     | Habilitar para venue telecom                               |
 
 ---
 
@@ -648,11 +646,13 @@ App Startup → SplashScreen → Device Activated?
 ```
 
 **Archivos clave:**
+
 - `features/modules/domain/repository/ModulesRepository.kt` - Interface
 - `features/modules/data/repository/ModulesRepositoryImpl.kt` - Implementation + cache
 - `core/presentation/navigation/AppNavigation.kt` - Fetch at startup
 
 **Endpoint semi-público:**
+
 ```
 GET /tpv/modules
 Headers:
@@ -733,18 +733,21 @@ Body: {
 **Componentes de UI unificados:**
 
 El estado `TimeclockState.RequiresPhoto` tiene un flag `isClockOut` para distinguir:
+
 - `isClockOut = false` → Flujo de clock-in
 - `isClockOut = true` → Flujo de clock-out
 
 **Admin Skip:** Los roles ADMIN, MANAGER, OWNER y SUPERADMIN pueden saltar la verificación de foto.
 
 **Archivos clave:**
+
 - `core/location/LocationService.kt` - GPS capture via FusedLocationProvider
 - `core/data/firebase/VerificationUploadManager.kt` - Firebase Storage upload (uploadClockInPhoto, uploadClockOutPhoto)
 - `features/timeclock/presentation/TimeclockViewModel.kt` - Orchestrates both flows
 - `features/timeclock/presentation/TimeclockState.kt` - RequiresPhoto state with isClockOut flag
 
 **Backend TimeEntry fields:**
+
 ```prisma
 model TimeEntry {
   // Check-in verification
@@ -786,10 +789,12 @@ Cuando el módulo SERIALIZED_INVENTORY está habilitado y `config.ui.simplifiedO
 ```
 
 **Archivos clave:**
+
 - `core/presentation/screens/WelcomeScreen.kt` - Detects simplified mode from module config
 - `core/presentation/navigation/AppNavigation.kt` - Routes to SerializedSale/SerializedInventory
 
 **Lógica:**
+
 ```kotlin
 val isSimplifiedMode = modulesRepository
     .getModuleConfig(ModulesRepository.MODULE_SERIALIZED_INVENTORY)
@@ -829,21 +834,18 @@ POST /tpv/serialized-inventory/sell
 Navigate to PaymentScreen with orderId
 ```
 
-**Estados del scan:**
-| Status | UI | Siguiente Paso |
-|--------|-----|----------------|
-| `available` | ✅ Mostrar info + precio sugerido | Confirmar venta |
-| `not_registered` | ⚠️ Selector de categoría | Seleccionar categoría → Confirmar |
-| `already_sold` | ❌ Error con fecha de venta | Escanear otro |
-| `module_disabled` | ❌ Error - módulo no habilitado | N/A |
+**Estados del scan:** | Status | UI | Siguiente Paso | |--------|-----|----------------| | `available` | ✅ Mostrar info + precio sugerido |
+Confirmar venta | | `not_registered` | ⚠️ Selector de categoría | Seleccionar categoría → Confirmar | | `already_sold` | ❌ Error con fecha
+de venta | Escanear otro | | `module_disabled` | ❌ Error - módulo no habilitado | N/A |
 
 **Archivos clave:**
+
 - `features/serialized_sale/presentation/SerializedSaleScreen.kt` - UI
 - `features/serialized_sale/presentation/SerializedSaleViewModel.kt` - Business logic
 - `features/serialized_sale/domain/repository/SerializedSaleRepository.kt` - API calls
 
-**Labels dinámicos:**
-La pantalla usa los labels del module config:
+**Labels dinámicos:** La pantalla usa los labels del module config:
+
 ```kotlin
 val labels = modulesRepository.getModuleConfig(...)?.labels
 val itemLabel = labels?.item ?: "Artículo"      // "SIM" para Telecom
@@ -880,17 +882,20 @@ Pantalla de alta masiva de productos (Alta de Productos):
 ```
 
 **Modo escaneo continuo:**
+
 - El scanner no se cierra después de cada escaneo
 - Muestra contador en overlay: "5 escaneados"
 - Feedback inmediato: "✓ Agregado" o "Ya escaneado"
 - Botón "Listo" para terminar
 
 **Archivos clave:**
+
 - `features/serialized_inventory/presentation/SerializedInventoryScreen.kt` - UI
 - `features/serialized_inventory/presentation/SerializedInventoryViewModel.kt` - Business logic
 - `features/serialized_inventory/domain/model/InventoryScanResult.kt` - Scan result types
 
 **Permisos:**
+
 - `serialized-inventory:sell` - Requerido para vender (Vender screen)
 - `serialized-inventory:create` - Requerido para registrar (Alta screen)
 
