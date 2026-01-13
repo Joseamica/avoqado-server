@@ -4,6 +4,12 @@ import {
   AlertStatus,
   AlertType,
   ChargeType,
+  CommissionCalcStatus,
+  CommissionCalcType,
+  CommissionPayoutStatus,
+  CommissionRecipient,
+  CommissionSummaryStatus,
+  CommissionTrigger,
   FeatureCategory,
   InvitationStatus,
   InvitationType,
@@ -35,6 +41,8 @@ import {
   SyncStatus,
   TerminalStatus,
   TerminalType,
+  TierPeriod,
+  TierType,
   TransactionCardType,
   TransactionStatus,
   TransactionType,
@@ -329,6 +337,17 @@ async function resetDatabase() {
     ['PaymentAllocations', () => prisma.paymentAllocation.deleteMany()],
     ['Reviews', () => prisma.review.deleteMany()],
     ['ProductModifierGroups', () => prisma.productModifierGroup.deleteMany()],
+    // Commission System - most dependent first
+    ['CommissionPayouts', () => prisma.commissionPayout.deleteMany()],
+    ['CommissionClawbacks', () => prisma.commissionClawback.deleteMany()],
+    ['CommissionCalculations', () => prisma.commissionCalculation.deleteMany()],
+    ['CommissionSummaries', () => prisma.commissionSummary.deleteMany()],
+    ['MilestoneAchievements', () => prisma.milestoneAchievement.deleteMany()],
+    ['CommissionMilestones', () => prisma.commissionMilestone.deleteMany()],
+    ['CommissionOverrides', () => prisma.commissionOverride.deleteMany()],
+    ['CommissionTiers', () => prisma.commissionTier.deleteMany()],
+    ['CommissionConfigs', () => prisma.commissionConfig.deleteMany()],
+    // End Commission System
     // Inventory Management - most dependent first
     ['RecipeLines', () => prisma.recipeLine.deleteMany()],
     ['Recipes', () => prisma.recipe.deleteMany()],
@@ -474,21 +493,22 @@ async function main() {
       name: 'Chatbot Inteligente',
       description: 'Chatbot con IA para atención automática de clientes 24/7.',
       category: FeatureCategory.OPERATIONS,
-      monthlyPrice: 399.0, // MXN
+      monthlyPrice: 199.0, // MXN
     },
-    {
-      code: 'ADVANCED_ANALYTICS',
-      name: 'Analíticas Avanzadas',
-      description: 'Reportes detallados, tendencias de ventas, y análisis predictivo.',
-      category: FeatureCategory.ANALYTICS,
-      monthlyPrice: 499.0, // MXN
-    },
+    // TEMPORARILY DISABLED - Re-enable when ready for launch
+    // {
+    //   code: 'ADVANCED_ANALYTICS',
+    //   name: 'Analíticas Avanzadas',
+    //   description: 'Reportes detallados, tendencias de ventas, y análisis predictivo.',
+    //   category: FeatureCategory.ANALYTICS,
+    //   monthlyPrice: 499.0, // MXN
+    // },
     {
       code: 'INVENTORY_TRACKING',
       name: 'Control de Inventario',
       description: 'Gestión FIFO de inventario, recetas, y alertas de stock bajo.',
       category: FeatureCategory.OPERATIONS,
-      monthlyPrice: 299.0, // MXN
+      monthlyPrice: 89.0, // MXN
     },
     {
       code: 'LOYALTY_PROGRAM',
@@ -502,15 +522,16 @@ async function main() {
       name: 'Pedidos en Línea',
       description: 'Permite a los clientes ordenar desde la web o app con QR.',
       category: FeatureCategory.INTEGRATIONS,
-      monthlyPrice: 799.0, // MXN
+      monthlyPrice: 99.0, // MXN
     },
-    {
-      code: 'RESERVATIONS',
-      name: 'Sistema de Reservas',
-      description: 'Gestión de reservas de mesas con confirmación automática.',
-      category: FeatureCategory.OPERATIONS,
-      monthlyPrice: 399.0, // MXN
-    },
+    // TEMPORARILY DISABLED - Re-enable when ready for launch
+    // {
+    //   code: 'RESERVATIONS',
+    //   name: 'Sistema de Reservas',
+    //   description: 'Gestión de reservas de mesas con confirmación automática.',
+    //   category: FeatureCategory.OPERATIONS,
+    //   monthlyPrice: 399.0, // MXN
+    // },
     {
       code: 'AVAILABLE_BALANCE',
       name: 'Saldo Disponible',
@@ -4799,6 +4820,373 @@ async function main() {
       })
       console.log('    - Created 1 invoice with 2 items.')
     }
+  }
+
+  // ==========================================
+  // COMMISSION SEED DATA
+  // ==========================================
+  console.log(`\n💰 Creating Commission Test Data...`)
+
+  // Find avoqado-full venue for commission testing
+  const avoqadoFullVenue = await prisma.venue.findFirst({
+    where: { slug: 'avoqado-full' },
+    include: {
+      staffVenues: {
+        include: { staff: true },
+        where: { active: true },
+      },
+    },
+  })
+
+  if (avoqadoFullVenue) {
+    // Find staff members by role
+    const ownerStaffVenue = avoqadoFullVenue.staffVenues.find(sv => sv.role === StaffRole.OWNER)
+    const waiterStaffVenues = avoqadoFullVenue.staffVenues.filter(sv => sv.role === StaffRole.WAITER)
+    const cashierStaffVenues = avoqadoFullVenue.staffVenues.filter(sv => sv.role === StaffRole.CASHIER)
+
+    if (ownerStaffVenue) {
+      console.log(`  Creating commission configs for ${avoqadoFullVenue.name}...`)
+
+      // 1. PERCENTAGE config - Standard commission for servers
+      const percentageConfig = await prisma.commissionConfig.create({
+        data: {
+          venueId: avoqadoFullVenue.id,
+          name: 'Comisión Estándar Meseros',
+          description: 'Comisión porcentual para meseros basada en ventas',
+          priority: 1,
+          recipient: CommissionRecipient.SERVER,
+          trigger: CommissionTrigger.PER_PAYMENT,
+          calcType: CommissionCalcType.PERCENTAGE,
+          defaultRate: 0.03, // 3%
+          minAmount: 5, // Minimum $5 commission
+          maxAmount: 500, // Maximum $500 commission
+          includeTips: false,
+          includeDiscount: false,
+          includeTax: false,
+          roleRates: {
+            WAITER: 0.03,
+            CASHIER: 0.02,
+            MANAGER: 0.015,
+          },
+          effectiveFrom: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000), // 60 days ago
+          active: true,
+          createdById: ownerStaffVenue.staffId,
+        },
+      })
+      console.log(`    - Created PERCENTAGE config: ${percentageConfig.name}`)
+
+      // 2. TIERED config - Volume-based commission tiers
+      const tieredConfig = await prisma.commissionConfig.create({
+        data: {
+          venueId: avoqadoFullVenue.id,
+          name: 'Comisión por Niveles',
+          description: 'Tasas escalonadas por volumen de ventas mensuales',
+          priority: 2,
+          recipient: CommissionRecipient.SERVER,
+          trigger: CommissionTrigger.PER_PAYMENT,
+          calcType: CommissionCalcType.TIERED,
+          defaultRate: 0.02, // Default 2%
+          includeTips: false,
+          includeDiscount: false,
+          includeTax: false,
+          effectiveFrom: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days ago
+          active: false, // Inactive - just for testing
+          createdById: ownerStaffVenue.staffId,
+        },
+      })
+      console.log(`    - Created TIERED config: ${tieredConfig.name}`)
+
+      // Create tiers for tiered config
+      const tiers = [
+        { level: 1, name: 'Bronce', minThreshold: 0, maxThreshold: 10000, rate: 0.02 },
+        { level: 2, name: 'Plata', minThreshold: 10000, maxThreshold: 25000, rate: 0.03 },
+        { level: 3, name: 'Oro', minThreshold: 25000, maxThreshold: 50000, rate: 0.04 },
+        { level: 4, name: 'Platino', minThreshold: 50000, maxThreshold: null, rate: 0.05 },
+      ]
+
+      for (const tier of tiers) {
+        await prisma.commissionTier.create({
+          data: {
+            configId: tieredConfig.id,
+            tierLevel: tier.level,
+            tierName: tier.name,
+            tierType: TierType.BY_AMOUNT,
+            tierPeriod: TierPeriod.MONTHLY,
+            minThreshold: tier.minThreshold,
+            maxThreshold: tier.maxThreshold,
+            rate: tier.rate,
+            active: true,
+          },
+        })
+      }
+      console.log(`    - Created ${tiers.length} tiers for tiered config`)
+
+      // 3. FIXED config - Fixed amount per payment (for processors)
+      const fixedConfig = await prisma.commissionConfig.create({
+        data: {
+          venueId: avoqadoFullVenue.id,
+          name: 'Comisión Fija Cajeros',
+          description: 'Monto fijo por cada pago procesado',
+          priority: 0,
+          recipient: CommissionRecipient.PROCESSOR,
+          trigger: CommissionTrigger.PER_PAYMENT,
+          calcType: CommissionCalcType.FIXED,
+          defaultRate: 5, // $5 per payment
+          includeTips: false,
+          includeDiscount: false,
+          includeTax: false,
+          effectiveFrom: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000), // 45 days ago
+          active: true,
+          createdById: ownerStaffVenue.staffId,
+        },
+      })
+      console.log(`    - Created FIXED config: ${fixedConfig.name}`)
+
+      // Create overrides for specific staff
+      if (waiterStaffVenues.length > 0) {
+        const topPerformerStaff = waiterStaffVenues[0]
+
+        // Override: Top performer gets higher rate
+        await prisma.commissionOverride.create({
+          data: {
+            configId: percentageConfig.id,
+            venueId: avoqadoFullVenue.id,
+            staffId: topPerformerStaff.staffId,
+            customRate: 0.05, // 5% instead of 3%
+            reason: 'Top performer bonus',
+            notes: 'Employee of the month recognition',
+            effectiveFrom: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000), // 15 days ago
+            active: true,
+            excludeFromCommissions: false,
+            createdById: ownerStaffVenue.staffId,
+          },
+        })
+        console.log(`    - Created override for top performer`)
+
+        // Override: Exclude a staff member (if we have more than one waiter)
+        if (waiterStaffVenues.length > 1) {
+          const excludedStaff = waiterStaffVenues[1]
+          await prisma.commissionOverride.create({
+            data: {
+              configId: percentageConfig.id,
+              venueId: avoqadoFullVenue.id,
+              staffId: excludedStaff.staffId,
+              customRate: 0,
+              reason: 'Training period',
+              notes: 'New employee in training - commissions excluded temporarily',
+              effectiveFrom: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // 7 days ago
+              effectiveTo: new Date(Date.now() + 23 * 24 * 60 * 60 * 1000), // 23 days from now
+              active: true,
+              excludeFromCommissions: true,
+              createdById: ownerStaffVenue.staffId,
+            },
+          })
+          console.log(`    - Created exclusion override for new employee`)
+        }
+      }
+
+      // Get some payments to create commission calculations
+      const completedPayments = await prisma.payment.findMany({
+        where: {
+          venueId: avoqadoFullVenue.id,
+          status: TransactionStatus.COMPLETED,
+          processedById: { not: null },
+        },
+        include: {
+          order: true,
+        },
+        take: 20, // Take 20 payments for commission calculations
+        orderBy: { createdAt: 'desc' },
+      })
+
+      console.log(`  Creating commission calculations for ${completedPayments.length} payments...`)
+
+      // Track calculations for creating summaries
+      const calculationsByStaff: Record<
+        string,
+        {
+          staffId: string
+          calculations: { id: string; netCommission: number; baseAmount: number }[]
+          totalSales: number
+          totalCommissions: number
+        }
+      > = {}
+
+      for (const payment of completedPayments) {
+        if (!payment.processedById) continue
+
+        const baseAmount = Number(payment.amount)
+        const effectiveRate = 0.03 // 3%
+        const grossCommission = baseAmount * effectiveRate
+        const netCommission = Math.min(Math.max(grossCommission, 5), 500) // Apply min/max
+
+        const calculation = await prisma.commissionCalculation.create({
+          data: {
+            venueId: avoqadoFullVenue.id,
+            staffId: payment.processedById,
+            paymentId: payment.id,
+            orderId: payment.orderId,
+            shiftId: payment.shiftId,
+            configId: percentageConfig.id,
+            baseAmount,
+            tipAmount: Number(payment.tipAmount || 0),
+            discountAmount: 0,
+            taxAmount: 0,
+            effectiveRate,
+            grossCommission,
+            netCommission,
+            calcType: CommissionCalcType.PERCENTAGE,
+            status: CommissionCalcStatus.CALCULATED,
+            calculatedAt: payment.createdAt,
+            createdAt: payment.createdAt,
+          },
+        })
+
+        // Track for summary
+        if (!calculationsByStaff[payment.processedById]) {
+          calculationsByStaff[payment.processedById] = {
+            staffId: payment.processedById,
+            calculations: [],
+            totalSales: 0,
+            totalCommissions: 0,
+          }
+        }
+        calculationsByStaff[payment.processedById].calculations.push({
+          id: calculation.id,
+          netCommission,
+          baseAmount,
+        })
+        calculationsByStaff[payment.processedById].totalSales += baseAmount
+        calculationsByStaff[payment.processedById].totalCommissions += netCommission
+      }
+
+      console.log(`    - Created ${completedPayments.length} commission calculations`)
+
+      // Create commission summaries for each staff
+      const periodStart = new Date()
+      periodStart.setDate(1) // First day of current month
+      periodStart.setHours(0, 0, 0, 0)
+
+      const periodEnd = new Date(periodStart)
+      periodEnd.setMonth(periodEnd.getMonth() + 1)
+      periodEnd.setDate(0) // Last day of current month
+      periodEnd.setHours(23, 59, 59, 999)
+
+      let summaryCount = 0
+      for (const staffData of Object.values(calculationsByStaff)) {
+        const summaryStatus =
+          summaryCount === 0
+            ? CommissionSummaryStatus.APPROVED
+            : summaryCount === 1
+              ? CommissionSummaryStatus.PENDING_APPROVAL
+              : summaryCount === 2
+                ? CommissionSummaryStatus.PAID
+                : CommissionSummaryStatus.CALCULATED
+
+        const summary = await prisma.commissionSummary.create({
+          data: {
+            venueId: avoqadoFullVenue.id,
+            staffId: staffData.staffId,
+            periodType: TierPeriod.MONTHLY,
+            periodStart,
+            periodEnd,
+            totalSales: staffData.totalSales,
+            totalTips: 0,
+            totalCommissions: staffData.totalCommissions,
+            totalBonuses: 0,
+            totalClawbacks: 0,
+            grandTotal: staffData.totalCommissions,
+            grossAmount: staffData.totalCommissions,
+            deductionAmount: 0,
+            netAmount: staffData.totalCommissions,
+            orderCount: staffData.calculations.length,
+            paymentCount: staffData.calculations.length,
+            status: summaryStatus,
+            approvedAt:
+              summaryStatus === CommissionSummaryStatus.APPROVED || summaryStatus === CommissionSummaryStatus.PAID
+                ? new Date()
+                : null,
+            approvedById:
+              summaryStatus === CommissionSummaryStatus.APPROVED || summaryStatus === CommissionSummaryStatus.PAID
+                ? ownerStaffVenue.staffId
+                : null,
+          },
+        })
+
+        // Link calculations to summary
+        for (const calc of staffData.calculations) {
+          await prisma.commissionCalculation.update({
+            where: { id: calc.id },
+            data: {
+              summaryId: summary.id,
+              status: CommissionCalcStatus.AGGREGATED,
+              aggregatedAt: new Date(),
+            },
+          })
+        }
+
+        // Create payout for PAID summaries
+        if (summaryStatus === CommissionSummaryStatus.PAID) {
+          await prisma.commissionPayout.create({
+            data: {
+              venueId: avoqadoFullVenue.id,
+              staffId: staffData.staffId,
+              summaryId: summary.id,
+              amount: staffData.totalCommissions,
+              paymentMethod: 'BANK_TRANSFER',
+              reference: `PAY-${faker.string.alphanumeric(8).toUpperCase()}`,
+              paymentReference: `TXN-${faker.string.alphanumeric(12).toUpperCase()}`,
+              status: CommissionPayoutStatus.PAID,
+              processedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), // 2 days ago
+              processedById: ownerStaffVenue.staffId,
+              paidAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000), // 1 day ago
+              notes: 'Regular monthly commission payout',
+            },
+          })
+        }
+
+        // Create pending payout for APPROVED summaries
+        if (summaryStatus === CommissionSummaryStatus.APPROVED) {
+          await prisma.commissionPayout.create({
+            data: {
+              venueId: avoqadoFullVenue.id,
+              staffId: staffData.staffId,
+              summaryId: summary.id,
+              amount: staffData.totalCommissions,
+              paymentMethod: 'PAYROLL',
+              status: CommissionPayoutStatus.PENDING,
+              notes: 'Awaiting payroll processing',
+            },
+          })
+        }
+
+        summaryCount++
+      }
+
+      console.log(`    - Created ${summaryCount} commission summaries with different statuses`)
+
+      // Get final commission counts
+      const commissionCounts = {
+        configs: await prisma.commissionConfig.count({ where: { venueId: avoqadoFullVenue.id } }),
+        tiers: await prisma.commissionTier.count(),
+        overrides: await prisma.commissionOverride.count({ where: { venueId: avoqadoFullVenue.id } }),
+        calculations: await prisma.commissionCalculation.count({ where: { venueId: avoqadoFullVenue.id } }),
+        summaries: await prisma.commissionSummary.count({ where: { venueId: avoqadoFullVenue.id } }),
+        payouts: await prisma.commissionPayout.count({ where: { venueId: avoqadoFullVenue.id } }),
+      }
+
+      console.log(`  ✅ Commission seed complete:`)
+      console.log(`     - Configs: ${commissionCounts.configs}`)
+      console.log(`     - Tiers: ${commissionCounts.tiers}`)
+      console.log(`     - Overrides: ${commissionCounts.overrides}`)
+      console.log(`     - Calculations: ${commissionCounts.calculations}`)
+      console.log(`     - Summaries: ${commissionCounts.summaries}`)
+      console.log(`     - Payouts: ${commissionCounts.payouts}`)
+    } else {
+      console.log(`  ⚠️ No OWNER found for ${avoqadoFullVenue.name}, skipping commission seed`)
+    }
+  } else {
+    console.log(`  ⚠️ avoqado-full venue not found, skipping commission seed`)
   }
 
   // ==========================================

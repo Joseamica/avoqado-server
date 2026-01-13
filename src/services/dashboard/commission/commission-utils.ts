@@ -187,6 +187,16 @@ export async function findActiveOverride(
 /**
  * Get the staff ID who should receive the commission based on recipient type
  *
+ * Fallback chain for each type:
+ * - CREATOR: createdById → processedById (for kiosk mode)
+ * - SERVER: servedById → createdById → processedById (for kiosk mode)
+ * - PROCESSOR: processedById
+ *
+ * The final fallback to processedById handles KIOSK MODE where:
+ * - Orders have no createdById (created by kiosk itself)
+ * - Orders have no servedById (no server in self-service)
+ * - But payments DO have processedById (staff who processed the card payment)
+ *
  * @param payment - Payment record with order relation
  * @param order - Order record (may be null for direct payments)
  * @param recipientType - Who receives commission (CREATOR, SERVER, PROCESSOR)
@@ -200,12 +210,13 @@ export function getRecipientStaffId(
   switch (recipientType) {
     case CommissionRecipient.CREATOR:
       // Order creator (who entered the order)
-      return order?.createdById ?? null
+      // Falls back to payment processor for kiosk mode
+      return order?.createdById ?? payment.processedById ?? null
 
     case CommissionRecipient.SERVER:
       // Order server (who served the customer)
-      // Falls back to creator if no server assigned
-      return order?.servedById ?? order?.createdById ?? null
+      // Falls back to creator, then to payment processor for kiosk mode
+      return order?.servedById ?? order?.createdById ?? payment.processedById ?? null
 
     case CommissionRecipient.PROCESSOR:
       // Payment processor (who completed the payment)

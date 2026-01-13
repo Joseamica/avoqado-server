@@ -885,3 +885,66 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
     topEarners,
   }
 }
+
+/**
+ * Get commission calculation for a specific payment
+ *
+ * Returns the commission record associated with a payment, including
+ * staff information for display in the payment detail view.
+ *
+ * @param paymentId - Payment ID to look up
+ * @param venueId - Venue ID for tenant isolation
+ * @returns Commission calculation with staff info, or null if no commission exists
+ */
+export async function getCommissionByPaymentId(
+  paymentId: string,
+  venueId: string,
+): Promise<{
+  id: string
+  staffId: string
+  staffName: string
+  netCommission: number
+  effectiveRate: number
+  baseAmount: number
+  status: string
+  calculatedAt: Date
+  configName: string
+} | null> {
+  const calculation = await prisma.commissionCalculation.findFirst({
+    where: {
+      paymentId,
+      venueId,
+      status: { not: CommissionCalcStatus.VOIDED },
+    },
+    include: {
+      staff: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+        },
+      },
+      config: {
+        select: {
+          name: true,
+        },
+      },
+    },
+  })
+
+  if (!calculation) {
+    return null
+  }
+
+  return {
+    id: calculation.id,
+    staffId: calculation.staffId,
+    staffName: `${calculation.staff.firstName} ${calculation.staff.lastName}`,
+    netCommission: decimalToNumber(calculation.netCommission),
+    effectiveRate: decimalToNumber(calculation.effectiveRate),
+    baseAmount: decimalToNumber(calculation.baseAmount),
+    status: calculation.status,
+    calculatedAt: calculation.calculatedAt,
+    configName: calculation.config.name,
+  }
+}

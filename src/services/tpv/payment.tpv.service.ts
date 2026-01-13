@@ -430,6 +430,9 @@ async function updateOrderTotalsForStandalonePayment(
   }
 
   // Update order totals and status (including partial payment tracking)
+  // ⭐ KIOSK MODE FIX: If servedById is null, assign the staff who processed the payment
+  const shouldAssignServer = !order.servedById && staffId
+
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
@@ -441,6 +444,11 @@ async function updateOrderTotalsForStandalonePayment(
       tipAmount: totalTip,
       // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
       total: newTotal,
+      // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
+      ...(shouldAssignServer && {
+        servedById: staffId,
+        createdById: order.createdById || staffId, // Also set createdById if null
+      }),
       ...(isFullyPaid && {
         status: 'COMPLETED',
         completedAt: new Date(),
@@ -482,6 +490,9 @@ async function updateOrderTotalsForStandalonePayment(
     remainingAmount,
     isFullyPaid,
     newPaymentStatus,
+    // ⭐ KIOSK MODE: Log if we assigned the server from payment processor
+    kioskModeServerAssigned: shouldAssignServer,
+    assignedServerId: shouldAssignServer ? staffId : null,
   })
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
@@ -1970,6 +1981,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         paymentStatus: 'PAID',
         splitType: paymentData.splitType as any, // Set splitType for fast orders
         createdById: validatedStaffId, // Track which staff created the fast order
+        servedById: validatedStaffId, // ⭐ KIOSK MODE FIX: Also set server to payment processor
       },
     })
 

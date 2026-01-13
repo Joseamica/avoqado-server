@@ -235,6 +235,9 @@ export async function aggregateVenueCommissions(venueId: string, period: TierPer
 /**
  * Aggregate all pending commissions across all venues
  * Called by the daily aggregation job
+ *
+ * Reads the aggregationPeriod from each venue's active CommissionConfig
+ * to determine how to group commissions (weekly, biweekly, monthly, etc.)
  */
 export async function aggregateAllPendingCommissions(): Promise<{
   venues: number
@@ -255,7 +258,21 @@ export async function aggregateAllPendingCommissions(): Promise<{
 
   for (const { venueId } of venuesWithPending) {
     try {
-      const result = await aggregateVenueCommissions(venueId)
+      // Get the active commission config for this venue to read aggregationPeriod
+      const activeConfig = await prisma.commissionConfig.findFirst({
+        where: {
+          venueId,
+          active: true,
+          deletedAt: null,
+        },
+        orderBy: { priority: 'desc' },
+        select: { aggregationPeriod: true },
+      })
+
+      // Use config's aggregationPeriod, fallback to MONTHLY if no config exists
+      const period = activeConfig?.aggregationPeriod ?? TierPeriod.MONTHLY
+
+      const result = await aggregateVenueCommissions(venueId, period)
       totalSummarized += result.calculationsAggregated
     } catch (error) {
       logger.error('Failed to aggregate commissions for venue', {
@@ -461,11 +478,20 @@ export async function disputeSummary(summaryId: string, venueId: string, dispute
     throw new BadRequestError('Cannot dispute a paid summary')
   }
 
+  // Fetch the staff member's name for the dispute notes
+  const disputedByStaff = await prisma.staff.findUnique({
+    where: { id: disputedById },
+    select: { firstName: true, lastName: true },
+  })
+  const disputedByName = disputedByStaff
+    ? `${disputedByStaff.firstName} ${disputedByStaff.lastName}`.trim()
+    : disputedById // Fallback to ID if staff not found
+
   const updated = await prisma.commissionSummary.update({
     where: { id: summaryId },
     data: {
       status: CommissionSummaryStatus.DISPUTED,
-      notes: `DISPUTED by ${disputedById}: ${reason}`,
+      notes: `DISPUTED by ${disputedByName}: ${reason}`,
       version: { increment: 1 },
     },
   })

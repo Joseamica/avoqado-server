@@ -251,6 +251,13 @@ router.post('/venues/:venueId/calculations/:calculationId/void', checkPermission
  */
 router.post('/venues/:venueId/calculations/manual', checkPermission('commissions:create'), controller.createManualCommission)
 
+/**
+ * GET /venues/:venueId/payments/:paymentId/commission
+ * Get commission calculation for a specific payment
+ * @permission commissions:read
+ */
+router.get('/venues/:venueId/payments/:paymentId/commission', checkPermission('commissions:read'), controller.getCommissionByPayment)
+
 // ==========================================
 // SELF-SERVICE (view own commissions)
 // Routes: /api/v1/dashboard/commissions/venues/:venueId/my-*

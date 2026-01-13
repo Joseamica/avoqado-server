@@ -624,6 +624,27 @@ export async function createManualCommission(req: Request, res: Response, next: 
   }
 }
 
+/**
+ * GET /api/v1/dashboard/venues/:venueId/payments/:paymentId/commission
+ * Get commission calculation for a specific payment
+ */
+export async function getCommissionByPayment(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, paymentId } = req.params
+
+    const commission = await calculationService.getCommissionByPaymentId(paymentId, venueId)
+
+    if (!commission) {
+      res.json({ data: null })
+      return
+    }
+
+    res.json({ data: commission })
+  } catch (error) {
+    next(error)
+  }
+}
+
 // ==========================================
 // COMMISSION SUMMARIES
 // ==========================================

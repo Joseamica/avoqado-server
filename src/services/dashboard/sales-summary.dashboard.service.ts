@@ -15,8 +15,14 @@
  * - deferredSales: Unpaid/partial orders total
  * - taxes: Total taxes collected (pass-through)
  * - tips: Total tips
- * - commissions: Avoqado platform fees
- * - totalCollected: netSales + tips - commissions (actual cash flow after platform fees)
+ *
+ * Costs breakdown:
+ * - platformFees: Avoqado platform fees (from VenueTransaction.feeAmount)
+ * - staffCommissions: Commissions paid to staff (from CommissionCalculation.netCommission)
+ *
+ * Calculated totals:
+ * - totalCollected: netSales + tips - platformFees (actual cash flow)
+ * - netProfit: netSales - platformFees - staffCommissions (true venue profit)
  */
 
 import { Prisma, PaymentMethod } from '@prisma/client'
@@ -38,8 +44,14 @@ export interface SalesSummaryMetrics {
   deferredSales: number
   taxes: number
   tips: number
+  // Costs breakdown (for clarity)
+  platformFees: number // Avoqado platform fees (from VenueTransaction)
+  staffCommissions: number // Commissions paid to staff (from CommissionCalculation)
+  // Legacy field for backwards compatibility (= platformFees)
   commissions: number
   totalCollected: number
+  // True profit after all costs
+  netProfit: number // netSales - platformFees - staffCommissions
   transactionCount: number
 }
 
@@ -173,8 +185,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     },
   })
 
-  // 6. Commissions (Avoqado Platform Fees) - From VenueTransaction
-  const commissionsResult = await prisma.venueTransaction.aggregate({
+  // 6. Platform Fees (Avoqado fees) - From VenueTransaction
+  const platformFeesResult = await prisma.venueTransaction.aggregate({
     where: {
       venueId,
       ...dateFilter,
@@ -184,7 +196,19 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     },
   })
 
-  // 7. Transaction Count - Completed payments
+  // 7. Staff Commissions (paid to employees) - From CommissionCalculation
+  const staffCommissionsResult = await prisma.commissionCalculation.aggregate({
+    where: {
+      venueId,
+      createdAt: dateFilter.createdAt,
+      status: { not: 'VOIDED' }, // Exclude voided commissions
+    },
+    _sum: {
+      netCommission: true,
+    },
+  })
+
+  // 8. Transaction Count - Completed payments
   const transactionCountResult = await prisma.payment.count({
     where: {
       venueId,
@@ -206,17 +230,23 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   const refunds = Number(refundsResult._sum.amount || 0)
   const taxes = Number(grossSalesResult._sum.taxAmount || 0)
   const tips = Number(tipsResult._sum.tipAmount || 0)
-  const commissions = Number(commissionsResult._sum.feeAmount || 0)
+  const platformFees = Number(platformFeesResult._sum.feeAmount || 0)
+  const staffCommissions = Number(staffCommissionsResult._sum.netCommission || 0)
   const deferredSales = Number(deferredResult._sum.remainingBalance || 0)
   const serviceCosts = 0 // Not tracked separately in current schema
 
   // Net Sales = Gross Sales - Discounts - Refunds
   const netSales = grossSales - discounts - refunds
 
-  // Total Collected = Net Sales + Tips - Commissions
+  // Total Collected = Net Sales + Tips - Platform Fees
   // Mexico model: taxes are already included in prices, NOT added on top
   // This represents the actual cash flow (money in account after platform fees)
-  const totalCollected = netSales + tips - commissions
+  const totalCollected = netSales + tips - platformFees
+
+  // Net Profit = Net Sales - Platform Fees - Staff Commissions
+  // This is the true profit after all costs to the venue
+  // Note: Tips are NOT subtracted here because they are pass-through to employees
+  const netProfit = netSales - platformFees - staffCommissions
 
   const summary: SalesSummaryMetrics = {
     grossSales,
@@ -228,8 +258,11 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     deferredSales,
     taxes,
     tips,
-    commissions,
+    platformFees,
+    staffCommissions,
+    commissions: platformFees, // Legacy field for backwards compatibility
     totalCollected,
+    netProfit,
     transactionCount: transactionCountResult,
   }
 
@@ -416,11 +449,11 @@ async function calculateTimePeriodMetrics(
     ORDER BY ${orderByExpression}
   `
 
-  // Query commissions grouped by period
-  const commissionsQuery = `
+  // Query platform fees (Avoqado fees) grouped by period
+  const platformFeesQuery = `
     SELECT
       ${groupByExpression} as period,
-      COALESCE(SUM("feeAmount"), 0) as commissions
+      COALESCE(SUM("feeAmount"), 0) as platform_fees
     FROM "VenueTransaction"
     WHERE "venueId" = $1
       AND "createdAt" >= $2
@@ -429,8 +462,22 @@ async function calculateTimePeriodMetrics(
     ORDER BY ${orderByExpression}
   `
 
+  // Query staff commissions grouped by period
+  const staffCommissionsQuery = `
+    SELECT
+      ${groupByExpression} as period,
+      COALESCE(SUM("netCommission"), 0) as staff_commissions
+    FROM "CommissionCalculation"
+    WHERE "venueId" = $1
+      AND "createdAt" >= $2
+      AND "createdAt" <= $3
+      AND status != 'VOIDED'
+    GROUP BY ${groupByExpression}
+    ORDER BY ${orderByExpression}
+  `
+
   // Execute all queries in parallel
-  const [orderMetrics, paymentMetrics, refundsMetrics, deferredMetrics, commissionsMetrics] = await Promise.all([
+  const [orderMetrics, paymentMetrics, refundsMetrics, deferredMetrics, platformFeesMetrics, staffCommissionsMetrics] = await Promise.all([
     prisma.$queryRawUnsafe<Array<{ period: Date | number; gross_sales: number; taxes: number; discounts: number; order_count: bigint }>>(
       orderMetricsQuery,
       venueId,
@@ -445,7 +492,8 @@ async function calculateTimePeriodMetrics(
     ),
     prisma.$queryRawUnsafe<Array<{ period: Date | number; refunds: number }>>(refundsQuery, venueId, startDate, endDate),
     prisma.$queryRawUnsafe<Array<{ period: Date | number; deferred_sales: number }>>(deferredQuery, venueId, startDate, endDate),
-    prisma.$queryRawUnsafe<Array<{ period: Date | number; commissions: number }>>(commissionsQuery, venueId, startDate, endDate),
+    prisma.$queryRawUnsafe<Array<{ period: Date | number; platform_fees: number }>>(platformFeesQuery, venueId, startDate, endDate),
+    prisma.$queryRawUnsafe<Array<{ period: Date | number; staff_commissions: number }>>(staffCommissionsQuery, venueId, startDate, endDate),
   ])
 
   // Create maps for quick lookup
@@ -453,7 +501,8 @@ async function calculateTimePeriodMetrics(
   const paymentMap = new Map(paymentMetrics.map(p => [String(Number(p.period)), p]))
   const refundsMap = new Map(refundsMetrics.map(r => [String(Number(r.period)), r]))
   const deferredMap = new Map(deferredMetrics.map(d => [String(Number(d.period)), d]))
-  const commissionsMap = new Map(commissionsMetrics.map(c => [String(Number(c.period)), c]))
+  const platformFeesMap = new Map(platformFeesMetrics.map(c => [String(Number(c.period)), c]))
+  const staffCommissionsMap = new Map(staffCommissionsMetrics.map(c => [String(Number(c.period)), c]))
   const orderMetricsMap = new Map(orderMetrics.map(o => [String(Number(o.period)), o]))
 
   // Debug logging for dailySum/hourlySum
@@ -477,19 +526,23 @@ async function calculateTimePeriodMetrics(
     const payment = paymentMap.get(periodKey)
     const refund = refundsMap.get(periodKey)
     const deferred = deferredMap.get(periodKey)
-    const commission = commissionsMap.get(periodKey)
+    const platformFee = platformFeesMap.get(periodKey)
+    const staffCommission = staffCommissionsMap.get(periodKey)
 
     const grossSales = Number(order?.gross_sales || 0)
     const discounts = Number(order?.discounts || 0)
     const refunds = Number(refund?.refunds || 0)
     const taxes = Number(order?.taxes || 0)
     const tips = Number(payment?.tips || 0)
-    const commissions = Number(commission?.commissions || 0)
+    const platformFees = Number(platformFee?.platform_fees || 0)
+    const staffCommissions = Number(staffCommission?.staff_commissions || 0)
     const deferredSales = Number(deferred?.deferred_sales || 0)
     const netSales = grossSales - discounts - refunds
     // Mexico model: taxes are already included in prices, NOT added on top
-    // Total Collected = Net Sales + Tips - Commissions (actual cash flow)
-    const totalCollected = netSales + tips - commissions
+    // Total Collected = Net Sales + Tips - Platform Fees (actual cash flow)
+    const totalCollected = netSales + tips - platformFees
+    // Net Profit = Net Sales - Platform Fees - Staff Commissions (true profit)
+    const netProfit = netSales - platformFees - staffCommissions
 
     return {
       period: formatPeriod(periodValue, reportType, timezone),
@@ -504,8 +557,11 @@ async function calculateTimePeriodMetrics(
         deferredSales,
         taxes,
         tips,
-        commissions,
+        platformFees,
+        staffCommissions,
+        commissions: platformFees, // Legacy field for backwards compatibility
         totalCollected,
+        netProfit,
         transactionCount: Number(payment?.transaction_count || 0),
       },
     }

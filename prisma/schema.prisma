@@ -5699,6 +5699,10 @@ model CommissionConfig {
   effectiveFrom DateTime  @default(now())
   effectiveTo   DateTime?
 
+  // Aggregation period for commission summaries (how often to group commissions)
+  // This determines payroll alignment: WEEKLY, BIWEEKLY, MONTHLY, etc.
+  aggregationPeriod TierPeriod @default(MONTHLY)
+
   // Status & Audit
   active    Boolean   @default(true)
   deletedAt DateTime?
