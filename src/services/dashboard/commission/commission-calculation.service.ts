@@ -536,6 +536,7 @@ export async function createManualCommission(
 
 /**
  * Get commission calculations for a staff member
+ * Returns calculations, summaries, stats, and tier progress
  */
 export async function getStaffCommissions(
   staffId: string,
@@ -547,7 +548,23 @@ export async function getStaffCommissions(
     limit?: number
     offset?: number
   } = {},
-): Promise<{ calculations: any[]; total: number }> {
+): Promise<{
+  calculations: any[]
+  total: number
+  summaries: any[]
+  stats: {
+    thisMonth: number
+    lastMonth: number
+    total: number
+  }
+  tierProgress: {
+    currentTier: string | null
+    nextTier: string | null
+    currentAmount: number
+    nextThreshold: number | null
+    progress: number
+  } | null
+}> {
   const where: Prisma.CommissionCalculationWhereInput = {
     staffId,
     venueId,
@@ -563,7 +580,14 @@ export async function getStaffCommissions(
     if (filters.endDate) where.calculatedAt.lte = filters.endDate
   }
 
-  const [calculations, total] = await Promise.all([
+  // Calculate date ranges for stats
+  const now = new Date()
+  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999)
+
+  const [calculations, total, summaries, thisMonthStats, lastMonthStats, totalStats] = await Promise.all([
+    // Calculations
     prisma.commissionCalculation.findMany({
       where,
       include: {
@@ -592,10 +616,118 @@ export async function getStaffCommissions(
       take: filters.limit ?? 50,
       skip: filters.offset ?? 0,
     }),
+    // Total count
     prisma.commissionCalculation.count({ where }),
+    // Summaries for this staff member
+    prisma.commissionSummary.findMany({
+      where: {
+        staffId,
+        venueId,
+      },
+      orderBy: { periodEnd: 'desc' },
+      take: 12, // Last 12 periods
+    }),
+    // This month stats
+    prisma.commissionCalculation.aggregate({
+      where: {
+        staffId,
+        venueId,
+        status: { not: CommissionCalcStatus.VOIDED },
+        calculatedAt: { gte: thisMonthStart },
+      },
+      _sum: { netCommission: true },
+    }),
+    // Last month stats
+    prisma.commissionCalculation.aggregate({
+      where: {
+        staffId,
+        venueId,
+        status: { not: CommissionCalcStatus.VOIDED },
+        calculatedAt: { gte: lastMonthStart, lte: lastMonthEnd },
+      },
+      _sum: { netCommission: true },
+    }),
+    // Total all-time stats
+    prisma.commissionCalculation.aggregate({
+      where: {
+        staffId,
+        venueId,
+        status: { not: CommissionCalcStatus.VOIDED },
+      },
+      _sum: { netCommission: true },
+    }),
   ])
 
-  return { calculations, total }
+  // Calculate stats
+  const stats = {
+    thisMonth: decimalToNumber(thisMonthStats._sum.netCommission),
+    lastMonth: decimalToNumber(lastMonthStats._sum.netCommission),
+    total: decimalToNumber(totalStats._sum.netCommission),
+  }
+
+  // Get tier progress (if tiered config exists)
+  let tierProgress: {
+    currentTier: string | null
+    nextTier: string | null
+    currentAmount: number
+    nextThreshold: number | null
+    progress: number
+  } | null = null
+
+  // Find active tiered config for this venue
+  const tieredConfig = await prisma.commissionConfig.findFirst({
+    where: {
+      venueId,
+      active: true,
+      calcType: CommissionCalcType.TIERED,
+    },
+    include: {
+      tiers: {
+        orderBy: { tierLevel: 'asc' },
+      },
+    },
+  })
+
+  if (tieredConfig && tieredConfig.tiers.length > 0) {
+    // Get current period sales for tier calculation
+    const currentPeriodAmount = stats.thisMonth // Use this month for now (could be configurable)
+
+    // Find current and next tier
+    let currentTier: string | null = null
+    let nextTier: string | null = null
+    let nextThreshold: number | null = null
+
+    for (let i = 0; i < tieredConfig.tiers.length; i++) {
+      const tier = tieredConfig.tiers[i]
+      const minThreshold = decimalToNumber(tier.minThreshold)
+      const maxThreshold = tier.maxThreshold ? decimalToNumber(tier.maxThreshold) : Infinity
+
+      if (currentPeriodAmount >= minThreshold && currentPeriodAmount < maxThreshold) {
+        currentTier = tier.tierName
+        if (i + 1 < tieredConfig.tiers.length) {
+          nextTier = tieredConfig.tiers[i + 1].tierName
+          nextThreshold = decimalToNumber(tieredConfig.tiers[i + 1].minThreshold)
+        }
+        break
+      }
+    }
+
+    // If no tier matched, they're below the first tier
+    if (!currentTier && tieredConfig.tiers.length > 0) {
+      nextTier = tieredConfig.tiers[0].tierName
+      nextThreshold = decimalToNumber(tieredConfig.tiers[0].minThreshold)
+    }
+
+    tierProgress = {
+      currentTier,
+      nextTier,
+      currentAmount: currentPeriodAmount,
+      nextThreshold,
+      progress: nextThreshold ? Math.min((currentPeriodAmount / nextThreshold) * 100, 100) : 100,
+    }
+  }
+
+  return { calculations, total, summaries, stats, tierProgress }
 }
 
 /**
@@ -690,15 +822,9 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
     _sum: { netAmount: true },
   })
 
-  const totalPaid = decimalToNumber(
-    summaryStats.find((s) => s.status === 'PAID')?._sum.netAmount
-  )
-  const totalPending = decimalToNumber(
-    summaryStats.find((s) => s.status === 'PENDING_APPROVAL')?._sum.netAmount
-  )
-  const totalApproved = decimalToNumber(
-    summaryStats.find((s) => s.status === 'APPROVED')?._sum.netAmount
-  )
+  const totalPaid = decimalToNumber(summaryStats.find(s => s.status === 'PAID')?._sum.netAmount)
+  const totalPending = decimalToNumber(summaryStats.find(s => s.status === 'PENDING_APPROVAL')?._sum.netAmount)
+  const totalApproved = decimalToNumber(summaryStats.find(s => s.status === 'APPROVED')?._sum.netAmount)
 
   // Count unique staff with commissions
   const staffCount = await prisma.commissionCalculation.groupBy({
@@ -732,15 +858,15 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
   })
 
   // Get staff names for top earners
-  const staffIds = topEarnersRaw.map((e) => e.staffId)
+  const staffIds = topEarnersRaw.map(e => e.staffId)
   const staffMembers = await prisma.staff.findMany({
     where: { id: { in: staffIds } },
     select: { id: true, firstName: true, lastName: true },
   })
 
-  const staffMap = new Map(staffMembers.map((s) => [s.id, s]))
+  const staffMap = new Map(staffMembers.map(s => [s.id, s]))
 
-  const topEarners = topEarnersRaw.map((e) => {
+  const topEarners = topEarnersRaw.map(e => {
     const staff = staffMap.get(e.staffId)
     return {
       staffId: e.staffId,

@@ -81,7 +81,6 @@ async function main() {
     await finalVerification()
 
     console.log('\n🎉 All tests passed! Commission system is working correctly.')
-
   } catch (error) {
     console.error('\n❌ Test failed:', error)
     throw error
@@ -97,11 +96,11 @@ async function cleanupCommissionData() {
   // Clawbacks need to be deleted based on calculation's venueId
   const calcIds = await prisma.commissionCalculation.findMany({
     where: { venueId: VENUE_ID },
-    select: { id: true }
+    select: { id: true },
   })
   if (calcIds.length > 0) {
     await prisma.commissionClawback.deleteMany({
-      where: { calculationId: { in: calcIds.map(c => c.id) } }
+      where: { calculationId: { in: calcIds.map(c => c.id) } },
     })
   }
 
@@ -117,8 +116,8 @@ async function cleanupCommissionData() {
   await prisma.order.deleteMany({
     where: {
       venueId: VENUE_ID,
-      orderNumber: { startsWith: 'TEST-' }
-    }
+      orderNumber: { startsWith: 'TEST-' },
+    },
   })
 }
 
@@ -276,7 +275,9 @@ async function createTestOrdersWithCommissions(configId: string, staffMembers: a
     })
 
     calculations.push(calc)
-    console.log(`      Created order ${order.orderNumber}: $${amount} → Commission: $${commission.toFixed(2)} for ${staffMember.staff.firstName}`)
+    console.log(
+      `      Created order ${order.orderNumber}: $${amount} → Commission: $${commission.toFixed(2)} for ${staffMember.staff.firstName}`,
+    )
   }
 
   return calculations

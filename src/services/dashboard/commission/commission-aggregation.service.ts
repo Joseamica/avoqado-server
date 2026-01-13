@@ -293,7 +293,7 @@ export async function getCommissionSummaries(venueId: string, filters: SummaryFi
     }
   }
 
-  return prisma.commissionSummary.findMany({
+  const summaries = await prisma.commissionSummary.findMany({
     where,
     include: {
       staff: {
@@ -302,6 +302,11 @@ export async function getCommissionSummaries(venueId: string, filters: SummaryFi
           firstName: true,
           lastName: true,
           email: true,
+          venues: {
+            where: { venueId },
+            select: { id: true },
+            take: 1,
+          },
         },
       },
       approvedBy: {
@@ -320,6 +325,18 @@ export async function getCommissionSummaries(venueId: string, filters: SummaryFi
     },
     orderBy: [{ periodStart: 'desc' }, { staff: { lastName: 'asc' } }],
   })
+
+  // Transform to include staffVenueId at top level of staff object
+  return summaries.map(summary => ({
+    ...summary,
+    staff: {
+      id: summary.staff.id,
+      firstName: summary.staff.firstName,
+      lastName: summary.staff.lastName,
+      email: summary.staff.email,
+      staffVenueId: summary.staff.venues[0]?.id || null,
+    },
+  }))
 }
 
 /**
