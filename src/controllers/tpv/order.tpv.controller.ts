@@ -68,7 +68,11 @@ export async function getOrder(req: Request<{ venueId: string; orderId: string }
 }
 
 export async function createOrder(
-  req: Request<{ venueId: string }, any, { tableId?: string; covers?: number; waiterId?: string; orderType?: string; terminalId?: string; source?: string }>,
+  req: Request<
+    { venueId: string },
+    any,
+    { tableId?: string; covers?: number; waiterId?: string; orderType?: string; terminalId?: string; source?: string }
+  >,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
