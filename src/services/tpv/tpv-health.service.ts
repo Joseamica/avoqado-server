@@ -307,6 +307,7 @@ export class TpvHealthService {
           status: {
             in: [TerminalStatus.ACTIVE], // Only mark ACTIVE terminals as offline, preserve MAINTENANCE state
           },
+          activatedAt: null, // Only mark as INACTIVE if never activated (e.g. before initial setup)
         },
         data: {
           status: TerminalStatus.INACTIVE,

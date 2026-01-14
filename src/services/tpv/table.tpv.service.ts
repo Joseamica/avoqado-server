@@ -119,8 +119,9 @@ export async function assignTable(
   tableId: string,
   staffId: string,
   covers: number,
+  terminalId?: string | null, // Terminal that created this order (for sales attribution)
 ): Promise<{ order: Order; isNewOrder: boolean }> {
-  logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId})`)
+  logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
   // Verify table exists and belongs to venue
   const table = await prisma.table.findFirst({
@@ -174,6 +175,7 @@ export async function assignTable(
       covers,
       orderNumber,
       servedById: staffId,
+      terminalId: terminalId || null, // Track which terminal created this order
       status: 'PENDING',
       paymentStatus: PaymentStatus.PENDING,
       kitchenStatus: 'PENDING',

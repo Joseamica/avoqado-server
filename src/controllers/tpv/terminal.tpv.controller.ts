@@ -27,8 +27,13 @@ interface TpvSettings {
   requireVerificationBarcode: boolean
   // Venue-level settings (from VenueSettings)
   enableShifts: boolean
-  // Clock-in photo verification (anti-fraud, from VenueSettings)
+  // Clock-in/out photo verification (anti-fraud, per-terminal settings from Terminal.config)
   requireClockInPhoto: boolean
+  requireClockOutPhoto: boolean
+  requireClockInToLogin: boolean
+  // Kiosk Mode (self-service terminal mode)
+  kioskModeEnabled: boolean
+  kioskDefaultMerchantId: string | null
 }
 
 /**
@@ -47,8 +52,13 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   requireVerificationBarcode: false,
   // Shift system enabled by default (can be disabled per-venue)
   enableShifts: true,
-  // Clock-in photo disabled by default (anti-fraud feature)
+  // Clock-in/out photo disabled by default (anti-fraud feature, per-terminal)
   requireClockInPhoto: false,
+  requireClockOutPhoto: false,
+  requireClockInToLogin: false,
+  // Kiosk Mode disabled by default
+  kioskModeEnabled: false,
+  kioskDefaultMerchantId: null,
 }
 
 /**
@@ -210,20 +220,20 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     // Step 4: Extract TPV settings from terminal config
     const terminalTpvSettings = getTpvSettingsFromConfig(terminal.config)
 
-    // Step 5: Fetch venue-level settings from VenueSettings
+    // Step 5: Fetch venue-level settings from VenueSettings (only enableShifts is venue-level)
     const venueSettings = await prisma.venueSettings.findUnique({
       where: { venueId: terminal.venueId },
       select: {
         enableShifts: true,
-        requireClockInPhoto: true, // Anti-fraud: require photo on clock-in
       },
     })
 
     // Merge terminal settings with venue-level settings
+    // Note: requireClockInPhoto/requireClockOutPhoto are terminal-level settings (from Terminal.config)
     const tpvSettings: TpvSettings = {
       ...terminalTpvSettings,
       enableShifts: venueSettings?.enableShifts ?? DEFAULT_TPV_SETTINGS.enableShifts,
-      requireClockInPhoto: venueSettings?.requireClockInPhoto ?? DEFAULT_TPV_SETTINGS.requireClockInPhoto,
+      // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config)
     }
 
     logger.info('[Terminal Config] Successfully fetched config', {

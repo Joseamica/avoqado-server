@@ -341,6 +341,13 @@ export interface TpvSettings {
   showVerificationScreen: boolean
   requireVerificationPhoto: boolean
   requireVerificationBarcode: boolean
+  // Attendance verification (clock-in/out with photo + GPS)
+  requireClockInPhoto: boolean // When true, GPS captured automatically with photo
+  requireClockOutPhoto: boolean // When true, GPS captured automatically with photo
+  requireClockInToLogin: boolean // When true, staff must have active clock-in to login
+  // Kiosk Mode
+  kioskModeEnabled: boolean // When true, terminal can enter self-service kiosk mode
+  kioskDefaultMerchantId: string | null // Default merchant for kiosk mode (null = show selection)
 }
 
 /**
@@ -357,6 +364,13 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showVerificationScreen: false,
   requireVerificationPhoto: false,
   requireVerificationBarcode: false,
+  // Attendance verification disabled by default
+  requireClockInPhoto: false,
+  requireClockOutPhoto: false,
+  requireClockInToLogin: false,
+  // Kiosk Mode disabled by default
+  kioskModeEnabled: false,
+  kioskDefaultMerchantId: null, // null = show merchant selection screen
 }
 
 /**
@@ -479,4 +493,60 @@ export async function activateTerminal(venueId: string, tpvId: string, serialNum
   logger.info(`Terminal ${tpvId} activated with serial number ${serialNumber}`)
 
   return updatedTerminal
+}
+
+/**
+ * Terminal merchant info for kiosk settings dropdown
+ */
+export interface TerminalMerchant {
+  id: string
+  displayName: string
+  active: boolean
+}
+
+/**
+ * Get merchants assigned to a specific terminal
+ * Used by Dashboard for kiosk default merchant dropdown
+ *
+ * @param tpvId - The terminal ID
+ * @returns Array of merchants assigned to this terminal (active ones only by default)
+ */
+export async function getTerminalMerchants(tpvId: string, includeInactive = false): Promise<TerminalMerchant[]> {
+  // 1. Get terminal with assigned merchant IDs
+  const terminal = await prisma.terminal.findUnique({
+    where: { id: tpvId },
+    select: { assignedMerchantIds: true },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
+  }
+
+  // 2. If no merchants assigned, return empty array
+  if (!terminal.assignedMerchantIds || terminal.assignedMerchantIds.length === 0) {
+    return []
+  }
+
+  // 3. Fetch merchant details
+  const merchants = await prisma.merchantAccount.findMany({
+    where: {
+      id: { in: terminal.assignedMerchantIds },
+      ...(includeInactive ? {} : { active: true }), // Filter by active unless includeInactive is true
+    },
+    select: {
+      id: true,
+      displayName: true,
+      active: true,
+    },
+    orderBy: {
+      displayName: 'asc',
+    },
+  })
+
+  // Transform to ensure displayName is always a string
+  return merchants.map(m => ({
+    id: m.id,
+    displayName: m.displayName || `Merchant ${m.id.slice(-6)}`, // Fallback to partial ID if no name
+    active: m.active,
+  }))
 }

@@ -13,6 +13,7 @@ import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service
 import { parseDateRange } from '@/utils/datetime'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
+import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -315,12 +316,14 @@ function mapPaymentSource(source?: string): PaymentSource {
  * Update order totals directly in backend for standalone mode
  * @param orderId Order ID to update
  * @param paymentAmount Total payment amount (including tip)
+ * @param tipAmount Tip amount from this payment (to calculate cumulative order.tipAmount)
  * @param currentPaymentId Current payment ID to exclude from calculation
  * @param staffId Optional staff ID who processed the payment (for loyalty points)
  */
 async function updateOrderTotalsForStandalonePayment(
   orderId: string,
   paymentAmount: number,
+  tipAmount: number, // ✅ FIX: Pass tip separately to update order.tipAmount
   currentPaymentId?: string,
   staffId?: string,
 ): Promise<void> {
@@ -357,10 +360,19 @@ async function updateOrderTotalsForStandalonePayment(
     0,
   )
   const totalPaid = previousPayments + paymentAmount
-  const originalTotal = parseFloat(order.total.toString())
 
-  // Calculate remaining amount
-  const remainingAmount = Math.max(0, originalTotal - totalPaid)
+  // ✅ FIX: Use subtotal as base (doesn't include tips), not order.total (which may already include tips from previous payments)
+  const orderSubtotal = parseFloat(order.subtotal.toString())
+
+  // ✅ FIX: Calculate cumulative tip from all completed payments + current tip
+  const previousTips = order.payments.reduce((sum, payment) => sum + parseFloat(payment.tipAmount.toString()), 0)
+  const totalTip = previousTips + tipAmount
+
+  // ✅ FIX: Calculate new total including tips (consistent with fast payments)
+  const newTotal = orderSubtotal + totalTip
+
+  // Calculate remaining amount (based on new total)
+  const remainingAmount = Math.max(0, newTotal - totalPaid)
   const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
 
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
@@ -418,6 +430,9 @@ async function updateOrderTotalsForStandalonePayment(
   }
 
   // Update order totals and status (including partial payment tracking)
+  // ⭐ KIOSK MODE FIX: If servedById is null, assign the staff who processed the payment
+  const shouldAssignServer = !order.servedById && staffId
+
   const updatedOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
@@ -425,6 +440,15 @@ async function updateOrderTotalsForStandalonePayment(
       // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
       paidAmount: totalPaid,
       remainingBalance: remainingAmount,
+      // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
+      tipAmount: totalTip,
+      // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
+      total: newTotal,
+      // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
+      ...(shouldAssignServer && {
+        servedById: staffId,
+        createdById: order.createdById || staffId, // Also set createdById if null
+      }),
       ...(isFullyPaid && {
         status: 'COMPLETED',
         completedAt: new Date(),
@@ -457,12 +481,18 @@ async function updateOrderTotalsForStandalonePayment(
 
   logger.info('Order totals updated for standalone payment', {
     orderId,
-    originalTotal,
+    orderSubtotal,
+    newTotal, // ✅ Subtotal + cumulative tips
     paymentAmount,
+    tipAmount,
+    totalTip, // ✅ Cumulative tip from all payments
     totalPaid,
     remainingAmount,
     isFullyPaid,
     newPaymentStatus,
+    // ⭐ KIOSK MODE: Log if we assigned the server from payment processor
+    kioskModeServerAssigned: shouldAssignServer,
+    assignedServerId: shouldAssignServer ? staffId : null,
   })
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
@@ -1021,6 +1051,11 @@ interface PaymentCreationData {
   // This allows refunds to work WITHOUT waiting for Blumon webhook
   // Example: 12945658 (fits in number, unlike the 12-digit referenceNumber string)
   blumonOperationNumber?: number
+
+  // ⭐ Device Serial Number for Terminal attribution (2026-01-08)
+  // Links payment to the Terminal that processed it (for device-based reporting)
+  // This is the Terminal.serialNumber (e.g., "AVQD-2841548417"), NOT blumonSerialNumber
+  deviceSerialNumber?: string
 }
 
 /**
@@ -1068,6 +1103,50 @@ async function resolveBlumonSerialToMerchantId(venueId: string, blumonSerialNumb
   } catch (error) {
     logger.error(`❌ Error resolving blumonSerialNumber ${blumonSerialNumber}:`, error)
     return undefined
+  }
+}
+
+/**
+ * ⭐ Helper: Resolve Terminal ID from device serial number
+ *
+ * **Purpose:** Auto-link payments/orders to the Terminal that processed them
+ * using the device's unique serial number (e.g., "AVQD-2841548417")
+ *
+ * **Logic:**
+ * 1. Find Terminal by serialNumber (unique field)
+ * 2. Verify it belongs to the venue (security)
+ * 3. Return terminal.id for foreign key assignment
+ *
+ * **Example:**
+ * ```typescript
+ * const terminalId = await resolveTerminalIdFromSerial('venue_123', 'AVQD-2841548417')
+ * // Returns: 'cmhtgsr3100gi9k1we6pyr777' (Terminal.id)
+ * ```
+ *
+ * @param venueId Venue ID to validate ownership
+ * @param deviceSerialNumber Terminal serial number (e.g., "AVQD-2841548417")
+ * @returns Terminal ID or null if not found
+ */
+async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: string): Promise<string | null> {
+  try {
+    const terminal = await prisma.terminal.findFirst({
+      where: {
+        serialNumber: deviceSerialNumber,
+        venueId, // Security: ensure terminal belongs to this venue
+      },
+      select: { id: true },
+    })
+
+    if (terminal) {
+      logger.debug(`✅ Resolved deviceSerialNumber ${deviceSerialNumber} → terminalId ${terminal.id}`)
+      return terminal.id
+    }
+
+    logger.warn(`⚠️ Could not resolve deviceSerialNumber ${deviceSerialNumber} for venue ${venueId}`)
+    return null
+  } catch (error) {
+    logger.error(`❌ Error resolving deviceSerialNumber ${deviceSerialNumber}:`, error)
+    return null
   }
 }
 
@@ -1297,6 +1376,13 @@ export async function recordOrderPayment(
     }
   }
 
+  // ⭐ TERMINAL ATTRIBUTION: Resolve terminalId from device serial number
+  // Links payment to the Terminal that processed it (for device-based reporting)
+  let terminalId: string | null = null
+  if (paymentData.deviceSerialNumber) {
+    terminalId = await resolveTerminalIdFromSerial(venueId, paymentData.deviceSerialNumber)
+  }
+
   // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const payment = await prisma.$transaction(async tx => {
@@ -1335,6 +1421,8 @@ export async function recordOrderPayment(
         entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
         // ⭐ Provider-agnostic merchant account tracking
         merchantAccountId,
+        // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+        terminalId,
         processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
         shiftId: currentShift?.id,
         feePercentage: 0, // TODO: Calculate based on payment processor
@@ -1543,6 +1631,17 @@ export async function recordOrderPayment(
         orderId: activeOrder.id,
         amount: payment.amount,
       })
+
+      // Create commission calculation for this payment (non-blocking)
+      if (payment.type !== 'TEST') {
+        createCommissionForPayment(payment.id).catch(err => {
+          logger.error('Failed to create commission for payment', {
+            paymentId: payment.id,
+            orderId: activeOrder.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+      }
     } else if (payment.status === 'PROCESSING') {
       socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_PROCESSING, paymentPayload)
       logger.info('🔌 PAYMENT_PROCESSING event emitted', {
@@ -1641,7 +1740,8 @@ export async function recordOrderPayment(
     try {
       // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
       // ⭐ LOYALTY: Pass staffId for loyalty points attribution
-      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, payment.id, validatedStaffId)
+      // ✅ FIX: Pass tipAmount separately to update order.tipAmount
+      await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId)
 
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
         paymentId: payment.id,
@@ -1844,6 +1944,13 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
   }
 
+  // ⭐ TERMINAL ATTRIBUTION: Resolve terminalId from device serial number
+  // Links order and payment to the Terminal that processed them (for device-based reporting)
+  let terminalId: string | null = null
+  if (paymentData.deviceSerialNumber) {
+    terminalId = await resolveTerminalIdFromSerial(venueId, paymentData.deviceSerialNumber)
+  }
+
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   const { payment, fastOrder } = await prisma.$transaction(async tx => {
@@ -1860,14 +1967,21 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         orderNumber,
         type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
         source: 'TPV',
+        // ⭐ Terminal that created this order (resolved from deviceSerialNumber)
+        terminalId,
         status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
         completedAt: new Date(),
-        subtotal: paymentData.amount / 100, // Convert to decimal
+        subtotal: totalAmount, // Base amount (without tip)
         taxAmount: 0, // No tax for fast payments
-        total: paymentData.amount / 100, // Convert to decimal
+        total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
+        // ✅ FIX: Include tip and paid amounts for fast orders
+        tipAmount, // Tip amount from this payment
+        paidAmount: totalAmount + tipAmount, // Total paid (base + tip)
+        remainingBalance: 0, // Fast payments are always fully paid
         paymentStatus: 'PAID',
         splitType: paymentData.splitType as any, // Set splitType for fast orders
         createdById: validatedStaffId, // Track which staff created the fast order
+        servedById: validatedStaffId, // ⭐ KIOSK MODE FIX: Also set server to payment processor
       },
     })
 
@@ -1907,6 +2021,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
         // ⭐ Provider-agnostic merchant account tracking
         merchantAccountId,
+        // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+        terminalId,
         processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
         shiftId: currentShift?.id,
         feePercentage: 0, // TODO: Calculate based on payment processor
@@ -2090,6 +2206,17 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         orderId: fastOrder.id,
         amount: payment.amount,
       })
+
+      // Create commission calculation for this fast payment (non-blocking)
+      if (payment.type !== 'TEST') {
+        createCommissionForPayment(payment.id).catch(err => {
+          logger.error('Failed to create commission for fast payment', {
+            paymentId: payment.id,
+            orderId: fastOrder.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+      }
     } else if (payment.status === 'PROCESSING') {
       socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_PROCESSING, paymentPayload)
       logger.info('🔌 PAYMENT_PROCESSING event emitted (fast payment)', {

@@ -258,6 +258,11 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'settings:manage': ['settings:read', 'settings:manage'],
 
   // ===========================
+  // NOTIFICATIONS
+  // ===========================
+  'notifications:send': ['notifications:send', 'teams:read'],
+
+  // ===========================
   // DISCOUNTS (Phase 2)
   // ===========================
   'discounts:read': [
@@ -274,6 +279,22 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'orders:read',
     'orders:update',
   ],
+
+  // ===========================
+  // COMMISSIONS (Staff bonus system)
+  // ===========================
+  'commissions:read': [
+    'commissions:read',
+    'teams:read', // Need to see staff for commission configs
+    'payments:read', // Commissions are based on payments
+    'orders:read', // Commissions may be based on orders
+  ],
+  'commissions:create': ['commissions:read', 'commissions:create'],
+  'commissions:update': ['commissions:read', 'commissions:update'],
+  'commissions:delete': ['commissions:read', 'commissions:delete'],
+  'commissions:view_own': ['commissions:view_own'], // Staff can view their own commissions
+  'commissions:approve': ['commissions:read', 'commissions:approve', 'teams:read'],
+  'commissions:payout': ['commissions:read', 'commissions:approve', 'commissions:payout'],
 
   // ===========================
   // COUPONS (Phase 2)
@@ -439,12 +460,15 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
+    'commissions:view_own', // Can view own commission earnings
     'teams:read',
     'tpv:read', // Can view TPV terminals (but not create/edit/command)
     // TPV-specific permissions
     'tpv-tables:assign', // Can assign tables to orders
     'tpv-time-entries:write', // Can clock in/out, take breaks
     'tpv-payments:pay-later', // Can create pay-later orders
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
   ],
 
   /**
@@ -466,12 +490,15 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
+    'commissions:view_own', // Can view own commission earnings
     'teams:read',
     // TPV-specific permissions
     'tpv-tables:assign', // Can assign tables
     'tpv-time-entries:write', // Can clock in/out
     'tpv-products:read', // Can search products by barcode
     'tpv-payments:pay-later', // Can create pay-later orders
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
   ],
 
   /**
@@ -525,6 +552,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
+    'commissions:read', // Can view commission configs and staff earnings
+    'commissions:view_own', // Can view own commission earnings
     'features:read',
     'features:write',
     'role-config:read', // Can view custom role display names
@@ -543,9 +572,14 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:read',
     'tpv-products:write', // Can create products on-the-fly (Scan & Go)
     'tpv-reports:pay-later-aging', // Can view pay-later aging report
+    'notifications:send', // Can send push notifications to staff
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
+    'serialized-inventory:create', // Can register (Alta de Productos)
     // NO: tpv-terminal:settings (ADMIN+ only)
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
     // NO: tpv-factory-reset (OWNER only)
+    // NO: commissions:create/update/delete/approve/payout (ADMIN+ only)
   ],
 
   /**
@@ -566,7 +600,16 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
+    'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
+    // Commission System (can manage but NOT payout - OWNER only)
+    'commissions:read',
+    'commissions:create',
+    'commissions:update',
+    'commissions:delete',
+    'commissions:view_own',
+    'commissions:approve',
     'features:*',
+    'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
     'tables:*',
@@ -596,6 +639,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:read',
     'tpv-products:write',
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
+    // NO: commissions:payout (OWNER only - financial)
   ],
 
   /**
@@ -605,6 +649,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'home:*',
     'analytics:*',
     'settlements:*', // Available Balance (settlements) - was missing!
+    'commissions:*', // Commission system (full control including payout)
     'menu:*',
     'orders:*',
     'payments:*',
@@ -617,6 +662,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
     'features:*',
+    'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
     'tpv:*',
     'tables:*',
@@ -969,6 +1015,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete'],
   coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete'],
   features: ['features:read', 'features:update'],
+  notifications: ['notifications:send'],
   products: ['products:read', 'products:create', 'products:update', 'products:delete'],
   'role-config': ['role-config:read', 'role-config:update'], // Custom role display names
   // TPV-specific permissions (granular features)
@@ -984,6 +1031,18 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tpv-reports': ['tpv-reports:read', 'tpv-reports:export', 'tpv-reports:pay-later-aging'],
   'tpv-products': ['tpv-products:read', 'tpv-products:write'],
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
+  // Serialized Inventory (SIMs, jewelry, etc.)
+  'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],
+  // Commission System (staff bonuses based on sales)
+  commissions: [
+    'commissions:read',
+    'commissions:create',
+    'commissions:update',
+    'commissions:delete',
+    'commissions:view_own',
+    'commissions:approve',
+    'commissions:payout',
+  ],
 }
 
 /**

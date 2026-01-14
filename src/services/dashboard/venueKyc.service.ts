@@ -6,7 +6,7 @@
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { uploadFileToStorage } from '@/services/storage.service'
+import { uploadFileToStorage, buildStoragePath } from '@/services/storage.service'
 
 import { notifySuperadminsNewKycSubmission } from '@/services/superadmin/kycReview.service'
 import { BadRequestError, ForbiddenError } from '@/errors/AppError'
@@ -109,8 +109,8 @@ export async function uploadSingleKycDocument(venueId: string, userId: string, d
     const extension = file.originalname.split('.').pop()?.toLowerCase() || 'pdf'
     const cleanName = DOCUMENT_KEY_TO_NAME[documentKey] || documentKey
 
-    // Upload to Firebase Storage
-    const filePath = `venues/${venue.slug}/kyc/${cleanName}.${extension}`
+    // Upload to Firebase Storage (path: {env}/venues/{slug}/kyc/{documentName}.{ext})
+    const filePath = buildStoragePath(`venues/${venue.slug}/kyc/${cleanName}.${extension}`)
     const downloadUrl = await uploadFileToStorage(file.buffer, filePath, file.mimetype)
 
     // Update venue with new document URL
@@ -334,8 +334,8 @@ export async function resubmitKycDocuments(venueId: string, userId: string, file
           cleanName = fieldName
       }
 
-      // Upload to Firebase Storage
-      const filePath = `venues/${venue.slug}/kyc/${cleanName}.${extension}`
+      // Upload to Firebase Storage (path: {env}/venues/{slug}/kyc/{documentName}.{ext})
+      const filePath = buildStoragePath(`venues/${venue.slug}/kyc/${cleanName}.${extension}`)
       const downloadUrl = await uploadFileToStorage(file.buffer, filePath, file.mimetype)
 
       // Map field name to Prisma field

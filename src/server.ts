@@ -19,6 +19,7 @@ import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
+import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -68,6 +69,10 @@ const gracefulShutdown = async (signal: string) => {
         // Stop abandoned orders cleanup job
         logger.info('Stopping abandoned orders cleanup job...')
         abandonedOrdersCleanupJob.stop()
+
+        // Stop commission aggregation job
+        logger.info('Stopping commission aggregation job...')
+        commissionAggregationJob.stop()
 
         // Stop live demo cleanup job
         if (liveDemoCleanupJob) {
@@ -214,6 +219,9 @@ const startApplication = async (retries = 3) => {
 
       // Start abandoned orders cleanup job
       abandonedOrdersCleanupJob.start()
+
+      // Start commission aggregation job (daily at 3:00 AM Mexico City)
+      commissionAggregationJob.start()
 
       // Start live demo cleanup job (runs every hour to delete expired sessions)
       liveDemoCleanupJob = new CronJob(

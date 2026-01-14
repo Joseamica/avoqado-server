@@ -199,6 +199,9 @@ import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 import reportsRoutes from './dashboard/reports.routes'
+import commissionRoutes from './dashboard/commission.routes'
+// @temporary - Serialized inventory demo routes (delete after final implementation)
+import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3345,7 +3348,7 @@ router.get(
 router.get(
   '/superadmin/settlement-incidents',
   authenticateTokenMiddleware,
-  checkPermission('system:admin'),
+  checkPermission('system:manage'),
   validateRequest(incidentListQuerySchema),
   settlementIncidentController.getAllIncidents,
 )
@@ -3366,7 +3369,7 @@ router.get(
 router.get(
   '/superadmin/settlement-incidents/stats',
   authenticateTokenMiddleware,
-  checkPermission('system:admin'),
+  checkPermission('system:manage'),
   settlementIncidentController.getGlobalIncidentStats,
 )
 
@@ -3395,7 +3398,7 @@ router.get(
 router.post(
   '/superadmin/settlement-incidents/:incidentId/escalate',
   authenticateTokenMiddleware,
-  checkPermission('system:admin'),
+  checkPermission('system:manage'),
   validateRequest(escalateIncidentSchema),
   settlementIncidentController.escalateIncident,
 )
@@ -3409,8 +3412,15 @@ router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, 
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
 
+// @temporary - Serialized Inventory Demo routes (delete after final implementation)
+// For PlayTelecom SIM sales visualization demo
+router.use('/venues/:venueId/serialized-inventory', authenticateTokenMiddleware, serializedInventoryRoutes)
+
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
+
+// Commission routes (OWNER/ADMIN for config, STAFF for view own)
+router.use('/commissions', authenticateTokenMiddleware, commissionRoutes)
 
 /**
  * @openapi
@@ -3954,6 +3964,52 @@ router.get('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission(
  *         description: Terminal not found
  */
 router.put('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission('tpv-settings:update'), tpvController.updateTpvSettings)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/tpv/{tpvId}/merchants:
+ *   get:
+ *     tags: [TPV Settings]
+ *     summary: Get merchants assigned to a terminal
+ *     description: |
+ *       Returns the list of merchant accounts assigned to this terminal.
+ *       Used for kiosk default merchant selection in Dashboard settings.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID
+ *     responses:
+ *       200:
+ *         description: List of assigned merchants
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       displayName:
+ *                         type: string
+ *                       active:
+ *                         type: boolean
+ *       401:
+ *         description: Unauthorized (missing or invalid token)
+ *       403:
+ *         description: Forbidden (missing tpv-settings:read permission)
+ *       404:
+ *         description: Terminal not found
+ */
+router.get('/tpv/:tpvId/merchants', authenticateTokenMiddleware, checkPermission('tpv-settings:read'), tpvController.getTerminalMerchants)
 
 // Heartbeat endpoint moved to tpv.routes.ts (unauthenticated endpoint for terminal health monitoring)
 
@@ -9539,7 +9595,7 @@ router.delete(
 router.get(
   '/venues/:venueId/settings',
   authenticateTokenMiddleware,
-  checkPermission('venue:read'),
+  checkPermission('venues:read'),
   venueSettingsController.getVenueSettings,
 )
 
@@ -9576,7 +9632,7 @@ router.get(
 router.put(
   '/venues/:venueId/settings',
   authenticateTokenMiddleware,
-  checkPermission('venue:update'),
+  checkPermission('venues:update'),
   validateRequest(UpdateVenueSettingsSchema),
   venueSettingsController.updateVenueSettings,
 )
@@ -9613,7 +9669,7 @@ router.put(
 router.get(
   '/venues/:venueId/settings/tpv',
   authenticateTokenMiddleware,
-  checkPermission('venue:read'),
+  checkPermission('venues:read'),
   venueSettingsController.getTpvSettings,
 )
 
@@ -9650,7 +9706,7 @@ router.get(
 router.put(
   '/venues/:venueId/settings/tpv',
   authenticateTokenMiddleware,
-  checkPermission('venue:update'),
+  checkPermission('venues:update'),
   validateRequest(UpdateTpvSettingsSchema),
   venueSettingsController.updateTpvSettings,
 )

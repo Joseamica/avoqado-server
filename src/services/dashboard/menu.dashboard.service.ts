@@ -1122,8 +1122,8 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
               where: { id: existingProduct.id },
               data: {
                 name: productData.name,
-                price: Math.round(productData.price * 100), // Convert to cents
-                cost: productData.cost ? Math.round(productData.cost * 100) : null,
+                price: productData.price,
+                cost: productData.cost ?? null,
                 description: productData.description || null,
                 type: productData.type || 'FOOD',
                 categoryId: category.id,
@@ -1140,8 +1140,8 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
                 venueId,
                 name: productData.name,
                 sku: productData.sku,
-                price: Math.round(productData.price * 100), // Convert to cents
-                cost: productData.cost ? Math.round(productData.cost * 100) : null,
+                price: productData.price,
+                cost: productData.cost ?? null,
                 description: productData.description || null,
                 type: productData.type || 'FOOD',
                 categoryId: category.id,
@@ -1231,7 +1231,7 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
                     data: {
                       groupId: modifierGroup.id,
                       name: modifierData.name,
-                      price: Math.round(modifierData.price * 100), // Convert to cents
+                      price: modifierData.price,
                     },
                   })
                   modifiersCreated++

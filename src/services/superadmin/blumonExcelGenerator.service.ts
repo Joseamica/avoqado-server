@@ -23,6 +23,7 @@ import { pdf } from 'pdf-to-img'
 import * as XLSX from 'xlsx'
 import logger from '@/config/logger'
 import { getStorage } from 'firebase-admin/storage'
+import { buildStoragePath } from '@/services/storage.service'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { writeFileSync, unlinkSync } from 'fs'
@@ -562,7 +563,7 @@ function generateExcel(data: BlumonData): Buffer {
 async function uploadToFirebase(buffer: Buffer, venueName: string, venueSlug: string): Promise<string | null> {
   try {
     const bucket = getStorage().bucket()
-    const fileName = `venues/${venueSlug}/blumon/${Date.now()}_LayOut_Comercio_${venueName.replace(/\s+/g, '_')}.xlsx`
+    const fileName = buildStoragePath(`venues/${venueSlug}/blumon/${Date.now()}_LayOut_Comercio_${venueName.replace(/\s+/g, '_')}.xlsx`)
     const file = bucket.file(fileName)
 
     await file.save(buffer, {

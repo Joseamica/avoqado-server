@@ -24,7 +24,7 @@ export const AcceptInvitationSchema = z.object({
       ),
     pin: z
       .string()
-      .regex(/^\d{4}$/, 'PIN must be exactly 4 digits')
+      .regex(/^\d{4,10}$/, 'PIN must be 4-10 digits')
       .optional()
       .nullable(),
   }),
