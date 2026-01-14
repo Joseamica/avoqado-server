@@ -31,6 +31,9 @@ interface TpvSettings {
   requireClockInPhoto: boolean
   requireClockOutPhoto: boolean
   requireClockInToLogin: boolean
+  // Kiosk Mode (self-service terminal mode)
+  kioskModeEnabled: boolean
+  kioskDefaultMerchantId: string | null
 }
 
 /**
@@ -53,6 +56,9 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   requireClockInPhoto: false,
   requireClockOutPhoto: false,
   requireClockInToLogin: false,
+  // Kiosk Mode disabled by default
+  kioskModeEnabled: false,
+  kioskDefaultMerchantId: null,
 }
 
 /**

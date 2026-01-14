@@ -4027,7 +4027,8 @@ enum OrderType {
 }
 
 enum OrderSource {
-  TPV // Terminal
+  TPV // Terminal (standard TPV mode)
+  KIOSK // Self-service kiosk mode (abandoned orders should NOT appear as cuentas por cobrar)
   QR // Customer QR
   WEB // Website
   APP // Mobile app

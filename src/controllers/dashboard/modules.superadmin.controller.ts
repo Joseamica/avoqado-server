@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express'
-import { moduleService, MODULE_CODES, ModuleCode } from '../../services/modules/module.service'
+import { moduleService, ModuleCode } from '../../services/modules/module.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 
@@ -276,9 +276,18 @@ export async function enableModuleForVenue(req: Request, res: Response, next: Ne
     const authContext = (req as any).authContext
     const enabledBy = authContext?.userId || 'system'
 
-    // Validate module code
-    if (!Object.values(MODULE_CODES).includes(moduleCode)) {
+    // Validate module exists in database (dynamic validation instead of hardcoded list)
+    const moduleExists = await prisma.module.findUnique({
+      where: { code: moduleCode },
+      select: { id: true, active: true },
+    })
+
+    if (!moduleExists) {
       return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
+    }
+
+    if (!moduleExists.active) {
+      return res.status(400).json({ error: `Module ${moduleCode} is not active` })
     }
 
     const venue = await prisma.venue.findUnique({
@@ -318,8 +327,13 @@ export async function disableModuleForVenue(req: Request, res: Response, next: N
   try {
     const { venueId, moduleCode } = req.body
 
-    // Validate module code
-    if (!Object.values(MODULE_CODES).includes(moduleCode)) {
+    // Validate module exists in database (dynamic validation)
+    const moduleExists = await prisma.module.findUnique({
+      where: { code: moduleCode },
+      select: { id: true },
+    })
+
+    if (!moduleExists) {
       return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
     }
 
@@ -362,8 +376,13 @@ export async function updateModuleConfig(req: Request, res: Response, next: Next
   try {
     const { venueId, moduleCode, config } = req.body
 
-    // Validate module code
-    if (!Object.values(MODULE_CODES).includes(moduleCode)) {
+    // Validate module exists in database (dynamic validation)
+    const moduleExists = await prisma.module.findUnique({
+      where: { code: moduleCode },
+      select: { id: true },
+    })
+
+    if (!moduleExists) {
       return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
     }
 

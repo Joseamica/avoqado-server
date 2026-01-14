@@ -3965,6 +3965,52 @@ router.get('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission(
  */
 router.put('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission('tpv-settings:update'), tpvController.updateTpvSettings)
 
+/**
+ * @openapi
+ * /api/v1/dashboard/tpv/{tpvId}/merchants:
+ *   get:
+ *     tags: [TPV Settings]
+ *     summary: Get merchants assigned to a terminal
+ *     description: |
+ *       Returns the list of merchant accounts assigned to this terminal.
+ *       Used for kiosk default merchant selection in Dashboard settings.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Terminal ID
+ *     responses:
+ *       200:
+ *         description: List of assigned merchants
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       displayName:
+ *                         type: string
+ *                       active:
+ *                         type: boolean
+ *       401:
+ *         description: Unauthorized (missing or invalid token)
+ *       403:
+ *         description: Forbidden (missing tpv-settings:read permission)
+ *       404:
+ *         description: Terminal not found
+ */
+router.get('/tpv/:tpvId/merchants', authenticateTokenMiddleware, checkPermission('tpv-settings:read'), tpvController.getTerminalMerchants)
+
 // Heartbeat endpoint moved to tpv.routes.ts (unauthenticated endpoint for terminal health monitoring)
 
 /**

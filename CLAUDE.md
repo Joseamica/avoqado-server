@@ -133,11 +133,41 @@ const config = await moduleService.getModuleConfig(venueId, MODULE_CODES.SERIALI
 **Key Files:**
 
 - `src/services/modules/module.service.ts` - Module enable/config/check
+- `src/controllers/dashboard/modules.superadmin.controller.ts` - CRUD de módulos
 - `src/services/serialized-inventory/serializedInventory.service.ts` - Scan, register, sell
 - `scripts/setup-modules.ts` - Create global modules
 - `scripts/setup-playtelecom.ts` - Example venue setup
 
-**Full docs:** `docs/features/SERIALIZED_INVENTORY.md`
+**Available Modules:**
+
+| Code | Description |
+|------|-------------|
+| `SERIALIZED_INVENTORY` | Inventario con items únicos (SIMs, joyas, electrónicos) |
+| `ATTENDANCE_TRACKING` | Control de asistencia de personal |
+| `WHITE_LABEL_DASHBOARD` | Dashboards personalizados para clientes enterprise |
+
+**⚠️ IMPORTANTE: Validación Dinámica de Módulos**
+
+El controller de superadmin valida módulos **contra la base de datos**, NO contra una lista hardcodeada. Esto permite crear nuevos módulos sin modificar código:
+
+```typescript
+// ✅ CORRECTO - Validación dinámica en modules.superadmin.controller.ts
+const moduleExists = await prisma.module.findUnique({
+  where: { code: moduleCode },
+  select: { id: true, active: true },
+})
+
+if (!moduleExists) {
+  return res.status(400).json({ error: `Invalid module code: ${moduleCode}` })
+}
+
+// ❌ INCORRECTO - NO usar listas hardcodeadas para validar
+if (!Object.values(MODULE_CODES).includes(moduleCode)) { ... }
+```
+
+**Full docs:**
+- `docs/features/SERIALIZED_INVENTORY.md`
+- `avoqado-web-dashboard/docs/features/WHITE_LABEL_DASHBOARD.md` (visual builder)
 
 ### AI Chatbot
 

@@ -53,6 +53,7 @@ export async function getOrders(
   options?: {
     includePayLater?: boolean // If true, include pay-later orders
     onlyPayLater?: boolean // If true, ONLY return pay-later orders
+    includeKiosk?: boolean // If true, include KIOSK orders (default: exclude)
   },
 ): Promise<(Order & { tableName: string | null })[]> {
   const where: any = {
@@ -60,6 +61,13 @@ export async function getOrders(
     paymentStatus: {
       in: ['PENDING', 'PARTIAL'], // Equivalent to legacy 'OPEN' status
     },
+  }
+
+  // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list
+  // KIOSK orders are self-service and if abandoned, should NOT clutter the TPV order list.
+  // The kiosk mode retrieves its own order by ID (getOrder), not from this list.
+  if (!options?.includeKiosk) {
+    where.source = { not: 'KIOSK' }
   }
 
   // Pay-later filtering logic
@@ -282,6 +290,7 @@ interface CreateOrderInput {
   waiterId?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   terminalId?: string | null // Terminal that created this order (for sales attribution)
+  source?: 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS' // Order source - KIOSK orders are excluded from pay-later lists
 }
 
 /**
@@ -293,7 +302,7 @@ interface CreateOrderInput {
  */
 export async function createOrder(venueId: string, input: CreateOrderInput): Promise<Order & { tableName: string | null }> {
   logger.info(
-    `🆕 [ORDER SERVICE] Creating new order | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | table=${input.tableId || 'none'}`,
+    `🆕 [ORDER SERVICE] Creating new order | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | table=${input.tableId || 'none'} | source=${input.source || 'TPV'}`,
   )
 
   // Validate staff if provided
@@ -323,7 +332,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
       paymentStatus: 'PENDING',
       kitchenStatus: 'PENDING',
       type: input.orderType || 'DINE_IN',
-      source: 'TPV',
+      source: input.source || 'TPV', // KIOSK orders are excluded from pay-later/open orders lists
       subtotal: 0,
       discountAmount: 0,
       taxAmount: 0,

@@ -81,6 +81,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                     },
                   },
                 },
+                // Include modules for module-based access control (e.g., SERIALIZED_INVENTORY)
+                venueModules: {
+                  select: {
+                    enabled: true,
+                    config: true,
+                    module: {
+                      select: {
+                        code: true,
+                        name: true,
+                      },
+                    },
+                  },
+                },
               },
             },
           },
@@ -96,7 +109,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       })
     }
 
-    // Define venue type with features and role
+    // Define venue type with features, modules and role
     interface VenueWithFeatures {
       id: string
       name: string
@@ -106,6 +119,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       status?: VenueStatus // Single source of truth for venue state
       kycStatus?: string | null // Include KYC verification status
       features?: any[]
+      modules?: any[] // VenueModule with Module data for module-based access control
       // Contact & Address fields (needed for TPV purchase wizard pre-fill)
       address?: string | null
       city?: string | null
@@ -132,6 +146,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       status: sv.venue.status, // Single source of truth
       kycStatus: sv.venue.kycStatus, // Include KYC status
       features: sv.venue.features, // Incluir las features
+      modules: sv.venue.venueModules, // Include modules for module-based access control
       // Contact & Address fields (needed for TPV purchase wizard pre-fill)
       address: sv.venue.address,
       city: sv.venue.city,
@@ -196,6 +211,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
               },
             },
           },
+          // Include modules for module-based access control (e.g., SERIALIZED_INVENTORY)
+          venueModules: {
+            select: {
+              enabled: true,
+              config: true,
+              module: {
+                select: {
+                  code: true,
+                  name: true,
+                },
+              },
+            },
+          },
         },
       })
 
@@ -207,6 +235,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
+        modules: venue.venueModules, // Include modules
         // Contact & Address fields (needed for TPV purchase wizard pre-fill)
         address: venue.address,
         city: venue.city,
@@ -271,6 +300,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
               },
             },
           },
+          // Include modules for module-based access control (e.g., SERIALIZED_INVENTORY)
+          venueModules: {
+            select: {
+              enabled: true,
+              config: true,
+              module: {
+                select: {
+                  code: true,
+                  name: true,
+                },
+              },
+            },
+          },
         },
       })
 
@@ -282,6 +324,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
+        modules: venue.venueModules, // Include modules
         // Contact & Address fields (needed for TPV purchase wizard pre-fill)
         address: venue.address,
         city: venue.city,

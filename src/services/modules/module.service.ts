@@ -9,6 +9,7 @@ import prisma from '../../utils/prismaClient'
 export const MODULE_CODES = {
   SERIALIZED_INVENTORY: 'SERIALIZED_INVENTORY',
   ATTENDANCE_TRACKING: 'ATTENDANCE_TRACKING',
+  WHITE_LABEL_DASHBOARD: 'WHITE_LABEL_DASHBOARD',
   // Add more modules here as needed
 } as const
 

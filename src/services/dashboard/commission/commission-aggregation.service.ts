@@ -483,9 +483,7 @@ export async function disputeSummary(summaryId: string, venueId: string, dispute
     where: { id: disputedById },
     select: { firstName: true, lastName: true },
   })
-  const disputedByName = disputedByStaff
-    ? `${disputedByStaff.firstName} ${disputedByStaff.lastName}`.trim()
-    : disputedById // Fallback to ID if staff not found
+  const disputedByName = disputedByStaff ? `${disputedByStaff.firstName} ${disputedByStaff.lastName}`.trim() : disputedById // Fallback to ID if staff not found
 
   const updated = await prisma.commissionSummary.update({
     where: { id: summaryId },

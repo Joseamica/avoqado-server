@@ -335,3 +335,20 @@ export async function activateTerminal(
     next(error)
   }
 }
+
+/**
+ * Get merchants assigned to a specific terminal
+ * Used for kiosk default merchant dropdown in Dashboard
+ * @permission tpv-settings:read (MANAGER+)
+ */
+export async function getTerminalMerchants(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { tpvId } = req.params
+
+    const merchants = await tpvDashboardService.getTerminalMerchants(tpvId)
+
+    res.status(200).json({ data: merchants })
+  } catch (error) {
+    next(error)
+  }
+}

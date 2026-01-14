@@ -4831,7 +4831,7 @@ async function main() {
   const avoqadoFullVenue = await prisma.venue.findFirst({
     where: { slug: 'avoqado-full' },
     include: {
-      staffVenues: {
+      staff: {
         include: { staff: true },
         where: { active: true },
       },
@@ -4840,9 +4840,9 @@ async function main() {
 
   if (avoqadoFullVenue) {
     // Find staff members by role
-    const ownerStaffVenue = avoqadoFullVenue.staffVenues.find(sv => sv.role === StaffRole.OWNER)
-    const waiterStaffVenues = avoqadoFullVenue.staffVenues.filter(sv => sv.role === StaffRole.WAITER)
-    const cashierStaffVenues = avoqadoFullVenue.staffVenues.filter(sv => sv.role === StaffRole.CASHIER)
+    const ownerStaffVenue = avoqadoFullVenue.staff.find(sv => sv.role === StaffRole.OWNER)
+    const waiterStaffVenues = avoqadoFullVenue.staff.filter(sv => sv.role === StaffRole.WAITER)
+    const cashierStaffVenues = avoqadoFullVenue.staff.filter(sv => sv.role === StaffRole.CASHIER)
 
     if (ownerStaffVenue) {
       console.log(`  Creating commission configs for ${avoqadoFullVenue.name}...`)
@@ -5103,9 +5103,7 @@ async function main() {
             paymentCount: staffData.calculations.length,
             status: summaryStatus,
             approvedAt:
-              summaryStatus === CommissionSummaryStatus.APPROVED || summaryStatus === CommissionSummaryStatus.PAID
-                ? new Date()
-                : null,
+              summaryStatus === CommissionSummaryStatus.APPROVED || summaryStatus === CommissionSummaryStatus.PAID ? new Date() : null,
             approvedById:
               summaryStatus === CommissionSummaryStatus.APPROVED || summaryStatus === CommissionSummaryStatus.PAID
                 ? ownerStaffVenue.staffId
