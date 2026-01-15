@@ -6475,6 +6475,62 @@ router.delete(
   teamController.removeTeamMember,
 )
 
+/**
+ * @openapi
+ * /api/v2/dashboard/{venueId}/team/{teamMemberId}/hard-delete:
+ *   delete:
+ *     tags: [Team]
+ *     summary: Hard delete team member (SUPERADMIN only)
+ *     description: |
+ *       **SUPERADMIN ONLY**: Permanently deletes ALL data associated with a team member.
+ *       This includes: commission calculations, commission payouts, milestone progress,
+ *       tip distributions, commission overrides, and the staff venue record itself.
+ *
+ *       WARNING: This action is IRREVERSIBLE. Use only for:
+ *       - GDPR "right to be forgotten" requests
+ *       - Removing test/demo data
+ *       - Legal compliance requirements
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: teamMemberId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [confirmDeletion]
+ *             properties:
+ *               confirmDeletion:
+ *                 type: boolean
+ *                 description: Must be explicitly set to true to confirm permanent deletion
+ *     responses:
+ *       200:
+ *         description: Team member permanently deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 deletedRecords:
+ *                   type: object
+ *                   description: Count of deleted records per table
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403:
+ *         description: Forbidden - SUPERADMIN role required
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/team/:teamMemberId/hard-delete',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  validateRequest(TeamMemberParamsSchema),
+  teamController.hardDeleteTeamMember,
+)
+
 // ==========================================
 // SHIFTS ROUTES
 // ==========================================
