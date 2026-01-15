@@ -189,7 +189,7 @@ async function sendConfigurationErrorCommand(
  */
 export async function processPosHeartbeat(payload: { venueId: string; instanceId: string; producerVersion: string }, posType?: string) {
   const { venueId, instanceId, producerVersion } = payload
-  logger.info(`[Heartbeat Service] ❤️ Recibido latido para Venue ${venueId} con InstanceId ${instanceId}`)
+  logger.debug(`[Heartbeat Service] ❤️ Recibido latido para Venue ${venueId} con InstanceId ${instanceId}`)
 
   try {
     // Use robust venue validation with retry logic and caching
@@ -224,7 +224,7 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
     if (validationResult.fromCache) {
       logger.debug(`[Heartbeat Service] Venue ${venueId} validado exitosamente desde cache`)
     } else {
-      logger.info(`[Heartbeat Service] Venue ${venueId} validado exitosamente desde base de datos`)
+      logger.debug(`[Heartbeat Service] Venue ${venueId} validado exitosamente desde base de datos`)
     }
 
     const existingStatus = await prisma.posConnectionStatus.findUnique({

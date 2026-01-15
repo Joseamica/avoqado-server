@@ -118,6 +118,13 @@ export async function sendTpvCommand(
     const { terminalId } = req.params
     const { command, payload } = req.body
     const requestedBy = (req as any).authContext?.userId || 'system'
+    const staff = requestedBy !== 'system'
+      ? await prisma.staff.findUnique({
+          where: { id: requestedBy },
+          select: { firstName: true, lastName: true },
+        })
+      : null
+    const requestedByName = staff ? `${staff.firstName} ${staff.lastName}`.trim() : undefined
 
     // Validate command logic
     if (command === 'EXIT_MAINTENANCE') {
@@ -144,6 +151,7 @@ export async function sendTpvCommand(
       type: command as any,
       payload,
       requestedBy,
+      requestedByName,
     })
 
     // Update terminal state in database based on command type

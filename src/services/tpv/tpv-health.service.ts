@@ -36,6 +36,7 @@ export interface TpvCommand {
   type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS' | 'REACTIVATE'
   payload?: any
   requestedBy: string
+  requestedByName?: string
 }
 
 /**
@@ -184,7 +185,7 @@ export class TpvHealthService {
         systemInfo: updatedTerminal.systemInfo,
       })
 
-      logger.info(`Heartbeat processed for terminal ${terminalId}`, {
+      logger.debug(`Heartbeat processed for terminal ${terminalId}`, {
         terminalId,
         status,
         version,
@@ -251,6 +252,7 @@ export class TpvHealthService {
         commandType,
         payload: command.payload,
         requestedBy: command.requestedBy,
+        requestedByName: command.requestedByName,
         source: 'DASHBOARD',
       })
 
@@ -626,8 +628,10 @@ export class TpvHealthService {
         TIMEOUT: 'FAILED',
       }
 
+      // CRITICAL: Use command.id (CUID) not commandId parameter
+      // When command was found via correlationId fallback, commandId is the UUID but we need the CUID
       await prisma.tpvCommandQueue.update({
-        where: { id: commandId },
+        where: { id: command.id },
         data: {
           status: statusMap[resultStatus] || 'FAILED',
           resultStatus: resultStatus as any,

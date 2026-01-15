@@ -187,8 +187,43 @@ export async function getCommands(
       prisma.tpvCommandQueue.count({ where }),
     ])
 
+    const missingNameIds = Array.from(
+      new Set(
+        commands
+          .filter(command => !command.requestedByName && command.requestedBy && command.requestedBy !== 'system')
+          .map(command => command.requestedBy),
+      ),
+    )
+
+    const staffById = missingNameIds.length
+      ? await prisma.staff.findMany({
+          where: { id: { in: missingNameIds } },
+          select: { id: true, firstName: true, lastName: true, email: true },
+        })
+      : []
+
+    const staffMap = new Map(
+      staffById.map(staff => [
+        staff.id,
+        { name: `${staff.firstName} ${staff.lastName}`.trim(), email: staff.email },
+      ]),
+    )
+
+    const enrichedCommands = commands.map(command => {
+      if (command.requestedByName || !command.requestedBy || command.requestedBy === 'system') {
+        return command
+      }
+      const staff = staffMap.get(command.requestedBy)
+      if (!staff) return command
+      return {
+        ...command,
+        requestedByName: staff.name,
+        requestedByEmail: staff.email,
+      }
+    })
+
     res.status(200).json({
-      data: commands,
+      data: enrichedCommands,
       meta: {
         total,
         page,

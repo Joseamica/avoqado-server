@@ -472,12 +472,9 @@ export class TpvCommandQueueService {
       if (updatedTerminal) {
         try {
           broadcastTpvStatusUpdate(updatedTerminal.id, updatedTerminal.venueId, {
-            terminalId: updatedTerminal.id,
-            terminalName: updatedTerminal.name,
             status: updatedTerminal.status,
             isLocked: updatedTerminal.isLocked,
-            isInMaintenance: updatedTerminal.status === TerminalStatus.MAINTENANCE,
-            lastHeartbeat: updatedTerminal.lastHeartbeat?.toISOString(),
+            lastHeartbeat: updatedTerminal.lastHeartbeat ?? undefined,
           })
           logger.info('Broadcast terminal status update after command completion', {
             terminalId: updatedTerminal.id,
