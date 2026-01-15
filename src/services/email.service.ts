@@ -13,6 +13,7 @@ interface InvitationEmailData {
   organizationName: string
   venueName: string
   role: string
+  roleDisplayName?: string // Custom role name from venue settings
   inviteLink: string
 }
 
@@ -409,8 +410,8 @@ Recibo enviado por ${data.venueName} vía Avoqado
             <p style="font-size: 18px; margin-bottom: 20px;">Hola,</p>
             
             <p style="font-size: 16px; margin-bottom: 20px;">
-              <strong>${data.inviterName}</strong> te ha invitado a unirte al equipo de 
-              <strong>${data.venueName}</strong> como <strong>${data.role}</strong>.
+              <strong>${data.inviterName}</strong> te ha invitado a unirte al equipo de
+              <strong>${data.venueName}</strong> como <strong>${data.roleDisplayName || data.role}</strong>.
             </p>
             
             <p style="font-size: 16px; margin-bottom: 30px;">
@@ -455,13 +456,13 @@ Recibo enviado por ${data.venueName} vía Avoqado
 
     const text = `
       Hola,
-      
-      ${data.inviterName} te ha invitado a unirte al equipo de ${data.venueName} como ${data.role}.
-      
+
+      ${data.inviterName} te ha invitado a unirte al equipo de ${data.venueName} como ${data.roleDisplayName || data.role}.
+
       Para aceptar la invitación, visita: ${data.inviteLink}
-      
+
       Esta invitación expirará en 7 días.
-      
+
       Saludos,
       Equipo de Avoqado
     `

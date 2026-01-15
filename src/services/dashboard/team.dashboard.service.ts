@@ -3,6 +3,7 @@ import { StaffRole, InvitationType, InvitationStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import emailService from '../email.service'
+import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
 
 interface TeamMember {
   id: string
@@ -165,12 +166,7 @@ export async function getTeamMembers(
     ]),
   )
 
-  const tipStatsMap = new Map(
-    tipStats.map(stat => [
-      stat.processedById,
-      Number(stat._sum?.tipAmount ?? 0),
-    ]),
-  )
+  const tipStatsMap = new Map(tipStats.map(stat => [stat.processedById, Number(stat._sum?.tipAmount ?? 0)]))
 
   const teamMembers: TeamMember[] = staffVenues.map(sv => {
     const orderData = orderStatsMap.get(sv.staff.id) || { totalSales: 0, totalOrders: 0 }
@@ -412,11 +408,15 @@ export async function inviteTeamMember(
   // Send invitation email
   const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`
 
+  // Get custom role display name (e.g., "Promotor" instead of "ADMIN")
+  const roleDisplayName = await getRoleDisplayName(venueId, request.role)
+
   const emailSent = await emailService.sendTeamInvitation(request.email, {
     inviterName: `${inviter.firstName} ${inviter.lastName}`,
     organizationName: venue.organization.name,
     venueName: venue.name,
     role: request.role,
+    roleDisplayName,
     inviteLink,
   })
 
@@ -786,12 +786,16 @@ export async function resendInvitation(venueId: string, invitationId: string, _i
   // Send email again
   const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`
 
+  // Get custom role display name (e.g., "Promotor" instead of "ADMIN")
+  const roleDisplayName = await getRoleDisplayName(venueId, invitation.role as StaffRole)
+
   try {
     await emailService.sendTeamInvitation(invitation.email, {
       inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,
       organizationName: invitation.organization.name,
       venueName: invitation.venue?.name || '',
       role: invitation.role,
+      roleDisplayName,
       inviteLink,
     })
 

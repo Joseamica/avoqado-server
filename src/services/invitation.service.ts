@@ -1,10 +1,11 @@
 import bcrypt from 'bcrypt'
 import { v4 as uuidv4 } from 'uuid'
-import { InvitationStatus, Prisma } from '@prisma/client'
+import { InvitationStatus, Prisma, StaffRole } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import AppError from '../errors/AppError'
 import { generateAccessToken, generateRefreshToken } from '../jwt.service'
 import logger from '../config/logger'
+import { getRoleDisplayName } from './dashboard/venueRoleConfig.dashboard.service'
 
 interface AcceptInvitationData {
   firstName: string
@@ -74,11 +75,27 @@ export async function getInvitationByToken(token: string) {
     },
   })
 
+  // Get custom role display name from venue config (if venue exists)
+  let roleDisplayName: string | null = null
+  if (invitation.venue?.id) {
+    try {
+      roleDisplayName = await getRoleDisplayName(invitation.venue.id, invitation.role as StaffRole)
+    } catch (error) {
+      // If role config lookup fails, roleDisplayName stays null (frontend will use default)
+      logger.warn('Failed to get role display name for invitation', {
+        venueId: invitation.venue.id,
+        role: invitation.role,
+        error,
+      })
+    }
+  }
+
   // Return invitation details for the frontend
   return {
     id: invitation.id,
     email: invitation.email,
     role: invitation.role,
+    roleDisplayName, // Custom role name from venue settings (if configured)
     organizationName: invitation.organization.name,
     venueName: invitation.venue?.name || null,
     inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,

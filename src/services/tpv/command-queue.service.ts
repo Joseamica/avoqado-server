@@ -27,7 +27,7 @@ import {
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
-import { broadcastTpvCommandStatusChanged, broadcastTpvCommandQueued } from '../../communication/sockets'
+import { broadcastTpvCommandStatusChanged, broadcastTpvCommandQueued, broadcastTpvStatusUpdate } from '../../communication/sockets'
 
 /**
  * Command configuration per type
@@ -466,7 +466,28 @@ export class TpvCommandQueueService {
 
     // Update terminal state based on command result
     if (resultStatus === 'SUCCESS') {
-      await this.updateTerminalStateForCommand(command.terminalId, command.commandType)
+      const updatedTerminal = await this.updateTerminalStateForCommand(command.terminalId, command.commandType)
+
+      // Broadcast terminal status update to dashboard (fixes maintenance exit not refreshing)
+      if (updatedTerminal) {
+        try {
+          broadcastTpvStatusUpdate(updatedTerminal.id, updatedTerminal.venueId, {
+            terminalId: updatedTerminal.id,
+            terminalName: updatedTerminal.name,
+            status: updatedTerminal.status,
+            isLocked: updatedTerminal.isLocked,
+            isInMaintenance: updatedTerminal.status === TerminalStatus.MAINTENANCE,
+            lastHeartbeat: updatedTerminal.lastHeartbeat?.toISOString(),
+          })
+          logger.info('Broadcast terminal status update after command completion', {
+            terminalId: updatedTerminal.id,
+            commandType: command.commandType,
+            newStatus: updatedTerminal.status,
+          })
+        } catch (error) {
+          logger.warn('Failed to broadcast terminal status update', { error, terminalId: updatedTerminal.id })
+        }
+      }
     }
 
     await this.updateCommandStatus(commandId, finalStatus, resultStatus, message)
@@ -635,8 +656,12 @@ export class TpvCommandQueueService {
 
   /**
    * Update terminal state after successful command execution
+   * Returns the updated terminal data for broadcasting
    */
-  private async updateTerminalStateForCommand(terminalId: string, commandType: TpvCommandType): Promise<void> {
+  private async updateTerminalStateForCommand(
+    terminalId: string,
+    commandType: TpvCommandType,
+  ): Promise<{ id: string; name: string; venueId: string; status: TerminalStatus; isLocked: boolean; lastHeartbeat: Date | null } | null> {
     const updates: any = {}
 
     switch (commandType) {
@@ -667,14 +692,24 @@ export class TpvCommandQueueService {
     }
 
     if (Object.keys(updates).length > 0) {
-      await prisma.terminal.update({
+      const terminal = await prisma.terminal.update({
         where: { id: terminalId },
         data: {
           ...updates,
           updatedAt: new Date(),
         },
+        select: {
+          id: true,
+          name: true,
+          venueId: true,
+          status: true,
+          isLocked: true,
+          lastHeartbeat: true,
+        },
       })
+      return terminal
     }
+    return null
   }
 
   /**
