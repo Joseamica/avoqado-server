@@ -203,10 +203,7 @@ export async function getCommands(
       : []
 
     const staffMap = new Map(
-      staffById.map(staff => [
-        staff.id,
-        { name: `${staff.firstName} ${staff.lastName}`.trim(), email: staff.email },
-      ]),
+      staffById.map(staff => [staff.id, { name: `${staff.firstName} ${staff.lastName}`.trim(), email: staff.email }]),
     )
 
     const enrichedCommands = commands.map(command => {
