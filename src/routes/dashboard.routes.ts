@@ -202,6 +202,14 @@ import reportsRoutes from './dashboard/reports.routes'
 import commissionRoutes from './dashboard/commission.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
+// Command Center routes for PlayTelecom/White-Label dashboard
+import commandCenterRoutes from './dashboard/commandCenter.routes'
+// Promoters Audit routes for PlayTelecom/White-Label dashboard
+import promotersRoutes from './dashboard/promoters.routes'
+// Stock Dashboard routes for PlayTelecom/White-Label dashboard
+import stockDashboardRoutes from './dashboard/stockDashboard.routes'
+// Organization Dashboard routes for PlayTelecom/White-Label dashboard
+import organizationDashboardRoutes from './dashboard/organizationDashboard.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3415,6 +3423,22 @@ router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryR
 // @temporary - Serialized Inventory Demo routes (delete after final implementation)
 // For PlayTelecom SIM sales visualization demo
 router.use('/venues/:venueId/serialized-inventory', authenticateTokenMiddleware, serializedInventoryRoutes)
+
+// Command Center routes for PlayTelecom/White-Label dashboard
+// Provides real-time KPIs, activity feeds, and operational insights
+router.use('/venues/:venueId/command-center', commandCenterRoutes)
+
+// Promoters Audit routes for PlayTelecom/White-Label dashboard
+// Provides promoter tracking, attendance, sales stats, and deposit management
+router.use('/venues/:venueId/promoters', promotersRoutes)
+
+// Stock Dashboard routes for PlayTelecom/White-Label dashboard
+// Provides stock metrics, charts, alerts, and bulk upload
+router.use('/venues/:venueId/stock', stockDashboardRoutes)
+
+// Organization Dashboard routes for PlayTelecom/White-Label dashboard
+// Provides organization-level aggregate metrics and vision global
+router.use('/organizations', organizationDashboardRoutes)
 
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
