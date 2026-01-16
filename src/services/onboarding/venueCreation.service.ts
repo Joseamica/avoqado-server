@@ -8,7 +8,7 @@
 import { BusinessType, OnboardingType, VenueType, InvitationType, InvitationStatus, StaffRole, VenueStatus } from '@prisma/client'
 import { addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
-import { generateSlug as slugify } from '@/utils/slugify'
+import { generateSlug as slugify, validateSlug } from '@/utils/slugify'
 import { seedDemoVenue } from './demoSeed.service'
 import * as stripeService from '@/services/stripe.service'
 import * as kycReviewService from '@/services/superadmin/kycReview.service'
@@ -107,6 +107,13 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
 
   // Generate unique slug
   const baseSlug = slugify(businessInfo.name)
+
+  // Validate the base slug is not a reserved word
+  const slugValidation = validateSlug(baseSlug)
+  if (!slugValidation.isValid) {
+    throw new Error(slugValidation.error)
+  }
+
   const slug = await generateUniqueSlug(baseSlug)
 
   // Determine if onboarding demo
@@ -501,15 +508,18 @@ async function processTeamInvites(
 
   for (const invite of teamInvites) {
     try {
+      // Normalize email to lowercase for consistent lookups
+      const normalizedEmail = invite.email.toLowerCase()
+
       // Validate role
       if (!Object.values(StaffRole).includes(invite.role as StaffRole)) {
-        logger.warn(`⚠️  Invalid role ${invite.role} for ${invite.email}, skipping`)
+        logger.warn(`⚠️  Invalid role ${invite.role} for ${normalizedEmail}, skipping`)
         continue
       }
 
       // Check if user already exists
       let staff = await prisma.staff.findUnique({
-        where: { email: invite.email },
+        where: { email: normalizedEmail },
       })
 
       // Check if already assigned to this venue
@@ -524,7 +534,7 @@ async function processTeamInvites(
         })
 
         if (existingStaffVenue && existingStaffVenue.active) {
-          logger.warn(`⚠️  ${invite.email} is already a team member of venue ${venueId}, skipping`)
+          logger.warn(`⚠️  ${normalizedEmail} is already a team member of venue ${venueId}, skipping`)
           continue
         }
       }
@@ -532,7 +542,7 @@ async function processTeamInvites(
       // Check for existing pending invitations
       const existingInvitation = await prisma.invitation.findFirst({
         where: {
-          email: invite.email,
+          email: normalizedEmail,
           venueId,
           status: InvitationStatus.PENDING,
           expiresAt: {
@@ -542,7 +552,7 @@ async function processTeamInvites(
       })
 
       if (existingInvitation) {
-        logger.warn(`⚠️  Pending invitation already exists for ${invite.email} to venue ${venueId}, skipping`)
+        logger.warn(`⚠️  Pending invitation already exists for ${normalizedEmail} to venue ${venueId}, skipping`)
         continue
       }
 
@@ -552,7 +562,7 @@ async function processTeamInvites(
 
       const invitation = await prisma.invitation.create({
         data: {
-          email: invite.email,
+          email: normalizedEmail,
           role: invite.role as StaffRole,
           type: InvitationType.VENUE_STAFF,
           organizationId,
@@ -566,7 +576,7 @@ async function processTeamInvites(
       if (!staff) {
         staff = await prisma.staff.create({
           data: {
-            email: invite.email,
+            email: normalizedEmail,
             firstName: invite.firstName,
             lastName: invite.lastName,
             organizationId,

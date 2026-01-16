@@ -311,6 +311,10 @@ export async function inviteTeamMember(
     throw new BadRequestError('Cannot invite SUPERADMIN role')
   }
 
+  // Normalize email to lowercase for consistent lookups
+  // This ensures emails are case-insensitive across the platform
+  request.email = request.email.toLowerCase()
+
   // Get venue and organization info
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },

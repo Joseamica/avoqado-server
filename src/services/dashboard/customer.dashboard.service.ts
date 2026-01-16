@@ -302,12 +302,15 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     throw new BadRequestError('Either email or phone must be provided')
   }
 
+  // Normalize email to lowercase for consistent lookups
+  const normalizedEmail = data.email?.toLowerCase()
+
   // Check for duplicate email/phone in this venue
-  if (data.email) {
+  if (normalizedEmail) {
     const existingByEmail = await prisma.customer.findFirst({
       where: {
         venueId,
-        email: data.email,
+        email: normalizedEmail,
       },
     })
 
@@ -346,7 +349,7 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
   const customer = await prisma.customer.create({
     data: {
       venueId, // ✅ CRITICAL: Multi-tenant assignment
-      email: data.email,
+      email: normalizedEmail,
       phone: data.phone,
       firstName: data.firstName,
       lastName: data.lastName,
@@ -386,12 +389,16 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     throw new NotFoundError(`Customer with ID ${customerId} not found`)
   }
 
+  // Normalize email to lowercase for consistent lookups
+  const normalizedEmail = data.email?.toLowerCase()
+  const existingNormalizedEmail = existingCustomer.email?.toLowerCase()
+
   // Check for duplicate email/phone (excluding current customer)
-  if (data.email && data.email !== existingCustomer.email) {
+  if (normalizedEmail && normalizedEmail !== existingNormalizedEmail) {
     const duplicateEmail = await prisma.customer.findFirst({
       where: {
         venueId,
-        email: data.email,
+        email: normalizedEmail,
         id: { not: customerId },
       },
     })
@@ -432,7 +439,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
   const updatedCustomer = await prisma.customer.update({
     where: { id: customerId },
     data: {
-      email: data.email,
+      email: normalizedEmail,
       phone: data.phone,
       firstName: data.firstName,
       lastName: data.lastName,
