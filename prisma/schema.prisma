@@ -18,6 +18,7 @@ datasource db {
 model Organization {
   id    String       @id @default(cuid())
   name  String
+  slug  String?      @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
   email String
   phone String
   taxId String?
@@ -31,6 +32,9 @@ model Organization {
   staff       Staff[]
   invitations Invitation[]
   invoices    Invoice[]
+
+  // Modules enabled at organization level (inherited by all venues)
+  organizationModules OrganizationModule[]
 
   // ✅ NEW: Onboarding tracking
   onboardingProgress    OnboardingProgress?
@@ -238,12 +242,19 @@ model Venue {
   // ==========================================
   // COMMISSION SYSTEM
   // ==========================================
-  commissionConfigs       CommissionConfig[]
-  commissionOverrides     CommissionOverride[]
-  commissionCalculations  CommissionCalculation[]
-  commissionSummaries     CommissionSummary[]
-  commissionPayouts       CommissionPayout[]
-  milestoneAchievements   MilestoneAchievement[]
+  commissionConfigs      CommissionConfig[]
+  commissionOverrides    CommissionOverride[]
+  commissionCalculations CommissionCalculation[]
+  commissionSummaries    CommissionSummary[]
+  commissionPayouts      CommissionPayout[]
+  milestoneAchievements  MilestoneAchievement[]
+
+  // ==========================================
+  // PLAYTELECOM / WHITE-LABEL DASHBOARD
+  // ==========================================
+  cashDeposits      CashDeposit[]
+  stockAlertConfigs StockAlertConfig[]
+  performanceGoals  PerformanceGoal[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -439,6 +450,11 @@ model Staff {
   resetTokenExpiry  DateTime?
   resetTokenUsedAt  DateTime?
   lastPasswordReset DateTime?
+
+  // ✅ PlayTelecom / White-Label Dashboard relations
+  cashDeposits      CashDeposit[]
+  depositsApproved  CashDeposit[]      @relation("DepositApprover")
+  performanceGoals  PerformanceGoal[]
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -4703,6 +4719,7 @@ enum TpvCommandType {
   MAINTENANCE_MODE // Enter maintenance mode
   EXIT_MAINTENANCE // Exit maintenance mode
   REACTIVATE // Reactivate retired terminal
+  REMOTE_ACTIVATE // Remote activation by SUPERADMIN (pre-registered terminal)
 
   // App Lifecycle Commands
   RESTART // Graceful app restart
@@ -5428,7 +5445,8 @@ model Module {
   updatedAt DateTime @updatedAt
 
   // Relations
-  venueModules VenueModule[]
+  venueModules        VenueModule[]
+  organizationModules OrganizationModule[]
 }
 
 /// Enables a module for a specific venue.
@@ -5458,6 +5476,34 @@ model VenueModule {
   @@index([venueId])
 }
 
+/// Enables a module for ALL venues in an organization.
+/// Provides inheritance: if enabled at org level, all venues get the module.
+/// Venues can override with their own VenueModule.config if needed.
+model OrganizationModule {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  moduleId       String
+  module         Module       @relation(fields: [moduleId], references: [id])
+
+  // State
+  enabled Boolean @default(true)
+
+  // Default configuration for all venues in the org
+  // Individual venues can override via VenueModule.config
+  config Json?
+
+  // Audit
+  enabledBy String // Staff ID that enabled the module
+  enabledAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, moduleId])
+  @@index([organizationId])
+}
+
 /// Categories for SerializedItems (NOT to be confused with MenuCategory).
 /// Represents sales channels, types, or classifications.
 model ItemCategory {
@@ -5485,7 +5531,8 @@ model ItemCategory {
   updatedAt DateTime @updatedAt
 
   // Relations
-  serializedItems SerializedItem[]
+  serializedItems   SerializedItem[]
+  stockAlertConfigs StockAlertConfig[]
 
   @@unique([venueId, name])
   @@index([venueId])
@@ -5678,15 +5725,15 @@ model CommissionConfig {
   // Configuration
   name        String // "Comisiones Meseros Q1 2025"
   description String?
-  priority    Int    @default(0) // Higher = takes precedence when multiple active
+  priority    Int     @default(0) // Higher = takes precedence when multiple active
 
   // Commission rules
-  recipient    CommissionRecipient @default(SERVER)
-  trigger      CommissionTrigger   @default(PER_PAYMENT)
-  calcType     CommissionCalcType  @default(PERCENTAGE)
-  defaultRate  Decimal             @db.Decimal(5, 4) // 0.0300 = 3%
-  minAmount    Decimal?            @db.Decimal(10, 2) // Min commission per transaction
-  maxAmount    Decimal?            @db.Decimal(10, 2) // Max commission per transaction
+  recipient   CommissionRecipient @default(SERVER)
+  trigger     CommissionTrigger   @default(PER_PAYMENT)
+  calcType    CommissionCalcType  @default(PERCENTAGE)
+  defaultRate Decimal             @db.Decimal(5, 4) // 0.0300 = 3%
+  minAmount   Decimal?            @db.Decimal(10, 2) // Min commission per transaction
+  maxAmount   Decimal?            @db.Decimal(10, 2) // Max commission per transaction
 
   // Base calculation settings
   includeTips     Boolean @default(false) // Tips are already direct bonus, exclude by default
@@ -5747,7 +5794,7 @@ model CommissionOverride {
   effectiveTo   DateTime?
 
   // Status
-  active                Boolean @default(true)
+  active                 Boolean @default(true)
   excludeFromCommissions Boolean @default(false) // Completely exclude this staff from commissions
 
   // Audit
@@ -5777,7 +5824,7 @@ model CommissionTier {
   tierPeriod TierPeriod // When tier resets
 
   // Thresholds
-  minThreshold Decimal @db.Decimal(12, 2) // Min orders/amount to reach this tier
+  minThreshold Decimal  @db.Decimal(12, 2) // Min orders/amount to reach this tier
   maxThreshold Decimal? @db.Decimal(12, 2) // Max before next tier (null = unlimited)
 
   // Rate at this tier
@@ -5814,14 +5861,14 @@ model CommissionMilestone {
   category   MenuCategory? @relation(fields: [categoryId], references: [id])
 
   // Bonus when achieved
-  bonusType   BonusType
-  bonusValue  Decimal   @db.Decimal(10, 2) // Amount or percentage based on bonusType
+  bonusType  BonusType
+  bonusValue Decimal   @db.Decimal(10, 2) // Amount or percentage based on bonusType
 
   // Period
   period      TierPeriod // DAILY, WEEKLY, MONTHLY, etc.
   periodStart DateTime
   periodEnd   DateTime
-  isRecurring Boolean  @default(false)
+  isRecurring Boolean    @default(false)
 
   // Time bounds for milestone validity
   effectiveFrom DateTime  @default(now())
@@ -5855,15 +5902,15 @@ model MilestoneAchievement {
   periodEnd   DateTime
 
   // Progress tracking
-  currentValue  Decimal  @db.Decimal(12, 2) // Current progress
-  achievedValue Decimal? @db.Decimal(12, 2) // Value when achieved (snapshot)
-  achieved      Boolean  @default(false)
+  currentValue  Decimal   @db.Decimal(12, 2) // Current progress
+  achievedValue Decimal?  @db.Decimal(12, 2) // Value when achieved (snapshot)
+  achieved      Boolean   @default(false)
   achievedAt    DateTime?
 
   // Bonus details (when achieved)
-  bonusAmount  Decimal? @db.Decimal(10, 2)
-  bonusPaidAt  DateTime?
-  bonusPaidIn  String? // CommissionSummary ID (legacy)
+  bonusAmount Decimal?  @db.Decimal(10, 2)
+  bonusPaidAt DateTime?
+  bonusPaidIn String? // CommissionSummary ID (legacy)
 
   // Summary inclusion
   includedInSummaryId String? // CommissionSummary where this bonus was aggregated
@@ -5906,7 +5953,7 @@ model CommissionCalculation {
   taxAmount      Decimal @default(0) @db.Decimal(10, 2) // Tax (if included)
 
   // Commission calculation
-  effectiveRate Decimal @db.Decimal(5, 4) // Rate that was applied
+  effectiveRate   Decimal @db.Decimal(5, 4) // Rate that was applied
   grossCommission Decimal @db.Decimal(10, 2) // Before any deductions
   netCommission   Decimal @db.Decimal(10, 2) // Final commission amount
 
@@ -5922,9 +5969,9 @@ model CommissionCalculation {
   summary      CommissionSummary?   @relation(fields: [summaryId], references: [id])
 
   // Voiding
-  voidedAt    DateTime?
-  voidedBy    String?
-  voidReason  String?
+  voidedAt   DateTime?
+  voidedBy   String?
+  voidReason String?
 
   // Timestamps
   calculatedAt DateTime @default(now())
@@ -5964,17 +6011,17 @@ model CommissionSummary {
   grandTotal       Decimal @db.Decimal(12, 2) // commissions + bonuses - clawbacks
 
   // Computed amounts (for easier querying)
-  grossAmount      Decimal @default(0) @db.Decimal(12, 2) // totalCommissions + totalBonuses
-  deductionAmount  Decimal @default(0) @db.Decimal(10, 2) // Same as totalClawbacks (alias)
-  netAmount        Decimal @default(0) @db.Decimal(12, 2) // Same as grandTotal (final payout)
+  grossAmount     Decimal @default(0) @db.Decimal(12, 2) // totalCommissions + totalBonuses
+  deductionAmount Decimal @default(0) @db.Decimal(10, 2) // Same as totalClawbacks (alias)
+  netAmount       Decimal @default(0) @db.Decimal(12, 2) // Same as grandTotal (final payout)
 
   // Statistics
   orderCount   Int @default(0)
   paymentCount Int @default(0)
 
   // Status
-  status CommissionSummaryStatus @default(DRAFT)
-  version Int @default(1) // Optimistic concurrency
+  status  CommissionSummaryStatus @default(DRAFT)
+  version Int                     @default(1) // Optimistic concurrency
 
   // Approval
   approvedAt   DateTime?
@@ -5982,8 +6029,8 @@ model CommissionSummary {
   approvedBy   Staff?    @relation("CommissionSummaryApprovedBy", fields: [approvedById], references: [id])
 
   // Dispute
-  disputedAt     DateTime?
-  disputeReason  String?
+  disputedAt        DateTime?
+  disputeReason     String?
   disputeResolvedAt DateTime?
 
   // Notes
@@ -6036,7 +6083,7 @@ model CommissionPayout {
 
   // Error handling
   failureReason String?
-  retryCount    Int      @default(0)
+  retryCount    Int     @default(0)
 
   // Notes
   notes String?
@@ -6054,11 +6101,11 @@ model CommissionPayout {
 /// Clawback records for refunds that occur after payout
 /// Created when a refund affects a commission that was already paid out
 model CommissionClawback {
-  id            String              @id @default(cuid())
+  id            String                @id @default(cuid())
   calculationId String
   calculation   CommissionCalculation @relation(fields: [calculationId], references: [id])
   summaryId     String
-  summary       CommissionSummary   @relation(fields: [summaryId], references: [id])
+  summary       CommissionSummary     @relation(fields: [summaryId], references: [id])
 
   // Clawback details
   reason          ClawbackReason
@@ -6072,7 +6119,7 @@ model CommissionClawback {
 
   // Audit
   createdById String
-  createdBy   Staff  @relation("CommissionClawbackCreatedBy", fields: [createdById], references: [id])
+  createdBy   Staff   @relation("CommissionClawbackCreatedBy", fields: [createdById], references: [id])
   notes       String?
 
   createdAt DateTime @default(now())
@@ -6080,4 +6127,91 @@ model CommissionClawback {
   @@index([calculationId])
   @@index([summaryId])
   @@index([refundPaymentId])
+}
+
+// ==========================================
+// PLAYTELECOM / WHITE-LABEL DASHBOARD MODELS
+// For cash deposits and performance goals
+// Used by Module System for venues with WHITE_LABEL_DASHBOARD module
+// Note: Attendance tracking uses the TimeEntry model (see above)
+// ==========================================
+
+enum CashDepositMethod {
+  CASH
+  BANK_TRANSFER
+}
+
+enum CashDepositStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// Tracks cash deposits from staff to be validated by supervisors
+model CashDeposit {
+  id      String @id @default(cuid())
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  amount    Decimal           @db.Decimal(10, 2)
+  method    CashDepositMethod
+  timestamp DateTime          @default(now())
+
+  // Voucher evidence
+  voucherImageUrl String?
+
+  // Status tracking
+  status          CashDepositStatus @default(PENDING)
+  approvedById    String?
+  approvedBy      Staff?            @relation("DepositApprover", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  rejectionReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([staffId])
+  @@index([venueId])
+  @@index([venueId, status])
+  @@index([staffId, venueId])
+}
+
+/// Configures low-stock alerts per category per venue
+model StockAlertConfig {
+  id         String       @id @default(cuid())
+  venueId    String
+  venue      Venue        @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  categoryId String
+  category   ItemCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  minimumStock Int // Minimum stock level before alert
+  alertEnabled Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, categoryId])
+  @@index([venueId])
+}
+
+/// Performance goals for staff (sales targets, units, etc.)
+model PerformanceGoal {
+  id      String @id @default(cuid())
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  month     DateTime // First day of month (YYYY-MM-01)
+  salesGoal Decimal  @db.Decimal(10, 2)
+  unitsGoal Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([staffId, venueId, month])
+  @@index([venueId])
+  @@index([staffId])
 }
