@@ -1,6 +1,6 @@
-import prisma from '../../utils/prismaClient'
+import { CreditEligibility, CreditGrade, CreditOfferStatus, Prisma, TrendDirection } from '@prisma/client'
 import logger from '../../config/logger'
-import { CreditGrade, CreditEligibility, TrendDirection, CreditOfferStatus, Prisma } from '@prisma/client'
+import prisma from '../../utils/prismaClient'
 
 /**
  * ============================================================================

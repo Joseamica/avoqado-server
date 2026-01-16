@@ -5,7 +5,8 @@ import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { Order, OrderStatus } from '@prisma/client'
-import { deductStockForRecipe } from './rawMaterial.service'
+import { deductInventoryForProduct } from './productInventoryIntegration.service'
+import { OrderModifierForInventory } from './rawMaterial.service'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -170,6 +171,12 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
       items: {
         include: {
           product: true,
+          // ✅ FIX: Include modifiers so we can deduct their inventory
+          modifiers: {
+            include: {
+              modifier: true,
+            },
+          },
         },
       },
     },
@@ -200,13 +207,39 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
         }
 
         try {
-          await deductStockForRecipe(updatedOrder.venueId, item.productId, item.quantity, orderId)
+          // ✅ FIX: Map modifiers to inventory format (same as TPV)
+          const orderModifiers: OrderModifierForInventory[] =
+            item.modifiers
+              ?.filter(m => m.modifier)
+              .map(m => ({
+                quantity: m.quantity,
+                modifier: {
+                  id: m.modifier!.id,
+                  name: m.modifier!.name,
+                  groupId: m.modifier!.groupId,
+                  rawMaterialId: m.modifier!.rawMaterialId,
+                  quantityPerUnit: m.modifier!.quantityPerUnit,
+                  unit: m.modifier!.unit,
+                  inventoryMode: m.modifier!.inventoryMode,
+                },
+              })) || []
+
+          // ✅ FIX: Use deductInventoryForProduct to handle BOTH Quantity and Recipe + Modifiers
+          await deductInventoryForProduct(
+            updatedOrder.venueId,
+            item.productId,
+            item.quantity,
+            orderId,
+            updatedOrder.servedById || undefined,
+            orderModifiers,
+          )
 
           logger.info('✅ Stock deducted successfully for product (dashboard)', {
             orderId,
             productId: item.productId,
             productName: item.product?.name || item.productName,
             quantity: item.quantity,
+            modifiersCount: orderModifiers.length,
           })
         } catch (deductionError: any) {
           // Log individual product deduction errors but continue with other products
@@ -224,7 +257,6 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
           })
         }
       }
-
       logger.info('🎯 Inventory deduction completed for order (dashboard)', {
         orderId,
         totalItems: updatedOrder.items.length,

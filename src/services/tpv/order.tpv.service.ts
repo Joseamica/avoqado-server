@@ -513,19 +513,6 @@ export async function addItemsToOrder(
       // Sort modifier IDs for consistent comparison
       const sortedNewModifiers = [...itemModifiers].sort()
 
-      const existingItem = order.items.find(existing => {
-        if (existing.productId !== item.productId) return false
-
-        // Get existing item's modifier IDs (need to fetch them)
-        // For simplicity, we compare by productId only if no modifiers involved
-        // Items with different modifiers are considered different items
-        if (itemModifiers.length === 0) {
-          // No modifiers in new item - match any existing item with no modifiers
-          return true // Will be refined below with actual modifier check
-        }
-        return false // With modifiers, we create new (can't easily compare here)
-      })
-
       // More precise check: query existing item with its modifiers
       const existingItemWithModifiers = await prisma.orderItem.findFirst({
         where: {
@@ -1785,7 +1772,6 @@ export async function addCustomerToOrder(venueId: string, orderId: string, custo
   // Combined with partial unique index on (orderId) WHERE isPrimary=true as defense-in-depth
   // Retry up to 5 times on serialization conflicts with exponential backoff
   const MAX_RETRIES = 5
-  let lastError: any = null
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -1820,7 +1806,6 @@ export async function addCustomerToOrder(venueId: string, orderId: string, custo
       // Success - exit the retry loop
       break
     } catch (error: any) {
-      lastError = error
       // Handle unique constraint violation (partial unique index on isPrimary)
       if (error.code === 'P2002') {
         logger.warn(`⚠️ [ORDER SERVICE] Race condition detected - another customer was set as primary simultaneously`)

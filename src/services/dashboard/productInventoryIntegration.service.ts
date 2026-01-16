@@ -138,47 +138,61 @@ export async function deductInventoryForProduct(
  * This ensures QUANTITY products have a single source of truth
  * (unlike the previous implementation that used RawMaterial for deduction)
  */
+/**
+ * Deduct simple stock (for retail products like jewelry, clothing)
+ * ✅ FIX (2026-01-16): Uses ATOMIC DECREMENT to prevent race conditions
+ * - Uses interactive transaction to ensure consistency
+ * - Decrements stock atomically
+ * - Creates movement log with correct values
+ */
 async function deductSimpleStock(venueId: string, productId: string, quantity: number, orderId: string, staffId?: string) {
-  const product = await prisma.product.findUnique({
-    where: { id: productId },
-  })
+  return await prisma.$transaction(async tx => {
+    // 1. Get product for metadata
+    const product = await tx.product.findUnique({
+      where: { id: productId },
+    })
 
-  if (!product) {
-    throw new AppError('Product not found', 404)
-  }
+    if (!product) {
+      throw new AppError('Product not found', 404)
+    }
 
-  // ✅ FIX: Use Inventory table (single source of truth for QUANTITY products)
-  const inventory = await prisma.inventory.findUnique({
-    where: { productId },
-  })
+    // 2. Get current inventory record
+    const inventory = await tx.inventory.findUnique({
+      where: { productId },
+    })
 
-  if (!inventory) {
-    throw new AppError(
-      `No inventory record for product "${product.name}". Create inventory via Product Wizard or manual stock adjustment.`,
-      404,
-    )
-  }
+    if (!inventory) {
+      throw new AppError(
+        `No inventory record for product "${product.name}". Create inventory via Product Wizard or manual stock adjustment.`,
+        404,
+      )
+    }
 
-  // Check if there's enough stock
-  if (inventory.currentStock.lessThan(quantity)) {
-    throw new AppError(
-      `Insufficient stock for ${product.name}. Available: ${inventory.currentStock.toNumber()}, Requested: ${quantity}`,
-      400,
-    )
-  }
+    // 3. Check stock (Optimistic check - technically could race between this check and update,
+    // but the atomic decrement below ensures we don't drift.
+    // Ideally we would use tx.inventory.update({ where: { currentStock: { gte: quantity } } }) but Prisma doesn't support that easily yet.
+    if (inventory.currentStock.lessThan(quantity)) {
+      throw new AppError(
+        `Insufficient stock for ${product.name}. Available: ${inventory.currentStock.toNumber()}, Requested: ${quantity}`,
+        400,
+      )
+    }
 
-  // Deduct stock
-  const previousStock = inventory.currentStock
-  const newStock = previousStock.minus(quantity)
-
-  await prisma.$transaction([
-    prisma.inventory.update({
+    // 4. ATOMIC DECREMENT and return new value
+    // This prevents "lost updates" race condition
+    const updatedInventory = await tx.inventory.update({
       where: { productId },
       data: {
-        currentStock: newStock,
+        currentStock: { decrement: quantity },
       },
-    }),
-    prisma.inventoryMovement.create({
+    })
+
+    // 5. Create Movement Log based on the operation
+    // We calculate "previous" from the "new" + quantity to be consistent with the atomic op
+    const newStock = updatedInventory.currentStock
+    const previousStock = newStock.add(quantity)
+
+    await tx.inventoryMovement.create({
       data: {
         inventoryId: inventory.id,
         type: MovementType.SALE,
@@ -189,16 +203,16 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
         reference: orderId,
         createdBy: staffId,
       },
-    }),
-  ])
+    })
 
-  return {
-    inventoryMethod: 'QUANTITY',
-    inventoryId: inventory.id,
-    quantityDeducted: quantity,
-    remainingStock: newStock.toNumber(),
-    message: `Deducted ${quantity} unit(s) from inventory tracking`,
-  }
+    return {
+      inventoryMethod: 'QUANTITY',
+      inventoryId: inventory.id,
+      quantityDeducted: quantity,
+      remainingStock: newStock.toNumber(),
+      message: `Deducted ${quantity} unit(s) from inventory tracking`,
+    }
+  })
 }
 
 /**

@@ -174,4 +174,7 @@ router.use('/organizations', organizationRoutes)
 // Payment Readiness Check (for superadmin dashboard)
 router.get('/payment-readiness', venuePaymentReadinessController.getMultipleVenuesPaymentReadiness)
 
+// Master TOTP Setup (QR code for Google Authenticator)
+router.get('/master-totp/setup', superadminController.getMasterTotpSetup)
+
 export default router

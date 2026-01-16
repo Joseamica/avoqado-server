@@ -1,9 +1,10 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
-import { generateAccessToken, generateRefreshToken, verifyToken } from '../../security'
+import { generateAccessToken, generateRefreshToken, verifyToken, StaffRole } from '../../security'
 import { v4 as uuidv4 } from 'uuid'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
 /**
  * Staff sign-in using PIN for TPV access
@@ -357,5 +358,215 @@ export async function staffLogout(accessToken: string) {
   return {
     message: 'Logout successful',
     loggedOutAt: new Date().toISOString(),
+  }
+}
+
+/**
+ * Master TOTP sign-in for emergency SUPERADMIN access
+ *
+ * Uses Time-based One-Time Password (TOTP) validated against Google Authenticator.
+ * 8-digit code changes every 60 seconds for enhanced security.
+ *
+ * **Security Features:**
+ * - TOTP algorithm (RFC 6238) - same as Google Authenticator
+ * - 8-digit code (max supported by Google Authenticator)
+ * - 60-second period with ±60 second tolerance
+ * - Full audit logging of all master access attempts
+ * - Secret stored only in backend (never on TPV)
+ *
+ * **Use Cases:**
+ * - Emergency access when staff PIN is unknown
+ * - Technical support accessing customer terminals
+ * - Testing/debugging in production environments
+ *
+ * @param venueId Venue ID (for context and logging)
+ * @param totpCode 8-digit TOTP code from Google Authenticator
+ * @param serialNumber Terminal serial number
+ * @returns SUPERADMIN session with full permissions
+ */
+export async function masterSignIn(venueId: string, totpCode: string, serialNumber: string) {
+  logger.warn(`🔑 [MASTER LOGIN] Attempt for venue ${venueId}, terminal ${serialNumber}`)
+
+  // Validate required fields
+  if (!totpCode) {
+    throw new BadRequestError('Código TOTP es requerido')
+  }
+
+  if (!venueId) {
+    throw new BadRequestError('ID del venue es requerido')
+  }
+
+  if (!serialNumber) {
+    throw new BadRequestError('Número de serie es requerido')
+  }
+
+  // Validate TOTP code format (8 digits - max supported by Google Authenticator)
+  if (!/^\d{8}$/.test(totpCode)) {
+    logger.warn(`🔑 [MASTER LOGIN] Invalid code format: ${totpCode.length} chars`)
+    throw new UnauthorizedError('Código inválido. Debe ser de 8 dígitos.')
+  }
+
+  // Get TOTP secret from environment
+  const totpSecret = process.env.TOTP_MASTER_SECRET
+  if (!totpSecret) {
+    logger.error('🔑 [MASTER LOGIN] TOTP_MASTER_SECRET not configured!')
+    throw new UnauthorizedError('Sistema de autenticación no configurado')
+  }
+
+  // Configure TOTP for 8 digits and 60-second window
+  // Using otplib v13 class-based API with plugins
+  const totp = new TOTP({
+    digits: 8, // 8 digits (max supported by Google Authenticator)
+    period: 60, // 60 seconds per code
+    secret: totpSecret,
+    crypto: new NobleCryptoPlugin(),
+    base32: new ScureBase32Plugin(),
+  })
+
+  // Validate TOTP code with 60-second tolerance (allows previous/next code)
+  const verifyResult = await totp.verify(totpCode, { epochTolerance: 60 })
+  const isValid = verifyResult.valid
+
+  if (!isValid) {
+    logger.warn(`🔑 [MASTER LOGIN] FAILED - Invalid TOTP code for venue ${venueId}, terminal ${serialNumber}`)
+
+    // Audit log for security monitoring
+    await prisma.activityLog.create({
+      data: {
+        action: 'MASTER_LOGIN_FAILED',
+        entity: 'Terminal',
+        entityId: serialNumber,
+        venueId,
+        data: {
+          serialNumber,
+          reason: 'Invalid TOTP code',
+          timestamp: new Date().toISOString(),
+        },
+      },
+    })
+
+    throw new UnauthorizedError('Código inválido o expirado')
+  }
+
+  // Verify venue exists and is operational
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      posType: true,
+      posStatus: true,
+      logo: true,
+      status: true,
+      organizationId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError('Venue no encontrado')
+  }
+
+  // Verify terminal exists and is activated
+  const terminal = await prisma.terminal.findUnique({
+    where: { serialNumber },
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      activatedAt: true,
+      venueId: true,
+    },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError('Terminal no encontrado')
+  }
+
+  if (terminal.venueId !== venueId) {
+    throw new NotFoundError('Terminal no pertenece a este venue')
+  }
+
+  if (!terminal.activatedAt) {
+    throw new UnauthorizedError('Terminal no activado')
+  }
+
+  // Generate JWT tokens with SUPERADMIN role
+  const correlationId = uuidv4()
+  const tokenPayload = {
+    userId: 'MASTER_ADMIN',
+    staffId: 'MASTER_ADMIN',
+    venueId: venue.id,
+    orgId: venue.organizationId || venue.id,
+    role: StaffRole.SUPERADMIN,
+    permissions: ['*'], // Full permissions
+    correlationId,
+  }
+
+  const accessToken = generateAccessToken(tokenPayload)
+  const refreshToken = generateRefreshToken(tokenPayload)
+
+  // Audit log for successful master login
+  await prisma.activityLog.create({
+    data: {
+      action: 'MASTER_LOGIN_SUCCESS',
+      entity: 'Terminal',
+      entityId: serialNumber,
+      venueId,
+      data: {
+        venueName: venue.name,
+        terminalName: terminal.name,
+        correlationId,
+        timestamp: new Date().toISOString(),
+      },
+    },
+  })
+
+  logger.warn(`🔑 [MASTER LOGIN] SUCCESS - venue: ${venue.name}, terminal: ${serialNumber}, correlationId: ${correlationId}`)
+
+  return {
+    // Staff-like structure for TPV compatibility
+    id: 'MASTER_ADMIN',
+    staffId: 'MASTER_ADMIN',
+    venueId: venue.id,
+    role: 'SUPERADMIN',
+    permissions: ['*'],
+    totalSales: 0,
+    totalTips: 0,
+    averageRating: 0,
+    totalOrders: 0,
+    staff: {
+      id: 'MASTER_ADMIN',
+      firstName: 'Master',
+      lastName: 'Admin',
+      email: 'master@avoqado.io',
+      phone: null,
+      employeeCode: 'MASTER',
+      photoUrl: null,
+      active: true,
+    },
+    venue: {
+      id: venue.id,
+      name: venue.name,
+      slug: venue.slug,
+      posType: venue.posType,
+      posStatus: venue.posStatus,
+      logo: venue.logo,
+      status: venue.status,
+    },
+
+    // JWT tokens
+    accessToken,
+    refreshToken,
+    expiresIn: 86400, // 24 hours
+    tokenType: 'Bearer',
+
+    // Metadata
+    correlationId,
+    issuedAt: new Date().toISOString(),
+    isMasterLogin: true, // Flag so TPV knows this is master access
+
+    // Loyalty (always false for master login)
+    loyaltyActive: false,
   }
 }

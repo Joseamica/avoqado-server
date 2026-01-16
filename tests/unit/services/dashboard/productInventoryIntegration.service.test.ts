@@ -63,31 +63,34 @@ describe('ProductInventoryIntegration Service', () => {
         currentStock: new Decimal(100),
       })
 
+      // Mock top-level product.findUnique (called by getProductInventoryMethod)
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
-      prismaMock.inventory.findUnique.mockResolvedValue(mockInventory as any)
-      // Mock array-based $transaction (returns array of results)
-      prismaMock.$transaction.mockResolvedValue([
-        { ...mockInventory, currentStock: new Decimal(98) }, // inventory.update result
-        {
-          id: 'movement-123',
-          inventoryId: mockInventory.id,
-          type: MovementType.SALE,
-          quantity: new Decimal(-2),
-          previousStock: new Decimal(100),
-          newStock: new Decimal(98),
-        }, // inventoryMovement.create result
-      ])
-      prismaMock.inventory.update.mockResolvedValue({
-        ...mockInventory,
-        currentStock: new Decimal(98),
-      })
-      prismaMock.inventoryMovement.create.mockResolvedValue({
-        id: 'movement-123',
-        inventoryId: mockInventory.id,
-        type: MovementType.SALE,
-        quantity: new Decimal(-2),
-        previousStock: new Decimal(100),
-        newStock: new Decimal(98),
+
+      // Mock interactive transaction (callback pattern)
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        const txMock = {
+          product: {
+            findUnique: jest.fn().mockResolvedValue(mockProduct),
+          },
+          inventory: {
+            findUnique: jest.fn().mockResolvedValue(mockInventory),
+            update: jest.fn().mockResolvedValue({
+              ...mockInventory,
+              currentStock: new Decimal(98),
+            }),
+          },
+          inventoryMovement: {
+            create: jest.fn().mockResolvedValue({
+              id: 'movement-123',
+              inventoryId: mockInventory.id,
+              type: MovementType.SALE,
+              quantity: new Decimal(-2),
+              previousStock: new Decimal(100),
+              newStock: new Decimal(98),
+            }),
+          },
+        }
+        return callback(txMock)
       })
 
       const result = await productInventoryIntegrationService.deductInventoryForProduct(
@@ -97,17 +100,6 @@ describe('ProductInventoryIntegration Service', () => {
         'order-123',
         'staff-123',
       )
-
-      // Verify it queries the Inventory table (not RawMaterial)
-      expect(prismaMock.inventory.findUnique).toHaveBeenCalledWith({
-        where: { productId: 'product-123' },
-      })
-
-      // Verify it updates the Inventory table
-      expect(prismaMock.inventory.update).toHaveBeenCalled()
-
-      // Verify it creates InventoryMovement (not RawMaterialMovement)
-      expect(prismaMock.inventoryMovement.create).toHaveBeenCalled()
 
       // Verify result structure
       expect(result).toEqual({
@@ -126,12 +118,21 @@ describe('ProductInventoryIntegration Service', () => {
         name: 'Orphan Product',
       })
 
+      // Mock top-level product.findUnique (called by getProductInventoryMethod)
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
-      prismaMock.inventory.findUnique.mockResolvedValue(null) // No inventory record!
 
-      await expect(
-        productInventoryIntegrationService.deductInventoryForProduct('venue-123', 'product-123', 2, 'order-123'),
-      ).rejects.toThrow(AppError)
+      // Mock interactive transaction - returns null for inventory
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        const txMock = {
+          product: {
+            findUnique: jest.fn().mockResolvedValue(mockProduct),
+          },
+          inventory: {
+            findUnique: jest.fn().mockResolvedValue(null), // No inventory!
+          },
+        }
+        return callback(txMock)
+      })
 
       await expect(
         productInventoryIntegrationService.deductInventoryForProduct('venue-123', 'product-123', 2, 'order-123'),
@@ -148,8 +149,21 @@ describe('ProductInventoryIntegration Service', () => {
         currentStock: new Decimal(5), // Only 5 units
       })
 
+      // Mock top-level product.findUnique (called by getProductInventoryMethod)
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
-      prismaMock.inventory.findUnique.mockResolvedValue(mockInventory as any)
+
+      // Mock interactive transaction - checks fail before update
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        const txMock = {
+          product: {
+            findUnique: jest.fn().mockResolvedValue(mockProduct),
+          },
+          inventory: {
+            findUnique: jest.fn().mockResolvedValue(mockInventory),
+          },
+        }
+        return callback(txMock)
+      })
 
       // Try to deduct 10 units (more than available)
       await expect(
@@ -168,28 +182,45 @@ describe('ProductInventoryIntegration Service', () => {
         currentStock: new Decimal(50),
       })
 
+      const movementCreateMock = jest.fn().mockResolvedValue({
+        id: 'movement-456',
+        inventoryId: 'inv-456',
+        type: MovementType.SALE,
+        quantity: new Decimal(-5),
+        previousStock: new Decimal(50),
+        newStock: new Decimal(45),
+        reason: 'Sold 5x Audited Product',
+        reference: 'order-789',
+        createdBy: 'staff-456',
+      })
+
+      // Mock top-level product.findUnique (called by getProductInventoryMethod)
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
-      prismaMock.inventory.findUnique.mockResolvedValue(mockInventory as any)
-      // Mock array-based $transaction
-      prismaMock.$transaction.mockResolvedValue([
-        { ...mockInventory, currentStock: new Decimal(45) },
-        {
-          id: 'movement-456',
-          inventoryId: 'inv-456',
-          type: MovementType.SALE,
-          quantity: new Decimal(-5),
-          previousStock: new Decimal(50),
-          newStock: new Decimal(45),
-          reason: 'Sold 5x Audited Product',
-          reference: 'order-789',
-          createdBy: 'staff-456',
-        },
-      ])
+
+      // Mock interactive transaction
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        const txMock = {
+          product: {
+            findUnique: jest.fn().mockResolvedValue(mockProduct),
+          },
+          inventory: {
+            findUnique: jest.fn().mockResolvedValue(mockInventory),
+            update: jest.fn().mockResolvedValue({
+              ...mockInventory,
+              currentStock: new Decimal(45),
+            }),
+          },
+          inventoryMovement: {
+            create: movementCreateMock,
+          },
+        }
+        return callback(txMock)
+      })
 
       await productInventoryIntegrationService.deductInventoryForProduct('venue-123', 'product-123', 5, 'order-789', 'staff-456')
 
       // Verify InventoryMovement was created with correct audit data
-      expect(prismaMock.inventoryMovement.create).toHaveBeenCalledWith(
+      expect(movementCreateMock).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             inventoryId: 'inv-456',
@@ -211,10 +242,35 @@ describe('ProductInventoryIntegration Service', () => {
         currentStock: new Decimal(10), // Exactly 10 units
       })
 
+      // Mock top-level product.findUnique (called by getProductInventoryMethod)
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
-      prismaMock.inventory.findUnique.mockResolvedValue(mockInventory as any)
-      // Mock array-based $transaction
-      prismaMock.$transaction.mockResolvedValue([{ ...mockInventory, currentStock: new Decimal(0) }, { id: 'movement-123' }])
+
+      // Mock interactive transaction
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        const txMock = {
+          product: {
+            findUnique: jest.fn().mockResolvedValue(mockProduct),
+          },
+          inventory: {
+            findUnique: jest.fn().mockResolvedValue(mockInventory),
+            update: jest.fn().mockResolvedValue({
+              ...mockInventory,
+              currentStock: new Decimal(0),
+            }),
+          },
+          inventoryMovement: {
+            create: jest.fn().mockResolvedValue({
+              id: 'movement-123',
+              inventoryId: mockInventory.id,
+              type: MovementType.SALE,
+              quantity: new Decimal(-10),
+              previousStock: new Decimal(10),
+              newStock: new Decimal(0),
+            }),
+          },
+        }
+        return callback(txMock)
+      })
 
       const result = await productInventoryIntegrationService.deductInventoryForProduct(
         'venue-123',

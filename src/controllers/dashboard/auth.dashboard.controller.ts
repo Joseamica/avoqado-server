@@ -102,6 +102,92 @@ export const getAuthStatus = async (req: Request, res: Response) => {
     })
 
     if (!staff) {
+      // 🔐 Special handling for Master TOTP login (synthetic SUPERADMIN user)
+      if (decoded.sub === 'MASTER_ADMIN') {
+        logger.info('🔐 [AUTH STATUS] Master Admin session detected')
+
+        // Fetch ALL venues for SUPERADMIN access
+        const allVenues = await prisma.venue.findMany({
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            logo: true,
+            status: true,
+            kycStatus: true,
+            address: true,
+            city: true,
+            state: true,
+            zipCode: true,
+            country: true,
+            email: true,
+            phone: true,
+            organizationId: true,
+            organization: { select: { id: true, name: true } },
+            features: {
+              select: {
+                active: true,
+                feature: { select: { code: true, name: true } },
+              },
+            },
+            venueModules: {
+              select: {
+                enabled: true,
+                config: true,
+                module: { select: { code: true, name: true } },
+              },
+            },
+          },
+        })
+
+        const masterVenues = allVenues.map(venue => ({
+          id: venue.id,
+          name: venue.name,
+          slug: venue.slug,
+          logo: venue.logo,
+          role: StaffRole.SUPERADMIN,
+          status: venue.status,
+          kycStatus: venue.kycStatus,
+          features: venue.features,
+          modules: venue.venueModules,
+          address: venue.address,
+          city: venue.city,
+          state: venue.state,
+          zipCode: venue.zipCode,
+          country: venue.country,
+          email: venue.email,
+          phone: venue.phone,
+          organizationId: venue.organizationId,
+          organization: venue.organization,
+          permissions: DEFAULT_PERMISSIONS[StaffRole.SUPERADMIN] || [],
+        }))
+
+        // Disable caching for sensitive auth status data
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+        res.setHeader('Pragma', 'no-cache')
+        res.setHeader('Expires', '0')
+
+        return res.status(200).json({
+          authenticated: true,
+          user: {
+            id: 'MASTER_ADMIN',
+            firstName: 'Master',
+            lastName: 'Admin',
+            email: process.env.MASTER_LOGIN_EMAIL || 'master@avoqado.io',
+            emailVerified: true,
+            photoUrl: null,
+            phone: null,
+            organizationId: null,
+            role: StaffRole.SUPERADMIN, // Explicit role for frontend redirect
+            isMasterLogin: true, // Flag for frontend to identify master session
+            createdAt: new Date(),
+            lastLogin: new Date(),
+            venues: masterVenues,
+          },
+          allVenues: masterVenues,
+        })
+      }
+
       res.clearCookie('accessToken') // Nombre correcto
       return res.status(200).json({
         authenticated: false,

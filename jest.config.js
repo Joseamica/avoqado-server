@@ -66,8 +66,11 @@ module.exports = {
       displayName: 'unit',
       testMatch: ['<rootDir>/tests/unit/**/*.test.ts'],
       transform: {
-        '^.+\\.tsx?$': 'ts-jest',
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
+      transformIgnorePatterns: [
+        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
+      ],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
@@ -79,8 +82,11 @@ module.exports = {
       displayName: 'api-tests',
       testMatch: ['<rootDir>/tests/api-tests/**/*.api.test.ts'],
       transform: {
-        '^.+\\.tsx?$': 'ts-jest',
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
+      transformIgnorePatterns: [
+        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
+      ],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
@@ -92,8 +98,11 @@ module.exports = {
       displayName: 'workflows',
       testMatch: ['<rootDir>/tests/workflows/**/*.workflow.test.ts'],
       transform: {
-        '^.+\\.tsx?$': 'ts-jest',
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
+      transformIgnorePatterns: [
+        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
+      ],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
@@ -105,8 +114,11 @@ module.exports = {
       displayName: 'integration',
       testMatch: ['<rootDir>/tests/integration/**/*.test.ts'],
       transform: {
-        '^.+\\.tsx?$': 'ts-jest',
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
+      transformIgnorePatterns: [
+        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
+      ],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/integration-setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',

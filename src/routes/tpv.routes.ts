@@ -2132,6 +2132,55 @@ router.post('/venues/:venueId/auth', pinLoginRateLimiter, validateRequest(pinLog
 
 /**
  * @openapi
+ * /tpv/venues/{venueId}/auth/master:
+ *   post:
+ *     tags: [TPV - Authentication]
+ *     summary: Master TOTP sign-in for emergency SUPERADMIN access
+ *     description: |
+ *       Uses Google Authenticator TOTP code for emergency access to any TPV.
+ *       10-digit code changes every 60 seconds.
+ *
+ *       **Security:**
+ *       - TOTP algorithm (RFC 6238)
+ *       - All attempts logged for audit
+ *       - Only for emergency/support use
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - totpCode
+ *               - serialNumber
+ *             properties:
+ *               totpCode:
+ *                 type: string
+ *                 description: 10-digit TOTP code from Google Authenticator
+ *                 example: "1234567890"
+ *               serialNumber:
+ *                 type: string
+ *                 description: Terminal serial number
+ *                 example: "AVQD-1234567890"
+ *     responses:
+ *       200:
+ *         description: SUPERADMIN session created
+ *       401:
+ *         description: Invalid or expired TOTP code
+ *       404:
+ *         description: Venue or terminal not found
+ */
+router.post('/venues/:venueId/auth/master', pinLoginRateLimiter, authController.masterSignIn)
+
+/**
+ * @openapi
  * /tpv/venues/{venueId}/auth/refresh:
  *   post:
  *     tags: [TPV - Authentication]
