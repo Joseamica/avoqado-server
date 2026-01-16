@@ -9,9 +9,156 @@ import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 import emailService from '../email.service'
 import logger from '@/config/logger'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+// 🔐 Master TOTP Login imports
+import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
+
+/**
+ * 🔐 MASTER TOTP LOGIN - Dashboard Emergency Access
+ *
+ * Static email for master login. When this email is used with an 8-digit
+ * TOTP code as password, the system authenticates as SUPERADMIN.
+ *
+ * Usage:
+ * - Email configured via MASTER_LOGIN_EMAIL environment variable
+ * - Password: TOTP code from authenticator app
+ *
+ * Security:
+ * - All master logins are audited
+ * - Uses same TOTP_MASTER_SECRET as TPV
+ * - 60-second code validity with tolerance
+ */
+const MASTER_LOGIN_EMAIL = process.env.MASTER_LOGIN_EMAIL || 'master@avoqado.io'
+
+/**
+ * 🔐 Handle Master TOTP Login for Dashboard
+ *
+ * Validates 8-digit TOTP code and returns synthetic SUPERADMIN session.
+ * No real user is created in the database.
+ *
+ * @param totpCode - 8-digit code from Google Authenticator
+ * @param rememberMe - Whether to extend token expiration
+ * @returns Login response with synthetic SUPERADMIN staff
+ */
+async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
+  logger.warn(`🔐 [MASTER LOGIN] Dashboard master login attempt`)
+
+  // Get TOTP secret from environment
+  const totpSecret = process.env.TOTP_MASTER_SECRET
+  if (!totpSecret) {
+    logger.error('🔐 [MASTER LOGIN] TOTP_MASTER_SECRET not configured!')
+    throw new AuthenticationError('Sistema de autenticación no configurado')
+  }
+
+  // Configure TOTP for 8 digits and 60-second window
+  const totp = new TOTP({
+    digits: 8,
+    period: 60,
+    secret: totpSecret,
+    crypto: new NobleCryptoPlugin(),
+    base32: new ScureBase32Plugin(),
+  })
+
+  // Validate TOTP code with 60-second tolerance
+  const verifyResult = await totp.verify(totpCode, { epochTolerance: 60 })
+  const isValid = verifyResult.valid
+
+  if (!isValid) {
+    logger.warn(`🔐 [MASTER LOGIN] FAILED - Invalid TOTP code for dashboard`)
+    // Note: Audit log skipped for failed attempts (venueId required)
+    // Security monitoring relies on server logs with timestamp
+    throw new AuthenticationError('Código inválido o expirado')
+  }
+
+  // Get first available venue for context (SUPERADMIN can switch to any)
+  const firstVenue = await prisma.venue.findFirst({
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      logo: true,
+      status: true,
+      organizationId: true,
+    },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  if (!firstVenue) {
+    throw new AuthenticationError('No hay venues disponibles en el sistema')
+  }
+
+  // Generate JWT tokens with SUPERADMIN role
+  const accessToken = jwtService.generateAccessToken(
+    'MASTER_ADMIN',
+    firstVenue.organizationId || firstVenue.id,
+    firstVenue.id,
+    StaffRole.SUPERADMIN,
+    rememberMe,
+  )
+  const refreshToken = jwtService.generateRefreshToken(
+    'MASTER_ADMIN',
+    firstVenue.organizationId || firstVenue.id,
+    rememberMe,
+  )
+
+  // Audit log for successful master login
+  await prisma.activityLog.create({
+    data: {
+      action: 'MASTER_LOGIN_SUCCESS',
+      entity: 'Dashboard',
+      entityId: 'DASHBOARD_MASTER',
+      venueId: firstVenue.id,
+      data: {
+        venueName: firstVenue.name,
+        timestamp: new Date().toISOString(),
+        source: 'dashboard',
+      },
+    },
+  })
+
+  logger.warn(`🔐 [MASTER LOGIN] SUCCESS - Dashboard master login, initial venue: ${firstVenue.name}`)
+
+  // Return synthetic SUPERADMIN staff (matches normal login response structure)
+  return {
+    accessToken,
+    refreshToken,
+    staff: {
+      id: 'MASTER_ADMIN',
+      email: MASTER_LOGIN_EMAIL,
+      firstName: 'Master',
+      lastName: 'Admin',
+      organizationId: firstVenue.organizationId,
+      photoUrl: null,
+      phone: null,
+      createdAt: new Date(),
+      lastLogin: new Date(),
+      role: StaffRole.SUPERADMIN, // Include role for frontend
+      isMasterLogin: true, // 🔐 Flag so frontend knows this is master access
+      venues: [
+        {
+          id: firstVenue.id,
+          name: firstVenue.name,
+          slug: firstVenue.slug,
+          logo: firstVenue.logo,
+          role: StaffRole.SUPERADMIN,
+          status: firstVenue.status,
+          permissions: ['*'], // Full permissions
+        },
+      ],
+    },
+  }
+}
 
 export async function loginStaff(loginData: LoginDto) {
   const { email, password, venueId, rememberMe } = loginData
+
+  // 🔐 MASTER TOTP LOGIN - Check if this is a master login attempt
+  // Condition: email matches master email AND password is 8 digits (TOTP code)
+  const isMasterLoginAttempt =
+    email.toLowerCase() === MASTER_LOGIN_EMAIL.toLowerCase() && /^\d{8}$/.test(password)
+
+  if (isMasterLoginAttempt) {
+    return handleMasterTotpLogin(password, rememberMe)
+  }
 
   // 1. Buscar staff con TODOS sus venues (no solo el solicitado)
   // First query: get basic staff info to check if SUPERADMIN

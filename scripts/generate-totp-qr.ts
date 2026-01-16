@@ -20,7 +20,7 @@ async function main() {
   if (!secret) {
     console.error('❌ TOTP_MASTER_SECRET not found in .env file')
     console.error('   Add this line to your .env file:')
-    console.error('   TOTP_MASTER_SECRET=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP')
+
     process.exit(1)
   }
 

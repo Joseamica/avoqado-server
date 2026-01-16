@@ -417,7 +417,9 @@ export async function getMasterTotpSetup(req: Request, res: Response, next: Next
 
     // Generate otpauth:// URI for Google Authenticator
     // Format: otpauth://totp/LABEL?secret=SECRET&issuer=ISSUER&digits=8&period=60
-    const issuer = 'Avoqado TPV'
+    // Include environment (DEV/PROD) to differentiate in Google Authenticator
+    const env = process.env.NODE_ENV === 'production' ? 'PROD' : 'DEV'
+    const issuer = `Avoqado MasterKey (${env})`
     const label = 'MasterAdmin'
     const uri = `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(label)}?secret=${totpSecret}&issuer=${encodeURIComponent(issuer)}&digits=8&period=60&algorithm=SHA1`
 
