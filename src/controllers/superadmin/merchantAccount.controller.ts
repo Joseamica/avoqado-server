@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as merchantAccountService from '../../services/superadmin/merchantAccount.service'
+import * as settlementConfigService from '../../services/superadmin/settlementConfiguration.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { blumonApiService } from '../../services/blumon/blumonApi.service'
@@ -95,10 +96,26 @@ export async function getMerchantAccountCredentials(req: Request, res: Response,
 /**
  * POST /api/v1/superadmin/merchant-accounts
  * Create a new merchant account
+ *
+ * For Blumon accounts: credentials are optional if blumonSerialNumber is provided.
+ * This allows creating "pending" accounts before Blumon affiliation is complete.
  */
 export async function createMerchantAccount(req: Request, res: Response, next: NextFunction) {
   try {
-    const { providerId, externalMerchantId, alias, displayName, active, displayOrder, credentials, providerConfig } = req.body
+    const {
+      providerId,
+      externalMerchantId,
+      alias,
+      displayName,
+      active,
+      displayOrder,
+      credentials,
+      providerConfig,
+      // Blumon-specific fields for manual account creation
+      blumonSerialNumber,
+      blumonEnvironment,
+      blumonMerchantId,
+    } = req.body
 
     // Validate required fields
     if (!providerId) {
@@ -109,12 +126,19 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
       throw new BadRequestError('externalMerchantId is required')
     }
 
-    if (!credentials || typeof credentials !== 'object') {
-      throw new BadRequestError('credentials object is required')
-    }
+    // For Blumon accounts: credentials are optional if serial number is provided
+    // This allows creating "pending" accounts before affiliation is complete
+    const isBlumonPendingAccount = blumonSerialNumber && (!credentials || !credentials.merchantId || !credentials.apiKey)
 
-    if (!credentials.merchantId || !credentials.apiKey) {
-      throw new BadRequestError('credentials must include merchantId and apiKey')
+    if (!isBlumonPendingAccount) {
+      // Standard validation for non-Blumon or Blumon accounts with credentials
+      if (!credentials || typeof credentials !== 'object') {
+        throw new BadRequestError('credentials object is required')
+      }
+
+      if (!credentials.merchantId || !credentials.apiKey) {
+        throw new BadRequestError('credentials must include merchantId and apiKey')
+      }
     }
 
     const account = await merchantAccountService.createMerchantAccount({
@@ -124,13 +148,19 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
       displayName,
       active,
       displayOrder,
-      credentials,
+      credentials: isBlumonPendingAccount ? undefined : credentials,
       providerConfig,
+      // Include Blumon fields if provided
+      blumonSerialNumber,
+      blumonEnvironment,
+      blumonMerchantId,
     })
 
     logger.info('Merchant account created via API', {
       accountId: account.id,
       createdBy: (req as any).user?.uid,
+      isBlumonPendingAccount,
+      blumonSerialNumber,
     })
 
     res.status(201).json({
@@ -1004,6 +1034,320 @@ export async function createMerchantAccountWithCostStructure(req: Request, res: 
       message: result.costStructure
         ? 'Merchant account and provider cost structure created successfully'
         : 'Merchant account created successfully (no cost structure auto-created)',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/blumon/batch-auto-fetch
+ * Batch auto-fetch Blumon credentials for multiple terminals
+ *
+ * This is a SEPARATE endpoint that processes multiple serials in parallel.
+ * Each serial gets its own MerchantAccount with unique OAuth/DUKPT credentials.
+ *
+ * @example Request:
+ * ```json
+ * {
+ *   "terminals": [
+ *     { "serialNumber": "2841548417", "brand": "PAX", "model": "A910S" },
+ *     { "serialNumber": "2841548418", "brand": "PAX", "model": "A910S" },
+ *     { "serialNumber": "2841548419", "brand": "PAX", "model": "A920" }
+ *   ],
+ *   "environment": "PRODUCTION",
+ *   "displayNamePrefix": "Terminal Cancún",
+ *   "skipCostStructure": false
+ * }
+ * ```
+ *
+ * @example Response:
+ * ```json
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "total": 3,
+ *     "successful": 2,
+ *     "failed": 1,
+ *     "results": [
+ *       { "serialNumber": "2841548417", "success": true, "accountId": "ma_xxx", "terminalsAttached": 1 },
+ *       { "serialNumber": "2841548418", "success": true, "accountId": "ma_yyy", "terminalsAttached": 1 },
+ *       { "serialNumber": "2841548419", "success": false, "error": "Terminal not registered in Blumon" }
+ *     ]
+ *   }
+ * }
+ * ```
+ */
+export async function batchAutoFetchBlumonCredentials(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { terminals, environment = 'SANDBOX', displayNamePrefix, skipCostStructure = false, settlementConfig } = req.body
+
+    // Settlement config structure:
+    // {
+    //   enabled: boolean,
+    //   dayType: 'BUSINESS_DAYS' | 'CALENDAR_DAYS',
+    //   cutoffTime: '23:00',
+    //   cutoffTimezone: 'America/Mexico_City',
+    //   debitDays: 1,
+    //   creditDays: 2,
+    //   amexDays: 3,
+    //   internationalDays: 3,
+    //   otherDays: 2
+    // }
+
+    // Validate required fields
+    if (!terminals || !Array.isArray(terminals) || terminals.length === 0) {
+      throw new BadRequestError('terminals array is required and must contain at least one terminal')
+    }
+
+    if (terminals.length > 50) {
+      throw new BadRequestError('Maximum 50 terminals per batch request')
+    }
+
+    if (environment !== 'SANDBOX' && environment !== 'PRODUCTION') {
+      throw new BadRequestError('environment must be either "SANDBOX" or "PRODUCTION"')
+    }
+
+    // Validate each terminal entry
+    for (let i = 0; i < terminals.length; i++) {
+      const t = terminals[i]
+      if (!t.serialNumber || typeof t.serialNumber !== 'string') {
+        throw new BadRequestError(`terminals[${i}].serialNumber is required`)
+      }
+      if (!t.brand || typeof t.brand !== 'string') {
+        throw new BadRequestError(`terminals[${i}].brand is required`)
+      }
+      if (!t.model || typeof t.model !== 'string') {
+        throw new BadRequestError(`terminals[${i}].model is required`)
+      }
+    }
+
+    logger.info('[Blumon Batch Auto-Fetch] Starting batch credential fetch', {
+      terminalCount: terminals.length,
+      environment,
+      displayNamePrefix,
+      skipCostStructure,
+    })
+
+    // Fetch Blumon provider ID
+    const blumonProvider = await prisma.paymentProvider.findUnique({
+      where: { code: 'BLUMON' },
+    })
+
+    if (!blumonProvider) {
+      throw new BadRequestError('Blumon payment provider not found in database')
+    }
+
+    // Create Blumon TPV service
+    const blumonTpvService = createBlumonTpvService(environment as 'SANDBOX' | 'PRODUCTION')
+
+    // Process each terminal
+    const results: Array<{
+      serialNumber: string
+      success: boolean
+      accountId?: string
+      displayName?: string | null
+      posId?: string | null
+      terminalsAttached?: number
+      settlementConfigsCreated?: number
+      alreadyExists?: boolean
+      error?: string
+    }> = []
+
+    // Process in parallel with concurrency limit (5 at a time to avoid rate limiting)
+    const CONCURRENCY = 5
+    for (let i = 0; i < terminals.length; i += CONCURRENCY) {
+      const batch = terminals.slice(i, i + CONCURRENCY)
+
+      const batchResults = await Promise.allSettled(
+        batch.map(async (terminal: { serialNumber: string; brand: string; model: string }) => {
+          const { serialNumber, brand, model } = terminal
+          const externalMerchantId = `blumon_${serialNumber}`
+
+          try {
+            // Check if already exists
+            const existingAccount = await prisma.merchantAccount.findFirst({
+              where: {
+                providerId: blumonProvider.id,
+                externalMerchantId,
+              },
+            })
+
+            if (existingAccount) {
+              return {
+                serialNumber,
+                success: true,
+                accountId: existingAccount.id,
+                displayName: existingAccount.displayName,
+                posId: existingAccount.blumonPosId,
+                terminalsAttached: 0,
+                alreadyExists: true,
+              }
+            }
+
+            // Fetch credentials from Blumon
+            const merchantInfo = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
+
+            // Create display name
+            const displayName = displayNamePrefix
+              ? `${displayNamePrefix} ${terminals.indexOf(terminal) + 1}`
+              : `Blumon ${brand} ${model} - ${serialNumber}`
+
+            // Create merchant account
+            const merchantAccountData = {
+              providerId: blumonProvider.id,
+              externalMerchantId,
+              displayName,
+              active: true,
+              displayOrder: 0,
+              credentials: {
+                oauthAccessToken: merchantInfo.credentials.oauthAccessToken,
+                oauthRefreshToken: merchantInfo.credentials.oauthRefreshToken,
+                oauthExpiresAt: merchantInfo.credentials.oauthExpiresAt,
+                rsaId: merchantInfo.credentials.rsaId,
+                rsaKey: merchantInfo.credentials.rsaKey,
+                ...(merchantInfo.dukptKeysAvailable && {
+                  dukptKsn: merchantInfo.credentials.dukptKsn,
+                  dukptKey: merchantInfo.credentials.dukptKey,
+                  dukptKeyCrc32: merchantInfo.credentials.dukptKeyCrc32,
+                  dukptKeyCheckValue: merchantInfo.credentials.dukptKeyCheckValue,
+                }),
+              },
+              providerConfig: {
+                brand,
+                model,
+                environment,
+                autoFetched: true,
+                autoFetchedAt: new Date().toISOString(),
+                dukptKeysAvailable: merchantInfo.dukptKeysAvailable,
+                batchFetch: true,
+              },
+              blumonSerialNumber: serialNumber,
+              blumonPosId: merchantInfo.posId,
+              blumonEnvironment: environment,
+              blumonMerchantId: externalMerchantId,
+            }
+
+            const merchantAccount = await merchantAccountService.createMerchantAccount(merchantAccountData)
+
+            // Auto-attach to terminals with matching serial
+            const terminalsWithSerial = await prisma.terminal.findMany({
+              where: {
+                OR: [{ serialNumber }, { serialNumber: { endsWith: serialNumber } }, { serialNumber: { contains: serialNumber } }],
+              },
+            })
+
+            let attachedCount = 0
+            for (const term of terminalsWithSerial) {
+              if (!term.assignedMerchantIds.includes(merchantAccount.id)) {
+                await prisma.terminal.update({
+                  where: { id: term.id },
+                  data: {
+                    assignedMerchantIds: { push: merchantAccount.id },
+                  },
+                })
+                attachedCount++
+              }
+            }
+
+            // Create settlement configurations if enabled
+            let settlementConfigsCreated = 0
+            if (settlementConfig?.enabled) {
+              try {
+                const cardTypes = ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL', 'OTHER'] as const
+                const dayMapping = {
+                  DEBIT: settlementConfig.debitDays ?? 1,
+                  CREDIT: settlementConfig.creditDays ?? 2,
+                  AMEX: settlementConfig.amexDays ?? 3,
+                  INTERNATIONAL: settlementConfig.internationalDays ?? 3,
+                  OTHER: settlementConfig.otherDays ?? 2,
+                }
+
+                await settlementConfigService.bulkCreateSettlementConfigurations(
+                  merchantAccount.id,
+                  cardTypes.map(cardType => ({
+                    cardType,
+                    settlementDays: dayMapping[cardType],
+                    settlementDayType: settlementConfig.dayType || 'BUSINESS_DAYS',
+                    cutoffTime: settlementConfig.cutoffTime || '23:00',
+                    cutoffTimezone: settlementConfig.cutoffTimezone || 'America/Mexico_City',
+                  })),
+                  new Date(),
+                  (req as any).user?.uid,
+                )
+                settlementConfigsCreated = cardTypes.length
+                logger.info('[Blumon Batch Auto-Fetch] Settlement configs created', {
+                  serialNumber,
+                  merchantAccountId: merchantAccount.id,
+                  count: settlementConfigsCreated,
+                })
+              } catch (settlementError: any) {
+                logger.warn('[Blumon Batch Auto-Fetch] Failed to create settlement configs', {
+                  serialNumber,
+                  error: settlementError.message,
+                })
+              }
+            }
+
+            return {
+              serialNumber,
+              success: true,
+              accountId: merchantAccount.id,
+              displayName: merchantAccount.displayName,
+              posId: merchantInfo.posId,
+              terminalsAttached: attachedCount,
+              settlementConfigsCreated,
+              alreadyExists: false,
+            }
+          } catch (error: any) {
+            logger.error('[Blumon Batch Auto-Fetch] Failed for serial', {
+              serialNumber,
+              error: error.message,
+            })
+            return {
+              serialNumber,
+              success: false,
+              error: error.message || 'Unknown error',
+            }
+          }
+        }),
+      )
+
+      // Collect results
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled') {
+          results.push(result.value)
+        } else {
+          results.push({
+            serialNumber: 'unknown',
+            success: false,
+            error: result.reason?.message || 'Unknown error',
+          })
+        }
+      }
+    }
+
+    const successful = results.filter(r => r.success).length
+    const failed = results.filter(r => !r.success).length
+    const alreadyExisted = results.filter(r => r.alreadyExists).length
+
+    logger.info('[Blumon Batch Auto-Fetch] Completed', {
+      total: terminals.length,
+      successful,
+      failed,
+      alreadyExisted,
+    })
+
+    res.status(200).json({
+      success: true,
+      data: {
+        total: terminals.length,
+        successful,
+        failed,
+        alreadyExisted,
+        results,
+      },
+      message: `Batch auto-fetch completed: ${successful} exitosos, ${failed} fallidos, ${alreadyExisted} ya existían`,
     })
   } catch (error) {
     next(error)
