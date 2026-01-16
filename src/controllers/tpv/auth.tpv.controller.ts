@@ -3,6 +3,7 @@ import {
   staffSignIn as staffSignInService,
   refreshAccessToken as refreshAccessTokenService,
   staffLogout as staffLogoutService,
+  masterSignIn as masterSignInService,
 } from '../../services/tpv/auth.tpv.service'
 
 /**
@@ -58,6 +59,30 @@ export const staffLogout = async (req: Request, res: Response, next: NextFunctio
     const logoutData = await staffLogoutService(accessToken)
 
     return res.json(logoutData)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Master TOTP sign-in controller for emergency SUPERADMIN access
+ *
+ * Uses Google Authenticator TOTP code (8 digits, 60-second window)
+ * for emergency access to any TPV terminal as SUPERADMIN.
+ *
+ * @param req Request object with venueId in params and totpCode + serialNumber in body
+ * @param res Response object
+ * @param next Next function for error handling
+ * @returns SUPERADMIN session with full permissions
+ */
+export const masterSignIn = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const { totpCode, serialNumber } = req.body
+
+    const sessionData = await masterSignInService(venueId, totpCode, serialNumber)
+
+    return res.json(sessionData)
   } catch (error) {
     next(error)
   }

@@ -392,3 +392,52 @@ export async function getVenuesListSimple(req: Request, res: Response, next: Nex
     next(error)
   }
 }
+
+/**
+ * Get Master TOTP setup data for Google Authenticator
+ *
+ * Returns the otpauth:// URI that can be rendered as a QR code
+ * in the dashboard for superadmins to scan with Google Authenticator.
+ *
+ * Security: Only accessible to SUPERADMIN role (via checkPermission middleware)
+ */
+export async function getMasterTotpSetup(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    logger.warn('🔑 [MASTER TOTP] Setup data requested', { userId: req.authContext?.userId })
+
+    const totpSecret = process.env.TOTP_MASTER_SECRET
+    if (!totpSecret) {
+      logger.error('🔑 [MASTER TOTP] TOTP_MASTER_SECRET not configured')
+      res.status(500).json({
+        success: false,
+        message: 'TOTP Master not configured. Add TOTP_MASTER_SECRET to environment.',
+      })
+      return
+    }
+
+    // Generate otpauth:// URI for Google Authenticator
+    // Format: otpauth://totp/LABEL?secret=SECRET&issuer=ISSUER&digits=8&period=60
+    const issuer = 'Avoqado TPV'
+    const label = 'MasterAdmin'
+    const uri = `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(label)}?secret=${totpSecret}&issuer=${encodeURIComponent(issuer)}&digits=8&period=60&algorithm=SHA1`
+
+    res.json({
+      success: true,
+      data: {
+        uri,
+        issuer,
+        label,
+        digits: 8,
+        period: 60,
+        algorithm: 'SHA1',
+      },
+      message: 'TOTP setup data retrieved successfully',
+    })
+  } catch (error) {
+    logger.error('Error getting TOTP setup', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
