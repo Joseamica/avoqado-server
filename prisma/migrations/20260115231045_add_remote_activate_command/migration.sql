@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "TpvCommandType" ADD VALUE 'REMOTE_ACTIVATE';
