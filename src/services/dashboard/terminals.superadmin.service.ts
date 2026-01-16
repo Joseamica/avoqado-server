@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateActivationCode as generateActivationCodeUtil } from './terminal-activation.service'
 import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
+import { tpvCommandQueueService } from '../tpv/command-queue.service'
 
 /**
  * Get All Terminals (Cross-Venue)
@@ -371,4 +372,105 @@ export async function deleteTerminal(terminalId: string) {
   logger.info(`Terminal ${terminalId} deleted successfully`)
 
   return { success: true }
+}
+
+/**
+ * Send Remote Activation Command
+ *
+ * Sends a REMOTE_ACTIVATE command to a pre-registered terminal.
+ * The terminal must have a serialNumber and must have sent at least one heartbeat.
+ * Only SUPERADMIN can use this function.
+ *
+ * @param terminalId Terminal ID (CUID)
+ * @param staffId Staff ID (SUPERADMIN) who is sending the command
+ * @returns Command queue result
+ */
+export async function sendRemoteActivation(terminalId: string, staffId: string) {
+  logger.info(`Sending remote activation command to terminal ${terminalId} by staff ${staffId}`)
+
+  // Fetch terminal with venue info
+  const terminal = await prisma.terminal.findUnique({
+    where: { id: terminalId },
+    include: {
+      venue: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          timezone: true,
+        },
+      },
+    },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError('Terminal not found')
+  }
+
+  // Validate terminal is not already activated
+  if (terminal.activatedAt) {
+    throw new BadRequestError('Terminal is already activated')
+  }
+
+  // Validate terminal has a serial number (required for identification)
+  if (!terminal.serialNumber) {
+    throw new BadRequestError('Terminal must have a serial number for remote activation')
+  }
+
+  // Check if terminal has ever sent a heartbeat (proof of physical device)
+  if (!terminal.lastHeartbeat) {
+    throw new BadRequestError(
+      'Terminal must send at least one heartbeat before remote activation. ' +
+        'Please ensure the physical terminal is powered on and connected to the internet.',
+    )
+  }
+
+  // Validate terminal status - should be INACTIVE
+  if (terminal.status === 'RETIRED') {
+    throw new BadRequestError('Cannot activate a retired terminal')
+  }
+
+  // Get staff info for audit trail
+  const staff = await prisma.staff.findUnique({
+    where: { id: staffId },
+    select: { id: true, firstName: true, lastName: true, email: true },
+  })
+
+  const staffName = staff ? `${staff.firstName} ${staff.lastName}`.trim() : 'SUPERADMIN'
+
+  // Queue the REMOTE_ACTIVATE command with venue info payload
+  const result = await tpvCommandQueueService.queueCommand({
+    terminalId: terminal.id,
+    venueId: terminal.venueId,
+    commandType: 'REMOTE_ACTIVATE',
+    payload: {
+      venueId: terminal.venue.id,
+      venueName: terminal.venue.name,
+      venueSlug: terminal.venue.slug,
+      venueTimezone: terminal.venue.timezone,
+      terminalId: terminal.id,
+      terminalName: terminal.name,
+      serialNumber: terminal.serialNumber,
+    },
+    priority: 'HIGH',
+    requestedBy: staffId,
+    requestedByName: staffName,
+    source: 'DASHBOARD',
+  })
+
+  logger.info(`Remote activation command queued for terminal ${terminalId}`, {
+    commandId: result.commandId,
+    correlationId: result.correlationId,
+    status: result.status,
+  })
+
+  return {
+    ...result,
+    terminal: {
+      id: terminal.id,
+      name: terminal.name,
+      serialNumber: terminal.serialNumber,
+      venue: terminal.venue,
+    },
+  }
 }

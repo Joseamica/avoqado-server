@@ -84,6 +84,14 @@ const COMMAND_CONFIG: Record<
     expirationMinutes: 120,
     doubleConfirm: false,
   },
+  REMOTE_ACTIVATE: {
+    requiresPin: false, // SUPERADMIN only - PIN not required
+    riskLevel: 'HIGH',
+    defaultPriority: 'HIGH',
+    maxRetries: 3,
+    expirationMinutes: 1440, // 24 hours - terminal may not be connected yet
+    doubleConfirm: false,
+  },
   RESTART: {
     requiresPin: false,
     riskLevel: 'MEDIUM',

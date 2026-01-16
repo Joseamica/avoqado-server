@@ -17,6 +17,7 @@ const COMMAND_STATUS_UPDATES: Partial<Record<TpvCommandType, TerminalStatus>> = 
   EXIT_MAINTENANCE: TerminalStatus.ACTIVE,
   SHUTDOWN: TerminalStatus.INACTIVE,
   REACTIVATE: TerminalStatus.ACTIVE,
+  REMOTE_ACTIVATE: TerminalStatus.ACTIVE, // Remote activation sets terminal to ACTIVE
 }
 
 export interface HeartbeatData {
@@ -672,6 +673,16 @@ export class TpvHealthService {
           updateData.lockMessage = null
           updateData.lockedAt = null
           updateData.lockedBy = null
+        } else if (command.commandType === 'REMOTE_ACTIVATE') {
+          // REMOTE_ACTIVATE sets the terminal as activated (same as activation code flow)
+          updateData.activatedAt = new Date()
+          updateData.activatedBy = command.requestedBy // SUPERADMIN who sent the command
+          // Clear any existing activation code since we're activating remotely
+          updateData.activationCode = null
+          updateData.activationCodeExpiry = null
+          updateData.activationAttempts = 0
+          shouldUpdate = true
+          logger.info(`Terminal ${command.terminal.id} remotely activated by ${command.requestedBy}`)
         }
 
         if (shouldUpdate) {
