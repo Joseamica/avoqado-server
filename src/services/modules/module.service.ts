@@ -1,4 +1,4 @@
-import { PrismaClient, Module, VenueModule, Prisma } from '@prisma/client'
+import { PrismaClient, Module, VenueModule, OrganizationModule, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 
 // ==========================================
@@ -16,6 +16,23 @@ export const MODULE_CODES = {
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]
 
 // ==========================================
+// MODULE INHERITANCE
+// ==========================================
+// Modules can be enabled at two levels:
+// 1. Organization level (OrganizationModule) - applies to ALL venues in the org
+// 2. Venue level (VenueModule) - specific to ONE venue
+//
+// Resolution order:
+// 1. Check VenueModule first (explicit venue-level setting wins)
+// 2. If no VenueModule, fallback to OrganizationModule (inherited)
+//
+// Config merging:
+// - Module.defaultConfig (base)
+// - OrganizationModule.config (org customization, if org-level)
+// - VenueModule.config (venue override, if venue-level)
+// ==========================================
+
+// ==========================================
 // MODULE SERVICE
 // Manages module enablement and configuration per venue.
 // USE THIS instead of conditional checks by venue/industry.
@@ -27,6 +44,10 @@ export class ModuleService {
    * Verifies if a module is enabled for a venue.
    * USE THIS METHOD instead of conditionals by venue/industry.
    *
+   * Resolution order:
+   * 1. Check VenueModule (venue-level override)
+   * 2. If no VenueModule, check OrganizationModule (inherited from org)
+   *
    * @example
    * const isEnabled = await moduleService.isModuleEnabled(venueId, 'SERIALIZED_INVENTORY');
    * if (isEnabled) {
@@ -34,76 +55,171 @@ export class ModuleService {
    * }
    */
   async isModuleEnabled(venueId: string, moduleCode: ModuleCode): Promise<boolean> {
+    // First check if VenueModule EXISTS (regardless of enabled state)
+    // This allows venues to explicitly override/disable inherited modules
     const venueModule = await this.db.venueModule.findFirst({
       where: {
         venueId,
-        enabled: true,
         module: {
           code: moduleCode,
           active: true, // Module must be globally active
         },
       },
     })
-    return !!venueModule
+
+    // If VenueModule exists, IT is the source of truth (explicit override)
+    if (venueModule) return venueModule.enabled
+
+    // Fallback: check organization-level (inherited) only if NO VenueModule exists
+    const venue = await this.db.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
+    if (!venue) return false
+
+    const orgModule = await this.db.organizationModule.findFirst({
+      where: {
+        organizationId: venue.organizationId,
+        enabled: true,
+        module: {
+          code: moduleCode,
+          active: true,
+        },
+      },
+    })
+
+    return !!orgModule
   }
 
   /**
    * Gets the merged configuration of a module for a venue.
-   * Merges Module.defaultConfig with VenueModule.config (custom overrides).
+   * Merges configs in priority order:
+   * 1. Module.defaultConfig (base)
+   * 2. OrganizationModule.config (org-level customization)
+   * 3. VenueModule.config (venue-level override)
    *
-   * @returns null if module is not enabled
+   * @returns null if module is not enabled at any level
    * @example
    * const config = await moduleService.getModuleConfig(venueId, 'SERIALIZED_INVENTORY');
    * const itemLabel = config?.labels?.item; // "SIM" or "Piedra" or "Producto"
    */
   async getModuleConfig<T = Record<string, unknown>>(venueId: string, moduleCode: ModuleCode): Promise<T | null> {
+    // Get the module definition first
+    const module = await this.db.module.findFirst({
+      where: {
+        code: moduleCode,
+        active: true,
+      },
+    })
+
+    if (!module) return null
+
+    // Get venue with org info
+    const venue = await this.db.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
+    if (!venue) return null
+
+    // Check venue-level first (highest priority)
     const venueModule = await this.db.venueModule.findFirst({
       where: {
         venueId,
+        moduleId: module.id,
         enabled: true,
-        module: {
-          code: moduleCode,
-          active: true, // Module must be globally active
-        },
       },
-      include: { module: true },
     })
 
-    if (!venueModule) return null
+    // Check org-level (inherited)
+    const orgModule = await this.db.organizationModule.findFirst({
+      where: {
+        organizationId: venue.organizationId,
+        moduleId: module.id,
+        enabled: true,
+      },
+    })
 
-    // Merge defaultConfig with custom config
-    const defaultConfig = venueModule.module.defaultConfig as Record<string, unknown>
-    const customConfig = (venueModule.config as Record<string, unknown>) || {}
+    // If neither level has the module enabled, return null
+    if (!venueModule && !orgModule) return null
 
-    return this.deepMerge(defaultConfig, customConfig) as T
+    // Merge configs: defaultConfig -> orgConfig -> venueConfig
+    let config = module.defaultConfig as Record<string, unknown>
+
+    if (orgModule?.config) {
+      config = this.deepMerge(config, orgModule.config as Record<string, unknown>)
+    }
+
+    if (venueModule?.config) {
+      config = this.deepMerge(config, venueModule.config as Record<string, unknown>)
+    }
+
+    return config as T
   }
 
   /**
-   * Gets all enabled modules for a venue.
+   * Gets all enabled modules for a venue (venue-level + org-level inherited).
    * Useful for TPV at login time.
+   *
+   * Returns merged configs with venue-level overriding org-level.
    *
    * @example
    * const modules = await moduleService.getEnabledModules(venueId);
-   * // modules: [{ code: 'SERIALIZED_INVENTORY', config: { labels: { item: 'SIM' } } }]
+   * // modules: [{ code: 'SERIALIZED_INVENTORY', config: { labels: { item: 'SIM' } }, source: 'organization' }]
    */
-  async getEnabledModules(venueId: string): Promise<Array<{ code: string; config: Record<string, unknown> }>> {
+  async getEnabledModules(
+    venueId: string,
+  ): Promise<Array<{ code: string; config: Record<string, unknown>; source: 'venue' | 'organization' }>> {
+    // Get venue with org info
+    const venue = await this.db.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
+    if (!venue) return []
+
+    // Get venue-level modules
     const venueModules = await this.db.venueModule.findMany({
       where: {
         venueId,
         enabled: true,
-        module: { active: true }, // Module must be globally active
+        module: { active: true },
       },
       include: { module: true },
     })
 
-    return venueModules.map(vm => ({
-      code: vm.module.code,
-      config: this.deepMerge(vm.module.defaultConfig as Record<string, unknown>, (vm.config as Record<string, unknown>) || {}),
-    }))
+    // Get org-level modules
+    const orgModules = await this.db.organizationModule.findMany({
+      where: {
+        organizationId: venue.organizationId,
+        enabled: true,
+        module: { active: true },
+      },
+      include: { module: true },
+    })
+
+    // Collect modules, venue-level takes priority
+    const moduleMap = new Map<string, { code: string; config: Record<string, unknown>; source: 'venue' | 'organization' }>()
+
+    // First add org-level modules
+    for (const om of orgModules) {
+      const config = this.deepMerge(om.module.defaultConfig as Record<string, unknown>, (om.config as Record<string, unknown>) || {})
+      moduleMap.set(om.module.code, { code: om.module.code, config, source: 'organization' })
+    }
+
+    // Then override with venue-level (if exists)
+    for (const vm of venueModules) {
+      const baseConfig = moduleMap.get(vm.module.code)?.config || (vm.module.defaultConfig as Record<string, unknown>)
+      const config = this.deepMerge(baseConfig, (vm.config as Record<string, unknown>) || {})
+      moduleMap.set(vm.module.code, { code: vm.module.code, config, source: 'venue' })
+    }
+
+    return Array.from(moduleMap.values())
   }
 
   /**
-   * Gets all enabled module codes for a venue (simple array).
+   * Gets all enabled module codes for a venue (venue-level + org-level inherited).
    * Useful for quick checks.
    *
    * @example
@@ -111,15 +227,40 @@ export class ModuleService {
    * if (codes.includes('SERIALIZED_INVENTORY')) { ... }
    */
   async getEnabledModuleCodes(venueId: string): Promise<string[]> {
+    // Get venue with org info
+    const venue = await this.db.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
+    if (!venue) return []
+
+    // Get venue-level module codes
     const venueModules = await this.db.venueModule.findMany({
       where: {
         venueId,
         enabled: true,
-        module: { active: true }, // Module must be globally active
+        module: { active: true },
       },
       include: { module: { select: { code: true } } },
     })
-    return venueModules.map(vm => vm.module.code)
+
+    // Get org-level module codes
+    const orgModules = await this.db.organizationModule.findMany({
+      where: {
+        organizationId: venue.organizationId,
+        enabled: true,
+        module: { active: true },
+      },
+      include: { module: { select: { code: true } } },
+    })
+
+    // Combine and deduplicate
+    const codes = new Set<string>()
+    orgModules.forEach(om => codes.add(om.module.code))
+    venueModules.forEach(vm => codes.add(vm.module.code))
+
+    return Array.from(codes)
   }
 
   /**
@@ -242,6 +383,144 @@ export class ModuleService {
         configSchema: data.configSchema as Prisma.InputJsonValue | undefined,
       },
     })
+  }
+
+  // ==========================================
+  // ORGANIZATION-LEVEL MODULE MANAGEMENT
+  // ==========================================
+
+  /**
+   * Enables a module for ALL venues in an organization.
+   * This is inherited by all venues in the org.
+   *
+   * @param organizationId - Organization ID
+   * @param moduleCode - Module code to enable
+   * @param enabledBy - Staff ID enabling the module
+   * @param config - Custom configuration (optional)
+   * @param preset - Industry preset name (optional, e.g., 'telecom', 'jewelry')
+   */
+  async enableModuleForOrganization(
+    organizationId: string,
+    moduleCode: ModuleCode,
+    enabledBy: string,
+    config?: Record<string, unknown>,
+    preset?: string,
+  ): Promise<OrganizationModule> {
+    const module = await this.db.module.findUnique({
+      where: { code: moduleCode },
+    })
+
+    if (!module) throw new Error(`Module ${moduleCode} not found`)
+
+    // If preset specified, use preset configuration
+    let finalConfig: Prisma.InputJsonValue | undefined = config as Prisma.InputJsonValue | undefined
+    if (preset && module.presets) {
+      const presets = module.presets as Record<string, Prisma.InputJsonValue>
+      finalConfig = presets[preset]
+    }
+
+    return this.db.organizationModule.upsert({
+      where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
+      create: {
+        organizationId,
+        moduleId: module.id,
+        enabled: true,
+        config: finalConfig ?? Prisma.JsonNull,
+        enabledBy,
+      },
+      update: {
+        enabled: true,
+        config: finalConfig ?? Prisma.JsonNull,
+      },
+    })
+  }
+
+  /**
+   * Disables a module for an organization.
+   * Note: This removes inheritance. Venues with explicit VenueModule will still have access.
+   */
+  async disableModuleForOrganization(organizationId: string, moduleCode: ModuleCode): Promise<OrganizationModule | null> {
+    const module = await this.db.module.findUnique({
+      where: { code: moduleCode },
+    })
+
+    if (!module) return null
+
+    const orgModule = await this.db.organizationModule.findUnique({
+      where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
+    })
+
+    if (!orgModule) return null
+
+    return this.db.organizationModule.update({
+      where: { id: orgModule.id },
+      data: { enabled: false },
+    })
+  }
+
+  /**
+   * Updates module configuration for an organization.
+   * This affects all venues that inherit from org (don't have venue-level override).
+   */
+  async updateOrganizationModuleConfig(
+    organizationId: string,
+    moduleCode: ModuleCode,
+    config: Record<string, unknown>,
+  ): Promise<OrganizationModule | null> {
+    const module = await this.db.module.findUnique({
+      where: { code: moduleCode },
+    })
+
+    if (!module) return null
+
+    const orgModule = await this.db.organizationModule.findUnique({
+      where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
+    })
+
+    if (!orgModule) return null
+
+    return this.db.organizationModule.update({
+      where: { id: orgModule.id },
+      data: { config: config as Prisma.InputJsonValue },
+    })
+  }
+
+  /**
+   * Gets all modules enabled at organization level.
+   */
+  async getOrganizationModules(
+    organizationId: string,
+  ): Promise<Array<{ code: string; config: Record<string, unknown>; enabled: boolean }>> {
+    const orgModules = await this.db.organizationModule.findMany({
+      where: {
+        organizationId,
+        module: { active: true },
+      },
+      include: { module: true },
+    })
+
+    return orgModules.map(om => ({
+      code: om.module.code,
+      config: this.deepMerge(om.module.defaultConfig as Record<string, unknown>, (om.config as Record<string, unknown>) || {}),
+      enabled: om.enabled,
+    }))
+  }
+
+  /**
+   * Checks if a module is enabled at organization level.
+   */
+  async isModuleEnabledForOrganization(organizationId: string, moduleCode: ModuleCode): Promise<boolean> {
+    const orgModule = await this.db.organizationModule.findFirst({
+      where: {
+        organizationId,
+        enabled: true,
+        module: {
+          code: moduleCode,
+          active: true,
+        },
+      },
+    })
+    return !!orgModule
   }
 
   /**

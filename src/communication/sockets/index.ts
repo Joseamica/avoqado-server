@@ -256,6 +256,9 @@ export function broadcastSystemAlert(venueId: string, alertData: any, options?: 
 /**
  * Broadcast TPV command
  * Convenience function for sending commands to specific TPV terminals
+ *
+ * IMPORTANT: Always pass commandId and correlationId from the TpvCommandQueue record
+ * to ensure the TPV can send proper ACKs that the server can match.
  */
 export function broadcastTpvCommand(
   terminalId: string,
@@ -264,12 +267,17 @@ export function broadcastTpvCommand(
     type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS' | string
     payload?: any
     requestedBy: string
+    commandId?: string // CUID from TpvCommandQueue.id - used for ACK matching
+    correlationId?: string // UUID from TpvCommandQueue.correlationId
   },
   options?: BroadcastOptions,
 ): void {
   try {
     if (socketManager.getServer()) {
-      const correlationId = require('uuid').v4()
+      // Use passed IDs or generate new ones as fallback
+      // CRITICAL: Must use the same IDs from TpvCommandQueue for proper ACK matching
+      const commandId = command.commandId || require('uuid').v4()
+      const correlationId = command.correlationId || require('uuid').v4()
       const timestamp = new Date().toISOString()
 
       // Broadcast to venue - structure matches Android SocketManager.kt:732-755
@@ -278,7 +286,7 @@ export function broadcastTpvCommand(
         'tpv_command' as any,
         {
           terminalId,
-          commandId: correlationId, // Use correlationId as commandId for tracking
+          commandId, // Use the passed commandId (CUID) for ACK matching
           correlationId,
           type: command.type, // ← Android expects "type" at root level
           commandType: command.type, // ← Also include for backwards compatibility
@@ -312,6 +320,7 @@ export function broadcastTpvCommand(
         terminalId,
         venueId,
         commandType: command.type,
+        commandId,
         correlationId,
       })
     } else {

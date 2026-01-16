@@ -6,6 +6,7 @@ import {
   updateTerminal as updateTerminalService,
   generateActivationCodeForTerminal as generateActivationCodeService,
   deleteTerminal as deleteTerminalService,
+  sendRemoteActivation as sendRemoteActivationService,
 } from '../../services/dashboard/terminals.superadmin.service'
 
 /**
@@ -166,6 +167,35 @@ export const deleteTerminal = async (req: Request, res: Response, next: NextFunc
 
     return res.status(200).json({
       message: 'Terminal deleted successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Send remote activation command to a pre-registered terminal
+ *
+ * This allows SUPERADMIN to remotely activate a terminal that has been
+ * pre-registered but not yet activated through the normal activation code flow.
+ * The terminal must have sent at least one heartbeat (proof of physical device).
+ *
+ * @route POST /api/v1/dashboard/superadmin/terminals/:terminalId/remote-activate
+ * @param req Request with terminalId in params
+ * @param res Response with command queue result
+ */
+export const sendRemoteActivation = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { terminalId } = req.params
+
+    // Get staffId from authenticated user (must be SUPERADMIN)
+    const staffId = (req as any).user?.userId || 'superadmin'
+
+    const result = await sendRemoteActivationService(terminalId, staffId)
+
+    return res.status(200).json({
+      data: result,
+      message: 'Remote activation command sent successfully',
     })
   } catch (error) {
     next(error)

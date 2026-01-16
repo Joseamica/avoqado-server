@@ -202,6 +202,14 @@ import reportsRoutes from './dashboard/reports.routes'
 import commissionRoutes from './dashboard/commission.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
+// Command Center routes for PlayTelecom/White-Label dashboard
+import commandCenterRoutes from './dashboard/commandCenter.routes'
+// Promoters Audit routes for PlayTelecom/White-Label dashboard
+import promotersRoutes from './dashboard/promoters.routes'
+// Stock Dashboard routes for PlayTelecom/White-Label dashboard
+import stockDashboardRoutes from './dashboard/stockDashboard.routes'
+// Organization Dashboard routes for PlayTelecom/White-Label dashboard
+import organizationDashboardRoutes from './dashboard/organizationDashboard.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3416,6 +3424,22 @@ router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryR
 // For PlayTelecom SIM sales visualization demo
 router.use('/venues/:venueId/serialized-inventory', authenticateTokenMiddleware, serializedInventoryRoutes)
 
+// Command Center routes for PlayTelecom/White-Label dashboard
+// Provides real-time KPIs, activity feeds, and operational insights
+router.use('/venues/:venueId/command-center', commandCenterRoutes)
+
+// Promoters Audit routes for PlayTelecom/White-Label dashboard
+// Provides promoter tracking, attendance, sales stats, and deposit management
+router.use('/venues/:venueId/promoters', promotersRoutes)
+
+// Stock Dashboard routes for PlayTelecom/White-Label dashboard
+// Provides stock metrics, charts, alerts, and bulk upload
+router.use('/venues/:venueId/stock', stockDashboardRoutes)
+
+// Organization Dashboard routes for PlayTelecom/White-Label dashboard
+// Provides organization-level aggregate metrics and vision global
+router.use('/organizations', organizationDashboardRoutes)
+
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
 
@@ -6473,6 +6497,62 @@ router.delete(
   checkPermission('teams:delete'),
   validateRequest(TeamMemberParamsSchema),
   teamController.removeTeamMember,
+)
+
+/**
+ * @openapi
+ * /api/v2/dashboard/{venueId}/team/{teamMemberId}/hard-delete:
+ *   delete:
+ *     tags: [Team]
+ *     summary: Hard delete team member (SUPERADMIN only)
+ *     description: |
+ *       **SUPERADMIN ONLY**: Permanently deletes ALL data associated with a team member.
+ *       This includes: commission calculations, commission payouts, milestone progress,
+ *       tip distributions, commission overrides, and the staff venue record itself.
+ *
+ *       WARNING: This action is IRREVERSIBLE. Use only for:
+ *       - GDPR "right to be forgotten" requests
+ *       - Removing test/demo data
+ *       - Legal compliance requirements
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: teamMemberId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [confirmDeletion]
+ *             properties:
+ *               confirmDeletion:
+ *                 type: boolean
+ *                 description: Must be explicitly set to true to confirm permanent deletion
+ *     responses:
+ *       200:
+ *         description: Team member permanently deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 deletedRecords:
+ *                   type: object
+ *                   description: Count of deleted records per table
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403:
+ *         description: Forbidden - SUPERADMIN role required
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.delete(
+  '/venues/:venueId/team/:teamMemberId/hard-delete',
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  validateRequest(TeamMemberParamsSchema),
+  teamController.hardDeleteTeamMember,
 )
 
 // ==========================================

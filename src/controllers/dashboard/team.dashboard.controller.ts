@@ -171,3 +171,31 @@ export async function cancelInvitation(req: Request, res: Response, next: NextFu
     next(error)
   }
 }
+
+/**
+ * Hard delete team member - SUPERADMIN ONLY
+ * Permanently deletes all data associated with a team member from the venue.
+ */
+export async function hardDeleteTeamMember(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const teamMemberId: string = req.params.teamMemberId
+    const { confirmDeletion } = req.body
+
+    if (confirmDeletion !== true) {
+      res.status(400).json({
+        error: 'Must explicitly confirm deletion by setting confirmDeletion: true',
+      })
+      return
+    }
+
+    const result = await teamService.hardDeleteTeamMember(venueId, teamMemberId, confirmDeletion)
+
+    res.status(200).json({
+      message: 'Team member permanently deleted',
+      deletedRecords: result.deletedRecords,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

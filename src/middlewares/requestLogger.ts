@@ -19,9 +19,10 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
   const start = process.hrtime()
   const { method, url, ip } = req
 
-  // Skip logging health checks in production to reduce log noise
+  // Skip logging health checks and heartbeats to reduce log noise
   const isHealthCheck = url === '/health'
-  const shouldSkipLogging = isHealthCheck && process.env.NODE_ENV === 'production'
+  const isHeartbeat = url.includes('/heartbeat') || url.includes('/tpv/heartbeat')
+  const shouldSkipLogging = (isHealthCheck || isHeartbeat) && process.env.NODE_ENV === 'production'
 
   if (!shouldSkipLogging) {
     logger.info(`Request Start: ${method} ${url}`, {

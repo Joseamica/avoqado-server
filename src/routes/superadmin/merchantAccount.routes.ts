@@ -51,6 +51,10 @@ router.post('/blumon/register', merchantAccountController.registerBlumonMerchant
 // Auto-fetch Blumon credentials via device OAuth flow (serial + brand + model)
 router.post('/blumon/auto-fetch', merchantAccountController.autoFetchBlumonCredentials)
 
+// POST /api/v1/superadmin/merchant-accounts/blumon/batch-auto-fetch
+// Batch auto-fetch for multiple terminals at once (e.g., 10 terminals to Cancún)
+router.post('/blumon/batch-auto-fetch', merchantAccountController.batchAutoFetchBlumonCredentials)
+
 // PUT /api/v1/superadmin/merchant-accounts/:id
 router.put('/:id', merchantAccountController.updateMerchantAccount)
 

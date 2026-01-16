@@ -96,30 +96,10 @@ router.get('/', moduleController.getAllModules)
 router.post('/', validateRequest(createModuleSchema), moduleController.createModule)
 
 /**
- * @route   PATCH /api/v1/dashboard/superadmin/modules/:moduleId
- * @desc    Update a global module
- * @access  Superadmin only
- */
-router.patch('/:moduleId', validateRequest(updateModuleSchema), moduleController.updateModule)
-
-/**
- * @route   DELETE /api/v1/dashboard/superadmin/modules/:moduleId
- * @desc    Delete a global module (only if not enabled for any venue)
- * @access  Superadmin only
- */
-router.delete('/:moduleId', validateRequest(moduleIdSchema), moduleController.deleteModule)
-
-/**
- * @route   GET /api/v1/dashboard/superadmin/modules/:moduleCode/venues
- * @desc    Get all venues with their enablement status for a specific module
- * @access  Superadmin only
- */
-router.get('/:moduleCode/venues', validateRequest(moduleCodeSchema), moduleController.getVenuesForModule)
-
-/**
  * @route   GET /api/v1/dashboard/superadmin/modules/venues/:venueId
  * @desc    Get all modules with their enablement status for a specific venue
  * @access  Superadmin only
+ * @note    MUST be defined BEFORE /:moduleId to avoid route conflict
  */
 router.get('/venues/:venueId', validateRequest(venueIdSchema), moduleController.getModulesForVenue)
 
@@ -141,7 +121,29 @@ router.post('/disable', validateRequest(disableModuleSchema), moduleController.d
  * @route   PATCH /api/v1/dashboard/superadmin/modules/config
  * @desc    Update module configuration for a venue
  * @access  Superadmin only
+ * @note    MUST be defined BEFORE /:moduleId to avoid route conflict
  */
 router.patch('/config', validateRequest(updateConfigSchema), moduleController.updateModuleConfig)
+
+/**
+ * @route   PATCH /api/v1/dashboard/superadmin/modules/:moduleId
+ * @desc    Update a global module
+ * @access  Superadmin only
+ */
+router.patch('/:moduleId', validateRequest(updateModuleSchema), moduleController.updateModule)
+
+/**
+ * @route   DELETE /api/v1/dashboard/superadmin/modules/:moduleId
+ * @desc    Delete a global module (only if not enabled for any venue)
+ * @access  Superadmin only
+ */
+router.delete('/:moduleId', validateRequest(moduleIdSchema), moduleController.deleteModule)
+
+/**
+ * @route   GET /api/v1/dashboard/superadmin/modules/:moduleCode/venues
+ * @desc    Get all venues with their enablement status for a specific module
+ * @access  Superadmin only
+ */
+router.get('/:moduleCode/venues', validateRequest(moduleCodeSchema), moduleController.getVenuesForModule)
 
 export default router

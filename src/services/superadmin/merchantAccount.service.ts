@@ -178,7 +178,8 @@ interface CreateMerchantAccountData {
   displayName?: string
   active?: boolean
   displayOrder?: number
-  credentials: {
+  // Credentials are optional for Blumon pending accounts (will be fetched via OAuth later)
+  credentials?: {
     merchantId?: string // Optional - not all providers use this
     apiKey?: string // Optional - not all providers use this
     customerId?: string
@@ -373,16 +374,41 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
     throw new NotFoundError(`Payment provider ${data.providerId} not found`)
   }
 
+  // Determine if this is a Blumon "pending" account (no credentials but has serial number)
+  const isBlumonPendingAccount = provider.code === 'BLUMON' && data.blumonSerialNumber && !data.credentials
+
   // Validate required credential fields (provider-specific)
-  // Blumon uses OAuth tokens instead of merchantId/apiKey
-  if (provider.code !== 'BLUMON') {
-    if (!data.credentials.merchantId || !data.credentials.apiKey) {
-      throw new BadRequestError('Credentials must include merchantId and apiKey')
+  // Blumon pending accounts can skip credentials - they'll be fetched via OAuth later
+  if (!isBlumonPendingAccount) {
+    if (!data.credentials) {
+      throw new BadRequestError('Credentials object is required')
+    }
+    // For non-Blumon providers, require merchantId and apiKey
+    if (provider.code !== 'BLUMON') {
+      if (!data.credentials.merchantId || !data.credentials.apiKey) {
+        throw new BadRequestError('Credentials must include merchantId and apiKey')
+      }
     }
   }
 
-  // Encrypt credentials
-  const encryptedCredentials = encryptCredentials(data.credentials)
+  // Check if account with same externalMerchantId already exists for this provider
+  const existingAccount = await prisma.merchantAccount.findFirst({
+    where: {
+      providerId: data.providerId,
+      externalMerchantId: data.externalMerchantId,
+    },
+    include: { provider: true },
+  })
+
+  if (existingAccount) {
+    throw new BadRequestError(
+      `Ya existe una cuenta con el ID "${data.externalMerchantId}" para el procesador ${existingAccount.provider?.name || 'seleccionado'}. ` +
+        `Usa un ID diferente o elimina la cuenta existente primero.`,
+    )
+  }
+
+  // Encrypt credentials (or use empty placeholder for pending accounts)
+  const encryptedCredentials = data.credentials ? encryptCredentials(data.credentials) : encryptCredentials({ pending: true })
 
   // Create merchant account
   const account = await prisma.merchantAccount.create({
@@ -417,12 +443,14 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
     externalMerchantId: account.externalMerchantId,
     blumonSerialNumber: account.blumonSerialNumber,
     blumonPosId: account.blumonPosId,
+    isBlumonPendingAccount,
   })
 
   return {
     ...account,
     credentialsEncrypted: undefined, // Don't expose encrypted data
-    hasCredentials: true,
+    hasCredentials: !isBlumonPendingAccount, // Pending accounts don't have real credentials yet
+    isPendingAffiliation: isBlumonPendingAccount,
   }
 }
 

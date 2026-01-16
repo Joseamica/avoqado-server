@@ -27,6 +27,7 @@ const router = express.Router()
  *                 id: { type: string }
  *                 email: { type: string }
  *                 role: { type: string }
+ *                 roleDisplayName: { type: string, nullable: true, description: 'Custom role name from venue settings (if configured)' }
  *                 organizationName: { type: string }
  *                 venueName: { type: string, nullable: true }
  *                 inviterName: { type: string }

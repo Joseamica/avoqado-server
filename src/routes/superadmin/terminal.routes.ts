@@ -91,6 +91,13 @@ router.patch('/:terminalId', validateRequest(updateTerminalSchema), terminalCont
 router.post('/:terminalId/generate-activation-code', validateRequest(terminalIdSchema), terminalController.generateActivationCode)
 
 /**
+ * @route   POST /api/v1/dashboard/superadmin/terminals/:terminalId/remote-activate
+ * @desc    Send remote activation command to pre-registered terminal
+ * @access  Superadmin only
+ */
+router.post('/:terminalId/remote-activate', validateRequest(terminalIdSchema), terminalController.sendRemoteActivation)
+
+/**
  * @route   DELETE /api/v1/dashboard/superadmin/terminals/:terminalId
  * @desc    Delete terminal (only if inactive/not activated)
  * @access  Superadmin only

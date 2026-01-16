@@ -17,6 +17,7 @@ const COMMAND_STATUS_UPDATES: Partial<Record<TpvCommandType, TerminalStatus>> = 
   EXIT_MAINTENANCE: TerminalStatus.ACTIVE,
   SHUTDOWN: TerminalStatus.INACTIVE,
   REACTIVATE: TerminalStatus.ACTIVE,
+  REMOTE_ACTIVATE: TerminalStatus.ACTIVE, // Remote activation sets terminal to ACTIVE
 }
 
 export interface HeartbeatData {
@@ -36,6 +37,7 @@ export interface TpvCommand {
   type: 'SHUTDOWN' | 'RESTART' | 'MAINTENANCE_MODE' | 'EXIT_MAINTENANCE' | 'UPDATE_STATUS' | 'REACTIVATE'
   payload?: any
   requestedBy: string
+  requestedByName?: string
 }
 
 /**
@@ -184,7 +186,7 @@ export class TpvHealthService {
         systemInfo: updatedTerminal.systemInfo,
       })
 
-      logger.info(`Heartbeat processed for terminal ${terminalId}`, {
+      logger.debug(`Heartbeat processed for terminal ${terminalId}`, {
         terminalId,
         status,
         version,
@@ -251,6 +253,7 @@ export class TpvHealthService {
         commandType,
         payload: command.payload,
         requestedBy: command.requestedBy,
+        requestedByName: command.requestedByName,
         source: 'DASHBOARD',
       })
 
@@ -626,8 +629,10 @@ export class TpvHealthService {
         TIMEOUT: 'FAILED',
       }
 
+      // CRITICAL: Use command.id (CUID) not commandId parameter
+      // When command was found via correlationId fallback, commandId is the UUID but we need the CUID
       await prisma.tpvCommandQueue.update({
-        where: { id: commandId },
+        where: { id: command.id },
         data: {
           status: statusMap[resultStatus] || 'FAILED',
           resultStatus: resultStatus as any,
@@ -668,6 +673,16 @@ export class TpvHealthService {
           updateData.lockMessage = null
           updateData.lockedAt = null
           updateData.lockedBy = null
+        } else if (command.commandType === 'REMOTE_ACTIVATE') {
+          // REMOTE_ACTIVATE sets the terminal as activated (same as activation code flow)
+          updateData.activatedAt = new Date()
+          updateData.activatedBy = command.requestedBy // SUPERADMIN who sent the command
+          // Clear any existing activation code since we're activating remotely
+          updateData.activationCode = null
+          updateData.activationCodeExpiry = null
+          updateData.activationAttempts = 0
+          shouldUpdate = true
+          logger.info(`Terminal ${command.terminal.id} remotely activated by ${command.requestedBy}`)
         }
 
         if (shouldUpdate) {

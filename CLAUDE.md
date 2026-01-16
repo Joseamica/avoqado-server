@@ -119,20 +119,48 @@ const result = lookupRatesByBusinessName('Gimnasio')
 
 ### Module System (Multi-Tenant Features)
 
-**Concept:** VenueModule enables/disables behavior per venue. Different from VenueFeature (billing).
+**Concept:** Modules enable/disable behavior. Different from VenueFeature (billing).
+
+**Two-Level Inheritance:**
+- **OrganizationModule**: Enables module for ALL venues in an organization
+- **VenueModule**: Enables module for a SPECIFIC venue (overrides org-level)
+
+```
+Organization (PlayTelecom)
+    └── OrganizationModule: SERIALIZED_INVENTORY (config: { labels: { item: "SIM" } })
+            ↓ inherited by all 38 venues
+        ├── Venue 1: uses org config
+        ├── Venue 2: uses org config
+        └── Venue 3: VenueModule override (config: { labels: { item: "eSIM" } })
+```
+
+**Resolution Order:**
+1. Check VenueModule first (explicit venue override wins)
+2. If no VenueModule, fallback to OrganizationModule (inherited)
+
+**Config Merge Order:**
+1. Module.defaultConfig (base)
+2. OrganizationModule.config (org customization)
+3. VenueModule.config (venue override)
 
 ```typescript
-// Check if module is enabled for venue
+// Check if module is enabled for venue (checks both levels)
 const enabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
 
-// Get config with industry-specific terminology
+// Get merged config (Module.default → Org.config → Venue.config)
 const config = await moduleService.getModuleConfig(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
-// config.labels.item = "SIM" (telecom) or "Pieza" (jewelry) or "Dispositivo" (electronics)
+// config.labels.item = "SIM" (telecom) or "Pieza" (jewelry)
+
+// Enable for entire organization (all venues get it)
+await moduleService.enableModuleForOrganization(orgId, 'SERIALIZED_INVENTORY', staffId, config, 'telecom')
+
+// Enable for specific venue (override org-level)
+await moduleService.enableModule(venueId, 'SERIALIZED_INVENTORY', staffId, customConfig)
 ```
 
 **Key Files:**
 
-- `src/services/modules/module.service.ts` - Module enable/config/check
+- `src/services/modules/module.service.ts` - Module enable/config/check (both levels)
 - `src/controllers/dashboard/modules.superadmin.controller.ts` - CRUD de módulos
 - `src/services/serialized-inventory/serializedInventory.service.ts` - Scan, register, sell
 - `scripts/setup-modules.ts` - Create global modules

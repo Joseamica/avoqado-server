@@ -1922,6 +1922,9 @@ export async function createAndAddCustomerToOrder(
 ) {
   logger.info(`🆕 [ORDER SERVICE] Creating customer and adding to order ${orderId}`)
 
+  // Normalize email to lowercase for consistent lookups
+  const normalizedEmail = customerData.email?.toLowerCase()
+
   // Verify order exists and belongs to venue
   const order = await prisma.order.findUnique({
     where: { id: orderId, venueId },
@@ -1933,9 +1936,9 @@ export async function createAndAddCustomerToOrder(
   }
 
   // Check for duplicate email/phone in venue (if provided)
-  if (customerData.email) {
+  if (normalizedEmail) {
     const existingByEmail = await prisma.customer.findUnique({
-      where: { venueId_email: { venueId, email: customerData.email } },
+      where: { venueId_email: { venueId, email: normalizedEmail } },
     })
     if (existingByEmail) {
       throw new BadRequestError('Ya existe un cliente con ese email en este venue')
@@ -1972,7 +1975,7 @@ export async function createAndAddCustomerToOrder(
               venueId,
               firstName: customerData.firstName || null,
               phone: customerData.phone || null,
-              email: customerData.email || null,
+              email: normalizedEmail || null,
               firstVisitAt: new Date(),
             },
           })

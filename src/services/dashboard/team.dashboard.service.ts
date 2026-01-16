@@ -3,6 +3,7 @@ import { StaffRole, InvitationType, InvitationStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import emailService from '../email.service'
+import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
 
 interface TeamMember {
   id: string
@@ -126,7 +127,7 @@ export async function getTeamMembers(
   // Get all staff IDs for calculating real-time stats
   const staffIds = staffVenues.map(sv => sv.staff.id)
 
-  // Calculate real-time stats from orders grouped by staff
+  // Calculate real-time stats from orders grouped by staff (for sales and order count)
   const orderStats = await prisma.order.groupBy({
     by: ['createdById'],
     where: {
@@ -136,25 +137,40 @@ export async function getTeamMembers(
     },
     _sum: {
       total: true,
-      tipAmount: true,
     },
     _count: true,
   })
 
-  // Create a map for quick lookup
-  const statsMap = new Map(
+  // Calculate tips from payments grouped by processedById
+  // Tips are attributed to the person who processed the payment, not who created the order
+  const tipStats = await prisma.payment.groupBy({
+    by: ['processedById'],
+    where: {
+      venueId,
+      processedById: { in: staffIds },
+      status: 'COMPLETED',
+    },
+    _sum: {
+      tipAmount: true,
+    },
+  })
+
+  // Create maps for quick lookup
+  const orderStatsMap = new Map(
     orderStats.map(stat => [
       stat.createdById,
       {
         totalSales: Number(stat._sum?.total ?? 0),
-        totalTips: Number(stat._sum?.tipAmount ?? 0),
         totalOrders: stat._count ?? 0,
       },
     ]),
   )
 
+  const tipStatsMap = new Map(tipStats.map(stat => [stat.processedById, Number(stat._sum?.tipAmount ?? 0)]))
+
   const teamMembers: TeamMember[] = staffVenues.map(sv => {
-    const stats = statsMap.get(sv.staff.id) || { totalSales: 0, totalTips: 0, totalOrders: 0 }
+    const orderData = orderStatsMap.get(sv.staff.id) || { totalSales: 0, totalOrders: 0 }
+    const totalTips = tipStatsMap.get(sv.staff.id) || 0
     return {
       id: sv.id,
       staffId: sv.staff.id, // Staff table ID for order references (servedById, createdById)
@@ -166,9 +182,9 @@ export async function getTeamMembers(
       startDate: sv.startDate,
       endDate: sv.endDate,
       pin: sv.pin,
-      totalSales: stats.totalSales,
-      totalTips: stats.totalTips,
-      totalOrders: stats.totalOrders,
+      totalSales: orderData.totalSales,
+      totalTips: totalTips,
+      totalOrders: orderData.totalOrders,
       averageRating: 0, // Rating requires more complex query, keeping as 0 for list view
     }
   })
@@ -216,7 +232,7 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
     throw new NotFoundError('Team member not found')
   }
 
-  // Calculate real-time stats from orders
+  // Calculate real-time stats from orders (for sales and order count)
   const orderStats = await prisma.order.aggregate({
     where: {
       venueId,
@@ -225,9 +241,22 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
     },
     _sum: {
       total: true,
-      tipAmount: true,
     },
     _count: true,
+  })
+
+  // Calculate tips from payments processed by this staff member
+  // Tips are attributed to the person who processed the payment (processedById),
+  // not the person who created the order (createdById)
+  const tipStats = await prisma.payment.aggregate({
+    where: {
+      venueId,
+      processedById: staffVenue.staffId,
+      status: 'COMPLETED',
+    },
+    _sum: {
+      tipAmount: true,
+    },
   })
 
   // Calculate average rating from reviews linked through payments
@@ -246,7 +275,7 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
   })
 
   const totalSales = Number(orderStats._sum?.total ?? 0)
-  const totalTips = Number(orderStats._sum?.tipAmount ?? 0)
+  const totalTips = Number(tipStats._sum?.tipAmount ?? 0)
   const totalOrders = orderStats._count ?? 0
   const averageRating = Number(ratingStats._avg?.overallRating ?? 0)
 
@@ -281,6 +310,10 @@ export async function inviteTeamMember(
   if (request.role === StaffRole.SUPERADMIN) {
     throw new BadRequestError('Cannot invite SUPERADMIN role')
   }
+
+  // Normalize email to lowercase for consistent lookups
+  // This ensures emails are case-insensitive across the platform
+  request.email = request.email.toLowerCase()
 
   // Get venue and organization info
   const venue = await prisma.venue.findUnique({
@@ -379,11 +412,15 @@ export async function inviteTeamMember(
   // Send invitation email
   const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`
 
+  // Get custom role display name (e.g., "Promotor" instead of "ADMIN")
+  const roleDisplayName = await getRoleDisplayName(venueId, request.role)
+
   const emailSent = await emailService.sendTeamInvitation(request.email, {
     inviterName: `${inviter.firstName} ${inviter.lastName}`,
     organizationName: venue.organization.name,
     venueName: venue.name,
     role: request.role,
+    roleDisplayName,
     inviteLink,
   })
 
@@ -570,6 +607,107 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
 }
 
 /**
+ * Hard delete team member - SUPERADMIN ONLY
+ * Permanently removes all data associated with the team member from the venue.
+ * This includes: commissions, tip distributions, milestone progress, and the staff venue record.
+ *
+ * WARNING: This action is irreversible and should only be used for:
+ * - GDPR "right to be forgotten" requests
+ * - Removing test/demo data
+ * - Legal compliance requirements
+ */
+export async function hardDeleteTeamMember(
+  venueId: string,
+  teamMemberId: string,
+  confirmDeletion: boolean,
+): Promise<{ deletedRecords: Record<string, number> }> {
+  if (!confirmDeletion) {
+    throw new BadRequestError('Deletion must be explicitly confirmed')
+  }
+
+  // Get the StaffVenue record
+  const staffVenue = await prisma.staffVenue.findFirst({
+    where: {
+      id: teamMemberId,
+      venueId,
+    },
+    include: {
+      staff: true,
+    },
+  })
+
+  if (!staffVenue) {
+    throw new NotFoundError('Team member not found')
+  }
+
+  const staffId = staffVenue.staffId
+
+  // Track deleted records for audit
+  const deletedRecords: Record<string, number> = {}
+
+  // Use transaction to ensure atomicity
+  await prisma.$transaction(async tx => {
+    // 1. Delete Commission Payouts for this staff in this venue
+    const deletedPayouts = await tx.commissionPayout.deleteMany({
+      where: {
+        staffId,
+        venueId,
+      },
+    })
+    deletedRecords['commissionPayouts'] = deletedPayouts.count
+
+    // 2. Delete Commission Calculations for this staff in this venue
+    const deletedCalculations = await tx.commissionCalculation.deleteMany({
+      where: {
+        staffId,
+        venueId,
+      },
+    })
+    deletedRecords['commissionCalculations'] = deletedCalculations.count
+
+    // 3. Delete Milestone Achievements for this staff in this venue
+    const deletedMilestones = await tx.milestoneAchievement.deleteMany({
+      where: {
+        staffId,
+        venueId,
+      },
+    })
+    deletedRecords['milestoneAchievements'] = deletedMilestones.count
+
+    // 4. Delete Commission Overrides for this staff in this venue
+    const deletedOverrides = await tx.commissionOverride.deleteMany({
+      where: {
+        staffId,
+        config: {
+          venueId,
+        },
+      },
+    })
+    deletedRecords['commissionOverrides'] = deletedOverrides.count
+
+    // 5. Finally, delete the StaffVenue record itself
+    await tx.staffVenue.delete({
+      where: { id: teamMemberId },
+    })
+    deletedRecords['staffVenue'] = 1
+
+    // Note: We intentionally do NOT delete the Staff record even if this is the last venue.
+    // The Staff record has many foreign key references (Invitations, Orders, Shifts, etc.)
+    // that would cause cascade failures. The user is effectively removed from this venue
+    // by deleting StaffVenue and all their commission/milestone data.
+  })
+
+  logger.info('Team member hard deleted (SUPERADMIN)', {
+    teamMemberId,
+    venueId,
+    staffId,
+    deletedRecords,
+  })
+
+  return { deletedRecords }
+}
+
+/**
  * Get pending invitations for a venue (including expired ones)
  */
 export async function getPendingInvitations(venueId: string) {
@@ -652,12 +790,16 @@ export async function resendInvitation(venueId: string, invitationId: string, _i
   // Send email again
   const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`
 
+  // Get custom role display name (e.g., "Promotor" instead of "ADMIN")
+  const roleDisplayName = await getRoleDisplayName(venueId, invitation.role as StaffRole)
+
   try {
     await emailService.sendTeamInvitation(invitation.email, {
       inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,
       organizationName: invitation.organization.name,
       venueName: invitation.venue?.name || '',
       role: invitation.role,
+      roleDisplayName,
       inviteLink,
     })
 

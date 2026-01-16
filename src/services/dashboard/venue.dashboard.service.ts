@@ -29,7 +29,7 @@ import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, StaffRole } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import { generateSlug } from '../../utils/slugify'
+import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
 import {
@@ -54,6 +54,12 @@ export async function createVenueForOrganization(orgId: string, venueData: Creat
   // 1. Lógica de negocio: generar slug si no se provee
   if (!slugToUse) {
     slugToUse = generateSlug(venueData.name)
+  }
+
+  // 1.5. Validate slug is not a reserved word
+  const slugValidation = validateSlug(slugToUse)
+  if (!slugValidation.isValid) {
+    throw new BadRequestError(slugValidation.error || 'Invalid slug')
   }
 
   // 2. Lógica de negocio: Verificar unicidad del slug DENTRO de la organización
@@ -595,6 +601,12 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
   return await prisma.$transaction(async tx => {
     // 1. Generate slug if not provided
     let slugToUse = generateSlug(venueData.name)
+
+    // 1.5. Validate slug is not a reserved word
+    const slugValidation = validateSlug(slugToUse)
+    if (!slugValidation.isValid) {
+      throw new BadRequestError(slugValidation.error || 'Invalid slug')
+    }
 
     // 2. Check slug uniqueness within organization
     const existingVenueWithSlug = await tx.venue.findFirst({

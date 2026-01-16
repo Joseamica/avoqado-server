@@ -76,7 +76,7 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
     const heartbeatData = req.body
     const clientIp = req.ip || req.socket.remoteAddress
 
-    logger.info(`Unauthenticated heartbeat received from terminal ${heartbeatData.terminalId}`, {
+    logger.debug(`Heartbeat received from terminal ${heartbeatData.terminalId}`, {
       terminalId: heartbeatData.terminalId,
       status: heartbeatData.status,
       ip: clientIp,
@@ -97,7 +97,7 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
     // This catches missed Socket.IO events (Layer 1) when terminal was offline
     const configVersion = await getMerchantConfigVersion(heartbeatData.terminalId)
 
-    logger.info(`Heartbeat processed, server status: ${terminalHealth.status}`, {
+    logger.debug(`Heartbeat processed, server status: ${terminalHealth.status}`, {
       terminalId: heartbeatData.terminalId,
       clientReported: heartbeatData.status,
       serverStatus: terminalHealth.status,
