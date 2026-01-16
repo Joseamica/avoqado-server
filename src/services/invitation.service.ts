@@ -66,14 +66,23 @@ export async function getInvitationByToken(token: string) {
     throw new AppError('La invitación ha expirado', 410)
   }
 
-  // Get the staff record if it exists (created during invitation)
+  // Get the staff record if it exists (might have been invited to another venue before)
+  // Use toLowerCase() for consistent case-insensitive email lookups
   const staff = await prisma.staff.findUnique({
-    where: { email: invitation.email },
+    where: { email: invitation.email.toLowerCase() },
     select: {
       firstName: true,
       lastName: true,
+      password: true, // Check if they already have a password
+      organizationId: true,
     },
   })
+
+  // Check if user exists in a DIFFERENT organization (they'll need to contact support)
+  const existsInDifferentOrg = staff && staff.organizationId !== invitation.organizationId
+
+  // Check if user already has an account with password (skip password form on frontend)
+  const userAlreadyHasPassword = staff && staff.password !== null && !existsInDifferentOrg
 
   // Get custom role display name from venue config (if venue exists)
   let roleDisplayName: string | null = null
@@ -104,6 +113,9 @@ export async function getInvitationByToken(token: string) {
     // Include firstName/lastName if staff record exists
     firstName: staff?.firstName || null,
     lastName: staff?.lastName || null,
+    // Multi-venue support: inform frontend about user's existing account status
+    userAlreadyHasPassword: userAlreadyHasPassword || false, // If true, skip password form
+    existsInDifferentOrg: existsInDifferentOrg || false, // If true, show "contact support" message
   }
 }
 
@@ -131,11 +143,12 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
       throw new AppError('La invitación ha expirado', 410)
     }
 
-    // Check if user with this email already exists
-    const existingStaff = await tx.staff.findFirst({
+    // Check if user with this email already exists GLOBALLY
+    // Staff.email is globally unique - one person = one Staff account
+    // Use toLowerCase() for consistent case-insensitive email lookups
+    const existingStaff = await tx.staff.findUnique({
       where: {
-        email: invitation.email,
-        organizationId: invitation.organizationId,
+        email: invitation.email.toLowerCase(),
       },
       include: {
         venues: {
@@ -146,10 +159,19 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
       },
     })
 
-    // Only prevent if user exists, is active, and has active venue assignments
-    if (existingStaff && existingStaff.active && existingStaff.venues.length > 0) {
-      throw new AppError('Ya existe un usuario activo con este email en la organización', 409)
+    // If user exists in a DIFFERENT organization, we need to handle this case
+    // Currently, the data model requires Staff to belong to one organization
+    // But they can be in multiple venues within that organization
+    if (existingStaff && existingStaff.organizationId !== invitation.organizationId) {
+      throw new AppError(
+        'Este email ya está registrado en otra organización. Por favor, contacta a soporte si necesitas acceso a múltiples organizaciones.',
+        409,
+      )
     }
+
+    // If user exists in the SAME organization, that's fine!
+    // They're being invited to a new venue within the same org
+    // No need to block - we'll just add them to the new venue
 
     // Hash the password
     const hashedPassword = await bcrypt.hash(userData.password, 12)
@@ -179,24 +201,46 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
     // Create or reuse the staff record
     let staff
     if (existingStaff) {
-      // Reuse existing staff record and update their information
+      // User already exists in this organization
+      // DON'T overwrite their password or name - they already have valid credentials
+      // Just ensure they're active and verified
+      const updateData: Prisma.StaffUpdateInput = {
+        active: true,
+        emailVerified: true, // Since they responded to email invitation
+      }
+
+      // Only update password if they don't have one (PIN-only users being upgraded)
+      if (!existingStaff.password && hashedPassword) {
+        updateData.password = hashedPassword
+      }
+
+      // Only update name if they don't have one set
+      if (!existingStaff.firstName && userData.firstName) {
+        updateData.firstName = userData.firstName
+      }
+      if (!existingStaff.lastName && userData.lastName) {
+        updateData.lastName = userData.lastName
+      }
+
       staff = await tx.staff.update({
         where: { id: existingStaff.id },
-        data: {
-          password: hashedPassword,
-          firstName: userData.firstName,
-          lastName: userData.lastName,
-          active: true,
-          emailVerified: true, // Since they responded to email invitation
-        },
+        data: updateData,
+      })
+
+      logger.info('Existing staff member invited to new venue', {
+        staffId: staff.id,
+        email: staff.email,
+        newVenueId: invitation.venueId,
+        existingVenuesCount: existingStaff.venues.length,
       })
     } else {
-      // Create new staff record
+      // Brand new user - create staff record with all provided data
+      // IMPORTANT: Normalize email to lowercase for consistent login lookups
       staff = await tx.staff.create({
         data: {
           id: uuidv4(),
           organizationId: invitation.organizationId,
-          email: invitation.email,
+          email: invitation.email.toLowerCase(),
           password: hashedPassword,
           firstName: userData.firstName,
           lastName: userData.lastName,
