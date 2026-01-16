@@ -16,7 +16,9 @@ async function testRevenueCalculation() {
   const startDate = DateTime.now().startOf('month').toJSDate()
   const endDate = DateTime.now().toJSDate()
 
-  console.log(`📅 Período: ${DateTime.fromJSDate(startDate).toFormat('yyyy-MM-dd')} to ${DateTime.fromJSDate(endDate).toFormat('yyyy-MM-dd')}\n`)
+  console.log(
+    `📅 Período: ${DateTime.fromJSDate(startDate).toFormat('yyyy-MM-dd')} to ${DateTime.fromJSDate(endDate).toFormat('yyyy-MM-dd')}\n`,
+  )
 
   // 1. PAGOS COMPLETADOS (base para todo)
   const payments = await prisma.payment.findMany({
@@ -99,10 +101,7 @@ async function testRevenueCalculation() {
       startDate: {
         lte: endDate,
       },
-      OR: [
-        { endDate: null },
-        { endDate: { gte: startDate } },
-      ],
+      OR: [{ endDate: null }, { endDate: { gte: startDate } }],
     },
     include: {
       feature: true,

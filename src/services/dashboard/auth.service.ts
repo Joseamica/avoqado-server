@@ -94,11 +94,7 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
     StaffRole.SUPERADMIN,
     rememberMe,
   )
-  const refreshToken = jwtService.generateRefreshToken(
-    'MASTER_ADMIN',
-    firstVenue.organizationId || firstVenue.id,
-    rememberMe,
-  )
+  const refreshToken = jwtService.generateRefreshToken('MASTER_ADMIN', firstVenue.organizationId || firstVenue.id, rememberMe)
 
   // Audit log for successful master login
   await prisma.activityLog.create({
@@ -153,8 +149,7 @@ export async function loginStaff(loginData: LoginDto) {
 
   // 🔐 MASTER TOTP LOGIN - Check if this is a master login attempt
   // Condition: email matches master email AND password is 8 digits (TOTP code)
-  const isMasterLoginAttempt =
-    email.toLowerCase() === MASTER_LOGIN_EMAIL.toLowerCase() && /^\d{8}$/.test(password)
+  const isMasterLoginAttempt = email.toLowerCase() === MASTER_LOGIN_EMAIL.toLowerCase() && /^\d{8}$/.test(password)
 
   if (isMasterLoginAttempt) {
     return handleMasterTotpLogin(password, rememberMe)
