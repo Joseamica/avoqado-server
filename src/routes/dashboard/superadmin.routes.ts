@@ -20,6 +20,7 @@ import kycReviewRoutes from '../superadmin/kycReview.routes'
 import settlementConfigRoutes from '../superadmin/settlementConfiguration.routes'
 import terminalRoutes from '../superadmin/terminal.routes'
 import moduleRoutes from '../superadmin/module.routes'
+import organizationRoutes from '../superadmin/organization.routes'
 
 // Import cost management validation schemas
 import {
@@ -166,6 +167,9 @@ router.use('/terminals', terminalRoutes)
 
 // Module Management (Enable/Disable modules for venues)
 router.use('/modules', moduleRoutes)
+
+// Organization Management (CRUD + Module Assignment)
+router.use('/organizations', organizationRoutes)
 
 // Payment Readiness Check (for superadmin dashboard)
 router.get('/payment-readiness', venuePaymentReadinessController.getMultipleVenuesPaymentReadiness)
