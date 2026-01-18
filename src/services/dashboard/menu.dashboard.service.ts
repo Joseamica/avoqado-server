@@ -253,8 +253,47 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     // Prisma treats undefined as 'do not update'.
   }
 
+  // Handle avoqadoMenus (Menu Assignments)
+  if (data.avoqadoMenus) {
+    // 1. Delete existing assignments for this category
+    // Note: We don't delete assignments by ID, but by categoryId relationship
+    // However, menuCategoryAssignment is Many-to-Many.
+    // We want to set which menus this category belongs to.
+    await prisma.menuCategoryAssignment.deleteMany({
+      where: { categoryId },
+    })
+
+    // 2. Create new assignments
+    if (data.avoqadoMenus.length > 0) {
+      const menuAssignments = data.avoqadoMenus.map(menu => ({
+        menuId: menu.value,
+        categoryId: categoryId,
+      }))
+
+      await prisma.menuCategoryAssignment.createMany({
+        data: menuAssignments,
+      })
+    }
+  }
+
+  // Handle avoqadoProducts (Product Assignments)
+  if (data.avoqadoProducts && data.avoqadoProducts.length > 0) {
+    const productIds = data.avoqadoProducts.map(product => product.value)
+
+    // Move selected products to this category
+    await prisma.product.updateMany({
+      where: {
+        id: { in: productIds },
+        venueId: venueId,
+      },
+      data: {
+        categoryId: categoryId,
+      },
+    })
+  }
+
   const updatedCategory = await prisma.menuCategory.update({
-    where: { id: categoryId, venueId }, // Ensure update is on the correct venue's category
+    where: { id: categoryId, venueId },
     data: updateData,
   })
 
@@ -377,6 +416,16 @@ export async function createMenu(venueId: string, data: CreateMenuDto): Promise<
     availableDays: data.availableDays ?? [],
   }
 
+  // Handle category assignments if provided
+  if (data.categoryIds) {
+    createData.categories = {
+      create: data.categoryIds.map((categoryId, index) => ({
+        categoryId,
+        displayOrder: index, // Maintain order from selection
+      })),
+    }
+  }
+
   return prisma.menu.create({
     data: createData,
     include: {
@@ -455,6 +504,54 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
   if (data.availableFrom !== undefined) updateData.availableFrom = data.availableFrom
   if (data.availableUntil !== undefined) updateData.availableUntil = data.availableUntil
   if (data.availableDays !== undefined) updateData.availableDays = data.availableDays
+
+  // Update category assignments if categoryIds is provided
+  if (data.categoryIds) {
+    // We use a transaction to delete all existing assignments and create new ones
+    // This is the simplest way to sync categories and handle reordering
+    return prisma.$transaction(async tx => {
+      // 1. Update basic menu details
+      if (Object.keys(updateData).length > 0) {
+        await tx.menu.update({
+          where: { id: menuId },
+          data: updateData,
+        })
+      }
+
+      // 2. Delete all existing category assignments
+      await tx.menuCategoryAssignment.deleteMany({
+        where: { menuId },
+      })
+
+      // 3. Create new assignments
+      if (data.categoryIds && data.categoryIds.length > 0) {
+        await tx.menuCategoryAssignment.createMany({
+          data: data.categoryIds.map((categoryId, index) => ({
+            menuId,
+            categoryId,
+            displayOrder: index, // Maintain order from selection
+          })),
+        })
+      }
+
+      // 4. Return updated menu with categories
+      return tx.menu.findUniqueOrThrow({
+        where: { id: menuId },
+        include: {
+          categories: {
+            orderBy: { displayOrder: 'asc' },
+            include: {
+              category: {
+                include: {
+                  products: true,
+                },
+              },
+            },
+          },
+        },
+      })
+    })
+  }
 
   return prisma.menu.update({
     where: { id: menuId, venueId },
