@@ -129,6 +129,115 @@ export async function checkForUpdate(req: Request, res: Response) {
 }
 
 /**
+ * @route   GET /api/v1/tpv/get-version
+ * @desc    Get a specific version by versionCode (for INSTALL_VERSION command)
+ * @access  Authenticated (requires valid token)
+ *
+ * Query params:
+ * - versionCode: number (e.g., 5)
+ * - environment: "SANDBOX" | "PRODUCTION"
+ *
+ * Response:
+ * - found: boolean
+ * - version: { versionName, versionCode, downloadUrl, fileSize, checksum, releaseNotes }
+ */
+export async function getSpecificVersion(req: Request, res: Response) {
+  try {
+    const { versionCode, environment } = req.query
+
+    // Validate parameters
+    if (!versionCode || !environment) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameters: versionCode, environment',
+      })
+    }
+
+    const targetVersionCode = parseInt(versionCode as string)
+    if (isNaN(targetVersionCode) || targetVersionCode < 1) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid versionCode: must be a positive integer',
+      })
+    }
+
+    const env = (environment as string).toUpperCase()
+    if (!['SANDBOX', 'PRODUCTION'].includes(env)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid environment: must be SANDBOX or PRODUCTION',
+      })
+    }
+
+    // Find the specific version
+    const update = await prisma.appUpdate.findUnique({
+      where: {
+        versionCode_environment: {
+          versionCode: targetVersionCode,
+          environment: env as AppEnvironment,
+        },
+      },
+      select: {
+        id: true,
+        versionName: true,
+        versionCode: true,
+        downloadUrl: true,
+        fileSize: true,
+        checksum: true,
+        releaseNotes: true,
+        isRequired: true,
+        isActive: true,
+        minAndroidSdk: true,
+        createdAt: true,
+      },
+    })
+
+    if (!update) {
+      logger.warn(`Version ${targetVersionCode} not found for ${env}`)
+      return res.json({
+        success: true,
+        found: false,
+        message: `Version ${targetVersionCode} not found for ${env} environment`,
+      })
+    }
+
+    if (!update.isActive) {
+      logger.warn(`Version ${targetVersionCode} is not active for ${env}`)
+      return res.json({
+        success: true,
+        found: false,
+        message: `Version ${targetVersionCode} is not active`,
+      })
+    }
+
+    logger.info(`Returning specific version: ${update.versionCode} (${env})`)
+
+    return res.json({
+      success: true,
+      found: true,
+      version: {
+        id: update.id,
+        versionName: update.versionName,
+        versionCode: update.versionCode,
+        downloadUrl: update.downloadUrl,
+        fileSize: update.fileSize.toString(),
+        checksum: update.checksum,
+        releaseNotes: update.releaseNotes,
+        isRequired: update.isRequired,
+        minAndroidSdk: update.minAndroidSdk,
+        publishedAt: update.createdAt.toISOString(),
+      },
+    })
+  } catch (error) {
+    logger.error('Error getting specific version:', error)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to get version',
+    })
+  }
+}
+
+/**
  * @route   POST /api/v1/tpv/report-update-installed
  * @desc    Report that an update was successfully installed (for analytics)
  * @access  Authenticated (called after successful update and login)

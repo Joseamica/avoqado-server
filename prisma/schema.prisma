@@ -4732,7 +4732,9 @@ enum TpvCommandType {
   RESTART // Graceful app restart
   SHUTDOWN // Complete shutdown
   CLEAR_CACHE // Clear specified caches
-  FORCE_UPDATE // Force app update
+  FORCE_UPDATE // Force app update (silent, no user prompt)
+  REQUEST_UPDATE // Request update (shows dialog, user can accept/dismiss)
+  INSTALL_VERSION // Install specific version (SUPERADMIN rollback/upgrade)
 
   // Data Management Commands
   SYNC_DATA // Force data synchronization

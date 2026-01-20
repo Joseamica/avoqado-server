@@ -2154,6 +2154,68 @@ router.post('/report-update-installed', authenticateTokenMiddleware, appUpdateCo
 
 /**
  * @openapi
+ * /tpv/get-version:
+ *   get:
+ *     tags: [TPV - App Updates]
+ *     summary: Get specific app version (for INSTALL_VERSION command)
+ *     description: |
+ *       Returns download information for a specific version by versionCode.
+ *       Used by TPV when processing INSTALL_VERSION command to download
+ *       a specific (older or newer) version for rollback/upgrade.
+ *
+ *       **Use Cases:**
+ *       - Rollback to older stable version if new version has bugs
+ *       - Upgrade specific terminals to a target version
+ *       - SUPERADMIN-initiated version control
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: versionCode
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: The versionCode of the version to retrieve
+ *         example: 5
+ *       - in: query
+ *         name: environment
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [SANDBOX, PRODUCTION]
+ *         description: Environment (SANDBOX or PRODUCTION)
+ *     responses:
+ *       200:
+ *         description: Version info or not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 found:
+ *                   type: boolean
+ *                 version:
+ *                   type: object
+ *                   properties:
+ *                     versionName:
+ *                       type: string
+ *                     versionCode:
+ *                       type: integer
+ *                     downloadUrl:
+ *                       type: string
+ *                     fileSize:
+ *                       type: string
+ *                     checksum:
+ *                       type: string
+ *       400:
+ *         description: Invalid parameters
+ */
+router.get('/get-version', authenticateTokenMiddleware, appUpdateController.getSpecificVersion)
+
+/**
+ * @openapi
  * /tpv/terminals/{serialNumber}/settings:
  *   put:
  *     tags: [TPV - Terminal Configuration]

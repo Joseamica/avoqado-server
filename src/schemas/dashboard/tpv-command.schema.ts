@@ -29,6 +29,8 @@ export const TpvCommandTypeSchema = z.enum([
   'SHUTDOWN',
   'CLEAR_CACHE',
   'FORCE_UPDATE',
+  'REQUEST_UPDATE', // Shows dialog, user can accept/dismiss
+  'INSTALL_VERSION', // Install specific version (SUPERADMIN rollback/upgrade)
   // Data Management Commands
   'SYNC_DATA',
   'FACTORY_RESET',
