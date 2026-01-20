@@ -60,6 +60,7 @@ import {
   // NEW: Modifier Inventory schemas
   ConfigureVariableIngredientSchema,
   RecipeLineIdParamsSchema,
+  GetGlobalMovementsQuerySchema,
 } from '../../schemas/dashboard/inventory.schema'
 
 const router = Router({ mergeParams: true })
@@ -1053,6 +1054,24 @@ router.get(
   checkPermission('inventory:read'),
   validateRequest(GetRecipeCostVariancesSchema),
   productWizardController.getRecipeCostVariances,
+)
+
+// ===========================================
+// GLOBAL INVENTORY MOVEMENTS (SQUARE STYLE)
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/movements:
+ *   get:
+ *     tags: [Inventory - Movements]
+ *     summary: Get unified global inventory movements (Products + Raw Materials)
+ */
+router.get(
+  '/movements',
+  checkPermission('inventory:read'),
+  validateRequest(GetGlobalMovementsQuerySchema),
+  productInventoryController.getGlobalMovementsHandler,
 )
 
 export default router

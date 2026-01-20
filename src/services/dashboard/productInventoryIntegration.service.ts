@@ -342,41 +342,63 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
         }
       }
 
-      // Check if all ingredients are available for at least 1 portion
-      const insufficientIngredients = product.recipe.lines.filter(line => {
-        if (line.isOptional) return false
-        const requiredQuantity = line.quantity
-        return line.rawMaterial.currentStock.lessThan(requiredQuantity)
-      })
+      // Calculate yield per ingredient and identify bottleneck
+      const ingredientYields = product.recipe.lines
+        .filter(line => !line.isOptional) // Skip optional ingredients for bottleneck calculation
+        .map(line => {
+          const available = line.rawMaterial.currentStock
+          const required = line.quantity
+          // Avoid division by zero
+          if (required.equals(0)) return { line, portions: Infinity, available, required }
 
-      // Calculate how many portions can be made
-      let maxPortions = Infinity
-      for (const line of product.recipe.lines) {
-        if (line.isOptional) continue
-        const portionsFromThisIngredient = line.rawMaterial.currentStock.div(line.quantity).toNumber()
-        maxPortions = Math.min(maxPortions, Math.floor(portionsFromThisIngredient))
-      }
+          const portions = available.div(required).toNumber()
+          return {
+            line,
+            portions: Math.floor(portions),
+            available: available.toNumber(),
+            required: required.toNumber(),
+          }
+        })
+        .sort((a, b) => a.portions - b.portions)
 
-      if (maxPortions === Infinity) maxPortions = 0
+      const bottleneck = ingredientYields[0]
 
-      return {
-        inventoryMethod: 'RECIPE',
-        available: insufficientIngredients.length === 0 && maxPortions > 0,
-        maxPortions: maxPortions > 0 ? maxPortions : 0,
-        insufficientIngredients: insufficientIngredients.map(line => ({
+      // If no mandatory ingredients, assume infinite capacity (or handling logic)
+      // But typically we treat "no ingredients" as "0 capacity" or "Not configured"
+      let maxPortions = bottleneck ? bottleneck.portions : 0
+
+      // If we have no mandatory ingredients but have recipe, strictly speaking yield is undefined/0
+      if (product.recipe.lines.length === 0) maxPortions = 0
+
+      // Map existing insufficientIngredients (legacy support + specific "completely missing" list)
+      const insufficientIngredients = product.recipe.lines
+        .filter(line => !line.isOptional && line.rawMaterial.currentStock.lessThan(line.quantity))
+        .map(line => ({
           rawMaterialId: line.rawMaterial.id,
           name: line.rawMaterial.name,
           required: line.quantity.toNumber(),
           available: line.rawMaterial.currentStock.toNumber(),
           unit: line.rawMaterial.unit,
-        })),
+        }))
+
+      return {
+        inventoryMethod: 'RECIPE',
+        available: maxPortions > 0,
+        maxPortions,
+        insufficientIngredients,
+        // ✅ NEW: Explicit Limiting Factor (Bottleneck)
+        limitingIngredient: bottleneck
+          ? {
+              rawMaterialId: bottleneck.line.rawMaterial.id,
+              name: bottleneck.line.rawMaterial.name,
+              required: bottleneck.required,
+              available: bottleneck.available,
+              unit: bottleneck.line.rawMaterial.unit,
+              maxPortions: bottleneck.portions, // How many this ingredient allows
+            }
+          : null,
         recipeCost: product.recipe.totalCost.toNumber(),
-        message:
-          maxPortions > 0
-            ? `Can make ${maxPortions} portion(s)`
-            : insufficientIngredients.length > 0
-              ? `Missing ${insufficientIngredients.length} ingredient(s)`
-              : 'Recipe configured but no stock',
+        message: bottleneck ? `Limited by ${bottleneck.line.rawMaterial.name} (${bottleneck.portions})` : 'Recipe needs ingredients',
       }
     }
 

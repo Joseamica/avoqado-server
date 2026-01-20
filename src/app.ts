@@ -1,6 +1,8 @@
 import express, { Express, Request as ExpressRequest, Response as ExpressResponse, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import type { StringValue } from 'ms'
+import cors from 'cors'
+import cookieParser from 'cookie-parser'
 import { StaffRole } from '@prisma/client' // Assuming Prisma client is set up
 
 import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
@@ -9,10 +11,14 @@ import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
 import AppError from './errors/AppError'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
+import { getCorsConfig, Environment } from './config/corsOptions'
 
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
 import webhookRoutes from './routes/webhook.routes'
+import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
+import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
+import { authorizeRole } from './middlewares/authorizeRole.middleware'
 
 // Types (could be moved to a central types file)
 import { AvoqadoJwtPayload } from './security' // Assuming this is where the type is defined
@@ -25,6 +31,19 @@ app.use(
   '/api/v1/webhooks',
   express.raw({ type: 'application/json' }), // Raw body parser for Stripe signature verification
   webhookRoutes,
+)
+
+// ⚠️ IMPORTANT: App update routes need larger body limit for base64-encoded APKs (up to 100MB)
+// Must be mounted BEFORE configureCoreMiddlewares to avoid the default 1MB limit
+// Needs CORS + cookieParser since it's mounted before global middlewares
+app.use(
+  '/api/v1/superadmin/app-updates',
+  cors(getCorsConfig(NODE_ENV as Environment)),
+  cookieParser(),
+  express.json({ limit: '100mb' }),
+  authenticateTokenMiddleware,
+  authorizeRole([StaffRole.SUPERADMIN]),
+  appUpdateRoutes,
 )
 
 // Configure core middlewares (helmet, cors, compression, body-parsers, cookie-parser, session, request-logger)

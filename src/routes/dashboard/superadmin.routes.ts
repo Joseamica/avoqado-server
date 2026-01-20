@@ -177,4 +177,7 @@ router.get('/payment-readiness', venuePaymentReadinessController.getMultipleVenu
 // Master TOTP Setup (QR code for Google Authenticator)
 router.get('/master-totp/setup', superadminController.getMasterTotpSetup)
 
+// Note: App Updates routes are mounted early in app.ts at /api/v1/superadmin/app-updates
+// with 100MB body limit for APK uploads
+
 export default router

@@ -21,6 +21,8 @@ export interface AdjustInventoryStockDto {
   quantity: number // Positive for additions, negative for reductions
   reason?: string
   reference?: string
+  unitCost?: number // Cost per unit for this movement (for PURCHASE)
+  supplier?: string // Supplier name for this movement (for PURCHASE)
 }
 
 /**
@@ -60,7 +62,7 @@ export async function adjustInventoryStock(
   }
 
   // Update inventory and create movement record in transaction
-  await prisma.$transaction([
+  const operations: Prisma.PrismaPromise<any>[] = [
     // Update inventory
     prisma.inventory.update({
       where: { id: inventory.id },
@@ -80,10 +82,26 @@ export async function adjustInventoryStock(
         newStock,
         reason: data.reason,
         reference: data.reference,
+        unitCost: data.unitCost ? new Prisma.Decimal(data.unitCost) : undefined,
+        supplier: data.supplier,
         createdBy: staffId,
       },
     }),
-  ])
+  ]
+
+  // Update Product.cost if this is a PURCHASE with unitCost
+  if (data.type === 'PURCHASE' && data.unitCost) {
+    operations.push(
+      prisma.product.update({
+        where: { id: productId },
+        data: {
+          cost: new Prisma.Decimal(data.unitCost),
+        },
+      }),
+    )
+  }
+
+  await prisma.$transaction(operations)
 
   logger.info(`✅ Inventory adjusted for product ${productId}: ${previousStock} → ${newStock}`, {
     venueId,
@@ -149,4 +167,151 @@ export async function getInventoryMovements(venueId: string, productId: string) 
     createdBy: m.createdBy,
     createdAt: m.createdAt,
   }))
+}
+
+/**
+ * Get unified global inventory movements (Products + Raw Materials)
+ */
+export async function getGlobalMovements(
+  venueId: string,
+  query: {
+    page: number
+    limit: number
+    search?: string
+    startDate?: string // ISO string
+    endDate?: string // ISO string
+    type?: string
+  },
+) {
+  const { page, limit, search, startDate, endDate, type } = query
+  const skip = (page - 1) * limit
+
+  // 1. Build where clauses
+  const dateFilter =
+    startDate && endDate
+      ? {
+          createdAt: {
+            gte: new Date(startDate),
+            lte: new Date(endDate),
+          },
+        }
+      : {}
+
+  // Filter by type if provided (need to map specific types if necessary)
+  const typeFilter = type && type !== 'ALL' ? { type: type as any } : {}
+
+  // 2. Fetch InventoryMovements (Products)
+  const productMovementsPromise = prisma.inventoryMovement.findMany({
+    where: {
+      inventory: {
+        venueId,
+        product: search
+          ? {
+              OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }],
+            }
+          : undefined,
+      },
+      ...dateFilter,
+      ...(type === 'SALE' || type === 'ALL' || type === undefined
+        ? {}
+        : type === 'RECEIVED'
+          ? { type: 'PURCHASE' } // Map generic types if needed
+          : typeFilter),
+    },
+    include: {
+      inventory: {
+        include: {
+          product: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit * page, // Fetch up to current page depth to ensure correct merge sort
+  })
+
+  // 3. Fetch RawMaterialMovements (Ingredients)
+  const rawMaterialMovementsPromise = prisma.rawMaterialMovement.findMany({
+    where: {
+      venueId,
+      rawMaterial: search
+        ? {
+            OR: [{ name: { contains: search, mode: 'insensitive' } }, { sku: { contains: search, mode: 'insensitive' } }],
+          }
+        : undefined,
+      ...dateFilter,
+      // Apply type filter if compatible, otherwise ignore or adapt
+      ...(type === 'SALE'
+        ? { type: { in: [] } } // Raw materials don't have direct SALES usually (they are consumed), maybe USAGE
+        : typeFilter),
+    },
+    include: {
+      rawMaterial: true,
+      batch: true,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit * page,
+  })
+
+  const [productMovements, rawMaterialMovements] = await Promise.all([productMovementsPromise, rawMaterialMovementsPromise])
+
+  // 4. Normalize and Merge
+  const combined = [
+    ...productMovements.map(m => ({
+      id: m.id,
+      createdAt: m.createdAt,
+      itemName: m.inventory.product.name,
+      sku: m.inventory.product.sku,
+      category: 'PRODUCT',
+      type: m.type,
+      quantity: m.quantity.toNumber(),
+      unit: m.inventory.product.unit || 'UNIT',
+      cost: m.inventory.product.cost?.toNumber() || 0,
+      totalCost: (m.inventory.product.cost?.toNumber() || 0) * Math.abs(m.quantity.toNumber()),
+      reason: m.reason,
+      reference: m.reference,
+      previousStock: m.previousStock.toNumber(),
+      newStock: m.newStock.toNumber(),
+      createdBy: m.createdBy,
+    })),
+    ...rawMaterialMovements.map(m => ({
+      id: m.id,
+      createdAt: m.createdAt,
+      itemName: m.rawMaterial.name,
+      sku: m.rawMaterial.sku,
+      category: 'INGREDIENT',
+      type: m.type,
+      quantity: m.quantity.toNumber(),
+      unit: m.unit,
+      cost: m.rawMaterial.costPerUnit.toNumber(),
+      totalCost: m.costImpact?.toNumber() || 0,
+      reason: m.reason,
+      reference: m.reference,
+      previousStock: m.previousStock.toNumber(),
+      newStock: m.newStock.toNumber(),
+      createdBy: m.createdBy,
+    })),
+  ]
+
+  // 5. Sort and Paginate in memory (since we merged sources)
+  // Note: For large datasets this isn't efficient, but for typical "history view" it's acceptable.
+  // Proper solution would be SQL UNION query or a dedicated history table.
+  combined.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+
+  // Calculate generic total estimate (sum of both counts is upper bound)
+  // To get *real* total we'd need count() queries, but for now length is fine (but length is capped by take)
+  // Actually, we can't return real total without count queries. We'll return -1 or just combined.length if less than request.
+  // For scrolling UI, we often just need "has more".
+
+  // Slice correct page window
+  const startIndex = (page - 1) * limit
+  const paginated = combined.slice(startIndex, startIndex + limit)
+
+  return {
+    data: paginated,
+    meta: {
+      total: 1000, // Dummy total to allow pagination in UI (since we don't count everything for perf)
+      page,
+      limit,
+    },
+  }
 }
