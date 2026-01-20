@@ -456,6 +456,9 @@ model Staff {
   depositsApproved  CashDeposit[]      @relation("DepositApprover")
   performanceGoals  PerformanceGoal[]
 
+  // ✅ TPV App Update System (superadmin uploads)
+  appUpdatesUploaded AppUpdate[] @relation("AppUpdateUploadedBy")
+
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
   // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
@@ -898,6 +901,10 @@ model InventoryMovement {
 
   reason    String?
   reference String? // Order ID, adjustment ID, etc.
+
+  // Cost and supplier tracking (for PURCHASE movements)
+  unitCost Decimal? @db.Decimal(10, 2) // Cost per unit for this movement
+  supplier String? // Supplier name for this movement
 
   createdBy String?
   createdAt DateTime @default(now())
@@ -4725,7 +4732,9 @@ enum TpvCommandType {
   RESTART // Graceful app restart
   SHUTDOWN // Complete shutdown
   CLEAR_CACHE // Clear specified caches
-  FORCE_UPDATE // Force app update
+  FORCE_UPDATE // Force app update (silent, no user prompt)
+  REQUEST_UPDATE // Request update (shows dialog, user can accept/dismiss)
+  INSTALL_VERSION // Install specific version (SUPERADMIN rollback/upgrade)
 
   // Data Management Commands
   SYNC_DATA // Force data synchronization
@@ -6214,4 +6223,56 @@ model PerformanceGoal {
   @@unique([staffId, venueId, month])
   @@index([venueId])
   @@index([staffId])
+}
+
+// ==========================================
+// TPV APP UPDATE SYSTEM
+// Dual update system: Blumon (provider) + Avoqado (self-managed)
+// Allows independent control over app distribution
+// ==========================================
+
+enum AppEnvironment {
+  SANDBOX    // Development/testing builds
+  PRODUCTION // Production builds for real terminals
+}
+
+/// Tracks TPV app versions uploaded by superadmin
+/// Enables self-managed updates independent of Blumon
+model AppUpdate {
+  id String @id @default(cuid())
+
+  // Version info (Android standard)
+  versionName String // Semantic version: "1.3.0"
+  versionCode Int    // Android version code: 6 (always increments)
+
+  // Environment targeting
+  environment AppEnvironment
+
+  // Release info
+  releaseNotes String? @db.Text // Markdown changelog
+  isRequired   Boolean @default(false) // Force update (blocks app until updated)
+
+  // File info (Firebase Storage)
+  downloadUrl String // Firebase Storage signed URL or public URL
+  fileSize    BigInt // File size in bytes
+  checksum    String // SHA-256 hash for integrity verification
+
+  // Compatibility
+  minAndroidSdk Int @default(27) // Minimum Android SDK (27 = Android 8.1)
+
+  // Status
+  isActive Boolean @default(true) // Whether this version is available for download
+
+  // Audit
+  uploadedById String
+  uploadedBy   Staff  @relation("AppUpdateUploadedBy", fields: [uploadedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Unique constraint: only one active version per environment
+  // Allows multiple versions but queries filter by isActive
+  @@unique([versionCode, environment])
+  @@index([environment, isActive])
+  @@index([versionCode])
 }

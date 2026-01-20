@@ -62,6 +62,7 @@ import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 import * as customerController from '../controllers/tpv/customer.tpv.controller'
 import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
+import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
 import * as productService from '../services/dashboard/product.dashboard.service'
 import emailService from '../services/email.service'
 import { moduleService, MODULE_CODES } from '../services/modules/module.service'
@@ -2030,6 +2031,188 @@ router.get('/terminals/:serialNumber/activation-status', activationController.ch
  *                   example: "Terminal not found with serial number: 2841548417"
  */
 router.get('/terminals/:serialNumber/config', validateRequest(serialNumberParamSchema), terminalController.getTerminalConfig)
+
+// ==========================================
+// APP UPDATE ENDPOINTS (Dual Update System)
+// Avoqado self-managed updates (independent of Blumon)
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/check-update:
+ *   get:
+ *     tags:
+ *       - TPV App Updates
+ *     summary: Check if a newer app version is available (Avoqado updates)
+ *     description: |
+ *       **Dual Update System - Avoqado Source**
+ *
+ *       This endpoint checks for updates managed by Avoqado (independent of Blumon).
+ *       The TPV app should check both sources:
+ *       1. Blumon: Via CheckVersionUseCase (provider-managed)
+ *       2. Avoqado: Via this endpoint (self-managed)
+ *
+ *       **No authentication required** - called before login.
+ *
+ *       **Flow:**
+ *       1. TPV sends current versionCode and environment
+ *       2. Backend checks for newer active version
+ *       3. Returns update info including signed APK URL from Firebase Storage
+ *
+ *     parameters:
+ *       - in: query
+ *         name: currentVersion
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Current app versionCode (e.g., 6)
+ *       - in: query
+ *         name: environment
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [SANDBOX, PRODUCTION]
+ *         description: App environment (matches build variant)
+ *     responses:
+ *       200:
+ *         description: Update check result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 hasUpdate:
+ *                   type: boolean
+ *                 update:
+ *                   type: object
+ *                   properties:
+ *                     versionName:
+ *                       type: string
+ *                       example: "1.3.0"
+ *                     versionCode:
+ *                       type: integer
+ *                       example: 6
+ *                     downloadUrl:
+ *                       type: string
+ *                       description: Firebase Storage URL for APK download
+ *                     fileSize:
+ *                       type: string
+ *                       description: File size in bytes
+ *                     checksum:
+ *                       type: string
+ *                       description: SHA-256 hash for integrity verification
+ *                     releaseNotes:
+ *                       type: string
+ *                       description: Markdown changelog
+ *                     isRequired:
+ *                       type: boolean
+ *                       description: Force update flag
+ *       400:
+ *         description: Invalid parameters
+ */
+router.get('/check-update', appUpdateController.checkForUpdate)
+
+/**
+ * @openapi
+ * /tpv/report-update-installed:
+ *   post:
+ *     tags:
+ *       - TPV App Updates
+ *     summary: Report successful update installation (analytics)
+ *     description: |
+ *       Called after an update is successfully installed to track adoption.
+ *       Updates the terminal's version record.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - versionCode
+ *               - versionName
+ *               - updateSource
+ *             properties:
+ *               versionCode:
+ *                 type: integer
+ *               versionName:
+ *                 type: string
+ *               updateSource:
+ *                 type: string
+ *                 enum: [AVOQADO, BLUMON]
+ *               serialNumber:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Report recorded
+ */
+router.post('/report-update-installed', authenticateTokenMiddleware, appUpdateController.reportUpdateInstalled)
+
+/**
+ * @openapi
+ * /tpv/get-version:
+ *   get:
+ *     tags: [TPV - App Updates]
+ *     summary: Get specific app version (for INSTALL_VERSION command)
+ *     description: |
+ *       Returns download information for a specific version by versionCode.
+ *       Used by TPV when processing INSTALL_VERSION command to download
+ *       a specific (older or newer) version for rollback/upgrade.
+ *
+ *       **Use Cases:**
+ *       - Rollback to older stable version if new version has bugs
+ *       - Upgrade specific terminals to a target version
+ *       - SUPERADMIN-initiated version control
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: versionCode
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: The versionCode of the version to retrieve
+ *         example: 5
+ *       - in: query
+ *         name: environment
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [SANDBOX, PRODUCTION]
+ *         description: Environment (SANDBOX or PRODUCTION)
+ *     responses:
+ *       200:
+ *         description: Version info or not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 found:
+ *                   type: boolean
+ *                 version:
+ *                   type: object
+ *                   properties:
+ *                     versionName:
+ *                       type: string
+ *                     versionCode:
+ *                       type: integer
+ *                     downloadUrl:
+ *                       type: string
+ *                     fileSize:
+ *                       type: string
+ *                     checksum:
+ *                       type: string
+ *       400:
+ *         description: Invalid parameters
+ */
+router.get('/get-version', authenticateTokenMiddleware, appUpdateController.getSpecificVersion)
 
 /**
  * @openapi

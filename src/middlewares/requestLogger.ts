@@ -24,7 +24,9 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
   const isHeartbeat = url.includes('/heartbeat') || url.includes('/tpv/heartbeat')
   const shouldSkipLogging = (isHealthCheck || isHeartbeat) && process.env.NODE_ENV === 'production'
 
-  if (!shouldSkipLogging) {
+  const shouldLogStart = !shouldSkipLogging && process.env.NODE_ENV !== 'development'
+
+  if (shouldLogStart) {
     logger.info(`Request Start: ${method} ${url}`, {
       correlationId,
       method,

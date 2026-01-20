@@ -603,6 +603,8 @@ export const AdjustProductInventoryStockSchema = z.object({
     type: z.nativeEnum(MovementType),
     reason: z.string().optional(),
     reference: z.string().optional(),
+    unitCost: z.number().positive('Unit cost must be positive').optional(),
+    supplier: z.string().optional(),
   }),
 })
 
@@ -801,7 +803,17 @@ export const RecipeLineIdParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
     productId: z.string().cuid(),
-    recipeLineId: z.string().cuid(),
+  }),
+})
+
+export const GetGlobalMovementsQuerySchema = z.object({
+  query: z.object({
+    page: z.string().transform(Number).default('1'),
+    limit: z.string().transform(Number).default('50'),
+    search: z.string().optional(),
+    startDate: z.string().datetime().optional(),
+    endDate: z.string().datetime().optional(),
+    type: z.enum(['ALL', 'RECEIVED', 'COUNT', 'WASTE', 'RETURN', 'SALE', 'TRANSFER']).optional(),
   }),
 })
 

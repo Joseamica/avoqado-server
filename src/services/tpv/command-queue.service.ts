@@ -124,6 +124,22 @@ const COMMAND_CONFIG: Record<
     expirationMinutes: 60,
     doubleConfirm: false,
   },
+  REQUEST_UPDATE: {
+    requiresPin: false, // User decides - just a suggestion
+    riskLevel: 'LOW',
+    defaultPriority: 'NORMAL',
+    maxRetries: 1,
+    expirationMinutes: 1440, // 24h validity
+    doubleConfirm: false,
+  },
+  INSTALL_VERSION: {
+    requiresPin: true, // SUPERADMIN only - requires PIN for rollback
+    riskLevel: 'HIGH',
+    defaultPriority: 'HIGH',
+    maxRetries: 2,
+    expirationMinutes: 60, // 1h validity
+    doubleConfirm: true, // Confirm before installing specific version
+  },
   SYNC_DATA: {
     requiresPin: false,
     riskLevel: 'LOW',

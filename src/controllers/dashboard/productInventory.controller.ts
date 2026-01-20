@@ -57,3 +57,38 @@ export const getInventoryMovementsHandler = async (req: Request, res: Response, 
     next(error)
   }
 }
+
+/**
+ * Get unified global inventory movements
+ */
+export const getGlobalMovementsHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { venueId } = req.params
+    const query = req.query as any
+    const correlationId = (req as any).correlationId
+
+    logger.info(`Fetching global inventory movements for venue ${venueId}`, {
+      correlationId,
+      venueId,
+      query,
+    })
+
+    const result = await productInventoryService.getGlobalMovements(venueId, {
+      page: Number(query.page),
+      limit: Number(query.limit),
+      search: query.search,
+      startDate: query.startDate,
+      endDate: query.endDate,
+      type: query.type,
+    })
+
+    res.status(200).json({
+      message: `Global inventory movements fetched successfully`,
+      data: result.data,
+      meta: result.meta,
+      correlationId,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

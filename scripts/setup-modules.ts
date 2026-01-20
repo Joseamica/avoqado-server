@@ -343,6 +343,359 @@ async function main() {
   console.log(`   Name: ${attendanceModule.name}`)
   console.log(`   Presets: strict, flexible\n`)
 
+  // Create WHITE_LABEL_DASHBOARD module
+  const whiteLabelModule = await prisma.module.upsert({
+    where: { code: 'WHITE_LABEL_DASHBOARD' },
+    create: {
+      code: 'WHITE_LABEL_DASHBOARD',
+      name: 'Dashboard White Label',
+      description:
+        'Dashboards personalizados con branding y características específicas para clientes enterprise. Permite customización de tema, navegación y funcionalidades habilitadas.',
+      defaultConfig: {
+        version: '1.0',
+        theme: {
+          primaryColor: '#3b82f6',
+          brandName: 'Mi Empresa',
+          logo: null,
+          favicon: null,
+        },
+        enabledFeatures: [],
+        navigation: {
+          layout: 'default',
+          items: [],
+        },
+        featureConfigs: {},
+      },
+      presets: {
+        telecom: {
+          theme: {
+            primaryColor: '#ff6b00',
+            brandName: 'Telecom Dashboard',
+          },
+          enabledFeatures: [
+            { code: 'COMMAND_CENTER', source: 'builtin' },
+            { code: 'SERIALIZED_STOCK', source: 'builtin' },
+            { code: 'STORES_ANALYSIS', source: 'builtin' },
+            { code: 'PROMOTERS_AUDIT', source: 'builtin' },
+            { code: 'AVOQADO_COMMISSIONS', source: 'builtin' },
+          ],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [
+              {
+                id: 'command-center',
+                label: 'Centro de Comando',
+                icon: 'LayoutDashboard',
+                route: '/wl/command-center',
+                order: 0,
+              },
+              { id: 'stock', label: 'Stock', icon: 'Package', route: '/wl/stock', order: 1 },
+              { id: 'stores', label: 'Tiendas', icon: 'Store', route: '/wl/stores', order: 2 },
+              { id: 'promoters', label: 'Promotores', icon: 'Users', route: '/wl/promoters', order: 3 },
+              {
+                id: 'commissions',
+                label: 'Comisiones',
+                icon: 'DollarSign',
+                route: '/wl/commissions',
+                order: 4,
+              },
+            ],
+          },
+        },
+        jewelry: {
+          theme: {
+            primaryColor: '#d4af37',
+            brandName: 'Jewelry Management',
+          },
+          enabledFeatures: [
+            { code: 'APPRAISALS', source: 'builtin' },
+            { code: 'CONSIGNMENT', source: 'builtin' },
+            { code: 'AVOQADO_REPORTS', source: 'builtin' },
+          ],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [
+              { id: 'appraisals', label: 'Valuaciones', icon: 'Gem', route: '/wl/appraisals', order: 0 },
+              {
+                id: 'consignment',
+                label: 'Consignación',
+                icon: 'Handshake',
+                route: '/wl/consignment',
+                order: 1,
+              },
+              { id: 'reports', label: 'Reportes', icon: 'FileText', route: '/wl/reports', order: 2 },
+            ],
+          },
+        },
+        retail: {
+          theme: {
+            primaryColor: '#10b981',
+            brandName: 'Retail Dashboard',
+          },
+          enabledFeatures: [
+            { code: 'AVOQADO_REPORTS', source: 'builtin' },
+            { code: 'AVOQADO_TIPS', source: 'builtin' },
+            { code: 'AVOQADO_COMMISSIONS', source: 'builtin' },
+          ],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [
+              { id: 'reports', label: 'Reportes', icon: 'FileText', route: '/wl/reports', order: 0 },
+              { id: 'tips', label: 'Propinas', icon: 'Gift', route: '/wl/tips', order: 1 },
+              {
+                id: 'commissions',
+                label: 'Comisiones',
+                icon: 'DollarSign',
+                route: '/wl/commissions',
+                order: 2,
+              },
+            ],
+          },
+        },
+        custom: {
+          theme: {
+            primaryColor: '#6b7280',
+            brandName: 'Custom Dashboard',
+          },
+          enabledFeatures: [],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [],
+          },
+        },
+      },
+      configSchema: {
+        type: 'object',
+        required: ['version', 'theme', 'enabledFeatures', 'navigation'],
+        properties: {
+          version: { type: 'string' },
+          theme: {
+            type: 'object',
+            required: ['primaryColor', 'brandName'],
+            properties: {
+              primaryColor: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' },
+              brandName: { type: 'string', minLength: 1, maxLength: 50 },
+              logo: { type: ['string', 'null'] },
+              favicon: { type: ['string', 'null'] },
+            },
+          },
+          enabledFeatures: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['code', 'source'],
+              properties: {
+                code: { type: 'string' },
+                source: { enum: ['builtin', 'custom'] },
+              },
+            },
+          },
+          navigation: {
+            type: 'object',
+            required: ['layout', 'items'],
+            properties: {
+              layout: { enum: ['sidebar-left', 'sidebar-right', 'top-nav'] },
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['id', 'label', 'route', 'order'],
+                  properties: {
+                    id: { type: 'string' },
+                    label: { type: 'string' },
+                    icon: { type: 'string' },
+                    route: { type: 'string' },
+                    order: { type: 'number' },
+                  },
+                },
+              },
+            },
+          },
+          featureConfigs: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        },
+      },
+    },
+    update: {
+      name: 'Dashboard White Label',
+      description:
+        'Dashboards personalizados con branding y características específicas para clientes enterprise. Permite customización de tema, navegación y funcionalidades habilitadas.',
+      defaultConfig: {
+        version: '1.0',
+        theme: {
+          primaryColor: '#3b82f6',
+          brandName: 'Mi Empresa',
+          logo: null,
+          favicon: null,
+        },
+        enabledFeatures: [],
+        navigation: {
+          layout: 'default',
+          items: [],
+        },
+        featureConfigs: {},
+      },
+      presets: {
+        telecom: {
+          theme: {
+            primaryColor: '#ff6b00',
+            brandName: 'Telecom Dashboard',
+          },
+          enabledFeatures: [
+            { code: 'COMMAND_CENTER', source: 'builtin' },
+            { code: 'SERIALIZED_STOCK', source: 'builtin' },
+            { code: 'STORES_ANALYSIS', source: 'builtin' },
+            { code: 'PROMOTERS_AUDIT', source: 'builtin' },
+            { code: 'AVOQADO_COMMISSIONS', source: 'builtin' },
+          ],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [
+              {
+                id: 'command-center',
+                label: 'Centro de Comando',
+                icon: 'LayoutDashboard',
+                route: '/wl/command-center',
+                order: 0,
+              },
+              { id: 'stock', label: 'Stock', icon: 'Package', route: '/wl/stock', order: 1 },
+              { id: 'stores', label: 'Tiendas', icon: 'Store', route: '/wl/stores', order: 2 },
+              { id: 'promoters', label: 'Promotores', icon: 'Users', route: '/wl/promoters', order: 3 },
+              {
+                id: 'commissions',
+                label: 'Comisiones',
+                icon: 'DollarSign',
+                route: '/wl/commissions',
+                order: 4,
+              },
+            ],
+          },
+        },
+        jewelry: {
+          theme: {
+            primaryColor: '#d4af37',
+            brandName: 'Jewelry Management',
+          },
+          enabledFeatures: [
+            { code: 'APPRAISALS', source: 'builtin' },
+            { code: 'CONSIGNMENT', source: 'builtin' },
+            { code: 'AVOQADO_REPORTS', source: 'builtin' },
+          ],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [
+              { id: 'appraisals', label: 'Valuaciones', icon: 'Gem', route: '/wl/appraisals', order: 0 },
+              {
+                id: 'consignment',
+                label: 'Consignación',
+                icon: 'Handshake',
+                route: '/wl/consignment',
+                order: 1,
+              },
+              { id: 'reports', label: 'Reportes', icon: 'FileText', route: '/wl/reports', order: 2 },
+            ],
+          },
+        },
+        retail: {
+          theme: {
+            primaryColor: '#10b981',
+            brandName: 'Retail Dashboard',
+          },
+          enabledFeatures: [
+            { code: 'AVOQADO_REPORTS', source: 'builtin' },
+            { code: 'AVOQADO_TIPS', source: 'builtin' },
+            { code: 'AVOQADO_COMMISSIONS', source: 'builtin' },
+          ],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [
+              { id: 'reports', label: 'Reportes', icon: 'FileText', route: '/wl/reports', order: 0 },
+              { id: 'tips', label: 'Propinas', icon: 'Gift', route: '/wl/tips', order: 1 },
+              {
+                id: 'commissions',
+                label: 'Comisiones',
+                icon: 'DollarSign',
+                route: '/wl/commissions',
+                order: 2,
+              },
+            ],
+          },
+        },
+        custom: {
+          theme: {
+            primaryColor: '#6b7280',
+            brandName: 'Custom Dashboard',
+          },
+          enabledFeatures: [],
+          navigation: {
+            layout: 'sidebar-left',
+            items: [],
+          },
+        },
+      },
+      configSchema: {
+        type: 'object',
+        required: ['version', 'theme', 'enabledFeatures', 'navigation'],
+        properties: {
+          version: { type: 'string' },
+          theme: {
+            type: 'object',
+            required: ['primaryColor', 'brandName'],
+            properties: {
+              primaryColor: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' },
+              brandName: { type: 'string', minLength: 1, maxLength: 50 },
+              logo: { type: ['string', 'null'] },
+              favicon: { type: ['string', 'null'] },
+            },
+          },
+          enabledFeatures: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['code', 'source'],
+              properties: {
+                code: { type: 'string' },
+                source: { enum: ['builtin', 'custom'] },
+              },
+            },
+          },
+          navigation: {
+            type: 'object',
+            required: ['layout', 'items'],
+            properties: {
+              layout: { enum: ['sidebar-left', 'sidebar-right', 'top-nav'] },
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['id', 'label', 'route', 'order'],
+                  properties: {
+                    id: { type: 'string' },
+                    label: { type: 'string' },
+                    icon: { type: 'string' },
+                    route: { type: 'string' },
+                    order: { type: 'number' },
+                  },
+                },
+              },
+            },
+          },
+          featureConfigs: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        },
+      },
+    },
+  })
+
+  console.log(`✅ Module: ${whiteLabelModule.code}`)
+  console.log(`   ID: ${whiteLabelModule.id}`)
+  console.log(`   Name: ${whiteLabelModule.name}`)
+  console.log(`   Presets: telecom, jewelry, retail, custom\n`)
+
   // Summary
   const moduleCount = await prisma.module.count({ where: { active: true } })
   console.log(`\n📊 Summary: ${moduleCount} active modules in system`)
