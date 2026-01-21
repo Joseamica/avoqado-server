@@ -770,34 +770,6 @@ async function main() {
 
   console.log(`  Created 4 payment providers (Menta, Clip, Blumon, Banorte).`)
 
-  // 🆕 Create Stripe merchant account (gateway for online payments)
-  const stripeMerchant = await prisma.merchantAccount.create({
-    data: {
-      providerId: mentaProvider.id, // Using Menta provider as fallback (could be a dedicated Stripe provider)
-      externalMerchantId: 'acct_stripe_demo_12345',
-      alias: 'Stripe Gateway Account',
-      displayName: 'Cuenta Stripe (Online)',
-      displayOrder: 0,
-      active: true,
-      bankName: 'Stripe Mexico',
-      clabeNumber: '646180157000000004', // STP CLABE for Stripe
-      accountHolder: 'Stripe Payments Mexico S. de R.L.',
-      credentialsEncrypted: {
-        // Stripe API credentials (mock for seed)
-        publishableKey: 'pk_test_mock_stripe_publishable_key',
-        secretKey: 'sk_test_mock_stripe_secret_key',
-        webhookSecret: 'whsec_mock_stripe_webhook_secret',
-      },
-      providerConfig: {
-        accountId: 'acct_stripe_demo_12345',
-        countryCode: 'MX',
-        currencyCode: 'MXN',
-        paymentMethods: ['card', 'oxxo', 'spei'],
-        webhookUrl: 'https://api.avoqado.com/webhooks/stripe',
-      },
-    },
-  })
-
   // 🆕 Blumon Merchant Accounts (Multi-Merchant Support - 2025-11-06)
   // These match the actual Blumon sandbox devices registered with Edgardo
   const blumonMerchantA = await prisma.merchantAccount.create({
@@ -810,7 +782,7 @@ async function main() {
       active: true,
       // Blumon-specific fields (Phase 2 - Multi-Merchant)
       blumonSerialNumber: '2841548417',
-      blumonPosId: '376',
+      blumonPosId: '388',
       blumonEnvironment: 'SANDBOX',
       blumonMerchantId: 'blumon_merchant_2841548417',
       credentialsEncrypted: {
@@ -823,7 +795,7 @@ async function main() {
       },
       providerConfig: {
         serialNumber: '2841548417',
-        posId: '376',
+        posId: '388',
         environment: 'SANDBOX',
         brand: 'PAX',
         model: 'A910S',
@@ -831,56 +803,9 @@ async function main() {
     },
   })
 
-  const blumonMerchantB = await prisma.merchantAccount.create({
-    data: {
-      providerId: blumonProvider.id,
-      externalMerchantId: 'blumon_merchant_2841548418',
-      alias: 'Blumon Account B',
-      displayName: 'Cuenta Blumon B (Sandbox)',
-      displayOrder: 21,
-      active: true,
-      // Blumon-specific fields (Phase 2 - Multi-Merchant)
-      blumonSerialNumber: '2841548418',
-      blumonPosId: '378',
-      blumonEnvironment: 'SANDBOX',
-      blumonMerchantId: 'blumon_merchant_2841548418',
-      credentialsEncrypted: {
-        // OAuth tokens and DUKPT keys (mock for seed)
-        clientId: 'mock_client_id_2841548418',
-        clientSecret: 'mock_client_secret_2841548418',
-        serialNumber: '2841548418',
-        environment: 'SANDBOX',
-      },
-      providerConfig: {
-        serialNumber: '2841548418',
-        posId: '378',
-        environment: 'SANDBOX',
-        brand: 'PAX',
-        model: 'A910S',
-      },
-    },
-  })
-
-  console.log(`  Created 3 merchant accounts (Stripe, Blumon x2).`)
+  console.log(`  Created 1 merchant account (Blumon A).`)
 
   // Create provider cost structures (what providers charge Avoqado)
-  const stripeCosts = await prisma.providerCostStructure.create({
-    data: {
-      providerId: mentaProvider.id,
-      merchantAccountId: stripeMerchant.id,
-      debitRate: 0.029, // 2.9% for all cards (Stripe standard rate)
-      creditRate: 0.029, // Same rate for all card types
-      amexRate: 0.029,
-      internationalRate: 0.044, // 4.4% for international cards (2.9% + 1.5%)
-      fixedCostPerTransaction: 3.0, // $3 MXN fixed fee
-      monthlyFee: 0.0, // No monthly fee
-      effectiveFrom: new Date('2024-01-01'),
-      active: true,
-      proposalReference: 'STRIPE-2024-001',
-      notes: 'Stripe standard rates for Mexico (2.9% + $3 MXN)',
-    },
-  })
-
   const blumonACosts = await prisma.providerCostStructure.create({
     data: {
       providerId: blumonProvider.id,
@@ -898,51 +823,10 @@ async function main() {
     },
   })
 
-  const blumonBCosts = await prisma.providerCostStructure.create({
-    data: {
-      providerId: blumonProvider.id,
-      merchantAccountId: blumonMerchantB.id,
-      debitRate: 0.015, // 1.5% for all cards
-      creditRate: 0.015, // 1.5% for all cards
-      amexRate: 0.015, // 1.5% for all cards
-      internationalRate: 0.015, // 1.5% for all cards
-      fixedCostPerTransaction: null, // No fixed cost
-      monthlyFee: null, // No monthly fee
-      effectiveFrom: new Date('2024-01-01'),
-      active: true,
-      proposalReference: 'BLUMON-2024-B-001',
-      notes: 'Blumon Account B rates - Flat 1.5% for all cards',
-    },
-  })
-
-  console.log(`  Created 3 provider cost structures (Stripe, Blumon x2).`)
+  console.log(`  Created 1 provider cost structure (Blumon A).`)
 
   // Create settlement configurations for each merchant account
   console.log('Seeding settlement configurations...')
-
-  // Stripe Account - Fast settlements
-  const stripeSettlementTypes = [
-    { cardType: TransactionCardType.DEBIT, settlementDays: 2, notes: 'Stripe débito - 2 días hábiles' },
-    { cardType: TransactionCardType.CREDIT, settlementDays: 2, notes: 'Stripe crédito - 2 días hábiles' },
-    { cardType: TransactionCardType.AMEX, settlementDays: 2, notes: 'Stripe Amex - 2 días hábiles' },
-    { cardType: TransactionCardType.INTERNATIONAL, settlementDays: 3, notes: 'Stripe internacional - 3 días hábiles' },
-    { cardType: TransactionCardType.OTHER, settlementDays: 2, notes: 'Stripe otras - 2 días hábiles' },
-  ]
-
-  for (const config of stripeSettlementTypes) {
-    await prisma.settlementConfiguration.create({
-      data: {
-        merchantAccountId: stripeMerchant.id,
-        cardType: config.cardType,
-        settlementDays: config.settlementDays,
-        settlementDayType: SettlementDayType.BUSINESS_DAYS,
-        cutoffTime: '23:59',
-        cutoffTimezone: 'America/Mexico_City',
-        effectiveFrom: new Date('2024-01-01'),
-        notes: config.notes,
-      },
-    })
-  }
 
   // Blumon Account A - Standard settlement times
   const blumonSettlementTypes = [
@@ -968,25 +852,7 @@ async function main() {
     })
   }
 
-  // Blumon Account B - Same settlement times
-  for (const config of blumonSettlementTypes) {
-    await prisma.settlementConfiguration.create({
-      data: {
-        merchantAccountId: blumonMerchantB.id,
-        cardType: config.cardType,
-        settlementDays: config.settlementDays,
-        settlementDayType: SettlementDayType.BUSINESS_DAYS,
-        cutoffTime: '23:00',
-        cutoffTimezone: 'America/Mexico_City',
-        effectiveFrom: new Date('2024-01-01'),
-        notes: config.notes,
-      },
-    })
-  }
-
-  console.log(
-    `  Created ${stripeSettlementTypes.length + blumonSettlementTypes.length * 2} settlement configurations (Stripe + Blumon x2).`,
-  )
+  console.log(`  Created ${blumonSettlementTypes.length} settlement configurations (Blumon A).`)
 
   // --- 1. Organizaciones ---
   console.log('Seeding organizations...')
@@ -1466,23 +1332,23 @@ async function main() {
           data: {
             venueId: venue.id,
             primaryAccountId: blumonMerchantA.id,
-            secondaryAccountId: blumonMerchantB.id,
-            tertiaryAccountId: index === 0 ? stripeMerchant.id : null,
+            secondaryAccountId: null,
+            tertiaryAccountId: null,
             routingRules: {
-              factura: 'secondary',
+              factura: 'primary',
               amount_over: 5000,
               customer_type: {
-                business: 'secondary',
+                business: 'primary',
               },
               bin_routing: {
-                '4111': 'secondary',
-                '5555': 'tertiary',
+                '4111': 'primary',
+                '5555': 'primary',
               },
               time_based: {
                 peak_hours: {
                   start: '18:00',
                   end: '22:00',
-                  account: 'tertiary',
+                  account: 'primary',
                 },
               },
             },
@@ -1507,22 +1373,7 @@ async function main() {
             contractReference: 'MENTA-2024-PRIMARY-RT01',
           },
         })
-        await prisma.venuePricingStructure.create({
-          data: {
-            venueId: venue.id,
-            accountType: AccountType.SECONDARY,
-            debitRate: 0.06, // 6% flat for all cards (Blumon B)
-            creditRate: 0.06, // 6% flat for all cards
-            amexRate: 0.06, // 6% flat for all cards
-            internationalRate: 0.06, // 6% flat for all cards
-            fixedFeePerTransaction: 1.0, // 1 peso fixed fee per transaction
-            monthlyServiceFee: null, // No monthly service fee
-            active: true,
-            effectiveFrom: new Date('2024-01-01'),
-            contractReference: 'MENTA-2024-SECONDARY-RT01',
-          },
-        })
-        console.log(`      - Created venue pricing structures.`)
+        console.log(`      - Created venue pricing structure.`)
       }
 
       // --- E-commerce Merchants (card-not-present channels) ---
@@ -1926,8 +1777,7 @@ async function main() {
               // 🆕 Hardware information (Phase 2 - Multi-Merchant)
               brand: isPrimaryVenueTerminal ? 'PAX' : null,
               model: isPrimaryVenueTerminal ? 'A910S' : null,
-              // 🆕 Assign both Blumon merchant accounts to primary terminal
-              assignedMerchantIds: isPrimaryVenueTerminal ? [blumonMerchantA.id, blumonMerchantB.id] : [],
+              assignedMerchantIds: isPrimaryVenueTerminal ? [blumonMerchantA.id] : [],
               status: scenario.status,
               lastHeartbeat: scenario.lastHeartbeat,
               version: scenario.version,
@@ -1952,7 +1802,7 @@ async function main() {
             brand: 'PAX',
             model: 'A920 Pro',
             status: TerminalStatus.ACTIVE,
-            assignedMerchantIds: [blumonMerchantA.id, blumonMerchantB.id],
+            assignedMerchantIds: [blumonMerchantA.id],
             lastHeartbeat: new Date(Date.now() - 45 * 1000),
             version: '2.1.4',
             systemInfo: {
@@ -4017,14 +3867,8 @@ async function main() {
               orderCompletedAt || new Date(orderCreatedAt.getTime() + faker.number.int({ min: 5, max: 30 }) * 60 * 1000)
 
             // 🆕 Determine merchant account BEFORE creating payment (for both payment and transaction cost)
-            // Simulate routing logic: 70% PRIMARY, 30% SECONDARY
-            const accountType = Math.random() > 0.7 ? AccountType.SECONDARY : AccountType.PRIMARY
-            const merchantAccountId =
-              paymentMethod !== PaymentMethod.CASH
-                ? accountType === AccountType.SECONDARY
-                  ? blumonMerchantB.id
-                  : blumonMerchantA.id
-                : undefined // Cash payments don't have merchant accounts
+            const accountType = AccountType.PRIMARY
+            const merchantAccountId = paymentMethod !== PaymentMethod.CASH ? blumonMerchantA.id : undefined
 
             const payment = await prisma.payment.create({
               data: {
@@ -4038,7 +3882,7 @@ async function main() {
                 source: paymentSource,
                 status: TransactionStatus.COMPLETED,
                 splitType: 'FULLPAYMENT',
-                processor: paymentMethod !== PaymentMethod.CASH ? 'stripe' : null,
+                processor: paymentMethod !== PaymentMethod.CASH ? 'blumon' : null,
                 processorId: paymentMethod !== PaymentMethod.CASH ? `pi_${faker.string.alphanumeric(24)}` : null,
                 merchantAccountId, // 🆕 Link payment to merchant account
                 feePercentage,
@@ -4064,7 +3908,7 @@ async function main() {
                     ])
 
               // Get the cost structures
-              const providerCost = accountType === AccountType.SECONDARY ? blumonBCosts : blumonACosts
+              const providerCost = blumonACosts
               const venuePricing = await prisma.venuePricingStructure.findFirst({
                 where: { venueId: venue.id, accountType, active: true },
               })

@@ -407,6 +407,26 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
     )
   }
 
+  // Check if account with same serial number already exists for this provider
+  // This prevents the TPV payment bug where two merchants with same serial but different posIds
+  // cause RSA data mismatch and NullPointerException during payment
+  if (data.blumonSerialNumber) {
+    const existingSerial = await prisma.merchantAccount.findFirst({
+      where: {
+        providerId: data.providerId,
+        blumonSerialNumber: data.blumonSerialNumber,
+      },
+      include: { provider: true },
+    })
+
+    if (existingSerial) {
+      throw new BadRequestError(
+        `Ya existe una cuenta con el número de serie "${data.blumonSerialNumber}" para el procesador ${existingSerial.provider?.name || 'seleccionado'}. ` +
+          `Cada terminal solo puede tener una cuenta por procesador. Elimina la cuenta existente primero o usa un serial diferente.`,
+      )
+    }
+  }
+
   // Encrypt credentials (or use empty placeholder for pending accounts)
   const encryptedCredentials = data.credentials ? encryptCredentials(data.credentials) : encryptCredentials({ pending: true })
 
