@@ -396,7 +396,8 @@ export const ReceivePurchaseOrderSchema = z.object({
 
 export const GetPurchaseOrdersQuerySchema = z.object({
   query: z.object({
-    status: z.nativeEnum(PurchaseOrderStatus).optional(),
+    // Accept array of statuses for multi-select filtering (e.g., status[]=SENT&status[]=CONFIRMED)
+    status: z.array(z.nativeEnum(PurchaseOrderStatus)).optional(),
     supplierId: z.string().cuid().optional(),
     startDate: z.string().datetime().optional(),
     endDate: z.string().datetime().optional(),

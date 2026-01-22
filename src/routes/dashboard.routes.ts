@@ -50,6 +50,7 @@ import * as tpvCommandController from '../controllers/dashboard/tpv-command.dash
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
+import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 import {
   dateRangeQuerySchema,
@@ -9899,6 +9900,139 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('settlements:write'),
   creditOfferController.declineOffer,
+)
+
+// ============================================================
+// SALE VERIFICATION ROUTES (Dashboard - Sales Report)
+// ============================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: List sale verifications with staff and payment details
+ *     description: Returns paginated list of sale verifications for the Sales Report dashboard
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: pageNumber
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [PENDING, COMPLETED, FAILED] }
+ *       - in: query
+ *         name: staffId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of sale verifications
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.listSaleVerifications,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications/summary:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: Get sale verifications summary statistics
+ *     description: Returns summary metrics for the Sales Report dashboard cards
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: Summary statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications/summary',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getSaleVerificationsSummary,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications/daily:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: Get daily sales data for charts
+ *     description: Returns daily aggregated sales data for revenue/volume charts
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: Daily sales data
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications/daily',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getDailySalesData,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications/staff:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: Get staff list with verification counts
+ *     description: Returns staff members who have sale verifications for filter dropdown
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Staff list with verification counts
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications/staff',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getStaffWithVerifications,
 )
 
 export default router

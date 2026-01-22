@@ -180,7 +180,7 @@ async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrderId: str
 export async function getPurchaseOrders(
   venueId: string,
   filters?: {
-    status?: PurchaseOrderStatus
+    status?: PurchaseOrderStatus[]
     supplierId?: string
     startDate?: Date
     endDate?: Date
@@ -188,7 +188,7 @@ export async function getPurchaseOrders(
 ): Promise<PurchaseOrder[]> {
   const where: Prisma.PurchaseOrderWhereInput = {
     venueId,
-    ...(filters?.status && { status: filters.status }),
+    ...(filters?.status && filters.status.length > 0 && { status: { in: filters.status } }),
     ...(filters?.supplierId && { supplierId: filters.supplierId }),
     ...(filters?.startDate && { orderDate: { gte: filters.startDate } }),
     ...(filters?.endDate && { orderDate: { lte: filters.endDate } }),
