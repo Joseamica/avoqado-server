@@ -2,18 +2,22 @@
 
 ## Overview
 
-This document outlines the backend API endpoints needed to support the PlayTelecom white-label dashboard. The APIs are organized into two levels:
+This document outlines the backend API endpoints needed to support the PlayTelecom white-label dashboard. The APIs are organized into two
+levels:
+
 - **Venue-Level APIs**: Scoped to a single venue (store)
 - **Organization-Level APIs**: Aggregate data across all venues in an organization
 
 ## Current State
 
 ### Existing Infrastructure
+
 - `serializedInventory.routes.ts` - Basic serialized inventory endpoints (summary, items, recent-sales)
 - `moduleService` - Module enable/disable system with `SERIALIZED_INVENTORY` module
 - Authentication middleware with `authContext` providing `venueId`, `userId`, `orgId`, `role`
 
 ### Prisma Models (Existing)
+
 ```prisma
 - SerializedItemCategory
 - SerializedItem
@@ -178,6 +182,7 @@ This document outlines the backend API endpoints needed to support the PlayTelec
 ### 3. Stock Control API (extends existing)
 
 **Existing endpoints in `serializedInventory.routes.ts`:**
+
 - `GET /summary` - Category counts
 - `GET /items` - Paginated items list
 - `GET /recent-sales` - Recent sales
@@ -188,24 +193,28 @@ This document outlines the backend API endpoints needed to support the PlayTelec
 // GET /dashboard/venues/:venueId/stock/chart-data
 // Returns: Stock vs Sales trend for last 7 days
 {
-  days: [{
-    date: string,
-    stockLevel: number,
-    salesCount: number
-  }]
+  days: [
+    {
+      date: string,
+      stockLevel: number,
+      salesCount: number,
+    },
+  ]
 }
 
 // GET /dashboard/venues/:venueId/stock/alerts
 // Returns: Low stock alerts
 {
-  alerts: [{
-    categoryId: string,
-    categoryName: string,
-    currentStock: number,
-    minimumStock: number,
-    alertLevel: 'WARNING' | 'CRITICAL',
-    coverageDays: number // Estimated days until stockout
-  }]
+  alerts: [
+    {
+      categoryId: string,
+      categoryName: string,
+      currentStock: number,
+      minimumStock: number,
+      alertLevel: 'WARNING' | 'CRITICAL',
+      coverageDays: number, // Estimated days until stockout
+    },
+  ]
 }
 
 // POST /dashboard/venues/:venueId/stock/bulk-upload
@@ -483,6 +492,7 @@ This document outlines the backend API endpoints needed to support the PlayTelec
 ## Implementation Order
 
 ### Phase 5A Priority (Venue-Level)
+
 1. **Command Center API** - Core dashboard data
 2. **Extend Stock API** - Charts and alerts
 3. **Promoters Audit API** - Team tracking
@@ -490,6 +500,7 @@ This document outlines the backend API endpoints needed to support the PlayTelec
 5. **Users Management API** - Permission system
 
 ### Phase 5B Priority (Org-Level)
+
 1. **Vision Global API** - Aggregate KPIs
 2. **Managers API** - Supervision dashboard
 3. **Reports API** - Cross-venue analytics
@@ -498,8 +509,9 @@ This document outlines the backend API endpoints needed to support the PlayTelec
 
 ### Attendance Tracking
 
-**Note:** Attendance tracking uses the existing `TimeEntry` model (not a separate `AttendanceRecord` model).
-The TPV app writes check-in/check-out data to `TimeEntry` with:
+**Note:** Attendance tracking uses the existing `TimeEntry` model (not a separate `AttendanceRecord` model). The TPV app writes
+check-in/check-out data to `TimeEntry` with:
+
 - `clockInTime` - Check-in timestamp
 - `clockOutTime` - Check-out timestamp
 - `checkInPhotoUrl` - Selfie photo URL

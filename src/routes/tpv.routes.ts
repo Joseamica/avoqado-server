@@ -43,6 +43,7 @@ import {
   createSaleVerificationSchema,
   listSaleVerificationsSchema,
   getSaleVerificationSchema,
+  createProofOfSaleSchema,
   tpvFeedbackSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
@@ -4548,6 +4549,70 @@ router.get(
   saleVerificationController.getVerificationByPaymentId,
 )
 
+/**
+ * @openapi
+ * /tpv/verification/proof-of-sale:
+ *   post:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Upload proof-of-sale photo
+ *     description: |
+ *       Simplified endpoint for uploading proof-of-sale photos after successful payment.
+ *       Used when SERIALIZED_INVENTORY module is active.
+ *
+ *       - If verification exists: Appends photos to existing record
+ *       - If no verification: Creates new verification with COMPLETED status
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - paymentId
+ *               - photoUrls
+ *             properties:
+ *               paymentId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Payment ID to attach proof-of-sale photo
+ *               photoUrls:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: uri
+ *                 minItems: 1
+ *                 description: Firebase Storage URLs of uploaded photos
+ *     responses:
+ *       200:
+ *         description: Proof-of-sale uploaded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 verificationId:
+ *                   type: string
+ *                   format: cuid
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: Invalid request data
+ *       404:
+ *         description: Payment or staff not found
+ */
+router.post(
+  '/verification/proof-of-sale',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(createProofOfSaleSchema),
+  saleVerificationController.createProofOfSale,
+)
+
 // ══════════════════════════════════════════════════════════════════════════════
 // BARCODE QUICK ADD (Square POS "Scan & Go" Pattern)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -5073,6 +5138,57 @@ router.get('/serialized-inventory/categories', authenticateTokenMiddleware, asyn
     return res.status(200).json({ success: true, data })
   } catch (error) {
     logger.error(`❌ [SERIALIZED INV] Error getting categories`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
+
+/**
+ * POST /tpv/serialized-inventory/categories
+ * Create a new category from TPV.
+ */
+router.post('/serialized-inventory/categories', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = (req as any).authContext
+    const { name, description, suggestedPrice } = req.body
+
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      throw new AppError('name is required', 400)
+    }
+
+    logger.info(`📦 [SERIALIZED INV] Creating category`, {
+      venueId,
+      name,
+      correlationId: req.correlationId,
+    })
+
+    const category = await serializedInventoryService.createCategory({
+      venueId,
+      name: name.trim(),
+      description: description?.trim(),
+      suggestedPrice: suggestedPrice ? parseFloat(suggestedPrice) : undefined,
+    })
+
+    logger.info(`✅ [SERIALIZED INV] Category created`, {
+      venueId,
+      categoryId: category.id,
+      name: category.name,
+      correlationId: req.correlationId,
+    })
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        id: category.id,
+        name: category.name,
+        description: category.description,
+        suggestedPrice: category.suggestedPrice?.toString() ?? null,
+      },
+    })
+  } catch (error) {
+    logger.error(`❌ [SERIALIZED INV] Error creating category`, {
       correlationId: req.correlationId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })

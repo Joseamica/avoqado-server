@@ -692,6 +692,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:read',
     'tpv-products:write',
     'tpv-factory-reset:execute', // ⚠️ CRITICAL: Can factory reset terminal (destructive)
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
+    'serialized-inventory:create', // Can register (Alta de Productos)
   ],
 
   /**

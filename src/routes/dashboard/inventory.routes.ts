@@ -37,6 +37,11 @@ import {
   ReceivePurchaseOrderSchema,
   GetPurchaseOrdersQuerySchema,
   PurchaseOrderIdParamsSchema,
+  UpdatePurchaseOrderFeesSchema,
+  UpdatePurchaseOrderItemStatusSchema,
+  ReceiveAllItemsSchema,
+  ReceiveNoItemsSchema,
+  GenerateLabelsSchema,
   GetAlertsQuerySchema,
   AcknowledgeAlertSchema,
   ResolveAlertSchema,
@@ -588,6 +593,20 @@ router.put(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}:
+ *   delete:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Delete a purchase order
+ */
+router.delete(
+  '/purchase-orders/:purchaseOrderId',
+  checkPermission('inventory:read'),
+  validateRequest(PurchaseOrderIdParamsSchema),
+  purchaseOrderController.deletePurchaseOrder,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/approve:
  *   post:
  *     tags: [Inventory - Purchase Orders]
@@ -626,6 +645,98 @@ router.post('/purchase-orders/:purchaseOrderId/cancel', checkPermission('invento
  *     summary: Get purchase order statistics
  */
 router.get('/purchase-orders/stats', checkPermission('inventory:read'), purchaseOrderController.getPurchaseOrderStats)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/fees:
+ *   put:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Update purchase order fees (tax and/or commission rates)
+ */
+router.put(
+  '/purchase-orders/:purchaseOrderId/fees',
+  checkPermission('inventory:update'),
+  validateRequest(UpdatePurchaseOrderFeesSchema),
+  purchaseOrderController.updatePurchaseOrderFees,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/items/{itemId}/status:
+ *   put:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Update individual purchase order item status
+ */
+router.put(
+  '/purchase-orders/:purchaseOrderId/items/:itemId/status',
+  checkPermission('inventory:update'),
+  validateRequest(UpdatePurchaseOrderItemStatusSchema),
+  purchaseOrderController.updatePurchaseOrderItemStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/recalculate-status:
+ *   post:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Recalculate purchase order status based on current item statuses
+ */
+router.post(
+  '/purchase-orders/:purchaseOrderId/recalculate-status',
+  checkPermission('inventory:update'),
+  purchaseOrderController.recalculateStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/receive-all:
+ *   post:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Mark all items in a purchase order as RECEIVED
+ */
+router.post(
+  '/purchase-orders/:purchaseOrderId/receive-all',
+  checkPermission('inventory:update'),
+  validateRequest(ReceiveAllItemsSchema),
+  purchaseOrderController.receiveAllItems,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/receive-none:
+ *   post:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Mark all items in a purchase order as NOT_PROCESSED
+ */
+router.post(
+  '/purchase-orders/:purchaseOrderId/receive-none',
+  checkPermission('inventory:update'),
+  validateRequest(ReceiveNoItemsSchema),
+  purchaseOrderController.receiveNoItems,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/labels:
+ *   post:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Generate labels for purchase order items
+ */
+router.post(
+  '/purchase-orders/:purchaseOrderId/labels',
+  checkPermission('inventory:read'),
+  validateRequest(GenerateLabelsSchema),
+  purchaseOrderController.generateLabels,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/pdf:
+ *   get:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Generate PDF for purchase order
+ */
+router.get('/purchase-orders/:purchaseOrderId/pdf', checkPermission('inventory:read'), purchaseOrderController.generatePDF)
 
 // ===========================================
 // ALERTS ROUTES

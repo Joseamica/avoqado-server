@@ -2244,12 +2244,12 @@ export async function sellSerializedItem(
     // Build OrderItem data with proper snapshot fields
     const orderItemData = serializedInventoryService.buildOrderItemData(serializedItemWithCategory!, input.price)
 
-    // Create order
+    // Create order (PENDING until payment)
     const order = await tx.order.create({
       data: {
         venueId,
         orderNumber,
-        status: 'COMPLETED', // SerializedItem sales are instant
+        status: 'PENDING', // Will be COMPLETED when payment succeeds
         paymentStatus: 'PENDING',
         subtotal: input.price,
         taxAmount: 0, // No tax by default for serialized items
@@ -2272,9 +2272,11 @@ export async function sellSerializedItem(
       },
     })
 
-    // Mark serialized item as sold (must use tx to reference the OrderItem created in this transaction)
+    // ⚠️ DO NOT mark as SOLD here - only mark as SOLD when payment completes
+    // Item will be marked as SOLD in processPayment() when payment succeeds
+    // This prevents marking items as sold when payment is cancelled/fails
     const orderItemId = order.items[0].id
-    await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItemId, tx)
+    // await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItemId, tx) // REMOVED
 
     // Fetch full order with all includes
     const fullOrder = await tx.order.findUniqueOrThrow({

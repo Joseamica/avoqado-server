@@ -4,6 +4,7 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import prisma from '../../utils/prismaClient'
+import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 
 // Types for organization dashboard
 export interface OrgVisionGlobalSummary {
@@ -34,7 +35,7 @@ export interface OrgStorePerformance {
 
 export interface OrgCrossStoreAnomaly {
   id: string
-  type: 'LOW_PERFORMANCE' | 'NO_CHECKINS' | 'LOW_STOCK' | 'PENDING_DEPOSITS'
+  type: 'LOW_PERFORMANCE' | 'NO_CHECKINS' | 'LOW_STOCK' | 'PENDING_DEPOSITS' | 'GPS_VIOLATION'
   severity: 'CRITICAL' | 'WARNING' | 'INFO'
   storeId: string
   storeName: string
@@ -81,6 +82,73 @@ export interface OrgStockSummary {
     value: number
     alertLevel: 'OK' | 'WARNING' | 'CRITICAL'
   }>
+}
+
+export interface OnlineStaffMember {
+  staffId: string
+  staffName: string
+  venueId: string
+  venueName: string
+  clockInTime: Date
+  role: string
+}
+
+export interface OrgOnlineStaff {
+  onlineCount: number
+  totalCount: number
+  percentageOnline: number
+  byVenue: Array<{
+    venueId: string
+    venueName: string
+    onlineCount: number
+    totalCount: number
+  }>
+  onlineStaff: OnlineStaffMember[]
+}
+
+export type ActivityType = 'sale' | 'checkin' | 'checkout' | 'gps_error' | 'alert' | 'other'
+export type ActivitySeverity = 'normal' | 'warning' | 'error'
+
+export interface ActivityEvent {
+  id: string
+  type: ActivityType
+  title: string
+  subtitle: string // "Staff Name • Venue Name"
+  timestamp: Date
+  severity: ActivitySeverity
+  venueId: string
+  venueName: string
+  staffId?: string
+  staffName?: string
+  metadata?: Record<string, any>
+}
+
+export interface OrgActivityFeed {
+  events: ActivityEvent[]
+  total: number
+}
+
+export interface OrganizationGoalData {
+  id: string
+  organizationId: string
+  period: string
+  periodDate: Date
+  salesTarget: number
+  volumeTarget: number
+}
+
+export interface RevenueVsTargetData {
+  day: string // "Lun", "Mar", "Mié", etc.
+  actual: number // Actual revenue
+  target: number // Target revenue for that day
+  date: string // ISO date string
+}
+
+export interface VolumeVsTargetData {
+  day: string
+  actual: number // Actual count
+  target: number // Target count
+  date: string // ISO date string
 }
 
 class OrganizationDashboardService {
@@ -310,11 +378,15 @@ class OrganizationDashboardService {
 
     const anomalies: OrgCrossStoreAnomaly[] = []
 
+    console.log('[ANOMALIES DEBUG] Starting anomalies detection for orgId:', orgId)
+
     // Get all venues
     const venues = await prisma.venue.findMany({
       where: { organizationId: orgId, status: 'ACTIVE' },
-      select: { id: true, name: true },
+      select: { id: true, name: true, latitude: true, longitude: true },
     })
+
+    console.log('[ANOMALIES DEBUG] Found venues:', venues.length)
 
     for (const venue of venues) {
       // Check for no check-ins after 10 AM (using TimeEntry)
@@ -397,6 +469,55 @@ class OrganizationDashboardService {
           }
         }
       }
+
+      // Check for GPS violations (check-ins outside geofence)
+      if (venue.latitude && venue.longitude) {
+        console.log(`[ANOMALIES DEBUG] Checking GPS for venue ${venue.name}, lat:${venue.latitude}, lon:${venue.longitude}`)
+
+        const gpsViolations = await prisma.timeEntry.findMany({
+          where: {
+            venueId: venue.id,
+            clockInTime: { gte: todayStart },
+            status: 'CLOCKED_IN',
+            clockInLatitude: { not: null },
+            clockInLongitude: { not: null },
+          },
+          include: {
+            staff: {
+              select: { firstName: true, lastName: true },
+            },
+          },
+        })
+
+        console.log(`[ANOMALIES DEBUG] Found ${gpsViolations.length} time entries with GPS for ${venue.name}`)
+
+        for (const entry of gpsViolations) {
+          if (entry.clockInLatitude && entry.clockInLongitude) {
+            const distance = this.calculateDistance(
+              Number(venue.latitude),
+              Number(venue.longitude),
+              Number(entry.clockInLatitude),
+              Number(entry.clockInLongitude),
+            )
+
+            console.log(`[ANOMALIES DEBUG] ${entry.staff.firstName} ${entry.staff.lastName}: distance = ${distance.toFixed(2)}km`)
+
+            // Alert if check-in is more than 500m from venue (0.5km)
+            if (distance > 0.5) {
+              console.log('[ANOMALIES DEBUG] GPS VIOLATION DETECTED!')
+              anomalies.push({
+                id: `gps-violation-${entry.id}`,
+                type: 'GPS_VIOLATION',
+                severity: distance > 1 ? 'CRITICAL' : 'WARNING',
+                storeId: venue.id,
+                storeName: venue.name,
+                title: 'Violación GPS',
+                description: `${entry.staff.firstName} ${entry.staff.lastName} hizo check-in ${distance.toFixed(1)}km fuera del rango en ${venue.name}`,
+              })
+            }
+          }
+        }
+      }
     }
 
     // Sort by severity
@@ -405,7 +526,33 @@ class OrganizationDashboardService {
       return severityOrder[a.severity] - severityOrder[b.severity]
     })
 
+    console.log(`[ANOMALIES DEBUG] Total anomalies found: ${anomalies.length}`)
+
     return anomalies
+  }
+
+  /**
+   * Calculate distance between two GPS coordinates using Haversine formula
+   * @returns distance in kilometers
+   */
+  private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const R = 6371 // Earth's radius in kilometers
+    const dLat = this.toRadians(lat2 - lat1)
+    const dLon = this.toRadians(lon2 - lon1)
+
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(this.toRadians(lat1)) * Math.cos(this.toRadians(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return R * c
+  }
+
+  /**
+   * Convert degrees to radians
+   */
+  private toRadians(degrees: number): number {
+    return degrees * (Math.PI / 180)
   }
 
   /**
@@ -666,6 +813,590 @@ class OrganizationDashboardService {
   }
 
   /**
+   * Get online staff (promoters with active TimeEntry today)
+   */
+  async getOnlineStaff(orgId: string): Promise<OrgOnlineStaff> {
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+
+    // Get all venues in organization
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId, status: 'ACTIVE' },
+      select: { id: true, name: true },
+    })
+    const venueIds = venues.map(v => v.id)
+
+    if (venueIds.length === 0) {
+      return {
+        onlineCount: 0,
+        totalCount: 0,
+        percentageOnline: 0,
+        byVenue: [],
+        onlineStaff: [],
+      }
+    }
+
+    // Get all active TimeEntry records for today (clockIn without clockOut)
+    const activeTimeEntries = await prisma.timeEntry.findMany({
+      where: {
+        venueId: { in: venueIds },
+        clockInTime: { gte: todayStart },
+        clockOutTime: null, // Only entries that haven't clocked out
+      },
+      include: {
+        staff: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        venue: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
+      orderBy: {
+        clockInTime: 'desc',
+      },
+    })
+
+    // Get total staff count (CASHIER and WAITER roles)
+    const totalStaff = await prisma.staffVenue.count({
+      where: {
+        venueId: { in: venueIds },
+        active: true,
+        role: { in: ['CASHIER', 'WAITER'] },
+      },
+    })
+
+    // Build online staff list
+    const onlineStaff: OnlineStaffMember[] = activeTimeEntries.map(entry => ({
+      staffId: entry.staffId,
+      staffName: `${entry.staff.firstName} ${entry.staff.lastName}`.trim(),
+      venueId: entry.venueId,
+      venueName: entry.venue.name,
+      clockInTime: entry.clockInTime,
+      role: entry.jobRole || 'Staff',
+    }))
+
+    // Group by venue for breakdown
+    const byVenueMap = new Map<string, { venueId: string; venueName: string; onlineCount: number; totalCount: number }>()
+
+    for (const venue of venues) {
+      const venueOnlineCount = activeTimeEntries.filter(e => e.venueId === venue.id).length
+      const venueTotalCount = await prisma.staffVenue.count({
+        where: {
+          venueId: venue.id,
+          active: true,
+          role: { in: ['CASHIER', 'WAITER'] },
+        },
+      })
+
+      byVenueMap.set(venue.id, {
+        venueId: venue.id,
+        venueName: venue.name,
+        onlineCount: venueOnlineCount,
+        totalCount: venueTotalCount,
+      })
+    }
+
+    const byVenue = Array.from(byVenueMap.values())
+
+    return {
+      onlineCount: activeTimeEntries.length,
+      totalCount: totalStaff,
+      percentageOnline: totalStaff > 0 ? Math.round((activeTimeEntries.length / totalStaff) * 100) : 0,
+      byVenue,
+      onlineStaff,
+    }
+  }
+
+  /**
+   * Get organization-wide activity feed
+   *
+   * Aggregates events from multiple sources:
+   * - Sales (Order table)
+   * - Check-ins (TimeEntry table)
+   * - System alerts
+   *
+   * @param orgId - Organization ID
+   * @param limit - Max events to return (default 50)
+   */
+  async getActivityFeed(orgId: string, limit: number = 50): Promise<OrgActivityFeed> {
+    // Get events from last 24 hours (avoids timezone issues)
+    const last24Hours = new Date()
+    last24Hours.setHours(last24Hours.getHours() - 24)
+
+    // Get all venues
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId, status: 'ACTIVE' },
+      select: { id: true, name: true },
+    })
+    const venueIds = venues.map(v => v.id)
+
+    if (venueIds.length === 0) {
+      return { events: [], total: 0 }
+    }
+
+    const events: ActivityEvent[] = []
+
+    // Fetch recent sales (completed orders from last 24 hours)
+    const recentOrders = await prisma.order.findMany({
+      where: {
+        venueId: { in: venueIds },
+        status: 'COMPLETED',
+        createdAt: { gte: last24Hours },
+      },
+      include: {
+        venue: { select: { id: true, name: true } },
+        servedBy: { select: { id: true, firstName: true, lastName: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: Math.ceil(limit * 0.6), // Allocate 60% of limit to sales
+    })
+
+    for (const order of recentOrders) {
+      events.push({
+        id: `sale-${order.id}`,
+        type: 'sale',
+        title: `Venta: ${order.total ? `$${Number(order.total).toFixed(2)}` : 'Sin monto'}`,
+        subtitle: `${order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}` : 'Staff desconocido'} • ${order.venue.name}`,
+        timestamp: order.createdAt,
+        severity: 'normal',
+        venueId: order.venueId,
+        venueName: order.venue.name,
+        staffId: order.servedById || undefined,
+        staffName: order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}` : undefined,
+        metadata: {
+          orderId: order.id,
+          total: order.total ? Number(order.total) : 0,
+        },
+      })
+    }
+
+    // Fetch recent check-ins and checkouts (TimeEntry from last 24 hours)
+    const recentTimeEntries = await prisma.timeEntry.findMany({
+      where: {
+        venueId: { in: venueIds },
+        clockInTime: { gte: last24Hours },
+      },
+      include: {
+        venue: { select: { id: true, name: true } },
+        staff: { select: { id: true, firstName: true, lastName: true } },
+      },
+      orderBy: { clockInTime: 'desc' },
+      take: Math.ceil(limit * 0.4), // Allocate 40% of limit to time entries
+    })
+
+    console.log(`[ACTIVITY FEED DEBUG] Found ${recentTimeEntries.length} time entries`)
+
+    for (const entry of recentTimeEntries) {
+      console.log(
+        `[ACTIVITY FEED DEBUG] Entry ${entry.id}: clockIn=${entry.clockInTime}, clockOut=${entry.clockOutTime}, status=${entry.status}`,
+      )
+      // Add check-in event
+      events.push({
+        id: `checkin-${entry.id}`,
+        type: 'checkin',
+        title: `Check-in: ${entry.staff.firstName} ${entry.staff.lastName}`,
+        subtitle: `${entry.jobRole || 'CASHIER'} • ${entry.venue.name}`,
+        timestamp: entry.clockInTime,
+        severity: 'normal',
+        venueId: entry.venueId,
+        venueName: entry.venue.name,
+        staffId: entry.staffId,
+        staffName: `${entry.staff.firstName} ${entry.staff.lastName}`,
+        metadata: {
+          timeEntryId: entry.id,
+          role: entry.jobRole,
+        },
+      })
+
+      // Add checkout event if it exists
+      if (entry.clockOutTime) {
+        events.push({
+          id: `checkout-${entry.id}`,
+          type: 'checkout',
+          title: `Check-out: ${entry.staff.firstName} ${entry.staff.lastName}`,
+          subtitle: `${entry.jobRole || 'CASHIER'} • ${entry.venue.name}`,
+          timestamp: entry.clockOutTime,
+          severity: 'normal',
+          venueId: entry.venueId,
+          venueName: entry.venue.name,
+          staffId: entry.staffId,
+          staffName: `${entry.staff.firstName} ${entry.staff.lastName}`,
+          metadata: {
+            timeEntryId: entry.id,
+            role: entry.jobRole,
+          },
+        })
+      }
+    }
+
+    // Sort all events by timestamp descending
+    events.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+
+    // Limit to requested size
+    const limitedEvents = events.slice(0, limit)
+
+    return {
+      events: limitedEvents,
+      total: events.length,
+    }
+  }
+
+  /**
+   * Get or create daily goals for current week
+   */
+  async getOrCreateWeeklyGoals(orgId: string): Promise<OrganizationGoalData[]> {
+    // Use venue timezone for date calculations
+    // Default to Mexico City if organization doesn't have timezone set
+    const timezone = 'America/Mexico_City' // TODO: Get from organization settings
+
+    const today = new Date()
+    // Get current time in venue timezone
+    const nowVenue = toZonedTime(today, timezone)
+
+    // Calculate week start (Sunday) in venue timezone
+    const weekStartVenue = new Date(nowVenue)
+    weekStartVenue.setDate(nowVenue.getDate() - nowVenue.getDay()) // Sunday
+    weekStartVenue.setHours(0, 0, 0, 0)
+
+    // Convert back to UTC for database query
+    const weekStart = fromZonedTime(weekStartVenue, timezone)
+
+    const weekEnd = new Date(weekStart)
+    weekEnd.setDate(weekStart.getDate() + 7)
+
+    const monthStartVenue = new Date(weekStartVenue)
+    monthStartVenue.setDate(1)
+    monthStartVenue.setHours(0, 0, 0, 0)
+    const monthStartUtc = new Date(Date.UTC(weekStartVenue.getFullYear(), weekStartVenue.getMonth(), 1))
+    const monthEndUtc = new Date(Date.UTC(weekStartVenue.getFullYear(), weekStartVenue.getMonth() + 1, 1))
+    const daysInMonth = new Date(monthStartVenue.getFullYear(), monthStartVenue.getMonth() + 1, 0).getDate()
+
+    // Fetch all daily goals for the week in one query
+    const existingGoals = await prisma.organizationGoal.findMany({
+      where: {
+        organizationId: orgId,
+        period: 'daily',
+        periodDate: {
+          gte: weekStart,
+          lt: weekEnd,
+        },
+      },
+    })
+
+    const weekStartUtc = new Date(Date.UTC(weekStartVenue.getFullYear(), weekStartVenue.getMonth(), weekStartVenue.getDate()))
+    const weekEndUtc = new Date(weekStartUtc)
+    weekEndUtc.setUTCDate(weekEndUtc.getUTCDate() + 7)
+
+    const weeklyGoal = await prisma.organizationGoal.findFirst({
+      where: {
+        organizationId: orgId,
+        period: 'weekly',
+        periodDate: {
+          gte: weekStartUtc,
+          lt: weekEndUtc,
+        },
+      },
+      orderBy: { periodDate: 'asc' },
+    })
+
+    const monthlyGoal = await prisma.organizationGoal.findFirst({
+      where: {
+        organizationId: orgId,
+        period: 'monthly',
+        periodDate: {
+          gte: monthStartUtc,
+          lt: monthEndUtc,
+        },
+      },
+      orderBy: { periodDate: 'asc' },
+    })
+
+    const defaultSalesTarget = 19285.71
+    const defaultVolumeTarget = 71
+
+    const baseSalesTarget = weeklyGoal
+      ? Number(weeklyGoal.salesTarget) / 7
+      : monthlyGoal
+        ? Number(monthlyGoal.salesTarget) / daysInMonth
+        : defaultSalesTarget
+
+    const baseVolumeTarget = weeklyGoal
+      ? Math.round(weeklyGoal.volumeTarget / 7)
+      : monthlyGoal
+        ? Math.round(monthlyGoal.volumeTarget / daysInMonth)
+        : defaultVolumeTarget
+
+    const dailySalesTarget = Math.round(baseSalesTarget * 100) / 100
+
+    const goals: OrganizationGoalData[] = []
+
+    // Create/fetch goals for each day of the week
+    for (let i = 0; i < 7; i++) {
+      const dayDate = new Date(weekStart)
+      dayDate.setUTCDate(weekStart.getUTCDate() + i)
+
+      // Find existing goal by comparing date strings (avoids timezone issues)
+      let goal = existingGoals.find(g => g.periodDate.toDateString() === dayDate.toDateString())
+
+      const shouldNormalizeDailyGoal =
+        !!goal &&
+        (weeklyGoal || monthlyGoal) &&
+        (Math.abs(Number(goal.salesTarget) - dailySalesTarget) > 0.01 || goal.volumeTarget !== baseVolumeTarget)
+
+      if (!goal) {
+        goal = await prisma.organizationGoal.create({
+          data: {
+            organizationId: orgId,
+            period: 'daily',
+            periodDate: dayDate,
+            salesTarget: dailySalesTarget,
+            volumeTarget: baseVolumeTarget,
+          },
+        })
+      } else if (shouldNormalizeDailyGoal) {
+        goal = await prisma.organizationGoal.update({
+          where: { id: goal.id },
+          data: {
+            salesTarget: dailySalesTarget,
+            volumeTarget: baseVolumeTarget,
+          },
+        })
+      }
+
+      goals.push({
+        id: goal.id,
+        organizationId: goal.organizationId,
+        period: goal.period,
+        periodDate: goal.periodDate,
+        salesTarget: Number(goal.salesTarget),
+        volumeTarget: goal.volumeTarget,
+      })
+    }
+
+    return goals
+  }
+
+  /**
+   * Get revenue vs target chart data for current week
+   */
+  async getRevenueVsTarget(
+    orgId: string,
+    venueId?: string,
+  ): Promise<{ days: RevenueVsTargetData[]; weekTotal: { actual: number; target: number } }> {
+    // IMPORTANT: Database timestamps are stored in UTC (timestamp without time zone treated as UTC)
+    // We calculate dates in venue timezone, then convert to UTC for queries
+    const timezone = 'America/Mexico_City' // TODO: Get from organization settings
+
+    const today = new Date()
+    const nowVenue = toZonedTime(today, timezone)
+
+    // Calculate week start (Sunday) in venue timezone
+    const weekStartVenue = new Date(nowVenue)
+    weekStartVenue.setDate(nowVenue.getDate() - nowVenue.getDay()) // Sunday
+    weekStartVenue.setHours(0, 0, 0, 0)
+
+    // Convert to UTC for database query (timestamps in DB are UTC)
+    const weekStart = fromZonedTime(weekStartVenue, timezone)
+
+    // Get venues
+    const venues = await prisma.venue.findMany({
+      where: {
+        organizationId: orgId,
+        status: 'ACTIVE',
+        ...(venueId ? { id: venueId } : {}),
+      },
+      select: { id: true },
+    })
+    const venueIds = venues.map(v => v.id)
+
+    // Get goals for the week
+    const goals = await this.getOrCreateWeeklyGoals(orgId)
+
+    const days: RevenueVsTargetData[] = []
+    const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
+    let totalActual = 0
+    let totalTarget = 0
+
+    for (let i = 0; i < 7; i++) {
+      // Calculate each day in venue timezone
+      const dayStartVenue = new Date(weekStartVenue)
+      dayStartVenue.setDate(weekStartVenue.getDate() + i)
+
+      const dayEndVenue = new Date(dayStartVenue)
+      dayEndVenue.setDate(dayStartVenue.getDate() + 1)
+
+      // Convert to UTC for database query (timestamps in DB are UTC)
+      const dayStart = fromZonedTime(dayStartVenue, timezone)
+      const dayEnd = fromZonedTime(dayEndVenue, timezone)
+
+      // Get actual revenue for this day
+      const orders = await prisma.order.aggregate({
+        where: {
+          venueId: { in: venueIds },
+          status: 'COMPLETED',
+          createdAt: { gte: dayStart, lt: dayEnd },
+        },
+        _sum: { total: true },
+      })
+
+      const goal = goals.find(g => g.periodDate.toDateString() === dayStart.toDateString())
+      const actual = Math.round((Number(orders._sum?.total) || 0) * 100) / 100
+      const target = goal ? goal.salesTarget : 0
+
+      totalActual += actual
+      totalTarget += target
+
+      days.push({
+        day: dayNames[i],
+        actual: actual,
+        target: target,
+        date: dayStart.toISOString(),
+      })
+    }
+
+    return {
+      days,
+      weekTotal: {
+        actual: Math.round(totalActual * 100) / 100,
+        target: Math.round(totalTarget * 100) / 100,
+      },
+    }
+  }
+
+  /**
+   * Get volume vs target chart data for current week
+   */
+  async getVolumeVsTarget(
+    orgId: string,
+    venueId?: string,
+  ): Promise<{ days: VolumeVsTargetData[]; weekTotal: { actual: number; target: number } }> {
+    // IMPORTANT: Database timestamps are stored in UTC (timestamp without time zone treated as UTC)
+    // We calculate dates in venue timezone, then convert to UTC for queries
+    const timezone = 'America/Mexico_City' // TODO: Get from organization settings
+
+    const today = new Date()
+    const nowVenue = toZonedTime(today, timezone)
+
+    // Calculate week start (Sunday) in venue timezone
+    const weekStartVenue = new Date(nowVenue)
+    weekStartVenue.setDate(nowVenue.getDate() - nowVenue.getDay()) // Sunday
+    weekStartVenue.setHours(0, 0, 0, 0)
+
+    // Convert to UTC for database query (timestamps in DB are UTC)
+    const weekStart = fromZonedTime(weekStartVenue, timezone)
+
+    // Get venues
+    const venues = await prisma.venue.findMany({
+      where: {
+        organizationId: orgId,
+        status: 'ACTIVE',
+        ...(venueId ? { id: venueId } : {}),
+      },
+      select: { id: true },
+    })
+    const venueIds = venues.map(v => v.id)
+
+    // Get goals for the week
+    const goals = await this.getOrCreateWeeklyGoals(orgId)
+
+    const days: VolumeVsTargetData[] = []
+    const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
+    let totalActual = 0
+    let totalTarget = 0
+
+    for (let i = 0; i < 7; i++) {
+      // Calculate each day in venue timezone
+      const dayStartVenue = new Date(weekStartVenue)
+      dayStartVenue.setDate(weekStartVenue.getDate() + i)
+
+      const dayEndVenue = new Date(dayStartVenue)
+      dayEndVenue.setDate(dayStartVenue.getDate() + 1)
+
+      // Convert to UTC for database query (timestamps in DB are UTC)
+      const dayStart = fromZonedTime(dayStartVenue, timezone)
+      const dayEnd = fromZonedTime(dayEndVenue, timezone)
+
+      // Get actual order count for this day
+      const orderCount = await prisma.order.count({
+        where: {
+          venueId: { in: venueIds },
+          status: 'COMPLETED',
+          createdAt: { gte: dayStart, lt: dayEnd },
+        },
+      })
+
+      const goal = goals.find(g => g.periodDate.toDateString() === dayStart.toDateString())
+      const target = goal ? goal.volumeTarget : 0
+
+      totalActual += orderCount
+      totalTarget += target
+
+      days.push({
+        day: dayNames[i],
+        actual: orderCount,
+        target: target,
+        date: dayStart.toISOString(),
+      })
+    }
+
+    return {
+      days,
+      weekTotal: {
+        actual: totalActual,
+        target: totalTarget,
+      },
+    }
+  }
+
+  /**
+   * Update goals for a specific period
+   */
+  async updateOrganizationGoal(
+    orgId: string,
+    period: string,
+    periodDate: Date,
+    salesTarget: number,
+    volumeTarget: number,
+  ): Promise<OrganizationGoalData> {
+    const goal = await prisma.organizationGoal.upsert({
+      where: {
+        organizationId_period_periodDate: {
+          organizationId: orgId,
+          period,
+          periodDate,
+        },
+      },
+      update: {
+        salesTarget,
+        volumeTarget,
+      },
+      create: {
+        organizationId: orgId,
+        period,
+        periodDate,
+        salesTarget,
+        volumeTarget,
+      },
+    })
+
+    return {
+      id: goal.id,
+      organizationId: goal.organizationId,
+      period: goal.period,
+      periodDate: goal.periodDate,
+      salesTarget: Number(goal.salesTarget),
+      volumeTarget: goal.volumeTarget,
+    }
+  }
+
+  /**
    * Get list of managers in organization
    */
   async getOrgManagers(orgId: string): Promise<
@@ -756,6 +1487,551 @@ class OrganizationDashboardService {
 
     // Sort by today's sales descending
     return results.sort((a, b) => b.todaySales - a.todaySales)
+  }
+
+  /**
+   * Get top promoter by sales count (completed orders today)
+   */
+  async getTopPromoter(orgId: string): Promise<{
+    staffId: string
+    staffName: string
+    venueId: string
+    venueName: string
+    salesCount: number
+  } | null> {
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+
+    // Get all venues in organization
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true, name: true },
+    })
+
+    if (venues.length === 0) return null
+
+    const venueIds = venues.map(v => v.id)
+
+    // Get all completed orders today with staff info
+    const orders = await prisma.order.findMany({
+      where: {
+        venueId: { in: venueIds },
+        status: 'COMPLETED',
+        createdAt: { gte: todayStart },
+        createdById: { not: null },
+      },
+      select: {
+        createdById: true,
+        venueId: true,
+        createdBy: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        venue: {
+          select: {
+            name: true,
+          },
+        },
+      },
+    })
+
+    if (orders.length === 0) return null
+
+    // Group by staff and count sales
+    const staffSalesMap = new Map<
+      string,
+      {
+        staffId: string
+        staffName: string
+        venueId: string
+        venueName: string
+        salesCount: number
+      }
+    >()
+
+    for (const order of orders) {
+      if (!order.createdById) continue
+
+      const existing = staffSalesMap.get(order.createdById)
+      if (existing) {
+        existing.salesCount++
+      } else {
+        staffSalesMap.set(order.createdById, {
+          staffId: order.createdById,
+          staffName: `${order.createdBy?.firstName || ''} ${order.createdBy?.lastName || ''}`.trim(),
+          venueId: order.venueId,
+          venueName: order.venue?.name || '',
+          salesCount: 1,
+        })
+      }
+    }
+
+    // Find top promoter
+    const topPromoter = Array.from(staffSalesMap.values()).sort((a, b) => b.salesCount - a.salesCount)[0]
+
+    return topPromoter || null
+  }
+
+  /**
+   * Get worst attendance (store with lowest percentage of active staff today)
+   */
+  async getWorstAttendance(orgId: string): Promise<{
+    venueId: string
+    venueName: string
+    totalStaff: number
+    activeStaff: number
+    absences: number
+    attendanceRate: number
+  } | null> {
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+
+    // Get all venues in organization
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true, name: true },
+    })
+
+    if (venues.length === 0) return null
+
+    // Calculate attendance for each venue
+    const venueAttendance = await Promise.all(
+      venues.map(async venue => {
+        // Total staff in venue - use StaffVenue junction table
+        const totalStaff = await prisma.staffVenue.count({
+          where: {
+            venueId: venue.id,
+            active: true, // Only count active staff assignments
+          },
+        })
+
+        if (totalStaff === 0) return null
+
+        // Active staff (with TimeEntry today and no clockOut)
+        // TimeEntry has venueId directly
+        const activeStaff = await prisma.timeEntry.count({
+          where: {
+            venueId: venue.id,
+            clockInTime: { gte: todayStart },
+            clockOutTime: null,
+          },
+        })
+
+        const absences = totalStaff - activeStaff
+        const attendanceRate = totalStaff > 0 ? (activeStaff / totalStaff) * 100 : 0
+
+        return {
+          venueId: venue.id,
+          venueName: venue.name,
+          totalStaff,
+          activeStaff,
+          absences,
+          attendanceRate: Math.round(attendanceRate * 10) / 10,
+        }
+      }),
+    )
+
+    // Filter out nulls and find worst attendance
+    const validVenues = venueAttendance.filter(v => v !== null)
+    if (validVenues.length === 0) return null
+
+    const worstAttendance = validVenues.sort((a, b) => a.attendanceRate - b.attendanceRate)[0]
+
+    return worstAttendance || null
+  }
+
+  /**
+   * Get staff attendance with TimeEntry data for promoter audit
+   * Returns all staff with their TimeEntry for the specified date
+   */
+  async getStaffAttendance(
+    orgId: string,
+    dateStr?: string,
+    venueId?: string,
+    statusFilter?: string,
+  ): Promise<{
+    staff: Array<{
+      id: string
+      name: string
+      email: string
+      avatar?: string | null
+      venueId: string
+      venueName: string
+      status: 'ACTIVE' | 'INACTIVE'
+      checkInTime?: string | null
+      checkInLocation?: { lat: number; lng: number } | null
+      checkInPhotoUrl?: string | null
+      checkOutTime?: string | null
+      checkOutLocation?: { lat: number; lng: number } | null
+      checkOutPhotoUrl?: string | null
+      break: boolean
+      breakMinutes: number
+      sales: number
+      attendancePercent: number
+    }>
+  }> {
+    // Parse date or use today
+    const targetDate = dateStr ? new Date(dateStr) : new Date()
+    const dayStart = new Date(targetDate)
+    dayStart.setHours(0, 0, 0, 0)
+    const dayEnd = new Date(targetDate)
+    dayEnd.setHours(23, 59, 59, 999)
+
+    // Get all venues in organization
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true, name: true },
+    })
+
+    const venueIds = venueId ? [venueId] : venues.map(v => v.id)
+
+    // Get all staff in these venues
+    const staffVenues = await prisma.staffVenue.findMany({
+      where: {
+        venueId: { in: venueIds },
+        active: true,
+      },
+      include: {
+        staff: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            photoUrl: true,
+          },
+        },
+        venue: { select: { name: true } },
+      },
+    })
+
+    // Get TimeEntry for the specified date
+    const timeEntries = await prisma.timeEntry.findMany({
+      where: {
+        venueId: { in: venueIds },
+        clockInTime: { gte: dayStart, lte: dayEnd },
+      },
+      select: {
+        staffId: true,
+        venueId: true,
+        clockInTime: true,
+        clockOutTime: true,
+        clockInLatitude: true,
+        clockInLongitude: true,
+        clockOutLatitude: true,
+        clockOutLongitude: true,
+        checkInPhotoUrl: true,
+        checkOutPhotoUrl: true,
+        status: true,
+      },
+    })
+
+    // Get sales for each staff member per venue from completed payments
+    const salesData = await prisma.payment.groupBy({
+      by: ['processedById', 'venueId'],
+      where: {
+        venueId: { in: venueIds },
+        createdAt: { gte: dayStart, lte: dayEnd },
+        status: 'COMPLETED',
+        processedById: { not: null },
+      },
+      _sum: { amount: true },
+    })
+
+    // Key: staffId:venueId -> sales amount
+    const salesByStaffVenue: Record<string, number> = {}
+    salesData.forEach(s => {
+      if (s.processedById) {
+        const key = `${s.processedById}:${s.venueId}`
+        salesByStaffVenue[key] = Number(s._sum.amount) || 0
+      }
+    })
+
+    // Calculate attendance percentage for last 30 days
+    const thirtyDaysAgo = new Date()
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+
+    const attendanceData = await prisma.timeEntry.groupBy({
+      by: ['staffId'],
+      where: {
+        venueId: { in: venueIds },
+        clockInTime: { gte: thirtyDaysAgo },
+      },
+      _count: { id: true },
+    })
+
+    const attendanceByStaff: Record<string, number> = {}
+    attendanceData.forEach(a => {
+      // Simplified: count / 30 days * 100
+      attendanceByStaff[a.staffId] = Math.round((a._count.id / 30) * 100)
+    })
+
+    // Build response
+    const staffData = staffVenues.map(sv => {
+      // Get ALL TimeEntries for this staff member at this venue (sorted most recent first)
+      const staffTimeEntries = timeEntries
+        .filter(te => te.staffId === sv.staffId && te.venueId === sv.venueId)
+        .sort((a, b) => b.clockInTime.getTime() - a.clockInTime.getTime())
+
+      const mostRecentEntry = staffTimeEntries[0] // Most recent for status
+      const isActive = mostRecentEntry && !mostRecentEntry.clockOutTime
+      const status = isActive ? 'ACTIVE' : 'INACTIVE'
+
+      // Apply status filter
+      if (statusFilter && status !== statusFilter) {
+        return null
+      }
+
+      const fullName = `${sv.staff.firstName} ${sv.staff.lastName}`
+
+      // Transform all time entries for this staff member
+      const allTimeEntries = staffTimeEntries.map(te => ({
+        clockInTime: te.clockInTime.toISOString(),
+        clockInLocation: te.clockInLatitude && te.clockInLongitude ? { lat: te.clockInLatitude, lng: te.clockInLongitude } : null,
+        checkInPhotoUrl: te.checkInPhotoUrl,
+        clockOutTime: te.clockOutTime?.toISOString() || null,
+        clockOutLocation: te.clockOutLatitude && te.clockOutLongitude ? { lat: te.clockOutLatitude, lng: te.clockOutLongitude } : null,
+        checkOutPhotoUrl: te.checkOutPhotoUrl,
+        status: te.status,
+      }))
+
+      // Calculate break time (time between clock out of one entry and clock in of next)
+      let breakMinutes = 0
+      const sortedEntriesAsc = [...staffTimeEntries].reverse() // Oldest first for break calculation
+      for (let i = 0; i < sortedEntriesAsc.length - 1; i++) {
+        const currentEntry = sortedEntriesAsc[i]
+        const nextEntry = sortedEntriesAsc[i + 1]
+        if (currentEntry.clockOutTime && nextEntry.clockInTime) {
+          const breakMs = nextEntry.clockInTime.getTime() - currentEntry.clockOutTime.getTime()
+          if (breakMs > 0) {
+            breakMinutes += Math.round(breakMs / 60000) // Convert to minutes
+          }
+        }
+      }
+
+      return {
+        id: sv.staffId,
+        name: fullName,
+        email: sv.staff.email,
+        avatar: sv.staff.photoUrl,
+        venueId: sv.venueId,
+        venueName: sv.venue.name,
+        status,
+        // Most recent entry info for table display
+        checkInTime: mostRecentEntry?.clockInTime?.toISOString() || null,
+        checkInLocation:
+          mostRecentEntry?.clockInLatitude && mostRecentEntry?.clockInLongitude
+            ? { lat: mostRecentEntry.clockInLatitude, lng: mostRecentEntry.clockInLongitude }
+            : null,
+        checkInPhotoUrl: mostRecentEntry?.checkInPhotoUrl || null,
+        checkOutTime: mostRecentEntry?.clockOutTime?.toISOString() || null,
+        checkOutLocation:
+          mostRecentEntry?.clockOutLatitude && mostRecentEntry?.clockOutLongitude
+            ? { lat: mostRecentEntry.clockOutLatitude, lng: mostRecentEntry.clockOutLongitude }
+            : null,
+        checkOutPhotoUrl: mostRecentEntry?.checkOutPhotoUrl || null,
+        break: mostRecentEntry?.status === 'ON_BREAK',
+        breakMinutes,
+        sales: salesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
+        attendancePercent: attendanceByStaff[sv.staffId] || 0,
+        // All time entries for the day
+        allTimeEntries,
+      }
+    })
+
+    return {
+      staff: staffData.filter(s => s !== null) as any,
+    }
+  }
+
+  /**
+   * Get sales trend for a staff member (last 7 days)
+   */
+  async getStaffSalesTrend(orgId: string, staffId: string) {
+    const today = new Date()
+    const sevenDaysAgo = new Date(today)
+    sevenDaysAgo.setDate(today.getDate() - 7)
+    sevenDaysAgo.setHours(0, 0, 0, 0)
+
+    // Get all orders created by this staff member in the last 7 days
+    const orders = await prisma.order.findMany({
+      where: {
+        createdById: staffId,
+        createdAt: { gte: sevenDaysAgo },
+        status: 'COMPLETED',
+      },
+      select: {
+        createdAt: true,
+        total: true,
+      },
+    })
+
+    // Group by day
+    const salesByDay: Record<string, number> = {}
+    const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
+
+    // Initialize last 7 days
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(today)
+      date.setDate(today.getDate() - i)
+      const dayName = dayNames[date.getDay()]
+      salesByDay[dayName] = 0
+    }
+
+    // Aggregate sales
+    orders.forEach(order => {
+      const dayName = dayNames[order.createdAt.getDay()]
+      if (salesByDay[dayName] !== undefined) {
+        salesByDay[dayName] += Number(order.total)
+      }
+    })
+
+    const salesData = Object.entries(salesByDay).map(([day, sales]) => ({
+      day,
+      sales,
+    }))
+
+    return { salesData }
+  }
+
+  /**
+   * Get sales mix by category for a staff member
+   */
+  async getStaffSalesMix(orgId: string, staffId: string) {
+    // Get orders with items created by this staff member
+    const orders = await prisma.order.findMany({
+      where: {
+        createdById: staffId,
+        status: 'COMPLETED',
+      },
+      include: {
+        items: {
+          include: {
+            product: {
+              select: {
+                category: {
+                  select: {
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+
+    // Aggregate by category
+    const categoryTotals: Record<string, number> = {}
+    let totalSales = 0
+
+    orders.forEach(order => {
+      order.items.forEach(item => {
+        const categoryName = item.product?.category?.name || 'Sin categoría'
+        const itemTotal = Number(item.total)
+        categoryTotals[categoryName] = (categoryTotals[categoryName] || 0) + itemTotal
+        totalSales += itemTotal
+      })
+    })
+
+    // Convert to percentages
+    const salesMix = Object.entries(categoryTotals)
+      .map(([category, amount]) => ({
+        category,
+        percentage: totalSales > 0 ? Math.round((amount / totalSales) * 100) : 0,
+        amount,
+      }))
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 4) // Top 4 categories
+
+    return { salesMix }
+  }
+
+  /**
+   * Get attendance calendar for current month
+   */
+  async getStaffAttendanceCalendar(orgId: string, staffId: string) {
+    const now = new Date()
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
+
+    // Get all TimeEntry for this month with full details for dialog
+    const timeEntries = await prisma.timeEntry.findMany({
+      where: {
+        staffId,
+        clockInTime: {
+          gte: monthStart,
+          lte: monthEnd,
+        },
+      },
+      select: {
+        clockInTime: true,
+        clockOutTime: true,
+        clockInLatitude: true,
+        clockInLongitude: true,
+        clockOutLatitude: true,
+        clockOutLongitude: true,
+        checkInPhotoUrl: true,
+        checkOutPhotoUrl: true,
+        status: true,
+      },
+      orderBy: {
+        clockInTime: 'desc',
+      },
+    })
+
+    // Transform entries to include location objects for frontend compatibility
+    const transformedEntries = timeEntries.map(entry => ({
+      clockInTime: entry.clockInTime,
+      clockOutTime: entry.clockOutTime,
+      clockInLocation: entry.clockInLatitude && entry.clockInLongitude ? { lat: entry.clockInLatitude, lng: entry.clockInLongitude } : null,
+      clockOutLocation:
+        entry.clockOutLatitude && entry.clockOutLongitude ? { lat: entry.clockOutLatitude, lng: entry.clockOutLongitude } : null,
+      checkInPhotoUrl: entry.checkInPhotoUrl,
+      checkOutPhotoUrl: entry.checkOutPhotoUrl,
+      status: entry.status,
+    }))
+
+    // Create calendar array with attendance info
+    const daysInMonth = monthEnd.getDate()
+    const calendar = Array.from({ length: daysInMonth }, (_, idx) => {
+      const dayNumber = idx + 1
+      const date = new Date(now.getFullYear(), now.getMonth(), dayNumber)
+      const dateString = date.toISOString().split('T')[0]
+
+      // Get all TimeEntry for this specific day
+      const dayTimeEntries = transformedEntries.filter(entry => {
+        const entryDate = entry.clockInTime.toISOString().split('T')[0]
+        return entryDate === dateString
+      })
+
+      const hasAttendance = dayTimeEntries.length > 0
+      const isToday = dayNumber === now.getDate()
+      const isFutureDay = date > now
+
+      return {
+        day: dayNumber,
+        date: dateString,
+        isPresent: hasAttendance,
+        isToday,
+        isFutureDay,
+        timeEntries: dayTimeEntries, // Include full time entries for the dialog
+      }
+    })
+
+    // Calculate stats
+    const presentDays = calendar.filter(d => !d.isFutureDay && d.isPresent).length
+    const absentDays = calendar.filter(d => !d.isFutureDay && !d.isPresent).length
+
+    return {
+      calendar,
+      stats: {
+        present: presentDays,
+        absent: absentDays,
+      },
+    }
   }
 }
 

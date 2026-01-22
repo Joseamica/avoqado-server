@@ -68,9 +68,7 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: [
-        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
-      ],
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
@@ -84,9 +82,7 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: [
-        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
-      ],
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
@@ -100,9 +96,7 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: [
-        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
-      ],
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
@@ -116,9 +110,7 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: [
-        'node_modules/(?!(@scure|@noble|otplib|@otplib))',
-      ],
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/integration-setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',

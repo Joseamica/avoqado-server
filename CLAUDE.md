@@ -122,6 +122,7 @@ const result = lookupRatesByBusinessName('Gimnasio')
 **Concept:** Modules enable/disable behavior. Different from VenueFeature (billing).
 
 **Two-Level Inheritance:**
+
 - **OrganizationModule**: Enables module for ALL venues in an organization
 - **VenueModule**: Enables module for a SPECIFIC venue (overrides org-level)
 
@@ -135,10 +136,12 @@ Organization (PlayTelecom)
 ```
 
 **Resolution Order:**
+
 1. Check VenueModule first (explicit venue override wins)
 2. If no VenueModule, fallback to OrganizationModule (inherited)
 
 **Config Merge Order:**
+
 1. Module.defaultConfig (base)
 2. OrganizationModule.config (org customization)
 3. VenueModule.config (venue override)
@@ -168,15 +171,16 @@ await moduleService.enableModule(venueId, 'SERIALIZED_INVENTORY', staffId, custo
 
 **Available Modules:**
 
-| Code | Description |
-|------|-------------|
-| `SERIALIZED_INVENTORY` | Inventario con items únicos (SIMs, joyas, electrónicos) |
-| `ATTENDANCE_TRACKING` | Control de asistencia de personal |
-| `WHITE_LABEL_DASHBOARD` | Dashboards personalizados para clientes enterprise |
+| Code                    | Description                                             |
+| ----------------------- | ------------------------------------------------------- |
+| `SERIALIZED_INVENTORY`  | Inventario con items únicos (SIMs, joyas, electrónicos) |
+| `ATTENDANCE_TRACKING`   | Control de asistencia de personal                       |
+| `WHITE_LABEL_DASHBOARD` | Dashboards personalizados para clientes enterprise      |
 
 **⚠️ IMPORTANTE: Validación Dinámica de Módulos**
 
-El controller de superadmin valida módulos **contra la base de datos**, NO contra una lista hardcodeada. Esto permite crear nuevos módulos sin modificar código:
+El controller de superadmin valida módulos **contra la base de datos**, NO contra una lista hardcodeada. Esto permite crear nuevos módulos
+sin modificar código:
 
 ```typescript
 // ✅ CORRECTO - Validación dinámica en modules.superadmin.controller.ts
@@ -194,6 +198,7 @@ if (!Object.values(MODULE_CODES).includes(moduleCode)) { ... }
 ```
 
 **Full docs:**
+
 - `docs/features/SERIALIZED_INVENTORY.md`
 - `avoqado-web-dashboard/docs/features/WHITE_LABEL_DASHBOARD.md` (visual builder)
 
