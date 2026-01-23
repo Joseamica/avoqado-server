@@ -229,7 +229,7 @@ export async function earnPoints(
   // If concurrent calls occur, the DB will reject duplicates with P2002
   try {
     // Create transaction and update customer balance in a transaction
-    const [transaction, customer] = await prisma.$transaction([
+    const [_transaction, customer] = await prisma.$transaction([
       prisma.loyaltyTransaction.create({
         data: {
           customerId,
@@ -313,7 +313,7 @@ export async function redeemPoints(
   const discountAmount = points * config.redemptionRate
 
   // Create transaction and update customer balance
-  const [transaction, customer] = await prisma.$transaction([
+  const [_transaction, customer] = await prisma.$transaction([
     prisma.loyaltyTransaction.create({
       data: {
         customerId,
@@ -371,7 +371,7 @@ export async function adjustPoints(
   }
 
   // Create transaction and update balance
-  const [transaction, updatedCustomer] = await prisma.$transaction([
+  const [_transaction, updatedCustomer] = await prisma.$transaction([
     prisma.loyaltyTransaction.create({
       data: {
         customerId,

@@ -1,4 +1,4 @@
-import { PaymentType, TransactionStatus, CardBrand, CardEntryMode, PaymentMethod, Prisma } from '@prisma/client'
+import { PaymentType, TransactionStatus, CardBrand, CardEntryMode, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -69,8 +69,8 @@ interface RefundResponse {
 export async function recordRefund(
   venueId: string,
   refundData: RefundRequestData,
-  userId?: string,
-  orgId?: string,
+  _userId?: string,
+  _orgId?: string,
 ): Promise<RefundResponse> {
   logger.info('Recording refund', {
     venueId,

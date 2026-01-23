@@ -14,7 +14,7 @@
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, CommissionRecipient, CommissionTrigger, CommissionCalcType } from '@prisma/client'
-import { BadRequestError, NotFoundError, ForbiddenError } from '../../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { validateRate, RoleRates } from './commission-utils'
 
 // ============================================
@@ -198,7 +198,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
 
   // Validate role rates if provided
   if (data.roleRates) {
-    for (const [role, rate] of Object.entries(data.roleRates)) {
+    for (const [_role, rate] of Object.entries(data.roleRates)) {
       validateRate(rate)
     }
   }
@@ -310,7 +310,7 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
 
   // Validate role rates if provided
   if (data.roleRates) {
-    for (const [role, rate] of Object.entries(data.roleRates)) {
+    for (const [_role, rate] of Object.entries(data.roleRates)) {
       validateRate(rate)
     }
   }

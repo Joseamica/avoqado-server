@@ -4,6 +4,7 @@
  */
 
 import bwipjs from 'bwip-js'
+import logger from '../../config/logger'
 
 export interface BarcodeOptions {
   code: string // The code to encode (SKU, GTIN, etc.)
@@ -17,7 +18,7 @@ export interface BarcodeOptions {
  * Generate barcode as PNG buffer
  */
 export async function generateBarcode(options: BarcodeOptions): Promise<Buffer> {
-  const { code, format = 'code128', width = 50, height = 10, includeText = true } = options
+  const { code, format = 'code128', height = 10, includeText = true } = options
 
   try {
     const buffer = await bwipjs.toBuffer({
@@ -31,7 +32,7 @@ export async function generateBarcode(options: BarcodeOptions): Promise<Buffer> 
 
     return buffer
   } catch (error) {
-    console.error('Error generating barcode:', error)
+    logger.error('Error generating barcode:', error)
     throw new Error(`Failed to generate barcode: ${error}`)
   }
 }

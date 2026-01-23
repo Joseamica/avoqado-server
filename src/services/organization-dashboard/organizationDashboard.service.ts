@@ -378,15 +378,11 @@ class OrganizationDashboardService {
 
     const anomalies: OrgCrossStoreAnomaly[] = []
 
-    console.log('[ANOMALIES DEBUG] Starting anomalies detection for orgId:', orgId)
-
     // Get all venues
     const venues = await prisma.venue.findMany({
       where: { organizationId: orgId, status: 'ACTIVE' },
       select: { id: true, name: true, latitude: true, longitude: true },
     })
-
-    console.log('[ANOMALIES DEBUG] Found venues:', venues.length)
 
     for (const venue of venues) {
       // Check for no check-ins after 10 AM (using TimeEntry)
@@ -472,8 +468,6 @@ class OrganizationDashboardService {
 
       // Check for GPS violations (check-ins outside geofence)
       if (venue.latitude && venue.longitude) {
-        console.log(`[ANOMALIES DEBUG] Checking GPS for venue ${venue.name}, lat:${venue.latitude}, lon:${venue.longitude}`)
-
         const gpsViolations = await prisma.timeEntry.findMany({
           where: {
             venueId: venue.id,
@@ -489,8 +483,6 @@ class OrganizationDashboardService {
           },
         })
 
-        console.log(`[ANOMALIES DEBUG] Found ${gpsViolations.length} time entries with GPS for ${venue.name}`)
-
         for (const entry of gpsViolations) {
           if (entry.clockInLatitude && entry.clockInLongitude) {
             const distance = this.calculateDistance(
@@ -500,11 +492,8 @@ class OrganizationDashboardService {
               Number(entry.clockInLongitude),
             )
 
-            console.log(`[ANOMALIES DEBUG] ${entry.staff.firstName} ${entry.staff.lastName}: distance = ${distance.toFixed(2)}km`)
-
             // Alert if check-in is more than 500m from venue (0.5km)
             if (distance > 0.5) {
-              console.log('[ANOMALIES DEBUG] GPS VIOLATION DETECTED!')
               anomalies.push({
                 id: `gps-violation-${entry.id}`,
                 type: 'GPS_VIOLATION',
@@ -525,8 +514,6 @@ class OrganizationDashboardService {
       const severityOrder = { CRITICAL: 0, WARNING: 1, INFO: 2 }
       return severityOrder[a.severity] - severityOrder[b.severity]
     })
-
-    console.log(`[ANOMALIES DEBUG] Total anomalies found: ${anomalies.length}`)
 
     return anomalies
   }
@@ -654,7 +641,7 @@ class OrganizationDashboardService {
         const monthGoal = goal ? Number(goal.salesGoal) : 50000 // Default goal
 
         // Calculate approximate month sales for goal progress
-        const daysInMonth = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getDate()
+        const _daysInMonth = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getDate()
         const dayOfMonth = new Date().getDate()
         const estimatedMonthSales = (weekSales / 7) * dayOfMonth
         const goalProgress = monthGoal > 0 ? (estimatedMonthSales / monthGoal) * 100 : 0
@@ -991,12 +978,7 @@ class OrganizationDashboardService {
       take: Math.ceil(limit * 0.4), // Allocate 40% of limit to time entries
     })
 
-    console.log(`[ACTIVITY FEED DEBUG] Found ${recentTimeEntries.length} time entries`)
-
     for (const entry of recentTimeEntries) {
-      console.log(
-        `[ACTIVITY FEED DEBUG] Entry ${entry.id}: clockIn=${entry.clockInTime}, clockOut=${entry.clockOutTime}, status=${entry.status}`,
-      )
       // Add check-in event
       events.push({
         id: `checkin-${entry.id}`,
@@ -1203,7 +1185,7 @@ class OrganizationDashboardService {
     weekStartVenue.setHours(0, 0, 0, 0)
 
     // Convert to UTC for database query (timestamps in DB are UTC)
-    const weekStart = fromZonedTime(weekStartVenue, timezone)
+    const _weekStart = fromZonedTime(weekStartVenue, timezone)
 
     // Get venues
     const venues = await prisma.venue.findMany({
@@ -1290,7 +1272,7 @@ class OrganizationDashboardService {
     weekStartVenue.setHours(0, 0, 0, 0)
 
     // Convert to UTC for database query (timestamps in DB are UTC)
-    const weekStart = fromZonedTime(weekStartVenue, timezone)
+    const _weekStart = fromZonedTime(weekStartVenue, timezone)
 
     // Get venues
     const venues = await prisma.venue.findMany({

@@ -6218,6 +6218,96 @@ router.patch(
   productController.deleteProductImageHandler,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/product-types:
+ *   get:
+ *     tags: [Products]
+ *     summary: Get available product types for a venue (Square-aligned)
+ *     description: |
+ *       Returns product type configurations filtered by the venue's industry type.
+ *       Types are sorted with recommended types first based on the venue's business category.
+ *
+ *       Square-aligned product types:
+ *       - REGULAR: Physical products that can be tracked in inventory
+ *       - FOOD_AND_BEV: Food, drinks, and alcoholic beverages (with isAlcoholic toggle)
+ *       - APPOINTMENTS_SERVICE: Bookable services with a specific duration
+ *       - EVENT: Tickets for events, shows, or workshops
+ *       - DIGITAL: Downloadable content, licenses, or subscriptions
+ *       - DONATION: Charitable contributions with suggested amounts
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Product types available for this venue
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     types:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           code: { type: string, enum: [REGULAR, FOOD_AND_BEV, APPOINTMENTS_SERVICE, EVENT, DIGITAL, DONATION] }
+ *                           label: { type: string }
+ *                           labelEs: { type: string }
+ *                           description: { type: string }
+ *                           descriptionEs: { type: string }
+ *                           hasAlcoholToggle: { type: boolean }
+ *                           fields: { type: array, items: { type: string } }
+ *                           canTrackInventory: { type: boolean }
+ *                           icon: { type: string }
+ *                     venueType: { type: string }
+ *                     recommended: { type: array, items: { type: string } }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/product-types',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  validateRequest(VenueIdParamsSchema),
+  productController.getProductTypesHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/product-types:
+ *   get:
+ *     tags: [Products]
+ *     summary: Get all product type configurations (reference)
+ *     description: |
+ *       Returns all available product type configurations for reference.
+ *       This is useful for superadmin or documentation purposes.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: All product type configurations
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     types:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/product-types', authenticateTokenMiddleware, productController.getAllProductTypesHandler)
+
 // ==========================================
 // TEAM MANAGEMENT ROUTES
 // ==========================================

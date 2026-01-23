@@ -374,7 +374,7 @@ export function calculateBaseAmount(
 export function getPeriodDateRange(
   period: TierPeriod,
   referenceDate: Date = new Date(),
-  timezone: string = 'UTC',
+  _timezone: string = 'UTC',
 ): { start: Date; end: Date } {
   // For simplicity, using UTC. In production, use venue timezone
   const date = new Date(referenceDate)

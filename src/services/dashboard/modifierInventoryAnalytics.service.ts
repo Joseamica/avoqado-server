@@ -177,7 +177,7 @@ export async function getModifierUsageStats(
  */
 export async function getModifiersLowStock(venueId: string): Promise<ModifierLowStockItem[]> {
   // Get all modifiers with inventory tracking that have low stock raw materials
-  const modifiers = await prisma.modifier.findMany({
+  const _modifiers = await prisma.modifier.findMany({
     where: {
       group: { venueId },
       rawMaterialId: { not: null },

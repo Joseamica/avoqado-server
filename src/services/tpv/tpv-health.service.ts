@@ -5,7 +5,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { broadcastTpvStatusUpdate, broadcastTpvCommandStatusChanged } from '../../communication/sockets'
-import { tpvCommandExecutionService } from './command-execution.service'
+// import { tpvCommandExecutionService } from './command-execution.service'
 import { tpvCommandQueueService } from './command-queue.service'
 
 /**

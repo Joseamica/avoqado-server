@@ -102,7 +102,7 @@ interface CouponValidationResult {
   errorCode?: 'NOT_FOUND' | 'INACTIVE' | 'EXPIRED' | 'NOT_STARTED' | 'USAGE_LIMIT' | 'MIN_PURCHASE' | 'CUSTOMER_LIMIT'
 }
 
-interface CouponRedemptionItem {
+interface _CouponRedemptionItem {
   id: string
   couponCodeId: string
   customerId: string | null

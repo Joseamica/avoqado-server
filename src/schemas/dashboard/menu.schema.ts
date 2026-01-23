@@ -127,7 +127,7 @@ export const CreateProductSchema = z.object({
     name: z.string().min(1, 'Name is required').max(255),
     description: z.string().optional().nullable(),
     categoryId: z.string().cuid('Invalid category ID format'),
-    type: z.nativeEnum(ProductType).default(ProductType.FOOD),
+    type: z.nativeEnum(ProductType).default(ProductType.FOOD), // Keep FOOD default for backwards compatibility
     price: z.number().positive('Price must be positive').multipleOf(0.01),
     cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
     taxRate: z.number().min(0).max(1).optional(),
@@ -146,6 +146,39 @@ export const CreateProductSchema = z.object({
     availableFrom: z.string().datetime().optional().nullable(),
     availableUntil: z.string().datetime().optional().nullable(),
     modifierGroupIds: z.array(z.string().cuid()).optional(), // Modifier groups to assign
+
+    // ═══════════════════════════════════════════════════════════════
+    // Square-aligned contextual fields
+    // ═══════════════════════════════════════════════════════════════
+    isAlcoholic: z.boolean().optional(), // Only for FOOD_AND_BEV
+    kitchenName: z.string().max(50, 'Kitchen name must be 50 characters or less').optional().nullable(),
+    abbreviation: z.string().max(24, 'Abbreviation must be 24 characters or less').optional().nullable(),
+    duration: z.number().int().min(1).max(1440).optional().nullable(), // Minutes (1 min to 24 hours)
+
+    // Event fields (for EVENT type)
+    eventDate: z.string().datetime().optional().nullable(),
+    eventTime: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Invalid time format. Expected HH:mm')
+      .optional()
+      .nullable(),
+    eventEndTime: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Invalid time format. Expected HH:mm')
+      .optional()
+      .nullable(),
+    eventCapacity: z.number().int().min(1).optional().nullable(),
+    eventLocation: z.string().max(500).optional().nullable(),
+
+    // Digital fields (for DIGITAL type)
+    downloadUrl: z.string().url().optional().nullable(),
+    downloadLimit: z.number().int().min(1).optional().nullable(),
+    fileSize: z.string().max(50).optional().nullable(),
+
+    // Donation fields (for DONATION type)
+    suggestedAmounts: z.array(z.number().positive('Donation amount must be positive')).optional(),
+    allowCustomAmount: z.boolean().optional(),
+    donationCause: z.string().max(500).optional().nullable(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
@@ -540,7 +573,24 @@ export const ImportMenuSchema = z.object({
             price: z.number().nonnegative(),
             cost: z.number().nonnegative().optional(),
             description: z.string().optional(),
-            type: z.enum(['FOOD', 'BEVERAGE', 'ALCOHOL', 'RETAIL', 'SERVICE']).default('FOOD'),
+            type: z
+              .enum([
+                // Legacy types (backwards compatibility - keep first)
+                'FOOD',
+                'BEVERAGE',
+                'ALCOHOL',
+                'RETAIL',
+                'SERVICE',
+                'OTHER',
+                // Square-aligned types (new)
+                'REGULAR',
+                'FOOD_AND_BEV',
+                'APPOINTMENTS_SERVICE',
+                'EVENT',
+                'DIGITAL',
+                'DONATION',
+              ])
+              .default('FOOD'), // Keep FOOD default for backwards compatibility
             tags: z.array(z.string()).optional(),
             allergens: z.array(z.string()).optional(),
             trackInventory: z.boolean().optional(),

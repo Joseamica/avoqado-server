@@ -821,6 +821,37 @@ model Product {
   prepTime     Int? // minutes
   cookingNotes String?
 
+  // ═══════════════════════════════════════════════════════════════
+  // Square-aligned contextual fields (January 2026)
+  // ═══════════════════════════════════════════════════════════════
+
+  // Alcohol flag (replaces ALCOHOL type - Square pattern)
+  isAlcoholic Boolean @default(false) // Only relevant for FOOD_AND_BEV
+
+  // POS Display
+  kitchenName  String? // Short name for kitchen display (max 50 chars)
+  abbreviation String? // Ultra-short text for POS (max 24 chars, like Square)
+
+  // Service-specific (SERVICE, APPOINTMENTS_SERVICE)
+  duration Int? // Duration in minutes (1-1440)
+
+  // Event-specific (EVENT)
+  eventDate     DateTime? // Event date
+  eventTime     String?   // Start time "HH:mm" format
+  eventEndTime  String?   // End time "HH:mm" format
+  eventCapacity Int?      // Max capacity
+  eventLocation String?   // Event location/venue
+
+  // Digital-specific (DIGITAL)
+  downloadUrl   String? // Download URL for digital product
+  downloadLimit Int?    // Max downloads per purchase (null = unlimited)
+  fileSize      String? // Display size "15 MB", "2.3 GB"
+
+  // Donation-specific (DONATION)
+  suggestedAmounts  Decimal[] @default([]) // [5.00, 10.00, 25.00, 50.00]
+  allowCustomAmount Boolean   @default(true) // Allow custom donation amount
+  donationCause     String? // "Tips for staff", "Red Cross", etc.
+
   // Inventory tracking configuration
   trackInventory  Boolean          @default(false)
   inventoryMethod InventoryMethod? // ✅ WORLD-CLASS: How to track (QUANTITY | RECIPE)
@@ -4029,12 +4060,27 @@ enum StaffRole {
 }
 
 enum ProductType {
-  FOOD
-  BEVERAGE
-  ALCOHOL
-  RETAIL
-  SERVICE
-  OTHER
+  // ═══════════════════════════════════════════════════════════════
+  // NEW: Square-aligned product types (January 2026)
+  // ═══════════════════════════════════════════════════════════════
+  REGULAR              // Physical products (retail, merchandise) - DEFAULT for new products
+  FOOD_AND_BEV         // Food AND beverage (use isAlcoholic boolean for alcohol)
+  APPOINTMENTS_SERVICE // Bookable services (haircuts, massages, appointments)
+  EVENT                // Event tickets (concerts, classes, experiences)
+  DIGITAL              // Digital products (ebooks, courses, downloads)
+  DONATION             // Donations (tips, causes, roundup)
+
+  // ═══════════════════════════════════════════════════════════════
+  // LEGACY: Kept for backwards compatibility - DO NOT USE FOR NEW PRODUCTS
+  // Migration: FOOD/BEVERAGE/ALCOHOL → FOOD_AND_BEV + isAlcoholic
+  //            RETAIL → REGULAR
+  // ═══════════════════════════════════════════════════════════════
+  FOOD     // @deprecated Use FOOD_AND_BEV
+  BEVERAGE // @deprecated Use FOOD_AND_BEV
+  ALCOHOL  // @deprecated Use FOOD_AND_BEV + isAlcoholic=true
+  RETAIL   // @deprecated Use REGULAR
+  SERVICE  // General services (kept as-is, use APPOINTMENTS_SERVICE for bookable)
+  OTHER    // Catch-all
 }
 
 enum MenuType {

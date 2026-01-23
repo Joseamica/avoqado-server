@@ -24,7 +24,7 @@ export interface BarcodeOptions {
  * Generate a barcode as a PNG buffer
  */
 export async function generateBarcode(options: BarcodeOptions): Promise<Buffer> {
-  const { code, format = 'code128', width = 50, height = 10, includeText = true } = options
+  const { code, format = 'code128', height = 10, includeText = true } = options
 
   try {
     const buffer = await bwipjs.toBuffer({
@@ -38,7 +38,6 @@ export async function generateBarcode(options: BarcodeOptions): Promise<Buffer> 
 
     return buffer
   } catch (error) {
-    console.error('Error generating barcode:', error)
     throw new Error(`Failed to generate barcode: ${error}`)
   }
 }

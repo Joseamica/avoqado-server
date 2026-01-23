@@ -8,7 +8,6 @@ import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
-import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 /**
  * Endpoint para verificar el estado de autenticación de un usuario.

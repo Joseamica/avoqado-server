@@ -972,7 +972,7 @@ function isWithinTimeWindow(timeFrom: string, timeUntil: string): boolean {
 /**
  * Estimate average tax rate for applicable items
  */
-function estimateAverageTaxRate(itemIds: string[], context: OrderContext): number {
+function estimateAverageTaxRate(itemIds: string[], _context: OrderContext): number {
   if (itemIds.length === 0) return 0.16 // Default Mexican tax rate
 
   // We don't have tax rates in the context, use default

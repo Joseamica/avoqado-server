@@ -66,7 +66,7 @@ import * as saleVerificationController from '../controllers/tpv/sale-verificatio
 import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
 import * as productService from '../services/dashboard/product.dashboard.service'
 import emailService from '../services/email.service'
-import { moduleService, MODULE_CODES } from '../services/modules/module.service'
+import { moduleService } from '../services/modules/module.service'
 import { serializedInventoryService } from '../services/serialized-inventory/serializedInventory.service'
 import * as orderTpvService from '../services/tpv/order.tpv.service'
 import AppError from '../errors/AppError'

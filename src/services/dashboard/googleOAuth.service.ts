@@ -398,7 +398,7 @@ export async function loginWithGoogleOneTap(credential: string): Promise<{
   isNewUser: boolean
 }> {
   // Verify the Google One Tap JWT credential
-  const googleUser = await verifyGoogleToken(credential)
+  const _googleUser = await verifyGoogleToken(credential)
 
   // Reuse the same logic as loginWithGoogle
   // The rest of the logic is the same - checking for existing staff, invitations, etc.

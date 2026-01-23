@@ -25,7 +25,6 @@
  * - netProfit: netSales - platformFees - staffCommissions (true venue profit)
  */
 
-import { Prisma, PaymentMethod } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
@@ -346,28 +345,23 @@ async function calculateTimePeriodMetrics(
   timezone: string,
 ): Promise<TimePeriodMetrics[]> {
   // Determine SQL grouping based on reportType
-  let dateTrunc: string
   let groupByExpression: string
   let orderByExpression: string
 
   switch (reportType) {
     case 'hours':
-      dateTrunc = 'hour'
       groupByExpression = `DATE_TRUNC('hour', "createdAt" AT TIME ZONE '${timezone}')`
       orderByExpression = 'period'
       break
     case 'days':
-      dateTrunc = 'day'
       groupByExpression = `DATE_TRUNC('day', "createdAt" AT TIME ZONE '${timezone}')`
       orderByExpression = 'period'
       break
     case 'weeks':
-      dateTrunc = 'week'
       groupByExpression = `DATE_TRUNC('week', "createdAt" AT TIME ZONE '${timezone}')`
       orderByExpression = 'period'
       break
     case 'months':
-      dateTrunc = 'month'
       groupByExpression = `DATE_TRUNC('month', "createdAt" AT TIME ZONE '${timezone}')`
       orderByExpression = 'period'
       break
@@ -590,7 +584,7 @@ function generateAllPeriods(reportType: ReportType): number[] {
 /**
  * Format period value for API response
  */
-function formatPeriod(period: Date | number, reportType: ReportType, timezone: string): string {
+function formatPeriod(period: Date | number, reportType: ReportType, _timezone: string): string {
   if (reportType === 'hourlySum') {
     // Hour of day (0-23)
     return String(period).padStart(2, '0') + ':00'

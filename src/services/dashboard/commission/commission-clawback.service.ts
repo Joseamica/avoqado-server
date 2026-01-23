@@ -13,7 +13,7 @@
 
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { Prisma, ClawbackReason, CommissionCalcStatus, CommissionSummaryStatus } from '@prisma/client'
+import { Prisma, ClawbackReason, CommissionCalcStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber } from './commission-utils'
 

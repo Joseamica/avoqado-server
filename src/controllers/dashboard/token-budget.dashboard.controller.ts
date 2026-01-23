@@ -170,7 +170,7 @@ export const purchase = async (req: Request, res: Response, next: NextFunction):
     })
 
     // Step 3: Finalize the invoice (generates PDF)
-    const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id)
+    const _finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id)
 
     // Step 4: Pay the invoice using the default payment method
     const paidInvoice = await stripe.invoices.pay(invoice.id)

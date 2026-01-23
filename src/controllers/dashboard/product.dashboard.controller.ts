@@ -243,3 +243,49 @@ export const deleteProductImageHandler = async (req: Request, res: Response, nex
     next(error)
   }
 }
+
+/**
+ * Get available product types for a venue (Square-aligned)
+ *
+ * Returns product type configurations filtered by venue's industry type.
+ * Types are sorted with recommended types first based on the venue's business category.
+ */
+export const getProductTypesHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { venueId } = req.params
+    const correlationId = (req as any).correlationId
+
+    logger.info(`Fetching product types for venue ${venueId}`, { correlationId })
+
+    const result = await productService.getProductTypesForVenue(venueId)
+
+    res.status(200).json({
+      message: 'Product types retrieved successfully',
+      data: result,
+      correlationId,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Get all product type configurations (for reference/superadmin)
+ */
+export const getAllProductTypesHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const correlationId = (req as any).correlationId
+
+    logger.info('Fetching all product type configurations', { correlationId })
+
+    const types = productService.getAllProductTypeConfigs()
+
+    res.status(200).json({
+      message: 'All product type configurations',
+      data: { types },
+      correlationId,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

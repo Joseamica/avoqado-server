@@ -22,7 +22,7 @@
 
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType, CommissionRecipient } from '@prisma/client'
+import { Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import {
   findActiveCommissionConfig,

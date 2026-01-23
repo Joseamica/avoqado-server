@@ -137,7 +137,7 @@ export async function extractApkMetadata(apkBuffer: Buffer): Promise<ApkMetadata
       if (fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath)
       }
-    } catch (cleanupError) {
+    } catch {
       logger.warn(`Failed to clean up temp APK file: ${tempFilePath}`)
     }
   }

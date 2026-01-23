@@ -9,7 +9,6 @@
 
 import { Request, Response, NextFunction } from 'express'
 import * as organizationService from '../../services/organization/organization.service'
-import logger from '../../config/logger'
 
 /**
  * GET /organizations/:orgId

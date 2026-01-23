@@ -12,7 +12,6 @@ import { NotificationChannel, NotificationPriority, NotificationType, StaffRole 
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { sendVenueNotification } from './notification.dashboard.service'
-import * as resendService from '../resend.service'
 
 /**
  * Context data for bad review notification
