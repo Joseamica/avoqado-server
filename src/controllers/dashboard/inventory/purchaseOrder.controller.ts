@@ -12,9 +12,7 @@ export async function getPurchaseOrders(req: Request, res: Response, next: NextF
     const { status, supplierId, startDate, endDate } = req.query
 
     // Handle status as array (from query string like status[]=SENT&status[]=CONFIRMED)
-    const statusArray = status
-      ? (Array.isArray(status) ? status : [status]) as PurchaseOrderStatus[]
-      : undefined
+    const statusArray = status ? ((Array.isArray(status) ? status : [status]) as PurchaseOrderStatus[]) : undefined
 
     const filters = {
       status: statusArray,

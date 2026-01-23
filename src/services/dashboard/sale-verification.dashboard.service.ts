@@ -239,11 +239,7 @@ export async function listSaleVerificationsWithDetails(
  *
  * Now counts ALL completed payments and checks which have/don't have verification
  */
-export async function getSaleVerificationsSummary(
-  venueId: string,
-  fromDate?: Date,
-  toDate?: Date,
-): Promise<SalesSummary> {
+export async function getSaleVerificationsSummary(venueId: string, fromDate?: Date, toDate?: Date): Promise<SalesSummary> {
   logger.info(`[SALE VERIFICATION DASHBOARD] Getting summary for venue ${venueId}`)
 
   // Build WHERE clause for payments

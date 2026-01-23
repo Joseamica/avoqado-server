@@ -87,6 +87,7 @@ export async function getProducts(
   venueId: string,
   options?: {
     includeRecipe?: boolean
+    includePricingPolicy?: boolean
     categoryId?: string
     orderBy?: 'displayOrder' | 'name'
   },
@@ -125,6 +126,10 @@ export async function getProducts(
           },
         },
       },
+      // ✅ Include pricing policy for pricing analysis page
+      ...(options?.includePricingPolicy && {
+        pricingPolicy: true,
+      }),
     },
     orderBy: options?.orderBy === 'name' ? { name: 'asc' } : { displayOrder: 'asc' },
   })

@@ -86,6 +86,12 @@
 
 ## Features
 
+### Products & Catalog
+
+| Document                                                                             | Description                                                   |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| [features/PRODUCT_TYPES_SQUARE_ALIGNED.md](./features/PRODUCT_TYPES_SQUARE_ALIGNED.md) | **Product types aligned with Square API** (FOOD_AND_BEV, EVENT, DIGITAL, DONATION, etc.) |
+
 ### Inventory & Purchasing
 
 | Document                                                               | Description                                                      |

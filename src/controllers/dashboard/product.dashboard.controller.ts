@@ -9,18 +9,20 @@ import logger from '../../config/logger'
 export const getProductsHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { venueId } = req.params
-    const { includeRecipe, categoryId, orderBy } = req.query
+    const { includeRecipe, includePricingPolicy, categoryId, orderBy } = req.query
     const correlationId = (req as any).correlationId
 
     logger.info(`Fetching products for venue ${venueId}`, {
       correlationId,
       includeRecipe: includeRecipe === 'true',
+      includePricingPolicy: includePricingPolicy === 'true',
       categoryId: categoryId || undefined,
       orderBy: orderBy || 'displayOrder',
     })
 
     const products = await productService.getProducts(venueId, {
       includeRecipe: includeRecipe === 'true',
+      includePricingPolicy: includePricingPolicy === 'true',
       categoryId: categoryId as string | undefined,
       orderBy: (orderBy === 'name' ? 'name' : 'displayOrder') as 'name' | 'displayOrder',
     })
