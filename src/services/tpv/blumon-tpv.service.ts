@@ -438,7 +438,7 @@ export class BlumonTpvService {
    * @param refreshToken OAuth refresh token
    * @returns New access token and expiry
    */
-  async refreshAccessToken(refreshToken: string): Promise<{
+  async refreshAccessToken(_refreshToken: string): Promise<{
     accessToken: string
     expiresAt: string
   }> {

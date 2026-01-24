@@ -4,7 +4,6 @@
  * the PlayTelecom/White-Label dashboard.
  */
 import prisma from '../../utils/prismaClient'
-import { Prisma } from '@prisma/client'
 
 // Types for the service responses
 export interface StockMetrics {

@@ -446,14 +446,14 @@ export class TpvCommandQueueService {
   /**
    * Handle command ACK from terminal
    */
-  async handleCommandAck(commandId: string, terminalId: string): Promise<void> {
+  async handleCommandAck(commandId: string, _terminalId: string): Promise<void> {
     await this.updateCommandStatus(commandId, 'RECEIVED')
   }
 
   /**
    * Handle command execution started
    */
-  async handleCommandStarted(commandId: string, terminalId: string): Promise<void> {
+  async handleCommandStarted(commandId: string, _terminalId: string): Promise<void> {
     await this.updateCommandStatus(commandId, 'EXECUTING')
   }
 
@@ -462,10 +462,10 @@ export class TpvCommandQueueService {
    */
   async handleCommandResult(
     commandId: string,
-    terminalId: string,
+    _terminalId: string,
     resultStatus: TpvCommandResultStatus,
     message?: string,
-    resultData?: Record<string, any>,
+    _resultData?: Record<string, any>,
   ): Promise<void> {
     const finalStatus: TpvCommandStatus = resultStatus === 'SUCCESS' || resultStatus === 'PARTIAL_SUCCESS' ? 'COMPLETED' : 'FAILED'
 
@@ -783,7 +783,10 @@ export class TpvCommandQueueService {
   /**
    * Map command status to history status
    */
-  private mapCommandStatusToHistoryStatus(commandStatus: TpvCommandStatus, resultStatus?: TpvCommandResultStatus): TpvCommandHistoryStatus {
+  private mapCommandStatusToHistoryStatus(
+    commandStatus: TpvCommandStatus,
+    _resultStatus?: TpvCommandResultStatus,
+  ): TpvCommandHistoryStatus {
     switch (commandStatus) {
       case 'PENDING':
       case 'QUEUED':

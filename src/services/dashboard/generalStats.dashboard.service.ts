@@ -36,7 +36,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
     },
   }
 
-  // Try with simplified filtering - remove status filter for now
+  // Fetch payments with order status to filter out cancelled orders
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
@@ -45,13 +45,26 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
         lte: toDate,
       },
     },
+    include: {
+      order: {
+        select: {
+          status: true,
+        },
+      },
+    },
     orderBy: {
       createdAt: 'desc',
     },
   })
 
-  // Filter out pending payments in memory instead of in the query
-  const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
+  // Filter out:
+  // 1. Pending payments (not completed)
+  // 2. Payments from cancelled orders (should not count towards total sales)
+  const validPayments = payments.filter(p => {
+    if (p.status === TransactionStatus.PENDING) return false
+    if (p.order?.status === OrderStatus.CANCELLED) return false
+    return true
+  })
 
   // Fetch reviews data
   const reviews = await prisma.review.findMany({
@@ -404,6 +417,7 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   }
 
   // Fetch only essential data for basic metrics
+  // Include order relationship to filter out payments from cancelled orders
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
@@ -419,14 +433,27 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
       tipAmount: true,
       status: true,
       createdAt: true,
+      order: {
+        select: {
+          status: true,
+        },
+      },
     },
     orderBy: {
       createdAt: 'desc',
     },
   })
 
-  // Filter out pending payments
-  const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
+  // Filter out:
+  // 1. Pending payments (not completed)
+  // 2. Payments from cancelled orders (should not count towards total sales)
+  const validPayments = payments.filter(p => {
+    // Exclude pending payments
+    if (p.status === TransactionStatus.PENDING) return false
+    // Exclude payments from cancelled orders
+    if (p.order?.status === OrderStatus.CANCELLED) return false
+    return true
+  })
 
   // Fetch reviews for star rating
   const reviews = await prisma.review.findMany({

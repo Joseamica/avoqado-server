@@ -44,6 +44,9 @@ model Organization {
   // Commission System (org-wide configs inherit to venues)
   commissionConfigs CommissionConfig[]
 
+  // Performance goals (for CommandCenter charts)
+  organizationGoals OrganizationGoal[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -818,6 +821,37 @@ model Product {
   prepTime     Int? // minutes
   cookingNotes String?
 
+  // ═══════════════════════════════════════════════════════════════
+  // Square-aligned contextual fields (January 2026)
+  // ═══════════════════════════════════════════════════════════════
+
+  // Alcohol flag (replaces ALCOHOL type - Square pattern)
+  isAlcoholic Boolean @default(false) // Only relevant for FOOD_AND_BEV
+
+  // POS Display
+  kitchenName  String? // Short name for kitchen display (max 50 chars)
+  abbreviation String? // Ultra-short text for POS (max 24 chars, like Square)
+
+  // Service-specific (SERVICE, APPOINTMENTS_SERVICE)
+  duration Int? // Duration in minutes (1-1440)
+
+  // Event-specific (EVENT)
+  eventDate     DateTime? // Event date
+  eventTime     String?   // Start time "HH:mm" format
+  eventEndTime  String?   // End time "HH:mm" format
+  eventCapacity Int?      // Max capacity
+  eventLocation String?   // Event location/venue
+
+  // Digital-specific (DIGITAL)
+  downloadUrl   String? // Download URL for digital product
+  downloadLimit Int?    // Max downloads per purchase (null = unlimited)
+  fileSize      String? // Display size "15 MB", "2.3 GB"
+
+  // Donation-specific (DONATION)
+  suggestedAmounts  Decimal[] @default([]) // [5.00, 10.00, 25.00, 50.00]
+  allowCustomAmount Boolean   @default(true) // Allow custom donation amount
+  donationCause     String? // "Tips for staff", "Red Cross", etc.
+
   // Inventory tracking configuration
   trackInventory  Boolean          @default(false)
   inventoryMethod InventoryMethod? // ✅ WORLD-CLASS: How to track (QUANTITY | RECIPE)
@@ -1139,11 +1173,20 @@ model PurchaseOrder {
   expectedDeliveryDate DateTime?
   receivedDate         DateTime?
 
+  // Shipping address (optional custom delivery location)
+  shippingAddressType ShippingAddressType @default(VENUE)
+  shippingAddress     String? // Street address
+  shippingCity        String?
+  shippingState       String?
+  shippingZipCode     String?
+
   // Amounts
-  subtotal  Decimal @db.Decimal(12, 2)
-  taxAmount Decimal @default(0) @db.Decimal(10, 2)
-  total     Decimal @db.Decimal(12, 2)
-  taxRate   Decimal @default(0.16) @db.Decimal(5, 4)
+  subtotal       Decimal @db.Decimal(12, 2)
+  taxAmount      Decimal @default(0) @db.Decimal(10, 2)
+  taxRate        Decimal @default(0.16) @db.Decimal(5, 4)
+  commission     Decimal @default(0) @db.Decimal(10, 2) // Additional fees/commission
+  commissionRate Decimal @default(0) @db.Decimal(5, 4) // Commission percentage
+  total          Decimal @db.Decimal(12, 2)
 
   // Tracking
   createdById String?
@@ -1183,6 +1226,9 @@ model PurchaseOrderItem {
   quantityOrdered  Decimal @db.Decimal(12, 3)
   quantityReceived Decimal @default(0) @db.Decimal(12, 3)
   unit             Unit
+
+  // Receive status tracking
+  receiveStatus PurchaseOrderItemStatus @default(PENDING)
 
   // Pricing
   unitPrice Decimal @db.Decimal(10, 4)
@@ -4014,12 +4060,27 @@ enum StaffRole {
 }
 
 enum ProductType {
-  FOOD
-  BEVERAGE
-  ALCOHOL
-  RETAIL
-  SERVICE
-  OTHER
+  // ═══════════════════════════════════════════════════════════════
+  // NEW: Square-aligned product types (January 2026)
+  // ═══════════════════════════════════════════════════════════════
+  REGULAR              // Physical products (retail, merchandise) - DEFAULT for new products
+  FOOD_AND_BEV         // Food AND beverage (use isAlcoholic boolean for alcohol)
+  APPOINTMENTS_SERVICE // Bookable services (haircuts, massages, appointments)
+  EVENT                // Event tickets (concerts, classes, experiences)
+  DIGITAL              // Digital products (ebooks, courses, downloads)
+  DONATION             // Donations (tips, causes, roundup)
+
+  // ═══════════════════════════════════════════════════════════════
+  // LEGACY: Kept for backwards compatibility - DO NOT USE FOR NEW PRODUCTS
+  // Migration: FOOD/BEVERAGE/ALCOHOL → FOOD_AND_BEV + isAlcoholic
+  //            RETAIL → REGULAR
+  // ═══════════════════════════════════════════════════════════════
+  FOOD     // @deprecated Use FOOD_AND_BEV
+  BEVERAGE // @deprecated Use FOOD_AND_BEV
+  ALCOHOL  // @deprecated Use FOOD_AND_BEV + isAlcoholic=true
+  RETAIL   // @deprecated Use REGULAR
+  SERVICE  // General services (kept as-is, use APPOINTMENTS_SERVICE for bookable)
+  OTHER    // Catch-all
 }
 
 enum MenuType {
@@ -5109,6 +5170,18 @@ enum PurchaseOrderStatus {
   PARTIAL // Partially received
   RECEIVED // Fully received
   CANCELLED // Cancelled
+}
+
+enum ShippingAddressType {
+  VENUE // Deliver to venue address
+  CUSTOM // Custom delivery address
+}
+
+enum PurchaseOrderItemStatus {
+  PENDING // Not yet received
+  RECEIVED // Successfully received
+  DAMAGED // Received but damaged
+  NOT_PROCESSED // Not received and won't be processed
 }
 
 enum PricingStrategy {
@@ -6223,6 +6296,31 @@ model PerformanceGoal {
   @@unique([staffId, venueId, month])
   @@index([venueId])
   @@index([staffId])
+}
+
+// ==========================================
+// ORGANIZATION GOALS (for CommandCenter charts)
+// Used in PlayTelecom dashboard for "Ingresos vs Meta" and "Volumen vs Meta"
+// ==========================================
+model OrganizationGoal {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Period configuration
+  period     String   @default("daily") // "daily" | "weekly" | "monthly"
+  periodDate DateTime // First day of the period (YYYY-MM-DD for daily, week start, or month start)
+
+  // Targets
+  salesTarget  Decimal @db.Decimal(12, 2) // Revenue target (e.g., $135,000)
+  volumeTarget Int // Number of sales target (e.g., 500 sales)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, period, periodDate])
+  @@index([organizationId])
+  @@index([periodDate])
 }
 
 // ==========================================

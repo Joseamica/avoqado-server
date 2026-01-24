@@ -203,7 +203,7 @@ describe('Terminal Activation System Integration', () => {
       for (let i = 0; i < 5; i++) {
         try {
           await activateTerminal(testSerialNumber, `WRONG${i}`)
-        } catch (error) {
+        } catch {
           // Expected to throw
         }
       }
@@ -339,7 +339,7 @@ describe('Terminal Activation System Integration', () => {
       for (let i = 0; i < 2; i++) {
         try {
           await activateTerminal(testSerialNumber, 'WRONG_CODE')
-        } catch (error) {
+        } catch {
           // Expected
         }
       }

@@ -14,8 +14,13 @@ const router = Router()
  */
 async function checkOrgAccess(req: Request, res: Response, next: NextFunction) {
   try {
-    const { orgId } = (req as any).authContext
+    const { orgId, role } = (req as any).authContext
     const requestedOrgId = req.params.orgId
+
+    // SUPERADMIN has access to all organizations
+    if (role === 'SUPERADMIN') {
+      return next()
+    }
 
     // User must belong to the organization they're querying
     if (orgId !== requestedOrgId) {
@@ -159,6 +164,51 @@ router.get(
 )
 
 /**
+ * GET /dashboard/organizations/:orgId/staff/online
+ * Returns: Online staff count and details (staff with active TimeEntry)
+ */
+router.get('/:orgId/staff/online', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+
+    const onlineStaff = await organizationDashboardService.getOnlineStaff(orgId)
+
+    res.json({
+      success: true,
+      data: onlineStaff,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/organizations/:orgId/activity-feed
+ * Returns: Real-time activity feed (sales, check-ins, alerts)
+ * Query: limit (default 50)
+ */
+router.get(
+  '/:orgId/activity-feed',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { limit = '50' } = req.query
+
+      const activityFeed = await organizationDashboardService.getActivityFeed(orgId, parseInt(limit as string, 10))
+
+      res.json({
+        success: true,
+        data: activityFeed,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
  * GET /dashboard/organizations/:orgId/stock-summary
  * Returns: Organization-wide stock summary
  */
@@ -175,6 +225,234 @@ router.get(
       res.json({
         success: true,
         data: stockSummary,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/charts/revenue-vs-target
+ * Returns: Revenue vs target chart data for current week
+ */
+router.get(
+  '/:orgId/charts/revenue-vs-target',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const venueId = typeof req.query.venueId === 'string' ? req.query.venueId : undefined
+      const chartData = await organizationDashboardService.getRevenueVsTarget(orgId, venueId)
+
+      res.json({
+        success: true,
+        data: chartData,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/charts/volume-vs-target
+ * Returns: Volume vs target chart data for current week
+ */
+router.get(
+  '/:orgId/charts/volume-vs-target',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const venueId = typeof req.query.venueId === 'string' ? req.query.venueId : undefined
+      const chartData = await organizationDashboardService.getVolumeVsTarget(orgId, venueId)
+
+      res.json({
+        success: true,
+        data: chartData,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/insights/top-promoter
+ * Returns: Top promoter by sales count today
+ */
+router.get(
+  '/:orgId/insights/top-promoter',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+
+      const topPromoter = await organizationDashboardService.getTopPromoter(orgId)
+
+      res.json({
+        success: true,
+        data: topPromoter,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/insights/worst-attendance
+ * Returns: Store with worst attendance (lowest percentage of active staff)
+ */
+router.get(
+  '/:orgId/insights/worst-attendance',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+
+      const worstAttendance = await organizationDashboardService.getWorstAttendance(orgId)
+
+      res.json({
+        success: true,
+        data: worstAttendance,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * PUT /dashboard/organizations/:orgId/goals
+ * Update or create goals for a specific period
+ * Body: { period, periodDate, salesTarget, volumeTarget }
+ */
+router.put('/:orgId/goals', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+    const { period, periodDate, salesTarget, volumeTarget } = req.body
+
+    if (!period || !periodDate || !salesTarget || !volumeTarget) {
+      return res.status(400).json({
+        success: false,
+        error: 'missing_fields',
+        message: 'period, periodDate, salesTarget, and volumeTarget are required',
+      })
+    }
+
+    const goal = await organizationDashboardService.updateOrganizationGoal(orgId, period, new Date(periodDate), salesTarget, volumeTarget)
+
+    res.json({
+      success: true,
+      data: goal,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/organizations/:orgId/staff/attendance
+ * Returns: Staff attendance with TimeEntry data for audit
+ * Query: date (ISO date), venueId (optional), status (optional: ACTIVE/INACTIVE)
+ */
+router.get(
+  '/:orgId/staff/attendance',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { date, venueId, status } = req.query
+
+      const attendance = await organizationDashboardService.getStaffAttendance(
+        orgId,
+        date as string | undefined,
+        venueId as string | undefined,
+        status as string | undefined,
+      )
+
+      res.json({
+        success: true,
+        data: attendance,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/staff/:staffId/sales-trend
+ * Returns: Sales trend for staff member (last 7 days)
+ */
+router.get(
+  '/:orgId/staff/:staffId/sales-trend',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, staffId } = req.params
+
+      const salesTrend = await organizationDashboardService.getStaffSalesTrend(orgId, staffId)
+
+      res.json({
+        success: true,
+        data: salesTrend,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/staff/:staffId/sales-mix
+ * Returns: Sales mix by category for staff member
+ */
+router.get(
+  '/:orgId/staff/:staffId/sales-mix',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, staffId } = req.params
+
+      const salesMix = await organizationDashboardService.getStaffSalesMix(orgId, staffId)
+
+      res.json({
+        success: true,
+        data: salesMix,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/staff/:staffId/attendance-calendar
+ * Returns: Attendance calendar for current month
+ */
+router.get(
+  '/:orgId/staff/:staffId/attendance-calendar',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, staffId } = req.params
+
+      const calendar = await organizationDashboardService.getStaffAttendanceCalendar(orgId, staffId)
+
+      res.json({
+        success: true,
+        data: calendar,
       })
     } catch (error) {
       next(error)

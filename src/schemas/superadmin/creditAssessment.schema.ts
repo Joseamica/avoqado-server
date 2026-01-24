@@ -5,7 +5,6 @@
  */
 
 import { z } from 'zod'
-import { CreditEligibility, CreditGrade } from '@prisma/client'
 
 /**
  * Validates list assessments query parameters

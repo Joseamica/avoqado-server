@@ -8,7 +8,6 @@ import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
-import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 
 /**
  * Endpoint para verificar el estado de autenticación de un usuario.
@@ -70,6 +69,15 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 country: true,
                 email: true,
                 phone: true,
+                // Organization info (needed for PlayTelecom white-label and multi-venue orgs)
+                organizationId: true,
+                organization: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                  },
+                },
                 features: {
                   select: {
                     active: true,
@@ -241,6 +249,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       country: sv.venue.country,
       email: sv.venue.email,
       phone: sv.venue.phone,
+      // Organization info (needed for PlayTelecom white-label and multi-venue orgs)
+      organizationId: sv.venue.organizationId,
+      organization: sv.venue.organization,
     }))
 
     // Create a map of venue IDs that user already has a direct relationship with

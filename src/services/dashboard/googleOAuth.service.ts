@@ -149,7 +149,13 @@ export async function loginWithGoogle(
       },
       include: {
         venue: {
-          include: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            logo: true,
+            status: true,
+            organizationId: true,
             organization: true,
           },
         },
@@ -201,46 +207,44 @@ export async function loginWithGoogle(
       },
     })
 
-    // Create staff-venue relationship from invitation
-    await prisma.staffVenue.create({
-      data: {
+    // Create staff-venue relationship and mark invitation as accepted IN PARALLEL
+    // These operations are independent and can run concurrently
+    const venueId = invitation.venueId || invitation.venue.id
+    await Promise.all([
+      prisma.staffVenue.create({
+        data: {
+          staffId: staff.id,
+          venueId: venueId,
+          role: invitation.role,
+          active: true,
+        },
+      }),
+      prisma.invitation.update({
+        where: { id: invitation.id },
+        data: {
+          status: 'ACCEPTED',
+          acceptedAt: new Date(),
+        },
+      }),
+    ])
+
+    // No need to refetch - we have all the data we need
+    // Manually construct the venues array from the invitation data
+    staff.venues = [
+      {
         staffId: staff.id,
-        venueId: invitation.venueId || invitation.venue.id,
+        venueId: venueId,
         role: invitation.role,
         active: true,
-      },
-    })
-
-    // Mark invitation as accepted
-    await prisma.invitation.update({
-      where: { id: invitation.id },
-      data: {
-        status: 'ACCEPTED',
-        acceptedAt: new Date(),
-      },
-    })
-
-    // Refetch staff with venues
-    staff = await prisma.staff.findUnique({
-      where: { id: staff.id },
-      include: {
-        organization: true,
-        venues: {
-          where: { active: true },
-          include: {
-            venue: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
-                logo: true,
-                status: true,
-              },
-            },
-          },
+        venue: {
+          id: invitation.venue.id,
+          name: invitation.venue.name,
+          slug: invitation.venue.slug,
+          logo: (invitation.venue as any).logo || null,
+          status: (invitation.venue as any).status || 'ACTIVE',
         },
       },
-    })
+    ] as any
 
     isNewUser = true
   } else {
@@ -394,7 +398,7 @@ export async function loginWithGoogleOneTap(credential: string): Promise<{
   isNewUser: boolean
 }> {
   // Verify the Google One Tap JWT credential
-  const googleUser = await verifyGoogleToken(credential)
+  const _googleUser = await verifyGoogleToken(credential)
 
   // Reuse the same logic as loginWithGoogle
   // The rest of the logic is the same - checking for existing staff, invitations, etc.

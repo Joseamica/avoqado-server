@@ -5,7 +5,6 @@ import {
   evaluateAutomaticDiscounts,
   applyDiscountToOrder,
   removeDiscountFromOrder,
-  applyAutomaticDiscounts,
   applyManualDiscount,
   getOrderDiscountsSummary,
 } from '../../../../src/services/dashboard/discountEngine.service'

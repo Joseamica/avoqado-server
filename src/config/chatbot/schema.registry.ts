@@ -414,7 +414,6 @@ function initializeRegistry(registry: SchemaRegistry): void {
     registry.registerTables(tables)
   } catch {
     // Tables not yet created - this is expected during Phase 1
-    console.warn('[SchemaRegistry] Tables not yet registered - will be added in Phase 2')
   }
 
   // Import and register intents
@@ -423,7 +422,6 @@ function initializeRegistry(registry: SchemaRegistry): void {
     registry.registerIntents(intents)
   } catch {
     // Intents not yet created
-    console.warn('[SchemaRegistry] Intents not yet registered - will be added in Phase 3')
   }
 
   // Import and register industry configs
@@ -433,7 +431,6 @@ function initializeRegistry(registry: SchemaRegistry): void {
     if (TELECOM_CONFIG) registry.registerIndustryConfig(TELECOM_CONFIG)
   } catch {
     // Industry configs not yet created
-    console.warn('[SchemaRegistry] Industry configs not yet registered - will be added in Phase 3')
   }
 
   registry.markInitialized()

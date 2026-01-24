@@ -9,7 +9,6 @@ import {
   calculateProcessingCost,
   findBestMatch,
   BlumonRates,
-  MCCLookupResult,
 } from '../../../../src/services/pricing/blumon-mcc-lookup.service'
 
 describe('BlumonMCCLookupService', () => {
@@ -589,7 +588,7 @@ describe('BlumonMCCLookupService', () => {
 
     test('Debit should always be <= Credit', () => {
       const familias = listAllFamilias()
-      familias.forEach(({ familia, rates }) => {
+      familias.forEach(({ rates }) => {
         expect(rates.debito).toBeLessThanOrEqual(rates.credito)
       })
     })

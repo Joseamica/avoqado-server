@@ -2,7 +2,8 @@
 
 ## Overview
 
-The team invitation system allows organization owners/admins to invite new staff members to their organization and specific venues. The system supports **multi-venue assignments** where a single staff member can belong to multiple venues with different roles.
+The team invitation system allows organization owners/admins to invite new staff members to their organization and specific venues. The
+system supports **multi-venue assignments** where a single staff member can belong to multiple venues with different roles.
 
 ## Data Model
 
@@ -39,6 +40,7 @@ The team invitation system allows organization owners/admins to invite new staff
 **`Staff.email` is globally unique** - One person = One Staff record across the entire platform.
 
 This means:
+
 - A user cannot have two Staff records (even in different organizations)
 - Multi-venue support is achieved through the `StaffVenue` junction table
 - Cross-organization access is **NOT currently supported** (requires support intervention)
@@ -119,16 +121,17 @@ This means:
 Returns invitation details for the frontend to render the appropriate UI.
 
 **Response:**
+
 ```typescript
 {
   id: string
   email: string
   role: StaffRole
-  roleDisplayName: string | null  // Custom role name from venue settings
+  roleDisplayName: string | null // Custom role name from venue settings
   organizationName: string
   venueName: string | null
   inviterName: string
-  expiresAt: string  // ISO 8601
+  expiresAt: string // ISO 8601
   status: 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED'
 
   // Pre-populated fields (if staff exists in same org)
@@ -136,8 +139,8 @@ Returns invitation details for the frontend to render the appropriate UI.
   lastName: string | null
 
   // Multi-venue support flags
-  userAlreadyHasPassword: boolean  // If true, skip password form
-  existsInDifferentOrg: boolean    // If true, show "contact support" message
+  userAlreadyHasPassword: boolean // If true, skip password form
+  existsInDifferentOrg: boolean // If true, show "contact support" message
 }
 ```
 
@@ -146,6 +149,7 @@ Returns invitation details for the frontend to render the appropriate UI.
 Accepts the invitation and creates/updates staff records.
 
 **Request:**
+
 ```typescript
 {
   firstName: string
@@ -156,6 +160,7 @@ Accepts the invitation and creates/updates staff records.
 ```
 
 **Response:**
+
 ```typescript
 {
   user: {
@@ -173,6 +178,7 @@ Accepts the invitation and creates/updates staff records.
 ```
 
 **Error Responses:**
+
 - `404` - Invitation not found or already used
 - `410` - Invitation expired
 - `409` - Email registered in different organization
@@ -182,31 +188,34 @@ Accepts the invitation and creates/updates staff records.
 
 The `InviteAccept.tsx` page handles all invitation scenarios:
 
-| State | Condition | UI |
-|-------|-----------|-----|
-| Loading | Fetching invitation | Spinner |
-| Error | Invalid token | Error message + Login link |
-| Expired | `expiresAt < now` | Expiration message + Contact admin |
-| Different Org | `existsInDifferentOrg: true` | "Contact support" message |
-| Has Password | `userAlreadyHasPassword: true` | "Login to accept" button |
-| Email Mismatch | Session email ≠ invitation email | Logout + Continue button |
-| Direct Accept | Session email = invitation email | "Accept" button (no form) |
-| New User | Default | Full registration form |
+| State          | Condition                        | UI                                 |
+| -------------- | -------------------------------- | ---------------------------------- |
+| Loading        | Fetching invitation              | Spinner                            |
+| Error          | Invalid token                    | Error message + Login link         |
+| Expired        | `expiresAt < now`                | Expiration message + Contact admin |
+| Different Org  | `existsInDifferentOrg: true`     | "Contact support" message          |
+| Has Password   | `userAlreadyHasPassword: true`   | "Login to accept" button           |
+| Email Mismatch | Session email ≠ invitation email | Logout + Continue button           |
+| Direct Accept  | Session email = invitation email | "Accept" button (no form)          |
+| New User       | Default                          | Full registration form             |
 
 ## Security Considerations
 
 ### Token Security
+
 - Invitation tokens are UUID v4 (cryptographically random)
 - Tokens are single-use (status changes to ACCEPTED)
 - Default expiration: 7 days
 - Tokens cannot be reused after expiration
 
 ### PIN Security
+
 - PINs are stored as **plain text** (for fast TPV login comparison)
 - PIN uniqueness is enforced per-venue (not globally)
 - PINs are 4-10 digits only
 
 ### Password Security
+
 - Passwords are hashed with bcrypt (12 rounds)
 - Existing passwords are NEVER overwritten when accepting new venue invitations
 - Users with existing accounts authenticate with their existing password
@@ -216,6 +225,7 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 ### Manual Testing Checklist
 
 #### Test 1: New User Invitation
+
 - [ ] Create invitation for non-existent email
 - [ ] Access invitation link (should show full form)
 - [ ] Submit form with valid data
@@ -223,6 +233,7 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 - [ ] Verify user can log in
 
 #### Test 2: Multi-Venue (Same Org)
+
 - [ ] Create invitation for existing user (different venue, same org)
 - [ ] Access invitation link (should show "login to accept")
 - [ ] Log in with existing credentials
@@ -231,12 +242,14 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 - [ ] Verify user has access to both venues
 
 #### Test 3: Cross-Organization (Blocked)
+
 - [ ] Create invitation for email that exists in different org
 - [ ] Access invitation link (should show "contact support")
 - [ ] Verify no new records created
 - [ ] Verify existing records unchanged
 
 #### Test 4: Direct Accept (Logged In)
+
 - [ ] Log in as user X
 - [ ] Access invitation link for user X (same email)
 - [ ] Should show "Accept directly" UI
@@ -245,6 +258,7 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 - [ ] Verify redirect to new venue
 
 #### Test 5: Email Mismatch
+
 - [ ] Log in as user X
 - [ ] Access invitation link for user Y (different email)
 - [ ] Should show "Email Mismatch" warning
@@ -252,11 +266,13 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 - [ ] Verify redirect back to invitation
 
 #### Test 6: Expired Invitation
+
 - [ ] Create invitation (manually set expiresAt in past)
 - [ ] Access invitation link
 - [ ] Should show "Invitation Expired" message
 
 #### Test 7: PIN Collision
+
 - [ ] User A has PIN 1234 in Venue X
 - [ ] Invite User B to Venue X
 - [ ] User B tries to use PIN 1234
@@ -265,6 +281,7 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 ## Database Queries
 
 ### Check User's Venue Assignments
+
 ```sql
 SELECT
   s.email,
@@ -282,6 +299,7 @@ WHERE s.email = 'user@example.com';
 ```
 
 ### Check Pending Invitations
+
 ```sql
 SELECT
   i.email,
@@ -305,6 +323,6 @@ AND i."expiresAt" > NOW();
 
 ## Changelog
 
-| Date | Change | Author |
-|------|--------|--------|
+| Date       | Change                                          | Author |
+| ---------- | ----------------------------------------------- | ------ |
 | 2025-01-15 | Initial documentation + multi-venue support fix | Claude |

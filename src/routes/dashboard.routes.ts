@@ -50,6 +50,7 @@ import * as tpvCommandController from '../controllers/dashboard/tpv-command.dash
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
+import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 import {
   dateRangeQuerySchema,
@@ -6217,6 +6218,96 @@ router.patch(
   productController.deleteProductImageHandler,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/product-types:
+ *   get:
+ *     tags: [Products]
+ *     summary: Get available product types for a venue (Square-aligned)
+ *     description: |
+ *       Returns product type configurations filtered by the venue's industry type.
+ *       Types are sorted with recommended types first based on the venue's business category.
+ *
+ *       Square-aligned product types:
+ *       - REGULAR: Physical products that can be tracked in inventory
+ *       - FOOD_AND_BEV: Food, drinks, and alcoholic beverages (with isAlcoholic toggle)
+ *       - APPOINTMENTS_SERVICE: Bookable services with a specific duration
+ *       - EVENT: Tickets for events, shows, or workshops
+ *       - DIGITAL: Downloadable content, licenses, or subscriptions
+ *       - DONATION: Charitable contributions with suggested amounts
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: Product types available for this venue
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     types:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           code: { type: string, enum: [REGULAR, FOOD_AND_BEV, APPOINTMENTS_SERVICE, EVENT, DIGITAL, DONATION] }
+ *                           label: { type: string }
+ *                           labelEs: { type: string }
+ *                           description: { type: string }
+ *                           descriptionEs: { type: string }
+ *                           hasAlcoholToggle: { type: boolean }
+ *                           fields: { type: array, items: { type: string } }
+ *                           canTrackInventory: { type: boolean }
+ *                           icon: { type: string }
+ *                     venueType: { type: string }
+ *                     recommended: { type: array, items: { type: string } }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/product-types',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  validateRequest(VenueIdParamsSchema),
+  productController.getProductTypesHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/product-types:
+ *   get:
+ *     tags: [Products]
+ *     summary: Get all product type configurations (reference)
+ *     description: |
+ *       Returns all available product type configurations for reference.
+ *       This is useful for superadmin or documentation purposes.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: All product type configurations
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     types:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/product-types', authenticateTokenMiddleware, productController.getAllProductTypesHandler)
+
 // ==========================================
 // TEAM MANAGEMENT ROUTES
 // ==========================================
@@ -9899,6 +9990,139 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('settlements:write'),
   creditOfferController.declineOffer,
+)
+
+// ============================================================
+// SALE VERIFICATION ROUTES (Dashboard - Sales Report)
+// ============================================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: List sale verifications with staff and payment details
+ *     description: Returns paginated list of sale verifications for the Sales Report dashboard
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: pageNumber
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [PENDING, COMPLETED, FAILED] }
+ *       - in: query
+ *         name: staffId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of sale verifications
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.listSaleVerifications,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications/summary:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: Get sale verifications summary statistics
+ *     description: Returns summary metrics for the Sales Report dashboard cards
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: Summary statistics
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications/summary',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getSaleVerificationsSummary,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications/daily:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: Get daily sales data for charts
+ *     description: Returns daily aggregated sales data for revenue/volume charts
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: fromDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: toDate
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: Daily sales data
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications/daily',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getDailySalesData,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications/staff:
+ *   get:
+ *     tags: [Sale Verifications]
+ *     summary: Get staff list with verification counts
+ *     description: Returns staff members who have sale verifications for filter dropdown
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Staff list with verification counts
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get(
+  '/venues/:venueId/sale-verifications/staff',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getStaffWithVerifications,
 )
 
 export default router

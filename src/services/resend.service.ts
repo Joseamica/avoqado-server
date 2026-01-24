@@ -633,6 +633,240 @@ Email automático de Avoqado Platform
   }
 }
 
+interface PurchaseOrderEmailData {
+  orderNumber: string
+  orderDate: string
+  expectedDeliveryDate?: string | null
+  venueName: string
+  venueAddress: string
+  venueCity: string
+  venueState: string
+  venueZipCode: string
+  supplierName: string
+  supplierContactName?: string | null
+  supplierEmail: string
+  staffName: string
+  staffEmail: string
+  items: Array<{
+    name: string
+    quantity: number
+    unit: string
+    unitPrice: string
+    total: string
+  }>
+  subtotal: string
+  taxRate: number
+  taxAmount: string
+  total: string
+  notes?: string | null
+}
+
+/**
+ * Send Purchase Order email to supplier
+ *
+ * Sends email to supplier (To:) with copy to staff (Cc:) and Reply-To set to staff email
+ * Follows Square/Toast pattern for professional PO communication
+ */
+export async function sendPurchaseOrderEmail(data: PurchaseOrderEmailData): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping Purchase Order email')
+    return false
+  }
+
+  try {
+    const orderDateFormatted = new Date(data.orderDate).toLocaleDateString('es-MX', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+
+    const expectedDeliveryFormatted = data.expectedDeliveryDate
+      ? new Date(data.expectedDeliveryDate).toLocaleDateString('es-MX', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        })
+      : null
+
+    // Build items table rows
+    const itemRowsHtml = data.items
+      .map(
+        item => `
+        <tr>
+          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; font-size: 14px;">${item.quantity} × ${item.name}</td>
+          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; font-size: 13px; color: #666;">@ ${item.unitPrice}</td>
+          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; text-align: right; font-size: 14px; font-weight: 600;">$${item.total}</td>
+        </tr>
+      `,
+      )
+      .join('')
+
+    const itemRowsText = data.items
+      .map(item => `${item.quantity} × ${item.name} (${item.unit}) @ $${item.unitPrice} = $${item.total}`)
+      .join('\n')
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Orden de compra ${data.orderNumber} de ${data.venueName}</title>
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">Orden de compra ${data.orderNumber} de ${data.venueName}</h1>
+              <p style="color: #e8f4f8; margin: 10px 0 0 0; font-size: 16px;">${orderDateFormatted}</p>
+            </div>
+
+            <!-- Content -->
+            <div style="padding: 40px 30px;">
+              <!-- Supplier Info -->
+              <div style="margin-bottom: 30px;">
+                <p style="font-size: 14px; margin: 0 0 5px 0; color: #666;">A:</p>
+                <p style="font-size: 16px; margin: 0 0 5px 0; font-weight: 600; color: #333;">${data.supplierName}</p>
+                ${data.supplierContactName ? `<p style="font-size: 14px; margin: 0 0 5px 0; color: #666;">Contacto: ${data.supplierContactName}</p>` : ''}
+              </div>
+
+              <!-- Venue Info -->
+              <div style="background: #f8f9ff; border-radius: 10px; padding: 20px; margin-bottom: 30px;">
+                <p style="font-size: 14px; margin: 0 0 5px 0; color: #666;">Enviar a:</p>
+                <p style="font-size: 16px; margin: 0 0 5px 0; font-weight: 600; color: #333;">${data.venueName}</p>
+                <p style="font-size: 14px; margin: 0; color: #666;">${data.venueAddress}, ${data.venueCity}, ${data.venueState}, ${data.venueZipCode}</p>
+              </div>
+
+              <!-- Order Info -->
+              <div style="margin-bottom: 30px;">
+                <table style="width: 100%; border-collapse: collapse;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #666; width: 50%;">Pedido por:</td>
+                    <td style="padding: 8px 0; color: #333;">${data.staffName}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #666;">Número de cuenta:</td>
+                    <td style="padding: 8px 0; color: #333; font-family: monospace;">${data.orderNumber}</td>
+                  </tr>
+                  ${expectedDeliveryFormatted ? `<tr><td style="padding: 8px 0; color: #666;">Fecha esperada de entrega:</td><td style="padding: 8px 0; color: #333;">${expectedDeliveryFormatted}</td></tr>` : ''}
+                </table>
+              </div>
+
+              <!-- Items Table -->
+              <div style="margin-bottom: 30px;">
+                <h2 style="color: #333; font-size: 18px; margin: 0 0 15px 0;">Productos ordenados</h2>
+                <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
+                  <tbody>
+                    ${itemRowsHtml}
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Totals -->
+              <div style="margin-bottom: 30px;">
+                <table style="width: 100%; border-collapse: collapse;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #666; text-align: right;">Subtotal:</td>
+                    <td style="padding: 8px 0; color: #333; text-align: right; width: 120px; font-weight: 600;">$${data.subtotal}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #666; text-align: right;">Impuesto estimado (${(data.taxRate * 100).toFixed(0)}%):</td>
+                    <td style="padding: 8px 0; color: #333; text-align: right; font-weight: 600;">$${data.taxAmount}</td>
+                  </tr>
+                  <tr style="border-top: 2px solid #333;">
+                    <td style="padding: 15px 0 0 0; color: #333; text-align: right; font-size: 18px; font-weight: bold;">Total:</td>
+                    <td style="padding: 15px 0 0 0; color: #333; text-align: right; font-size: 18px; font-weight: bold;">$${data.total}</td>
+                  </tr>
+                </table>
+              </div>
+
+              ${
+                data.notes
+                  ? `
+              <!-- Notes -->
+              <div style="background: #fff8e1; border-radius: 10px; padding: 20px; margin-bottom: 30px;">
+                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666; font-weight: 600;">Notas:</p>
+                <p style="font-size: 14px; margin: 0; color: #666; white-space: pre-line;">${data.notes}</p>
+              </div>
+              `
+                  : ''
+              }
+
+              <!-- Footer -->
+              <div style="text-align: center; padding-top: 30px; border-top: 1px solid #e0e0e0;">
+                <p style="font-size: 14px; color: #666; margin: 0 0 5px 0;">${data.venueName}</p>
+                <p style="font-size: 13px; color: #999; margin: 0;">
+                  Comunícate con ${data.venueName} para obtener más información sobre sus prácticas de privacidad.
+                </p>
+              </div>
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+
+    const text = `
+ORDEN DE COMPRA ${data.orderNumber} DE ${data.venueName}
+${'='.repeat(60)}
+
+Fecha: ${orderDateFormatted}
+
+A: ${data.supplierName}
+${data.supplierContactName ? `Contacto: ${data.supplierContactName}` : ''}
+
+ENVIAR A:
+${data.venueName}
+${data.venueAddress}
+${data.venueCity}, ${data.venueState}, ${data.venueZipCode}
+
+INFORMACIÓN DEL PEDIDO:
+Pedido por: ${data.staffName}
+Número de cuenta: ${data.orderNumber}
+${expectedDeliveryFormatted ? `Fecha esperada de entrega: ${expectedDeliveryFormatted}` : ''}
+
+PRODUCTOS ORDENADOS:
+${'-'.repeat(60)}
+${itemRowsText}
+${'-'.repeat(60)}
+
+Subtotal: $${data.subtotal}
+Impuesto estimado (${(data.taxRate * 100).toFixed(0)}%): $${data.taxAmount}
+${'='.repeat(60)}
+TOTAL: $${data.total}
+${'='.repeat(60)}
+
+${data.notes ? `NOTAS:\n${data.notes}\n\n` : ''}
+---
+${data.venueName}
+Comunícate con ${data.venueName} para obtener más información sobre sus prácticas de privacidad.
+    `
+
+    logger.info(`📧 Sending Purchase Order email for ${data.orderNumber}`)
+    logger.info(`📧 To: ${data.supplierEmail}, Cc: ${data.staffEmail}, Reply-To: ${data.staffEmail}`)
+
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: data.supplierEmail,
+      cc: data.staffEmail,
+      replyTo: data.staffEmail,
+      subject: `Orden de compra ${data.orderNumber} de ${data.venueName}`,
+      html,
+      text,
+    })
+
+    if (result.error) {
+      logger.error(`Failed to send Purchase Order email:`, result.error)
+      return false
+    }
+
+    logger.info(`✅ Purchase Order email sent successfully (ID: ${result.data?.id})`)
+    return true
+  } catch (error) {
+    logger.error(`Error sending Purchase Order email:`, error)
+    return false
+  }
+}
+
 /**
  * Verify Resend API connection
  */

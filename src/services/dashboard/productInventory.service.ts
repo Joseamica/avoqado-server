@@ -184,7 +184,7 @@ export async function getGlobalMovements(
   },
 ) {
   const { page, limit, search, startDate, endDate, type } = query
-  const skip = (page - 1) * limit
+  const _skip = (page - 1) * limit
 
   // 1. Build where clauses
   const dateFilter =

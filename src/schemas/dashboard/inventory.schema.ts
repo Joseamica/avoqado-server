@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
   RawMaterialCategory,
   PurchaseOrderStatus,
+  PurchaseOrderItemStatus,
   PricingStrategy,
   RawMaterialMovementType,
   MovementType,
@@ -336,7 +337,14 @@ export const CreatePurchaseOrderSchema = z.object({
     orderDate: z.string().datetime(),
     expectedDeliveryDate: z.string().datetime().optional(),
     taxRate: z.number().min(0).max(1).default(0.16),
+    commissionRate: z.number().min(0).max(1).default(0), // Optional commission rate
     notes: z.string().optional(),
+    // Shipping address (optional custom delivery location)
+    shippingAddressType: z.enum(['VENUE', 'CUSTOM']).default('VENUE'),
+    shippingAddress: z.string().optional(),
+    shippingCity: z.string().optional(),
+    shippingState: z.string().optional(),
+    shippingZipCode: z.string().optional(),
     items: z.array(
       z.object({
         rawMaterialId: z.string().cuid(),
@@ -388,7 +396,8 @@ export const ReceivePurchaseOrderSchema = z.object({
 
 export const GetPurchaseOrdersQuerySchema = z.object({
   query: z.object({
-    status: z.nativeEnum(PurchaseOrderStatus).optional(),
+    // Accept array of statuses for multi-select filtering (e.g., status[]=SENT&status[]=CONFIRMED)
+    status: z.array(z.nativeEnum(PurchaseOrderStatus)).optional(),
     supplierId: z.string().cuid().optional(),
     startDate: z.string().datetime().optional(),
     endDate: z.string().datetime().optional(),
@@ -431,6 +440,50 @@ export const TransitionPurchaseOrderStatusSchema = z.object({
     newStatus: z.nativeEnum(PurchaseOrderStatus),
     reason: z.string().optional(),
     notes: z.string().optional(),
+  }),
+})
+
+export const UpdatePurchaseOrderFeesSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    purchaseOrderId: z.string().cuid(),
+  }),
+  body: z.object({
+    taxRate: z.number().min(0).max(1).optional(),
+    commissionRate: z.number().min(0).max(1).optional(),
+  }),
+})
+
+export const UpdatePurchaseOrderItemStatusSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    purchaseOrderId: z.string().cuid(),
+    itemId: z.string().cuid(),
+  }),
+  body: z.object({
+    receiveStatus: z.nativeEnum(PurchaseOrderItemStatus),
+    quantityReceived: z.number().min(0).optional(), // For RECEIVED status
+    notes: z.string().optional(),
+  }),
+})
+
+export const ReceiveAllItemsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    purchaseOrderId: z.string().cuid(),
+  }),
+  body: z.object({
+    receivedDate: z.string().datetime().optional(),
+  }),
+})
+
+export const ReceiveNoItemsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    purchaseOrderId: z.string().cuid(),
+  }),
+  body: z.object({
+    reason: z.string().optional(),
   }),
 })
 
@@ -817,6 +870,39 @@ export const GetGlobalMovementsQuerySchema = z.object({
   }),
 })
 
+// ==========================================
+// LABEL GENERATION SCHEMAS
+// ==========================================
+
+export const GenerateLabelsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    purchaseOrderId: z.string().cuid(),
+  }),
+  body: z.object({
+    labelType: z.string().min(1, 'Label type is required'),
+    barcodeFormat: z.enum(['SKU', 'GTIN'], {
+      errorMap: () => ({ message: 'Barcode format must be SKU or GTIN' }),
+    }),
+    details: z.object({
+      sku: z.boolean(),
+      gtin: z.boolean(),
+      variantName: z.boolean(),
+      price: z.boolean(),
+      itemName: z.boolean(),
+      unitAbbr: z.boolean(),
+    }),
+    items: z
+      .array(
+        z.object({
+          itemId: z.string().cuid(),
+          quantity: z.number().int().min(1, 'Quantity must be at least 1'),
+        }),
+      )
+      .min(1, 'At least one item is required'),
+  }),
+})
+
 // Type exports for TypeScript
 export type CreateRawMaterialDto = z.infer<typeof CreateRawMaterialSchema>['body']
 export type UpdateRawMaterialDto = z.infer<typeof UpdateRawMaterialSchema>['body']
@@ -828,6 +914,11 @@ export type UpdateSupplierDto = z.infer<typeof UpdateSupplierSchema>['body']
 export type CreatePurchaseOrderDto = z.infer<typeof CreatePurchaseOrderSchema>['body']
 export type UpdatePurchaseOrderDto = z.infer<typeof UpdatePurchaseOrderSchema>['body']
 export type ReceivePurchaseOrderDto = z.infer<typeof ReceivePurchaseOrderSchema>['body']
+export type UpdatePurchaseOrderFeesDto = z.infer<typeof UpdatePurchaseOrderFeesSchema>['body']
+export type UpdatePurchaseOrderItemStatusDto = z.infer<typeof UpdatePurchaseOrderItemStatusSchema>['body']
+export type ReceiveAllItemsDto = z.infer<typeof ReceiveAllItemsSchema>['body']
+export type ReceiveNoItemsDto = z.infer<typeof ReceiveNoItemsSchema>['body']
+export type GenerateLabelsDto = z.infer<typeof GenerateLabelsSchema>['body']
 export type CreatePricingPolicyDto = z.infer<typeof CreatePricingPolicySchema>['body']
 export type UpdatePricingPolicyDto = z.infer<typeof UpdatePricingPolicySchema>['body']
 

@@ -414,7 +414,7 @@ function generateAllPeriods(reportType: ReportType): number[] {
 /**
  * Format period value for API response
  */
-function formatPeriod(period: Date | number, reportType: ReportType, timezone: string): string {
+function formatPeriod(period: Date | number, reportType: ReportType, _timezone: string): string {
   if (reportType === 'hourlySum') {
     // Hour of day (0-23)
     return String(period).padStart(2, '0') + ':00'

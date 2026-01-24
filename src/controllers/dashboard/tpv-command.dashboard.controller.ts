@@ -32,7 +32,6 @@
 
 import { NextFunction, Request, Response } from 'express'
 import { tpvCommandExecutionService } from '../../services/tpv/command-execution.service'
-import * as commandQueueService from '../../services/tpv/command-queue.service'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import {
@@ -157,7 +156,7 @@ export async function getCommands(
 ): Promise<void> {
   try {
     const { venueId } = req.params
-    const { page = 1, pageSize = 20, terminalId, commandType, status, priority, source, fromDate, toDate, search } = req.query
+    const { page = 1, pageSize = 20, terminalId, commandType, status, priority, source, fromDate, toDate } = req.query
 
     const where: any = { venueId }
 

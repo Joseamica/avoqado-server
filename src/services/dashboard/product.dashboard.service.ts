@@ -14,6 +14,31 @@ export interface CreateProductDto {
   sku: string
   categoryId: string
   modifierGroupIds?: string[]
+
+  // ═══════════════════════════════════════════════════════════════
+  // Square-aligned contextual fields
+  // ═══════════════════════════════════════════════════════════════
+  isAlcoholic?: boolean // Only for FOOD_AND_BEV
+  kitchenName?: string // Short name for kitchen display (max 50)
+  abbreviation?: string // Ultra-short text for POS (max 24)
+  duration?: number // Minutes (for SERVICE, APPOINTMENTS_SERVICE)
+
+  // Event fields
+  eventDate?: string | Date
+  eventTime?: string
+  eventEndTime?: string
+  eventCapacity?: number
+  eventLocation?: string
+
+  // Digital fields
+  downloadUrl?: string
+  downloadLimit?: number
+  fileSize?: string
+
+  // Donation fields
+  suggestedAmounts?: number[]
+  allowCustomAmount?: boolean
+  donationCause?: string
 }
 
 export interface UpdateProductDto {
@@ -29,6 +54,31 @@ export interface UpdateProductDto {
   displayOrder?: number
   trackInventory?: boolean
   inventoryMethod?: 'QUANTITY' | 'RECIPE' | null
+
+  // ═══════════════════════════════════════════════════════════════
+  // Square-aligned contextual fields
+  // ═══════════════════════════════════════════════════════════════
+  isAlcoholic?: boolean
+  kitchenName?: string | null
+  abbreviation?: string | null
+  duration?: number | null
+
+  // Event fields
+  eventDate?: string | Date | null
+  eventTime?: string | null
+  eventEndTime?: string | null
+  eventCapacity?: number | null
+  eventLocation?: string | null
+
+  // Digital fields
+  downloadUrl?: string | null
+  downloadLimit?: number | null
+  fileSize?: string | null
+
+  // Donation fields
+  suggestedAmounts?: number[]
+  allowCustomAmount?: boolean
+  donationCause?: string | null
 }
 
 export interface ReorderProductsDto {
@@ -42,6 +92,115 @@ export interface QuickAddProductDto {
   price: number
   categoryId?: string
   trackInventory?: boolean
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PRODUCT TYPE VALIDATION (Square-aligned)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Types that CANNOT track inventory (services, digital, donations)
+ */
+const _NO_INVENTORY_TYPES: ProductType[] = ['SERVICE', 'APPOINTMENTS_SERVICE', 'DIGITAL', 'DONATION']
+
+/**
+ * Validate product data based on its type (Square-aligned rules)
+ */
+function validateProductByType(data: CreateProductDto | UpdateProductDto, _isUpdate: boolean = false): void {
+  const type = data.type
+
+  if (!type) return // Type not being changed in update
+
+  // Kitchen name validation (max 50 chars)
+  if (data.kitchenName && data.kitchenName.length > 50) {
+    throw new AppError('Kitchen name must be 50 characters or less', 400)
+  }
+
+  // Abbreviation validation (max 24 chars, like Square)
+  if (data.abbreviation && data.abbreviation.length > 24) {
+    throw new AppError('Abbreviation must be 24 characters or less', 400)
+  }
+
+  // Duration validation (1-1440 minutes = 1 min to 24 hours)
+  if (data.duration !== undefined && data.duration !== null) {
+    if (data.duration < 1 || data.duration > 1440) {
+      throw new AppError('Duration must be between 1 and 1440 minutes', 400)
+    }
+  }
+
+  // Type-specific validations
+  switch (type) {
+    case 'FOOD_AND_BEV':
+      // isAlcoholic is optional, defaults to false
+      break
+
+    case 'SERVICE':
+    case 'APPOINTMENTS_SERVICE':
+      // Services cannot track inventory
+      if ('trackInventory' in data && data.trackInventory === true) {
+        throw new AppError('Services cannot track inventory', 400)
+      }
+      break
+
+    case 'EVENT':
+      // Event date is recommended but not strictly required (can be TBD)
+      // Capacity validation
+      if (data.eventCapacity !== undefined && data.eventCapacity !== null && data.eventCapacity < 1) {
+        throw new AppError('Event capacity must be at least 1', 400)
+      }
+      break
+
+    case 'DIGITAL':
+      // Digital products cannot track inventory (infinite by nature)
+      if ('trackInventory' in data && data.trackInventory === true) {
+        throw new AppError('Digital products cannot track inventory', 400)
+      }
+      // Download URL is recommended but can be added later
+      break
+
+    case 'DONATION':
+      // Donations cannot track inventory
+      if ('trackInventory' in data && data.trackInventory === true) {
+        throw new AppError('Donations cannot track inventory', 400)
+      }
+      // Suggested amounts validation
+      if (data.suggestedAmounts) {
+        for (const amount of data.suggestedAmounts) {
+          if (amount <= 0) {
+            throw new AppError('Suggested donation amounts must be positive', 400)
+          }
+        }
+      }
+      break
+
+    case 'REGULAR':
+    case 'OTHER':
+      // No special validations
+      break
+
+    // Legacy types (deprecated but still valid for backwards compatibility)
+    case 'FOOD':
+    case 'BEVERAGE':
+    case 'ALCOHOL':
+    case 'RETAIL':
+      // Allow but log deprecation warning
+      logger.warn(`Using deprecated product type: ${type}. Consider migrating to Square-aligned types.`)
+      break
+  }
+}
+
+/**
+ * Normalize product type for legacy compatibility
+ * Maps legacy types to new Square-aligned types for queries
+ */
+export function normalizeProductType(type: ProductType): ProductType {
+  const legacyMap: Record<string, ProductType> = {
+    FOOD: 'FOOD_AND_BEV',
+    BEVERAGE: 'FOOD_AND_BEV',
+    ALCOHOL: 'FOOD_AND_BEV',
+    RETAIL: 'REGULAR',
+  }
+  return (legacyMap[type] as ProductType) || type
 }
 
 /**
@@ -87,6 +246,7 @@ export async function getProducts(
   venueId: string,
   options?: {
     includeRecipe?: boolean
+    includePricingPolicy?: boolean
     categoryId?: string
     orderBy?: 'displayOrder' | 'name'
   },
@@ -125,6 +285,10 @@ export async function getProducts(
           },
         },
       },
+      // ✅ Include pricing policy for pricing analysis page
+      ...(options?.includePricingPolicy && {
+        pricingPolicy: true,
+      }),
     },
     orderBy: options?.orderBy === 'name' ? { name: 'asc' } : { displayOrder: 'asc' },
   })
@@ -221,6 +385,9 @@ export async function getProduct(venueId: string, productId: string): Promise<an
  * Create a new product
  */
 export async function createProduct(venueId: string, productData: CreateProductDto): Promise<Product> {
+  // ✅ Validate product data based on type (Square-aligned)
+  validateProductByType(productData)
+
   const { modifierGroupIds, ...productFields } = productData
 
   // Get the next display order
@@ -232,8 +399,10 @@ export async function createProduct(venueId: string, productData: CreateProductD
 
   const displayOrder = (maxOrder?.displayOrder || 0) + 1
 
+  // ✅ Build product data with Square-aligned contextual fields
   const product = await prisma.product.create({
     data: {
+      // Basic fields
       name: productFields.name,
       description: productFields.description,
       price: productFields.price,
@@ -244,6 +413,33 @@ export async function createProduct(venueId: string, productData: CreateProductD
       venueId,
       displayOrder,
       active: true,
+
+      // ═══════════════════════════════════════════════════════════════
+      // Square-aligned contextual fields
+      // ═══════════════════════════════════════════════════════════════
+      isAlcoholic: productFields.isAlcoholic ?? false,
+      kitchenName: productFields.kitchenName,
+      abbreviation: productFields.abbreviation,
+      duration: productFields.duration,
+
+      // Event fields
+      eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,
+      eventTime: productFields.eventTime,
+      eventEndTime: productFields.eventEndTime,
+      eventCapacity: productFields.eventCapacity,
+      eventLocation: productFields.eventLocation,
+
+      // Digital fields
+      downloadUrl: productFields.downloadUrl,
+      downloadLimit: productFields.downloadLimit,
+      fileSize: productFields.fileSize,
+
+      // Donation fields
+      suggestedAmounts: productFields.suggestedAmounts,
+      allowCustomAmount: productFields.allowCustomAmount ?? true,
+      donationCause: productFields.donationCause,
+
+      // Modifier groups
       modifierGroups: modifierGroupIds?.length
         ? {
             create: modifierGroupIds.map((groupId, index) => ({
@@ -303,6 +499,9 @@ export async function createProduct(venueId: string, productData: CreateProductD
  * Update an existing product
  */
 export async function updateProduct(venueId: string, productId: string, productData: UpdateProductDto): Promise<Product> {
+  // ✅ Validate product data based on type (Square-aligned)
+  validateProductByType(productData, true)
+
   const { modifierGroupIds, ...productFields } = productData
 
   // First check if product exists and belongs to venue
@@ -315,11 +514,16 @@ export async function updateProduct(venueId: string, productId: string, productD
   }
 
   // If modifierGroupIds is provided, update the relationships
-  const updateData: any = productFields
+  const updateData: any = { ...productFields }
 
   // ✅ WORLD-CLASS: If trackInventory is set to false, clear inventoryMethod
   if (productData.trackInventory === false) {
     updateData.inventoryMethod = null
+  }
+
+  // ✅ Handle event date conversion
+  if (productData.eventDate !== undefined) {
+    updateData.eventDate = productData.eventDate ? new Date(productData.eventDate) : null
   }
 
   if (modifierGroupIds !== undefined) {
@@ -771,4 +975,172 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
   }
 
   return product
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PRODUCT TYPE CONFIGURATION (Square-aligned)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Product type configuration for frontend display
+ * Based on Square's CatalogItemProductType enum
+ */
+export interface ProductTypeConfig {
+  code: ProductType
+  label: string
+  labelEs: string
+  description: string
+  descriptionEs: string
+  hasAlcoholToggle?: boolean
+  fields: string[]
+  canTrackInventory: boolean
+  icon?: string // Lucide icon name suggestion
+}
+
+/**
+ * Complete product type definitions (Square-aligned)
+ */
+const PRODUCT_TYPE_CONFIGS: ProductTypeConfig[] = [
+  {
+    code: 'REGULAR' as ProductType,
+    label: 'Regular Item',
+    labelEs: 'Artículo Regular',
+    description: 'Physical products that can be tracked in inventory',
+    descriptionEs: 'Productos físicos que pueden rastrearse en inventario',
+    fields: ['sku', 'trackInventory', 'inventoryMethod'],
+    canTrackInventory: true,
+    icon: 'Package',
+  },
+  {
+    code: 'FOOD_AND_BEV' as ProductType,
+    label: 'Food & Beverage',
+    labelEs: 'Comida y Bebida',
+    description: 'Food, drinks, and alcoholic beverages',
+    descriptionEs: 'Comida, bebidas y bebidas alcohólicas',
+    hasAlcoholToggle: true,
+    fields: ['isAlcoholic', 'kitchenName', 'abbreviation', 'calories', 'allergens', 'prepTime', 'cookingNotes'],
+    canTrackInventory: true,
+    icon: 'UtensilsCrossed',
+  },
+  {
+    code: 'APPOINTMENTS_SERVICE' as ProductType,
+    label: 'Service / Appointment',
+    labelEs: 'Servicio / Cita',
+    description: 'Bookable services with a specific duration',
+    descriptionEs: 'Servicios reservables con una duración específica',
+    fields: ['duration'],
+    canTrackInventory: false,
+    icon: 'Calendar',
+  },
+  {
+    code: 'EVENT' as ProductType,
+    label: 'Event Ticket',
+    labelEs: 'Boleto de Evento',
+    description: 'Tickets for events, shows, or workshops',
+    descriptionEs: 'Boletos para eventos, shows o talleres',
+    fields: ['eventDate', 'eventTime', 'eventEndTime', 'eventCapacity', 'eventLocation'],
+    canTrackInventory: false,
+    icon: 'Ticket',
+  },
+  {
+    code: 'DIGITAL' as ProductType,
+    label: 'Digital Product',
+    labelEs: 'Producto Digital',
+    description: 'Downloadable content, licenses, or subscriptions',
+    descriptionEs: 'Contenido descargable, licencias o suscripciones',
+    fields: ['downloadUrl', 'downloadLimit', 'fileSize'],
+    canTrackInventory: false,
+    icon: 'Download',
+  },
+  {
+    code: 'DONATION' as ProductType,
+    label: 'Donation',
+    labelEs: 'Donación',
+    description: 'Charitable contributions with suggested amounts',
+    descriptionEs: 'Contribuciones caritativas con montos sugeridos',
+    fields: ['suggestedAmounts', 'allowCustomAmount', 'donationCause'],
+    canTrackInventory: false,
+    icon: 'Heart',
+  },
+]
+
+/**
+ * Industry-specific type recommendations
+ * (which types make sense for which VenueType)
+ */
+const INDUSTRY_TYPE_MATRIX: Record<string, ProductType[]> = {
+  // Restaurant/Food Service
+  RESTAURANT: ['FOOD_AND_BEV', 'REGULAR', 'DONATION'],
+  CAFE: ['FOOD_AND_BEV', 'REGULAR', 'DONATION'],
+  BAR: ['FOOD_AND_BEV', 'REGULAR', 'EVENT', 'DONATION'],
+  FOOD_TRUCK: ['FOOD_AND_BEV', 'REGULAR'],
+  BAKERY: ['FOOD_AND_BEV', 'REGULAR'],
+  PIZZERIA: ['FOOD_AND_BEV', 'REGULAR', 'DONATION'],
+
+  // Retail
+  RETAIL_STORE: ['REGULAR', 'DIGITAL', 'DONATION'],
+  CLOTHING_STORE: ['REGULAR', 'DONATION'],
+  ELECTRONICS_STORE: ['REGULAR', 'DIGITAL', 'APPOINTMENTS_SERVICE'],
+  GROCERY_STORE: ['REGULAR', 'FOOD_AND_BEV'],
+  CONVENIENCE_STORE: ['REGULAR', 'FOOD_AND_BEV'],
+  PHARMACY: ['REGULAR', 'APPOINTMENTS_SERVICE'],
+
+  // Services
+  SALON: ['APPOINTMENTS_SERVICE', 'REGULAR', 'DONATION'],
+  SPA: ['APPOINTMENTS_SERVICE', 'REGULAR', 'DONATION'],
+  GYM: ['APPOINTMENTS_SERVICE', 'REGULAR', 'EVENT', 'DONATION'],
+  CLINIC: ['APPOINTMENTS_SERVICE', 'REGULAR'],
+
+  // Entertainment
+  THEATER: ['EVENT', 'FOOD_AND_BEV', 'REGULAR', 'DONATION'],
+  MUSEUM: ['EVENT', 'REGULAR', 'DONATION'],
+  NIGHT_CLUB: ['FOOD_AND_BEV', 'EVENT', 'DONATION'],
+
+  // Telecom (PlayTelecom specific)
+  TELECOM: ['REGULAR', 'DIGITAL', 'APPOINTMENTS_SERVICE'],
+
+  // Default (all types available)
+  OTHER: ['REGULAR', 'FOOD_AND_BEV', 'APPOINTMENTS_SERVICE', 'EVENT', 'DIGITAL', 'DONATION'],
+}
+
+/**
+ * Get available product types for a venue
+ * Returns filtered types based on venue's industry
+ *
+ * @param venueId - The venue to get types for
+ * @returns Product type configurations available for this venue
+ */
+export async function getProductTypesForVenue(venueId: string): Promise<{
+  types: ProductTypeConfig[]
+  venueType: string
+  recommended: ProductType[]
+}> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { type: true },
+  })
+
+  if (!venue) {
+    throw new AppError('Venue not found', 404)
+  }
+
+  const venueType = venue.type || 'OTHER'
+  const recommendedTypes = INDUSTRY_TYPE_MATRIX[venueType] || INDUSTRY_TYPE_MATRIX.OTHER
+
+  // Filter and sort: recommended types first, then others
+  const recommended = PRODUCT_TYPE_CONFIGS.filter(t => recommendedTypes.includes(t.code))
+  const others = PRODUCT_TYPE_CONFIGS.filter(t => !recommendedTypes.includes(t.code))
+
+  return {
+    types: [...recommended, ...others],
+    venueType,
+    recommended: recommendedTypes,
+  }
+}
+
+/**
+ * Get all product type configurations (for superadmin/reference)
+ */
+export function getAllProductTypeConfigs(): ProductTypeConfig[] {
+  return PRODUCT_TYPE_CONFIGS
 }

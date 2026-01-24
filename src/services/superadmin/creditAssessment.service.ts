@@ -678,7 +678,7 @@ function determineGrade(score: number): CreditGrade {
   return CreditGrade.D
 }
 
-function determineEligibility(grade: CreditGrade, gates: EligibilityGates, metrics: VenueMetrics): CreditEligibility {
+function determineEligibility(grade: CreditGrade, gates: EligibilityGates, _metrics: VenueMetrics): CreditEligibility {
   // Must pass all gates
   if (!gates.passed) {
     return CreditEligibility.INELIGIBLE
@@ -809,7 +809,7 @@ function calculateRecommendation(metrics: VenueMetrics, grade: CreditGrade, gate
 
 async function calculateVenueMetrics(venueId: string): Promise<VenueMetrics> {
   const now = new Date()
-  const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000)
+  const _ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000)
   const oneYearAgo = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
   const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1)
   const previousMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1)

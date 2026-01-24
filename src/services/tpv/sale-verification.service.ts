@@ -232,6 +232,74 @@ export async function updateVerificationStatus(
 }
 
 /**
+ * Create or update proof-of-sale photo for a payment
+ * Simpler than full verification - just adds photos to existing or creates minimal record
+ * Used by Android TPV after successful payment when SERIALIZED_INVENTORY module is active
+ */
+export async function createOrUpdateProofOfSale(
+  venueId: string,
+  paymentId: string,
+  photoUrls: string[],
+  staffId: string,
+): Promise<SaleVerificationResponse> {
+  logger.info(`📸 [SALE VERIFICATION SERVICE] Creating/updating proof-of-sale for payment ${paymentId}`)
+
+  // Validate payment exists and belongs to venue
+  const payment = await prisma.payment.findFirst({
+    where: { id: paymentId, venueId },
+    include: { saleVerification: true },
+  })
+
+  if (!payment) {
+    throw new NotFoundError(`Payment ${paymentId} not found in venue ${venueId}`)
+  }
+
+  // Validate staff exists
+  const staff = await prisma.staffVenue.findFirst({
+    where: { staffId, venueId },
+  })
+
+  if (!staff) {
+    throw new NotFoundError(`Staff ${staffId} not found in venue ${venueId}`)
+  }
+
+  let verification
+
+  if (payment.saleVerification) {
+    // Verification exists → Append photos
+    logger.info(`📸 [SALE VERIFICATION SERVICE] Appending photos to existing verification ${payment.saleVerification.id}`)
+
+    verification = await prisma.saleVerification.update({
+      where: { id: payment.saleVerification.id },
+      data: {
+        photos: {
+          push: photoUrls,
+        },
+      },
+    })
+  } else {
+    // No verification → Create new with COMPLETED status (no scanned products needed)
+    logger.info(`📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification`)
+
+    verification = await prisma.saleVerification.create({
+      data: {
+        venueId,
+        paymentId,
+        staffId,
+        photos: photoUrls,
+        scannedProducts: [], // Empty array for proof-of-sale only
+        status: 'COMPLETED',
+        inventoryDeducted: false,
+      },
+    })
+  }
+
+  logger.info(`✅ [SALE VERIFICATION SERVICE] Proof-of-sale saved: ${verification.id}`)
+
+  return mapToResponse(verification)
+}
+
+/**
  * Map Prisma model to response type
  */
 function mapToResponse(verification: {

@@ -175,7 +175,7 @@ export class SocketManager implements ISocketManager {
 
     this.io.on(SocketEventType.CONNECTION, (socket: Socket) => {
       const authenticatedSocket = socket as AuthenticatedSocket
-      const correlationId = authenticatedSocket.correlationId || uuidv4()
+      const _correlationId = authenticatedSocket.correlationId || uuidv4()
 
       const user = authenticatedSocket.authContext?.userId || 'unauthenticated'
       logger.info(`📡 Socket connected: ${user} (${socket.id})`)
@@ -325,7 +325,7 @@ export class SocketManager implements ISocketManager {
     })
 
     // Disconnection
-    socket.on(SocketEventType.DISCONNECT, reason => {
+    socket.on(SocketEventType.DISCONNECT, _reason => {
       if (socket.authContext) {
         this.roomManager.unregisterSocket(socket)
       }

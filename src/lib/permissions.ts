@@ -620,6 +620,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (all except factory-reset)
     'tpv-terminal:settings', // Can modify terminal configuration
+    'tpv-devices:manage', // Can link external devices (iPad, tablets) for BLE payments
     'tpv-kiosk:enable', // Can enable/disable kiosk mode
     'tpv-orders:comp',
     'tpv-orders:void',
@@ -673,6 +674,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (ALL including factory-reset)
     'tpv-terminal:settings',
+    'tpv-devices:manage', // Can link external devices (iPad, tablets) for BLE payments
     'tpv-kiosk:enable', // Can enable/disable kiosk mode
     'tpv-orders:comp',
     'tpv-orders:void',
@@ -692,6 +694,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:read',
     'tpv-products:write',
     'tpv-factory-reset:execute', // ⚠️ CRITICAL: Can factory reset terminal (destructive)
+    // Serialized Inventory (SIMs, jewelry, etc.)
+    'serialized-inventory:sell', // Can sell serialized items
+    'serialized-inventory:create', // Can register (Alta de Productos)
   ],
 
   /**
@@ -1020,6 +1025,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'role-config': ['role-config:read', 'role-config:update'], // Custom role display names
   // TPV-specific permissions (granular features)
   'tpv-terminal': ['tpv-terminal:settings'],
+  'tpv-devices': ['tpv-devices:manage'], // External devices (iPad, tablets) for BLE payments
   'tpv-kiosk': ['tpv-kiosk:enable'], // Kiosk/self-service mode
   'tpv-orders': ['tpv-orders:comp', 'tpv-orders:void', 'tpv-orders:discount'],
   'tpv-payments': ['tpv-payments:send-receipt', 'tpv-payments:pay-later'],

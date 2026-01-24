@@ -53,8 +53,8 @@ import { processBlumonPaymentWebhook, validateBlumonWebhookPayload, BlumonWebhoo
 export async function handleBlumonTPVWebhook(req: Request, res: Response, _next: NextFunction): Promise<void> {
   const correlationId = `blumon-wh-${Date.now()}`
 
-  // Get source IP for whitelist configuration
-  const sourceIP =
+  // Get source IP for whitelist configuration (kept for future IP whitelisting)
+  const _sourceIP =
     req.headers['x-forwarded-for'] ||
     req.headers['x-real-ip'] ||
     req.headers['cf-connecting-ip'] ||

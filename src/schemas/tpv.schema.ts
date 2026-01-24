@@ -600,6 +600,16 @@ export const getSaleVerificationSchema = z.object({
   }),
 })
 
+/** Schema for proof-of-sale photo upload (simplified verification) */
+export const createProofOfSaleSchema = z.object({
+  body: z.object({
+    paymentId: z.string().cuid({ message: 'El ID del pago debe ser un CUID válido.' }),
+    photoUrls: z
+      .array(z.string().url({ message: 'Cada foto debe ser una URL válida.' }))
+      .min(1, { message: 'Debe proporcionar al menos una foto.' }),
+  }),
+})
+
 /** Schema for TPV feedback (bug reports and feature suggestions) */
 export const tpvFeedbackSchema = z.object({
   body: z.object({

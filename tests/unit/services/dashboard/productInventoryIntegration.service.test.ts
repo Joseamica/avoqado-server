@@ -1,7 +1,7 @@
 import { Decimal } from '@prisma/client/runtime/library'
 import { MovementType } from '@prisma/client'
 
-import AppError from '../../../../src/errors/AppError'
+// import AppError from '../../../../src/errors/AppError'
 import { prismaMock } from '../../../__helpers__/setup'
 
 // Import the service - need to import after mock setup
@@ -33,13 +33,6 @@ const createMockInventory = (overrides: Record<string, any> = {}) => ({
   lastCountedAt: null,
   createdAt: new Date('2025-01-01'),
   updatedAt: new Date('2025-01-20'),
-  ...overrides,
-})
-
-// Helper to create mock Venue
-const createMockVenue = (overrides: Record<string, any> = {}) => ({
-  id: 'venue-123',
-  features: [],
   ...overrides,
 })
 

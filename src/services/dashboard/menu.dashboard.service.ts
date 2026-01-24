@@ -1090,7 +1090,20 @@ interface ImportMenuData {
       price: number
       cost?: number
       description?: string
-      type?: 'FOOD' | 'BEVERAGE' | 'ALCOHOL' | 'RETAIL' | 'SERVICE'
+      // Square-aligned types (new) + Legacy types (backwards compatibility)
+      type?:
+        | 'REGULAR'
+        | 'FOOD_AND_BEV'
+        | 'APPOINTMENTS_SERVICE'
+        | 'EVENT'
+        | 'DIGITAL'
+        | 'DONATION'
+        | 'FOOD'
+        | 'BEVERAGE'
+        | 'ALCOHOL'
+        | 'RETAIL'
+        | 'SERVICE'
+        | 'OTHER'
       tags?: string[]
       allergens?: string[]
       trackInventory?: boolean

@@ -407,8 +407,8 @@ export class SerializedInventoryService {
           if (regex.test(serialNumber)) {
             return category
           }
-        } catch (e) {
-          console.error(`Invalid regex for category ${category.id}: ${category.barcodePattern}`)
+        } catch {
+          // Invalid regex pattern for category - skip silently
         }
       }
     }

@@ -14,6 +14,7 @@ import { parseDateRange } from '@/utils/datetime'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
+import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -510,10 +511,41 @@ async function updateOrderTotalsForStandalonePayment(
     for (const item of updatedOrder.items) {
       // Skip items where product was deleted (Toast/Square pattern)
       if (!item.productId) {
-        logger.info('⏭️ Skipping inventory deduction for deleted product', {
-          orderId,
-          productName: item.productName,
-        })
+        // ⚠️ SERIALIZED INVENTORY: Check if this is a serialized item before skipping
+        // Serialized items have productId=null but productSku contains the serial number
+        if (item.productSku) {
+          try {
+            logger.info('📦 Marking serialized item as SOLD', {
+              orderId,
+              orderItemId: item.id,
+              serialNumber: item.productSku,
+              productName: item.productName,
+            })
+            await serializedInventoryService.markAsSold(
+              updatedOrder.venueId,
+              item.productSku, // Serial number stored in productSku
+              item.id, // orderItemId
+            )
+            logger.info('✅ Serialized item marked as SOLD', {
+              orderId,
+              serialNumber: item.productSku,
+            })
+          } catch (markAsSoldError: any) {
+            logger.error('❌ Failed to mark serialized item as SOLD', {
+              orderId,
+              orderItemId: item.id,
+              serialNumber: item.productSku,
+              error: markAsSoldError.message,
+            })
+            // Don't fail the payment if marking as sold fails
+            // Item will remain in AVAILABLE status and can be manually corrected
+          }
+        } else {
+          logger.info('⏭️ Skipping inventory deduction for deleted product', {
+            orderId,
+            productName: item.productName,
+          })
+        }
         continue
       }
 

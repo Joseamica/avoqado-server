@@ -27,7 +27,7 @@
 import prisma from '../../utils/prismaClient'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
-import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, StaffRole } from '@prisma/client'
+import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'

@@ -16,7 +16,7 @@
  * 4. onlyPayLater option returns ONLY pay-later orders
  */
 
-import { PaymentStatus, OrderStatus } from '@prisma/client'
+import { PaymentStatus } from '@prisma/client'
 
 // Define mock type
 interface MockPrismaClient {
@@ -67,7 +67,7 @@ describe('Pay Later Orders - getOrders()', () => {
       mockPrismaClient.order.findMany.mockResolvedValue([mockOrders[0]]) // Only returns regular order
 
       // Act
-      const result = await orderTpvService.getOrders(venueId, orgId)
+      await orderTpvService.getOrders(venueId, orgId)
 
       // Assert
       expect(mockPrismaClient.order.findMany).toHaveBeenCalledWith(

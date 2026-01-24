@@ -297,7 +297,7 @@ describe('Discount Dashboard Service', () => {
 
       prismaMock.discount.create.mockResolvedValue(mockDiscount)
 
-      const result = await createDiscount('venue-123', {
+      await createDiscount('venue-123', {
         name: 'Comp Order',
         type: 'COMP',
         value: 0, // Should be overridden to 100

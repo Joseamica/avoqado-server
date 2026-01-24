@@ -351,7 +351,7 @@ export class SharedQueryService {
 
     // SECURITY: Sanitize timezone to prevent SQL injection
     // Only allow valid IANA timezone format (e.g., 'America/Mexico_City')
-    const sanitizedTimezone = venueTimezone.replace(/[^a-zA-Z0-9_\/\-+:]/g, '')
+    const sanitizedTimezone = venueTimezone.replace(/[^a-zA-Z0-9_/\-+:]/g, '')
     if (sanitizedTimezone !== venueTimezone) {
       throw new Error(`Invalid timezone format: ${venueTimezone}`)
     }

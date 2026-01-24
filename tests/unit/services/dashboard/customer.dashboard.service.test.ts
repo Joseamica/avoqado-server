@@ -262,7 +262,7 @@ describe('Customer Dashboard Service', () => {
       prismaMock.customerGroup.findFirst.mockResolvedValue({ id: 'group-1', name: 'VIP' } as any)
       prismaMock.customer.create.mockResolvedValue(createMockCustomer({ customerGroupId: 'group-1' }) as any)
 
-      const result = await createCustomer('venue-123', {
+      await createCustomer('venue-123', {
         email: 'vip@example.com',
         customerGroupId: 'group-1',
       })

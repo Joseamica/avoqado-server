@@ -166,3 +166,40 @@ export async function updateVerificationStatus(req: Request, res: Response): Pro
     })
   }
 }
+
+/**
+ * POST /tpv/verification/proof-of-sale
+ * Create or update proof-of-sale photo for a payment
+ * Simpler endpoint than full verification - just adds photos after successful payment
+ */
+export async function createProofOfSale(req: Request, res: Response): Promise<void> {
+  try {
+    const { paymentId, photoUrls } = req.body
+    const venueId = req.authContext?.venueId
+    const staffId = req.authContext?.userId
+
+    if (!venueId || !staffId) {
+      res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Missing authentication context',
+      })
+      return
+    }
+
+    logger.info(`[SALE VERIFICATION CONTROLLER] POST /tpv/verification/proof-of-sale - PaymentId: ${paymentId}`)
+
+    const verification = await saleVerificationService.createOrUpdateProofOfSale(venueId, paymentId, photoUrls, staffId)
+
+    res.status(200).json({
+      success: true,
+      verificationId: verification.id,
+      message: 'Proof-of-sale photo uploaded successfully',
+    })
+  } catch (error: any) {
+    logger.error(`[SALE VERIFICATION CONTROLLER] Error creating proof-of-sale: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}
