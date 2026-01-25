@@ -1,0 +1,109 @@
+/**
+ * Mobile Auth Controller
+ *
+ * Authentication endpoints for mobile apps (iOS, Android).
+ * Handles passkey (WebAuthn) authentication for passwordless login.
+ */
+
+import { NextFunction, Request, Response } from 'express'
+import logger from '../../config/logger'
+import * as authMobileService from '../../services/mobile/auth.mobile.service'
+
+// ============================================================================
+// PASSKEY (WebAuthn) AUTHENTICATION
+// ============================================================================
+
+/**
+ * Generate passkey challenge
+ * PUBLIC endpoint - no authentication required
+ * First step in the passkey sign-in flow
+ *
+ * @route POST /api/v1/mobile/auth/passkey/challenge
+ */
+export const passkeyChallenge = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await authMobileService.generatePasskeyChallenge()
+
+    res.status(200).json({
+      success: true,
+      challenge: result.challenge,
+      challengeKey: result.challengeKey,
+      rpId: result.rpId,
+      timeout: result.timeout,
+      userVerification: result.userVerification,
+    })
+  } catch (error) {
+    logger.error('Error in passkeyChallenge controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * Verify passkey assertion and authenticate user
+ * PUBLIC endpoint - no authentication required
+ * Second step in the passkey sign-in flow
+ *
+ * @route POST /api/v1/mobile/auth/passkey/verify
+ */
+export const passkeyVerify = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { credential, challengeKey, rememberMe } = req.body
+
+    if (!credential) {
+      return res.status(400).json({
+        success: false,
+        message: 'Credential requerido',
+      })
+    }
+
+    // Transform client credential format to server format
+    // iOS sends: { id, rawId, type, response: { authenticatorData, clientDataJSON, signature, userHandle } }
+    const authCredential = {
+      id: credential.id,
+      rawId: credential.rawId || credential.id,
+      type: credential.type || 'public-key',
+      response: {
+        authenticatorData: credential.response.authenticatorData,
+        clientDataJSON: credential.response.clientDataJSON,
+        signature: credential.response.signature,
+        userHandle: credential.response.userHandle,
+      },
+      clientExtensionResults: credential.clientExtensionResults || {},
+      authenticatorAttachment: credential.authenticatorAttachment,
+    }
+
+    const result = await authMobileService.verifyPasskeyAssertion(authCredential, challengeKey, rememberMe === true)
+
+    // Set cookies (for web clients that might use these endpoints)
+    const accessTokenMaxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000
+    const refreshTokenMaxAge = rememberMe ? 90 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000
+
+    res.cookie('accessToken', result.accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
+      maxAge: accessTokenMaxAge,
+      path: '/',
+    })
+
+    res.cookie('refreshToken', result.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
+      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax',
+      maxAge: refreshTokenMaxAge,
+      path: '/',
+    })
+
+    // Return response (tokens in body for mobile apps that can't read httpOnly cookies)
+    res.status(200).json({
+      success: true,
+      message: 'Login exitoso',
+      user: result.staff,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+    })
+  } catch (error) {
+    logger.error('Error in passkeyVerify controller:', error)
+    next(error)
+  }
+}

@@ -12,6 +12,7 @@ import superadminRoutes from './superadmin.routes'
 import liveDemoRoutes from './liveDemo.routes'
 import demoRoutes from './demo.routes'
 import sdkRoutes from './sdk.routes'
+import mobileRoutes from './mobile.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -27,5 +28,6 @@ router.use('/superadmin', superadminRoutes) // All superadmin routes under /api/
 router.use('/live-demo', liveDemoRoutes) // Live demo routes for demo.dashboard.avoqado.io
 router.use('/demo', demoRoutes) // Legacy demo redirects for obsolete QR codes
 router.use('/sdk', sdkRoutes) // Avoqado Payment SDK routes under /api/v1/sdk
+router.use('/mobile', mobileRoutes) // Mobile app routes (iOS, Android) under /api/v1/mobile
 
 export default router
