@@ -294,6 +294,8 @@ describe('Dashboard Auth Controller', () => {
         success: true,
         message: 'Login exitoso',
         user: mockStaff,
+        accessToken: mockAccessToken,
+        refreshToken: mockRefreshToken,
       })
       expect(next).not.toHaveBeenCalled()
     })
