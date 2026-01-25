@@ -82,11 +82,7 @@ export async function generatePasskeyChallenge() {
  * @param rememberMe - Whether to extend token expiration
  * @returns Login result with tokens and user data
  */
-export async function verifyPasskeyAssertion(
-  credential: AuthenticationResponseJSON,
-  challengeKey?: string,
-  rememberMe?: boolean,
-) {
+export async function verifyPasskeyAssertion(credential: AuthenticationResponseJSON, challengeKey?: string, rememberMe?: boolean) {
   logger.info(`🔐 [PASSKEY] Verifying assertion for credential: ${credential.id.substring(0, 20)}...`)
 
   // 1. Find the stored challenge
@@ -176,9 +172,7 @@ export async function verifyPasskeyAssertion(
 
   if (staff.lockedUntil && new Date() < staff.lockedUntil) {
     const minutesLeft = Math.ceil((staff.lockedUntil.getTime() - Date.now()) / 60000)
-    throw new ForbiddenError(
-      `Cuenta bloqueada. Intenta de nuevo en ${minutesLeft} minuto${minutesLeft > 1 ? 's' : ''}.`,
-    )
+    throw new ForbiddenError(`Cuenta bloqueada. Intenta de nuevo en ${minutesLeft} minuto${minutesLeft > 1 ? 's' : ''}.`)
   }
 
   // 4. Verify the WebAuthn assertion
@@ -192,9 +186,7 @@ export async function verifyPasskeyAssertion(
         id: passkey.credentialId,
         publicKey: Buffer.from(passkey.publicKey, 'base64'),
         counter: passkey.counter,
-        transports: (passkey.deviceType === 'platform'
-          ? ['internal']
-          : ['usb', 'ble', 'nfc']) as AuthenticatorTransportFuture[],
+        transports: (passkey.deviceType === 'platform' ? ['internal'] : ['usb', 'ble', 'nfc']) as AuthenticatorTransportFuture[],
       },
     })
 
@@ -227,13 +219,7 @@ export async function verifyPasskeyAssertion(
   const selectedVenue = staff.venues[0]
 
   // 7. Generate tokens
-  const accessToken = jwtService.generateAccessToken(
-    staff.id,
-    staff.organizationId,
-    selectedVenue.venueId,
-    selectedVenue.role,
-    rememberMe,
-  )
+  const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role, rememberMe)
   const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId, rememberMe)
 
   // 8. Update last login
