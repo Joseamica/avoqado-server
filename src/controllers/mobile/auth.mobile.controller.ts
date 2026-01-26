@@ -2,12 +2,84 @@
  * Mobile Auth Controller
  *
  * Authentication endpoints for mobile apps (iOS, Android).
- * Handles passkey (WebAuthn) authentication for passwordless login.
+ * Handles:
+ * - Email/password login (tokens in response body)
+ * - Token refresh
+ * - Passkey (WebAuthn) authentication for passwordless login
  */
 
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import * as authMobileService from '../../services/mobile/auth.mobile.service'
+
+// ============================================================================
+// EMAIL/PASSWORD AUTHENTICATION
+// ============================================================================
+
+/**
+ * Login with email and password
+ * PUBLIC endpoint - no authentication required
+ * Returns tokens in response body (mobile apps can't read httpOnly cookies)
+ *
+ * @route POST /api/v1/mobile/auth/login
+ */
+export const login = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { email, password, rememberMe } = req.body
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email y contraseña son requeridos',
+      })
+    }
+
+    const result = await authMobileService.loginWithEmail(email, password, rememberMe === true)
+
+    // Return tokens in body for mobile apps
+    res.status(200).json({
+      success: true,
+      message: 'Login exitoso',
+      user: result.staff,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+    })
+  } catch (error) {
+    logger.error('Error in mobile login controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * Refresh access token
+ * PUBLIC endpoint - no authentication required
+ * Accepts refresh token in request body
+ *
+ * @route POST /api/v1/mobile/auth/refresh
+ */
+export const refresh = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { refreshToken } = req.body
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Refresh token requerido',
+      })
+    }
+
+    const result = await authMobileService.refreshAccessToken(refreshToken)
+
+    res.status(200).json({
+      success: true,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+    })
+  } catch (error) {
+    logger.error('Error in mobile refresh controller:', error)
+    next(error)
+  }
+}
 
 // ============================================================================
 // PASSKEY (WebAuthn) AUTHENTICATION

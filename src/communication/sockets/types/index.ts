@@ -122,6 +122,10 @@ export enum SocketEventType {
   CARD_READER_STATUS = 'card_reader_status',
   PERIPHERAL_ERROR = 'peripheral_error',
 
+  // Business Events - Crypto Payments (B4Bit)
+  CRYPTO_PAYMENT_CONFIRMED = 'crypto:payment_confirmed',
+  CRYPTO_PAYMENT_FAILED = 'crypto:payment_failed',
+
   // Business Events - Terminal Observability
   TERMINAL_LOG = 'terminal:log',
   TERMINAL_HEARTBEAT = 'terminal:heartbeat',
@@ -171,6 +175,31 @@ export interface PaymentEventPayload extends BaseEventPayload {
   orderId?: string
   status: 'initiated' | 'processing' | 'completed' | 'failed'
   metadata?: Record<string, any>
+}
+
+/**
+ * Crypto Payment Event Payloads (B4Bit Integration)
+ */
+export interface CryptoPaymentConfirmedPayload extends BaseEventPayload {
+  requestId: string // B4Bit request ID
+  paymentId: string // Our internal payment ID
+  amount: number // Amount in centavos
+  currency: string // "MXN"
+  txHash: string // Blockchain transaction hash
+  cryptoAmount: string // Amount in crypto (e.g., "0.00123")
+  cryptoCurrency: string // Crypto currency (e.g., "BTC", "ETH")
+  confirmations?: number // Blockchain confirmations
+  orderId?: string
+  orderNumber?: string
+  receiptUrl?: string
+  receiptAccessKey?: string
+}
+
+export interface CryptoPaymentFailedPayload extends BaseEventPayload {
+  requestId: string // B4Bit request ID
+  paymentId?: string
+  reason: string // "timeout", "insufficient_amount", "expired", etc.
+  status: 'OC' | 'EX' // Out of Condition or Expired
 }
 
 export interface OrderEventPayload extends BaseEventPayload {

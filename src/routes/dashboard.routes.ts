@@ -209,6 +209,8 @@ import commandCenterRoutes from './dashboard/commandCenter.routes'
 import promotersRoutes from './dashboard/promoters.routes'
 // Stock Dashboard routes for PlayTelecom/White-Label dashboard
 import stockDashboardRoutes from './dashboard/stockDashboard.routes'
+// Item Category routes for serialized inventory management
+import itemCategoryRoutes from './dashboard/itemCategory.routes'
 // Organization Dashboard routes for PlayTelecom/White-Label dashboard
 import organizationDashboardRoutes from './dashboard/organizationDashboard.routes'
 
@@ -3436,6 +3438,10 @@ router.use('/venues/:venueId/promoters', promotersRoutes)
 // Stock Dashboard routes for PlayTelecom/White-Label dashboard
 // Provides stock metrics, charts, alerts, and bulk upload
 router.use('/venues/:venueId/stock', stockDashboardRoutes)
+
+// Item Category routes for serialized inventory management
+// CRUD for categories + bulk upload items
+router.use('/venues/:venueId/item-categories', itemCategoryRoutes)
 
 // Organization Dashboard routes for PlayTelecom/White-Label dashboard
 // Provides organization-level aggregate metrics and vision global

@@ -11,6 +11,148 @@ import * as authMobileController from '../controllers/mobile/auth.mobile.control
 const router = Router()
 
 // ============================================================================
+// EMAIL/PASSWORD AUTHENTICATION
+// Public endpoints - no authentication required
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/mobile/auth/login:
+ *   post:
+ *     tags: [Mobile - Authentication]
+ *     summary: Login with email and password
+ *     description: |
+ *       Authenticate with email and password.
+ *       Returns JWT tokens in the response body (mobile apps can't read httpOnly cookies).
+ *
+ *       **Store tokens securely:**
+ *       - iOS: Store in Keychain
+ *       - Android: Store in EncryptedSharedPreferences
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 description: User email address
+ *                 example: user@example.com
+ *               password:
+ *                 type: string
+ *                 description: User password
+ *               rememberMe:
+ *                 type: boolean
+ *                 default: false
+ *                 description: Extend token expiration (30 days vs 24 hours)
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Login exitoso
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     email:
+ *                       type: string
+ *                     firstName:
+ *                       type: string
+ *                     lastName:
+ *                       type: string
+ *                     venues:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           id:
+ *                             type: string
+ *                           name:
+ *                             type: string
+ *                           slug:
+ *                             type: string
+ *                           role:
+ *                             type: string
+ *                 accessToken:
+ *                   type: string
+ *                   description: JWT access token (store in Keychain)
+ *                 refreshToken:
+ *                   type: string
+ *                   description: JWT refresh token (store in Keychain)
+ *       400:
+ *         description: Missing email or password
+ *       401:
+ *         description: Invalid credentials
+ *       403:
+ *         description: Account locked, email not verified, or no venue access
+ */
+router.post('/auth/login', authMobileController.login)
+
+/**
+ * @openapi
+ * /api/v1/mobile/auth/refresh:
+ *   post:
+ *     tags: [Mobile - Authentication]
+ *     summary: Refresh access token
+ *     description: |
+ *       Get a new access token using a refresh token.
+ *       Send the refresh token in the request body.
+ *
+ *       **When to use:**
+ *       - When access token expires (401 response)
+ *       - Proactively before expiration
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - refreshToken
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *                 description: The refresh token stored from login
+ *     responses:
+ *       200:
+ *         description: Token refreshed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 accessToken:
+ *                   type: string
+ *                   description: New JWT access token
+ *                 refreshToken:
+ *                   type: string
+ *                   description: New JWT refresh token (rotate tokens for security)
+ *       400:
+ *         description: Missing refresh token
+ *       401:
+ *         description: Invalid or expired refresh token
+ */
+router.post('/auth/refresh', authMobileController.refresh)
+
+// ============================================================================
 // PASSKEY (WebAuthn) AUTHENTICATION
 // Public endpoints - no authentication required
 // ============================================================================

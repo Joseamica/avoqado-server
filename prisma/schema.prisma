@@ -4215,6 +4215,7 @@ enum PaymentMethod {
   DEBIT_CARD
   DIGITAL_WALLET
   BANK_TRANSFER
+  CRYPTOCURRENCY // B4Bit crypto payments (BTC, ETH, USDT, etc.)
   OTHER
 }
 

@@ -9,6 +9,7 @@
 import { Router } from 'express'
 import { handleStripeWebhook } from '../controllers/webhook.controller'
 import { handleBlumonTPVWebhook, blumonWebhookHealthCheck } from '../controllers/tpv/blumon-webhook.tpv.controller'
+import { handleB4BitWebhook, b4bitWebhookHealthCheck } from '../controllers/tpv/b4bit-webhook.tpv.controller'
 import { blumonIPWhitelist } from '../middlewares/blumon-ip-whitelist.middleware'
 
 const router = Router()
@@ -160,5 +161,98 @@ router.post('/blumon/tpv', blumonIPWhitelist, handleBlumonTPVWebhook)
  *                 version: { type: string }
  */
 router.get('/blumon/tpv/health', blumonWebhookHealthCheck)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/b4bit:
+ *   post:
+ *     tags: [Webhooks]
+ *     summary: B4Bit crypto payment confirmation webhook
+ *     description: |
+ *       Receives payment status updates from B4Bit crypto payment gateway.
+ *
+ *       **Status Codes:**
+ *       - PE: Pending - Waiting for payment
+ *       - AC: Awaiting Completion - Payment detected, waiting for confirmations
+ *       - CO: Completed - Payment confirmed
+ *       - OC: Out of Condition - Insufficient amount or other issue
+ *       - EX: Expired - Order timed out without payment
+ *
+ *       **Security:**
+ *       - Verifies HMAC-SHA256 signature in X-SIGNATURE header
+ *       - Checks timestamp freshness in X-NONCE header (max 20s)
+ *
+ *       **Actions:**
+ *       - On CO: Marks payment as COMPLETED, emits Socket.IO event to TPV
+ *       - On EX/OC: Marks payment as FAILED, emits failure event
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - identifier
+ *               - status
+ *             properties:
+ *               identifier:
+ *                 type: string
+ *                 description: Our payment ID (passed as reference to B4Bit)
+ *               request_id:
+ *                 type: string
+ *                 description: B4Bit request ID
+ *               fiat_amount:
+ *                 type: number
+ *                 description: Amount in fiat currency
+ *               fiat_currency:
+ *                 type: string
+ *                 example: "MXN"
+ *               crypto_amount:
+ *                 type: string
+ *                 description: Amount paid in crypto
+ *               currency:
+ *                 type: string
+ *                 description: Crypto currency (BTC, ETH, etc.)
+ *               status:
+ *                 type: string
+ *                 enum: [PE, AC, CO, OC, EX]
+ *               tx_hash:
+ *                 type: string
+ *                 description: Blockchain transaction hash (on confirmation)
+ *               confirmations:
+ *                 type: integer
+ *                 description: Number of blockchain confirmations
+ *     responses:
+ *       200:
+ *         description: Webhook processed (always returns 200 to prevent retries)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 action:
+ *                   type: string
+ *                   enum: [CONFIRMED, AWAITING_CONFIRMATION, FAILED, EXPIRED, NOT_FOUND, ERROR]
+ *                 message:
+ *                   type: string
+ *                 paymentId:
+ *                   type: string
+ */
+router.post('/b4bit', handleB4BitWebhook)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/b4bit/health:
+ *   get:
+ *     tags: [Webhooks]
+ *     summary: B4Bit webhook health check
+ *     description: Endpoint for B4Bit to verify webhook connectivity
+ *     responses:
+ *       200:
+ *         description: Webhook endpoint is healthy
+ */
+router.get('/b4bit/health', b4bitWebhookHealthCheck)
 
 export default router

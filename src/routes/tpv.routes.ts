@@ -45,6 +45,9 @@ import {
   getSaleVerificationSchema,
   createProofOfSaleSchema,
   tpvFeedbackSchema,
+  initiateCryptoPaymentSchema,
+  cancelCryptoPaymentSchema,
+  getCryptoPaymentStatusSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
@@ -64,10 +67,12 @@ import * as customerController from '../controllers/tpv/customer.tpv.controller'
 import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
 import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
+import * as cryptoController from '../controllers/tpv/crypto.tpv.controller'
 import * as productService from '../services/dashboard/product.dashboard.service'
 import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
 import { serializedInventoryService } from '../services/serialized-inventory/serializedInventory.service'
+import * as salesGoalService from '../services/dashboard/commission/sales-goal.service'
 import * as orderTpvService from '../services/tpv/order.tpv.service'
 import AppError from '../errors/AppError'
 import logger from '../config/logger'
@@ -2814,6 +2819,229 @@ router.post(
 )
 
 // ==========================================
+// CRYPTO PAYMENTS (B4Bit Integration)
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/crypto/initiate:
+ *   post:
+ *     tags: [TPV - Crypto Payments]
+ *     security:
+ *       - bearerAuth: []
+ *     summary: Initiate a cryptocurrency payment
+ *     description: |
+ *       Creates a pending payment record and requests a crypto payment order from B4Bit.
+ *       Returns a payment URL that can be displayed as a QR code for the customer to scan.
+ *
+ *       **Flow:**
+ *       1. TPV calls this endpoint with payment amount
+ *       2. Backend creates pending payment and calls B4Bit API
+ *       3. Returns payment URL + request ID for tracking
+ *       4. TPV displays QR code from payment URL
+ *       5. Customer scans QR and pays with crypto
+ *       6. B4Bit sends webhook when payment confirmed
+ *       7. Backend emits Socket.IO event to TPV
+ *       8. TPV shows success screen
+ *
+ *       **Supported Cryptocurrencies:**
+ *       BTC, ETH, USDT, USDC, DAI, SOL, XRP, and more (13 total)
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *         description: The venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amount
+ *               - staffId
+ *             properties:
+ *               amount:
+ *                 type: integer
+ *                 description: Payment amount in centavos (e.g., 5500 = $55.00 MXN)
+ *                 example: 5500
+ *               tip:
+ *                 type: integer
+ *                 description: Tip amount in centavos
+ *                 example: 500
+ *               staffId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Staff member processing the payment
+ *               shiftId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Current shift ID (optional)
+ *               orderId:
+ *                 type: string
+ *                 format: cuid
+ *                 description: Associated order ID (optional, for order payments)
+ *               orderNumber:
+ *                 type: string
+ *                 description: Order number for display
+ *               deviceSerialNumber:
+ *                 type: string
+ *                 description: Terminal serial number
+ *               rating:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 5
+ *                 description: Customer rating (1-5)
+ *     responses:
+ *       200:
+ *         description: Crypto payment initiated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     requestId:
+ *                       type: string
+ *                       description: B4Bit request ID for tracking
+ *                     paymentId:
+ *                       type: string
+ *                       format: cuid
+ *                       description: Internal payment ID
+ *                     paymentUrl:
+ *                       type: string
+ *                       description: URL for QR code generation
+ *                       example: "https://pay.b4bit.com/order/abc123"
+ *                     expiresAt:
+ *                       type: string
+ *                       format: date-time
+ *                       description: When the payment order expires
+ *                     expiresInSeconds:
+ *                       type: integer
+ *                       description: Seconds until expiration
+ *                       example: 900
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden - Insufficient permissions
+ *       400:
+ *         description: Bad request
+ *       500:
+ *         description: B4Bit API error
+ */
+router.post(
+  '/venues/:venueId/crypto/initiate',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(initiateCryptoPaymentSchema),
+  cryptoController.initiateCryptoPaymentHandler,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/crypto/cancel:
+ *   post:
+ *     tags: [TPV - Crypto Payments]
+ *     security:
+ *       - bearerAuth: []
+ *     summary: Cancel a pending crypto payment
+ *     description: |
+ *       Cancels a pending crypto payment before it's confirmed.
+ *       Can only cancel payments in PENDING status.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - paymentId
+ *             properties:
+ *               paymentId:
+ *                 type: string
+ *                 format: cuid
+ *     responses:
+ *       200:
+ *         description: Payment cancelled
+ *       400:
+ *         description: Cannot cancel (already completed/failed)
+ */
+router.post(
+  '/venues/:venueId/crypto/cancel',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(cancelCryptoPaymentSchema),
+  cryptoController.cancelCryptoPaymentHandler,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/crypto/status/{requestId}:
+ *   get:
+ *     tags: [TPV - Crypto Payments]
+ *     security:
+ *       - bearerAuth: []
+ *     summary: Get crypto payment status (polling fallback)
+ *     description: |
+ *       Queries B4Bit API for current payment status.
+ *       Use this as a fallback if Socket.IO connection is lost.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: cuid
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: B4Bit request ID
+ *     responses:
+ *       200:
+ *         description: Payment status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   enum: [PE, AC, CO, OC, EX]
+ *                   description: |
+ *                     PE = Pending, AC = Awaiting Confirmation,
+ *                     CO = Completed, OC = Out of Condition, EX = Expired
+ *                 cryptoAmount:
+ *                   type: string
+ *                 cryptoCurrency:
+ *                   type: string
+ *                 txHash:
+ *                   type: string
+ */
+router.get(
+  '/venues/:venueId/crypto/status/:requestId',
+  authenticateTokenMiddleware,
+  validateRequest(getCryptoPaymentStatusSchema),
+  cryptoController.getCryptoPaymentStatusHandler,
+)
+
+// ==========================================
 // SEND RECEIPT BY EMAIL
 // ==========================================
 
@@ -5094,6 +5322,77 @@ router.get('/modules', async (req: Request, res: Response, next: NextFunction) =
     return res.status(200).json({ modules })
   } catch (error) {
     logger.error(`❌ [TPV MODULES] Error getting modules`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
+
+// ==========================================
+// SALES GOAL - Staff sales targets
+// Returns the current staff's active sales goal with progress
+// ==========================================
+
+/**
+ * GET /tpv/sales-goal
+ * Get the current staff's sales goal with progress.
+ *
+ * Returns the active sales goal for the logged-in staff member,
+ * or the venue-wide goal if no staff-specific goal exists.
+ *
+ * Response:
+ * - If goal exists: { salesGoal: { goal, period, currentSales, staffId } }
+ * - If no goal: { salesGoal: null }
+ */
+router.get('/sales-goal', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, userId: staffId } = (req as any).authContext
+
+    logger.info(`🎯 [TPV SALES GOAL] Getting sales goal`, {
+      venueId,
+      staffId,
+      correlationId: req.correlationId,
+    })
+
+    // First try to get staff-specific goal
+    let salesGoal = await salesGoalService.getStaffSalesGoal(venueId, staffId)
+
+    // If no staff-specific goal, try venue-wide goal
+    if (!salesGoal) {
+      salesGoal = await salesGoalService.getPrimarySalesGoal(venueId)
+    }
+
+    if (salesGoal) {
+      logger.info(`✅ [TPV SALES GOAL] Found sales goal`, {
+        venueId,
+        staffId,
+        goalId: salesGoal.id,
+        period: salesGoal.period,
+        goal: salesGoal.goal,
+        currentSales: salesGoal.currentSales,
+        correlationId: req.correlationId,
+      })
+
+      return res.status(200).json({
+        salesGoal: {
+          goal: salesGoal.goal.toString(),
+          period: salesGoal.period,
+          currentSales: salesGoal.currentSales.toString(),
+          staffId: salesGoal.staffId,
+        },
+      })
+    }
+
+    logger.info(`ℹ️ [TPV SALES GOAL] No sales goal configured`, {
+      venueId,
+      staffId,
+      correlationId: req.correlationId,
+    })
+
+    return res.status(200).json({ salesGoal: null })
+  } catch (error) {
+    logger.error(`❌ [TPV SALES GOAL] Error getting sales goal`, {
       correlationId: req.correlationId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })
