@@ -553,10 +553,14 @@ export async function dashboardLoginController(req: Request, res: Response, next
     })
 
     // Respuesta exitosa
+    // Include tokens in body for mobile apps (iOS/Android) that can't read httpOnly cookies
+    // Web dashboard uses the cookies, mobile apps use the body tokens
     res.status(200).json({
       success: true,
       message: 'Login exitoso',
       user: staff, // Ya viene sanitizado del servicio
+      accessToken, // For mobile apps (stored in Keychain/SecureStorage)
+      refreshToken, // For mobile apps
     })
   } catch (error) {
     next(error)

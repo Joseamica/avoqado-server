@@ -462,6 +462,9 @@ model Staff {
   // ✅ TPV App Update System (superadmin uploads)
   appUpdatesUploaded AppUpdate[] @relation("AppUpdateUploadedBy")
 
+  // ✅ Passkeys (WebAuthn) for passwordless authentication
+  passkeys StaffPasskey[]
+
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
   // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
@@ -508,6 +511,36 @@ model StaffVenue {
   @@index([venueId])
   @@index([role])
   @@index([pin]) // ✅ Índice para búsquedas de PIN
+}
+
+// ==========================================
+// NOTE: PASSKEY (WebAuthn) AUTHENTICATION
+// ==========================================
+
+/// Stores WebAuthn/Passkey credentials for passwordless authentication.
+/// Each staff member can have multiple passkeys (e.g., different devices).
+model StaffPasskey {
+  id        String @id @default(cuid())
+  staffId   String
+  staff     Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  // WebAuthn credential data
+  credentialId     String @unique // Base64URL encoded credential ID
+  publicKey        String // Base64URL encoded public key (COSE format)
+  counter          Int    @default(0) // Signature counter for replay attack prevention
+  credentialType   String @default("public-key") // Always "public-key" for WebAuthn
+
+  // Device info (optional, for user-friendly display)
+  deviceName       String? // e.g., "iPhone 15 Pro", "MacBook Pro"
+  deviceType       String? // e.g., "platform", "cross-platform"
+  aaguid           String? // Authenticator AAGUID for identifying authenticator type
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+  lastUsedAt       DateTime?
+
+  @@index([staffId])
+  @@index([credentialId])
 }
 
 // ==========================================

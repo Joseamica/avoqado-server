@@ -52,6 +52,17 @@ configureCoreMiddlewares(app)
 // Serve static files from public directory (SDK, checkout pages)
 app.use(express.static('public'))
 
+// Apple App Site Association (AASA) for Passkeys/WebAuthn
+// Required for iOS passkey authentication to verify domain ownership
+app.get('/.well-known/apple-app-site-association', (req: ExpressRequest, res: ExpressResponse) => {
+  res.setHeader('Content-Type', 'application/json')
+  res.json({
+    webcredentials: {
+      apps: ['ZPSQA32NDL.com.avoqado.avoqado-ios'],
+    },
+  })
+})
+
 // Setup Swagger UI
 setupSwaggerUI(app)
 
