@@ -7,6 +7,10 @@
 
 import { Router } from 'express'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
+import * as orderMobileController from '../controllers/mobile/order.mobile.controller'
+import * as timeEntryMobileController from '../controllers/mobile/time-entry.mobile.controller'
+import * as pushMobileController from '../controllers/mobile/push.mobile.controller'
+import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 
 const router = Router()
 
@@ -344,5 +348,579 @@ router.post('/auth/passkey/challenge', authMobileController.passkeyChallenge)
  *                   example: Passkey no registrado. Por favor usa otro método de autenticación.
  */
 router.post('/auth/passkey/verify', authMobileController.passkeyVerify)
+
+// ============================================================================
+// ORDER MANAGEMENT
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/orders:
+ *   post:
+ *     tags: [Mobile - Orders]
+ *     summary: Create order with items
+ *     description: |
+ *       Creates an order with products/items for the dual-mode payment flow.
+ *       Returns orderId which should be sent to TPV via BLE for payment.
+ *
+ *       **Dual-Mode Payment Flow:**
+ *       1. iOS creates order with items (this endpoint)
+ *       2. iOS sends `{orderId, amount, tip}` to TPV via BLE
+ *       3. TPV processes card and completes payment
+ *
+ *       **Quick Payment (no products):**
+ *       - Skip this endpoint, send `{amount, tip}` directly to TPV
+ *       - TPV uses FastPayment flow
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Venue ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - items
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 description: Products to add to the order
+ *                 items:
+ *                   type: object
+ *                   required:
+ *                     - productId
+ *                     - quantity
+ *                   properties:
+ *                     productId:
+ *                       type: string
+ *                       description: Product ID
+ *                     quantity:
+ *                       type: integer
+ *                       minimum: 1
+ *                       description: Quantity
+ *                     notes:
+ *                       type: string
+ *                       description: Item notes (e.g., "sin cebolla")
+ *                     modifierIds:
+ *                       type: array
+ *                       items:
+ *                         type: string
+ *                       description: Selected modifier IDs
+ *               staffId:
+ *                 type: string
+ *                 description: Staff member ID (defaults to authenticated user)
+ *               orderType:
+ *                 type: string
+ *                 enum: [DINE_IN, TAKEOUT, DELIVERY, PICKUP]
+ *                 default: TAKEOUT
+ *               source:
+ *                 type: string
+ *                 enum: [AVOQADO_IOS, AVOQADO_ANDROID]
+ *                 default: AVOQADO_IOS
+ *     responses:
+ *       201:
+ *         description: Order created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 order:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                       description: Order ID (send this to TPV)
+ *                     orderNumber:
+ *                       type: string
+ *                       example: ORD-1706285432123
+ *                     status:
+ *                       type: string
+ *                       example: PENDING
+ *                     paymentStatus:
+ *                       type: string
+ *                       example: PENDING
+ *                     subtotal:
+ *                       type: number
+ *                       description: Subtotal in cents
+ *                     total:
+ *                       type: number
+ *                       description: Total in cents
+ *                     items:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *       400:
+ *         description: Invalid request (missing items, invalid productId)
+ *       401:
+ *         description: Not authenticated
+ */
+router.post('/venues/:venueId/orders', authenticateTokenMiddleware, orderMobileController.createOrder)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/orders/{orderId}:
+ *   get:
+ *     tags: [Mobile - Orders]
+ *     summary: Get order details
+ *     description: Retrieve order with items and payment status
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: orderId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Order details
+ *       404:
+ *         description: Order not found
+ */
+router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, orderMobileController.getOrder)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/orders/{orderId}/pay:
+ *   post:
+ *     tags: [Mobile - Orders]
+ *     summary: Pay order with cash
+ *     description: |
+ *       Record a cash payment for an order. No TPV terminal involved.
+ *       Payment goes directly to backend. Used when the user selects "Efectivo".
+ *
+ *       **Cash Payment Flow:**
+ *       1. iOS creates order with items
+ *       2. User selects "Efectivo" payment method
+ *       3. User selects cash amount tendered (preset buttons or custom)
+ *       4. iOS calculates and displays change
+ *       5. iOS calls this endpoint to record the payment
+ *       6. Backend marks order as PAID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: orderId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amount
+ *             properties:
+ *               amount:
+ *                 type: integer
+ *                 description: Payment amount in cents
+ *                 example: 5000
+ *               tip:
+ *                 type: integer
+ *                 description: Tip amount in cents (optional)
+ *                 default: 0
+ *               staffId:
+ *                 type: string
+ *                 description: Staff ID (defaults to authenticated user)
+ *     responses:
+ *       200:
+ *         description: Cash payment recorded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 payment:
+ *                   type: object
+ *                   properties:
+ *                     paymentId:
+ *                       type: string
+ *                     orderId:
+ *                       type: string
+ *                     orderNumber:
+ *                       type: string
+ *                     amount:
+ *                       type: integer
+ *                       description: Amount in cents
+ *                     tipAmount:
+ *                       type: integer
+ *                       description: Tip in cents
+ *                     method:
+ *                       type: string
+ *                       enum: [CASH]
+ *                     status:
+ *                       type: string
+ *                       enum: [COMPLETED]
+ *       400:
+ *         description: Invalid request (missing amount, order already paid)
+ *       401:
+ *         description: Not authenticated
+ *       404:
+ *         description: Order not found
+ */
+router.post('/venues/:venueId/orders/:orderId/pay', authenticateTokenMiddleware, orderMobileController.payCash)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/orders/{orderId}:
+ *   delete:
+ *     tags: [Mobile - Orders]
+ *     summary: Cancel unpaid order
+ *     description: Cancel an order that hasn't been paid yet
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: orderId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Cancellation reason
+ *     responses:
+ *       200:
+ *         description: Order cancelled
+ *       400:
+ *         description: Cannot cancel paid order
+ *       404:
+ *         description: Order not found
+ */
+router.delete('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, orderMobileController.cancelOrder)
+
+// ============================================================================
+// TIME CLOCK (Reloj Checador)
+// PIN-based identification - no JWT required
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/time-clock/identify:
+ *   post:
+ *     tags: [Mobile - Time Clock]
+ *     summary: Identify staff by PIN
+ *     description: |
+ *       Identify a staff member by their PIN and return their current time entry status.
+ *       This is the first step in the time clock flow.
+ *
+ *       **Flow:**
+ *       1. User enters PIN
+ *       2. Call this endpoint to identify staff and get status
+ *       3. Based on `currentEntry`:
+ *          - null → Show "Iniciar turno" button
+ *          - exists with status CLOCKED_IN → Show "Cerrar turno" / "Tomar descanso"
+ *          - exists with status ON_BREAK → Show "Terminar descanso"
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - pin
+ *             properties:
+ *               pin:
+ *                 type: string
+ *                 description: Staff PIN (4-10 digits)
+ *     responses:
+ *       200:
+ *         description: Staff identified
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 staff:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     firstName:
+ *                       type: string
+ *                     lastName:
+ *                       type: string
+ *                     role:
+ *                       type: string
+ *                 currentEntry:
+ *                   type: object
+ *                   nullable: true
+ *                   description: Current active time entry (null if not clocked in)
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     status:
+ *                       type: string
+ *                       enum: [CLOCKED_IN, ON_BREAK]
+ *                     clockInTime:
+ *                       type: string
+ *                       format: date-time
+ *                     isOnBreak:
+ *                       type: boolean
+ *       401:
+ *         description: Invalid PIN
+ */
+router.post('/venues/:venueId/time-clock/identify', timeEntryMobileController.identifyByPin)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/time-clock/clock-in:
+ *   post:
+ *     tags: [Mobile - Time Clock]
+ *     summary: Clock in (by PIN)
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - pin
+ *             properties:
+ *               pin:
+ *                 type: string
+ *               jobRole:
+ *                 type: string
+ *               checkInPhotoUrl:
+ *                 type: string
+ *               latitude:
+ *                 type: number
+ *               longitude:
+ *                 type: number
+ *     responses:
+ *       201:
+ *         description: Clocked in successfully
+ *       400:
+ *         description: Already clocked in
+ *       401:
+ *         description: Invalid PIN
+ */
+router.post('/venues/:venueId/time-clock/clock-in', timeEntryMobileController.clockIn)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/time-clock/clock-out:
+ *   post:
+ *     tags: [Mobile - Time Clock]
+ *     summary: Clock out (by PIN)
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - pin
+ *             properties:
+ *               pin:
+ *                 type: string
+ *               checkOutPhotoUrl:
+ *                 type: string
+ *               latitude:
+ *                 type: number
+ *               longitude:
+ *                 type: number
+ *     responses:
+ *       200:
+ *         description: Clocked out successfully
+ *       400:
+ *         description: Not clocked in
+ *       401:
+ *         description: Invalid PIN
+ */
+router.post('/venues/:venueId/time-clock/clock-out', timeEntryMobileController.clockOut)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/time-clock/break/start:
+ *   post:
+ *     tags: [Mobile - Time Clock]
+ *     summary: Start break (by PIN)
+ */
+router.post('/venues/:venueId/time-clock/break/start', timeEntryMobileController.startBreak)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/time-clock/break/end:
+ *   post:
+ *     tags: [Mobile - Time Clock]
+ *     summary: End break (by PIN)
+ */
+router.post('/venues/:venueId/time-clock/break/end', timeEntryMobileController.endBreak)
+
+// ============================================================================
+// DEVICE REGISTRATION (Push Notifications)
+// Authenticated endpoints
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/mobile/devices/register:
+ *   post:
+ *     tags: [Mobile - Push Notifications]
+ *     summary: Register device for push notifications
+ *     description: |
+ *       Register an FCM token for push notifications.
+ *       Call this after login and whenever the FCM token is refreshed.
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - token
+ *               - platform
+ *             properties:
+ *               token:
+ *                 type: string
+ *                 description: FCM registration token
+ *               platform:
+ *                 type: string
+ *                 enum: [IOS, ANDROID, WEB]
+ *               deviceModel:
+ *                 type: string
+ *                 description: Device model (e.g., "iPhone 15 Pro")
+ *               osVersion:
+ *                 type: string
+ *                 description: OS version (e.g., "iOS 17.2")
+ *               appVersion:
+ *                 type: string
+ *                 description: App version (e.g., "1.0.0")
+ *               bundleId:
+ *                 type: string
+ *                 description: App bundle ID
+ *     responses:
+ *       200:
+ *         description: Device registered successfully
+ *       401:
+ *         description: Authentication required
+ */
+router.post('/devices/register', authenticateTokenMiddleware, pushMobileController.registerDevice)
+
+/**
+ * @openapi
+ * /api/v1/mobile/devices/unregister:
+ *   post:
+ *     tags: [Mobile - Push Notifications]
+ *     summary: Unregister device (on logout)
+ *     description: Remove the FCM token to stop receiving push notifications.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - token
+ *             properties:
+ *               token:
+ *                 type: string
+ *                 description: FCM registration token to unregister
+ *     responses:
+ *       200:
+ *         description: Device unregistered successfully
+ */
+router.post('/devices/unregister', pushMobileController.unregisterDevice)
+
+/**
+ * @openapi
+ * /api/v1/mobile/devices:
+ *   get:
+ *     tags: [Mobile - Push Notifications]
+ *     summary: Get my registered devices
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of registered devices
+ */
+router.get('/devices', authenticateTokenMiddleware, pushMobileController.getMyDevices)
+
+/**
+ * @openapi
+ * /api/v1/mobile/push/test:
+ *   post:
+ *     tags: [Mobile - Push Notifications]
+ *     summary: Send test push notification
+ *     description: Send a test push notification to all devices of the authenticated user
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               title:
+ *                 type: string
+ *                 description: Notification title (optional)
+ *               body:
+ *                 type: string
+ *                 description: Notification body (optional)
+ *     responses:
+ *       200:
+ *         description: Test notification sent
+ */
+router.post('/push/test', authenticateTokenMiddleware, pushMobileController.sendTestPush)
 
 export default router

@@ -393,6 +393,7 @@ model Staff {
   // Notifications
   notifications           Notification[]
   notificationPreferences NotificationPreference[]
+  deviceTokens            DeviceToken[]
 
   // AI Training
   chatTrainingData ChatTrainingData[] @relation("UserChatTraining")
@@ -455,9 +456,9 @@ model Staff {
   lastPasswordReset DateTime?
 
   // ✅ PlayTelecom / White-Label Dashboard relations
-  cashDeposits      CashDeposit[]
-  depositsApproved  CashDeposit[]      @relation("DepositApprover")
-  performanceGoals  PerformanceGoal[]
+  cashDeposits     CashDeposit[]
+  depositsApproved CashDeposit[]     @relation("DepositApprover")
+  performanceGoals PerformanceGoal[]
 
   // ✅ TPV App Update System (superadmin uploads)
   appUpdatesUploaded AppUpdate[] @relation("AppUpdateUploadedBy")
@@ -520,24 +521,24 @@ model StaffVenue {
 /// Stores WebAuthn/Passkey credentials for passwordless authentication.
 /// Each staff member can have multiple passkeys (e.g., different devices).
 model StaffPasskey {
-  id        String @id @default(cuid())
-  staffId   String
-  staff     Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  id      String @id @default(cuid())
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
   // WebAuthn credential data
-  credentialId     String @unique // Base64URL encoded credential ID
-  publicKey        String // Base64URL encoded public key (COSE format)
-  counter          Int    @default(0) // Signature counter for replay attack prevention
-  credentialType   String @default("public-key") // Always "public-key" for WebAuthn
+  credentialId   String @unique // Base64URL encoded credential ID
+  publicKey      String // Base64URL encoded public key (COSE format)
+  counter        Int    @default(0) // Signature counter for replay attack prevention
+  credentialType String @default("public-key") // Always "public-key" for WebAuthn
 
   // Device info (optional, for user-friendly display)
-  deviceName       String? // e.g., "iPhone 15 Pro", "MacBook Pro"
-  deviceType       String? // e.g., "platform", "cross-platform"
-  aaguid           String? // Authenticator AAGUID for identifying authenticator type
+  deviceName String? // e.g., "iPhone 15 Pro", "MacBook Pro"
+  deviceType String? // e.g., "platform", "cross-platform"
+  aaguid     String? // Authenticator AAGUID for identifying authenticator type
 
   // Timestamps
-  createdAt        DateTime @default(now())
-  lastUsedAt       DateTime?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
 
   @@index([staffId])
   @@index([credentialId])
@@ -870,14 +871,14 @@ model Product {
 
   // Event-specific (EVENT)
   eventDate     DateTime? // Event date
-  eventTime     String?   // Start time "HH:mm" format
-  eventEndTime  String?   // End time "HH:mm" format
-  eventCapacity Int?      // Max capacity
-  eventLocation String?   // Event location/venue
+  eventTime     String? // Start time "HH:mm" format
+  eventEndTime  String? // End time "HH:mm" format
+  eventCapacity Int? // Max capacity
+  eventLocation String? // Event location/venue
 
   // Digital-specific (DIGITAL)
   downloadUrl   String? // Download URL for digital product
-  downloadLimit Int?    // Max downloads per purchase (null = unlimited)
+  downloadLimit Int? // Max downloads per purchase (null = unlimited)
   fileSize      String? // Display size "15 MB", "2.3 GB"
 
   // Donation-specific (DONATION)
@@ -3876,6 +3877,37 @@ model NotificationTemplate {
   @@index([active])
 }
 
+// Device tokens for push notifications (FCM)
+model DeviceToken {
+  id String @id @default(cuid())
+
+  // Owner
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  // Token info
+  token    String         @unique // FCM token
+  platform DevicePlatform
+
+  // Device info (optional, for debugging)
+  deviceModel String? // "iPhone 15 Pro", "Pixel 8"
+  osVersion   String? // "iOS 17.2", "Android 14"
+  appVersion  String? // "1.0.0"
+  bundleId    String? // "io.avoqado.pos", "com.jaac.avoqado_tpv"
+
+  // Status
+  active    Boolean  @default(true)
+  lastUsed  DateTime @default(now())
+  failCount Int      @default(0) // Consecutive delivery failures
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([staffId])
+  @@index([platform])
+  @@index([active])
+}
+
 model PosCommand {
   id            String        @id @default(cuid())
   venueId       String
@@ -4096,24 +4128,24 @@ enum ProductType {
   // ═══════════════════════════════════════════════════════════════
   // NEW: Square-aligned product types (January 2026)
   // ═══════════════════════════════════════════════════════════════
-  REGULAR              // Physical products (retail, merchandise) - DEFAULT for new products
-  FOOD_AND_BEV         // Food AND beverage (use isAlcoholic boolean for alcohol)
+  REGULAR // Physical products (retail, merchandise) - DEFAULT for new products
+  FOOD_AND_BEV // Food AND beverage (use isAlcoholic boolean for alcohol)
   APPOINTMENTS_SERVICE // Bookable services (haircuts, massages, appointments)
-  EVENT                // Event tickets (concerts, classes, experiences)
-  DIGITAL              // Digital products (ebooks, courses, downloads)
-  DONATION             // Donations (tips, causes, roundup)
+  EVENT // Event tickets (concerts, classes, experiences)
+  DIGITAL // Digital products (ebooks, courses, downloads)
+  DONATION // Donations (tips, causes, roundup)
 
   // ═══════════════════════════════════════════════════════════════
   // LEGACY: Kept for backwards compatibility - DO NOT USE FOR NEW PRODUCTS
   // Migration: FOOD/BEVERAGE/ALCOHOL → FOOD_AND_BEV + isAlcoholic
   //            RETAIL → REGULAR
   // ═══════════════════════════════════════════════════════════════
-  FOOD     // @deprecated Use FOOD_AND_BEV
+  FOOD // @deprecated Use FOOD_AND_BEV
   BEVERAGE // @deprecated Use FOOD_AND_BEV
-  ALCOHOL  // @deprecated Use FOOD_AND_BEV + isAlcoholic=true
-  RETAIL   // @deprecated Use REGULAR
-  SERVICE  // General services (kept as-is, use APPOINTMENTS_SERVICE for bookable)
-  OTHER    // Catch-all
+  ALCOHOL // @deprecated Use FOOD_AND_BEV + isAlcoholic=true
+  RETAIL // @deprecated Use REGULAR
+  SERVICE // General services (kept as-is, use APPOINTMENTS_SERVICE for bookable)
+  OTHER // Catch-all
 }
 
 enum MenuType {
@@ -4148,7 +4180,9 @@ enum OrderSource {
   KIOSK // Self-service kiosk mode (abandoned orders should NOT appear as cuentas por cobrar)
   QR // Customer QR
   WEB // Website
-  APP // Mobile app
+  APP // Mobile app (generic)
+  AVOQADO_IOS // Avoqado iOS app
+  AVOQADO_ANDROID // Avoqado Android app
   PHONE // Phone order
   POS // Direct from POS
 }
@@ -4572,6 +4606,12 @@ enum NotificationChannel {
   SMS // SMS notifications (future)
   PUSH // Push notifications (future)
   WEBHOOK // Webhook notifications (future)
+}
+
+enum DevicePlatform {
+  IOS
+  ANDROID
+  WEB
 }
 
 // ============================
@@ -6364,7 +6404,7 @@ model OrganizationGoal {
 // ==========================================
 
 enum AppEnvironment {
-  SANDBOX    // Development/testing builds
+  SANDBOX // Development/testing builds
   PRODUCTION // Production builds for real terminals
 }
 
@@ -6375,7 +6415,7 @@ model AppUpdate {
 
   // Version info (Android standard)
   versionName String // Semantic version: "1.3.0"
-  versionCode Int    // Android version code: 6 (always increments)
+  versionCode Int // Android version code: 6 (always increments)
 
   // Environment targeting
   environment AppEnvironment

@@ -34,12 +34,16 @@ interface PaginatedTeamResponse {
   }
 }
 
+type InviteType = 'email' | 'tpv-only'
+
 interface InviteTeamMemberRequest {
-  email: string
+  email?: string // Optional for TPV-only invitations
   firstName: string
   lastName: string
   role: StaffRole
   message?: string
+  type?: InviteType // 'email' (default) or 'tpv-only'
+  pin?: string // For TPV-only invitations, set PIN directly
 }
 
 interface UpdateTeamMemberRequest {
@@ -299,21 +303,39 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
 }
 
 /**
+ * Generate a placeholder email for TPV-only staff members
+ * Format: tpv-{venueSlug}-{timestamp}@internal.avoqado.io
+ */
+function generateTpvOnlyEmail(venueSlug: string): string {
+  const timestamp = Date.now()
+  const random = Math.random().toString(36).substring(2, 8)
+  return `tpv-${venueSlug}-${timestamp}-${random}@internal.avoqado.io`
+}
+
+/**
+ * Check if an email is a TPV-only placeholder
+ */
+export function isTPVOnlyEmail(email: string): boolean {
+  return email.endsWith('@internal.avoqado.io') && email.startsWith('tpv-')
+}
+
+/**
  * Invite a new team member
+ * Supports two modes:
+ * - 'email' (default): Traditional invitation with email verification
+ * - 'tpv-only': Creates staff directly with PIN, no email required
  */
 export async function inviteTeamMember(
   venueId: string,
   inviterStaffId: string,
   request: InviteTeamMemberRequest,
-): Promise<{ invitation: any; emailSent: boolean }> {
+): Promise<{ invitation: any; emailSent: boolean; isTPVOnly: boolean; inviteLink?: string }> {
   // Validate role - can't invite SUPERADMIN
   if (request.role === StaffRole.SUPERADMIN) {
     throw new BadRequestError('Cannot invite SUPERADMIN role')
   }
 
-  // Normalize email to lowercase for consistent lookups
-  // This ensures emails are case-insensitive across the platform
-  request.email = request.email.toLowerCase()
+  const isTPVOnly = request.type === 'tpv-only'
 
   // Get venue and organization info
   const venue = await prisma.venue.findUnique({
@@ -340,15 +362,49 @@ export async function inviteTeamMember(
     throw new NotFoundError('Inviter not found')
   }
 
-  // Check if user already exists
+  // Determine email to use
+  let email: string
+  if (isTPVOnly) {
+    // Generate placeholder email for TPV-only staff
+    email = generateTpvOnlyEmail(venue.slug)
+
+    // Validate PIN if provided
+    if (request.pin) {
+      if (!/^\d{4,10}$/.test(request.pin)) {
+        throw new BadRequestError('PIN must be between 4 and 10 digits')
+      }
+
+      // Check if PIN is already used in this venue
+      const existingPinMember = await prisma.staffVenue.findFirst({
+        where: {
+          venueId,
+          active: true,
+          pin: request.pin,
+        },
+      })
+
+      if (existingPinMember) {
+        throw new BadRequestError('PIN no disponible. Por favor, elige otro diferente.')
+      }
+    } else {
+      throw new BadRequestError('PIN is required for TPV-only staff members')
+    }
+  } else {
+    // Traditional email invitation
+    if (!request.email) {
+      throw new BadRequestError('Email is required for standard invitations')
+    }
+    email = request.email.toLowerCase()
+  }
+
+  // Check if user already exists (for email invitations only)
   let staff = await prisma.staff.findUnique({
-    where: { email: request.email },
+    where: { email },
   })
 
-  let existingStaffVenue = null
-  if (staff) {
+  if (staff && !isTPVOnly) {
     // Check if already assigned to this venue
-    existingStaffVenue = await prisma.staffVenue.findUnique({
+    const existingStaffVenue = await prisma.staffVenue.findUnique({
       where: {
         staffId_venueId: {
           staffId: staff.id,
@@ -362,20 +418,22 @@ export async function inviteTeamMember(
     }
   }
 
-  // Check for existing pending invitations
-  const existingInvitation = await prisma.invitation.findFirst({
-    where: {
-      email: request.email,
-      venueId,
-      status: InvitationStatus.PENDING,
-      expiresAt: {
-        gt: new Date(),
+  // Check for existing pending invitations (for email invitations only)
+  if (!isTPVOnly) {
+    const existingInvitation = await prisma.invitation.findFirst({
+      where: {
+        email,
+        venueId,
+        status: InvitationStatus.PENDING,
+        expiresAt: {
+          gt: new Date(),
+        },
       },
-    },
-  })
+    })
 
-  if (existingInvitation) {
-    throw new BadRequestError('A pending invitation already exists for this email')
+    if (existingInvitation) {
+      throw new BadRequestError('A pending invitation already exists for this email')
+    }
   }
 
   // Create invitation
@@ -384,7 +442,7 @@ export async function inviteTeamMember(
 
   const invitation = await prisma.invitation.create({
     data: {
-      email: request.email,
+      email,
       role: request.role,
       type: InvitationType.VENUE_STAFF,
       organizationId: venue.organizationId,
@@ -395,11 +453,67 @@ export async function inviteTeamMember(
     },
   })
 
-  // If user doesn't exist, create them
+  // For TPV-only: Create staff and staffVenue directly (already active)
+  if (isTPVOnly) {
+    staff = await prisma.staff.create({
+      data: {
+        email,
+        firstName: request.firstName,
+        lastName: request.lastName,
+        organizationId: venue.organizationId,
+        active: true, // TPV-only staff are immediately active
+        emailVerified: false, // No email to verify
+      },
+    })
+
+    // Create StaffVenue with PIN
+    await prisma.staffVenue.create({
+      data: {
+        staffId: staff.id,
+        venueId,
+        role: request.role,
+        pin: request.pin!,
+        active: true,
+      },
+    })
+
+    // Mark invitation as accepted immediately
+    await prisma.invitation.update({
+      where: { id: invitation.id },
+      data: {
+        status: InvitationStatus.ACCEPTED,
+        acceptedAt: new Date(),
+      },
+    })
+
+    logger.info('TPV-only team member created', {
+      invitationId: invitation.id,
+      staffId: staff.id,
+      venueId,
+      role: request.role,
+      firstName: request.firstName,
+      lastName: request.lastName,
+    })
+
+    return {
+      invitation: {
+        id: invitation.id,
+        email: invitation.email,
+        role: invitation.role,
+        status: 'ACCEPTED',
+        expiresAt: invitation.expiresAt,
+        createdAt: invitation.createdAt,
+      },
+      emailSent: false,
+      isTPVOnly: true,
+    }
+  }
+
+  // Traditional email invitation flow
   if (!staff) {
     staff = await prisma.staff.create({
       data: {
-        email: request.email,
+        email,
         firstName: request.firstName,
         lastName: request.lastName,
         organizationId: venue.organizationId,
@@ -415,7 +529,7 @@ export async function inviteTeamMember(
   // Get custom role display name (e.g., "Promotor" instead of "ADMIN")
   const roleDisplayName = await getRoleDisplayName(venueId, request.role)
 
-  const emailSent = await emailService.sendTeamInvitation(request.email, {
+  const emailSent = await emailService.sendTeamInvitation(email, {
     inviterName: `${inviter.firstName} ${inviter.lastName}`,
     organizationName: venue.organization.name,
     venueName: venue.name,
@@ -426,7 +540,7 @@ export async function inviteTeamMember(
 
   logger.info('Team invitation created', {
     invitationId: invitation.id,
-    email: request.email,
+    email,
     venueId,
     role: request.role,
     emailSent,
@@ -442,6 +556,8 @@ export async function inviteTeamMember(
       createdAt: invitation.createdAt,
     },
     emailSent,
+    isTPVOnly: false,
+    inviteLink,
   }
 }
 

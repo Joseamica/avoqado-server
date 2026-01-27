@@ -38,20 +38,46 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
       return
     }
 
-    const { email, firstName, lastName, role, message } = req.body
+    const { email, firstName, lastName, role, message, type, pin } = req.body
+
+    const isTPVOnly = type === 'tpv-only'
 
     // Validate required fields
-    if (!email || !firstName || !lastName || !role) {
+    if (!firstName || !lastName || !role) {
       res.status(400).json({
-        error: 'Missing required fields: email, firstName, lastName, role',
+        error: 'Missing required fields: firstName, lastName, role',
       })
       return
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (!emailRegex.test(email)) {
-      res.status(400).json({ error: 'Invalid email format' })
+    // For standard invitations, email is required
+    if (!isTPVOnly && !email) {
+      res.status(400).json({
+        error: 'Email is required for standard invitations',
+      })
+      return
+    }
+
+    // For TPV-only, PIN is required
+    if (isTPVOnly && !pin) {
+      res.status(400).json({
+        error: 'PIN is required for TPV-only staff members',
+      })
+      return
+    }
+
+    // Validate email format (only if provided)
+    if (email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+      if (!emailRegex.test(email)) {
+        res.status(400).json({ error: 'Invalid email format' })
+        return
+      }
+    }
+
+    // Validate PIN format (only if provided)
+    if (pin && !/^\d{4,10}$/.test(pin)) {
+      res.status(400).json({ error: 'PIN must be between 4 and 10 digits' })
       return
     }
 
@@ -67,12 +93,16 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
       lastName,
       role,
       message,
+      type,
+      pin,
     })
 
     res.status(201).json({
-      message: 'Team member invited successfully',
+      message: isTPVOnly ? 'TPV-only team member created successfully' : 'Team member invited successfully',
       invitation: result.invitation,
       emailSent: result.emailSent,
+      isTPVOnly: result.isTPVOnly,
+      inviteLink: result.inviteLink,
     })
   } catch (error) {
     next(error)
