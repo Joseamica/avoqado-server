@@ -20,6 +20,8 @@ import { subscriptionCancellationJob } from './jobs/subscription-cancellation.jo
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
+import { autoClockOutJob } from './jobs/auto-clockout.job'
+import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -73,6 +75,14 @@ const gracefulShutdown = async (signal: string) => {
         // Stop commission aggregation job
         logger.info('Stopping commission aggregation job...')
         commissionAggregationJob.stop()
+
+        // Stop auto clock-out job
+        logger.info('Stopping auto clock-out job...')
+        autoClockOutJob.stop()
+
+        // Stop nightly sales summary job
+        logger.info('Stopping nightly sales summary job...')
+        nightlySalesSummaryJob.stop()
 
         // Stop live demo cleanup job
         if (liveDemoCleanupJob) {
@@ -222,6 +232,12 @@ const startApplication = async (retries = 3) => {
 
       // Start commission aggregation job (daily at 3:00 AM Mexico City)
       commissionAggregationJob.start()
+
+      // Start auto clock-out job (every 15 minutes for HR automation)
+      autoClockOutJob.start()
+
+      // Start nightly sales summary job (daily at 10 PM Mexico City - sends email to admins/owners)
+      nightlySalesSummaryJob.start()
 
       // Start live demo cleanup job (runs every hour to delete expired sessions)
       liveDemoCleanupJob = new CronJob(

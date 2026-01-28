@@ -28,6 +28,12 @@ export const DEFAULT_VENUE_SETTINGS = {
   enableShifts: true, // Enable/disable shift system for venue
   requirePinLogin: true,
 
+  // Auto Clock-Out (HR automation - Square-style)
+  autoClockOutEnabled: false, // Enable automatic clock-out at fixed time
+  autoClockOutTime: null as string | null, // "HH:mm" format - e.g., "03:00" for 3 AM
+  maxShiftDurationEnabled: false, // Enable max shift duration enforcement
+  maxShiftDurationHours: 12, // Max hours before auto clock-out
+
   // Reviews
   autoReplyReviews: false,
   notifyBadReviews: true,
@@ -117,6 +123,11 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     shiftDuration: DEFAULT_VENUE_SETTINGS.shiftDuration,
     enableShifts: DEFAULT_VENUE_SETTINGS.enableShifts,
     requirePinLogin: DEFAULT_VENUE_SETTINGS.requirePinLogin,
+    // Auto Clock-Out
+    autoClockOutEnabled: DEFAULT_VENUE_SETTINGS.autoClockOutEnabled,
+    autoClockOutTime: DEFAULT_VENUE_SETTINGS.autoClockOutTime,
+    maxShiftDurationEnabled: DEFAULT_VENUE_SETTINGS.maxShiftDurationEnabled,
+    maxShiftDurationHours: DEFAULT_VENUE_SETTINGS.maxShiftDurationHours,
     autoReplyReviews: DEFAULT_VENUE_SETTINGS.autoReplyReviews,
     notifyBadReviews: DEFAULT_VENUE_SETTINGS.notifyBadReviews,
     badReviewThreshold: DEFAULT_VENUE_SETTINGS.badReviewThreshold,

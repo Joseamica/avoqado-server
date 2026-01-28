@@ -300,6 +300,12 @@ model VenueSettings {
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 
+  // Auto Clock-Out (HR automation - Square-style)
+  autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
+  autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
+  maxShiftDurationEnabled Boolean @default(false) // Enable max shift duration enforcement
+  maxShiftDurationHours   Int     @default(12)    // Max hours before auto clock-out
+
   // Reviews
   autoReplyReviews    Boolean  @default(false)
   notifyBadReviews    Boolean  @default(true)
@@ -1658,6 +1664,10 @@ model TimeEntry {
   clockOutLatitude  Float? // GPS latitude at clock-out
   clockOutLongitude Float? // GPS longitude at clock-out
   clockOutAccuracy  Float? // GPS accuracy in meters at clock-out
+
+  // Auto clock-out tracking
+  autoClockOut     Boolean @default(false) // Was this entry auto-closed by the system?
+  autoClockOutNote String?                 // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

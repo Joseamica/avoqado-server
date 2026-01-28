@@ -92,8 +92,43 @@ export async function identifyByPin(venueId: string, pin: string) {
     },
   })
 
+  // Find the last completed entry (for auto clock-out notification)
+  // Only fetch if there's no active entry (user is not currently clocked in)
+  let lastEntry = null
+  if (!activeEntry) {
+    const lastCompletedEntry = await prisma.timeEntry.findFirst({
+      where: {
+        staffId: staffVenue.staffId,
+        venueId,
+        status: TimeEntryStatus.CLOCKED_OUT,
+      },
+      orderBy: {
+        clockOutTime: 'desc',
+      },
+      select: {
+        id: true,
+        clockInTime: true,
+        clockOutTime: true,
+        totalHours: true,
+        autoClockOut: true,
+        autoClockOutNote: true,
+      },
+    })
+
+    if (lastCompletedEntry) {
+      lastEntry = {
+        id: lastCompletedEntry.id,
+        clockInTime: lastCompletedEntry.clockInTime,
+        clockOutTime: lastCompletedEntry.clockOutTime,
+        totalHours: lastCompletedEntry.totalHours,
+        autoClockOut: lastCompletedEntry.autoClockOut,
+        autoClockOutNote: lastCompletedEntry.autoClockOutNote,
+      }
+    }
+  }
+
   logger.info(
-    `✅ [TIME-ENTRY.MOBILE] Identified: ${staffVenue.staff.firstName} ${staffVenue.staff.lastName} | hasActiveEntry=${!!activeEntry}`,
+    `✅ [TIME-ENTRY.MOBILE] Identified: ${staffVenue.staff.firstName} ${staffVenue.staff.lastName} | hasActiveEntry=${!!activeEntry} | lastEntryAutoClockOut=${lastEntry?.autoClockOut ?? false}`,
   )
 
   return {
@@ -115,6 +150,8 @@ export async function identifyByPin(venueId: string, pin: string) {
           activeBreak: activeEntry.breaks[0] || null,
         }
       : null,
+    // Last completed entry (for auto clock-out notification)
+    lastEntry,
   }
 }
 
