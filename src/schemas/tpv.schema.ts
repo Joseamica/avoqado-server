@@ -623,3 +623,42 @@ export const tpvFeedbackSchema = z.object({
     deviceManufacturer: z.string().min(1, { message: 'El fabricante del dispositivo es requerido.' }),
   }),
 })
+
+// ==========================================
+// CRYPTO PAYMENT SCHEMAS
+// ==========================================
+
+/** Schema for initiating a crypto payment */
+export const initiateCryptoPaymentSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    amount: z.number().int().positive({ message: 'El monto debe ser un número entero positivo (en centavos).' }),
+    tip: z.number().int().min(0, { message: 'La propina debe ser un número entero no negativo (en centavos).' }).optional(),
+    staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+    shiftId: z.string().cuid({ message: 'El ID del turno debe ser un CUID válido.' }).optional(),
+    orderId: z.string().cuid({ message: 'El ID del order debe ser un CUID válido.' }).optional(),
+    orderNumber: z.string().optional(),
+    deviceSerialNumber: z.string().optional(),
+    rating: z.number().int().min(1).max(5).optional(),
+  }),
+})
+
+/** Schema for cancelling a crypto payment */
+export const cancelCryptoPaymentSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  body: z.object({
+    paymentId: z.string().cuid({ message: 'El ID del pago debe ser un CUID válido.' }),
+  }),
+})
+
+/** Schema for getting crypto payment status */
+export const getCryptoPaymentStatusSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    requestId: z.string().min(1, { message: 'El requestId de B4Bit es requerido.' }),
+  }),
+})

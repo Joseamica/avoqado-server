@@ -21,6 +21,7 @@ import settlementConfigRoutes from '../superadmin/settlementConfiguration.routes
 import terminalRoutes from '../superadmin/terminal.routes'
 import moduleRoutes from '../superadmin/module.routes'
 import organizationRoutes from '../superadmin/organization.routes'
+import pushNotificationsRoutes from '../superadmin/pushNotifications.routes'
 
 // Import cost management validation schemas
 import {
@@ -170,6 +171,9 @@ router.use('/modules', moduleRoutes)
 
 // Organization Management (CRUD + Module Assignment)
 router.use('/organizations', organizationRoutes)
+
+// Push Notifications Testing & Management
+router.use('/push-notifications', pushNotificationsRoutes)
 
 // Payment Readiness Check (for superadmin dashboard)
 router.get('/payment-readiness', venuePaymentReadinessController.getMultipleVenuesPaymentReadiness)

@@ -1,6 +1,7 @@
 import { NotificationType, NotificationChannel, NotificationPriority, AlertType, Prisma } from '@prisma/client'
 
 import * as resendService from '../resend.service'
+import * as pushService from '../mobile/push.mobile.service'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
@@ -323,21 +324,27 @@ async function sendSMSNotification(notification: any): Promise<boolean> {
 }
 
 /**
- * Send push notification (placeholder)
+ * Send push notification via Firebase Cloud Messaging (FCM)
  */
 async function sendPushNotification(notification: any): Promise<boolean> {
-  // TODO: Implement push notification logic
-  // Integration options:
-  // - Firebase Cloud Messaging (FCM)
-  // - Apple Push Notification Service (APNs)
-  // - OneSignal
+  try {
+    const result = await pushService.sendPushToStaff(notification.recipientId, {
+      title: notification.title,
+      body: notification.message,
+      data: {
+        type: notification.type,
+        notificationId: notification.id,
+        entityType: notification.entityType || '',
+        entityId: notification.entityId || '',
+        actionUrl: notification.actionUrl || '',
+      },
+    })
 
-  logger.info(`Push notification would be sent to: ${notification.recipientId}`)
-  logger.info(`Title: ${notification.title}`)
-  logger.info(`Body: ${notification.message}`)
-
-  // For now, just log and return true
-  return true
+    return result.success
+  } catch (error) {
+    logger.error(`❌ [Push] Error sending push notification:`, error)
+    return false
+  }
 }
 
 /**

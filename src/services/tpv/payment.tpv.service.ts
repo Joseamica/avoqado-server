@@ -2572,6 +2572,7 @@ function mapPaymentMethodToPOS(method: PaymentMethod): string {
     DEBIT_CARD: 'DEB', // TAR. DEBITO
     DIGITAL_WALLET: 'MPY', // MARC PAYMENTS (como genérico para wallets)
     BANK_TRANSFER: 'DEB', // ✅ CHANGED: Use DEB instead of AEF to prevent $0.00 archiving
+    CRYPTOCURRENCY: 'ACARD', // 🪙 B4Bit crypto payments - map to generic card type
     OTHER: 'ACARD', // ✅ CHANGED: Default to DEB instead of AEF
   }
 

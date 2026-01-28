@@ -46,13 +46,36 @@ export const InviteTeamMemberSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
   }),
-  body: z.object({
-    email: z.string().email('Invalid email format'),
-    firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
-    lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long'),
-    role: z.nativeEnum(StaffRole).refine(role => role !== StaffRole.SUPERADMIN, 'Cannot invite SUPERADMIN role'),
-    message: z.string().max(500, 'Message too long').optional(),
-  }),
+  body: z
+    .object({
+      email: z.string().email('Invalid email format').optional(),
+      firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
+      lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long'),
+      role: z.nativeEnum(StaffRole).refine(role => role !== StaffRole.SUPERADMIN, 'Cannot invite SUPERADMIN role'),
+      message: z.string().max(500, 'Message too long').optional(),
+      type: z.enum(['email', 'tpv-only']).optional().default('email'),
+      pin: z
+        .string()
+        .regex(/^\d{4,10}$/, 'PIN must be 4-10 digits')
+        .optional(),
+    })
+    .refine(
+      data => {
+        // If type is 'email' (or not specified), email is required
+        if (data.type === 'email' || !data.type) {
+          return !!data.email
+        }
+        // If type is 'tpv-only', pin is required
+        if (data.type === 'tpv-only') {
+          return !!data.pin
+        }
+        return true
+      },
+      {
+        message: 'Email is required for email invitations, PIN is required for TPV-only',
+        path: ['email'],
+      },
+    ),
 })
 
 export const UpdateTeamMemberSchema = z.object({

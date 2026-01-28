@@ -90,6 +90,10 @@ const prismaMock: any = {
   recipeLine: createMockModel(),
   stockBatch: createMockModel(),
   rawMaterialMovement: createMockModel(),
+  // Time entry models
+  timeEntry: createMockModel(),
+  timeEntryBreak: createMockModel(),
+  venueSettings: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

@@ -482,7 +482,76 @@ val storagePath = "venues/$venueSlug/verifications/$dateStr/$fileName" // NO pre
 
 ---
 
-## 8. Documentation Policy
+## 8. Email Template Design Standards
+
+**ALL email templates MUST follow this unified design.** This ensures brand consistency across all communications.
+
+### Design Specifications
+
+| Element | Value |
+|---------|-------|
+| **Background** | White (`#ffffff`) |
+| **Text color** | Black (`#000000`) |
+| **Link color** | Blue (`#1a73e8`) |
+| **Border color** | Light gray (`#e0e0e0`) |
+| **Font family** | `-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif` |
+| **Logo URL** | `https://avoqado.io/isotipo.svg` |
+| **Max width** | `600px` |
+| **Border radius** | `8px` for content boxes, `4px` for buttons |
+
+### Required Structure
+
+```html
+<!-- Header with Logo -->
+<div style="padding-bottom: 32px;">
+  <img src="https://avoqado.io/isotipo.svg" alt="Avoqado" width="32" height="32">
+  <span style="font-size: 18px; font-weight: 700; color: #000;">Avoqado</span>
+</div>
+
+<!-- Title -->
+<h1 style="font-size: 32px; font-weight: 400; color: #000;">Email Title</h1>
+
+<!-- Content boxes -->
+<div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px;">
+  <!-- Content -->
+</div>
+
+<!-- CTA Button (black background) -->
+<a href="#" style="background: #000; color: #fff; padding: 14px 32px; border-radius: 4px; font-weight: 600;">
+  Button Text
+</a>
+
+<!-- Footer -->
+<hr style="border-top: 1px solid #e0e0e0;">
+<div>
+  <img src="https://avoqado.io/isotipo.svg" width="24" height="24">
+  <span>Avoqado</span>
+  <p>Footer text</p>
+  <a href="https://avoqado.io/privacy">Politica de Privacidad</a>
+</div>
+```
+
+### Rules
+
+1. **NO emojis** in subjects or content
+2. **NO gradients** or colored backgrounds
+3. **NO special characters** with accents (use `a` instead of `á`, etc.) for better email client compatibility
+4. **Always include** the Avoqado logo in header and footer
+5. **Always include** privacy policy link in footer
+6. **Use inline styles only** - email clients don't support external CSS
+7. **Warning boxes** use `background: #fef3c7` with `color: #92400e`
+
+### Template File
+
+All email templates are in: `src/services/email.service.ts`
+
+### Testing
+
+Test script to send all templates: `npx ts-node scripts/test-all-emails.ts`
+
+---
+
+## 9. Documentation Policy
 
 ### Central Documentation Hub
 
@@ -560,7 +629,7 @@ avoqado-tpv/docs/              ← Android-specific ONLY
 
 ---
 
-## 9. Pending TODOs
+## 10. Pending TODOs
 
 ### Chatbot Token Pricing (Requested 2025-01-25)
 

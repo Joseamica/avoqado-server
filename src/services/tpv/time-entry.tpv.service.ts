@@ -61,6 +61,82 @@ async function verifyStaffPin(venueId: string, staffId: string, pin: string): Pr
 }
 
 /**
+ * Identify staff by PIN and return their current time entry status
+ * Used by time clock to show the correct screen (clock in vs clock out)
+ */
+export async function identifyByPin(venueId: string, pin: string) {
+  // Find staff by PIN in this venue
+  const staffVenue = await prisma.staffVenue.findFirst({
+    where: {
+      venueId,
+      pin,
+      active: true,
+      staff: {
+        active: true,
+      },
+    },
+    include: {
+      staff: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          photoUrl: true,
+        },
+      },
+    },
+  })
+
+  if (!staffVenue) {
+    throw new UnauthorizedError('PIN inválido')
+  }
+
+  // Find active time entry for this staff
+  const activeEntry = await prisma.timeEntry.findFirst({
+    where: {
+      staffId: staffVenue.staffId,
+      venueId,
+      status: {
+        in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK],
+      },
+    },
+    include: {
+      breaks: {
+        where: {
+          endTime: null, // Active break
+        },
+        orderBy: {
+          startTime: 'desc',
+        },
+        take: 1,
+      },
+    },
+  })
+
+  return {
+    staff: {
+      id: staffVenue.staffId,
+      firstName: staffVenue.staff.firstName,
+      lastName: staffVenue.staff.lastName,
+      email: staffVenue.staff.email,
+      photoUrl: staffVenue.staff.photoUrl,
+      role: staffVenue.role,
+    },
+    currentEntry: activeEntry
+      ? {
+          id: activeEntry.id,
+          status: activeEntry.status,
+          clockInTime: activeEntry.clockInTime,
+          jobRole: activeEntry.jobRole,
+          isOnBreak: activeEntry.status === TimeEntryStatus.ON_BREAK,
+          activeBreak: activeEntry.breaks[0] || null,
+        }
+      : null,
+  }
+}
+
+/**
  * Calculate total hours and break minutes for a time entry
  */
 function calculateHours(clockInTime: Date, clockOutTime: Date, breakMinutes: number): number {
@@ -91,7 +167,7 @@ export async function clockIn(params: ClockInParams) {
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
   if (!isValidPin) {
-    throw new UnauthorizedError('Invalid PIN for this venue')
+    throw new UnauthorizedError('PIN inválido')
   }
 
   // Check if staff member is already clocked in
@@ -106,7 +182,7 @@ export async function clockIn(params: ClockInParams) {
   })
 
   if (existingEntry) {
-    throw new BadRequestError('Staff member is already clocked in. Please clock out first.')
+    throw new BadRequestError('El empleado ya tiene entrada registrada. Primero marca la salida.')
   }
 
   // Create new time entry with photo and GPS data
@@ -147,7 +223,7 @@ export async function clockOut(params: ClockOutParams) {
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
   if (!isValidPin) {
-    throw new UnauthorizedError('Invalid PIN for this venue')
+    throw new UnauthorizedError('PIN inválido')
   }
 
   // Find active time entry
@@ -165,7 +241,7 @@ export async function clockOut(params: ClockOutParams) {
   })
 
   if (!timeEntry) {
-    throw new BadRequestError('Staff member is not currently clocked in')
+    throw new BadRequestError('El empleado no tiene entrada registrada')
   }
 
   // End any active break
@@ -233,13 +309,13 @@ export async function startBreak(params: BreakParams) {
   })
 
   if (!timeEntry) {
-    throw new BadRequestError('Time entry not found or not in valid state for break')
+    throw new BadRequestError('Registro no encontrado o no válido para descanso')
   }
 
   // Check if there's already an active break
   const activeBreak = timeEntry.breaks.find(brk => brk.endTime === null)
   if (activeBreak) {
-    throw new BadRequestError('A break is already in progress')
+    throw new BadRequestError('Ya hay un descanso en progreso')
   }
 
   // Create break and update time entry status
@@ -288,13 +364,13 @@ export async function endBreak(params: BreakParams) {
   })
 
   if (!timeEntry) {
-    throw new BadRequestError('Time entry not found or not on break')
+    throw new BadRequestError('Registro no encontrado o no en descanso')
   }
 
   // Find active break
   const activeBreak = timeEntry.breaks.find(brk => brk.endTime === null)
   if (!activeBreak) {
-    throw new BadRequestError('No active break found')
+    throw new BadRequestError('No hay descanso activo')
   }
 
   // End break and update time entry status

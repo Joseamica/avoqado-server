@@ -491,4 +491,44 @@ router.get('/venues/:venueId/job-status', checkPermission('commissions:payout'),
  */
 router.post('/venues/:venueId/run-job', checkPermission('commissions:payout'), controller.runAggregationJob)
 
+// ==========================================
+// SALES GOALS
+// Routes: /api/v1/dashboard/commissions/venues/:venueId/goals
+// ==========================================
+
+/**
+ * GET /venues/:venueId/goals
+ * List all sales goals for a venue
+ * @permission commissions:read
+ */
+router.get('/venues/:venueId/goals', checkPermission('commissions:read'), controller.getSalesGoals)
+
+/**
+ * GET /venues/:venueId/goals/:goalId
+ * Get single sales goal
+ * @permission commissions:read
+ */
+router.get('/venues/:venueId/goals/:goalId', checkPermission('commissions:read'), controller.getSalesGoalById)
+
+/**
+ * POST /venues/:venueId/goals
+ * Create a new sales goal
+ * @permission commissions:create
+ */
+router.post('/venues/:venueId/goals', checkPermission('commissions:create'), controller.createSalesGoal)
+
+/**
+ * PATCH /venues/:venueId/goals/:goalId
+ * Update a sales goal
+ * @permission commissions:update
+ */
+router.patch('/venues/:venueId/goals/:goalId', checkPermission('commissions:update'), controller.updateSalesGoal)
+
+/**
+ * DELETE /venues/:venueId/goals/:goalId
+ * Delete a sales goal
+ * @permission commissions:delete
+ */
+router.delete('/venues/:venueId/goals/:goalId', checkPermission('commissions:delete'), controller.deleteSalesGoal)
+
 export default router

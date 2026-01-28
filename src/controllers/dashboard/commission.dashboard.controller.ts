@@ -19,6 +19,7 @@ import * as calculationService from '@/services/dashboard/commission/commission-
 import * as aggregationService from '@/services/dashboard/commission/commission-aggregation.service'
 import * as payoutService from '@/services/dashboard/commission/commission-payout.service'
 import * as clawbackService from '@/services/dashboard/commission/commission-clawback.service'
+import * as salesGoalService from '@/services/dashboard/commission/sales-goal.service'
 import { commissionAggregationJob } from '@/jobs/commission-aggregation.job'
 import { TierPeriod } from '@prisma/client'
 
@@ -1127,6 +1128,91 @@ export async function runAggregationJob(req: Request, res: Response, next: NextF
     const result = await commissionAggregationJob.runNow()
 
     res.json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+// ==========================================
+// SALES GOALS
+// ==========================================
+
+/**
+ * GET /api/v1/dashboard/commissions/venues/:venueId/goals
+ * List all sales goals for a venue
+ */
+export async function getSalesGoals(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const includeInactive = req.query.includeInactive === 'true'
+
+    const goals = await salesGoalService.getSalesGoals(venueId, { includeInactive })
+
+    res.json({ data: goals })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/commissions/venues/:venueId/goals/:goalId
+ * Get single sales goal
+ */
+export async function getSalesGoalById(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, goalId } = req.params
+
+    const goal = await salesGoalService.getSalesGoal(venueId, goalId)
+
+    res.json(goal)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/commissions/venues/:venueId/goals
+ * Create a new sales goal
+ */
+export async function createSalesGoal(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+
+    const goal = await salesGoalService.createSalesGoal(venueId, req.body)
+
+    res.status(201).json(goal)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * PATCH /api/v1/dashboard/commissions/venues/:venueId/goals/:goalId
+ * Update a sales goal
+ */
+export async function updateSalesGoal(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, goalId } = req.params
+
+    const goal = await salesGoalService.updateSalesGoal(venueId, goalId, req.body)
+
+    res.json(goal)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * DELETE /api/v1/dashboard/commissions/venues/:venueId/goals/:goalId
+ * Delete a sales goal
+ */
+export async function deleteSalesGoal(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, goalId } = req.params
+
+    await salesGoalService.deleteSalesGoal(venueId, goalId)
+
+    res.json({ message: 'Sales goal deleted successfully' })
   } catch (error) {
     next(error)
   }
