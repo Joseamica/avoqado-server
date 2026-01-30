@@ -9,6 +9,7 @@ import { Request, Response } from 'express'
 import logger from '../../config/logger'
 import { processWebhook, verifyWebhookSignature } from '../../services/b4bit/b4bit.service'
 import type { B4BitWebhookPayload } from '../../services/b4bit/types'
+import prisma from '../../utils/prismaClient'
 
 /**
  * POST /api/v1/webhooks/b4bit
@@ -46,9 +47,26 @@ export async function handleB4BitWebhook(req: Request, res: Response): Promise<v
       hasNonce: !!nonce,
     })
 
-    // Verify signature (if secret is configured)
+    // Verify signature dynamically per venue
+    // Look up the payment to find the venue, then get the venue's secret key
     if (signature && nonce) {
-      const isValid = verifyWebhookSignature(nonce, body, signature)
+      let venueSecretKey: string | null | undefined
+      const paymentRef = payload.reference
+      if (paymentRef) {
+        const payment = await prisma.payment.findUnique({
+          where: { id: paymentRef },
+          select: { venueId: true },
+        })
+        if (payment) {
+          const cryptoConfig = await prisma.venueCryptoConfig.findUnique({
+            where: { venueId: payment.venueId },
+            select: { b4bitSecretKey: true },
+          })
+          venueSecretKey = cryptoConfig?.b4bitSecretKey
+        }
+      }
+
+      const isValid = verifyWebhookSignature(nonce, body, signature, venueSecretKey)
       if (!isValid) {
         logger.warn('⚠️ B4Bit webhook: Invalid signature', {
           identifier: payload.identifier,

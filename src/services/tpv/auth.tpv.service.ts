@@ -63,6 +63,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
           posStatus: true,
           logo: true,
           status: true, // Include for frontend to know venue status
+          organizationId: true,
         },
       },
     },
@@ -147,7 +148,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     userId: staffVenue.staff.id,
     staffId: staffVenue.staffId,
     venueId: staffVenue.venueId,
-    orgId: staffVenue.venueId, // Using venueId as orgId for consistency
+    orgId: staffVenue.venue.organizationId,
     role: staffVenue.role,
     permissions: staffVenue.permissions,
     correlationId,
@@ -253,6 +254,7 @@ export async function refreshAccessToken(refreshToken: string) {
           id: true,
           name: true,
           status: true, // Single source of truth for venue state
+          organizationId: true, // For token generation fallback
         },
       },
     },
@@ -268,7 +270,7 @@ export async function refreshAccessToken(refreshToken: string) {
     userId: staffVenue.staffId,
     staffId: staffVenue.staffId,
     venueId: staffVenue.venueId,
-    orgId: orgId || staffVenue.venueId,
+    orgId: orgId || staffVenue.venue.organizationId,
     role: staffVenue.role,
     permissions: staffVenue.permissions,
     correlationId,

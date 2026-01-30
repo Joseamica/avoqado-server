@@ -14,9 +14,10 @@ export const STAFF_TABLE: TableDefinition = {
   allowedRoles: ['SUPERADMIN', 'OWNER', 'ADMIN', 'MANAGER'],
 
   tenant: {
-    field: 'organizationId',
+    field: 'id',
     required: true,
-    autoInject: false, // Staff is org-level, not venue-level
+    autoInject: false, // Staff uses StaffOrganization junction table for org membership
+    // To filter by org: JOIN StaffOrganization ON staffId = Staff.id WHERE organizationId = $orgId
   },
 
   columns: [
@@ -25,14 +26,6 @@ export const STAFF_TABLE: TableDefinition = {
       type: 'string',
       description: 'Staff member identifier',
       isPrimaryKey: true,
-    },
-    {
-      name: 'organizationId',
-      type: 'string',
-      description: 'Organization this staff belongs to',
-      isForeignKey: true,
-      foreignKeyTable: 'Organization',
-      isFilterable: true,
     },
     {
       name: 'firstName',

@@ -11,12 +11,33 @@
  * DEV:  baseUrl=https://dev-payments.b4bit.com, loginUrl=https://dev-pay.b4bit.com
  * PROD: baseUrl=https://pos.b4bit.com, loginUrl=https://pay.b4bit.com
  */
-export interface B4BitConfig {
+/**
+ * Global B4Bit config (from environment - shared across all venues)
+ */
+export interface B4BitGlobalConfig {
   baseUrl: string // API server (dev-payments.b4bit.com or pos.b4bit.com)
   loginUrl: string // Frontend/login server (dev-pay.b4bit.com or pay.b4bit.com)
   username: string // B4Bit account email
   password: string // B4Bit account password
-  deviceId: string // Device identifier from B4Bit dashboard
+}
+
+/**
+ * Per-venue B4Bit device config (from database)
+ */
+export interface B4BitVenueConfig {
+  deviceId: string // Device identifier (API Key UUID)
+  secretKey?: string | null // Webhook secret key
+}
+
+/**
+ * @deprecated Use B4BitGlobalConfig + B4BitVenueConfig instead
+ */
+export interface B4BitConfig {
+  baseUrl: string
+  loginUrl: string
+  username: string
+  password: string
+  deviceId: string
   webhookSecret?: string
 }
 

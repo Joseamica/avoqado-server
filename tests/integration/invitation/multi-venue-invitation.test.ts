@@ -80,6 +80,12 @@ const mockPrismaClient = {
   venueRoleConfig: {
     findFirst: jest.fn(),
   },
+  staffOrganization: {
+    findFirst: jest.fn(),
+    findUnique: jest.fn(),
+    create: jest.fn(),
+    upsert: jest.fn(),
+  },
   $transaction: jest.fn(),
   $connect: jest.fn(),
   $disconnect: jest.fn(),
@@ -152,11 +158,19 @@ describe('Multi-Venue Invitation Flow', () => {
         email: newUserEmail.toLowerCase(),
         firstName: 'New',
         lastName: 'User',
-        organizationId: org1Id,
         emailVerified: true,
         active: true,
       }
       mockPrismaClient.staff.create.mockResolvedValue(createdStaff)
+
+      // Mock StaffOrganization creation for new staff
+      mockPrismaClient.staffOrganization.create.mockResolvedValue({
+        staffId: newUserId,
+        organizationId: org1Id,
+        role: 'MEMBER',
+        isPrimary: true,
+        isActive: true,
+      })
 
       // Mock: No existing StaffVenue assignment
       mockPrismaClient.staffVenue.findUnique.mockResolvedValue(null)
@@ -176,6 +190,9 @@ describe('Multi-Venue Invitation Flow', () => {
       // Mock first venue assignment lookup
       mockPrismaClient.staffVenue.findFirst.mockResolvedValue(null)
 
+      // Mock venue lookup for token generation (getOrganizationIdFromVenue)
+      mockPrismaClient.venue.findUnique.mockResolvedValue({ organizationId: org1Id })
+
       const result = await invitationService.acceptInvitation(invitationToken, {
         firstName: 'New',
         lastName: 'User',
@@ -188,7 +205,6 @@ describe('Multi-Venue Invitation Flow', () => {
           email: newUserEmail.toLowerCase(),
           firstName: 'New',
           lastName: 'User',
-          organizationId: org1Id,
           emailVerified: true,
           active: true,
         }),
@@ -203,6 +219,9 @@ describe('Multi-Venue Invitation Flow', () => {
           active: true,
         }),
       })
+
+      // Verify StaffOrganization was created
+      expect(mockPrismaClient.staffOrganization.create).toHaveBeenCalled()
 
       // Verify result
       expect(result.user.email).toBe(newUserEmail.toLowerCase())
@@ -236,7 +255,6 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'Waiter',
-        organizationId: org1Id, // SAME org!
         password: 'hashedpassword',
         emailVerified: true,
         active: true,
@@ -249,6 +267,7 @@ describe('Multi-Venue Invitation Flow', () => {
             active: true,
           },
         ],
+        organizations: [{ organizationId: org1Id }], // SAME org!
       })
 
       // Mock staff update (should only update active/emailVerified, not password)
@@ -257,10 +276,12 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'Waiter',
-        organizationId: org1Id,
         emailVerified: true,
         active: true,
       })
+
+      // Mock venue lookup for token generation
+      mockPrismaClient.venue.findUnique.mockResolvedValue({ organizationId: org1Id })
 
       // Mock: No existing StaffVenue for Venue B
       mockPrismaClient.staffVenue.findUnique.mockResolvedValue(null)
@@ -333,11 +354,11 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'User',
-        organizationId: org1Id,
         password: '$2b$12$existinghash', // Already has password
         emailVerified: true,
         active: true,
         venues: [],
+        organizations: [{ organizationId: org1Id }],
       })
 
       mockPrismaClient.staff.update.mockImplementation((args: any) => {
@@ -359,6 +380,9 @@ describe('Multi-Venue Invitation Flow', () => {
       })
       mockPrismaClient.invitation.update.mockResolvedValue({})
 
+      // Mock venue lookup for token generation
+      mockPrismaClient.venue.findUnique.mockResolvedValue({ organizationId: org1Id })
+
       await invitationService.acceptInvitation(invitationToken, {
         firstName: 'Existing',
         lastName: 'User',
@@ -375,8 +399,8 @@ describe('Multi-Venue Invitation Flow', () => {
     })
   })
 
-  describe('Scenario 3: User invited to DIFFERENT organization → BLOCKED', () => {
-    it('should reject invitation when user exists in different organization', async () => {
+  describe('Scenario 3: User invited to DIFFERENT organization → Cross-org membership created', () => {
+    it('should create StaffOrganization membership for cross-org invitation', async () => {
       const invitationToken = 'different-org-token'
 
       // Invitation is for org2
@@ -385,7 +409,7 @@ describe('Multi-Venue Invitation Flow', () => {
         token: invitationToken,
         email: testEmail,
         role: StaffRole.WAITER,
-        organizationId: org2Id, // Different org!
+        organizationId: org2Id,
         venueId: venueCId,
         status: InvitationStatus.PENDING,
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
@@ -400,7 +424,6 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'User',
-        organizationId: org1Id, // Different from invitation!
         password: 'hashedpassword',
         emailVerified: true,
         active: true,
@@ -408,22 +431,70 @@ describe('Multi-Venue Invitation Flow', () => {
           {
             venueId: venueAId,
             role: StaffRole.WAITER,
+            active: true,
           },
         ],
+        organizations: [{ organizationId: org1Id }], // Different from invitation
       })
 
-      // Expect rejection
-      await expect(
-        invitationService.acceptInvitation(invitationToken, {
-          firstName: 'Existing',
-          lastName: 'User',
-          password: testPassword,
-        }),
-      ).rejects.toThrow('ya está registrado en otra organización')
+      // Mock staff update
+      mockPrismaClient.staff.update.mockResolvedValue({
+        id: existingUserId,
+        email: testEmail.toLowerCase(),
+        firstName: 'Existing',
+        lastName: 'User',
+        emailVerified: true,
+        active: true,
+      })
 
-      // Verify no staff or staffVenue was created
+      // Mock cross-org StaffOrganization upsert
+      mockPrismaClient.staffOrganization.upsert.mockResolvedValue({
+        staffId: existingUserId,
+        organizationId: org2Id,
+        role: 'MEMBER',
+        isPrimary: false,
+        isActive: true,
+      })
+
+      // Mock: No existing StaffVenue for Venue C
+      mockPrismaClient.staffVenue.findUnique.mockResolvedValue(null)
+
+      // Mock StaffVenue creation for Venue C
+      mockPrismaClient.staffVenue.create.mockResolvedValue({
+        id: uuidv4(),
+        staffId: existingUserId,
+        venueId: venueCId,
+        role: StaffRole.WAITER,
+        active: true,
+      })
+
+      // Mock invitation update
+      mockPrismaClient.invitation.update.mockResolvedValue({})
+
+      // Mock venue lookup for token generation
+      mockPrismaClient.venue.findUnique.mockResolvedValue({ organizationId: org2Id })
+
+      const result = await invitationService.acceptInvitation(invitationToken, {
+        firstName: 'Existing',
+        lastName: 'User',
+        password: testPassword,
+      })
+
+      // Verify NO new staff was created (reused existing)
       expect(mockPrismaClient.staff.create).not.toHaveBeenCalled()
-      expect(mockPrismaClient.staffVenue.create).not.toHaveBeenCalled()
+
+      // Verify StaffVenue was created for the new venue
+      expect(mockPrismaClient.staffVenue.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          staffId: existingUserId,
+          venueId: venueCId,
+          role: StaffRole.WAITER,
+        }),
+      })
+
+      // Verify result
+      expect(result.user.id).toBe(existingUserId)
+      expect(result.user.organizationId).toBe(org2Id)
     })
   })
 
@@ -453,7 +524,6 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'User',
-        organizationId: org1Id,
         password: 'hashedpassword',
         emailVerified: true,
         active: true,
@@ -466,13 +536,16 @@ describe('Multi-Venue Invitation Flow', () => {
             active: true,
           },
         ],
+        organizations: [{ organizationId: org1Id }],
       })
 
       mockPrismaClient.staff.update.mockResolvedValue({
         id: existingUserId,
         email: testEmail.toLowerCase(),
-        organizationId: org1Id,
       })
+
+      // Mock venue lookup for token generation
+      mockPrismaClient.venue.findUnique.mockResolvedValue({ organizationId: org1Id })
 
       // StaffVenue EXISTS for this venue
       mockPrismaClient.staffVenue.findUnique.mockResolvedValue({
@@ -577,12 +650,11 @@ describe('Multi-Venue Invitation Flow', () => {
         invitedBy: { id: inviterId, firstName: 'Manager', lastName: 'Test' },
       })
 
-      // User exists with password in SAME org
+      // User exists with password
       mockPrismaClient.staff.findUnique.mockResolvedValue({
         firstName: 'Existing',
         lastName: 'User',
         password: '$2b$12$hashedpassword',
-        organizationId: org1Id,
       })
 
       // Mock venueRoleConfig lookup
@@ -596,7 +668,7 @@ describe('Multi-Venue Invitation Flow', () => {
       expect(result.lastName).toBe('User')
     })
 
-    it('should return existsInDifferentOrg=true for user in different org', async () => {
+    it('should return existsInDifferentOrg=false for user in different org (multi-org now supported)', async () => {
       const invitationToken = 'diff-org-check-token'
 
       mockPrismaClient.invitation.findFirst.mockResolvedValue({
@@ -613,20 +685,20 @@ describe('Multi-Venue Invitation Flow', () => {
         invitedBy: { id: inviterId, firstName: 'Manager', lastName: 'Other' },
       })
 
-      // User exists in org1 (different!)
+      // User exists in org1 (different!) — but multi-org is now supported
       mockPrismaClient.staff.findUnique.mockResolvedValue({
         firstName: 'Existing',
         lastName: 'User',
         password: '$2b$12$hashedpassword',
-        organizationId: org1Id, // Different from invitation org2
       })
 
       mockPrismaClient.venueRoleConfig.findFirst.mockResolvedValue(null)
 
       const result = await invitationService.getInvitationByToken(invitationToken)
 
-      expect(result.existsInDifferentOrg).toBe(true)
-      expect(result.userAlreadyHasPassword).toBe(false) // False because different org
+      // Multi-org supported: existsInDifferentOrg is always false now
+      expect(result.existsInDifferentOrg).toBe(false)
+      expect(result.userAlreadyHasPassword).toBe(true) // Has password regardless of org
     })
 
     it('should return both false for new user (no existing account)', async () => {
@@ -682,6 +754,11 @@ describe('Multi-Venue Invitation Flow', () => {
       mockPrismaClient.staff.create.mockResolvedValue({
         id: newUserId,
         email: newUserEmail.toLowerCase(),
+      })
+
+      // Mock StaffOrganization creation
+      mockPrismaClient.staffOrganization.create.mockResolvedValue({
+        staffId: newUserId,
         organizationId: org1Id,
       })
 
@@ -697,6 +774,9 @@ describe('Multi-Venue Invitation Flow', () => {
         active: true,
       })
       mockPrismaClient.invitation.update.mockResolvedValue({})
+
+      // Mock venue lookup for token generation
+      mockPrismaClient.venue.findUnique.mockResolvedValue({ organizationId: org1Id })
 
       const result = await invitationService.acceptInvitation(invitationToken, {
         firstName: 'New',

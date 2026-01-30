@@ -29,9 +29,11 @@ model Organization {
   billingAddress Json?
 
   venues      Venue[]
-  staff       Staff[]
   invitations Invitation[]
   invoices    Invoice[]
+
+  // Staff memberships (multi-org support)
+  staffOrganizations StaffOrganization[] @relation("StaffOrganizations")
 
   // Modules enabled at organization level (inherited by all venues)
   organizationModules OrganizationModule[]
@@ -210,6 +212,7 @@ model Venue {
   creditAssessment        VenueCreditAssessment?
   creditOffers            CreditOffer[]
   ecommerceMerchants      EcommerceMerchant[]      @relation("VenueEcommerceMerchants") // ⭐ E-commerce sales channels for this venue
+  cryptoConfig            VenueCryptoConfig? // Per-venue B4Bit crypto payment device config
 
   // ✅ NEW: Inventory Management
   rawMaterials         RawMaterial[]
@@ -358,9 +361,8 @@ model PosConnectionStatus {
 // ==========================================
 
 model Staff {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  id String @id @default(cuid())
+  // organizationId removed: use StaffOrganization junction table for multi-org membership
 
   // Authentication
   // NOTE: email is GLOBALLY UNIQUE (industry standard: Stripe, Shopify, Toast)
@@ -387,6 +389,7 @@ model Staff {
   emailVerificationExpires DateTime? // Expiration time for verification code
 
   // Access
+  organizations     StaffOrganization[]
   venues            StaffVenue[]
   shifts            Shift[]
   ordersCreated     Order[]       @relation("OrderCreatedBy")
@@ -474,8 +477,6 @@ model Staff {
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
-  // @@index([pin])  // ❌ REMOVER - Ya no existe pin aquí
-  @@index([organizationId])
 }
 
 model StaffVenue {
@@ -518,6 +519,32 @@ model StaffVenue {
   @@index([venueId])
   @@index([role])
   @@index([pin]) // ✅ Índice para búsquedas de PIN
+}
+
+// ==========================================
+// STAFF-ORGANIZATION JUNCTION TABLE
+// Enables staff to belong to multiple organizations
+// Pattern: Stripe, GitHub, Slack multi-tenant membership
+// ==========================================
+model StaffOrganization {
+  id             String       @id @default(cuid())
+  staffId        String
+  staff          Staff        @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation("StaffOrganizations", fields: [organizationId], references: [id], onDelete: Cascade)
+
+  role      OrgRole  @default(MEMBER)
+  isActive  Boolean  @default(true)
+  isPrimary Boolean  @default(false) // Primary org for token generation fallback
+
+  joinedAt   DateTime  @default(now())
+  joinedById String? // Staff who invited this member
+  leftAt     DateTime?
+
+  @@unique([staffId, organizationId])
+  @@index([staffId])
+  @@index([organizationId])
+  @@index([isPrimary])
 }
 
 // ==========================================
@@ -1755,6 +1782,11 @@ model Order {
 
   // Optimistic concurrency control (prevent concurrent updates)
   version Int @default(1)
+
+  // Tags for flexible categorization (e.g., ["portabilidad", "promo-enero"])
+  // Future use: any business-specific label without schema changes.
+  // Pattern consistent with Product.tags and Customer.tags.
+  tags String[] @default([])
 
   // POS sync
   externalId   String? // POS order ID
@@ -4134,6 +4166,13 @@ enum StaffRole {
   VIEWER // Read-only
 }
 
+enum OrgRole {
+  OWNER // Organization owner
+  ADMIN // Organization admin
+  MEMBER // Regular member
+  VIEWER // Read-only access
+}
+
 enum ProductType {
   // ═══════════════════════════════════════════════════════════════
   // NEW: Square-aligned product types (January 2026)
@@ -6457,4 +6496,33 @@ model AppUpdate {
   @@unique([versionCode, environment])
   @@index([environment, isActive])
   @@index([versionCode])
+}
+
+// ==========================================
+// VENUE CRYPTO CONFIG - Per-venue B4Bit device credentials
+// ==========================================
+
+enum CryptoConfigStatus {
+  PENDING_SETUP // Device created, missing secretKey
+  ACTIVE // Fully configured and validated
+  INACTIVE // Manually disabled
+}
+
+model VenueCryptoConfig {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // B4Bit Device credentials
+  b4bitDeviceId   String // API Key (UUID) - auto-created via POST /device/
+  b4bitDeviceName String // Device name (= venue name for matching)
+  b4bitSecretKey  String? // Device Secret Key (manual - from B4Bit dashboard)
+
+  // Status
+  status CryptoConfigStatus @default(PENDING_SETUP)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
 }

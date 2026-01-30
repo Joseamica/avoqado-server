@@ -8,10 +8,10 @@
  * 3. User can then clock in/out/break based on status
  */
 
-import prisma from '../../utils/prismaClient'
 import { TimeEntryStatus } from '@prisma/client'
-import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 
 // MARK: - Types
 
@@ -355,7 +355,7 @@ export async function clockOut(params: ClockOutParams) {
 /**
  * Start a break for a staff member (identified by PIN)
  */
-export async function startBreak(venueId: string, pin: string, breakType?: string) {
+export async function startBreak(venueId: string, pin: string, _breakType?: string) {
   logger.info(`📱 [TIME-ENTRY.MOBILE] Start break request | venue=${venueId}`)
 
   // Find staff by PIN

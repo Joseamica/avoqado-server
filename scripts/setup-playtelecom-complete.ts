@@ -278,7 +278,7 @@ async function main() {
     console.log('   🗑️  Eliminando Staff (excepto Superadmin global)...')
     await prisma.staff.deleteMany({
       where: {
-        organizationId: existingOrg.id,
+        organizations: { some: { organizationId: existingOrg.id } },
         email: { not: SUPERADMIN_EMAIL }, // Keep superadmin
       },
     })
@@ -353,7 +353,6 @@ async function main() {
     if (!staff) {
       staff = await prisma.staff.create({
         data: {
-          organizationId: organization.id,
           firstName: userConfig.firstName,
           lastName: userConfig.lastName,
           email: userConfig.email,
@@ -361,11 +360,47 @@ async function main() {
           active: true,
           emailVerified: true, // ✅ RESTORED: Email verified for authentication
           password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // ✅ RESTORED: Password = admin123
+          organizations: {
+            create: {
+              organizationId: organization.id,
+              role:
+                (userConfig.role as string) === 'OWNER' || (userConfig.role as string) === 'SUPERADMIN'
+                  ? 'OWNER'
+                  : (userConfig.role as string) === 'ADMIN'
+                    ? 'ADMIN'
+                    : 'MEMBER',
+              isActive: true,
+              isPrimary: true,
+              joinedAt: new Date(),
+            },
+          },
         },
       })
       console.log(`✅ Staff creado: ${staff.firstName} ${staff.lastName}`)
     } else {
       console.log(`✅ Staff encontrado: ${staff.firstName} ${staff.lastName}`)
+      // Ensure StaffOrganization exists for this org (superadmin may belong to different org)
+      await prisma.staffOrganization.upsert({
+        where: {
+          staffId_organizationId: {
+            staffId: staff.id,
+            organizationId: organization.id,
+          },
+        },
+        update: { isActive: true, leftAt: null },
+        create: {
+          staffId: staff.id,
+          organizationId: organization.id,
+          role:
+            (userConfig.role as string) === 'OWNER' || (userConfig.role as string) === 'SUPERADMIN'
+              ? 'OWNER'
+              : (userConfig.role as string) === 'ADMIN'
+                ? 'ADMIN'
+                : 'MEMBER',
+          isActive: true,
+          isPrimary: false,
+        },
+      })
     }
 
     // Agregar a cada venue especificado
@@ -853,7 +888,7 @@ async function main() {
 
   const venueCount = await prisma.venue.count({ where: { organizationId: organization.id } })
   const staffCount = await prisma.staff.count({
-    where: { organizationId: organization.id },
+    where: { organizations: { some: { organizationId: organization.id } } },
   })
   const categoryCount = await prisma.itemCategory.count({
     where: { venue: { organizationId: organization.id } },
@@ -877,7 +912,7 @@ async function main() {
 
   console.log('👥 USUARIOS:')
   const allStaff = await prisma.staff.findMany({
-    where: { organizationId: organization.id },
+    where: { organizations: { some: { organizationId: organization.id } } },
     include: {
       venues: {
         include: {

@@ -887,6 +887,88 @@ export async function getVenueCommissionStats(venueId: string): Promise<{
 }
 
 /**
+ * Get commissions for multiple payments in a single query
+ *
+ * @param paymentIds - Array of Payment IDs to look up
+ * @param venueId - Venue ID for tenant isolation
+ * @returns Map of paymentId to commission data
+ */
+export async function getCommissionsByPaymentIds(
+  paymentIds: string[],
+  venueId: string,
+): Promise<
+  Record<
+    string,
+    {
+      id: string
+      staffId: string
+      staffName: string
+      netCommission: number
+      effectiveRate: number
+      baseAmount: number
+      status: string
+      calculatedAt: Date
+      configName: string
+    }
+  >
+> {
+  if (paymentIds.length === 0) return {}
+
+  const calculations = await prisma.commissionCalculation.findMany({
+    where: {
+      paymentId: { in: paymentIds },
+      venueId,
+      status: { not: CommissionCalcStatus.VOIDED },
+    },
+    include: {
+      staff: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+        },
+      },
+      config: {
+        select: {
+          name: true,
+        },
+      },
+    },
+  })
+
+  const result: Record<
+    string,
+    {
+      id: string
+      staffId: string
+      staffName: string
+      netCommission: number
+      effectiveRate: number
+      baseAmount: number
+      status: string
+      calculatedAt: Date
+      configName: string
+    }
+  > = {}
+  for (const calc of calculations) {
+    if (calc.paymentId) {
+      result[calc.paymentId] = {
+        id: calc.id,
+        staffId: calc.staffId,
+        staffName: `${calc.staff.firstName} ${calc.staff.lastName}`,
+        netCommission: decimalToNumber(calc.netCommission),
+        effectiveRate: decimalToNumber(calc.effectiveRate),
+        baseAmount: decimalToNumber(calc.baseAmount),
+        status: calc.status,
+        calculatedAt: calc.calculatedAt,
+        configName: calc.config.name,
+      }
+    }
+  }
+  return result
+}
+
+/**
  * Get commission calculation for a specific payment
  *
  * Returns the commission record associated with a payment, including

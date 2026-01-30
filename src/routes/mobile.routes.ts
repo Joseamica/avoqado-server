@@ -10,7 +10,11 @@ import * as authMobileController from '../controllers/mobile/auth.mobile.control
 import * as orderMobileController from '../controllers/mobile/order.mobile.controller'
 import * as timeEntryMobileController from '../controllers/mobile/time-entry.mobile.controller'
 import * as pushMobileController from '../controllers/mobile/push.mobile.controller'
+import * as transactionMobileController from '../controllers/mobile/transaction.mobile.controller'
+import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { validateRequest } from '../middlewares/validation'
+import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 
 const router = Router()
 
@@ -627,6 +631,94 @@ router.post('/venues/:venueId/orders/:orderId/pay', authenticateTokenMiddleware,
 router.delete('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, orderMobileController.cancelOrder)
 
 // ============================================================================
+// TRANSACTIONS
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/transactions:
+ *   get:
+ *     tags: [Mobile - Transactions]
+ *     summary: List transactions (paginated)
+ *     description: Get paginated list of completed transactions for a venue
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - name: pageSize
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 50
+ *       - name: search
+ *         in: query
+ *         schema:
+ *           type: string
+ *       - name: method
+ *         in: query
+ *         schema:
+ *           type: string
+ *           enum: [CARD, CASH, OTHER]
+ *       - name: dateFrom
+ *         in: query
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - name: dateTo
+ *         in: query
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Paginated transaction list
+ *       401:
+ *         description: Not authenticated
+ */
+router.get('/venues/:venueId/transactions', authenticateTokenMiddleware, transactionMobileController.listTransactions)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/transactions/{paymentId}:
+ *   get:
+ *     tags: [Mobile - Transactions]
+ *     summary: Get transaction detail
+ *     description: Get full transaction detail including order items
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: paymentId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Transaction detail with order items
+ *       404:
+ *         description: Transaction not found
+ *       401:
+ *         description: Not authenticated
+ */
+router.get('/venues/:venueId/transactions/:paymentId', authenticateTokenMiddleware, transactionMobileController.getTransaction)
+
+// ============================================================================
 // TIME CLOCK (Reloj Checador)
 // PIN-based identification - no JWT required
 // ============================================================================
@@ -922,5 +1014,55 @@ router.get('/devices', authenticateTokenMiddleware, pushMobileController.getMyDe
  *         description: Test notification sent
  */
 router.post('/push/test', authenticateTokenMiddleware, pushMobileController.sendTestPush)
+
+// ============================================================================
+// PAYMENTS
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/fast:
+ *   post:
+ *     tags: [Mobile - Payments]
+ *     summary: Record a fast payment (no order)
+ *     description: Record a quick payment with just an amount, no order required.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [amount, method]
+ *             properties:
+ *               amount:
+ *                 type: integer
+ *                 description: Amount in cents
+ *               tip:
+ *                 type: integer
+ *                 description: Tip in cents
+ *               method:
+ *                 type: string
+ *                 enum: [CASH, CREDIT_CARD]
+ *     responses:
+ *       201:
+ *         description: Payment recorded
+ *       401:
+ *         description: Unauthorized
+ */
+router.post(
+  '/venues/:venueId/fast',
+  authenticateTokenMiddleware,
+  validateRequest(recordFastPaymentParamsSchema),
+  validateRequest(recordPaymentBodySchema),
+  paymentMobileController.recordFastPayment,
+)
 
 export default router

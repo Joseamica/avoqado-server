@@ -871,9 +871,10 @@ export async function convertDemoVenue(
       const organization = await prisma.organization.findUnique({
         where: { id: orgId },
         include: {
-          staff: {
+          staffOrganizations: {
+            include: { staff: true },
             take: 1, // Get first staff member for billing contact
-            orderBy: { createdAt: 'asc' }, // Oldest = likely owner
+            orderBy: { joinedAt: 'asc' }, // Oldest = likely owner
           },
         },
       })
@@ -883,7 +884,7 @@ export async function convertDemoVenue(
       }
 
       // Use organization email or first staff member's email for Stripe customer
-      const billingEmail = organization.email || organization.staff[0]?.email
+      const billingEmail = organization.email || organization.staffOrganizations[0]?.staff?.email
       if (!billingEmail) {
         throw new BadRequestError('Organization does not have a valid email for billing')
       }

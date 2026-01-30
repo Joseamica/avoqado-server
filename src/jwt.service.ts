@@ -23,7 +23,7 @@ if (!REFRESH_TOKEN_SECRET) {
  */
 export interface AccessTokenPayload extends jwt.JwtPayload {
   sub: string // Staff.id
-  orgId: string // Staff.organizationId
+  orgId: string // Organization ID (derived from venue or StaffOrganization)
   venueId: string // Venue actual de operación
   role: StaffRole // StaffVenue.role para el venueId actual
   jti: string // SECURITY: JWT ID for token blacklisting/revocation
@@ -34,7 +34,7 @@ export interface AccessTokenPayload extends jwt.JwtPayload {
  */
 export interface RefreshTokenPayload extends jwt.JwtPayload {
   sub: string // Staff.id
-  orgId?: string // Opcional: Staff.organizationId
+  orgId?: string // Organization ID (from StaffOrganization)
   tokenId: string // ID único para el token de refresco
 }
 
@@ -43,7 +43,7 @@ export interface RefreshTokenPayload extends jwt.JwtPayload {
 /**
  * Genera un token de acceso.
  * @param staffId - ID del Staff (Staff.id)
- * @param organizationId - ID de la Organización (Staff.organizationId)
+ * @param organizationId - ID de la Organización (from venue or StaffOrganization)
  * @param venueId - ID del Venue para la sesión actual
  * @param role - Rol del Staff en el Venue actual
  * @param rememberMe - Si true, extiende la duración del token a 30 días

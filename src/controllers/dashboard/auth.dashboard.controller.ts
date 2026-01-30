@@ -40,14 +40,12 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         emailVerified: true,
         photoUrl: true,
         phone: true,
-        organizationId: true,
         createdAt: true,
         lastLoginAt: true,
-        organization: {
-          select: {
-            email: true,
-            onboardingCompletedAt: true,
-          },
+        organizations: {
+          where: { isPrimary: true, isActive: true },
+          include: { organization: true },
+          take: 1,
         },
         venues: {
           where: { active: true },
@@ -360,7 +358,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       // For OWNER, fetch all venues in their organization
       const orgVenues = await prisma.venue.findMany({
         where: {
-          organizationId: staff.organizationId,
+          organizationId: staff.organizations[0]?.organizationId!,
           active: true,
         },
         select: {
@@ -455,8 +453,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       highestRole = StaffRole.OWNER
     } else if (staff.venues.length === 0) {
       // Check if staff is primary OWNER during onboarding (Stripe/Shopify pattern)
-      const isPrimaryOwner = staff.email === staff.organization.email
-      const onboardingIncomplete = !staff.organization.onboardingCompletedAt
+      const primaryOrg = staff.organizations[0]?.organization
+      const isPrimaryOwner = primaryOrg ? staff.email === primaryOrg.email : false
+      const onboardingIncomplete = primaryOrg ? !primaryOrg.onboardingCompletedAt : false
 
       if (isPrimaryOwner && onboardingIncomplete) {
         highestRole = StaffRole.OWNER
@@ -485,7 +484,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       emailVerified: staff.emailVerified, // Changed from isVerified to emailVerified for frontend compatibility
       photoUrl: staff.photoUrl,
       phone: staff.phone,
-      organizationId: staff.organizationId,
+      organizationId: staff.organizations[0]?.organizationId ?? null,
       role: highestRole, // Add explicit role field
       createdAt: staff.createdAt,
       lastLogin: staff.lastLoginAt,

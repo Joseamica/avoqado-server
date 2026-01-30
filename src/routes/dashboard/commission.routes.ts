@@ -252,6 +252,13 @@ router.post('/venues/:venueId/calculations/:calculationId/void', checkPermission
 router.post('/venues/:venueId/calculations/manual', checkPermission('commissions:create'), controller.createManualCommission)
 
 /**
+ * POST /venues/:venueId/payments/commissions/batch
+ * Get commissions for multiple payments in a single request
+ * @permission commissions:read
+ */
+router.post('/venues/:venueId/payments/commissions/batch', checkPermission('commissions:read'), controller.getCommissionsByPaymentsBatch)
+
+/**
  * GET /venues/:venueId/payments/:paymentId/commission
  * Get commission calculation for a specific payment
  * @permission commissions:read

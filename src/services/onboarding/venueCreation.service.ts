@@ -5,7 +5,7 @@
  * Supports both demo venues (pre-populated) and real business venues.
  */
 
-import { BusinessType, OnboardingType, VenueType, InvitationType, InvitationStatus, StaffRole, VenueStatus } from '@prisma/client'
+import { BusinessType, OnboardingType, VenueType, InvitationType, InvitationStatus, StaffRole, VenueStatus, OrgRole } from '@prisma/client'
 import { addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify, validateSlug } from '@/utils/slugify'
@@ -572,16 +572,43 @@ async function processTeamInvites(
         },
       })
 
-      // If user doesn't exist, create them
+      // If user doesn't exist, create them with org membership
       if (!staff) {
         staff = await prisma.staff.create({
           data: {
             email: normalizedEmail,
             firstName: invite.firstName,
             lastName: invite.lastName,
-            organizationId,
             active: false, // Will be activated when they accept invitation
             emailVerified: false,
+            organizations: {
+              create: {
+                organizationId,
+                role: OrgRole.MEMBER,
+                isPrimary: true,
+                isActive: true,
+                joinedById: inviterStaffId,
+              },
+            },
+          },
+        })
+      } else {
+        // Existing staff — ensure they have StaffOrganization for this org
+        await prisma.staffOrganization.upsert({
+          where: {
+            staffId_organizationId: {
+              staffId: staff.id,
+              organizationId,
+            },
+          },
+          update: { isActive: true, leftAt: null },
+          create: {
+            staffId: staff.id,
+            organizationId,
+            role: OrgRole.MEMBER,
+            isPrimary: false,
+            isActive: true,
+            joinedById: inviterStaffId,
           },
         })
       }

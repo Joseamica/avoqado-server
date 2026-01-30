@@ -60,8 +60,9 @@ POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliabi
 | ------------------------------- | ----------------------------------------------------------------- |
 | `docs/ARCHITECTURE_OVERVIEW.md` | Layered architecture, multi-tenant, control/application plane     |
 | `docs/PERMISSIONS_SYSTEM.md`    | Permission system, RBAC, override vs merge modes                  |
-| `docs/DATABASE_SCHEMA.md`       | Complete database schema reference                                |
+| `docs/DATABASE_SCHEMA.md`       | Complete database schema reference (includes StaffOrganization)   |
 | `docs/BUSINESS_TYPES.md`        | VenueType enum, BusinessCategory, MCC mapping, industry standards |
+| `docs/features/TEAM_INVITATIONS.md` | Team invitations, multi-venue, multi-org (StaffOrganization)  |
 
 ### Payments
 
@@ -326,6 +327,19 @@ Routes → Middleware → Controllers → Services → Prisma (Database)
 
 ## 6. Role Hierarchy
 
+**Roles exist at TWO levels:**
+
+### Organization-Level Roles (`OrgRole` on `StaffOrganization`)
+
+| Role       | Description                                      |
+| ---------- | ------------------------------------------------ |
+| **OWNER**  | Organization owner, full org-level control       |
+| **ADMIN**  | Organization admin, can manage org settings      |
+| **MEMBER** | Regular member, default for invited staff        |
+| **VIEWER** | Read-only organization access                    |
+
+### Venue-Level Roles (`StaffRole` on `StaffVenue`)
+
 | Role           | Scope             | Key Permissions                    |
 | -------------- | ----------------- | ---------------------------------- |
 | **SUPERADMIN** | Full system       | Complete administrative control    |
@@ -337,6 +351,8 @@ Routes → Middleware → Controllers → Services → Prisma (Database)
 | **KITCHEN**    | Venue-specific    | Kitchen display, order prep        |
 | **HOST**       | Venue-specific    | Reservations, seating              |
 | **VIEWER**     | Venue-specific    | Read-only access                   |
+
+**Multi-org model:** Staff can belong to multiple organizations via `StaffOrganization` (junction table). Each membership has an `OrgRole` and an `isPrimary` flag. See `docs/features/TEAM_INVITATIONS.md` and `docs/DATABASE_SCHEMA.md` for details.
 
 ---
 
@@ -351,7 +367,7 @@ The `authContext` object is set by `authenticateToken.middleware.ts` and contain
 ```typescript
 interface AuthContext {
   userId: string // ← Staff member ID (from JWT sub claim)
-  orgId: string // ← Organization ID
+  orgId: string // ← Organization ID (derived from venue.organizationId or StaffOrganization)
   venueId: string // ← Venue ID
   role: string // ← User role (ADMIN, MANAGER, CASHIER, etc.)
 }

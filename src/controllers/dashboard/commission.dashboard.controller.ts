@@ -626,6 +626,30 @@ export async function createManualCommission(req: Request, res: Response, next: 
 }
 
 /**
+ * POST /api/v1/dashboard/venues/:venueId/payments/commissions/batch
+ * Get commissions for multiple payments in a single request
+ */
+export async function getCommissionsByPaymentsBatch(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const { paymentIds } = req.body
+
+    if (!Array.isArray(paymentIds) || paymentIds.length === 0) {
+      res.json({ data: {} })
+      return
+    }
+
+    // Limit to prevent abuse
+    const limitedIds = paymentIds.slice(0, 100)
+    const commissions = await calculationService.getCommissionsByPaymentIds(limitedIds, venueId)
+
+    res.json({ data: commissions })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * GET /api/v1/dashboard/venues/:venueId/payments/:paymentId/commission
  * Get commission calculation for a specific payment
  */

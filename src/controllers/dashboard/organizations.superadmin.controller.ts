@@ -21,7 +21,7 @@ export async function getAllOrganizations(req: Request, res: Response, next: Nex
         _count: {
           select: {
             venues: true,
-            staff: true,
+            staffOrganizations: true,
           },
         },
         organizationModules: {
@@ -46,7 +46,7 @@ export async function getAllOrganizations(req: Request, res: Response, next: Nex
       createdAt: org.createdAt,
       updatedAt: org.updatedAt,
       venueCount: org._count.venues,
-      staffCount: org._count.staff,
+      staffCount: org._count.staffOrganizations,
       enabledModules: org.organizationModules.map(om => ({
         code: om.module.code,
         name: om.module.name,
@@ -90,7 +90,7 @@ export async function getOrganizationById(req: Request, res: Response, next: Nex
         _count: {
           select: {
             venues: true,
-            staff: true,
+            staffOrganizations: true,
           },
         },
       },

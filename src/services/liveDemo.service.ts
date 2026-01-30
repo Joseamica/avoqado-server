@@ -6,7 +6,7 @@
  * Sessions expire after 5 hours of inactivity.
  */
 
-import { StaffRole, VenueStatus } from '@prisma/client'
+import { StaffRole, VenueStatus, OrgRole } from '@prisma/client'
 import { addHours, addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
@@ -175,7 +175,6 @@ async function createLiveDemoSession(sessionId: string): Promise<LiveDemoSession
       email: `demo-${timestamp}@livedemo.avoqado.io`,
       firstName: 'Demo',
       lastName: 'User',
-      organizationId: organization.id,
       active: true,
       emailVerified: true,
       password: null, // No password for auto-login
@@ -183,6 +182,17 @@ async function createLiveDemoSession(sessionId: string): Promise<LiveDemoSession
   })
 
   logger.info(`👤 Created live demo staff: ${staff.id}`)
+
+  // Create StaffOrganization membership
+  await prisma.staffOrganization.create({
+    data: {
+      staffId: staff.id,
+      organizationId: organization.id,
+      role: OrgRole.OWNER,
+      isPrimary: true,
+      isActive: true,
+    },
+  })
 
   // Assign staff to venue as OWNER
   await prisma.staffVenue.create({

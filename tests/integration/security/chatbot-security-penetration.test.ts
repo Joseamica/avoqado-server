@@ -80,7 +80,14 @@ describe.skip('🔒 Chatbot Security Penetration Tests', () => {
         firstName: 'Security',
         lastName: 'Test User',
         phone: '+1234567890', // PII to test redaction
-        organizationId: testOrgId,
+        organizations: {
+          create: {
+            organizationId: testOrgId,
+            role: 'OWNER',
+            isPrimary: true,
+            isActive: true,
+          },
+        },
       },
     })
     testUserId = staff.id

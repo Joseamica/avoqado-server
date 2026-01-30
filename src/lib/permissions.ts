@@ -639,6 +639,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-reports:pay-later-aging', // Can view pay-later aging report
     'tpv-products:read',
     'tpv-products:write',
+    // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
   ],
@@ -697,6 +698,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
     'serialized-inventory:create', // Can register (Alta de Productos)
+    // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
   ],
 
   /**
@@ -1039,6 +1041,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
   // Serialized Inventory (SIMs, jewelry, etc.)
   'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],
+  // Venue Crypto Config (per-venue B4Bit device management)
+  'venue-crypto': ['venue-crypto:manage'],
   // Commission System (staff bonuses based on sales)
   commissions: [
     'commissions:read',

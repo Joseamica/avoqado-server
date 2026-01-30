@@ -10,8 +10,9 @@ import crypto from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
 import * as jwtService from '@/jwt.service'
-import { StaffRole } from '@prisma/client'
+import { StaffRole, OrgRole } from '@prisma/client'
 import emailService from '@/services/email.service'
+import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
 
 export interface SignupInput {
   email: string
@@ -27,7 +28,7 @@ export interface SignupResult {
     email: string
     firstName: string
     lastName: string
-    organizationId: string
+    organizationId: string | null
     photoUrl: string | null
   }
   organization: {
@@ -86,10 +87,20 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
         password: hashedPassword,
         firstName,
         lastName,
-        organizationId: organization.id,
         active: true,
         emailVerified: false,
         lastLoginAt: new Date(),
+      },
+    })
+
+    // Create StaffOrganization junction table entry (multi-org support)
+    await tx.staffOrganization.create({
+      data: {
+        staffId: staff.id,
+        organizationId: organization.id,
+        role: OrgRole.OWNER,
+        isPrimary: true,
+        isActive: true,
       },
     })
 
@@ -126,7 +137,7 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
       email: result.staff.email,
       firstName: result.staff.firstName,
       lastName: result.staff.lastName,
-      organizationId: result.staff.organizationId,
+      organizationId: result.organization.id,
       photoUrl: result.staff.photoUrl,
     },
     organization: {
@@ -170,8 +181,9 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
     })
 
     // Generate JWT tokens for auto-login
-    const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, 'pending', StaffRole.OWNER)
-    const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+    const orgId = await getPrimaryOrganizationId(staff.id)
+    const accessToken = jwtService.generateAccessToken(staff.id, orgId, 'pending', StaffRole.OWNER)
+    const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
 
     return {
       emailVerified: true,
@@ -183,13 +195,14 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
   // 2. Check if already verified
   if (staff.emailVerified) {
     // Already verified - generate tokens for auto-login
+    const orgId = await getPrimaryOrganizationId(staff.id)
     const accessToken = jwtService.generateAccessToken(
       staff.id,
-      staff.organizationId,
+      orgId,
       'pending', // Temporary placeholder until venue is created
       StaffRole.OWNER,
     )
-    const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+    const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
 
     return {
       emailVerified: true,
@@ -224,13 +237,14 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
   })
 
   // 7. Generate JWT tokens for auto-login
+  const orgId = await getPrimaryOrganizationId(staff.id)
   const accessToken = jwtService.generateAccessToken(
     staff.id,
-    staff.organizationId,
+    orgId,
     'pending', // Temporary placeholder until venue is created
     StaffRole.OWNER,
   )
-  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
 
   return {
     emailVerified: true,

@@ -557,7 +557,7 @@ class OrganizationDashboardService {
     const manager = await prisma.staff.findFirst({
       where: {
         id: managerId,
-        organizationId: orgId,
+        organizations: { some: { organizationId: orgId } },
       },
       select: {
         id: true,

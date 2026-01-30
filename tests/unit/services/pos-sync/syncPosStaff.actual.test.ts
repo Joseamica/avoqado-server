@@ -136,7 +136,6 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
     const newStaffId = 'new-staff-prisma-id'
     const createdStaffData = {
       id: newStaffId,
-      organizationId,
       email: `pos-${venueId}-${staffPayload.externalId}@avoqado.app`,
       firstName: staffPayload.name,
       lastName: '(POS)',
@@ -166,7 +165,6 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
       })
       expect(mockPrismaStaffCreate).toHaveBeenCalledWith({
         data: {
-          organizationId: organizationId,
           email: `pos-${venueId}-${staffPayload.externalId}@avoqado.app`,
           firstName: staffPayload.name,
           lastName: '(POS)',
@@ -177,6 +175,14 @@ describe('syncPosStaff (Actual Implementation Tests)', () => {
               posStaffId: staffPayload.externalId,
               role: StaffRole.WAITER,
               pin: staffPayload.pin?.toString() || null,
+            },
+          },
+          organizations: {
+            create: {
+              organizationId,
+              role: 'MEMBER',
+              isPrimary: true,
+              isActive: true,
             },
           },
         },
