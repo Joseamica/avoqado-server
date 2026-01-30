@@ -9,7 +9,7 @@
 import { InvitationStatus, OrgRole, StaffRole } from '@prisma/client'
 
 const mockStaffOrganizationCreate = jest.fn().mockResolvedValue({})
-const mockStaffOrganizationUpsert = jest.fn().mockResolvedValue({})
+// const mockStaffOrganizationUpsert = jest.fn().mockResolvedValue({})
 
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,

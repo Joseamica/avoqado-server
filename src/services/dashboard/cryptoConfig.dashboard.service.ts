@@ -77,7 +77,7 @@ async function getAuthToken(): Promise<string> {
  */
 export async function listB4BitDevices() {
   const auth = await getAuthData()
-  return auth.devices.map((d) => ({
+  return auth.devices.map(d => ({
     deviceId: d.device_identifier,
     name: d.device_name,
   }))
@@ -223,9 +223,7 @@ function sanitizeConfig(config: {
     b4bitDeviceId: config.b4bitDeviceId,
     b4bitDeviceName: config.b4bitDeviceName,
     hasSecretKey: !!config.b4bitSecretKey,
-    b4bitSecretKeyMasked: config.b4bitSecretKey
-      ? `****${config.b4bitSecretKey.slice(-4)}`
-      : null,
+    b4bitSecretKeyMasked: config.b4bitSecretKey ? `****${config.b4bitSecretKey.slice(-4)}` : null,
     status: config.status,
     createdAt: config.createdAt,
     updatedAt: config.updatedAt,

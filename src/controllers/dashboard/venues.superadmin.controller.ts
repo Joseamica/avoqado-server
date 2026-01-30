@@ -37,7 +37,7 @@ export async function createVenue(req: Request, res: Response, next: NextFunctio
       slug = `${slug}-${suffix}`
     }
 
-    const venue = await prisma.$transaction(async (tx) => {
+    const venue = await prisma.$transaction(async tx => {
       const newVenue = await tx.venue.create({
         data: {
           organizationId,
@@ -125,7 +125,7 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
 
     const staffIds = staffVenues.map(sv => sv.staffId)
 
-    await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async tx => {
       // Move venue to target org
       await tx.venue.update({
         where: { id: venueId },
@@ -155,16 +155,13 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
       }
     })
 
-    logger.info(
-      `[VENUES_SUPERADMIN] Transferred venue "${venue.name}" from "${sourceOrgName}" to "${targetOrg.name}"`,
-      {
-        venueId,
-        sourceOrganizationId: venue.organizationId,
-        targetOrganizationId,
-        staffMembersUpdated: staffIds.length,
-        transferredBy,
-      },
-    )
+    logger.info(`[VENUES_SUPERADMIN] Transferred venue "${venue.name}" from "${sourceOrgName}" to "${targetOrg.name}"`, {
+      venueId,
+      sourceOrganizationId: venue.organizationId,
+      targetOrganizationId,
+      staffMembersUpdated: staffIds.length,
+      transferredBy,
+    })
 
     const updatedVenue = await prisma.venue.findUnique({
       where: { id: venueId },

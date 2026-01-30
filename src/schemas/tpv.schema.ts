@@ -650,13 +650,15 @@ export const cancelCryptoPaymentSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
   }),
-  body: z.object({
-    paymentId: z.string().cuid({ message: 'El ID del pago debe ser un CUID válido.' }).optional(),
-    requestId: z.string().optional(),
-    reason: z.string().optional(),
-  }).refine(data => data.paymentId || data.requestId, {
-    message: 'paymentId or requestId is required',
-  }),
+  body: z
+    .object({
+      paymentId: z.string().cuid({ message: 'El ID del pago debe ser un CUID válido.' }).optional(),
+      requestId: z.string().optional(),
+      reason: z.string().optional(),
+    })
+    .refine(data => data.paymentId || data.requestId, {
+      message: 'paymentId or requestId is required',
+    }),
 })
 
 /** Schema for getting crypto payment status */

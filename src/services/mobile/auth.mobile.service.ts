@@ -12,7 +12,6 @@ import prisma from '../../utils/prismaClient'
 import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
-import { StaffRole } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 import logger from '@/config/logger'
@@ -472,7 +471,7 @@ export async function refreshAccessToken(refreshToken: string) {
   let payload: jwtService.RefreshTokenPayload
   try {
     payload = jwtService.verifyRefreshToken(refreshToken)
-  } catch (error) {
+  } catch {
     logger.warn('🔐 [MOBILE AUTH] Invalid refresh token')
     throw new AuthenticationError('Token de refresco inválido o expirado')
   }

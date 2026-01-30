@@ -829,7 +829,10 @@ async function handlePaymentConfirmed(
  * @param requestId B4Bit request ID (identifier)
  * @returns Current payment status
  */
-export async function getPaymentStatus(requestId: string, venueId: string): Promise<{
+export async function getPaymentStatus(
+  requestId: string,
+  venueId: string,
+): Promise<{
   status: B4BitPaymentStatus
   cryptoAmount?: string
   cryptoCurrency?: string

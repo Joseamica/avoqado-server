@@ -3422,10 +3422,30 @@ router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, check
 router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, ecommerceMerchantRoutes)
 
 // Venue Crypto Config routes (ADMIN+) - Per-venue B4Bit device management
-router.post('/venues/:venueId/crypto/enable', authenticateTokenMiddleware, checkPermission('system:manage'), cryptoConfigController.enableCrypto as any)
-router.put('/venues/:venueId/crypto/setup', authenticateTokenMiddleware, checkPermission('system:manage'), cryptoConfigController.setupCrypto as any)
-router.get('/venues/:venueId/crypto/config', authenticateTokenMiddleware, checkPermission('system:manage'), cryptoConfigController.getConfig as any)
-router.put('/venues/:venueId/crypto/disable', authenticateTokenMiddleware, checkPermission('system:manage'), cryptoConfigController.disableCryptoHandler as any)
+router.post(
+  '/venues/:venueId/crypto/enable',
+  authenticateTokenMiddleware,
+  checkPermission('system:manage'),
+  cryptoConfigController.enableCrypto as any,
+)
+router.put(
+  '/venues/:venueId/crypto/setup',
+  authenticateTokenMiddleware,
+  checkPermission('system:manage'),
+  cryptoConfigController.setupCrypto as any,
+)
+router.get(
+  '/venues/:venueId/crypto/config',
+  authenticateTokenMiddleware,
+  checkPermission('system:manage'),
+  cryptoConfigController.getConfig as any,
+)
+router.put(
+  '/venues/:venueId/crypto/disable',
+  authenticateTokenMiddleware,
+  checkPermission('system:manage'),
+  cryptoConfigController.disableCryptoHandler as any,
+)
 router.get('/crypto/devices', authenticateTokenMiddleware, checkPermission('system:manage'), cryptoConfigController.listDevices as any)
 
 // Inventory Management routes (ADMIN and MANAGER)
