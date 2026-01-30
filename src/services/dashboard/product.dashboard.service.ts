@@ -12,6 +12,7 @@ export interface CreateProductDto {
   type: ProductType
   imageUrl?: string
   sku: string
+  gtin?: string
   categoryId: string
   modifierGroupIds?: string[]
 
@@ -48,6 +49,7 @@ export interface UpdateProductDto {
   type?: ProductType
   imageUrl?: string | null
   sku?: string
+  gtin?: string | null
   categoryId?: string
   modifierGroupIds?: string[]
   active?: boolean
@@ -409,6 +411,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
       type: productFields.type,
       imageUrl: productFields.imageUrl,
       sku: productFields.sku,
+      gtin: productFields.gtin,
       categoryId: productFields.categoryId,
       venueId,
       displayOrder,
@@ -820,9 +823,12 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
   const product = await prisma.product.findFirst({
     where: {
       venueId,
-      sku: barcode, // ✅ SKU field stores barcode
+      OR: [
+        { sku: barcode },
+        { gtin: barcode },
+      ],
       active: true,
-      deletedAt: null, // Exclude soft-deleted products
+      deletedAt: null,
     },
     include: {
       category: true,
@@ -889,11 +895,14 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
     throw new AppError('categoryId is required for creating a product', 400)
   }
 
-  // ✅ Check if product with this barcode already exists
+  // ✅ Check if product with this barcode already exists (check both SKU and GTIN)
   const existing = await prisma.product.findFirst({
     where: {
       venueId,
-      sku: barcode,
+      OR: [
+        { sku: barcode },
+        { gtin: barcode },
+      ],
     },
   })
 

@@ -96,6 +96,7 @@ export const ProductSchema = z.object({
   id: z.string().cuid(),
   venueId: z.string().cuid(),
   sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
+  gtin: z.string().max(14).nullable().optional(),
   name: z.string().min(1, 'Name is required').max(255),
   description: z.string().nullable().optional(),
   categoryId: z.string().cuid(),
@@ -124,6 +125,7 @@ export const ProductSchema = z.object({
 export const CreateProductSchema = z.object({
   body: z.object({
     sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
+    gtin: z.string().max(14).optional().nullable(),
     name: z.string().min(1, 'Name is required').max(255),
     description: z.string().optional().nullable(),
     categoryId: z.string().cuid('Invalid category ID format'),
@@ -570,6 +572,7 @@ export const ImportMenuSchema = z.object({
           z.object({
             name: z.string().min(1),
             sku: z.string().min(1),
+            gtin: z.string().max(14).optional(),
             price: z.number().nonnegative(),
             cost: z.number().nonnegative().optional(),
             description: z.string().optional(),

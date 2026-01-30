@@ -859,6 +859,7 @@ model Product {
 
   // Basic info
   sku         String
+  gtin        String? // Global Trade Item Number (UPC/EAN barcode)
   name        String
   description String?
 
@@ -958,6 +959,7 @@ model Product {
   updatedAt DateTime @updatedAt
 
   @@unique([venueId, sku])
+  @@unique([venueId, gtin])
   @@unique([venueId, externalId])
   @@index([venueId])
   @@index([categoryId])
@@ -1029,6 +1031,7 @@ model RawMaterial {
   name        String
   description String?
   sku         String // Internal tracking code
+  gtin        String? // Global Trade Item Number (UPC/EAN barcode)
   category    RawMaterialCategory @default(OTHER)
 
   // Stock tracking
@@ -1072,6 +1075,7 @@ model RawMaterial {
   updatedAt DateTime @updatedAt
 
   @@unique([venueId, sku])
+  @@unique([venueId, gtin])
   @@index([venueId])
   @@index([category])
   @@index([active])

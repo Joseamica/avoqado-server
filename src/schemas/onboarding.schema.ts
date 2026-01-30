@@ -119,6 +119,7 @@ export const UpdateStep4Schema = z.object({
         z.object({
           name: z.string().min(1, 'Product name is required'),
           sku: z.string().min(1, 'Product SKU is required'),
+          gtin: z.string().max(14).optional(),
           description: z.string().optional(),
           price: z.number().positive('Price must be greater than 0'),
           type: z.nativeEnum(ProductType).optional(),
