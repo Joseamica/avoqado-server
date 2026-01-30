@@ -823,10 +823,7 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
   const product = await prisma.product.findFirst({
     where: {
       venueId,
-      OR: [
-        { sku: barcode },
-        { gtin: barcode },
-      ],
+      OR: [{ sku: barcode }, { gtin: barcode }],
       active: true,
       deletedAt: null,
     },
@@ -899,10 +896,7 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
   const existing = await prisma.product.findFirst({
     where: {
       venueId,
-      OR: [
-        { sku: barcode },
-        { gtin: barcode },
-      ],
+      OR: [{ sku: barcode }, { gtin: barcode }],
     },
   })
 
