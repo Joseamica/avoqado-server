@@ -10,7 +10,7 @@ import logger from './config/logger'
  */
 export interface AvoqadoJwtPayload extends jwt.JwtPayload {
   sub: string // Staff.id
-  orgId: string // Staff.organizationId
+  orgId: string // Organization ID (derived from venue or StaffOrganization)
   venueId: string // Venue actual de operación
   role: StaffRole // StaffVenue.role para el venueId actual
   // permissions?: string[]; // Opcional

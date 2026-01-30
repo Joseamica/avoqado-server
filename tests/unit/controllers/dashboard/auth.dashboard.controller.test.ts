@@ -159,13 +159,17 @@ describe('Dashboard Auth Controller', () => {
         emailVerified: true,
         photoUrl: null,
         phone: null,
-        organizationId: 'org-123',
         createdAt: new Date(),
         lastLoginAt: new Date(),
-        organization: {
-          email: 'org@example.com',
-          onboardingCompletedAt: new Date(),
-        },
+        organizations: [
+          {
+            organizationId: 'org-123',
+            organization: {
+              email: 'org@example.com',
+              onboardingCompletedAt: new Date(),
+            },
+          },
+        ],
         venues: [
           {
             role: StaffRole.OWNER,

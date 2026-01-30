@@ -69,6 +69,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
       posStatus: null,
       logo: null,
       status: VenueStatus.ACTIVE,
+      organizationId: 'org-1',
     },
   }
 
@@ -149,7 +150,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         userId: 'staff-1',
         staffId: 'staff-1',
         venueId: 'venue-1',
-        orgId: 'venue-1',
+        orgId: 'org-1',
         role: StaffRole.WAITER,
         permissions: null,
         correlationId: expect.any(String),
@@ -159,7 +160,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         userId: 'staff-1',
         staffId: 'staff-1',
         venueId: 'venue-1',
-        orgId: 'venue-1',
+        orgId: 'org-1',
         role: StaffRole.WAITER,
         permissions: null,
         correlationId: expect.any(String),
@@ -228,6 +229,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
               posStatus: true,
               logo: true,
               status: true,
+              organizationId: true,
             },
           },
         },

@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { StaffRole, InvitationType, InvitationStatus } from '@prisma/client'
+import { StaffRole, InvitationType, InvitationStatus, OrgRole } from '@prisma/client'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import emailService from '../email.service'
@@ -460,9 +460,27 @@ export async function inviteTeamMember(
         email,
         firstName: request.firstName,
         lastName: request.lastName,
-        organizationId: venue.organizationId,
         active: true, // TPV-only staff are immediately active
         emailVerified: false, // No email to verify
+      },
+    })
+
+    // Create StaffOrganization membership
+    await prisma.staffOrganization.upsert({
+      where: {
+        staffId_organizationId: {
+          staffId: staff.id,
+          organizationId: venue.organizationId,
+        },
+      },
+      update: { isActive: true },
+      create: {
+        staffId: staff.id,
+        organizationId: venue.organizationId,
+        role: OrgRole.MEMBER,
+        isPrimary: true,
+        isActive: true,
+        joinedById: inviterStaffId,
       },
     })
 
@@ -516,9 +534,39 @@ export async function inviteTeamMember(
         email,
         firstName: request.firstName,
         lastName: request.lastName,
-        organizationId: venue.organizationId,
         active: false, // Will be activated when they accept invitation
         emailVerified: false,
+      },
+    })
+
+    // Create StaffOrganization membership
+    await prisma.staffOrganization.create({
+      data: {
+        staffId: staff.id,
+        organizationId: venue.organizationId,
+        role: OrgRole.MEMBER,
+        isPrimary: true,
+        isActive: true,
+        joinedById: inviterStaffId,
+      },
+    })
+  } else {
+    // Staff already exists — ensure they have StaffOrganization for this venue's org
+    await prisma.staffOrganization.upsert({
+      where: {
+        staffId_organizationId: {
+          staffId: staff.id,
+          organizationId: venue.organizationId,
+        },
+      },
+      update: { isActive: true, leftAt: null },
+      create: {
+        staffId: staff.id,
+        organizationId: venue.organizationId,
+        role: OrgRole.MEMBER,
+        isPrimary: false,
+        isActive: true,
+        joinedById: inviterStaffId,
       },
     })
   }

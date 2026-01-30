@@ -22,30 +22,69 @@ import type {
   B4BitConfig,
   B4BitCreateOrderRequest,
   B4BitCreateOrderResponse,
+  B4BitGlobalConfig,
   B4BitPaymentStatus,
+  B4BitVenueConfig,
   B4BitWebhookPayload,
   InitiateCryptoPaymentParams,
   InitiateCryptoPaymentResult,
   ProcessWebhookResult,
 } from './types'
 
-// Configuration from environment
-const getB4BitConfig = (): B4BitConfig => {
-  // API URLs:
-  // - DEV: https://dev-payments.b4bit.com (API), https://dev-pay.b4bit.com (frontend/login)
-  // - PROD: https://pos.b4bit.com (API), https://pay.b4bit.com (frontend/login)
-  const baseUrl = process.env.B4BIT_API_BASE_URL || 'https://dev-payments.b4bit.com'
-  const loginUrl = process.env.B4BIT_LOGIN_URL || 'https://dev-pay.b4bit.com'
+// B4Bit URLs by environment (no env vars needed for URLs)
+const isProduction = process.env.NODE_ENV === 'production'
+const B4BIT_URLS = {
+  baseUrl: isProduction ? 'https://pos.b4bit.com' : 'https://dev-payments.b4bit.com',
+  loginUrl: isProduction ? 'https://pay.b4bit.com' : 'https://dev-pay.b4bit.com',
+}
+
+// Global B4Bit configuration (shared credentials from environment)
+const getB4BitGlobalConfig = (): B4BitGlobalConfig => {
   const username = process.env.B4BIT_USERNAME || ''
   const password = process.env.B4BIT_PASSWORD || ''
-  const deviceId = process.env.B4BIT_DEVICE_ID || ''
-  const webhookSecret = process.env.B4BIT_WEBHOOK_SECRET
 
   if (!username || !password) {
     logger.warn('⚠️ B4BIT_USERNAME/PASSWORD not configured - crypto payments will fail')
   }
 
-  return { baseUrl, loginUrl, username, password, deviceId, webhookSecret }
+  return { baseUrl: B4BIT_URLS.baseUrl, loginUrl: B4BIT_URLS.loginUrl, username, password }
+}
+
+/**
+ * Get per-venue B4Bit device config from database.
+ * Falls back to env vars for backwards compatibility during migration.
+ */
+async function getVenueCryptoConfig(venueId: string): Promise<B4BitVenueConfig> {
+  const config = await prisma.venueCryptoConfig.findUnique({
+    where: { venueId },
+    select: { b4bitDeviceId: true, b4bitSecretKey: true, status: true },
+  })
+
+  if (config && config.status === 'ACTIVE') {
+    return { deviceId: config.b4bitDeviceId, secretKey: config.b4bitSecretKey }
+  }
+
+  // Fallback to env vars (backwards compatibility)
+  const envDeviceId = process.env.B4BIT_DEVICE_ID
+  const envSecret = process.env.B4BIT_WEBHOOK_SECRET
+  if (envDeviceId) {
+    logger.debug('Using fallback env B4BIT_DEVICE_ID for venue', { venueId })
+    return { deviceId: envDeviceId, secretKey: envSecret }
+  }
+
+  throw new BadRequestError('Crypto payments not configured for this venue')
+}
+
+/**
+ * @deprecated Use getB4BitGlobalConfig + getVenueCryptoConfig instead
+ */
+const getB4BitConfig = (): B4BitConfig => {
+  const global = getB4BitGlobalConfig()
+  return {
+    ...global,
+    deviceId: process.env.B4BIT_DEVICE_ID || '',
+    webhookSecret: process.env.B4BIT_WEBHOOK_SECRET,
+  }
 }
 
 // Cache for auth token (expires after 23 hours to be safe)
@@ -56,7 +95,7 @@ let cachedAuthToken: { token: string; expiresAt: number } | null = null
  * Caches token for 23 hours to avoid repeated logins
  */
 async function getAuthToken(): Promise<string> {
-  const config = getB4BitConfig()
+  const config = getB4BitGlobalConfig()
 
   // Return cached token if still valid
   if (cachedAuthToken && Date.now() < cachedAuthToken.expiresAt) {
@@ -123,21 +162,23 @@ const _isB4BitMockEnabled = (): boolean => {
  * @param request Order creation parameters
  * @returns Order data including payment URL for QR generation
  */
-async function createPaymentOrder(request: B4BitCreateOrderRequest): Promise<B4BitCreateOrderResponse> {
-  const config = getB4BitConfig()
-  const url = `${config.baseUrl}/api/v1/orders/`
+async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: string }): Promise<B4BitCreateOrderResponse> {
+  const globalConfig = getB4BitGlobalConfig()
+  const venueConfig = await getVenueCryptoConfig(request.venueId)
+  const url = `${globalConfig.baseUrl}/api/v1/orders/`
 
   logger.info('🔗 B4Bit: Creating crypto payment order', {
     fiatAmount: request.fiat_amount,
     currency: request.fiat_currency,
     identifier: request.identifier,
+    venueId: request.venueId,
   })
 
   try {
     // Get auth token (cached)
     const authToken = await getAuthToken()
 
-    logger.debug('🔗 B4Bit: Calling API', { url, hasToken: !!authToken, hasDeviceId: !!config.deviceId })
+    logger.debug('🔗 B4Bit: Calling API', { url, hasToken: !!authToken, hasDeviceId: !!venueConfig.deviceId })
 
     // Build form data (B4Bit API expects multipart/form-data)
     // B4Bit field names: expected_output_amount, fiat_currency (or output_currency)
@@ -157,7 +198,7 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest): Promise<B4B
       method: 'POST',
       headers: {
         Authorization: `Token ${authToken}`,
-        'X-Device-Id': config.deviceId,
+        'X-Device-Id': venueConfig.deviceId,
       },
       body: formData,
     })
@@ -376,6 +417,7 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
   const webhookUrl = `${process.env.API_BASE_URL || 'https://api.avoqado.io'}/api/v1/webhooks/b4bit`
 
   const b4bitResponse = await createPaymentOrder({
+    venueId,
     fiat_amount: fiatAmount,
     fiat_currency: 'MXN',
     identifier: payment.id, // Use our payment ID as reference
@@ -456,17 +498,17 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
  * @param signature X-SIGNATURE header
  * @returns true if signature is valid
  */
-export function verifyWebhookSignature(nonce: string, body: string, signature: string): boolean {
-  const config = getB4BitConfig()
+export function verifyWebhookSignature(nonce: string, body: string, signature: string, webhookSecret?: string | null): boolean {
+  const secret = webhookSecret || process.env.B4BIT_WEBHOOK_SECRET
 
-  if (!config.webhookSecret) {
+  if (!secret) {
     logger.warn('⚠️ B4BIT_WEBHOOK_SECRET not configured - skipping signature verification')
     return true // Allow in development, should require in production
   }
 
   // B4Bit documentation: X-SIGNATURE = hexadecimal(hmac_sha256(merchant_secret_key, nonce + body))
   // The merchant_secret_key must be converted from hex string to bytes
-  const secretBytes = Buffer.from(config.webhookSecret, 'hex')
+  const secretBytes = Buffer.from(secret, 'hex')
   const message = nonce + body
   const expectedSignature = crypto.createHmac('sha256', secretBytes).update(message).digest('hex')
 
@@ -682,10 +724,10 @@ async function handlePaymentConfirmed(
   // Generate digital receipt
   let receipt = null
   let receiptUrl: string | null = null
-  const apiBaseUrl = process.env.API_BASE_URL || 'https://api.avoqado.io'
+  const frontendUrl = process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
   try {
     receipt = await generateDigitalReceipt(payment.id)
-    receiptUrl = generateReceiptUrl(receipt.accessKey, apiBaseUrl)
+    receiptUrl = generateReceiptUrl(receipt.accessKey, frontendUrl)
     logger.info('📄 Digital receipt generated', { receiptUrl })
   } catch (receiptError: any) {
     logger.error('⚠️ Failed to generate receipt', { error: receiptError.message })
@@ -787,14 +829,15 @@ async function handlePaymentConfirmed(
  * @param requestId B4Bit request ID (identifier)
  * @returns Current payment status
  */
-export async function getPaymentStatus(requestId: string): Promise<{
+export async function getPaymentStatus(requestId: string, venueId: string): Promise<{
   status: B4BitPaymentStatus
   cryptoAmount?: string
   cryptoCurrency?: string
   txHash?: string
 }> {
-  const config = getB4BitConfig()
-  const url = `${config.baseUrl}/api/v1/orders/info/${requestId}/`
+  const globalConfig = getB4BitGlobalConfig()
+  const venueConfig = await getVenueCryptoConfig(venueId)
+  const url = `${globalConfig.baseUrl}/api/v1/orders/info/${requestId}/`
 
   try {
     const authToken = await getAuthToken()
@@ -803,7 +846,7 @@ export async function getPaymentStatus(requestId: string): Promise<{
       method: 'GET',
       headers: {
         Authorization: `Token ${authToken}`,
-        'X-Device-Id': config.deviceId,
+        'X-Device-Id': venueConfig.deviceId,
       },
     })
 

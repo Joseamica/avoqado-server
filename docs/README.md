@@ -112,6 +112,12 @@
 | [features/DIGITAL_RECEIPTS.md](./features/DIGITAL_RECEIPTS.md)           | Digital receipt generation, immutable snapshots, email delivery |
 | [PAY_LATER_ORDER_CLASSIFICATION.md](./PAY_LATER_ORDER_CLASSIFICATION.md) | Pay later order classification logic                            |
 
+### Staff & Team Management
+
+| Document                                                                   | Description                                                                |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| [features/TEAM_INVITATIONS.md](./features/TEAM_INVITATIONS.md)             | Team invitations, multi-venue, multi-org (StaffOrganization junction table) |
+
 ### Venue & Operations
 
 | Document                                                                 | Description                                                   |

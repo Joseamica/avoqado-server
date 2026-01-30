@@ -8,6 +8,7 @@ import * as jwtService from '../../jwt.service'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 import emailService from '../email.service'
 import logger from '@/config/logger'
+import { getPrimaryOrganizationId, hasOrganizationAccess } from '../staffOrganization.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
@@ -174,22 +175,12 @@ export async function loginStaff(loginData: LoginDto) {
   // SUPERADMIN can see ALL venues (including suspended), others only see operational venues
   const staff = await prisma.staff.findUnique({
     where: { email: email.toLowerCase() },
-    select: {
-      id: true,
-      email: true,
-      emailVerified: true, // FAANG pattern: check email verification
-      firstName: true,
-      lastName: true,
-      password: true,
-      active: true,
-      photoUrl: true,
-      phone: true,
-      organizationId: true,
-      lockedUntil: true,
-      failedLoginAttempts: true,
-      createdAt: true,
-      lastLoginAt: true,
-      organization: true,
+    include: {
+      organizations: {
+        where: { isPrimary: true, isActive: true },
+        include: { organization: true },
+        take: 1,
+      },
       venues: {
         where: {
           active: true,
@@ -205,6 +196,7 @@ export async function loginStaff(loginData: LoginDto) {
               logo: true,
               status: true, // Single source of truth for venue state
               kycStatus: true, // Include KYC status for frontend
+              organizationId: true, // For deriving orgId in token generation
             },
           },
         },
@@ -273,14 +265,15 @@ export async function loginStaff(loginData: LoginDto) {
   // This prevents chicken-and-egg problem: User needs to login to complete onboarding, but onboarding creates first venue
   if (!selectedVenue) {
     // Check if user has OWNER role in any venue (even if no active venues)
-    const organization = staff.organization
-    const hasOwnerRole = staff.email === organization.email // Primary owner (created during signup)
+    const organization = staff.organizations[0]?.organization
+    const hasOwnerRole = organization ? staff.email === organization.email : false // Primary owner (created during signup)
 
     // If OWNER and onboarding not completed, allow login with placeholder venueId
-    if (hasOwnerRole && !organization.onboardingCompletedAt) {
+    if (hasOwnerRole && organization && !organization.onboardingCompletedAt) {
       // Generate token with placeholder venueId for onboarding flow
-      const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, 'pending', StaffRole.OWNER)
-      const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+      const orgId = await getPrimaryOrganizationId(staff.id)
+      const accessToken = jwtService.generateAccessToken(staff.id, orgId, 'pending', StaffRole.OWNER)
+      const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
 
       // Reset failed attempts
       await prisma.staff.update({
@@ -301,7 +294,7 @@ export async function loginStaff(loginData: LoginDto) {
           email: staff.email,
           firstName: staff.firstName,
           lastName: staff.lastName,
-          organizationId: staff.organizationId,
+          organizationId: staff.organizations[0]?.organizationId ?? null,
           photoUrl: staff.photoUrl,
           phone: staff.phone,
           createdAt: staff.createdAt,
@@ -316,10 +309,11 @@ export async function loginStaff(loginData: LoginDto) {
     throw new ForbiddenError('No tienes acceso a ningún establecimiento', 'NO_VENUE_ACCESS')
   }
 
-  // 4. Generar tokens con el venue seleccionado
-  const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role, rememberMe)
+  // 4. Generar tokens con el venue seleccionado (derive orgId from venue)
+  const selectedVenueOrgId = selectedVenue.venue.organizationId ?? staff.organizations[0]?.organizationId
+  const accessToken = jwtService.generateAccessToken(staff.id, selectedVenueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
 
-  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId, rememberMe)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, selectedVenueOrgId, rememberMe)
 
   // 5. Actualizar último login y resetear intentos fallidos
   await prisma.staff.update({
@@ -350,7 +344,7 @@ export async function loginStaff(loginData: LoginDto) {
     email: staff.email,
     firstName: staff.firstName,
     lastName: staff.lastName,
-    organizationId: staff.organizationId,
+    organizationId: staff.organizations[0]?.organizationId ?? null,
     photoUrl: staff.photoUrl,
     phone: staff.phone,
     createdAt: staff.createdAt,
@@ -396,9 +390,7 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
   // Get the staff with his venues to check roles
   const staff = await prisma.staff.findUnique({
     where: { id: staffId },
-    select: {
-      id: true,
-      organizationId: true,
+    include: {
       venues: {
         where: { active: true },
         select: {
@@ -448,8 +440,8 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
     // Los SUPERADMINs mantienen su rol SUPERADMIN incluso al cambiar de venue
     roleInNewVenue = StaffRole.SUPERADMIN
   }
-  // Si es OWNER, permitir acceso a cualquier venue de su organización
-  else if (isOwner && targetVenue.organizationId === staff.organizationId) {
+  // Si es OWNER, permitir acceso a cualquier venue de su organización (multi-org aware)
+  else if (isOwner && (await hasOrganizationAccess(staffId, targetVenue.organizationId))) {
     roleInNewVenue = StaffRole.OWNER
   }
   // Para otros usuarios, verificar acceso normal al venue
@@ -469,9 +461,10 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
     roleInNewVenue = staffVenueAccess.role
   }
 
-  // 2. Generar un nuevo set de tokens
-  const accessToken = jwtService.generateAccessToken(staffId, orgId, targetVenueId, roleInNewVenue)
-  const refreshToken = jwtService.generateRefreshToken(staffId, orgId)
+  // 2. Generar un nuevo set de tokens (derive orgId from target venue)
+  const targetOrgId = targetVenue.organizationId
+  const accessToken = jwtService.generateAccessToken(staffId, targetOrgId, targetVenueId, roleInNewVenue)
+  const refreshToken = jwtService.generateRefreshToken(staffId, targetOrgId)
 
   return { accessToken, refreshToken }
 }

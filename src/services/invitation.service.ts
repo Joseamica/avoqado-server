@@ -1,16 +1,17 @@
 import bcrypt from 'bcrypt'
 import { v4 as uuidv4 } from 'uuid'
-import { InvitationStatus, Prisma, StaffRole } from '@prisma/client'
+import { InvitationStatus, OrgRole, Prisma, StaffRole } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import AppError from '../errors/AppError'
 import { generateAccessToken, generateRefreshToken } from '../jwt.service'
 import logger from '../config/logger'
 import { getRoleDisplayName } from './dashboard/venueRoleConfig.dashboard.service'
+import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganizationIdFromVenue } from './staffOrganization.service'
 
 interface AcceptInvitationData {
-  firstName: string
-  lastName: string
-  password: string
+  firstName?: string
+  lastName?: string
+  password?: string
   pin?: string | null
 }
 
@@ -20,7 +21,7 @@ interface AcceptInvitationResult {
     email: string
     firstName: string
     lastName: string
-    organizationId: string
+    organizationId: string | null
   }
   tokens: {
     accessToken: string | null
@@ -74,15 +75,14 @@ export async function getInvitationByToken(token: string) {
       firstName: true,
       lastName: true,
       password: true, // Check if they already have a password
-      organizationId: true,
     },
   })
 
-  // Check if user exists in a DIFFERENT organization (they'll need to contact support)
-  const existsInDifferentOrg = staff && staff.organizationId !== invitation.organizationId
+  // Multi-org: cross-org is now supported, no longer a blocking condition
+  const existsInDifferentOrg = false
 
   // Check if user already has an account with password (skip password form on frontend)
-  const userAlreadyHasPassword = staff && staff.password !== null && !existsInDifferentOrg
+  const userAlreadyHasPassword = staff && staff.password !== null
 
   // Get custom role display name from venue config (if venue exists)
   let roleDisplayName: string | null = null
@@ -156,25 +156,21 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
             active: true,
           },
         },
+        organizations: {
+          where: { isActive: true },
+          select: { organizationId: true },
+        },
       },
     })
 
-    // If user exists in a DIFFERENT organization, we need to handle this case
-    // Currently, the data model requires Staff to belong to one organization
-    // But they can be in multiple venues within that organization
-    if (existingStaff && existingStaff.organizationId !== invitation.organizationId) {
-      throw new AppError(
-        'Este email ya está registrado en otra organización. Por favor, contacta a soporte si necesitas acceso a múltiples organizaciones.',
-        409,
-      )
-    }
+    // Multi-org support: Staff can belong to multiple organizations
+    // If user exists in a DIFFERENT organization, we create a new StaffOrganization membership
+    // If user exists in the SAME organization, we just add them to the new venue
+    const existingStaffOrgId = existingStaff?.organizations?.[0]?.organizationId
+    const isCrossOrgInvitation = existingStaff && existingStaffOrgId !== invitation.organizationId
 
-    // If user exists in the SAME organization, that's fine!
-    // They're being invited to a new venue within the same org
-    // No need to block - we'll just add them to the new venue
-
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(userData.password, 12)
+    // Hash the password (only if provided — existing users don't need to send it)
+    const hashedPassword = userData.password ? await bcrypt.hash(userData.password, 12) : null
 
     // Validate PIN if provided (stored as PLAIN TEXT for fast TPV login)
     // ⚠️ PIN is NOT hashed - auth.tpv.service.ts does plain text comparison
@@ -227,25 +223,55 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
         data: updateData,
       })
 
+      // If cross-org invitation, create StaffOrganization for the new org
+      if (isCrossOrgInvitation) {
+        const venueRoles = existingStaff.venues.map(v => v.role as StaffRole)
+        const highestRole = venueRoles.includes(StaffRole.OWNER) || venueRoles.includes(StaffRole.ADMIN) ? OrgRole.ADMIN : OrgRole.MEMBER
+        await createStaffOrganizationMembership({
+          staffId: staff.id,
+          organizationId: invitation.organizationId,
+          role: highestRole,
+          isPrimary: false,
+          joinedById: invitation.invitedById ?? undefined,
+        })
+      }
+
       logger.info('Existing staff member invited to new venue', {
         staffId: staff.id,
         email: staff.email,
         newVenueId: invitation.venueId,
         existingVenuesCount: existingStaff.venues.length,
+        isCrossOrgInvitation,
       })
     } else {
-      // Brand new user - create staff record with all provided data
+      // Brand new user - require firstName, lastName, password
+      if (!userData.firstName || !userData.lastName || !hashedPassword) {
+        throw new AppError('Se requiere nombre, apellido y contrasena para crear una cuenta nueva', 400)
+      }
+
+      // Create staff record with all provided data
       // IMPORTANT: Normalize email to lowercase for consistent login lookups
       staff = await tx.staff.create({
         data: {
           id: uuidv4(),
-          organizationId: invitation.organizationId,
           email: invitation.email.toLowerCase(),
           password: hashedPassword,
           firstName: userData.firstName,
           lastName: userData.lastName,
           active: true,
           emailVerified: true, // Since they responded to email invitation
+        },
+      })
+
+      // Create StaffOrganization membership for new staff
+      await tx.staffOrganization.create({
+        data: {
+          staffId: staff.id,
+          organizationId: invitation.organizationId,
+          role: OrgRole.MEMBER,
+          isPrimary: true,
+          isActive: true,
+          joinedById: invitation.invitedById,
         },
       })
     }
@@ -320,15 +346,18 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
       }
     }
 
+    // Derive orgId from venue (preferred) or primary organization (fallback)
+    const orgId = venueId ? await getOrganizationIdFromVenue(venueId) : await getPrimaryOrganizationId(staff.id)
+
     const tokens = {
-      accessToken: venueId ? generateAccessToken(staff.id, staff.organizationId, venueId, role) : null,
-      refreshToken: generateRefreshToken(staff.id, staff.organizationId),
+      accessToken: venueId ? generateAccessToken(staff.id, orgId, venueId, role) : null,
+      refreshToken: generateRefreshToken(staff.id, orgId),
     }
 
     logger.info('Invitation accepted and user created', {
       staffId: staff.id,
       email: staff.email,
-      organizationId: staff.organizationId,
+      organizationId: invitation.organizationId,
       venueId: invitation.venueId,
       role: invitation.role,
     })
@@ -339,7 +368,7 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
         email: staff.email,
         firstName: staff.firstName,
         lastName: staff.lastName,
-        organizationId: staff.organizationId,
+        organizationId: invitation.organizationId,
       },
       tokens,
     }

@@ -5603,7 +5603,7 @@ router.post(
     try {
       // userId from authContext IS the staffId (authenticated staff member)
       const { venueId, userId: staffId } = (req as any).authContext
-      const { serialNumber, categoryId, price, paymentMethodId, notes, terminalId } = req.body
+      const { serialNumber, categoryId, price, paymentMethodId, notes, terminalId, isPortabilidad } = req.body
 
       if (!serialNumber || typeof serialNumber !== 'string') {
         throw new AppError('serialNumber is required', 400)
@@ -5623,7 +5623,7 @@ router.post(
 
       const result = await orderTpvService.sellSerializedItem(
         venueId,
-        { serialNumber, categoryId, price, paymentMethodId, notes, terminalId },
+        { serialNumber, categoryId, price, paymentMethodId, notes, terminalId, isPortabilidad },
         staffId,
       )
 

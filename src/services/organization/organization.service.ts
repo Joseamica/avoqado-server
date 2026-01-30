@@ -340,7 +340,7 @@ export async function getOrganizationOverview(orgId: string, filter?: DateRangeF
 
   // Count total staff
   const staffCount = await prisma.staff.count({
-    where: { organizationId: orgId },
+    where: { organizations: { some: { organizationId: orgId } } },
   })
 
   // Get metrics per venue
@@ -453,7 +453,7 @@ export async function getEnhancedOrganizationOverview(orgId: string, filter?: Da
       _count: true,
     }),
     prisma.staff.count({
-      where: { organizationId: orgId },
+      where: { organizations: { some: { organizationId: orgId } } },
     }),
   ])
 
@@ -1028,7 +1028,7 @@ export async function getOrganizationVenues(orgId: string, filter?: DateRangeFil
  */
 export async function getOrganizationTeam(orgId: string): Promise<OrganizationTeamMember[]> {
   const staff = await prisma.staff.findMany({
-    where: { organizationId: orgId },
+    where: { organizations: { some: { organizationId: orgId } } },
     select: {
       id: true,
       firstName: true,
@@ -1102,7 +1102,7 @@ export async function updateOrganization(
 export async function getOrganizationStats(orgId: string) {
   const [venueCount, staffCount, organization] = await Promise.all([
     prisma.venue.count({ where: { organizationId: orgId } }),
-    prisma.staff.count({ where: { organizationId: orgId } }),
+    prisma.staff.count({ where: { organizations: { some: { organizationId: orgId } } } }),
     prisma.organization.findUnique({
       where: { id: orgId },
       select: { id: true, name: true },

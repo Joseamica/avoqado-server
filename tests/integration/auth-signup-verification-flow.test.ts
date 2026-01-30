@@ -51,6 +51,12 @@ const mockPrismaClient = {
   organization: {
     create: jest.fn(),
   },
+  staffOrganization: {
+    findFirst: jest.fn(),
+    findUnique: jest.fn(),
+    create: jest.fn(),
+    upsert: jest.fn(),
+  },
   $transaction: jest.fn(),
 }
 
@@ -92,7 +98,6 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
         email: testEmail,
         firstName: testFirstName,
         lastName: testLastName,
-        organizationId,
         emailVerified: false,
         emailVerificationCode: verificationCode,
         emailVerificationExpires: new Date(Date.now() + 10 * 60 * 1000),
@@ -196,7 +201,6 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
       const mockStaff = {
         id: userId,
         email: testEmail,
-        organizationId,
         emailVerified: false,
         emailVerificationCode: verificationCode,
         emailVerificationExpires: new Date(Date.now() + 10 * 60 * 1000),
@@ -209,6 +213,10 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
         emailVerified: true,
         emailVerificationCode: null,
         emailVerificationExpires: null,
+      })
+      // Mock StaffOrganization for getPrimaryOrganizationId()
+      mockPrismaClient.staffOrganization.findFirst.mockResolvedValue({
+        organizationId,
       })
 
       const response = await request(app).post('/api/v1/onboarding/verify-email').send({
@@ -284,13 +292,15 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
       const mockStaff = {
         id: userId,
         email: testEmail,
-        organizationId,
         emailVerified: true, // Already verified
         emailVerificationCode: null,
         emailVerificationExpires: null,
       }
 
       mockPrismaClient.staff.findUnique.mockResolvedValue(mockStaff)
+      mockPrismaClient.staffOrganization.findFirst.mockResolvedValue({
+        organizationId,
+      })
 
       const response = await request(app).post('/api/v1/onboarding/verify-email').send({
         email: testEmail,
@@ -458,6 +468,9 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
         ...mockStaff,
         emailVerified: true,
         emailVerificationCode: null,
+      })
+      mockPrismaClient.staffOrganization.findFirst.mockResolvedValue({
+        organizationId,
       })
 
       const verifyResponse = await request(app).post('/api/v1/onboarding/verify-email').send({

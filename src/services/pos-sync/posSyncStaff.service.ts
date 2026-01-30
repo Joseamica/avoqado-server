@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
-import { OriginSystem, StaffRole } from '@prisma/client'
+import { OrgRole, OriginSystem, StaffRole } from '@prisma/client'
 import logger from '../../config/logger'
 import { PosStaffPayload } from '../../types/pos.types'
 
@@ -91,6 +91,23 @@ const posSyncStaffService = {
               pin: staffPayload.pin?.toString() || null, // Set venue-specific PIN
             },
           })
+          // Ensure StaffOrganization exists for this venue's org
+          await prisma.staffOrganization.upsert({
+            where: {
+              staffId_organizationId: {
+                staffId: existingStaffByEmail.id,
+                organizationId,
+              },
+            },
+            update: { isActive: true, leftAt: null },
+            create: {
+              staffId: existingStaffByEmail.id,
+              organizationId,
+              role: OrgRole.MEMBER,
+              isPrimary: false,
+              isActive: true,
+            },
+          })
         } else {
           // Update existing staffVenue with PIN if provided
           if (staffPayload.pin) {
@@ -110,18 +127,24 @@ const posSyncStaffService = {
 
       const newStaff = await prisma.staff.create({
         data: {
-          organizationId: organizationId,
           email: `pos-${venueId}-${staffPayload.externalId}@avoqado.app`,
           firstName: staffPayload.name || `Mesero ${staffPayload.externalId}`,
           lastName: `(POS)`,
-          // PIN removed from Staff - now venue-specific on StaffVenue
           originSystem: OriginSystem.POS_SOFTRESTAURANT,
           venues: {
             create: {
               venueId: venueId,
               posStaffId: staffPayload.externalId,
               role: StaffRole.WAITER,
-              pin: staffPayload.pin?.toString() || null, // Set venue-specific PIN
+              pin: staffPayload.pin?.toString() || null,
+            },
+          },
+          organizations: {
+            create: {
+              organizationId,
+              role: OrgRole.MEMBER,
+              isPrimary: true,
+              isActive: true,
             },
           },
         },

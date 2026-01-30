@@ -76,7 +76,14 @@ export async function setupTestData(): Promise<TestData> {
       firstName: 'Test',
       lastName: 'User',
       phone: '1234567890',
-      organizationId: org.id,
+      organizations: {
+        create: {
+          organizationId: org.id,
+          role: 'OWNER',
+          isPrimary: true,
+          isActive: true,
+        },
+      },
       venues: {
         create: {
           venueId: venue.id,
@@ -139,7 +146,14 @@ export async function setupTestData(): Promise<TestData> {
           firstName: s.firstName,
           lastName: s.lastName,
           phone: '1234567890',
-          organizationId: org.id,
+          organizations: {
+            create: {
+              organizationId: org.id,
+              role: 'MEMBER',
+              isPrimary: true,
+              isActive: true,
+            },
+          },
           venues: {
             create: {
               venueId: venue.id,

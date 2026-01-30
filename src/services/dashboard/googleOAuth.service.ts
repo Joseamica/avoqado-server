@@ -1,9 +1,10 @@
 import { OAuth2Client } from 'google-auth-library'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { StaffRole } from '@prisma/client'
+import { StaffRole, OrgRole } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
+import { getPrimaryOrganizationId } from '../staffOrganization.service'
 
 // Validate Google OAuth configuration
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
@@ -116,7 +117,11 @@ export async function loginWithGoogle(
   let staff = await prisma.staff.findUnique({
     where: { email: googleUser.email.toLowerCase() },
     include: {
-      organization: true,
+      organizations: {
+        where: { isPrimary: true, isActive: true },
+        include: { organization: true },
+        take: 1,
+      },
       venues: {
         where: { active: true },
         include: {
@@ -127,6 +132,7 @@ export async function loginWithGoogle(
               slug: true,
               logo: true,
               status: true, // Single source of truth for venue state
+              organizationId: true, // For deriving orgId in token generation
             },
           },
         },
@@ -183,13 +189,16 @@ export async function loginWithGoogle(
         lastName: googleUser.family_name || googleUser.name.split(' ').slice(1).join(' ') || '',
         photoUrl: googleUser.picture,
         emailVerified: true,
-        organizationId: invitation.organizationId,
         googleId: googleUser.id,
         active: true,
         lastLoginAt: new Date(),
       },
       include: {
-        organization: true,
+        organizations: {
+          where: { isPrimary: true, isActive: true },
+          include: { organization: true },
+          take: 1,
+        },
         venues: {
           where: { active: true },
           include: {
@@ -204,6 +213,17 @@ export async function loginWithGoogle(
             },
           },
         },
+      },
+    })
+
+    // Create StaffOrganization membership
+    await prisma.staffOrganization.create({
+      data: {
+        staffId: staff.id,
+        organizationId: invitation.organizationId,
+        role: OrgRole.MEMBER,
+        isPrimary: true,
+        isActive: true,
       },
     })
 
@@ -229,7 +249,14 @@ export async function loginWithGoogle(
     ])
 
     // No need to refetch - we have all the data we need
-    // Manually construct the venues array from the invitation data
+    // Manually construct the organizations and venues arrays from the invitation data
+    staff.organizations = [
+      {
+        organizationId: invitation.organizationId,
+        organization: invitation.venue.organization,
+      },
+    ] as any
+
     staff.venues = [
       {
         staffId: staff.id,
@@ -242,6 +269,7 @@ export async function loginWithGoogle(
           slug: invitation.venue.slug,
           logo: (invitation.venue as any).logo || null,
           status: (invitation.venue as any).status || 'ACTIVE',
+          organizationId: invitation.venue.organizationId,
         },
       },
     ] as any
@@ -280,14 +308,15 @@ export async function loginWithGoogle(
   // This prevents chicken-and-egg problem: User needs to login to complete onboarding, but onboarding creates first venue
   if (staff.venues.length === 0) {
     // Check if user has OWNER role (primary owner created during signup)
-    const organization = staff.organization
-    const hasOwnerRole = staff.email === organization.email
+    const organization = staff.organizations[0]?.organization
+    const hasOwnerRole = organization ? staff.email === organization.email : false
 
     // If OWNER and onboarding not completed, allow login with placeholder venueId
-    if (hasOwnerRole && !organization.onboardingCompletedAt) {
+    if (hasOwnerRole && organization && !organization.onboardingCompletedAt) {
       // Generate token with placeholder venueId for onboarding flow
-      const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, 'pending', StaffRole.OWNER)
-      const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+      const orgId = await getPrimaryOrganizationId(staff.id)
+      const accessToken = jwtService.generateAccessToken(staff.id, orgId, 'pending', StaffRole.OWNER)
+      const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
 
       // Return with onboarding flag - same structure as normal login
       return {
@@ -298,7 +327,7 @@ export async function loginWithGoogle(
           email: staff.email,
           firstName: staff.firstName,
           lastName: staff.lastName,
-          organizationId: staff.organizationId,
+          organizationId: staff.organizations[0]?.organizationId ?? null,
           photoUrl: staff.photoUrl,
           role: StaffRole.OWNER, // CRITICAL: Include role so frontend can detect OWNER status for onboarding redirect
           venues: [], // Empty venues array (user needs to complete onboarding)
@@ -314,10 +343,11 @@ export async function loginWithGoogle(
   // Use the first venue as default
   const selectedVenue = staff.venues[0]
 
-  // Generate tokens
-  const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role)
+  // Generate tokens (derive orgId from venue)
+  const googleOrgId = selectedVenue.venue.organizationId
+  const accessToken = jwtService.generateAccessToken(staff.id, googleOrgId, selectedVenue.venueId, selectedVenue.role)
 
-  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, googleOrgId)
 
   // Format response
   const sanitizedStaff = {
@@ -325,7 +355,7 @@ export async function loginWithGoogle(
     email: staff.email,
     firstName: staff.firstName,
     lastName: staff.lastName,
-    organizationId: staff.organizationId,
+    organizationId: staff.organizations[0]?.organizationId ?? null,
     photoUrl: staff.photoUrl,
     venues: staff.venues.map(sv => ({
       id: sv.venue.id,

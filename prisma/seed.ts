@@ -907,7 +907,6 @@ async function main() {
     for (const staffData of staffToCreate) {
       const staffMember = await prisma.staff.create({
         data: {
-          organizationId: org.id,
           email: staffData.email,
           password: await bcrypt.hash(staffData.password, HASH_ROUNDS),
           // PIN removed - now venue-specific on StaffVenue
@@ -916,6 +915,16 @@ async function main() {
           phone: faker.phone.number(),
           active: true,
           emailVerified: true,
+        },
+      })
+      // Create StaffOrganization junction table entry
+      await prisma.staffOrganization.create({
+        data: {
+          staffId: staffMember.id,
+          organizationId: org.id,
+          role: staffData.role === StaffRole.OWNER || staffData.role === StaffRole.SUPERADMIN ? 'OWNER' : 'MEMBER',
+          isPrimary: true,
+          isActive: true,
         },
       })
       createdStaffList.push({ ...staffMember, assignedRole: staffData.role })
@@ -1116,7 +1125,6 @@ async function main() {
         for (const staffData of venueStaffToCreate) {
           const staffMember = await prisma.staff.create({
             data: {
-              organizationId: org.id,
               email: staffData.email,
               password: await bcrypt.hash(staffData.password, HASH_ROUNDS),
               firstName: staffData.firstName,
@@ -1124,6 +1132,16 @@ async function main() {
               phone: faker.phone.number(),
               active: true,
               emailVerified: true,
+            },
+          })
+          // Create StaffOrganization junction table entry
+          await prisma.staffOrganization.create({
+            data: {
+              staffId: staffMember.id,
+              organizationId: org.id,
+              role: 'MEMBER',
+              isPrimary: true,
+              isActive: true,
             },
           })
           venueSpecificStaff.push({ ...staffMember, assignedRole: staffData.role })

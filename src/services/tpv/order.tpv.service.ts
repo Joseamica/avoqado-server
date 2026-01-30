@@ -2184,6 +2184,7 @@ interface SellSerializedItemInput {
   paymentMethodId?: string // Optional: if paying immediately
   notes?: string | null
   terminalId?: string | null // Terminal that created this order (for sales attribution)
+  isPortabilidad?: boolean // Portabilidad sale (number porting) — stored as order tag
 }
 
 /**
@@ -2244,6 +2245,10 @@ export async function sellSerializedItem(
     // Build OrderItem data with proper snapshot fields
     const orderItemData = serializedInventoryService.buildOrderItemData(serializedItemWithCategory!, input.price)
 
+    // Build tags from sale context
+    const tags: string[] = []
+    if (input.isPortabilidad) tags.push('portabilidad')
+
     // Create order (PENDING until payment)
     const order = await tx.order.create({
       data: {
@@ -2260,6 +2265,8 @@ export async function sellSerializedItem(
         type: 'DINE_IN', // Default, could be parameterized
         // ⭐ Terminal that created this order (for sales attribution by device)
         terminalId: input.terminalId || null,
+        // Tags for flexible categorization (e.g., portabilidad)
+        tags,
         items: {
           create: {
             ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId

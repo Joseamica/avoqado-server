@@ -132,7 +132,6 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
           firstName: true,
           lastName: true,
           active: true,
-          organizationId: true,
           photoUrl: true,
           phone: true,
           createdAt: true,
@@ -149,6 +148,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
                   logo: true,
                   status: true,
                   kycStatus: true,
+                  organizationId: true,
                 },
               },
             },
@@ -222,9 +222,10 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
 
   const selectedVenue = staff.venues[0]
 
-  // 7. Generate tokens
-  const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId, rememberMe)
+  // 7. Generate tokens (derive orgId from venue)
+  const venueOrgId = selectedVenue.venue.organizationId
+  const accessToken = jwtService.generateAccessToken(staff.id, venueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe)
 
   // 8. Update last login
   await prisma.staff.update({
@@ -249,7 +250,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
     email: staff.email,
     firstName: staff.firstName,
     lastName: staff.lastName,
-    organizationId: staff.organizationId,
+    organizationId: venueOrgId,
     photoUrl: staff.photoUrl,
     phone: staff.phone,
     createdAt: staff.createdAt,
@@ -321,7 +322,6 @@ export async function loginWithEmail(email: string, password: string, rememberMe
       active: true,
       photoUrl: true,
       phone: true,
-      organizationId: true,
       lockedUntil: true,
       failedLoginAttempts: true,
       createdAt: true,
@@ -337,6 +337,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
               logo: true,
               status: true,
               kycStatus: true,
+              organizationId: true,
             },
           },
         },
@@ -394,9 +395,10 @@ export async function loginWithEmail(email: string, password: string, rememberMe
 
   const selectedVenue = staff.venues[0]
 
-  // 6. Generate tokens
-  const accessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId, rememberMe)
+  // 6. Generate tokens (derive orgId from venue)
+  const emailLoginOrgId = selectedVenue.venue.organizationId
+  const accessToken = jwtService.generateAccessToken(staff.id, emailLoginOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe)
 
   // 7. Update last login and reset failed attempts
   await prisma.staff.update({
@@ -421,7 +423,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     email: staff.email,
     firstName: staff.firstName,
     lastName: staff.lastName,
-    organizationId: staff.organizationId,
+    organizationId: emailLoginOrgId,
     photoUrl: staff.photoUrl,
     phone: staff.phone,
     createdAt: staff.createdAt,
@@ -482,7 +484,6 @@ export async function refreshAccessToken(refreshToken: string) {
       id: true,
       email: true,
       active: true,
-      organizationId: true,
       venues: {
         where: { active: true },
         include: {
@@ -490,6 +491,7 @@ export async function refreshAccessToken(refreshToken: string) {
             select: {
               id: true,
               status: true,
+              organizationId: true,
             },
           },
         },
@@ -512,9 +514,10 @@ export async function refreshAccessToken(refreshToken: string) {
 
   const selectedVenue = staff.venues[0]
 
-  // 4. Generate new tokens
-  const newAccessToken = jwtService.generateAccessToken(staff.id, staff.organizationId, selectedVenue.venueId, selectedVenue.role)
-  const newRefreshToken = jwtService.generateRefreshToken(staff.id, staff.organizationId)
+  // 4. Generate new tokens (derive orgId from venue)
+  const refreshOrgId = selectedVenue.venue.organizationId
+  const newAccessToken = jwtService.generateAccessToken(staff.id, refreshOrgId, selectedVenue.venueId, selectedVenue.role)
+  const newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId)
 
   logger.info(`🔐 [MOBILE AUTH] Token refreshed for: ${staff.email}`)
 

@@ -43,10 +43,10 @@ model Organization {
   billingEmail   String?
   billingAddress Json?
 
-  venues      Venue[]
-  staff       Staff[]
-  invitations Invitation[]
-  invoices    Invoice[]
+  venues              Venue[]
+  staffOrganizations  StaffOrganization[]
+  invitations         Invitation[]
+  invoices            Invoice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -75,7 +75,7 @@ const organization = await prisma.organization.create({
   },
   include: {
     venues: true,
-    staff: true,
+    staffOrganizations: { include: { staff: true } },
   },
 })
 
@@ -101,7 +101,7 @@ const orgWithVenues = await prisma.organization.findUnique({
 **Key Relationships**:
 
 - Has multiple `Venue` locations
-- Has organization-wide `Staff` members
+- Has `Staff` members via `StaffOrganization` junction table (multi-org support)
 - Receives consolidated `Invoice` billing
 - Manages `Invitation` system for new staff
 
@@ -254,17 +254,93 @@ Each venue can have different operational rules.
 
 #### **Staff**
 
-**Purpose**: Organization-level staff member that can be assigned to multiple venues with different roles.
+**Purpose**: Identity record representing a person on the platform. Staff can belong to **multiple organizations** via the `StaffOrganization` junction table and be assigned to **multiple venues** via the `StaffVenue` junction table.
 
-**Use Case**: Maria González works for "Grupo Avoqado Prime" and can be assigned as a manager at Avoqado Centro and as a waiter at Avoqado
-Sur, with different PINs and permissions at each location.
+**Use Case**: Maria González works for "Grupo Avoqado Prime" (as ADMIN at Avoqado Centro, WAITER at Avoqado Sur) and is also invited to "Restaurante La Cima" (different organization). She has one Staff record, two StaffOrganization records, and three StaffVenue records.
 
 **Key Features**:
 
-- Organization-wide authentication (email/password)
+- Platform-wide authentication (email/password) — one account per person
 - Google OAuth integration
 - Employee information and contact details
-- Multi-venue access capability
+- Multi-organization membership via `StaffOrganization`
+- Multi-venue access via `StaffVenue`
+
+**Key Relationships**:
+
+- Belongs to one or more `Organization` via `StaffOrganization` (multi-org)
+- Assigned to one or more `Venue` via `StaffVenue` (multi-venue)
+- `StaffOrganization.isPrimary` marks the staff's primary organization
+- Organization-level role (`OrgRole`: OWNER, ADMIN, MEMBER, VIEWER) is on `StaffOrganization`
+- Venue-level role (`StaffRole`: ADMIN, MANAGER, CASHIER, WAITER, etc.) is on `StaffVenue`
+
+---
+
+#### **StaffOrganization**
+
+**Purpose**: Junction table linking Staff to Organizations. Enables multi-org membership (industry pattern: Stripe, GitHub, Slack).
+
+**Use Case**: Maria is an OWNER of "Grupo Avoqado Prime" (isPrimary: true) and a MEMBER of "Restaurante La Cima" (isPrimary: false). Each membership tracks when she joined, who invited her, and whether it's active.
+
+**Model Definition**:
+
+```prisma
+model StaffOrganization {
+  id             String       @id @default(cuid())
+  staffId        String
+  staff          Staff        @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  role       OrgRole  @default(MEMBER)  // OWNER, ADMIN, MEMBER, VIEWER
+  isPrimary  Boolean  @default(false)
+  isActive   Boolean  @default(true)
+  joinedAt   DateTime @default(now())
+  joinedById String?
+  leftAt     DateTime?
+
+  @@unique([staffId, organizationId])
+  @@index([staffId])
+  @@index([organizationId])
+  @@index([isPrimary])
+}
+```
+
+**Code Example**:
+
+```typescript
+// Get staff member's primary organization
+const primaryOrg = await prisma.staffOrganization.findFirst({
+  where: { staffId: 'staff_maria_123', isPrimary: true, isActive: true },
+  include: { organization: true },
+})
+
+// Add staff to a new organization (cross-org invitation)
+await prisma.staffOrganization.upsert({
+  where: { staffId_organizationId: { staffId: 'staff_maria_123', organizationId: 'org_new' } },
+  create: {
+    staffId: 'staff_maria_123',
+    organizationId: 'org_new',
+    role: 'MEMBER',
+    isPrimary: false,
+    isActive: true,
+  },
+  update: { isActive: true, leftAt: null },
+})
+
+// List all organizations a staff member belongs to
+const memberships = await prisma.staffOrganization.findMany({
+  where: { staffId: 'staff_maria_123', isActive: true },
+  include: { organization: { select: { name: true } } },
+})
+```
+
+**Key Features**:
+
+- Multi-org membership with org-level roles
+- Primary organization flag for default context
+- Active/inactive tracking with join/leave dates
+- Audit trail (joinedById tracks who invited the member)
 
 ---
 
@@ -2093,4 +2169,4 @@ improvement with user feedback on accuracy.
 
 ---
 
-_Last updated: September 2024_ _Schema version: v2.0.0 (Generic Payment Providers + Cost Management)_
+_Last updated: January 2026_ _Schema version: v3.0.0 (Multi-Org StaffOrganization Junction Table + Generic Payment Providers + Cost Management)_

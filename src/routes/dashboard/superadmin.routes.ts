@@ -2,6 +2,7 @@ import { Router } from 'express'
 import * as superadminController from '../../controllers/dashboard/superadmin.controller'
 import * as costManagementController from '../../controllers/dashboard/cost-management.controller'
 import * as venuePaymentReadinessController from '../../controllers/dashboard/venuePaymentReadiness.controller'
+import * as venuesSuperadminController from '../../controllers/dashboard/venues.superadmin.controller'
 
 import { validateRequest } from '../../middlewares/validation'
 
@@ -77,6 +78,41 @@ const createFeatureSchema = z.object({
   }),
 })
 
+// Schema for venue creation (superadmin)
+const createVenueSchema = z.object({
+  body: z.object({
+    organizationId: z.string().cuid('Invalid organization ID'),
+    name: z.string().min(1, 'Venue name is required'),
+    type: z
+      .enum([
+        'RESTAURANT', 'BAR', 'CAFE', 'BAKERY', 'FOOD_TRUCK', 'FAST_FOOD', 'CATERING', 'CLOUD_KITCHEN',
+        'RETAIL_STORE', 'JEWELRY', 'CLOTHING', 'ELECTRONICS', 'CONVENIENCE_STORE', 'SUPERMARKET',
+        'PHARMACY', 'PET_STORE', 'BOOKSTORE', 'HARDWARE_STORE', 'BEAUTY_SUPPLY',
+        'SALON', 'SPA', 'GYM', 'YOGA_STUDIO', 'CONSULTING', 'COWORKING',
+        'HOTEL', 'HOSTEL', 'RESORT',
+        'NIGHTCLUB', 'CINEMA', 'ARCADE', 'THEME_PARK',
+        'CLINIC', 'DENTAL', 'VETERINARY', 'OPTICAL',
+        'TELECOM', 'AUTO_SHOP', 'LAUNDRY', 'OTHER',
+      ])
+      .optional(),
+    timezone: z.string().optional(),
+    currency: z.string().optional(),
+    address: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+  }),
+})
+
+// Schema for venue transfer
+const transferVenueSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('Invalid venue ID'),
+  }),
+  body: z.object({
+    targetOrganizationId: z.string().cuid('Invalid target organization ID'),
+  }),
+})
+
 // Dashboard overview
 router.get('/dashboard', superadminController.getDashboardData)
 
@@ -86,6 +122,8 @@ router.get('/venues/list', superadminController.getVenuesListSimple) // Must be 
 router.get('/venues/:venueId', superadminController.getVenueDetails)
 router.post('/venues/:venueId/approve', superadminController.approveVenue)
 router.post('/venues/:venueId/suspend', validateRequest(suspendVenueSchema), superadminController.suspendVenue)
+router.post('/venues', validateRequest(createVenueSchema), venuesSuperadminController.createVenue)
+router.patch('/venues/:venueId/transfer', validateRequest(transferVenueSchema), venuesSuperadminController.transferVenue)
 
 // Feature management routes
 router.get('/features', superadminController.getAllFeatures)

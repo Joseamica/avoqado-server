@@ -95,7 +95,10 @@ async function main() {
   const owners = await prisma.staff.findMany({
     where: { venues: { some: { role: StaffRole.OWNER } } },
     include: {
-      organization: { select: { id: true, name: true } },
+      organizations: {
+        include: { organization: { select: { id: true, name: true } } },
+        take: 1,
+      },
       venues: {
         where: { active: true, role: StaffRole.OWNER },
         include: { venue: { select: { name: true, status: true } } },
@@ -106,12 +109,17 @@ async function main() {
 
   for (const owner of owners) {
     // Simulate what getAuthStatus does for OWNER
-    const orgVenues = await prisma.venue.findMany({
-      where: { organizationId: owner.organizationId, active: true },
-      select: { id: true, name: true, status: true },
-    })
+    const orgId = owner.organizations[0]?.organizationId
+    const orgName = owner.organizations[0]?.organization?.name
 
-    console.log(`   OWNER ${owner.email} (Org: ${owner.organization.name}):`)
+    const orgVenues = orgId
+      ? await prisma.venue.findMany({
+          where: { organizationId: orgId, active: true },
+          select: { id: true, name: true, status: true },
+        })
+      : []
+
+    console.log(`   OWNER ${owner.email} (Org: ${orgName}):`)
     orgVenues.forEach(v => console.log(`   - ${v.name} (${v.status})`))
 
     test(`OWNER ${owner.email} sees all org venues`, orgVenues.length >= owner.venues.length, `${orgVenues.length} venues in org`)

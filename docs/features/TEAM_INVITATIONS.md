@@ -10,30 +10,31 @@ system supports **multi-venue assignments** where a single staff member can belo
 ### Key Entities
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   Organization  │────▶│      Staff      │────▶│   StaffVenue    │
-│                 │  1:N│                 │  1:N│                 │
-│  id             │     │  id             │     │  staffId        │
-│  name           │     │  email (unique) │     │  venueId        │
-│                 │     │  organizationId │     │  role           │
-│                 │     │  password       │     │  pin            │
-│                 │     │  firstName      │     │  active         │
-│                 │     │  lastName       │     │                 │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-                                                        │
-┌─────────────────┐                                     │
-│   Invitation    │                                     │
-│                 │                              ┌──────▼──────────┐
-│  id             │                              │     Venue       │
-│  token (unique) │                              │                 │
-│  email          │                              │  id             │
-│  role           │                              │  name           │
-│  organizationId │──────────────────────────────│  organizationId │
-│  venueId?       │                              │                 │
-│  status         │                              └─────────────────┘
+┌─────────────────┐     ┌───────────────────────┐     ┌─────────────────┐
+│   Organization  │◀────│  StaffOrganization    │────▶│      Staff      │
+│                 │  N:1│  (junction table)     │  N:1│                 │
+│  id             │     │  staffId              │     │  id             │
+│  name           │     │  organizationId       │     │  email (unique) │
+│                 │     │  role (OrgRole)        │     │  password       │
+│                 │     │  isPrimary            │     │  firstName      │
+│                 │     │  isActive             │     │  lastName       │
+└─────────────────┘     └───────────────────────┘     └────────┬────────┘
+                                                               │ 1:N
+┌─────────────────┐                                     ┌──────▼──────────┐
+│   Invitation    │                                     │   StaffVenue    │
+│                 │                                     │                 │
+│  id             │     ┌─────────────────┐             │  staffId        │
+│  token (unique) │     │     Venue       │             │  venueId        │
+│  email          │     │                 │◀────────────│  role (StaffRole)│
+│  role           │     │  id             │             │  pin            │
+│  organizationId │────▶│  name           │             │  active         │
+│  venueId?       │     │  organizationId │             └─────────────────┘
+│  status         │     └─────────────────┘
 │  expiresAt      │
 └─────────────────┘
 ```
+
+**Multi-org model**: Staff can belong to multiple organizations via `StaffOrganization`. Each membership has an org-level role (`OrgRole`: OWNER, ADMIN, MEMBER, VIEWER) and a primary flag.
 
 ### Critical Constraint
 
@@ -43,7 +44,8 @@ This means:
 
 - A user cannot have two Staff records (even in different organizations)
 - Multi-venue support is achieved through the `StaffVenue` junction table
-- Cross-organization access is **NOT currently supported** (requires support intervention)
+- Multi-organization support is achieved through the `StaffOrganization` junction table
+- Cross-organization invitations are **fully supported** — accepting creates a new `StaffOrganization` membership with `isPrimary: false`
 
 ## Invitation Flow
 
@@ -56,6 +58,7 @@ This means:
 4. Juan fills form: firstName, lastName, password, PIN (optional)
 5. System creates:
    - Staff record (new)
+   - StaffOrganization record (role: MEMBER, isPrimary: true)
    - StaffVenue record (Venue A, role: WAITER)
 6. Juan receives access tokens and is logged in
 ```
@@ -78,7 +81,7 @@ This means:
    - Keeps existing Staff record unchanged
 ```
 
-### Scenario 3: Existing User, Different Organization (Blocked)
+### Scenario 3: Existing User, Different Organization (Cross-Org)
 
 ```
 1. Maria works at Organization X
@@ -87,9 +90,15 @@ This means:
 4. Maria clicks invitation link → InviteAccept page
 5. System detects:
    - Staff record exists ✓
-   - DIFFERENT organization ✗
-6. Frontend shows "Account registered in another organization"
-7. Maria must contact support for cross-org access
+   - DIFFERENT organization (cross-org) ✓
+   - User already has password ✓
+6. Frontend shows "You already have an account" → Login button
+7. Maria logs in with existing credentials
+8. System creates:
+   - StaffOrganization record (Org Y, role: ADMIN if user has OWNER/ADMIN venue roles else MEMBER, isPrimary: false)
+   - StaffVenue record (Venue in Org Y, with invited role)
+   - Keeps existing Staff record unchanged
+9. Maria can now switch between Org X and Org Y venues
 ```
 
 ### Scenario 4: Logged In User, Same Email (Direct Accept)
@@ -134,13 +143,13 @@ Returns invitation details for the frontend to render the appropriate UI.
   expiresAt: string // ISO 8601
   status: 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED'
 
-  // Pre-populated fields (if staff exists in same org)
+  // Pre-populated fields (if staff record exists)
   firstName: string | null
   lastName: string | null
 
-  // Multi-venue support flags
+  // Multi-venue/multi-org support flags
   userAlreadyHasPassword: boolean // If true, skip password form
-  existsInDifferentOrg: boolean // If true, show "contact support" message
+  existsInDifferentOrg: boolean // Always false (cross-org is now supported)
 }
 ```
 
@@ -181,7 +190,6 @@ Accepts the invitation and creates/updates staff records.
 
 - `404` - Invitation not found or already used
 - `410` - Invitation expired
-- `409` - Email registered in different organization
 - `409` - PIN already used in this venue
 
 ## Frontend States
@@ -193,7 +201,7 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 | Loading        | Fetching invitation              | Spinner                            |
 | Error          | Invalid token                    | Error message + Login link         |
 | Expired        | `expiresAt < now`                | Expiration message + Contact admin |
-| Different Org  | `existsInDifferentOrg: true`     | "Contact support" message          |
+| Different Org  | _(no longer blocked)_            | Same as "Has Password" flow        |
 | Has Password   | `userAlreadyHasPassword: true`   | "Login to accept" button           |
 | Email Mismatch | Session email ≠ invitation email | Logout + Continue button           |
 | Direct Accept  | Session email = invitation email | "Accept" button (no form)          |
@@ -241,12 +249,15 @@ The `InviteAccept.tsx` page handles all invitation scenarios:
 - [ ] Verify existing Staff record unchanged
 - [ ] Verify user has access to both venues
 
-#### Test 3: Cross-Organization (Blocked)
+#### Test 3: Cross-Organization (Multi-Org)
 
 - [ ] Create invitation for email that exists in different org
-- [ ] Access invitation link (should show "contact support")
-- [ ] Verify no new records created
-- [ ] Verify existing records unchanged
+- [ ] Access invitation link (should show "login to accept")
+- [ ] Log in with existing credentials
+- [ ] Verify new StaffOrganization record created (isPrimary: false)
+- [ ] Verify new StaffVenue record created in the new org's venue
+- [ ] Verify existing Staff record unchanged
+- [ ] Verify user can access venues in both organizations
 
 #### Test 4: Direct Accept (Logged In)
 
@@ -288,14 +299,19 @@ SELECT
   s."firstName",
   s."lastName",
   o.name as organization,
+  so."role" as org_role,
+  so."isPrimary",
   v.name as venue,
-  sv.role,
+  sv.role as venue_role,
   sv.active
 FROM "Staff" s
-JOIN "Organization" o ON s."organizationId" = o.id
+JOIN "StaffOrganization" so ON s.id = so."staffId"
+JOIN "Organization" o ON so."organizationId" = o.id
 JOIN "StaffVenue" sv ON s.id = sv."staffId"
 JOIN "Venue" v ON sv."venueId" = v.id
-WHERE s.email = 'user@example.com';
+  AND v."organizationId" = o.id
+WHERE s.email = 'user@example.com'
+AND so."isActive" = true;
 ```
 
 ### Check Pending Invitations
@@ -325,4 +341,5 @@ AND i."expiresAt" > NOW();
 
 | Date       | Change                                          | Author |
 | ---------- | ----------------------------------------------- | ------ |
+| 2026-01-29 | Multi-org support: StaffOrganization junction table, cross-org invitations enabled | Claude |
 | 2025-01-15 | Initial documentation + multi-venue support fix | Claude |

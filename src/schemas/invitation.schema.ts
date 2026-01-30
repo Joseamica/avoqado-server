@@ -13,15 +13,17 @@ export const AcceptInvitationSchema = z.object({
     token: z.string().cuid('Invalid invitation token format'),
   }),
   body: z.object({
-    firstName: z.string().min(1, 'First name is required').max(50, 'First name must be at most 50 characters'),
-    lastName: z.string().min(1, 'Last name is required').max(50, 'Last name must be at most 50 characters'),
+    // Optional for existing users (already have account); required for new users (validated in service)
+    firstName: z.string().min(1).max(50, 'First name must be at most 50 characters').optional(),
+    lastName: z.string().min(1).max(50, 'Last name must be at most 50 characters').optional(),
     password: z
       .string()
       .min(8, 'Password must be at least 8 characters')
       .regex(
         /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/,
         'Password must contain at least one lowercase letter, one uppercase letter, and one number',
-      ),
+      )
+      .optional(),
     pin: z
       .string()
       .regex(/^\d{4,10}$/, 'PIN must be 4-10 digits')

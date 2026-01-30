@@ -64,10 +64,22 @@ async function main() {
       WHERE "venueId" IN (SELECT id FROM "Venue" WHERE "organizationId" = ${existingOrg.id})
     `
 
-    // Delete Staff
-    await prisma.staff.deleteMany({
+    // Delete StaffOrganization
+    await prisma.staffOrganization.deleteMany({
       where: { organizationId: existingOrg.id },
     })
+
+    // Delete Staff that were in this org (find via venues)
+    const orgStaffIds = await prisma.staffVenue.findMany({
+      where: { venue: { organizationId: existingOrg.id } },
+      select: { staffId: true },
+      distinct: ['staffId'],
+    })
+    if (orgStaffIds.length > 0) {
+      await prisma.staff.deleteMany({
+        where: { id: { in: orgStaffIds.map(s => s.staffId) } },
+      })
+    }
 
     // Delete Venues
     await prisma.venue.deleteMany({
@@ -152,75 +164,74 @@ async function main() {
   // ===========================================
   console.log('👥 Creating staff...')
 
+  // Helper to create staff with StaffOrganization
+  async function createStaffWithOrg(data, orgId, orgRole = 'MEMBER') {
+    return prisma.staff.create({
+      data: {
+        ...data,
+        organizations: {
+          create: {
+            organizationId: orgId,
+            role: orgRole,
+            isActive: true,
+            isPrimary: true,
+          },
+        },
+      },
+    })
+  }
+
   // Manager
-  const manager = await prisma.staff.create({
-    data: {
-      organizationId: org.id,
-      email: 'manager@playtelecom.mx',
-      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-      firstName: 'Manager',
-      lastName: 'PlayTelecom',
-      emailVerified: true,
-    },
-  })
+  const manager = await createStaffWithOrg({
+    email: 'manager@playtelecom.mx',
+    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+    firstName: 'Manager',
+    lastName: 'PlayTelecom',
+    emailVerified: true,
+  }, org.id, 'OWNER')
   console.log(`   ✅ Manager: ${manager.email}`)
 
   // Promoters - Centro
-  const juan = await prisma.staff.create({
-    data: {
-      organizationId: org.id,
-      email: 'juan.promotor@playtelecom.mx',
-      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-      firstName: 'Juan',
-      lastName: 'Pérez',
-      emailVerified: true,
-    },
-  })
+  const juan = await createStaffWithOrg({
+    email: 'juan.promotor@playtelecom.mx',
+    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+    firstName: 'Juan',
+    lastName: 'Pérez',
+    emailVerified: true,
+  }, org.id)
 
-  const maria = await prisma.staff.create({
-    data: {
-      organizationId: org.id,
-      email: 'maria.promotor@playtelecom.mx',
-      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-      firstName: 'María',
-      lastName: 'García',
-      emailVerified: true,
-    },
-  })
+  const maria = await createStaffWithOrg({
+    email: 'maria.promotor@playtelecom.mx',
+    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+    firstName: 'María',
+    lastName: 'García',
+    emailVerified: true,
+  }, org.id)
 
-  const carlos = await prisma.staff.create({
-    data: {
-      organizationId: org.id,
-      email: 'carlos.promotor@playtelecom.mx',
-      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-      firstName: 'Carlos',
-      lastName: 'López',
-      emailVerified: true,
-    },
-  })
+  const carlos = await createStaffWithOrg({
+    email: 'carlos.promotor@playtelecom.mx',
+    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+    firstName: 'Carlos',
+    lastName: 'López',
+    emailVerified: true,
+  }, org.id)
 
   // Promoters - Sur
-  const ana = await prisma.staff.create({
-    data: {
-      organizationId: org.id,
-      email: 'ana.promotor@playtelecom.mx',
-      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-      firstName: 'Ana',
-      lastName: 'Martínez',
-      emailVerified: true,
-    },
-  })
+  const ana = await createStaffWithOrg({
+    email: 'ana.promotor@playtelecom.mx',
+    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+    firstName: 'Ana',
+    lastName: 'Martínez',
+    emailVerified: true,
+  }, org.id)
 
-  const luis = await prisma.staff.create({
-    data: {
-      organizationId: org.id,
-      email: 'luis.promotor@playtelecom.mx',
-      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-      firstName: 'Luis',
-      lastName: 'Hernández',
-      emailVerified: true,
-    },
-  })
+  const luis = await createStaffWithOrg({
+    email: 'luis.promotor@playtelecom.mx',
+    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+    firstName: 'Luis',
+    lastName: 'Hernández',
+    emailVerified: true,
+  }, org.id)
 
   console.log(`   ✅ Created 5 promoters\n`)
 

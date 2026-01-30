@@ -9,6 +9,7 @@ import { Request, Response, NextFunction } from 'express'
 import logger from '../../config/logger'
 import { initiateCryptoPayment, cancelCryptoPayment, getPaymentStatus } from '../../services/b4bit/b4bit.service'
 import { BadRequestError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 
 /**
  * POST /api/v1/tpv/venues/:venueId/crypto/initiate
@@ -73,15 +74,28 @@ export async function initiateCryptoPaymentHandler(req: Request, res: Response, 
  */
 export async function cancelCryptoPaymentHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { paymentId } = req.body
+    const { paymentId, requestId, reason } = req.body
 
-    if (!paymentId) {
-      throw new BadRequestError('paymentId is required')
+    let resolvedPaymentId = paymentId
+
+    // TPV sends requestId (B4Bit external ID), resolve to internal paymentId
+    if (!resolvedPaymentId && requestId) {
+      const payment = await prisma.payment.findFirst({
+        where: { externalId: requestId },
+        select: { id: true },
+      })
+      if (payment) {
+        resolvedPaymentId = payment.id
+      }
     }
 
-    logger.info('🚫 TPV: Cancelling crypto payment', { paymentId })
+    if (!resolvedPaymentId) {
+      throw new BadRequestError('paymentId or requestId is required')
+    }
 
-    await cancelCryptoPayment(paymentId)
+    logger.info('🚫 TPV: Cancelling crypto payment', { paymentId: resolvedPaymentId, reason })
+
+    await cancelCryptoPayment(resolvedPaymentId)
 
     res.status(200).json({
       success: true,
@@ -107,7 +121,8 @@ export async function getCryptoPaymentStatusHandler(req: Request, res: Response,
 
     logger.info('🔍 TPV: Checking crypto payment status', { requestId })
 
-    const status = await getPaymentStatus(requestId)
+    const venueId = req.params.venueId
+    const status = await getPaymentStatus(requestId, venueId)
 
     res.status(200).json({
       success: true,
