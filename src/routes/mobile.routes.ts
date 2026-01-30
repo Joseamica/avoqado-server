@@ -13,6 +13,7 @@ import * as pushMobileController from '../controllers/mobile/push.mobile.control
 import * as transactionMobileController from '../controllers/mobile/transaction.mobile.controller'
 import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
 import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
+import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -1083,5 +1084,44 @@ router.post('/venues/:venueId/terminal-payment', authenticateTokenMiddleware, te
  * List terminals currently connected via Socket.IO.
  */
 router.get('/venues/:venueId/terminals/online', authenticateTokenMiddleware, terminalPaymentMobileController.getOnlineTerminals)
+
+// ============================================================================
+// INVENTORY
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/inventory/stock-overview
+ * List products with inventory tracking and stock levels.
+ */
+router.get('/venues/:venueId/inventory/stock-overview', authenticateTokenMiddleware, inventoryMobileController.getStockOverview)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/inventory/stock-counts
+ * List stock counts for a venue.
+ */
+router.get('/venues/:venueId/inventory/stock-counts', authenticateTokenMiddleware, inventoryMobileController.getStockCounts)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/inventory/stock-counts
+ * Create a new stock count (CYCLE or FULL).
+ */
+router.post('/venues/:venueId/inventory/stock-counts', authenticateTokenMiddleware, inventoryMobileController.createStockCount)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId
+ * Update stock count items (set counted quantities).
+ */
+router.put('/venues/:venueId/inventory/stock-counts/:countId', authenticateTokenMiddleware, inventoryMobileController.updateStockCount)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId/confirm
+ * Confirm stock count and apply inventory adjustments.
+ */
+router.post(
+  '/venues/:venueId/inventory/stock-counts/:countId/confirm',
+  authenticateTokenMiddleware,
+  inventoryMobileController.confirmStockCount,
+)
 
 export default router

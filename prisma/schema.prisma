@@ -247,6 +247,7 @@ model Venue {
   rawMaterialMovements RawMaterialMovement[]
   lowStockAlerts       LowStockAlert[]
   stockBatches         StockBatch[] // FIFO batch tracking
+  stockCounts          StockCount[]
 
   // ✅ NEW: Webhook event logging
   webhookEvents WebhookEvent[]
@@ -499,6 +500,9 @@ model Staff {
 
   // ✅ Passkeys (WebAuthn) for passwordless authentication
   passkeys StaffPasskey[]
+
+  // Stock Counts
+  stockCounts StockCount[] @relation("StockCountCreatedBy")
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -977,6 +981,9 @@ model Product {
   // Commission System
   commissionMilestones CommissionMilestone[]
 
+  // Stock Counts
+  stockCountItems StockCountItem[]
+
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
@@ -1454,6 +1461,56 @@ model LowStockAlert {
   @@index([status])
   @@index([alertType])
   @@index([createdAt])
+}
+
+// ==========================================
+// STOCK COUNTS (Physical inventory counting)
+// ==========================================
+
+model StockCount {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  type   StockCountType   // CYCLE or FULL
+  status StockCountStatus @default(IN_PROGRESS)
+  note   String?
+
+  items StockCountItem[]
+
+  createdById   String?
+  createdByUser Staff?   @relation("StockCountCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  completedAt   DateTime?
+
+  @@index([venueId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model StockCountItem {
+  id           String     @id @default(cuid())
+  stockCountId String
+  stockCount   StockCount @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  expected Decimal @db.Decimal(10, 2) // System stock at count time
+  counted  Decimal @default(0) @db.Decimal(10, 2) // Physically counted
+
+  @@index([stockCountId])
+  @@index([productId])
+}
+
+enum StockCountType {
+  CYCLE // Partial - specific items
+  FULL  // All inventory items
+}
+
+enum StockCountStatus {
+  IN_PROGRESS
+  COMPLETED
 }
 
 // ==========================================

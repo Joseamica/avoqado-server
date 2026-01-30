@@ -3,7 +3,7 @@
  * Verifies that signupUser creates a StaffOrganization record with OWNER role
  */
 
-import { OrgRole, StaffRole } from '@prisma/client'
+import { OrgRole } from '@prisma/client'
 import prisma from '../../../src/utils/prismaClient'
 
 // Mock prisma
