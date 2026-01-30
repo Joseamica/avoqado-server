@@ -49,14 +49,39 @@ model Organization {
   // Performance goals (for CommandCenter charts)
   organizationGoals OrganizationGoal[]
 
+  // Geographic zones for grouping venues
+  zones Zone[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// Geographic zone for grouping venues (used by PlayTelecom manager/supervisor dashboards)
+model Zone {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name String // "CDMX", "Zona Norte", "Zona Sur"
+  slug String // "cdmx", "zona-norte" (for URLs)
+
+  venues Venue[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
 }
 
 model Venue {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Zone assignment (optional geographic grouping)
+  zoneId String?
+  zone   Zone?   @relation(fields: [zoneId], references: [id], onDelete: SetNull)
 
   // Basic info
   name     String
@@ -1700,12 +1725,19 @@ model TimeEntry {
   autoClockOut     Boolean @default(false) // Was this entry auto-closed by the system?
   autoClockOutNote String?                 // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")
 
+  // Manager validation (approve/reject clock-in/out evidence)
+  validationStatus TimeEntryValidation @default(PENDING)
+  validatedBy      String? // StaffId of manager who validated
+  validatedAt      DateTime?
+  validationNote   String? // Reason for rejection
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([staffId, venueId])
   @@index([venueId, clockInTime])
   @@index([status])
+  @@index([validationStatus])
   @@map("time_entries")
 }
 
@@ -5254,6 +5286,12 @@ enum TimeEntryStatus {
   ON_BREAK // Currently on break
   CLOCKED_OUT // Finished shift
   ADMIN_EDITED // Modified by admin
+}
+
+enum TimeEntryValidation {
+  PENDING // Awaiting manager review
+  APPROVED // Manager approved the entry
+  REJECTED // Manager rejected the entry (see validationNote)
 }
 
 // ==========================================

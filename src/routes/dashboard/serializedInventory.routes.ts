@@ -232,4 +232,34 @@ router.get('/recent-sales', authenticateTokenMiddleware, async (req: Request, re
   }
 })
 
+/**
+ * PUT /dashboard/serialized-inventory/categories/reorder
+ * Bulk reorder categories by sortOrder
+ * Body: { categories: [{ id: string, sortOrder: number }] }
+ */
+router.put('/categories/reorder', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = (req as any).authContext
+    const { categories } = req.body
+
+    if (!Array.isArray(categories)) {
+      return res.status(400).json({ success: false, error: 'invalid_body', message: 'categories array is required' })
+    }
+
+    await prisma.$transaction(
+      categories.map((cat: { id: string; sortOrder: number }) =>
+        prisma.itemCategory.update({
+          where: { id: cat.id },
+          data: { sortOrder: cat.sortOrder },
+        }),
+      ),
+    )
+
+    const updated = await serializedInventoryService.getCategories(venueId)
+    res.json({ success: true, data: { categories: updated } })
+  } catch (error) {
+    next(error)
+  }
+})
+
 export default router

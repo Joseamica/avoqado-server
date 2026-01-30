@@ -78,7 +78,7 @@ async function getVenueCryptoConfig(venueId: string): Promise<B4BitVenueConfig> 
 /**
  * @deprecated Use getB4BitGlobalConfig + getVenueCryptoConfig instead
  */
-const getB4BitConfig = (): B4BitConfig => {
+const _getB4BitConfig = (): B4BitConfig => {
   const global = getB4BitGlobalConfig()
   return {
     ...global,
@@ -226,7 +226,7 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: 
     let data: any
     try {
       data = JSON.parse(responseText)
-    } catch (_parseError: any) {
+    } catch {
       logger.error('❌ B4Bit: Failed to parse JSON response', {
         status: response.status,
         responsePreview: responseText.substring(0, 200),

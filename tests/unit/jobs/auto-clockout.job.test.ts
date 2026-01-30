@@ -327,7 +327,7 @@ describe('AutoClockOutJob', () => {
       const testJob = new AutoClockOutJob()
 
       // Mock current time to be 03:05 in Mexico City
-      const now = new Date()
+      // const now = new Date()
       const mockDateFormat = jest.spyOn(Intl, 'DateTimeFormat').mockImplementation(
         () =>
           ({

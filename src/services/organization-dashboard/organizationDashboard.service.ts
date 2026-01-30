@@ -1696,6 +1696,7 @@ class OrganizationDashboardService {
         clockInTime: { gte: dayStart, lte: dayEnd },
       },
       select: {
+        id: true,
         staffId: true,
         venueId: true,
         clockInTime: true,
@@ -1795,6 +1796,7 @@ class OrganizationDashboardService {
 
       return {
         id: sv.staffId,
+        timeEntryId: mostRecentEntry?.id || null,
         name: fullName,
         email: sv.staff.email,
         avatar: sv.staff.photoUrl,
@@ -2014,6 +2016,176 @@ class OrganizationDashboardService {
         absent: absentDays,
       },
     }
+  }
+
+  // ==========================================
+  // TIME ENTRY VALIDATION
+  // ==========================================
+
+  async validateTimeEntry(timeEntryId: string, orgId: string, validatedById: string, status: 'APPROVED' | 'REJECTED', note?: string) {
+    // Verify the time entry belongs to a venue in this org
+    const timeEntry = await prisma.timeEntry.findFirst({
+      where: {
+        id: timeEntryId,
+        venue: { organizationId: orgId },
+      },
+    })
+
+    if (!timeEntry) {
+      throw new Error('Time entry not found in this organization')
+    }
+
+    return prisma.timeEntry.update({
+      where: { id: timeEntryId },
+      data: {
+        validationStatus: status,
+        validatedBy: validatedById,
+        validatedAt: new Date(),
+        validationNote: note || null,
+      },
+    })
+  }
+
+  // ==========================================
+  // ZONES CRUD
+  // ==========================================
+
+  async getZones(orgId: string) {
+    return prisma.zone.findMany({
+      where: { organizationId: orgId },
+      include: {
+        venues: { select: { id: true, name: true, slug: true } },
+      },
+      orderBy: { name: 'asc' },
+    })
+  }
+
+  async createZone(orgId: string, name: string, slug: string) {
+    return prisma.zone.create({
+      data: { organizationId: orgId, name, slug },
+    })
+  }
+
+  async updateZone(zoneId: string, data: { name?: string; slug?: string }) {
+    return prisma.zone.update({
+      where: { id: zoneId },
+      data,
+    })
+  }
+
+  async deleteZone(zoneId: string) {
+    // Set null on venues referencing this zone, then delete
+    await prisma.venue.updateMany({
+      where: { zoneId },
+      data: { zoneId: null },
+    })
+    return prisma.zone.delete({ where: { id: zoneId } })
+  }
+
+  // ==========================================
+  // CLOSING REPORT
+  // ==========================================
+
+  async getClosingReportData(orgId: string, dateStr?: string, venueId?: string) {
+    const timezone = 'America/Mexico_City'
+    const now = toZonedTime(new Date(), timezone)
+    const targetDate = dateStr ? new Date(dateStr) : now
+
+    const startOfDay = new Date(targetDate)
+    startOfDay.setHours(0, 0, 0, 0)
+    const endOfDay = new Date(targetDate)
+    endOfDay.setHours(23, 59, 59, 999)
+
+    const startUtc = fromZonedTime(startOfDay, timezone)
+    const endUtc = fromZonedTime(endOfDay, timezone)
+
+    const venueWhere = venueId ? { id: venueId, organizationId: orgId } : { organizationId: orgId }
+
+    // Get completed orders with serialized items
+    const orders = await prisma.order.findMany({
+      where: {
+        venue: venueWhere,
+        createdAt: { gte: startUtc, lte: endUtc },
+        status: 'COMPLETED',
+      },
+      include: {
+        venue: { select: { name: true, city: true, state: true } },
+        createdBy: { select: { firstName: true, lastName: true } },
+        payments: { select: { amount: true, status: true } },
+        items: { select: { productName: true, productSku: true, unitPrice: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    })
+
+    const rows = orders.map((order: any, idx: number) => {
+      const totalPaid = (order.payments || [])
+        .filter((p: any) => p.status === 'COMPLETED')
+        .reduce((sum: number, p: any) => sum + Number(p.amount), 0)
+
+      // Try to extract ICCID from product SKU (serialized items)
+      const iccid = order.items?.[0]?.productSku || ''
+      const productName = order.items?.[0]?.productName || 'Venta'
+
+      return {
+        row: idx + 1,
+        city: order.venue?.city || order.venue?.state || '',
+        store: order.venue?.name || '',
+        iccid,
+        saleType: productName,
+        promoter: order.createdBy ? `${order.createdBy.firstName} ${order.createdBy.lastName}` : 'N/A',
+        date: order.createdAt.toISOString().split('T')[0],
+        amount: totalPaid,
+      }
+    })
+
+    const totalAmount = rows.reduce((sum, r) => sum + r.amount, 0)
+
+    return { rows, totalAmount, date: dateStr || startOfDay.toISOString().split('T')[0] }
+  }
+
+  async exportClosingReport(orgId: string, dateStr?: string, venueId?: string): Promise<Buffer> {
+    const XLSX = await import('xlsx')
+    const data = await this.getClosingReportData(orgId, dateStr, venueId)
+
+    const worksheetData = [
+      ['#', 'Ciudad', 'Tienda', 'ICCID', 'Tipo Venta', 'Promotor', 'Fecha', 'Monto Cobrado'],
+      ...data.rows.map(r => [r.row, r.city, r.store, r.iccid, r.saleType, r.promoter, r.date, r.amount]),
+      [],
+      ['', '', '', '', '', '', 'TOTAL COBRADO:', data.totalAmount],
+    ]
+
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.aoa_to_sheet(worksheetData)
+    XLSX.utils.book_append_sheet(wb, ws, 'Reporte de Cierre')
+
+    return Buffer.from(XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' }))
+  }
+
+  // ==========================================
+  // ADMIN PASSWORD RESET
+  // ==========================================
+
+  async resetUserPassword(orgId: string, userId: string) {
+    // Verify user belongs to org
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { staffId: userId, organizationId: orgId },
+    })
+
+    if (!staffOrg) {
+      throw new Error('User not found in this organization')
+    }
+
+    // Generate a temp password
+    const tempPassword = Math.random().toString(36).slice(-8)
+    const bcrypt = await import('bcryptjs')
+    const hashedPassword = await bcrypt.hash(tempPassword, 12)
+
+    await prisma.staff.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    })
+
+    return { tempPassword, message: 'Password reset successfully. Share the temporary password securely.' }
   }
 }
 

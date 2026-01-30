@@ -348,6 +348,14 @@ export interface TpvSettings {
   // Kiosk Mode
   kioskModeEnabled: boolean // When true, terminal can enter self-service kiosk mode
   kioskDefaultMerchantId: string | null // Default merchant for kiosk mode (null = show selection)
+  // Evidence rules (PlayTelecom config TPV)
+  clockInPhotoRule?: 'OBLIGATORIO' | 'OPCIONAL' | 'DESACTIVADO'
+  depositPhotoRule?: 'OBLIGATORIO' | 'OBLIGATORIO_ALTA_CALIDAD'
+  facadePhotoRule?: 'ALEATORIO' | 'SIEMPRE' | 'NUNCA'
+  // Module toggles for TPV
+  enableCashPayments?: boolean
+  enableCardPayments?: boolean
+  enableBarcodeScanner?: boolean
 }
 
 /**

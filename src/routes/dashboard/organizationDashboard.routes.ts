@@ -460,4 +460,210 @@ router.get(
   },
 )
 
+// ==========================================
+// TIME ENTRY VALIDATION (Manager approve/reject)
+// ==========================================
+
+/**
+ * PATCH /dashboard/organizations/:orgId/time-entries/:timeEntryId/validate
+ * Body: { status: 'APPROVED' | 'REJECTED', note?: string }
+ */
+router.patch(
+  '/:orgId/time-entries/:timeEntryId/validate',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, timeEntryId } = req.params
+      const { status, note } = req.body
+      const { userId } = (req as any).authContext
+
+      if (!status || !['APPROVED', 'REJECTED'].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_status',
+          message: 'status must be APPROVED or REJECTED',
+        })
+      }
+
+      const updated = await organizationDashboardService.validateTimeEntry(timeEntryId, orgId, userId, status, note)
+
+      res.json({
+        success: true,
+        data: updated,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ==========================================
+// ZONES CRUD (Geographic grouping of venues)
+// ==========================================
+
+/**
+ * GET /dashboard/organizations/:orgId/zones
+ */
+router.get('/:orgId/zones', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+    const zones = await organizationDashboardService.getZones(orgId)
+    res.json({ success: true, data: { zones } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * POST /dashboard/organizations/:orgId/zones
+ * Body: { name: string, slug: string }
+ */
+router.post('/:orgId/zones', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+    const { name, slug } = req.body
+
+    if (!name || !slug) {
+      return res.status(400).json({ success: false, error: 'missing_fields', message: 'name and slug are required' })
+    }
+
+    const zone = await organizationDashboardService.createZone(orgId, name, slug)
+    res.status(201).json({ success: true, data: zone })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PUT /dashboard/organizations/:orgId/zones/:zoneId
+ * Body: { name?: string, slug?: string }
+ */
+router.put(
+  '/:orgId/zones/:zoneId',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { zoneId } = req.params
+      const { name, slug } = req.body
+
+      const zone = await organizationDashboardService.updateZone(zoneId, { name, slug })
+      res.json({ success: true, data: zone })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * DELETE /dashboard/organizations/:orgId/zones/:zoneId
+ */
+router.delete(
+  '/:orgId/zones/:zoneId',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { zoneId } = req.params
+      await organizationDashboardService.deleteZone(zoneId)
+      res.json({ success: true })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ==========================================
+// CLOSING REPORT EXPORT
+// ==========================================
+
+/**
+ * GET /dashboard/organizations/:orgId/reports/closing-report
+ * Query: date (ISO), venueId (optional)
+ * Returns: XLSX file
+ */
+router.get(
+  '/:orgId/reports/closing-report',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { date, venueId } = req.query
+
+      const report = await organizationDashboardService.getClosingReportData(
+        orgId,
+        date as string | undefined,
+        venueId as string | undefined,
+      )
+
+      res.json({
+        success: true,
+        data: report,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/reports/closing-report/export
+ * Query: date (ISO), venueId (optional)
+ * Returns: XLSX file download
+ */
+router.get(
+  '/:orgId/reports/closing-report/export',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { date, venueId } = req.query
+
+      const buffer = await organizationDashboardService.exportClosingReport(
+        orgId,
+        date as string | undefined,
+        venueId as string | undefined,
+      )
+
+      const dateStr = (date as string) || new Date().toISOString().split('T')[0]
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', `attachment; filename=reporte-cierre-${dateStr}.xlsx`)
+      res.send(buffer)
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ==========================================
+// ADMIN PASSWORD RESET
+// ==========================================
+
+/**
+ * POST /dashboard/organizations/:orgId/users/:userId/reset-password
+ * Admin resets a user's password
+ */
+router.post(
+  '/:orgId/users/:userId/reset-password',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, visitorId: _userId } = req.params
+
+      const result = await organizationDashboardService.resetUserPassword(orgId, req.params.userId)
+
+      res.json({
+        success: true,
+        data: result,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
 export default router
