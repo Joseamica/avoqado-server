@@ -7,12 +7,12 @@
  * - Order Payment: Create order first, then pay via TPV
  */
 
-import prisma from '../../utils/prismaClient'
-import { Order, Prisma } from '@prisma/client'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
-import logger from '../../config/logger'
+import { Prisma } from '@prisma/client'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
+import logger from '../../config/logger'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
 
 // MARK: - Types
 

@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { terminalRegistry } from '../../communication/sockets/terminal-registry'
 
 /**
  * Calculate config version for a terminal's merchant configuration
@@ -84,6 +85,29 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
 
     // Process the heartbeat using the existing service
     await tpvHealthService.processHeartbeat(heartbeatData, clientIp)
+
+    // Register terminal in the terminal registry (for Socket.IO payment routing)
+    // HTTP heartbeat doesn't have socketId, but we register anyway so the terminal
+    // appears in GET /terminals/online. The socketId will be filled when the
+    // Socket.IO heartbeat fires, or resolved at payment time.
+    try {
+      const terminal = await prisma.terminal.findFirst({
+        where: {
+          OR: [
+            { serialNumber: { equals: heartbeatData.terminalId, mode: 'insensitive' } },
+            { serialNumber: { equals: `AVQD-${heartbeatData.terminalId}`, mode: 'insensitive' } },
+            { id: heartbeatData.terminalId },
+          ],
+        },
+        select: { venueId: true, name: true },
+      })
+      if (terminal) {
+        terminalRegistry.register(heartbeatData.terminalId, null, terminal.venueId, terminal.name || undefined)
+        logger.info(`📡 [HTTP-Heartbeat] Terminal registered: ${heartbeatData.terminalId} (venue: ${terminal.venueId})`)
+      }
+    } catch (regError) {
+      logger.warn(`Failed to register terminal in registry: ${regError}`)
+    }
 
     // Get current server status for the terminal to enable synchronization
     const terminalHealth = await tpvHealthService.getTerminalHealth(heartbeatData.terminalId)

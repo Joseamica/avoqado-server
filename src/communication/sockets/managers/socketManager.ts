@@ -24,6 +24,10 @@ import { ConnectionController } from '../controllers/connection.controller'
 
 // Import TPV command service for handling command ACK/results
 import { tpvCommandExecutionService } from '../../../services/tpv/command-execution.service'
+// Import terminal registry for tracking terminalId → socketId
+import { terminalRegistry } from '../terminal-registry'
+// Import terminal payment service for handling payment results
+import { terminalPaymentService } from '../../../services/terminal-payment.service'
 import { RoomController } from '../controllers/room.controller'
 import { BusinessEventController } from '../controllers/businessEvent.controller'
 import { ObservabilityController } from '../controllers/observability.controller'
@@ -183,6 +187,12 @@ export class SocketManager implements ISocketManager {
       // Register socket with room manager if authenticated
       if (authenticatedSocket.authContext) {
         this.roomManager.registerSocket(authenticatedSocket)
+
+        // Register terminal in registry if terminalId provided in auth handshake
+        const terminalId = socket.handshake?.auth?.terminalId
+        if (terminalId) {
+          terminalRegistry.register(terminalId, socket.id, authenticatedSocket.authContext.venueId)
+        }
       }
 
       // Setup authentication timeout if required
@@ -324,11 +334,44 @@ export class SocketManager implements ISocketManager {
       }
     })
 
+    // Terminal Payment Result (TPV → Server → iOS HTTP response)
+    socket.on('terminal:payment_result', (payload, callback) => {
+      try {
+        const { requestId, status, transactionId, cardDetails, errorMessage, receipt } = payload
+        logger.info('💳 Terminal payment result received', {
+          requestId,
+          status,
+          transactionId,
+          socketId: socket.id,
+        })
+
+        const handled = terminalPaymentService.handlePaymentResult({
+          requestId,
+          status,
+          transactionId,
+          cardDetails,
+          errorMessage,
+          receipt,
+        })
+
+        if (callback) callback({ success: handled })
+      } catch (error) {
+        logger.error('Error processing terminal payment result', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
+    })
+
     // Disconnection
     socket.on(SocketEventType.DISCONNECT, _reason => {
       if (socket.authContext) {
         this.roomManager.unregisterSocket(socket)
       }
+      // Clean up terminal registry
+      terminalRegistry.unregisterBySocketId(socket.id)
       const user = socket.authContext?.userId || 'unauthenticated'
       logger.info(`📡 Socket disconnected: ${user} (${socket.id})`)
     })

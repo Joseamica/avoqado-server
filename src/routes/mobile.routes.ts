@@ -12,6 +12,7 @@ import * as timeEntryMobileController from '../controllers/mobile/time-entry.mob
 import * as pushMobileController from '../controllers/mobile/push.mobile.controller'
 import * as transactionMobileController from '../controllers/mobile/transaction.mobile.controller'
 import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
+import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -1064,5 +1065,23 @@ router.post(
   validateRequest(recordPaymentBodySchema),
   paymentMobileController.recordFastPayment,
 )
+
+// ============================================================================
+// TERMINAL PAYMENTS (Socket.IO Bridge)
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/terminal-payment
+ * Send payment request to a TPV terminal via Socket.IO.
+ * Long-polls until terminal responds (max 60s).
+ */
+router.post('/venues/:venueId/terminal-payment', authenticateTokenMiddleware, terminalPaymentMobileController.sendTerminalPayment)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/terminals/online
+ * List terminals currently connected via Socket.IO.
+ */
+router.get('/venues/:venueId/terminals/online', authenticateTokenMiddleware, terminalPaymentMobileController.getOnlineTerminals)
 
 export default router

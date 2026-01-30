@@ -1,6 +1,7 @@
 import { AuthenticatedSocket, SocketEventType } from '../types'
 import { RoomManagerService } from '../services/roomManager.service'
 import { BroadcastingService } from '../services/broadcasting.service'
+import { terminalRegistry } from '../terminal-registry'
 import logger from '../../../config/logger'
 import { v4 as uuidv4 } from 'uuid'
 import { PrismaClient, LogLevel } from '@prisma/client'
@@ -195,6 +196,10 @@ export class ObservabilityController {
       }
 
       const { health } = payload
+
+      // Register terminal in registry (for Socket.IO payment routing)
+      logger.info(`📡 [Heartbeat] Registering terminal ${payload.terminalId} (socket: ${socket.id}, venue: ${payload.venueId})`)
+      terminalRegistry.register(payload.terminalId, socket.id, payload.venueId)
 
       // Store health metrics in database
       const terminalHealth = await prisma.terminalHealth.create({

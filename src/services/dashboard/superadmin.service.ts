@@ -500,6 +500,71 @@ export async function reactivateVenueByAdmin(venueId: string, reactivatedBy: str
 }
 
 /**
+ * Change venue status (Superadmin action)
+ * Validates allowed transitions and performs the update
+ */
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  [VenueStatus.ONBOARDING]: ['PENDING_ACTIVATION', 'ACTIVE', 'TRIAL'],
+  [VenueStatus.TRIAL]: ['ACTIVE', 'SUSPENDED', 'CLOSED'],
+  [VenueStatus.PENDING_ACTIVATION]: ['ACTIVE'],
+  [VenueStatus.ACTIVE]: ['SUSPENDED', 'ADMIN_SUSPENDED', 'CLOSED'],
+  [VenueStatus.SUSPENDED]: ['ACTIVE'],
+  [VenueStatus.ADMIN_SUSPENDED]: ['ACTIVE'],
+  [VenueStatus.CLOSED]: ['ACTIVE'],
+}
+
+export function getValidTransitions(currentStatus: string): string[] {
+  return VALID_TRANSITIONS[currentStatus] || []
+}
+
+export async function changeVenueStatus(
+  venueId: string,
+  newStatus: VenueStatus,
+  reason: string | undefined,
+  changedBy: string,
+): Promise<void> {
+  try {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { status: true, name: true },
+    })
+
+    if (!venue) {
+      throw new Error('Venue not found')
+    }
+
+    const allowed = getValidTransitions(venue.status)
+    if (!allowed.includes(newStatus)) {
+      throw new Error(`Cannot transition from ${venue.status} to ${newStatus}. Allowed: ${allowed.join(', ') || 'none'}`)
+    }
+
+    const isActivating = newStatus === VenueStatus.ACTIVE
+    const isSuspending = newStatus === VenueStatus.SUSPENDED || newStatus === VenueStatus.ADMIN_SUSPENDED
+    const isClosing = newStatus === VenueStatus.CLOSED
+
+    await prisma.venue.update({
+      where: { id: venueId },
+      data: {
+        status: newStatus,
+        statusChangedAt: new Date(),
+        statusChangedBy: changedBy,
+        ...(isActivating && { suspensionReason: null, active: true }),
+        ...(isSuspending && { suspensionReason: reason || 'Suspendido por administrador', active: false }),
+        ...(isClosing && { suspensionReason: reason || 'Cerrado por administrador', active: false }),
+        updatedAt: new Date(),
+      },
+    })
+
+    logger.info(`Venue ${venue.name} (${venueId}) status changed from ${venue.status} to ${newStatus} by ${changedBy}`, {
+      reason,
+    })
+  } catch (error) {
+    logger.error('Error changing venue status:', error)
+    throw error instanceof Error ? error : new Error('Failed to change venue status')
+  }
+}
+
+/**
  * Get venues by status (for superadmin dashboard)
  */
 export async function getVenuesByStatus(status?: VenueStatus): Promise<{ status: VenueStatus; count: number }[]> {

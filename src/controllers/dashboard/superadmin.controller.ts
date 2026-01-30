@@ -85,6 +85,29 @@ export async function approveVenue(req: Request, res: Response, next: NextFuncti
 }
 
 /**
+ * Change venue status
+ */
+export async function changeVenueStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { status, reason } = req.body
+    logger.info('Changing venue status', { venueId, status, userId: req.authContext?.userId })
+
+    await superadminService.changeVenueStatus(venueId, status, reason, req.authContext!.userId)
+
+    logger.info('Venue status changed successfully', { venueId, newStatus: status, changedBy: req.authContext!.userId })
+    res.json({ success: true, data: { venueId, status }, message: 'Venue status changed successfully' })
+  } catch (error) {
+    logger.error('Error changing venue status', {
+      venueId: req.params.venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
  * Create a new platform feature
  */
 export async function createFeature(req: Request, res: Response, next: NextFunction): Promise<void> {

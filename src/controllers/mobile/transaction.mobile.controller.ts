@@ -5,7 +5,6 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
-import logger from '../../config/logger'
 import * as transactionService from '../../services/mobile/transaction.mobile.service'
 
 /**

@@ -46,6 +46,14 @@ router.use(authenticateTokenMiddleware)
 // And must have system:manage permission (SUPERADMIN only)
 router.use(checkPermission('system:manage'))
 
+// Schema for venue status change
+const changeVenueStatusSchema = z.object({
+  body: z.object({
+    status: z.enum(['LIVE_DEMO', 'TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE', 'SUSPENDED', 'ADMIN_SUSPENDED', 'CLOSED']),
+    reason: z.string().optional(),
+  }),
+})
+
 // Schema for venue suspension
 const suspendVenueSchema = z.object({
   body: z.object({
@@ -154,6 +162,7 @@ router.get('/venues/list', superadminController.getVenuesListSimple) // Must be 
 router.get('/venues/:venueId', superadminController.getVenueDetails)
 router.post('/venues/:venueId/approve', superadminController.approveVenue)
 router.post('/venues/:venueId/suspend', validateRequest(suspendVenueSchema), superadminController.suspendVenue)
+router.patch('/venues/:venueId/status', validateRequest(changeVenueStatusSchema), superadminController.changeVenueStatus)
 router.post('/venues', validateRequest(createVenueSchema), venuesSuperadminController.createVenue)
 router.patch('/venues/:venueId/transfer', validateRequest(transferVenueSchema), venuesSuperadminController.transferVenue)
 

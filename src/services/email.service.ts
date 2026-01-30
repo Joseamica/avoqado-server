@@ -1876,12 +1876,12 @@ Avoqado Dashboard
     const avgOrder = data.metrics.transactionCount > 0 ? data.metrics.netSales / data.metrics.transactionCount : 0
 
     // Previous period values
-    const prevNetSales = data.previousPeriod?.netSales || 0
+    const _prevNetSales = data.previousPeriod?.netSales || 0
     const prevAvgOrder = data.previousPeriod?.avgOrder || 0
 
     // Format weekly change
     const weeklyChangeFormatted = weeklyChange !== 0 ? `${weeklyChange >= 0 ? '+' : ''}${weeklyChange.toFixed(1)}%` : 'n/a'
-    const weeklyChangeColor = weeklyChange >= 0 ? '#22c55e' : '#ef4444'
+    const _weeklyChangeColor = weeklyChange >= 0 ? '#22c55e' : '#ef4444'
 
     const subject = `${reportDateCapitalized} - Resumen de ventas - ${data.venueName}`
 

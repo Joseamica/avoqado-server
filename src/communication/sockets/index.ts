@@ -36,6 +36,7 @@
 
 // Core exports
 export { socketManager as default, SocketManager } from './managers/socketManager'
+export { terminalRegistry } from './terminal-registry'
 export { RoomManagerService } from './services/roomManager.service'
 export { BroadcastingService } from './services/broadcasting.service'
 
