@@ -8,6 +8,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as pushService from '../../services/mobile/push.mobile.service'
 import { DevicePlatform } from '@prisma/client'
 import { z } from 'zod'
+import prisma from '../../utils/prismaClient'
 
 // Validation schemas
 const registerDeviceSchema = z.object({
@@ -35,6 +36,20 @@ export async function registerDevice(req: Request, res: Response, next: NextFunc
       return res.status(401).json({
         success: false,
         error: 'Authentication required',
+      })
+    }
+
+    // Verify staff exists before registering device token
+    const staff = await prisma.staff.findUnique({
+      where: { id: staffId },
+      select: { id: true },
+    })
+
+    if (!staff) {
+      return res.status(404).json({
+        success: false,
+        error: 'Staff not found',
+        message: 'Your account no longer exists. Please contact support.',
       })
     }
 
