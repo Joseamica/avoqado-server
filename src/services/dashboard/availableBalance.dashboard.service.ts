@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { TransactionCardType, SettlementStatus, SimulationType, PaymentMethod } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
+import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { calculateSettlementDate, findActiveSettlementConfig } from '../payments/settlementCalculation.service'
 import { addDays } from 'date-fns'
 import { getLastCloseoutDate } from './cashCloseout.dashboard.service'
@@ -462,20 +463,17 @@ export async function simulateTransaction(
 }> {
   logger.info('Simulating transaction', { venueId, params })
 
-  // Get venue payment config to find merchant account
-  const venueConfig = await prisma.venuePaymentConfig.findUnique({
-    where: { venueId },
-    select: {
-      primaryAccountId: true,
-    },
-  })
+  // Get venue payment config to find merchant account (with org-level fallback)
+  const effectiveResult = await getEffectivePaymentConfig(venueId)
 
-  if (!venueConfig) {
+  if (!effectiveResult) {
     throw new NotFoundError('Venue payment configuration not found')
   }
 
+  const primaryAccountId = effectiveResult.config.primaryAccountId
+
   // Find settlement configuration
-  const config = await findActiveSettlementConfig(venueConfig.primaryAccountId, params.cardType, params.transactionDate)
+  const config = await findActiveSettlementConfig(primaryAccountId, params.cardType, params.transactionDate)
 
   if (!config) {
     logger.warn('No settlement configuration found for simulation', {

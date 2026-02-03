@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { AccountType } from '@prisma/client'
 
 /**
@@ -56,47 +57,22 @@ interface UpdateVenuePaymentConfigData {
  * @returns Venue payment config with merchant account details
  */
 export async function getVenuePaymentConfig(venueId: string) {
-  const config = await prisma.venuePaymentConfig.findUnique({
-    where: { venueId },
-    include: {
-      venue: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-        },
-      },
-      primaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-      secondaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-      tertiaryAccount: {
-        include: {
-          provider: true,
-        },
-      },
-    },
-  })
+  const result = await getEffectivePaymentConfig(venueId)
 
-  if (!config) {
+  if (!result) {
     logger.warn('No payment config found for venue', { venueId })
     return null
   }
 
   logger.info('Retrieved venue payment config', {
     venueId,
-    hasPrimary: !!config.primaryAccount,
-    hasSecondary: !!config.secondaryAccount,
-    hasTertiary: !!config.tertiaryAccount,
+    source: result.source,
+    hasPrimary: !!result.config.primaryAccount,
+    hasSecondary: !!result.config.secondaryAccount,
+    hasTertiary: !!result.config.tertiaryAccount,
   })
 
-  return config
+  return result.config
 }
 
 /**

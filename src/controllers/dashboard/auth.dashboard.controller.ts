@@ -356,9 +356,13 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       }
     } else if (isOwner) {
       // For OWNER, fetch all venues in their organization
+      const ownerOrgId = staff.organizations[0]?.organizationId
+      if (!ownerOrgId) {
+        return res.status(400).json({ error: 'Owner has no organization assigned' })
+      }
       const orgVenues = await prisma.venue.findMany({
         where: {
-          organizationId: staff.organizations[0]?.organizationId!,
+          organizationId: ownerOrgId,
           active: true,
         },
         select: {

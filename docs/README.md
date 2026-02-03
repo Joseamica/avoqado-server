@@ -127,6 +127,7 @@
 | [features/CASH_CLOSEOUT.md](./features/CASH_CLOSEOUT.md)                 | Cash reconciliation, variance detection, deposit methods      |
 | [SHIFT_MANAGEMENT_ROADMAP.md](./SHIFT_MANAGEMENT_ROADMAP.md)             | Shift management implementation                               |
 | [features/SETTLEMENT_INCIDENTS.md](./features/SETTLEMENT_INCIDENTS.md)   | Settlement incident tracking for SOFOM                        |
+| [features/ORGANIZATION_PAYMENT_CONFIG.md](./features/ORGANIZATION_PAYMENT_CONFIG.md) | Org-level payment config with venue inheritance      |
 
 ### AI & Analytics
 

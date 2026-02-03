@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client'
+import { getEffectivePaymentConfig, getEffectivePricing } from '@/services/organization-payment-config.service'
 
 const prisma = new PrismaClient()
 
@@ -20,53 +21,11 @@ interface VenuePaymentConfigUpdateInput {
 }
 
 /**
- * Get payment config for a venue
+ * Get payment config for a venue (with org-level fallback)
  */
 export async function getVenuePaymentConfig(venueId: string) {
-  const config = await prisma.venuePaymentConfig.findUnique({
-    where: { venueId },
-    include: {
-      venue: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-        },
-      },
-      primaryAccount: {
-        include: {
-          provider: true,
-          costStructures: {
-            where: { active: true },
-            orderBy: { effectiveFrom: 'desc' },
-            take: 1,
-          },
-        },
-      },
-      secondaryAccount: {
-        include: {
-          provider: true,
-          costStructures: {
-            where: { active: true },
-            orderBy: { effectiveFrom: 'desc' },
-            take: 1,
-          },
-        },
-      },
-      tertiaryAccount: {
-        include: {
-          provider: true,
-          costStructures: {
-            where: { active: true },
-            orderBy: { effectiveFrom: 'desc' },
-            take: 1,
-          },
-        },
-      },
-    },
-  })
-
-  return config
+  const result = await getEffectivePaymentConfig(venueId)
+  return result?.config ?? null
 }
 
 /**
@@ -264,65 +223,17 @@ export async function deleteVenuePaymentConfig(configId: string) {
 }
 
 /**
- * Get merchant accounts for a venue (based on payment config)
+ * Get merchant accounts for a venue (with org-level fallback)
  */
 export async function getVenueMerchantAccounts(venueId: string) {
-  const config = await prisma.venuePaymentConfig.findUnique({
-    where: { venueId },
-    include: {
-      primaryAccount: {
-        include: {
-          provider: true,
-          costStructures: {
-            where: { active: true },
-            orderBy: { effectiveFrom: 'desc' },
-            take: 1,
-          },
-          _count: {
-            select: {
-              transactionCosts: true,
-            },
-          },
-        },
-      },
-      secondaryAccount: {
-        include: {
-          provider: true,
-          costStructures: {
-            where: { active: true },
-            orderBy: { effectiveFrom: 'desc' },
-            take: 1,
-          },
-          _count: {
-            select: {
-              transactionCosts: true,
-            },
-          },
-        },
-      },
-      tertiaryAccount: {
-        include: {
-          provider: true,
-          costStructures: {
-            where: { active: true },
-            orderBy: { effectiveFrom: 'desc' },
-            take: 1,
-          },
-          _count: {
-            select: {
-              transactionCosts: true,
-            },
-          },
-        },
-      },
-    },
-  })
+  const result = await getEffectivePaymentConfig(venueId)
+  const config = result?.config
 
   if (!config) {
     return []
   }
 
-  const accounts = []
+  const accounts: any[] = []
 
   if (config.primaryAccount) {
     accounts.push({
@@ -349,18 +260,11 @@ export async function getVenueMerchantAccounts(venueId: string) {
 }
 
 /**
- * Get venue pricing structures for a venue
+ * Get venue pricing structures for a venue (with org-level fallback)
  */
 export async function getVenuePricingByVenue(venueId: string) {
-  const pricingStructures = await prisma.venuePricingStructure.findMany({
-    where: {
-      venueId,
-      active: true,
-    },
-    orderBy: [{ accountType: 'asc' }, { effectiveFrom: 'desc' }],
-  })
-
-  return pricingStructures
+  const result = await getEffectivePricing(venueId)
+  return result?.pricing ?? []
 }
 
 /**

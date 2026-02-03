@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import * as organizationController from '../../controllers/dashboard/organizations.superadmin.controller'
+import * as orgPaymentController from '../../controllers/dashboard/organization-payment.superadmin.controller'
 import { validateRequest } from '../../middlewares/validation'
 import { z } from 'zod'
 
@@ -92,6 +93,49 @@ const updateModuleConfigSchema = z.object({
   }),
 })
 
+// --- Payment Config Schemas ---
+
+const setPaymentConfigSchema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('Invalid organization ID'),
+  }),
+  body: z.object({
+    primaryAccountId: z.string().cuid('Invalid primary account ID'),
+    secondaryAccountId: z.string().cuid('Invalid secondary account ID').optional().nullable(),
+    tertiaryAccountId: z.string().cuid('Invalid tertiary account ID').optional().nullable(),
+    routingRules: z.record(z.any()).optional().nullable(),
+    preferredProcessor: z.enum(['LEGACY', 'MENTA', 'CLIP', 'BANK_DIRECT', 'AUTO']).optional(),
+  }),
+})
+
+const setPricingSchema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('Invalid organization ID'),
+  }),
+  body: z.object({
+    accountType: z.enum(['PRIMARY', 'SECONDARY', 'TERTIARY']),
+    debitRate: z.number().min(0).max(1),
+    creditRate: z.number().min(0).max(1),
+    amexRate: z.number().min(0).max(1),
+    internationalRate: z.number().min(0).max(1),
+    fixedFeePerTransaction: z.number().optional().nullable(),
+    monthlyServiceFee: z.number().optional().nullable(),
+    minimumMonthlyVolume: z.number().optional().nullable(),
+    volumePenalty: z.number().optional().nullable(),
+    effectiveFrom: z.string().datetime(),
+    effectiveTo: z.string().datetime().optional().nullable(),
+    contractReference: z.string().optional().nullable(),
+    notes: z.string().optional().nullable(),
+  }),
+})
+
+const deletePricingSchema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('Invalid organization ID'),
+    pricingId: z.string().cuid('Invalid pricing ID'),
+  }),
+})
+
 // ===========================================
 // ROUTES
 // ===========================================
@@ -174,5 +218,55 @@ router.patch(
   validateRequest(updateModuleConfigSchema),
   organizationController.updateOrganizationModuleConfig,
 )
+
+// ===========================================
+// ORGANIZATION PAYMENT CONFIG ROUTES
+// ===========================================
+
+/**
+ * @route   GET /api/v1/dashboard/superadmin/organizations/:organizationId/payment-config
+ * @desc    Get org payment config, pricing, and venue inheritance status
+ * @access  Superadmin only
+ */
+router.get('/:organizationId/payment-config', validateRequest(organizationIdSchema), orgPaymentController.getPaymentConfig)
+
+/**
+ * @route   PUT /api/v1/dashboard/superadmin/organizations/:organizationId/payment-config
+ * @desc    Set/update org payment config (merchant accounts)
+ * @access  Superadmin only
+ */
+router.put('/:organizationId/payment-config', validateRequest(setPaymentConfigSchema), orgPaymentController.setPaymentConfig)
+
+/**
+ * @route   DELETE /api/v1/dashboard/superadmin/organizations/:organizationId/payment-config
+ * @desc    Remove org payment config
+ * @access  Superadmin only
+ */
+router.delete('/:organizationId/payment-config', validateRequest(organizationIdSchema), orgPaymentController.deletePaymentConfig)
+
+/**
+ * @route   PUT /api/v1/dashboard/superadmin/organizations/:organizationId/payment-config/pricing
+ * @desc    Set/update org pricing structure
+ * @access  Superadmin only
+ */
+router.put('/:organizationId/payment-config/pricing', validateRequest(setPricingSchema), orgPaymentController.setPricing)
+
+/**
+ * @route   DELETE /api/v1/dashboard/superadmin/organizations/:organizationId/payment-config/pricing/:pricingId
+ * @desc    Remove (deactivate) a pricing structure
+ * @access  Superadmin only
+ */
+router.delete(
+  '/:organizationId/payment-config/pricing/:pricingId',
+  validateRequest(deletePricingSchema),
+  orgPaymentController.deletePricing,
+)
+
+/**
+ * @route   GET /api/v1/dashboard/superadmin/organizations/:organizationId/payment-config/venues
+ * @desc    Venue inheritance status list
+ * @access  Superadmin only
+ */
+router.get('/:organizationId/payment-config/venues', validateRequest(organizationIdSchema), orgPaymentController.getVenueInheritance)
 
 export default router

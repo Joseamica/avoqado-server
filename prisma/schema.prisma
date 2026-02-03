@@ -52,6 +52,10 @@ model Organization {
   // Geographic zones for grouping venues
   zones Zone[]
 
+  // Organization-level payment configuration (inherited by venues)
+  organizationPaymentConfig   OrganizationPaymentConfig?
+  organizationPricingStructures OrganizationPricingStructure[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -2805,6 +2809,9 @@ model MerchantAccount {
   venueConfigsPrimary   VenuePaymentConfig[]      @relation("PrimaryAccount")
   venueConfigsSecondary VenuePaymentConfig[]      @relation("SecondaryAccount")
   venueConfigsTertiary  VenuePaymentConfig[]      @relation("TertiaryAccount")
+  orgConfigsPrimary     OrganizationPaymentConfig[] @relation("OrgPrimaryAccount")
+  orgConfigsSecondary   OrganizationPaymentConfig[] @relation("OrgSecondaryAccount")
+  orgConfigsTertiary    OrganizationPaymentConfig[] @relation("OrgTertiaryAccount")
   costStructures        ProviderCostStructure[]
   transactionCosts      TransactionCost[]
   settlementConfigs     SettlementConfiguration[]
@@ -3021,6 +3028,84 @@ model VenuePaymentConfig {
   @@index([primaryAccountId])
   @@index([secondaryAccountId])
   @@index([tertiaryAccountId])
+}
+
+/// Organization-level payment configuration. Mirrors VenuePaymentConfig but
+/// applies to all venues in the organization that don't have their own config.
+/// Resolution order: VenuePaymentConfig (explicit) → OrganizationPaymentConfig (inherited).
+model OrganizationPaymentConfig {
+  id             String       @id @default(cuid())
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Account hierarchy (same structure as VenuePaymentConfig)
+  primaryAccountId String
+  primaryAccount   MerchantAccount @relation("OrgPrimaryAccount", fields: [primaryAccountId], references: [id], onDelete: Restrict)
+
+  secondaryAccountId String?
+  secondaryAccount   MerchantAccount? @relation("OrgSecondaryAccount", fields: [secondaryAccountId], references: [id], onDelete: Restrict)
+
+  tertiaryAccountId String?
+  tertiaryAccount   MerchantAccount? @relation("OrgTertiaryAccount", fields: [tertiaryAccountId], references: [id], onDelete: Restrict)
+
+  // Routing rules (JSON for flexibility)
+  routingRules Json?
+
+  // Default processor preference
+  preferredProcessor PaymentProcessor @default(AUTO)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([primaryAccountId])
+  @@index([secondaryAccountId])
+  @@index([tertiaryAccountId])
+}
+
+/// Organization-level pricing structure. Mirrors VenuePricingStructure but
+/// applies to all venues in the organization that don't have their own pricing.
+/// Resolution order: VenuePricingStructure (explicit) → OrganizationPricingStructure (inherited).
+model OrganizationPricingStructure {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Account type this pricing applies to
+  accountType AccountType // PRIMARY, SECONDARY, TERTIARY
+
+  // Pricing by transaction type (with Avoqado's margin included)
+  debitRate         Decimal @db.Decimal(5, 4)
+  creditRate        Decimal @db.Decimal(5, 4)
+  amexRate          Decimal @db.Decimal(5, 4)
+  internationalRate Decimal @db.Decimal(5, 4)
+
+  // Fixed fees (with margin)
+  fixedFeePerTransaction Decimal? @db.Decimal(8, 4)
+  monthlyServiceFee      Decimal? @db.Decimal(10, 2)
+
+  // Minimum transaction volumes or penalties
+  minimumMonthlyVolume Decimal? @db.Decimal(12, 2)
+  volumePenalty        Decimal? @db.Decimal(10, 2)
+
+  // Period this pricing is valid for
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  // Status
+  active Boolean @default(true)
+
+  // Contract/agreement reference
+  contractReference String?
+  notes             String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, accountType, effectiveFrom])
+  @@index([organizationId])
+  @@index([accountType])
+  @@index([effectiveFrom])
 }
 
 // Generic webhook subscription (works for any provider)

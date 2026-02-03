@@ -63,6 +63,7 @@ POS terminals, payments, reconciliation, compliance (PCI/KYC), security, reliabi
 | `docs/DATABASE_SCHEMA.md`       | Complete database schema reference (includes StaffOrganization)   |
 | `docs/BUSINESS_TYPES.md`        | VenueType enum, BusinessCategory, MCC mapping, industry standards |
 | `docs/features/TEAM_INVITATIONS.md` | Team invitations, multi-venue, multi-org (StaffOrganization)  |
+| `docs/features/ORGANIZATION_PAYMENT_CONFIG.md` | Org-level payment config with venue inheritance |
 
 ### Payments
 

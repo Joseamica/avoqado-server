@@ -18,9 +18,10 @@
 import prisma from '@/utils/prismaClient'
 import { VerificationStatus, VenueType, AccountType } from '@prisma/client'
 import logger from '@/config/logger'
+import { getEffectivePaymentConfig, getEffectivePricing } from '@/services/organization-payment-config.service'
 
 // Status types for checklist items
-type CheckStatus = 'ok' | 'pending' | 'missing' | 'default'
+type CheckStatus = 'ok' | 'pending' | 'missing' | 'default' | 'inherited'
 
 interface ChecklistItem {
   status: CheckStatus
@@ -134,6 +135,9 @@ export async function getPaymentReadiness(venueId: string): Promise<PaymentReadi
   const blockingItems: string[] = []
   let nextAction = ''
 
+  // Resolve effective payment config early (needed by steps 3, 5, 7, 8)
+  const effectiveConfig = await getEffectivePaymentConfig(venueId)
+
   // 1. KYC Approved
   const kycApproved: ChecklistItem = {
     status: venue.kycStatus === VerificationStatus.VERIFIED ? 'ok' : 'pending',
@@ -165,8 +169,8 @@ export async function getPaymentReadiness(venueId: string): Promise<PaymentReadi
   }
 
   // 3. Merchant Account Created (non-demo)
-  // Check both: primaryAccount from VenuePaymentConfig OR merchant accounts linked via terminals
-  const primaryAccount = venue.paymentConfig?.primaryAccount
+  // Check: primaryAccount from effective config (venue or org) OR merchant accounts linked via terminals
+  const primaryAccount = effectiveConfig?.config?.primaryAccount ?? venue.paymentConfig?.primaryAccount
 
   // Also check if any terminal has a merchant account assigned (even if VenuePaymentConfig not set)
   const terminalMerchantIds = realTerminals.flatMap(t => t.assignedMerchantIds)
@@ -227,29 +231,41 @@ export async function getPaymentReadiness(venueId: string): Promise<PaymentReadi
     if (!nextAction) nextAction = 'Vincular terminal con cuenta merchant'
   }
 
-  // 5. Venue Payment Config
+  // 5. Venue Payment Config (with org-level inheritance)
+  const configSource = effectiveConfig?.source
+  const hasPaymentConfig = !!effectiveConfig?.config?.primaryAccountId
+
   const venuePaymentConfigured: ChecklistItem = {
-    status: venue.paymentConfig?.primaryAccountId ? 'ok' : 'missing',
-    details: venue.paymentConfig?.primaryAccountId ? 'Configuración de pago activa' : 'No hay VenuePaymentConfig',
+    status: hasPaymentConfig ? (configSource === 'organization' ? 'inherited' : 'ok') : 'missing',
+    details: hasPaymentConfig
+      ? configSource === 'organization'
+        ? 'Heredado de organizacion'
+        : 'Configuracion de pago activa'
+      : 'No hay VenuePaymentConfig',
   }
-  if (venuePaymentConfigured.status !== 'ok') {
+  if (!hasPaymentConfig) {
     blockingItems.push('venuePaymentConfigured')
     if (!nextAction) nextAction = 'Configurar cuenta primaria de pagos'
   }
 
-  // 6. Pricing Structure Set
-  const primaryPricing = venue.pricingStructures.find(p => p.accountType === AccountType.PRIMARY)
-  const isDefaultPricing = primaryPricing?.contractReference?.startsWith('AUTO-')
+  // 6. Pricing Structure Set (with org-level inheritance)
+  const effectivePricingResult = await getEffectivePricing(venueId, AccountType.PRIMARY)
+  const pricingSource = effectivePricingResult?.source
+  const primaryPricing = effectivePricingResult?.pricing?.[0]
+  const isDefaultPricing =
+    primaryPricing && 'contractReference' in primaryPricing ? (primaryPricing as any).contractReference?.startsWith('AUTO-') : false
   const pricingStructureSet: ChecklistItem & { isDefault?: boolean } = {
-    status: primaryPricing ? (isDefaultPricing ? 'default' : 'ok') : 'missing',
+    status: primaryPricing ? (pricingSource === 'organization' ? 'inherited' : isDefaultPricing ? 'default' : 'ok') : 'missing',
     details: primaryPricing
-      ? isDefaultPricing
-        ? `Pricing por defecto (${Number(primaryPricing.debitRate) * 100}%)`
-        : `Pricing personalizado (${Number(primaryPricing.debitRate) * 100}%)`
+      ? pricingSource === 'organization'
+        ? `Heredado de organizacion (${Number(primaryPricing.debitRate) * 100}%)`
+        : isDefaultPricing
+          ? `Pricing por defecto (${Number(primaryPricing.debitRate) * 100}%)`
+          : `Pricing personalizado (${Number(primaryPricing.debitRate) * 100}%)`
       : 'No hay estructura de precios configurada',
     isDefault: isDefaultPricing,
   }
-  // Pricing is not blocking if using defaults
+  // Pricing is not blocking if using defaults or inherited
 
   // 7. Provider Cost Structure
   const merchantAccountId = primaryAccount?.id
@@ -277,12 +293,14 @@ export async function getPaymentReadiness(venueId: string): Promise<PaymentReadi
 
   // Determine if venue can process payments
   // Blocking: KYC, Terminal, Merchant, Terminal-Merchant Link, VenuePaymentConfig
+  // 'inherited' counts as configured (org-level config is valid)
+  const configReady = venuePaymentConfigured.status === 'ok' || venuePaymentConfigured.status === 'inherited'
   const canProcessPayments =
     kycApproved.status === 'ok' &&
     terminalRegistered.status === 'ok' &&
     merchantAccountCreated.status === 'ok' &&
     terminalMerchantLinked.status === 'ok' &&
-    venuePaymentConfigured.status === 'ok'
+    configReady
 
   // Default next action if all blocking items are done
   if (!nextAction && !canProcessPayments) {
