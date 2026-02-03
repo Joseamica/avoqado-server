@@ -15,6 +15,7 @@ import webhookRoutes from './superadmin/webhook.routes'
 import terminalRoutes from './superadmin/terminal.routes'
 import creditAssessmentRoutes from './superadmin/creditAssessment.routes'
 import moduleRoutes from './superadmin/module.routes'
+import onboardingRoutes from './superadmin/onboarding.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -35,6 +36,7 @@ router.use('/venue-pricing', venuePricingRoutes)
 router.use('/webhooks', webhookRoutes)
 router.use('/credit', creditAssessmentRoutes)
 router.use('/modules', moduleRoutes)
+router.use('/onboarding', onboardingRoutes)
 // app-updates route is mounted in app.ts with 100MB body limit (not here)
 
 export default router
