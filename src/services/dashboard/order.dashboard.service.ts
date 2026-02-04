@@ -38,10 +38,10 @@ export async function getOrders(venueId: string, page: number, pageSize: number)
   const skip = (page - 1) * pageSize
   const take = pageSize
 
-  // Exclude PENDING orders - they're drafts/carts still being built
+  // Exclude PENDING, CANCELLED, DELETED orders - they shouldn't appear in order list
   const whereClause = {
     venueId,
-    status: { not: OrderStatus.PENDING },
+    status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
   }
 
   const [orders, total] = await prisma.$transaction([

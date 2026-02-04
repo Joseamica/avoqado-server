@@ -58,10 +58,10 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   })
 
   // Filter out:
-  // 1. Pending payments (not completed)
+  // 1. Pending/Failed payments (only COMPLETED should count as sales)
   // 2. Payments from cancelled orders (should not count towards total sales)
   const validPayments = payments.filter(p => {
-    if (p.status === TransactionStatus.PENDING) return false
+    if (p.status !== TransactionStatus.COMPLETED) return false
     if (p.order?.status === OrderStatus.CANCELLED) return false
     return true
   })
@@ -81,7 +81,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       ...dateFilter,
     },
     include: {
@@ -195,7 +195,7 @@ async function generateTablePerformance(venueId: string, fromDate: Date, toDate:
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -270,7 +270,7 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -331,7 +331,7 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -445,11 +445,11 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   })
 
   // Filter out:
-  // 1. Pending payments (not completed)
+  // 1. Pending/Failed payments (only COMPLETED should count as sales)
   // 2. Payments from cancelled orders (should not count towards total sales)
   const validPayments = payments.filter(p => {
-    // Exclude pending payments
-    if (p.status === TransactionStatus.PENDING) return false
+    // Only include completed payments
+    if (p.status !== TransactionStatus.COMPLETED) return false
     // Exclude payments from cancelled orders
     if (p.order?.status === OrderStatus.CANCELLED) return false
     return true
@@ -616,7 +616,7 @@ async function getBestSellingProductsData(venueId: string, dateFilter: any) {
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       ...dateFilter,
     },
     include: {
@@ -668,7 +668,8 @@ async function getTipsOverTimeData(venueId: string, dateFilter: any) {
     },
   })
 
-  const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
+  // Only include COMPLETED payments (exclude PENDING, FAILED, etc.)
+  const validPayments = payments.filter(p => p.status === TransactionStatus.COMPLETED)
 
   const transformedPayments = validPayments.map(payment => ({
     createdAt: payment.createdAt.toISOString(),
@@ -692,7 +693,8 @@ async function getSalesByPaymentMethodData(venueId: string, dateFilter: any) {
     },
   })
 
-  const validPayments = payments.filter(p => p.status !== TransactionStatus.PENDING)
+  // Only include COMPLETED payments (exclude PENDING, FAILED, etc.)
+  const validPayments = payments.filter(p => p.status === TransactionStatus.COMPLETED)
 
   const transformedPayments = validPayments.map(payment => ({
     amount: Number(payment.amount),
@@ -720,7 +722,7 @@ async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Dat
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -736,7 +738,7 @@ async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Dat
   orders.forEach(order => {
     const dateStr = order.createdAt.toISOString().split('T')[0]
     const revenue = order.payments
-      .filter(payment => payment.status !== TransactionStatus.PENDING)
+      .filter(payment => payment.status === TransactionStatus.COMPLETED)
       .reduce((sum, payment) => sum + Number(payment.amount), 0)
 
     revenueByDate.set(dateStr, (revenueByDate.get(dateStr) || 0) + revenue)
@@ -760,7 +762,7 @@ async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -776,7 +778,7 @@ async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
   orders.forEach(order => {
     const dateStr = order.createdAt.toISOString().split('T')[0]
     const revenue = order.payments
-      .filter(payment => payment.status !== TransactionStatus.PENDING)
+      .filter(payment => payment.status === TransactionStatus.COMPLETED)
       .reduce((sum, payment) => sum + Number(payment.amount), 0)
 
     if (revenue > 0) {
@@ -806,7 +808,7 @@ async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Da
   const orders = await prisma.order.findMany({
     where: {
       venueId,
-      status: { not: OrderStatus.PENDING },
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: {
         gte: fromDate,
         lte: toDate,

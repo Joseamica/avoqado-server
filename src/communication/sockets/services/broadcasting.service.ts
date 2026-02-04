@@ -57,7 +57,7 @@ export class BroadcastingService {
         socket.emit(event, enrichedPayload)
       })
 
-      logger.info('Broadcast to venue completed', {
+      logger.debug('Broadcast to venue completed', {
         correlationId,
         venueId,
         event,

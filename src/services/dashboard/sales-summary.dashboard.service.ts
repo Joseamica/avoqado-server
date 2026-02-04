@@ -123,12 +123,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Calculate Core Metrics
   // ============================================================
 
-  // 1. Gross Sales - Total from valid orders (not cancelled, not refunded)
+  // 1. Gross Sales - Total from valid orders (exclude drafts, cancelled, deleted, refunded)
   const grossSalesResult = await prisma.order.aggregate({
     where: {
       venueId,
       ...dateFilter,
-      status: { notIn: ['CANCELLED'] },
+      status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] },
       paymentStatus: { notIn: ['REFUNDED'] },
     },
     _sum: {
@@ -163,7 +163,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     where: {
       venueId,
       ...dateFilter,
-      status: { notIn: ['CANCELLED'] },
+      status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] },
       paymentStatus: { in: ['PENDING', 'PARTIAL'] },
     },
     _sum: {

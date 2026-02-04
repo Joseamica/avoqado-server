@@ -60,7 +60,7 @@ class TerminalRegistry {
       this.socketToTerminal.set(effectiveSocketId, terminalId)
     }
 
-    logger.info(`📡 Terminal registered: ${terminalId} → ${socketId} (venue: ${venueId}). Total: ${this.terminals.size}`, {
+    logger.debug(`📡 Terminal registered: ${terminalId} → ${socketId} (venue: ${venueId}). Total: ${this.terminals.size}`, {
       terminalId,
       socketId,
       venueId,

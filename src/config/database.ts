@@ -15,8 +15,15 @@ pgPool.on('connect', () => {
 })
 
 pgPool.on('error', err => {
-  logger.error('Unexpected error on idle client in pgPool', err)
-  process.exit(-1) // Or handle more gracefully depending on your strategy
+  // Don't crash on connection errors - pg Pool handles reconnection automatically
+  // This commonly happens on cloud platforms (Render, Heroku) due to:
+  // - Network blips
+  // - Database maintenance windows
+  // - Idle connection timeouts
+  logger.warn('Connection error on idle client in pgPool (will auto-reconnect)', {
+    message: err.message,
+    code: (err as any).code,
+  })
 })
 
 export default pgPool

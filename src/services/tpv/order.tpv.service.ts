@@ -291,6 +291,7 @@ interface CreateOrderInput {
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   terminalId?: string | null // Terminal that created this order (for sales attribution)
   source?: 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS' // Order source - KIOSK orders are excluded from pay-later lists
+  externalId?: string | null // Idempotency key (client order ID)
 }
 
 /**
@@ -304,6 +305,59 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
   logger.info(
     `🆕 [ORDER SERVICE] Creating new order | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | table=${input.tableId || 'none'} | source=${input.source || 'TPV'}`,
   )
+
+  if (input.externalId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: {
+        venueId_externalId: {
+          venueId,
+          externalId: input.externalId,
+        },
+      },
+      include: {
+        items: {
+          include: {
+            product: true,
+            modifiers: {
+              include: {
+                modifier: true,
+              },
+            },
+          },
+        },
+        payments: true,
+        table: {
+          select: {
+            id: true,
+            number: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        servedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+
+    if (existingOrder) {
+      logger.warn(`🔄 [ORDER SERVICE] Duplicate createOrder detected (externalId=${input.externalId}) - returning existing order`)
+      const tableName = existingOrder.table ? `Mesa ${existingOrder.table.number}` : null
+      return {
+        ...flattenOrderModifiers(existingOrder),
+        tableName,
+      }
+    }
+  }
 
   // Validate staff if provided
   if (input.waiterId) {
@@ -333,6 +387,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
       kitchenStatus: 'PENDING',
       type: input.orderType || 'DINE_IN',
       source: input.source || 'TPV', // KIOSK orders are excluded from pay-later/open orders lists
+      externalId: input.externalId || null,
       subtotal: 0,
       discountAmount: 0,
       taxAmount: 0,
@@ -393,6 +448,62 @@ interface AddOrderItemInput {
   quantity: number
   notes?: string | null
   modifierIds?: string[] // Array of modifier IDs to add to the order item
+  externalId?: string | null
+}
+
+interface NormalizedAddOrderItemInput extends AddOrderItemInput {
+  _count: number
+}
+
+function normalizeNotes(notes?: string | null): string | null {
+  if (!notes) return null
+  const trimmed = notes.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function normalizeExternalId(externalId?: string | null): string | null {
+  if (!externalId) return null
+  const trimmed = externalId.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function normalizeModifierIds(modifierIds?: string[]): string[] {
+  return (modifierIds || []).filter(Boolean).sort()
+}
+
+function buildAddItemKey(productId: string, modifierIds: string[], notes: string | null, externalId: string | null): string {
+  const notesKey = notes ?? ''
+  const modifiersKey = modifierIds.join('|')
+  const externalKey = externalId ?? ''
+  return `${productId}|${notesKey}|${modifiersKey}|${externalKey}`
+}
+
+function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemInput[] {
+  const map = new Map<string, NormalizedAddOrderItemInput>()
+
+  for (const item of items) {
+    const normalizedNotes = normalizeNotes(item.notes)
+    const normalizedModifiers = normalizeModifierIds(item.modifierIds)
+    const normalizedExternalId = normalizeExternalId(item.externalId)
+    const key = buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId)
+
+    const existing = map.get(key)
+    if (existing) {
+      existing.quantity += item.quantity
+      existing._count += 1
+    } else {
+      map.set(key, {
+        productId: item.productId,
+        quantity: item.quantity,
+        notes: normalizedNotes,
+        modifierIds: normalizedModifiers,
+        externalId: normalizedExternalId,
+        _count: 1,
+      })
+    }
+  }
+
+  return Array.from(map.values())
 }
 
 /**
@@ -411,6 +522,13 @@ export async function addItemsToOrder(
   expectedVersion: number,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`📝 [ORDER SERVICE] Adding ${items.length} items to order ${orderId} (expected version: ${expectedVersion})`)
+
+  const normalizedItems = normalizeAddItems(items)
+  if (normalizedItems.length !== items.length) {
+    logger.warn(
+      `⚠️ [ADD ITEMS] Normalized ${items.length} items → ${normalizedItems.length} unique (duplicates merged by product+modifiers+notes)`,
+    )
+  }
 
   // Fetch order with version check
   const order = await prisma.order.findUnique({
@@ -467,7 +585,7 @@ export async function addItemsToOrder(
   }
 
   // Fetch all modifiers if any items have modifiers
-  const allModifierIds = items.flatMap(item => item.modifierIds || [])
+  const allModifierIds = normalizedItems.flatMap(item => item.modifierIds || [])
   logger.info(`🔍 [ADD ITEMS] Modifier IDs requested: ${JSON.stringify(allModifierIds)}`)
 
   // ✅ P1 FIX: Add venueId filter through group relation to prevent cross-tenant access (security)
@@ -492,8 +610,9 @@ export async function addItemsToOrder(
   // Previously, when TPV synced a quantity change, it called addItemsToOrder
   // which always created NEW items. Now we check for existing items first.
   const newOrderItems = await Promise.all(
-    items.map(async item => {
+    normalizedItems.map(async item => {
       const product = products.find(p => p.id === item.productId)!
+      const normalizedNotes = normalizeNotes(item.notes)
 
       // Calculate modifier total
       const itemModifiers = item.modifierIds || []
@@ -506,15 +625,173 @@ export async function addItemsToOrder(
         `💰 [ADD ITEMS] Product: ${product.name} | Base: $${product.price} | Modifiers: $${modifierTotal} | Total per unit: $${Number(product.price) + modifierTotal}`,
       )
 
-      // Calculate item total: (product price + modifiers) * quantity
-      const itemTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * item.quantity)
+      // ⭐ Idempotency: prefer externalId when provided
+      const normalizedExternalId = normalizeExternalId(item.externalId)
 
-      // ⭐ P0 FIX: Check if item with same productId AND same modifiers already exists
+      if (normalizedExternalId) {
+        const existingByExternal = await prisma.orderItem.findFirst({
+          where: {
+            orderId: order.id,
+            externalId: normalizedExternalId,
+          },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
+            },
+          },
+        })
+
+        if (existingByExternal) {
+          const updatedQuantity = item.quantity
+          const updatedTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * updatedQuantity)
+
+          logger.info(
+            `🔄 [ADD ITEMS] UPDATING by externalId: ${product.name} | old qty=${existingByExternal.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
+          )
+
+          const updatedItem = await prisma.orderItem.update({
+            where: { id: existingByExternal.id },
+            data: {
+              quantity: updatedQuantity,
+              total: updatedTotal,
+              notes: normalizedNotes ?? existingByExternal.notes,
+              externalId: existingByExternal.externalId ?? normalizedExternalId,
+            },
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          })
+
+          logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by externalId: ${product.name} | qty=${updatedItem.quantity}`)
+          return updatedItem
+        }
+
+        const existingById = await prisma.orderItem.findFirst({
+          where: {
+            id: normalizedExternalId,
+            orderId: order.id,
+          },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
+            },
+          },
+        })
+
+        if (existingById) {
+          const updatedQuantity = item.quantity
+          const updatedTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * updatedQuantity)
+
+          logger.info(
+            `🔄 [ADD ITEMS] UPDATING by id fallback: ${product.name} | old qty=${existingById.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
+          )
+
+          const updatedItem = await prisma.orderItem.update({
+            where: { id: existingById.id },
+            data: {
+              quantity: updatedQuantity,
+              total: updatedTotal,
+              notes: normalizedNotes ?? existingById.notes,
+              externalId: existingById.externalId ?? normalizedExternalId,
+            },
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          })
+
+          logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by id fallback: ${product.name} | qty=${updatedItem.quantity}`)
+          return updatedItem
+        }
+
+        // If externalId provided and no match, create new line (no merge)
+        const itemTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * item.quantity)
+        const createdItem = await prisma.orderItem.create({
+          data: {
+            orderId: order.id,
+            productId: item.productId,
+            productName: product.name,
+            productSku: product.sku,
+            categoryName: product.category?.name || null,
+            quantity: item.quantity,
+            unitPrice: product.price,
+            discountAmount: 0,
+            taxAmount: 0,
+            total: itemTotal,
+            notes: normalizedNotes,
+            externalId: normalizedExternalId,
+            modifiers: {
+              create: itemModifiers.map(modifierId => {
+                const modifier = modifiers.find(m => m.id === modifierId)!
+                logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
+                return {
+                  modifierId,
+                  name: modifier.name,
+                  quantity: 1,
+                  price: modifier.price,
+                }
+              }),
+            },
+          },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
+            },
+          },
+        })
+
+        logger.info(`✅ [ADD ITEMS] CREATED OrderItem by externalId: ${product.name} | qty=${createdItem.quantity}`)
+        return createdItem
+      }
+
       // Sort modifier IDs for consistent comparison
       const sortedNewModifiers = [...itemModifiers].sort()
 
-      // More precise check: query existing item with its modifiers
-      const existingItemWithModifiers = await prisma.orderItem.findFirst({
+      // More precise check: query existing items with their modifiers and match by notes + modifiers
+      const existingItemsWithModifiers = await prisma.orderItem.findMany({
         where: {
           orderId: order.id,
           productId: item.productId,
@@ -524,25 +801,27 @@ export async function addItemsToOrder(
         },
       })
 
-      // Check if modifiers match
-      let shouldUpdate = false
-      if (existingItemWithModifiers) {
-        const existingModifierIds = existingItemWithModifiers.modifiers.map(m => m.modifierId).sort()
-        shouldUpdate = JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
-      }
+      const existingItemWithModifiers = existingItemsWithModifiers.find(existing => {
+        const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
+        const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
+        return notesMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+      })
 
-      if (shouldUpdate && existingItemWithModifiers) {
+      if (existingItemWithModifiers) {
         // ⭐ UPDATE existing item instead of creating new one
+        const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
+        const updatedTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * updatedQuantity)
+
         logger.info(
-          `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${item.quantity}`,
+          `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${updatedQuantity} | merged=${item._count > 1}`,
         )
 
         const updatedItem = await prisma.orderItem.update({
           where: { id: existingItemWithModifiers.id },
           data: {
-            quantity: item.quantity,
-            total: itemTotal,
-            notes: item.notes ?? existingItemWithModifiers.notes,
+            quantity: updatedQuantity,
+            total: updatedTotal,
+            notes: normalizedNotes ?? existingItemWithModifiers.notes,
           },
           include: {
             product: {
@@ -565,6 +844,7 @@ export async function addItemsToOrder(
 
       // Create NEW order item with modifiers (original behavior)
       // ✅ Toast/Square pattern: Denormalize product data for order history preservation
+      const itemTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * item.quantity)
       const createdItem = await prisma.orderItem.create({
         data: {
           orderId: order.id,
@@ -578,7 +858,7 @@ export async function addItemsToOrder(
           discountAmount: 0,
           taxAmount: 0,
           total: itemTotal,
-          notes: item.notes,
+          notes: normalizedNotes,
           modifiers: {
             create: itemModifiers.map(modifierId => {
               const modifier = modifiers.find(m => m.id === modifierId)!

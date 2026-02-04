@@ -103,7 +103,7 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
       })
       if (terminal) {
         terminalRegistry.register(heartbeatData.terminalId, null, terminal.venueId, terminal.name || undefined)
-        logger.info(`📡 [HTTP-Heartbeat] Terminal registered: ${heartbeatData.terminalId} (venue: ${terminal.venueId})`)
+        logger.debug(`📡 [HTTP-Heartbeat] Terminal registered: ${heartbeatData.terminalId} (venue: ${terminal.venueId})`)
       }
     } catch (regError) {
       logger.warn(`Failed to register terminal in registry: ${regError}`)

@@ -14,6 +14,8 @@ import * as transactionMobileController from '../controllers/mobile/transaction.
 import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
 import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
+import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
+import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -1016,6 +1018,99 @@ router.get('/devices', authenticateTokenMiddleware, pushMobileController.getMyDe
  *         description: Test notification sent
  */
 router.post('/push/test', authenticateTokenMiddleware, pushMobileController.sendTestPush)
+
+// ============================================================================
+// CUSTOMERS (for POS app)
+// ============================================================================
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customers:
+ *   get:
+ *     tags: [Mobile - Customers]
+ *     summary: List customers for a venue
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *       - in: query
+ *         name: sortBy
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: sortOrder
+ *         schema:
+ *           type: string
+ *           enum: [asc, desc]
+ *     responses:
+ *       200:
+ *         description: List of customers
+ */
+router.get('/venues/:venueId/customers', authenticateTokenMiddleware, customerController.getCustomers)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customers:
+ *   post:
+ *     tags: [Mobile - Customers]
+ *     summary: Create a new customer
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               firstName:
+ *                 type: string
+ *               lastName:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Customer created
+ */
+router.post('/venues/:venueId/customers', authenticateTokenMiddleware, customerController.createCustomer)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customer-groups:
+ *   get:
+ *     tags: [Mobile - Customers]
+ *     summary: List customer groups for a venue
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of customer groups
+ */
+router.get('/venues/:venueId/customer-groups', authenticateTokenMiddleware, customerGroupController.getCustomerGroups)
 
 // ============================================================================
 // PAYMENTS

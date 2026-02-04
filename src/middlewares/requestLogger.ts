@@ -19,10 +19,10 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
   const start = process.hrtime()
   const { method, url, ip } = req
 
-  // Skip logging health checks and heartbeats to reduce log noise
+  // Skip logging health checks and heartbeats to reduce log noise (in all environments)
   const isHealthCheck = url === '/health'
   const isHeartbeat = url.includes('/heartbeat') || url.includes('/tpv/heartbeat')
-  const shouldSkipLogging = (isHealthCheck || isHeartbeat) && process.env.NODE_ENV === 'production'
+  const shouldSkipLogging = isHealthCheck || isHeartbeat
 
   const shouldLogStart = !shouldSkipLogging && process.env.NODE_ENV !== 'development'
 

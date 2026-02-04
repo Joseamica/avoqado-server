@@ -107,6 +107,7 @@
 | Document                                                                 | Description                                                     |
 | ------------------------------------------------------------------------ | --------------------------------------------------------------- |
 | [features/DISCOUNT_ENGINE.md](./features/DISCOUNT_ENGINE.md)             | Discount calculation, BOGO, time-based, stacking rules          |
+| [features/ORDERING_SYNC.md](./features/ORDERING_SYNC.md)                 | TPV ordering sync semantics (add items, merge rules)            |
 | [features/SPLIT_PAYMENTS.md](./features/SPLIT_PAYMENTS.md)               | Split payment types, PaymentAllocation, transition rules        |
 | [features/REFUNDS.md](./features/REFUNDS.md)                             | Refund processing, partial refunds, multi-merchant routing      |
 | [features/DIGITAL_RECEIPTS.md](./features/DIGITAL_RECEIPTS.md)           | Digital receipt generation, immutable snapshots, email delivery |

@@ -2,9 +2,13 @@
  * Organization Dashboard Service
  * Provides organization-level metrics, manager dashboards, and cross-venue analytics
  * for the PlayTelecom/White-Label dashboard.
+ *
+ * IMPORTANT: All date calculations use venue timezone (America/Mexico_City by default)
+ * to ensure "today", "this week", "this month" match the business's operating timezone.
  */
 import prisma from '../../utils/prismaClient'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 
 // Types for organization dashboard
 export interface OrgVisionGlobalSummary {
@@ -154,18 +158,32 @@ export interface VolumeVsTargetData {
 class OrganizationDashboardService {
   /**
    * Get vision global summary for an organization (aggregate KPIs)
+   *
+   * IMPORTANT: Date calculations use venue timezone (America/Mexico_City by default)
+   * to ensure "today", "this week", "this month" match the business's operating timezone,
+   * not the server's timezone (which may be UTC).
    */
-  async getVisionGlobalSummary(orgId: string): Promise<OrgVisionGlobalSummary> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+  async getVisionGlobalSummary(orgId: string, timezone: string = 'America/Mexico_City'): Promise<OrgVisionGlobalSummary> {
+    // Calculate dates in venue timezone, then convert to UTC for database queries
+    const now = new Date()
+    const nowInTz = toZonedTime(now, timezone)
 
-    const weekStart = new Date()
-    weekStart.setDate(weekStart.getDate() - 7)
-    weekStart.setHours(0, 0, 0, 0)
+    // Today start in venue timezone
+    const todayStartTz = new Date(nowInTz)
+    todayStartTz.setHours(0, 0, 0, 0)
+    const todayStart = fromZonedTime(todayStartTz, timezone)
 
-    const monthStart = new Date()
-    monthStart.setDate(1)
-    monthStart.setHours(0, 0, 0, 0)
+    // Week start (7 days ago) in venue timezone
+    const weekStartTz = new Date(nowInTz)
+    weekStartTz.setDate(weekStartTz.getDate() - 7)
+    weekStartTz.setHours(0, 0, 0, 0)
+    const weekStart = fromZonedTime(weekStartTz, timezone)
+
+    // Month start in venue timezone
+    const monthStartTz = new Date(nowInTz)
+    monthStartTz.setDate(1)
+    monthStartTz.setHours(0, 0, 0, 0)
+    const monthStart = fromZonedTime(monthStartTz, timezone)
 
     // Get all venues in organization
     const venues = await prisma.venue.findMany({
@@ -264,18 +282,30 @@ class OrganizationDashboardService {
 
   /**
    * Get store performance ranking for organization
+   *
+   * IMPORTANT: Date calculations use venue timezone to match business operating hours.
    */
-  async getStorePerformance(orgId: string, limit: number = 10): Promise<OrgStorePerformance[]> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+  async getStorePerformance(orgId: string, limit: number = 10, timezone: string = 'America/Mexico_City'): Promise<OrgStorePerformance[]> {
+    // Calculate dates in venue timezone, then convert to UTC for database queries
+    const now = new Date()
+    const nowInTz = toZonedTime(now, timezone)
 
-    const weekStart = new Date()
-    weekStart.setDate(weekStart.getDate() - 7)
-    weekStart.setHours(0, 0, 0, 0)
+    // Today start in venue timezone
+    const todayStartTz = new Date(nowInTz)
+    todayStartTz.setHours(0, 0, 0, 0)
+    const todayStart = fromZonedTime(todayStartTz, timezone)
 
-    const prevWeekStart = new Date()
-    prevWeekStart.setDate(prevWeekStart.getDate() - 14)
-    prevWeekStart.setHours(0, 0, 0, 0)
+    // Week start (7 days ago) in venue timezone
+    const weekStartTz = new Date(nowInTz)
+    weekStartTz.setDate(weekStartTz.getDate() - 7)
+    weekStartTz.setHours(0, 0, 0, 0)
+    const weekStart = fromZonedTime(weekStartTz, timezone)
+
+    // Previous week start (14 days ago) in venue timezone
+    const prevWeekStartTz = new Date(nowInTz)
+    prevWeekStartTz.setDate(prevWeekStartTz.getDate() - 14)
+    prevWeekStartTz.setHours(0, 0, 0, 0)
+    const prevWeekStart = fromZonedTime(prevWeekStartTz, timezone)
 
     // Get all venues
     const venues = await prisma.venue.findMany({
@@ -371,10 +401,16 @@ class OrganizationDashboardService {
 
   /**
    * Get cross-store anomalies for organization
+   *
+   * IMPORTANT: Uses venue timezone for date calculations.
    */
-  async getCrossStoreAnomalies(orgId: string): Promise<OrgCrossStoreAnomaly[]> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+  async getCrossStoreAnomalies(orgId: string, timezone: string = DEFAULT_TIMEZONE): Promise<OrgCrossStoreAnomaly[]> {
+    // Calculate today start in venue timezone
+    const now = new Date()
+    const nowInTz = toZonedTime(now, timezone)
+    const todayStartTz = new Date(nowInTz)
+    todayStartTz.setHours(0, 0, 0, 0)
+    const todayStart = fromZonedTime(todayStartTz, timezone)
 
     const anomalies: OrgCrossStoreAnomaly[] = []
 
@@ -385,8 +421,8 @@ class OrganizationDashboardService {
     })
 
     for (const venue of venues) {
-      // Check for no check-ins after 10 AM (using TimeEntry)
-      const currentHour = new Date().getHours()
+      // Check for no check-ins after 10 AM in venue timezone (using TimeEntry)
+      const currentHour = nowInTz.getHours()
       if (currentHour >= 10) {
         const checkIns = await prisma.timeEntry.count({
           where: {
@@ -544,14 +580,22 @@ class OrganizationDashboardService {
 
   /**
    * Get manager dashboard with stores they oversee
+   *
+   * IMPORTANT: Uses venue timezone for date calculations.
    */
-  async getManagerDashboard(orgId: string, managerId: string): Promise<ManagerDashboard | null> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+  async getManagerDashboard(orgId: string, managerId: string, timezone: string = DEFAULT_TIMEZONE): Promise<ManagerDashboard | null> {
+    // Calculate dates in venue timezone
+    const now = new Date()
+    const nowInTz = toZonedTime(now, timezone)
 
-    const weekStart = new Date()
-    weekStart.setDate(weekStart.getDate() - 7)
-    weekStart.setHours(0, 0, 0, 0)
+    const todayStartTz = new Date(nowInTz)
+    todayStartTz.setHours(0, 0, 0, 0)
+    const todayStart = fromZonedTime(todayStartTz, timezone)
+
+    const weekStartTz = new Date(nowInTz)
+    weekStartTz.setDate(weekStartTz.getDate() - 7)
+    weekStartTz.setHours(0, 0, 0, 0)
+    const weekStart = fromZonedTime(weekStartTz, timezone)
 
     // Get manager info
     const manager = await prisma.staff.findFirst({
@@ -590,9 +634,11 @@ class OrganizationDashboardService {
       },
     })
 
-    const monthStart = new Date()
-    monthStart.setDate(1)
-    monthStart.setHours(0, 0, 0, 0)
+    // Month start in venue timezone
+    const monthStartTz = new Date(nowInTz)
+    monthStartTz.setDate(1)
+    monthStartTz.setHours(0, 0, 0, 0)
+    const monthStart = fromZonedTime(monthStartTz, timezone)
 
     const stores = await Promise.all(
       managedStores.map(async sv => {
