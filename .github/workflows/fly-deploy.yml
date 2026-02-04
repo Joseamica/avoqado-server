@@ -79,6 +79,7 @@ jobs:
 
       - name: 🚀 Deploy to Fly.io
         run: flyctl deploy --remote-only
+        timeout-minutes: 15
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
