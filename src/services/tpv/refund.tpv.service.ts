@@ -122,17 +122,22 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   const refundAmountInPesos = refundData.amount / 100
   const originalAmountNumber = Number(originalPayment.amount)
+  // 💸 FIX: Include tip in refundable amount - tip is part of the total transaction
+  const originalTipNumber = Number(originalPayment.tipAmount || 0)
+  const totalOriginalAmount = originalAmountNumber + originalTipNumber
 
   // Calculate already refunded amount from processorData
   const processorData = (originalPayment.processorData as Record<string, unknown>) || {}
   const alreadyRefunded = Number(processorData.refundedAmount || 0)
-  const remainingRefundable = originalAmountNumber - alreadyRefunded
+  const remainingRefundable = totalOriginalAmount - alreadyRefunded
 
   if (refundAmountInPesos > remainingRefundable) {
     logger.error('Refund amount exceeds remaining refundable', {
       originalPaymentId: refundData.originalPaymentId,
       requestedRefund: refundAmountInPesos,
       originalAmount: originalAmountNumber,
+      originalTip: originalTipNumber,
+      totalOriginalAmount,
       alreadyRefunded,
       remainingRefundable,
     })

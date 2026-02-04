@@ -47,7 +47,7 @@ negative payment records for accurate financial tracking and generate digital re
 │     └── Creates TransactionCost (negative for reporting)            │
 │                                                                      │
 │  6. Backend → Updates original payment processorData                │
-│     └── Tracks: refundedAmount, refundHistory, isFullyRefunded      │
+│     └── Tracks: refundedAmount, refundHistory                       │
 │                                                                      │
 │  7. Backend → Generates digital receipt                             │
 │     └── Returns receiptUrl with ?refund=true flag                   │
@@ -81,9 +81,7 @@ After a refund, the original payment's `processorData` is updated:
 {
   // ... existing data ...
   refundedAmount: 150.00,        // Cumulative refunded amount
-  isFullyRefunded: false,        // true if all refunded
   lastRefundId: "pay_refund_123",
-  lastRefundAt: "2025-01-06T14:30:00Z",
   refundHistory: [
     {
       refundId: "pay_refund_123",
@@ -95,6 +93,15 @@ After a refund, the original payment's `processorData` is updated:
   ]
 }
 ```
+
+### TPV Payments History Fields
+
+When TPV calls **payment history**, the backend returns:
+
+- `refundedAmount` (string) → derived from `processorData.refundedAmount`
+- `isFullyRefunded` (boolean) → derived from `refundedAmount >= (amount + tipAmount)`
+
+This allows the TPV to clamp the refundable amount and prevent over‑refund errors.
 
 ### PaymentType Enum
 

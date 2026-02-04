@@ -785,6 +785,11 @@ interface PaginationResponse<T> {
   }
 }
 
+interface PaymentHistoryItem extends Payment {
+  refundedAmount?: string | null
+  isFullyRefunded?: boolean
+}
+
 /**
  * Validate staff and venue relationship using staffId
  * @param staffId Staff ID to validate
@@ -877,7 +882,7 @@ export async function getPayments(
   pageNumber: number,
   filters: PaymentFilters = {},
   _orgId?: string,
-): Promise<PaginationResponse<Payment>> {
+): Promise<PaginationResponse<PaymentHistoryItem>> {
   const { fromDate, toDate, staffId } = filters
 
   // Build the query filters
@@ -982,8 +987,32 @@ export async function getPayments(
   // Calculate pagination metadata
   const totalPages = Math.ceil(totalCount / pageSize)
 
-  const response: PaginationResponse<Payment> = {
-    data: payments,
+  const paymentsWithRefundMeta: PaymentHistoryItem[] = payments.map(payment => {
+    const processorData = (payment.processorData as Record<string, unknown>) || {}
+    const refundedRaw = processorData.refundedAmount
+
+    let refundedAmount: number | null = null
+    if (typeof refundedRaw === 'number') {
+      refundedAmount = refundedRaw
+    } else if (typeof refundedRaw === 'string' && refundedRaw.trim() !== '') {
+      const parsed = parseFloat(refundedRaw)
+      refundedAmount = Number.isNaN(parsed) ? null : parsed
+    }
+
+    const amountValue = parseFloat(payment.amount.toString())
+    const tipValue = parseFloat(payment.tipAmount?.toString() || '0')
+    const totalOriginalAmount = amountValue + tipValue
+    const isFullyRefunded = refundedAmount != null && totalOriginalAmount > 0 ? refundedAmount >= totalOriginalAmount : false
+
+    return {
+      ...payment,
+      refundedAmount: refundedAmount != null ? refundedAmount.toString() : null,
+      isFullyRefunded,
+    }
+  })
+
+  const response: PaginationResponse<PaymentHistoryItem> = {
+    data: paymentsWithRefundMeta,
     meta: {
       totalCount,
       pageSize,
