@@ -23,6 +23,7 @@ export interface TerminalPaymentRequest {
   venueId: string
   requestedBy: string // userId
   senderDeviceName?: string
+  requestId?: string // Client-generated for cancel tracking
 }
 
 export interface TerminalPaymentResult {
@@ -63,9 +64,19 @@ class TerminalPaymentService {
   async sendPaymentToTerminal(request: TerminalPaymentRequest): Promise<TerminalPaymentResult> {
     const { terminalId, venueId } = request
 
+    logger.info(`💳 [TerminalPayment] Looking up terminal`, {
+      terminalId,
+      venueId,
+      allTerminals: terminalRegistry.getAllTerminalIds(),
+    })
+
     // Look up terminal (registry normalizes AVQD- prefix automatically)
     const terminalEntry = terminalRegistry.getTerminal(terminalId)
     if (!terminalEntry) {
+      logger.error(`❌ [TerminalPayment] Terminal not found in registry`, {
+        terminalId,
+        registeredTerminals: terminalRegistry.getAllTerminalIds(),
+      })
       throw new Error(`Terminal ${terminalId} is not online`)
     }
     const socketId = terminalEntry.socketId
@@ -73,7 +84,14 @@ class TerminalPaymentService {
       throw new Error(`Terminal ${terminalId} is online but has no socket connection`)
     }
 
-    const requestId = uuidv4()
+    logger.info(`✅ [TerminalPayment] Terminal found`, {
+      terminalId,
+      socketId,
+      terminalVenueId: terminalEntry.venueId,
+    })
+
+    // Use client-provided requestId if available, otherwise generate one
+    const requestId = request.requestId || uuidv4()
 
     logger.info(`💳 [TerminalPayment] Sending payment request to terminal`, {
       requestId,
@@ -158,6 +176,48 @@ class TerminalPaymentService {
 
     // Resolve the pending Promise → HTTP response returns to iOS
     pending.resolve(result)
+    return true
+  }
+
+  /**
+   * Cancel a pending payment and notify the terminal.
+   * requestId ensures TPV only cancels if it's still processing THAT specific payment.
+   */
+  async cancelPayment(terminalId: string, requestId?: string, reason?: string): Promise<boolean> {
+    const terminalEntry = terminalRegistry.getTerminal(terminalId)
+    if (!terminalEntry?.socketId) {
+      logger.warn(`⚠️ [TerminalPayment] Cannot cancel - terminal not online`, { terminalId })
+      return false
+    }
+
+    const io = socketManager.getServer()
+    if (!io) {
+      return false
+    }
+
+    logger.info(`🚫 [TerminalPayment] Sending cancel to terminal`, { terminalId, requestId, reason })
+
+    io.to(terminalEntry.socketId).emit('terminal:payment_cancel', {
+      terminalId,
+      requestId, // TPV checks: if currentRequestId !== requestId, ignore cancel
+      reason: reason || 'Cancelled by user',
+      timestamp: new Date().toISOString(),
+    })
+
+    // Also clean up pending payment on backend if exists
+    if (requestId) {
+      const pending = this.pendingPayments.get(requestId)
+      if (pending) {
+        clearTimeout(pending.timeout)
+        this.pendingPayments.delete(requestId)
+        pending.resolve({
+          requestId,
+          status: 'failed',
+          errorMessage: 'Cancelled by user',
+        })
+      }
+    }
+
     return true
   }
 

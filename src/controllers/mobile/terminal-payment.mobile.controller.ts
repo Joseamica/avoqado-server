@@ -19,7 +19,7 @@ import logger from '../../config/logger'
 export async function sendTerminalPayment(req: Request, res: Response) {
   try {
     const { venueId } = req.params
-    const { terminalId, amountCents, tipCents, rating, skipReview, orderId } = req.body
+    const { terminalId, amountCents, tipCents, rating, skipReview, orderId, requestId } = req.body
     const userId = (req as any).authContext?.userId
 
     // Validate required fields
@@ -65,6 +65,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       venueId,
       requestedBy: userId,
       senderDeviceName: req.headers['x-device-name'] as string | undefined,
+      requestId, // Client-generated for cancel tracking
     })
 
     const httpStatus = result.status === 'success' ? 200 : result.status === 'timeout' ? 504 : 422
@@ -86,7 +87,51 @@ export async function sendTerminalPayment(req: Request, res: Response) {
 
     logger.error('Error in sendTerminalPayment', {
       error: message,
+      stack: error instanceof Error ? error.stack : undefined,
       venueId: req.params.venueId,
+      terminalId: req.body.terminalId,
+      amountCents: req.body.amountCents,
+    })
+
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    })
+  }
+}
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/terminal-payment/cancel
+ *
+ * Cancel a pending terminal payment and notify the terminal.
+ * Includes requestId so TPV only cancels if it's still on THAT payment.
+ */
+export async function cancelTerminalPayment(req: Request, res: Response) {
+  try {
+    const { terminalId, requestId, reason } = req.body
+
+    if (!terminalId) {
+      return res.status(400).json({
+        success: false,
+        message: 'terminalId is required',
+      })
+    }
+
+    logger.info(`🚫 [API] Cancel terminal payment request`, {
+      terminalId,
+      requestId,
+      reason,
+    })
+
+    const cancelled = await terminalPaymentService.cancelPayment(terminalId, requestId, reason)
+
+    return res.json({
+      success: cancelled,
+      message: cancelled ? 'Cancel sent to terminal' : 'Terminal not online',
+    })
+  } catch (error) {
+    logger.error('Error in cancelTerminalPayment', {
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
 
     return res.status(500).json({

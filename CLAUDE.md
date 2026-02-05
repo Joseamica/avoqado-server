@@ -735,6 +735,28 @@ replaced.
 
 ---
 
+## 11. Cross-Repo Compatibility (TPV Android)
+
+**⚠️ IMPORTANTE**: Antes de deploy a producción, verificar compatibilidad con avoqado-tpv.
+
+| Aspecto | Regla |
+|---------|-------|
+| **TPV update time** | 3-5 días (requiere firma PAX) |
+| **Backwards compatibility** | Backend SIEMPRE soporta versiones antiguas del TPV |
+| **Breaking changes** | NUNCA quitar campos de respuestas API existentes |
+| **New required fields** | NUNCA - nuevos campos deben ser opcionales con defaults |
+| **Header para versión** | TPV envía `X-App-Version-Code`, usar para comportamiento condicional |
+
+**Deploy order para features cross-repo:**
+1. Deploy backend (este repo) primero
+2. Esperar que esté estable en prod
+3. Generar APK del TPV
+4. Backend debe soportar versión vieja Y nueva durante ~1 semana
+
+**Ver documentación completa:** `avoqado-tpv/docs/` o `avoqado-tpv/CLAUDE.md` sección 12.
+
+---
+
 ## Quick Links
 
 | Need to...                | Go to...                                        |

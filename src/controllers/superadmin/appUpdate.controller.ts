@@ -1,6 +1,6 @@
 // src/controllers/superadmin/appUpdate.controller.ts
 import { Request, Response } from 'express'
-import { PrismaClient, AppEnvironment } from '@prisma/client'
+import { PrismaClient, AppEnvironment, UpdateMode } from '@prisma/client'
 import { getStorageBucket } from '../../config/firebase'
 import logger from '../../config/logger'
 import crypto from 'crypto'
@@ -125,7 +125,7 @@ export async function getAppUpdateById(req: Request, res: Response) {
  * - versionCode?: number (e.g., 6) - Auto-detected from APK if not provided
  * - environment: "SANDBOX" | "PRODUCTION"
  * - releaseNotes?: string (markdown)
- * - isRequired?: boolean
+ * - updateMode?: "NONE" | "BANNER" | "FORCE" (default: "NONE")
  * - minAndroidSdk?: number (default: auto-detected from APK or 27)
  * - apkBase64: string (base64-encoded APK file)
  */
@@ -136,10 +136,14 @@ export async function createAppUpdate(req: Request, res: Response) {
       versionCode: providedVersionCode,
       environment,
       releaseNotes,
-      isRequired = false,
+      updateMode = 'NONE',
       minAndroidSdk: providedMinSdk,
       apkBase64,
     } = req.body
+
+    // DEBUG: Log what we received
+    logger.info(`📥 Received updateMode from request: ${req.body.updateMode}`)
+    logger.info(`📥 updateMode after destructuring (with default): ${updateMode}`)
 
     // Validate required fields (only environment and apkBase64 are required now)
     if (!environment || !apkBase64) {
@@ -264,6 +268,15 @@ export async function createAppUpdate(req: Request, res: Response) {
     // Ensure versionCode is an integer
     const versionCodeInt = typeof versionCode === 'string' ? parseInt(versionCode) : versionCode
 
+    // Validate updateMode
+    const validUpdateModes = ['NONE', 'BANNER', 'FORCE']
+    if (!validUpdateModes.includes(updateMode)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid updateMode. Must be one of: ${validUpdateModes.join(', ')}`,
+      })
+    }
+
     // Create database record
     const appUpdate = await prisma.appUpdate.create({
       data: {
@@ -271,7 +284,7 @@ export async function createAppUpdate(req: Request, res: Response) {
         versionCode: versionCodeInt,
         environment: environment as AppEnvironment,
         releaseNotes,
-        isRequired,
+        updateMode: updateMode as UpdateMode,
         minAndroidSdk,
         downloadUrl,
         fileSize: BigInt(fileSize),
@@ -329,7 +342,7 @@ export async function createAppUpdate(req: Request, res: Response) {
 export async function updateAppUpdate(req: Request, res: Response) {
   try {
     const { id } = req.params
-    const { releaseNotes, isRequired, isActive } = req.body
+    const { releaseNotes, updateMode, isActive } = req.body
 
     const existing = await prisma.appUpdate.findUnique({ where: { id } })
     if (!existing) {
@@ -339,11 +352,22 @@ export async function updateAppUpdate(req: Request, res: Response) {
       })
     }
 
+    // Validate updateMode if provided
+    if (updateMode !== undefined) {
+      const validUpdateModes = ['NONE', 'BANNER', 'FORCE']
+      if (!validUpdateModes.includes(updateMode)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid updateMode. Must be one of: ${validUpdateModes.join(', ')}`,
+        })
+      }
+    }
+
     const updated = await prisma.appUpdate.update({
       where: { id },
       data: {
         ...(releaseNotes !== undefined && { releaseNotes }),
-        ...(isRequired !== undefined && { isRequired }),
+        ...(updateMode !== undefined && { updateMode: updateMode as UpdateMode }),
         ...(isActive !== undefined && { isActive }),
       },
       include: {

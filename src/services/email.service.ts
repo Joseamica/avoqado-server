@@ -1,5 +1,9 @@
-import nodemailer from 'nodemailer'
+import { Resend } from 'resend'
 import logger from '../config/logger'
+
+// Initialize Resend client
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
+const FROM_EMAIL = process.env.EMAIL_FROM || 'Avoqado <noreply@avoqado.io>'
 
 interface EmailOptions {
   to: string
@@ -132,64 +136,49 @@ interface TpvFeedbackEmailData {
 }
 
 class EmailService {
-  private transporter: nodemailer.Transporter | null = null
+  private isAvailable: boolean = false
 
   constructor() {
-    this.initializeTransporter()
+    this.initialize()
   }
 
-  private initializeTransporter() {
-    const smtpHost = process.env.SMTP_HOST
-    const smtpPort = process.env.SMTP_PORT
-    const smtpUser = process.env.SMTP_USER
-    const smtpPass = process.env.SMTP_PASS
-
-    if (!smtpHost || !smtpPort || !smtpUser || !smtpPass) {
-      logger.warn('Email service not configured. Email functionality will be disabled.')
+  private initialize() {
+    if (!resend) {
+      logger.warn('📧 Resend not configured (missing RESEND_API_KEY). Email functionality will be disabled.')
       return
     }
 
-    try {
-      this.transporter = nodemailer.createTransport({
-        host: smtpHost,
-        port: parseInt(smtpPort),
-        secure: parseInt(smtpPort) === 465, // true for 465, false for other ports
-        auth: {
-          user: smtpUser,
-          pass: smtpPass,
-        },
-      })
-
-      logger.info('Email service initialized successfully')
-    } catch (error) {
-      logger.error('Failed to initialize email service:', error)
-    }
+    this.isAvailable = true
+    logger.info('📧 Email service initialized with Resend (from: ' + FROM_EMAIL + ')')
   }
 
   async sendEmail(options: EmailOptions): Promise<boolean> {
-    if (!this.transporter) {
-      logger.warn('Email service not available. Skipping email send.')
+    if (!resend || !this.isAvailable) {
+      logger.warn('📧 Email service not available. Skipping email send.')
       return false
     }
 
     try {
-      // Format: "Display Name <email>" so recipients see "Avoqado" instead of raw email
-      const fromAddress = process.env.EMAIL_FROM_NAME
-        ? `${process.env.EMAIL_FROM_NAME} <${process.env.SMTP_USER}>`
-        : `Avoqado <${process.env.SMTP_USER}>`
-
-      const info = await this.transporter.sendMail({
-        from: fromAddress,
+      // Build email payload - Resend requires at least html or text
+      const emailPayload: Parameters<typeof resend.emails.send>[0] = {
+        from: FROM_EMAIL,
         to: options.to,
         subject: options.subject,
-        html: options.html,
-        text: options.text,
-      })
+        html: options.html || undefined,
+        text: options.text || 'Please view this email in an HTML-compatible email client.',
+      }
 
-      logger.info('Email sent successfully:', { messageId: info.messageId, to: options.to })
+      const result = await resend.emails.send(emailPayload)
+
+      if (result.error) {
+        logger.error('📧 Failed to send email:', result.error)
+        return false
+      }
+
+      logger.info('📧 Email sent successfully:', { id: result.data?.id, to: options.to })
       return true
     } catch (error) {
-      logger.error('Failed to send email:', error)
+      logger.error('📧 Failed to send email:', error)
       return false
     }
   }
@@ -2143,18 +2132,13 @@ Avoqado Technologies S.A. de C.V.
   }
 
   async verifyConnection(): Promise<boolean> {
-    if (!this.transporter) {
+    if (!resend || !this.isAvailable) {
       return false
     }
 
-    try {
-      await this.transporter.verify()
-      logger.info('Email service connection verified')
-      return true
-    } catch (error) {
-      logger.error('Email service connection failed:', error)
-      return false
-    }
+    // Resend doesn't have a verify method, just check if client is available
+    logger.info('📧 Email service (Resend) is available')
+    return true
   }
 }
 
