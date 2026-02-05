@@ -498,6 +498,61 @@ val storagePath = buildStoragePath("venues/$venueSlug/verifications/$dateStr/$fi
 val storagePath = "venues/$venueSlug/verifications/$dateStr/$fileName" // NO prefix!
 ```
 
+### Permission System (Centralized)
+
+**⚠️ CRITICAL: Backend is the SINGLE SOURCE OF TRUTH for permissions.**
+
+**Key Files:**
+- `src/lib/permissions.ts` - `DEFAULT_PERMISSIONS` by role
+- `src/services/access/access.service.ts` - Permission resolution + `PERMISSION_TO_FEATURE_MAP`
+- `src/middlewares/verifyAccess.middleware.ts` - Route protection
+- `src/routes/me.routes.ts` - `/me/access` endpoint
+
+**🔴 MANDATORY: When adding NEW features with permissions:**
+
+1. **Add permission to `DEFAULT_PERMISSIONS`** (`src/lib/permissions.ts`):
+   ```typescript
+   [StaffRole.MANAGER]: [
+     // ... existing
+     'reports:read',
+     'reports:create',
+     'reports:export',
+   ]
+   ```
+
+2. **If white-label feature, add to `PERMISSION_TO_FEATURE_MAP`** (`src/services/access/access.service.ts`):
+   ```typescript
+   const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
+     // ... existing mappings
+     'reports:read': 'AVOQADO_REPORTS',
+     'reports:create': 'AVOQADO_REPORTS',
+     'reports:export': 'AVOQADO_REPORTS',
+   }
+   ```
+
+3. **Protect routes with `verifyAccess` middleware**:
+   ```typescript
+   import { verifyAccess } from '@/middlewares/verifyAccess.middleware'
+
+   router.get('/reports',
+     authenticateTokenMiddleware,
+     verifyAccess({ permission: 'reports:read' }),
+     reportController.list
+   )
+
+   router.post('/reports',
+     authenticateTokenMiddleware,
+     verifyAccess({ permission: 'reports:create' }),
+     reportController.create
+   )
+   ```
+
+4. **Update documentation** (`docs/PERMISSIONS_SYSTEM.md`)
+
+**Frontend just calls `can('permission')`** - no mapping logic needed there.
+
+**Verification:** Run `bash scripts/check-permission-migration.sh` to verify centralization.
+
 ---
 
 ## 8. Email Template Design Standards

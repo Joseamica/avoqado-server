@@ -46,6 +46,7 @@ export interface BulkUploadResult {
   created: number
   duplicates: string[]
   errors: string[]
+  total: number
 }
 
 class StockDashboardService {
@@ -320,6 +321,7 @@ class StockDashboardService {
         created: 0,
         duplicates: [],
         errors: ['No serial numbers found in upload'],
+        total: 0,
       }
     }
 
@@ -334,6 +336,7 @@ class StockDashboardService {
         created: 0,
         duplicates: [],
         errors: ['Invalid category'],
+        total: lines.length,
       }
     }
 
@@ -384,6 +387,7 @@ class StockDashboardService {
       created,
       duplicates,
       errors,
+      total: lines.length,
     }
   }
 

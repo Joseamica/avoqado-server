@@ -13,6 +13,7 @@ import liveDemoRoutes from './liveDemo.routes'
 import demoRoutes from './demo.routes'
 import sdkRoutes from './sdk.routes'
 import mobileRoutes from './mobile.routes'
+import meRoutes from './me.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -29,5 +30,6 @@ router.use('/live-demo', liveDemoRoutes) // Live demo routes for demo.dashboard.
 router.use('/demo', demoRoutes) // Legacy demo redirects for obsolete QR codes
 router.use('/sdk', sdkRoutes) // Avoqado Payment SDK routes under /api/v1/sdk
 router.use('/mobile', mobileRoutes) // Mobile app routes (iOS, Android) under /api/v1/mobile
+router.use('/me', meRoutes) // Current user routes under /api/v1/me
 
 export default router

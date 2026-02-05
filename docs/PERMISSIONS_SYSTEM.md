@@ -3,6 +3,38 @@
 This document details the complete permission system implementation using action-based permissions inspired by Fortune 500 companies like
 Stripe, AWS, and GitHub.
 
+## 🔴 IMPORTANT: Centralized Architecture (2024 Update)
+
+**Backend is the SINGLE SOURCE OF TRUTH for all permissions.**
+
+The permission system is now centralized with the following architecture:
+
+```
+Backend (Single Source of Truth)
+├── /api/v1/me/access → Returns resolved permissions to frontend
+├── PERMISSION_TO_FEATURE_MAP → Maps permissions to white-label features
+├── access.service.ts → Resolves + filters permissions for white-label
+└── verifyAccess middleware → Enforces on API routes
+
+Frontend (UI Only - No mapping logic)
+├── useAccess() → Fetches from /me/access
+├── can('permission') → Just checks, no mapping needed
+└── PermissionGate → UI visibility only
+```
+
+**Key Files (Centralized System):**
+
+| File | Purpose |
+|------|---------|
+| `src/lib/permissions.ts` | `DEFAULT_PERMISSIONS` by role, permission validation |
+| `src/services/access/access.service.ts` | **CENTRAL** - Permission resolution + `PERMISSION_TO_FEATURE_MAP` |
+| `src/middlewares/verifyAccess.middleware.ts` | **RECOMMENDED** - Unified route protection |
+| `src/routes/me.routes.ts` | `/me/access` endpoint for frontend |
+
+**When adding new features, see "Adding New Permissions" section below.**
+
+---
+
 ## Architecture Overview
 
 The platform uses a **granular permission system** based on action-based permissions.
@@ -12,13 +44,15 @@ The platform uses a **granular permission system** based on action-based permiss
 ## Two-Layer Permission System
 
 1. **Default Role-Based Permissions** - Defined in `src/lib/permissions.ts`
-2. **Custom Permissions** - Stored in `StaffVenue.permissions` JSON field (Prisma schema)
+2. **Custom Permissions** - Stored in `VenueRolePermission` table (per venue + role)
 
 **Key Files:**
 
 - `src/lib/permissions.ts` - Permission constants and validation logic
-- `src/middlewares/checkPermission.middleware.ts` - Route-level permission middleware
-- `prisma/schema.prisma` - `StaffVenue.permissions` field (JSON array for custom permissions)
+- `src/services/access/access.service.ts` - Central permission resolution service
+- `src/middlewares/verifyAccess.middleware.ts` - Unified route-level permission middleware
+- `src/middlewares/checkPermission.middleware.ts` - Legacy route-level permission middleware
+- `prisma/schema.prisma` - `VenueRolePermission` model for custom permissions
 
 ## Permission Middleware Usage
 
@@ -522,7 +556,113 @@ router.put(
 - **Visual indicator** showing role defaults vs custom overrides
 - **Permission inheritance display** (role → custom)
 
+## White-Label Permission Filtering
+
+When a venue has the `WHITE_LABEL_DASHBOARD` module enabled, permissions are automatically filtered based on enabled features.
+
+### PERMISSION_TO_FEATURE_MAP
+
+Located in `src/services/access/access.service.ts`:
+
+```typescript
+const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
+  // TPV Management
+  'tpv:read': 'AVOQADO_TPVS',
+  'tpv:write': 'AVOQADO_TPVS',
+
+  // Team Management
+  'teams:read': 'AVOQADO_TEAM',
+  'teams:write': 'AVOQADO_TEAM',
+
+  // Menu Management
+  'menu:read': 'AVOQADO_MENU',
+  'menu:write': 'AVOQADO_MENU',
+
+  // ... etc
+}
+```
+
+### How It Works
+
+1. User requests `/me/access?venueId=xxx`
+2. `access.service.ts` resolves permissions normally
+3. If white-label is enabled:
+   - Checks each permission against `PERMISSION_TO_FEATURE_MAP`
+   - If the feature is disabled or user's role doesn't have access → permission is filtered out
+4. Frontend receives only the permissions the user actually has
+
+**Frontend just calls `can('permission')` - no mapping logic needed.**
+
+## Adding New Permissions
+
+**🔴 MANDATORY: Follow these steps when adding new features:**
+
+### Step 1: Add to DEFAULT_PERMISSIONS
+
+In `src/lib/permissions.ts`:
+
+```typescript
+export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
+  [StaffRole.VIEWER]: [
+    // ... existing
+  ],
+  [StaffRole.MANAGER]: [
+    // ... existing
+    'newfeature:read',
+    'newfeature:create',
+  ],
+  [StaffRole.ADMIN]: ['*:*'],
+  [StaffRole.OWNER]: ['*:*'],
+  [StaffRole.SUPERADMIN]: ['*:*'],
+}
+```
+
+### Step 2: If White-Label Feature, Add to PERMISSION_TO_FEATURE_MAP
+
+In `src/services/access/access.service.ts`:
+
+```typescript
+const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
+  // ... existing
+  'newfeature:read': 'AVOQADO_NEWFEATURE',
+  'newfeature:create': 'AVOQADO_NEWFEATURE',
+  'newfeature:update': 'AVOQADO_NEWFEATURE',
+  'newfeature:delete': 'AVOQADO_NEWFEATURE',
+}
+```
+
+### Step 3: Protect Routes with verifyAccess
+
+```typescript
+import { verifyAccess } from '@/middlewares/verifyAccess.middleware'
+
+router.get('/newfeature',
+  authenticateTokenMiddleware,
+  verifyAccess({ permission: 'newfeature:read' }),
+  controller.list
+)
+
+router.post('/newfeature',
+  authenticateTokenMiddleware,
+  verifyAccess({ permission: 'newfeature:create' }),
+  controller.create
+)
+```
+
+### Step 4: Update Documentation
+
+Update this file (`docs/PERMISSIONS_SYSTEM.md`) with new permission strings.
+
+### Verification
+
+Run the centralization checker:
+
+```bash
+bash scripts/check-permission-migration.sh
+```
+
 ## Related Documentation
 
 - **Root CLAUDE.md** - Architecture overview and authentication flow
 - **STRIPE_INTEGRATION.md** - Feature access control middleware usage
+- **avoqado-web-dashboard/docs/architecture/permissions.md** - Frontend permission usage
