@@ -56,6 +56,24 @@ export const checkPermission = (requiredPermission: string) => {
         })
       }
 
+      // Check if user is SUPERADMIN (they have access to ALL venues)
+      // SUPERADMIN is determined by having ANY StaffVenue with role = SUPERADMIN
+      const superAdminVenue = await prisma.staffVenue.findFirst({
+        where: {
+          staffId: authContext.userId,
+          role: StaffRole.SUPERADMIN,
+        },
+        select: { id: true },
+      })
+
+      const isSuperAdmin = !!superAdminVenue
+
+      // SUPERADMIN has all permissions - skip further checks
+      if (isSuperAdmin) {
+        logger.debug(`checkPermission: SUPERADMIN ${authContext.userId} granted '${requiredPermission}' in venue ${venueId}`)
+        return next()
+      }
+
       // If venueId from URL differs from token, look up user's actual role in that venue
       let userRole: StaffRole
       if (urlVenueId && urlVenueId !== authContext.venueId) {
