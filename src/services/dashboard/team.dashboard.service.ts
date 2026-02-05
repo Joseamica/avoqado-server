@@ -44,6 +44,7 @@ interface InviteTeamMemberRequest {
   message?: string
   type?: InviteType // 'email' (default) or 'tpv-only'
   pin?: string // For TPV-only invitations, set PIN directly
+  inviteToAllVenues?: boolean // When true (OWNER role only), creates StaffVenue for all org venues
 }
 
 interface UpdateTeamMemberRequest {
@@ -402,6 +403,9 @@ export async function inviteTeamMember(
     where: { email },
   })
 
+  // Only OWNER role can use inviteToAllVenues - calculate early for validation
+  const shouldInviteToAllVenues = request.inviteToAllVenues && request.role === StaffRole.OWNER
+
   if (staff && !isTPVOnly) {
     // Check if already assigned to this venue
     const existingStaffVenue = await prisma.staffVenue.findUnique({
@@ -413,7 +417,9 @@ export async function inviteTeamMember(
       },
     })
 
-    if (existingStaffVenue && existingStaffVenue.active) {
+    // Allow if inviteToAllVenues is true - we'll update their role and add to other venues
+    // Otherwise block if they're already an active member
+    if (existingStaffVenue && existingStaffVenue.active && !shouldInviteToAllVenues) {
       throw new BadRequestError('User is already a team member of this venue')
     }
   }
@@ -450,6 +456,8 @@ export async function inviteTeamMember(
       expiresAt,
       invitedById: inviterStaffId,
       message: request.message,
+      // Store inviteToAllVenues flag in permissions JSON for email invitations
+      permissions: shouldInviteToAllVenues ? { inviteToAllVenues: true } : undefined,
     },
   })
 
@@ -465,6 +473,9 @@ export async function inviteTeamMember(
       },
     })
 
+    // Determine OrgRole based on venue role (OWNER gets OrgRole.OWNER)
+    const orgRole = request.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
+
     // Create StaffOrganization membership
     await prisma.staffOrganization.upsert({
       where: {
@@ -473,27 +484,50 @@ export async function inviteTeamMember(
           organizationId: venue.organizationId,
         },
       },
-      update: { isActive: true },
+      update: { isActive: true, role: orgRole },
       create: {
         staffId: staff.id,
         organizationId: venue.organizationId,
-        role: OrgRole.MEMBER,
+        role: orgRole,
         isPrimary: true,
         isActive: true,
         joinedById: inviterStaffId,
       },
     })
 
-    // Create StaffVenue with PIN
-    await prisma.staffVenue.create({
-      data: {
-        staffId: staff.id,
-        venueId,
-        role: request.role,
-        pin: request.pin!,
-        active: true,
-      },
-    })
+    // Get all venues for this organization if inviteToAllVenues is true
+    let venuesToAssign = [{ id: venueId }]
+    if (shouldInviteToAllVenues) {
+      const orgVenues = await prisma.venue.findMany({
+        where: { organizationId: venue.organizationId },
+        select: { id: true },
+      })
+      venuesToAssign = orgVenues
+    }
+
+    // Create StaffVenue for each venue (with PIN only for the primary venue)
+    for (const v of venuesToAssign) {
+      await prisma.staffVenue.upsert({
+        where: {
+          staffId_venueId: {
+            staffId: staff.id,
+            venueId: v.id,
+          },
+        },
+        update: {
+          role: request.role,
+          pin: v.id === venueId ? request.pin! : null, // PIN only for primary venue
+          active: true,
+        },
+        create: {
+          staffId: staff.id,
+          venueId: v.id,
+          role: request.role,
+          pin: v.id === venueId ? request.pin! : null, // PIN only for primary venue
+          active: true,
+        },
+      })
+    }
 
     // Mark invitation as accepted immediately
     await prisma.invitation.update({
@@ -511,6 +545,8 @@ export async function inviteTeamMember(
       role: request.role,
       firstName: request.firstName,
       lastName: request.lastName,
+      inviteToAllVenues: shouldInviteToAllVenues,
+      venuesAssigned: venuesToAssign.length,
     })
 
     return {
@@ -528,6 +564,9 @@ export async function inviteTeamMember(
   }
 
   // Traditional email invitation flow
+  // Determine OrgRole based on venue role (OWNER gets OrgRole.OWNER)
+  const orgRoleForEmail = request.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
+
   if (!staff) {
     staff = await prisma.staff.create({
       data: {
@@ -544,7 +583,7 @@ export async function inviteTeamMember(
       data: {
         staffId: staff.id,
         organizationId: venue.organizationId,
-        role: OrgRole.MEMBER,
+        role: orgRoleForEmail,
         isPrimary: true,
         isActive: true,
         joinedById: inviterStaffId,
@@ -559,11 +598,11 @@ export async function inviteTeamMember(
           organizationId: venue.organizationId,
         },
       },
-      update: { isActive: true, leftAt: null },
+      update: { isActive: true, leftAt: null, role: orgRoleForEmail },
       create: {
         staffId: staff.id,
         organizationId: venue.organizationId,
-        role: OrgRole.MEMBER,
+        role: orgRoleForEmail,
         isPrimary: false,
         isActive: true,
         joinedById: inviterStaffId,

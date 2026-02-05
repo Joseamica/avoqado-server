@@ -103,6 +103,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 
 // Import after mocks
 import { v4 as uuidv4 } from 'uuid'
+import bcrypt from 'bcrypt'
 import { InvitationStatus, StaffRole } from '@prisma/client'
 import * as invitationService from '../../../src/services/invitation.service'
 
@@ -120,6 +121,15 @@ describe('Multi-Venue Invitation Flow', () => {
   const testEmail = 'waiter@restaurant.com'
   const newUserEmail = 'newuser@restaurant.com'
   const testPassword = 'SecurePass123!'
+
+  // Pre-hashed password for existing user tests
+  // The service compares userData.password against existingStaff.password using bcrypt
+  let hashedTestPassword: string
+
+  beforeAll(async () => {
+    // Generate a real bcrypt hash for tests with existing users
+    hashedTestPassword = await bcrypt.hash(testPassword, 12)
+  })
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -255,7 +265,7 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'Waiter',
-        password: 'hashedpassword',
+        password: hashedTestPassword, // Use real bcrypt hash for password verification
         emailVerified: true,
         active: true,
         venues: [
@@ -354,7 +364,7 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'User',
-        password: '$2b$12$existinghash', // Already has password
+        password: hashedTestPassword, // Use real bcrypt hash for password verification
         emailVerified: true,
         active: true,
         venues: [],
@@ -386,10 +396,11 @@ describe('Multi-Venue Invitation Flow', () => {
       await invitationService.acceptInvitation(invitationToken, {
         firstName: 'Existing',
         lastName: 'User',
-        password: 'newpassword123', // Trying to set new password
+        password: testPassword, // Correct password for identity verification
       })
 
       // Verify password was NOT included in update (because user already has one)
+      // The service verifies the password but doesn't overwrite existing passwords
       expect(mockPrismaClient.staff.update).toHaveBeenCalledWith({
         where: { id: existingUserId },
         data: expect.not.objectContaining({
@@ -424,7 +435,7 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'User',
-        password: 'hashedpassword',
+        password: hashedTestPassword, // Use real bcrypt hash for password verification
         emailVerified: true,
         active: true,
         venues: [
@@ -524,7 +535,7 @@ describe('Multi-Venue Invitation Flow', () => {
         email: testEmail.toLowerCase(),
         firstName: 'Existing',
         lastName: 'User',
-        password: 'hashedpassword',
+        password: hashedTestPassword, // Use real bcrypt hash for password verification
         emailVerified: true,
         active: true,
         venues: [

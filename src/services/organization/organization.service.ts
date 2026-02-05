@@ -489,51 +489,68 @@ export async function getEnhancedOrganizationOverview(orgId: string, filter?: Da
   const prevPayments = previousPayments._count
   const prevAverageTicketSize = prevOrders > 0 ? prevRevenue / prevOrders : 0
 
-  // Get metrics per venue for current AND previous periods
-  const venueMetricsPromises = venues.map(async venue => {
-    const [currentVenuePayments, currentVenueOrders, previousVenuePayments, venueStaff] = await Promise.all([
-      prisma.payment.aggregate({
-        where: {
-          venueId: venue.id,
-          status: TransactionStatus.COMPLETED,
-          createdAt: { gte: from, lte: to },
-        },
-        _sum: { amount: true },
-        _count: true,
-      }),
-      prisma.order.count({
-        where: {
-          venueId: venue.id,
-          createdAt: { gte: from, lte: to },
-        },
-      }),
-      prisma.payment.aggregate({
-        where: {
-          venueId: venue.id,
-          status: TransactionStatus.COMPLETED,
-          createdAt: { gte: previousPeriodDates.from, lte: previousPeriodDates.to },
-        },
-        _sum: { amount: true },
-      }),
-      prisma.staffVenue.count({
-        where: { venueId: venue.id },
-      }),
-    ])
+  // Get metrics per venue using groupBy (optimized: 4 queries instead of N×4)
+  const [currentPaymentsByVenue, currentOrdersByVenue, previousPaymentsByVenue, staffByVenue] = await Promise.all([
+    // Current period payments grouped by venue
+    prisma.payment.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        status: TransactionStatus.COMPLETED,
+        createdAt: { gte: from, lte: to },
+      },
+      _sum: { amount: true },
+      _count: true,
+    }),
+    // Current period orders grouped by venue
+    prisma.order.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        createdAt: { gte: from, lte: to },
+      },
+      _count: true,
+    }),
+    // Previous period payments grouped by venue
+    prisma.payment.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        status: TransactionStatus.COMPLETED,
+        createdAt: { gte: previousPeriodDates.from, lte: previousPeriodDates.to },
+      },
+      _sum: { amount: true },
+    }),
+    // Staff count grouped by venue
+    prisma.staffVenue.groupBy({
+      by: ['venueId'],
+      where: { venueId: { in: venueIds } },
+      _count: true,
+    }),
+  ])
 
-    const currentVenueRevenue = currentVenuePayments._sum.amount?.toNumber() || 0
-    const previousVenueRevenue = previousVenuePayments._sum.amount?.toNumber() || 0
+  // Create lookup maps for O(1) access
+  const currentPaymentsMap = new Map(currentPaymentsByVenue.map(p => [p.venueId, p]))
+  const currentOrdersMap = new Map(currentOrdersByVenue.map(o => [o.venueId, o]))
+  const previousPaymentsMap = new Map(previousPaymentsByVenue.map(p => [p.venueId, p]))
+  const staffMap = new Map(staffByVenue.map(s => [s.venueId, s]))
+
+  // Build venue metrics data from the maps
+  const venueMetricsData = venues.map(venue => {
+    const currentPayments = currentPaymentsMap.get(venue.id)
+    const currentOrders = currentOrdersMap.get(venue.id)
+    const previousPayments = previousPaymentsMap.get(venue.id)
+    const staff = staffMap.get(venue.id)
 
     return {
       venue,
-      currentRevenue: currentVenueRevenue,
-      previousRevenue: previousVenueRevenue,
-      orderCount: currentVenueOrders,
-      paymentCount: currentVenuePayments._count,
-      staffCount: venueStaff,
+      currentRevenue: currentPayments?._sum.amount?.toNumber() || 0,
+      previousRevenue: previousPayments?._sum.amount?.toNumber() || 0,
+      orderCount: currentOrders?._count || 0,
+      paymentCount: currentPayments?._count || 0,
+      staffCount: staff?._count || 0,
     }
   })
-
-  const venueMetricsData = await Promise.all(venueMetricsPromises)
 
   // Build venue metrics array
   const venueMetrics: VenueMetrics[] = venueMetricsData.map(data => ({
