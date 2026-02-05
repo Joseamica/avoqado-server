@@ -22,6 +22,7 @@ import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
+import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -163,9 +164,9 @@ const startApplication = async (retries = 3) => {
 
     // Connect to RabbitMQ in background (non-blocking)
     // If RabbitMQ is unavailable, the app will continue without it
-    // DEMO MODE: Skip RabbitMQ to save memory on free tier deployments
-    if (process.env.DEMO_MODE === 'true') {
-      logger.info('⏭️  RabbitMQ disabled (DEMO_MODE=true)')
+    // DEMO MODE or DISABLE_RABBITMQ: Skip RabbitMQ to save bandwidth/memory
+    if (process.env.DEMO_MODE === 'true' || process.env.DISABLE_RABBITMQ === 'true') {
+      logger.info('⏭️  RabbitMQ disabled (DEMO_MODE or DISABLE_RABBITMQ)')
     } else {
       connectToRabbitMQ()
         .then(() => {
@@ -238,6 +239,9 @@ const startApplication = async (retries = 3) => {
 
       // Start nightly sales summary job (daily at 10 PM Mexico City - sends email to admins/owners)
       nightlySalesSummaryJob.start()
+
+      // Start marketing campaign job (every 5 minutes - processes email queue)
+      marketingCampaignJob.start()
 
       // Start live demo cleanup job (runs every hour to delete expired sessions)
       liveDemoCleanupJob = new CronJob(

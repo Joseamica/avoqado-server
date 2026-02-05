@@ -1480,6 +1480,7 @@ export async function getVenuesListSimple(includeDemos = false, includeAllStatus
         slug: true,
         status: true,
         active: true, // Keep for backwards compatibility
+        email: true, // For marketing campaigns
       },
       orderBy: { name: 'asc' },
     })

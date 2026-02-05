@@ -10,6 +10,7 @@ import { Router } from 'express'
 import { handleStripeWebhook } from '../controllers/webhook.controller'
 import { handleBlumonTPVWebhook, blumonWebhookHealthCheck } from '../controllers/tpv/blumon-webhook.tpv.controller'
 import { handleB4BitWebhook, b4bitWebhookHealthCheck } from '../controllers/tpv/b4bit-webhook.tpv.controller'
+import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/webhooks/resend.webhook.controller'
 import { blumonIPWhitelist } from '../middlewares/blumon-ip-whitelist.middleware'
 
 const router = Router()
@@ -254,5 +255,93 @@ router.post('/b4bit', handleB4BitWebhook)
  *         description: Webhook endpoint is healthy
  */
 router.get('/b4bit/health', b4bitWebhookHealthCheck)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/resend:
+ *   post:
+ *     tags: [Webhooks]
+ *     summary: Resend email tracking webhook
+ *     description: |
+ *       Receives email tracking events from Resend for marketing campaigns.
+ *
+ *       **Handled Events:**
+ *       - email.opened - Track when recipients open emails
+ *       - email.clicked - Track when recipients click links in emails
+ *       - email.bounced - Mark delivery as bounced
+ *
+ *       **Security:**
+ *       - Verifies Svix signature using RESEND_WEBHOOK_SECRET
+ *       - Headers: svix-id, svix-timestamp, svix-signature
+ *
+ *       **Setup:**
+ *       1. Configure webhook in Resend dashboard (https://resend.com/webhooks)
+ *       2. Set events: email.opened, email.clicked, email.bounced
+ *       3. Copy signing secret to RESEND_WEBHOOK_SECRET env var
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [email.sent, email.delivered, email.opened, email.clicked, email.bounced, email.complained]
+ *               data:
+ *                 type: object
+ *                 properties:
+ *                   email_id:
+ *                     type: string
+ *                     description: Resend email ID
+ *                   to:
+ *                     type: array
+ *                     items:
+ *                       type: string
+ *                   from:
+ *                     type: string
+ *                   subject:
+ *                     type: string
+ *                   created_at:
+ *                     type: string
+ *                   click:
+ *                     type: object
+ *                     description: Only for email.clicked events
+ *                     properties:
+ *                       link:
+ *                         type: string
+ *                       timestamp:
+ *                         type: string
+ *     responses:
+ *       200:
+ *         description: Webhook processed (always returns 200 to prevent retries)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 handled:
+ *                   type: boolean
+ *                 reason:
+ *                   type: string
+ *       400:
+ *         description: Invalid signature or payload
+ */
+router.post('/resend', handleResendWebhook)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/resend/health:
+ *   get:
+ *     tags: [Webhooks]
+ *     summary: Resend webhook health check
+ *     description: Endpoint to verify Resend webhook connectivity
+ *     responses:
+ *       200:
+ *         description: Webhook endpoint is healthy
+ */
+router.get('/resend/health', resendWebhookHealthCheck)
 
 export default router

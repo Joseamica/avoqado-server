@@ -29,6 +29,18 @@
 
 ---
 
+## Claude Code Guides (`guides/`)
+
+> Operational cheat sheets auto-referenced by `.claude/rules/` and `CLAUDE.md`. Optimized for AI agent consumption.
+
+| Guide | When to read |
+|-------|-------------|
+| [guides/PERMISSIONS_GUIDE.md](./guides/PERMISSIONS_GUIDE.md) | Adding features with auth, modifying permissions |
+| [guides/PAYMENT_FLOW_GUIDE.md](./guides/PAYMENT_FLOW_GUIDE.md) | Working on order→payment→inventory flow |
+| [guides/EMAIL_STANDARDS.md](./guides/EMAIL_STANDARDS.md) | Creating or modifying email templates |
+
+---
+
 ## Architecture & Core
 
 | Document                                               | Description                                                   |
@@ -173,12 +185,10 @@
 | Document                                                                             | Description                                |
 | ------------------------------------------------------------------------------------ | ------------------------------------------ |
 | [ENVIRONMENT_SETUP_GUIDE.md](./ENVIRONMENT_SETUP_GUIDE.md)                           | Local development setup                    |
-| [DEV_ENVIRONMENT_PERFECTION_CHECKLIST.md](./DEV_ENVIRONMENT_PERFECTION_CHECKLIST.md) | Environment checklist                      |
 | [DATETIME_SYNC.md](./DATETIME_SYNC.md)                                               | Timezone handling between frontend/backend |
 | [CI_CD_SETUP.md](./CI_CD_SETUP.md)                                                   | GitHub Actions, deployment                 |
 | [GITHUB_ENVIRONMENTS.md](./GITHUB_ENVIRONMENTS.md)                                   | GitHub environment configuration           |
 | [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md)             | Pre-deployment checklist                   |
-| [DEPLOYMENT-OPTIMIZATION-SUMMARY.md](./DEPLOYMENT-OPTIMIZATION-SUMMARY.md)           | Deployment optimization                    |
 | [UNUSED_CODE_DETECTION.md](./UNUSED_CODE_DETECTION.md)                               | Dead code detection tools                  |
 | [SEED_CREDENTIALS.md](./SEED_CREDENTIALS.md)                                         | Test credentials                           |
 | [COST_MANAGEMENT_IMPLEMENTATION.md](./COST_MANAGEMENT_IMPLEMENTATION.md)             | Cost management                            |
@@ -190,12 +200,13 @@
 ```
 avoqado-server/docs/           <- YOU ARE HERE (Central Hub)
 ├── README.md                  <- This index
-├── architecture/              <- Cross-repo architecture
+├── guides/                    <- Claude Code operational cheat sheets
 ├── features/                  <- Cross-repo features
 ├── blumon-tpv/               <- Blumon TPV integration
 ├── blumon-ecommerce/         <- Blumon E-commerce integration
 ├── industry-config/          <- Multi-vertical configuration
-└── clients&promotions/       <- Customer & promotions
+├── clients&promotions/       <- Customer & promotions
+└── _archive/                  <- Completed/superseded docs (not deleted)
 
 avoqado-web-dashboard/docs/    <- Frontend-specific
 ├── architecture/             <- React routing, overview
@@ -233,4 +244,4 @@ avoqado-tpv/docs/              <- Android-specific
 
 ---
 
-**Last Updated:** 2025-01-06
+**Last Updated:** 2026-02-05
