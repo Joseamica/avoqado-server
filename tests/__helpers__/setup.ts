@@ -77,6 +77,9 @@ const prismaMock: any = {
   orderDiscount: createMockModel(),
   // Venue Role Config (custom role display names)
   venueRoleConfig: createMockModel(),
+  // Invitation and StaffOrganization models
+  invitation: createMockModel(),
+  staffOrganization: createMockModel(),
   // Modifier Inventory Analytics models
   modifier: createMockModel(),
   modifierGroup: createMockModel(),

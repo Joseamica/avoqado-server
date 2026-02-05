@@ -18,8 +18,10 @@ import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
  */
 export const getAuthStatus = async (req: Request, res: Response) => {
   const token = req.cookies?.accessToken // Consistente con el login
+  logger.info('[AUTH] 📊 Status check', { hasToken: !!token })
 
   if (!token) {
+    logger.info('[AUTH] 📊 No token - returning unauthenticated')
     return res.status(200).json({
       authenticated: false,
       user: null,
@@ -43,9 +45,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         createdAt: true,
         lastLoginAt: true,
         organizations: {
-          where: { isPrimary: true, isActive: true },
+          where: { isActive: true },
           include: { organization: true },
-          take: 1,
+          // Fetch all active organizations (not just primary) to find OWNER orgs
         },
         venues: {
           where: { active: true },
@@ -355,98 +357,110 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         }
       }
     } else if (isOwner) {
-      // For OWNER, fetch all venues in their organization
-      const ownerOrgId = staff.organizations[0]?.organizationId
-      if (!ownerOrgId) {
-        return res.status(400).json({ error: 'Owner has no organization assigned' })
-      }
-      const orgVenues = await prisma.venue.findMany({
-        where: {
-          organizationId: ownerOrgId,
-          active: true,
-        },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          logo: true,
-          status: true, // Single source of truth
-          kycStatus: true, // Include KYC status
-          // Contact & Address fields (needed for TPV purchase wizard pre-fill)
-          address: true,
-          city: true,
-          state: true,
-          zipCode: true,
-          country: true,
-          email: true,
-          phone: true,
-          // Organization info (needed for VenuesSwitcher grouping)
-          organizationId: true,
-          organization: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-          features: {
-            select: {
-              active: true,
-              feature: {
-                select: {
-                  code: true,
-                  name: true,
-                },
-              },
-            },
-          },
-          // Include modules for module-based access control (e.g., SERIALIZED_INVENTORY)
-          venueModules: {
-            select: {
-              enabled: true,
-              config: true,
-              module: {
-                select: {
-                  code: true,
-                  name: true,
-                },
-              },
-            },
-          },
-        },
-      })
+      // For OWNER, fetch all venues from organizations where user has OWNER role
+      // This fixes the bug where primary org was used instead of the org where user is OWNER
+      const ownerOrgIds = staff.organizations.filter(so => so.role === 'OWNER').map(so => so.organizationId)
 
-      allVenues = orgVenues.map(venue => ({
-        id: venue.id,
-        name: venue.name,
-        slug: venue.slug,
-        logo: venue.logo,
-        status: venue.status, // Single source of truth
-        kycStatus: venue.kycStatus, // Include KYC status
-        features: venue.features,
-        modules: venue.venueModules, // Include modules
-        // Contact & Address fields (needed for TPV purchase wizard pre-fill)
-        address: venue.address,
-        city: venue.city,
-        state: venue.state,
-        zipCode: venue.zipCode,
-        country: venue.country,
-        email: venue.email,
-        phone: venue.phone,
-        // Organization info (needed for VenuesSwitcher grouping)
-        organizationId: venue.organizationId,
-        organization: venue.organization,
-      }))
-
-      // Add all organization venues to user's venues array (if not already there)
-      // with OWNER role
-      for (const venue of allVenues) {
-        if (!directVenueIds.has(venue.id)) {
-          directVenues.push({
-            ...venue,
-            role: StaffRole.OWNER,
-          })
+      if (ownerOrgIds.length === 0) {
+        // Fallback: if no OrgRole.OWNER, use the org from their OWNER StaffVenue
+        const ownerVenue = staff.venues.find(sv => sv.role === StaffRole.OWNER)
+        if (ownerVenue?.venue.organizationId) {
+          ownerOrgIds.push(ownerVenue.venue.organizationId)
         }
       }
+
+      if (ownerOrgIds.length === 0) {
+        // No owner orgs found, just use direct venues
+        allVenues = directVenues
+      } else {
+        const orgVenues = await prisma.venue.findMany({
+          where: {
+            organizationId: { in: ownerOrgIds },
+            active: true,
+          },
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            logo: true,
+            status: true, // Single source of truth
+            kycStatus: true, // Include KYC status
+            // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+            address: true,
+            city: true,
+            state: true,
+            zipCode: true,
+            country: true,
+            email: true,
+            phone: true,
+            // Organization info (needed for VenuesSwitcher grouping)
+            organizationId: true,
+            organization: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            features: {
+              select: {
+                active: true,
+                feature: {
+                  select: {
+                    code: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+            // Include modules for module-based access control (e.g., SERIALIZED_INVENTORY)
+            venueModules: {
+              select: {
+                enabled: true,
+                config: true,
+                module: {
+                  select: {
+                    code: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        })
+
+        allVenues = orgVenues.map(venue => ({
+          id: venue.id,
+          name: venue.name,
+          slug: venue.slug,
+          logo: venue.logo,
+          status: venue.status, // Single source of truth
+          kycStatus: venue.kycStatus, // Include KYC status
+          features: venue.features,
+          modules: venue.venueModules, // Include modules
+          // Contact & Address fields (needed for TPV purchase wizard pre-fill)
+          address: venue.address,
+          city: venue.city,
+          state: venue.state,
+          zipCode: venue.zipCode,
+          country: venue.country,
+          email: venue.email,
+          phone: venue.phone,
+          // Organization info (needed for VenuesSwitcher grouping)
+          organizationId: venue.organizationId,
+          organization: venue.organization,
+        }))
+
+        // Add all organization venues to user's venues array (if not already there)
+        // with OWNER role
+        for (const venue of allVenues) {
+          if (!directVenueIds.has(venue.id)) {
+            directVenues.push({
+              ...venue,
+              role: StaffRole.OWNER,
+            })
+          }
+        }
+      } // Close the else block for ownerOrgIds.length > 0
     }
 
     // Determine highest role (World-Class Pattern: Detect OWNER even without venues during onboarding)
@@ -457,7 +471,8 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       highestRole = StaffRole.OWNER
     } else if (staff.venues.length === 0) {
       // Check if staff is primary OWNER during onboarding (Stripe/Shopify pattern)
-      const primaryOrg = staff.organizations[0]?.organization
+      const primaryStaffOrg = staff.organizations.find(so => so.isPrimary)
+      const primaryOrg = primaryStaffOrg?.organization
       const isPrimaryOwner = primaryOrg ? staff.email === primaryOrg.email : false
       const onboardingIncomplete = primaryOrg ? !primaryOrg.onboardingCompletedAt : false
 
@@ -500,12 +515,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
     res.setHeader('Pragma', 'no-cache')
     res.setHeader('Expires', '0')
 
+    logger.info('[AUTH] 📊 Status check complete - authenticated', {
+      userId: staff.id,
+      role: highestRole,
+      venueCount: enrichedVenues.length,
+    })
+
     return res.status(200).json({
       authenticated: true,
       user: userPayload,
       allVenues: isSuperAdmin || highestRole === StaffRole.OWNER ? allVenues : [], // Provide all venues for SUPERADMIN and OWNER
     })
   } catch (error) {
+    logger.warn('[AUTH] 📊 Status check failed - clearing cookie', { error: (error as Error).message })
     res.clearCookie('accessToken')
 
     if (error instanceof jwt.TokenExpiredError) {
@@ -525,11 +547,13 @@ export const getAuthStatus = async (req: Request, res: Response) => {
 
 export async function dashboardLoginController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    logger.info('[AUTH] 🔐 Login attempt started', { email: req.body.email })
     const loginData = req.body
     const rememberMe = loginData.rememberMe === true
 
     // Llamar al servicio
     const { accessToken, refreshToken, staff } = await authService.loginStaff(loginData)
+    logger.info('[AUTH] 🔐 Login service success', { staffId: staff.id, email: staff.email })
 
     // Cookie maxAge must match JWT expiration to prevent premature logout
     // JWT expires in: 24h (normal) or 30 days (rememberMe)
@@ -555,6 +579,8 @@ export async function dashboardLoginController(req: Request, res: Response, next
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
 
+    logger.info('[AUTH] 🔐 Login complete - cookies set', { staffId: staff.id })
+
     // Respuesta exitosa
     // Include tokens in body for mobile apps (iOS/Android) that can't read httpOnly cookies
     // Web dashboard uses the cookies, mobile apps use the body tokens
@@ -566,11 +592,13 @@ export async function dashboardLoginController(req: Request, res: Response, next
       refreshToken, // For mobile apps
     })
   } catch (error) {
+    logger.error('[AUTH] 🔐 Login failed', { email: req.body?.email, error })
     next(error)
   }
 }
 
 export const dashboardLogoutController = async (req: Request, res: Response) => {
+  logger.info('[AUTH] 🚪 Logout request received')
   try {
     // Limpiar cookies con las mismas opciones
     res.clearCookie('accessToken', {
@@ -580,6 +608,7 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
+    logger.info('[AUTH] 🚪 accessToken cookie cleared')
 
     res.clearCookie('refreshToken', {
       httpOnly: true,
@@ -588,22 +617,26 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
       path: '/',
       // No domain specified for cross-domain deployment (Cloudflare + Render)
     })
+    logger.info('[AUTH] 🚪 refreshToken cookie cleared')
 
     // Destruir sesión si existe
     if (req.session) {
       req.session.destroy(err => {
         if (err) {
-          logger.error('Error al destruir sesión:', err)
+          logger.error('[AUTH] 🚪 Error destroying session:', err)
+        } else {
+          logger.info('[AUTH] 🚪 Session destroyed')
         }
       })
     }
 
+    logger.info('[AUTH] 🚪 Logout complete - sending response')
     res.status(200).json({
       success: true,
       message: 'Logout exitoso',
     })
   } catch (error) {
-    logger.error('Error en logout:', error)
+    logger.error('[AUTH] 🚪 Logout error:', error)
     throw new AuthenticationError('Error al cerrar sesión')
   }
 }

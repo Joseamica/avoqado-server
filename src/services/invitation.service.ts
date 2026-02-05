@@ -197,6 +197,19 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
     // Create or reuse the staff record
     let staff
     if (existingStaff) {
+      // User already exists - verify password if they have one and one was provided
+      // This allows existing users to accept invitations by verifying their password
+      // instead of going through the full login flow (which fails if they have no active venues)
+      if (existingStaff.password && userData.password) {
+        const isPasswordValid = await bcrypt.compare(userData.password, existingStaff.password)
+        if (!isPasswordValid) {
+          throw new AppError('Contraseña incorrecta', 401)
+        }
+      } else if (existingStaff.password && !userData.password) {
+        // User has a password but didn't provide one - they need to verify
+        throw new AppError('Se requiere contraseña para verificar tu identidad', 400)
+      }
+
       // User already exists in this organization
       // DON'T overwrite their password or name - they already have valid credentials
       // Just ensure they're active and verified
@@ -225,12 +238,18 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
 
       // If cross-org invitation, create StaffOrganization for the new org
       if (isCrossOrgInvitation) {
-        const venueRoles = existingStaff.venues.map(v => v.role as StaffRole)
-        const highestRole = venueRoles.includes(StaffRole.OWNER) || venueRoles.includes(StaffRole.ADMIN) ? OrgRole.ADMIN : OrgRole.MEMBER
+        // Use OWNER OrgRole if invitation role is OWNER, otherwise derive from existing roles
+        let orgRoleForCrossOrg: OrgRole = OrgRole.MEMBER
+        if (invitation.role === StaffRole.OWNER) {
+          orgRoleForCrossOrg = OrgRole.OWNER
+        } else {
+          const venueRoles = existingStaff.venues.map(v => v.role as StaffRole)
+          orgRoleForCrossOrg = venueRoles.includes(StaffRole.OWNER) || venueRoles.includes(StaffRole.ADMIN) ? OrgRole.ADMIN : OrgRole.MEMBER
+        }
         await createStaffOrganizationMembership({
           staffId: staff.id,
           organizationId: invitation.organizationId,
-          role: highestRole,
+          role: orgRoleForCrossOrg,
           isPrimary: false,
           joinedById: invitation.invitedById ?? undefined,
         })
@@ -264,11 +283,13 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
       })
 
       // Create StaffOrganization membership for new staff
+      // Use OWNER OrgRole if invitation role is OWNER
+      const orgRoleForNewStaff = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
       await tx.staffOrganization.create({
         data: {
           staffId: staff.id,
           organizationId: invitation.organizationId,
-          role: OrgRole.MEMBER,
+          role: orgRoleForNewStaff,
           isPrimary: true,
           isActive: true,
           joinedById: invitation.invitedById,
@@ -278,43 +299,64 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
 
     // Create the staff-venue relationship if venue is specified
     if (invitation.venueId) {
-      // Check if this staff is already assigned to this venue
-      const existingAssignment = await tx.staffVenue.findUnique({
-        where: {
-          staffId_venueId: {
-            staffId: staff.id,
-            venueId: invitation.venueId,
-          },
-        },
-      })
+      // Check if invitation has inviteToAllVenues flag (for OWNER invitations)
+      const permissions = invitation.permissions as { inviteToAllVenues?: boolean } | null
+      const shouldInviteToAllVenues = permissions?.inviteToAllVenues === true
 
-      if (existingAssignment) {
-        // Update existing assignment instead of creating new one
-        await tx.staffVenue.update({
-          where: { id: existingAssignment.id },
-          data: {
-            role: invitation.role,
-            pin: validatedPin,
-            active: true,
-            startDate: new Date(),
+      // Get all venues for the organization if inviteToAllVenues is true
+      let venuesToAssign = [{ id: invitation.venueId }]
+      if (shouldInviteToAllVenues) {
+        const orgVenues = await tx.venue.findMany({
+          where: { organizationId: invitation.organizationId },
+          select: { id: true },
+        })
+        venuesToAssign = orgVenues
+        logger.info('Assigning staff to all organization venues', {
+          staffId: staff.id,
+          organizationId: invitation.organizationId,
+          venueCount: orgVenues.length,
+        })
+      }
+
+      // Create StaffVenue for each venue
+      for (const v of venuesToAssign) {
+        const existingAssignment = await tx.staffVenue.findUnique({
+          where: {
+            staffId_venueId: {
+              staffId: staff.id,
+              venueId: v.id,
+            },
           },
         })
-      } else {
-        // Create new assignment (let Prisma auto-generate CUID)
-        await tx.staffVenue.create({
-          data: {
-            staffId: staff.id,
-            venueId: invitation.venueId,
-            role: invitation.role,
-            pin: validatedPin, // PIN is stored per venue
-            active: true,
-            startDate: new Date(),
-            totalSales: 0,
-            totalTips: 0,
-            averageRating: 0,
-            totalOrders: 0,
-          },
-        })
+
+        if (existingAssignment) {
+          // Update existing assignment
+          await tx.staffVenue.update({
+            where: { id: existingAssignment.id },
+            data: {
+              role: invitation.role,
+              pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
+              active: true,
+              startDate: new Date(),
+            },
+          })
+        } else {
+          // Create new assignment
+          await tx.staffVenue.create({
+            data: {
+              staffId: staff.id,
+              venueId: v.id,
+              role: invitation.role,
+              pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
+              active: true,
+              startDate: new Date(),
+              totalSales: 0,
+              totalTips: 0,
+              averageRating: 0,
+              totalOrders: 0,
+            },
+          })
+        }
       }
     }
 

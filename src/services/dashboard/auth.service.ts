@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 import { AuthenticationError, ForbiddenError, BadRequestError } from '../../errors/AppError'
 import { LoginDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
-import { StaffRole } from '@prisma/client'
+import { StaffRole, InvitationStatus } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 import emailService from '../email.service'
@@ -305,7 +305,81 @@ export async function loginStaff(loginData: LoginDto) {
       }
     }
 
-    // Not OWNER or onboarding completed but no venue access → error
+    // 3.6. Enterprise Pattern: Check for pending invitations before blocking
+    // This allows users with no active venues but pending invitations to login
+    // and be redirected to accept their invitations
+    const pendingInvitations = await prisma.invitation.findMany({
+      where: {
+        email: staff.email.toLowerCase(),
+        status: InvitationStatus.PENDING,
+        expiresAt: { gt: new Date() },
+      },
+      select: {
+        id: true,
+        token: true,
+        role: true,
+        venue: { select: { id: true, name: true } },
+        organization: { select: { id: true, name: true } },
+        expiresAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10, // Limit to 10 most recent
+    })
+
+    if (pendingInvitations.length > 0) {
+      // User has pending invitations - allow login with limited access
+      // Frontend will redirect to invitation acceptance flow
+      const orgId = staff.organizations[0]?.organizationId ?? pendingInvitations[0].organization.id
+      const accessToken = jwtService.generateAccessToken(staff.id, orgId, 'pending-invitation', StaffRole.VIEWER)
+      const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
+
+      // Reset failed attempts
+      await prisma.staff.update({
+        where: { id: staff.id },
+        data: {
+          lastLoginAt: new Date(),
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      })
+
+      logger.info('User logged in with pending invitations (no active venues)', {
+        staffId: staff.id,
+        email: staff.email,
+        pendingInvitationsCount: pendingInvitations.length,
+      })
+
+      return {
+        accessToken,
+        refreshToken,
+        staff: {
+          id: staff.id,
+          email: staff.email,
+          firstName: staff.firstName,
+          lastName: staff.lastName,
+          organizationId: orgId,
+          photoUrl: staff.photoUrl,
+          phone: staff.phone,
+          createdAt: staff.createdAt,
+          lastLogin: staff.lastLoginAt,
+          role: StaffRole.VIEWER,
+          venues: [],
+        },
+        // NEW: Include pending invitations for frontend to handle
+        pendingInvitations: pendingInvitations.map(inv => ({
+          id: inv.id,
+          token: inv.token,
+          role: inv.role,
+          venueName: inv.venue?.name ?? null,
+          venueId: inv.venue?.id ?? null,
+          organizationName: inv.organization.name,
+          organizationId: inv.organization.id,
+          expiresAt: inv.expiresAt.toISOString(),
+        })),
+      }
+    }
+
+    // Not OWNER, no pending invitations, no venue access → error
     throw new ForbiddenError('No tienes acceso a ningún establecimiento', 'NO_VENUE_ACCESS')
   }
 

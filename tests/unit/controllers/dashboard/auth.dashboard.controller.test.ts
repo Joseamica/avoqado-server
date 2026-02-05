@@ -413,7 +413,7 @@ describe('Dashboard Auth Controller', () => {
       await authController.dashboardLogoutController(req as Request, res as Response)
 
       expect(mockSessionDestroy).toHaveBeenCalled()
-      expect(logger.error).toHaveBeenCalledWith('Error al destruir sesión:', mockSessionError)
+      expect(logger.error).toHaveBeenCalledWith('[AUTH] 🚪 Error destroying session:', mockSessionError)
       expect(res.status).toHaveBeenCalledWith(200)
       expect(res.json).toHaveBeenCalledWith({ success: true, message: 'Logout exitoso' })
     })
@@ -442,7 +442,7 @@ describe('Dashboard Auth Controller', () => {
       await expect(authController.dashboardLogoutController(req as Request, res as Response)).rejects.toThrow(
         new AuthenticationError('Error al cerrar sesión'),
       )
-      expect(logger.error).toHaveBeenCalledWith('Error en logout:', clearCookieError)
+      expect(logger.error).toHaveBeenCalledWith('[AUTH] 🚪 Logout error:', clearCookieError)
     })
   })
   describe('switchVenueController', () => {

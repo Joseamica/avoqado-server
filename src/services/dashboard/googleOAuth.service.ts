@@ -1,7 +1,7 @@
 import { OAuth2Client } from 'google-auth-library'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { StaffRole, OrgRole } from '@prisma/client'
+import { StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
@@ -105,6 +105,16 @@ export async function loginWithGoogle(
   refreshToken: string
   staff: any
   isNewUser: boolean
+  pendingInvitations?: {
+    id: string
+    token: string
+    role: string
+    venueName: string | null
+    venueId: string | null
+    organizationName: string
+    organizationId: string
+    expiresAt: string
+  }[]
 }> {
   // Get user info from Google
   const googleUser = isCode ? await getGoogleUserFromCode(codeOrToken) : await verifyGoogleToken(codeOrToken)
@@ -336,8 +346,70 @@ export async function loginWithGoogle(
       }
     }
 
-    // Not OWNER or onboarding completed but no venue access → error
-    throw new ForbiddenError('No venue access assigned')
+    // Enterprise Pattern: Check for pending invitations before blocking
+    // This allows users with no active venues but pending invitations to login
+    // and be redirected to accept their invitations (same as email/password login)
+    const pendingInvitations = await prisma.invitation.findMany({
+      where: {
+        email: staff.email.toLowerCase(),
+        status: InvitationStatus.PENDING,
+        expiresAt: { gt: new Date() },
+      },
+      select: {
+        id: true,
+        token: true,
+        role: true,
+        venue: { select: { id: true, name: true } },
+        organization: { select: { id: true, name: true } },
+        expiresAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    })
+
+    if (pendingInvitations.length > 0) {
+      // User has pending invitations - allow login with limited access
+      // Frontend will redirect to invitation acceptance flow
+      const orgId = staff.organizations[0]?.organizationId ?? pendingInvitations[0].organization.id
+      const accessToken = jwtService.generateAccessToken(staff.id, orgId, 'pending-invitation', StaffRole.VIEWER)
+      const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
+
+      logger.info('Google OAuth: User logged in with pending invitations (no active venues)', {
+        staffId: staff.id,
+        email: staff.email,
+        pendingInvitationsCount: pendingInvitations.length,
+      })
+
+      return {
+        accessToken,
+        refreshToken,
+        staff: {
+          id: staff.id,
+          email: staff.email,
+          firstName: staff.firstName,
+          lastName: staff.lastName,
+          organizationId: orgId,
+          photoUrl: staff.photoUrl,
+          role: StaffRole.VIEWER,
+          venues: [],
+        },
+        isNewUser,
+        // Include pending invitations for frontend to handle
+        pendingInvitations: pendingInvitations.map(inv => ({
+          id: inv.id,
+          token: inv.token,
+          role: inv.role,
+          venueName: inv.venue?.name ?? null,
+          venueId: inv.venue?.id ?? null,
+          organizationName: inv.organization.name,
+          organizationId: inv.organization.id,
+          expiresAt: inv.expiresAt.toISOString(),
+        })),
+      }
+    }
+
+    // Not OWNER, no pending invitations, no venue access → error
+    throw new ForbiddenError('No venue access assigned', 'NO_VENUE_ACCESS')
   }
 
   // Use the first venue as default
@@ -426,6 +498,16 @@ export async function loginWithGoogleOneTap(credential: string): Promise<{
   refreshToken: string
   staff: any
   isNewUser: boolean
+  pendingInvitations?: {
+    id: string
+    token: string
+    role: string
+    venueName: string | null
+    venueId: string | null
+    organizationName: string
+    organizationId: string
+    expiresAt: string
+  }[]
 }> {
   // Verify the Google One Tap JWT credential
   const _googleUser = await verifyGoogleToken(credential)

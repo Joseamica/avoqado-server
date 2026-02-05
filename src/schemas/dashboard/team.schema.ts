@@ -58,6 +58,8 @@ export const InviteTeamMemberSchema = z.object({
         .string()
         .regex(/^\d{4,10}$/, 'PIN must be 4-10 digits')
         .optional(),
+      // When true and role is OWNER, creates StaffVenue for all organization venues
+      inviteToAllVenues: z.boolean().optional(),
     })
     .refine(
       data => {

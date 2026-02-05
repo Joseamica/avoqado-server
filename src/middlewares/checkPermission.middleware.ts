@@ -35,7 +35,7 @@ export const checkPermission = (requiredPermission: string) => {
       // authContext should be attached by authenticateToken middleware
       const authContext = (req as any).authContext
 
-      if (!authContext || !authContext.role || !authContext.venueId) {
+      if (!authContext || !authContext.userId) {
         logger.warn('checkPermission: No authContext found in request')
         return res.status(401).json({
           error: 'Unauthorized',
@@ -43,9 +43,46 @@ export const checkPermission = (requiredPermission: string) => {
         })
       }
 
-      // Get user's role and venue from authContext
-      const userRole = authContext.role as StaffRole
-      const venueId = authContext.venueId
+      // MULTI-VENUE FIX: Use venueId from URL params if available, fallback to authContext
+      // This allows users to navigate between venues without calling switchVenue
+      const urlVenueId = req.params.venueId
+      const venueId = urlVenueId || authContext.venueId
+
+      if (!venueId) {
+        logger.warn('checkPermission: No venueId found in request params or authContext')
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Venue ID required',
+        })
+      }
+
+      // If venueId from URL differs from token, look up user's actual role in that venue
+      let userRole: StaffRole
+      if (urlVenueId && urlVenueId !== authContext.venueId) {
+        // Look up user's role in the target venue
+        const staffVenue = await prisma.staffVenue.findUnique({
+          where: {
+            staffId_venueId: {
+              staffId: authContext.userId,
+              venueId: urlVenueId,
+            },
+          },
+          select: { role: true },
+        })
+
+        if (!staffVenue) {
+          logger.warn(`checkPermission: User ${authContext.userId} has no access to venue ${urlVenueId}`)
+          return res.status(403).json({
+            error: 'Forbidden',
+            message: 'No access to this venue',
+          })
+        }
+
+        userRole = staffVenue.role
+      } else {
+        // Use role from token (same venue)
+        userRole = authContext.role as StaffRole
+      }
 
       // Load custom permissions from VenueRolePermission table
       let customPermissions: string[] | null = null
@@ -106,15 +143,47 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
     try {
       const authContext = (req as any).authContext
 
-      if (!authContext || !authContext.role || !authContext.venueId) {
+      if (!authContext || !authContext.userId) {
         return res.status(401).json({
           error: 'Unauthorized',
           message: 'Authentication required',
         })
       }
 
-      const userRole = authContext.role as StaffRole
-      const venueId = authContext.venueId
+      // MULTI-VENUE FIX: Use venueId from URL params if available
+      const urlVenueId = req.params.venueId
+      const venueId = urlVenueId || authContext.venueId
+
+      if (!venueId) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Venue ID required',
+        })
+      }
+
+      // Dynamic role lookup if URL venue differs from token
+      let userRole: StaffRole
+      if (urlVenueId && urlVenueId !== authContext.venueId) {
+        const staffVenue = await prisma.staffVenue.findUnique({
+          where: {
+            staffId_venueId: {
+              staffId: authContext.userId,
+              venueId: urlVenueId,
+            },
+          },
+          select: { role: true },
+        })
+
+        if (!staffVenue) {
+          return res.status(403).json({
+            error: 'Forbidden',
+            message: 'No access to this venue',
+          })
+        }
+        userRole = staffVenue.role
+      } else {
+        userRole = authContext.role as StaffRole
+      }
 
       // Load custom permissions
       let customPermissions: string[] | null = null
@@ -174,15 +243,47 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
     try {
       const authContext = (req as any).authContext
 
-      if (!authContext || !authContext.role || !authContext.venueId) {
+      if (!authContext || !authContext.userId) {
         return res.status(401).json({
           error: 'Unauthorized',
           message: 'Authentication required',
         })
       }
 
-      const userRole = authContext.role as StaffRole
-      const venueId = authContext.venueId
+      // MULTI-VENUE FIX: Use venueId from URL params if available
+      const urlVenueId = req.params.venueId
+      const venueId = urlVenueId || authContext.venueId
+
+      if (!venueId) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Venue ID required',
+        })
+      }
+
+      // Dynamic role lookup if URL venue differs from token
+      let userRole: StaffRole
+      if (urlVenueId && urlVenueId !== authContext.venueId) {
+        const staffVenue = await prisma.staffVenue.findUnique({
+          where: {
+            staffId_venueId: {
+              staffId: authContext.userId,
+              venueId: urlVenueId,
+            },
+          },
+          select: { role: true },
+        })
+
+        if (!staffVenue) {
+          return res.status(403).json({
+            error: 'Forbidden',
+            message: 'No access to this venue',
+          })
+        }
+        userRole = staffVenue.role
+      } else {
+        userRole = authContext.role as StaffRole
+      }
 
       // Load custom permissions
       let customPermissions: string[] | null = null

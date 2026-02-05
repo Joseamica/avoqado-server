@@ -118,6 +118,7 @@
 | Document                                                                   | Description                                                                |
 | -------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | [features/TEAM_INVITATIONS.md](./features/TEAM_INVITATIONS.md)             | Team invitations, multi-venue, multi-org (StaffOrganization junction table) |
+| [features/LOGIN_SCENARIOS.md](./features/LOGIN_SCENARIOS.md)               | **Complete login & invitation scenarios reference** (all edge cases)       |
 
 ### Venue & Operations
 
