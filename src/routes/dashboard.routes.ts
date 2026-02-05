@@ -214,6 +214,8 @@ import stockDashboardRoutes from './dashboard/stockDashboard.routes'
 import itemCategoryRoutes from './dashboard/itemCategory.routes'
 // Organization Dashboard routes for PlayTelecom/White-Label dashboard
 import organizationDashboardRoutes from './dashboard/organizationDashboard.routes'
+// Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
+import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3474,6 +3476,10 @@ router.use('/venues/:venueId/item-categories', itemCategoryRoutes)
 // Organization Dashboard routes for PlayTelecom/White-Label dashboard
 // Provides organization-level aggregate metrics and vision global
 router.use('/organizations', organizationDashboardRoutes)
+
+// Stores Analysis routes for PlayTelecom/White-Label dashboard
+// Venue-level routes that fetch organization data with white-label access control
+router.use('/venues/:venueId/stores-analysis', storesAnalysisRoutes)
 
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)

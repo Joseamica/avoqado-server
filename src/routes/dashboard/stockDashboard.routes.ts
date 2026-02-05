@@ -2,43 +2,39 @@
  * Stock Dashboard Routes
  * Provides stock metrics, charts, alerts, and bulk upload
  * for the PlayTelecom/White-Label dashboard.
+ *
+ * These routes are WHITE-LABEL SPECIFIC and completely independent
+ * from regular dashboard endpoints.
+ *
+ * Middleware: verifyAccess with requireWhiteLabel + featureCode
+ * - Validates JWT authentication
+ * - Ensures WHITE_LABEL_DASHBOARD module is enabled
+ * - Checks role-based access to SERIALIZED_STOCK feature
  */
 import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
+import { verifyAccess } from '../../middlewares/verifyAccess.middleware'
 import { stockDashboardService } from '../../services/stock-dashboard/stockDashboard.service'
-import { moduleService, MODULE_CODES } from '../../services/modules/module.service'
+import * as itemCategoryService from '../../services/dashboard/itemCategory.dashboard.service'
 
-const router = Router()
+// mergeParams: true allows access to :venueId from parent route
+const router = Router({ mergeParams: true })
 
-/**
- * Middleware to check WHITE_LABEL_DASHBOARD module is enabled
- */
-async function checkWhiteLabelModule(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId } = (req as any).authContext
+// Feature code for role-based access control
+const FEATURE_CODE = 'SERIALIZED_STOCK'
 
-    const isEnabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.WHITE_LABEL_DASHBOARD)
-    if (!isEnabled) {
-      return res.status(403).json({
-        success: false,
-        error: 'module_disabled',
-        message: 'White-label dashboard module is not enabled for this venue',
-      })
-    }
-
-    next()
-  } catch (error) {
-    next(error)
-  }
-}
+// Unified middleware for white-label stock routes
+// - requireWhiteLabel: ensures WHITE_LABEL_DASHBOARD module is enabled
+// - featureCode: checks role-based access to the feature
+const whiteLabelStockAccess = [authenticateTokenMiddleware, verifyAccess({ featureCode: FEATURE_CODE, requireWhiteLabel: true })]
 
 /**
  * GET /dashboard/stock/metrics
  * Returns: Total pieces, value, available, sold today/week
  */
-router.get('/metrics', authenticateTokenMiddleware, checkWhiteLabelModule, async (req: Request, res: Response, next: NextFunction) => {
+router.get('/metrics', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
 
     const metrics = await stockDashboardService.getStockMetrics(venueId)
 
@@ -55,9 +51,9 @@ router.get('/metrics', authenticateTokenMiddleware, checkWhiteLabelModule, async
  * GET /dashboard/stock/categories
  * Returns: Stock by category with coverage estimation
  */
-router.get('/categories', authenticateTokenMiddleware, checkWhiteLabelModule, async (req: Request, res: Response, next: NextFunction) => {
+router.get('/categories', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
 
     const categories = await stockDashboardService.getCategoryStock(venueId)
 
@@ -77,9 +73,9 @@ router.get('/categories', authenticateTokenMiddleware, checkWhiteLabelModule, as
  * Returns: Stock vs sales trend for chart visualization
  * Query: days (default 14)
  */
-router.get('/chart', authenticateTokenMiddleware, checkWhiteLabelModule, async (req: Request, res: Response, next: NextFunction) => {
+router.get('/chart', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { days = '14' } = req.query
 
     const data = await stockDashboardService.getStockVsSales(venueId, parseInt(days as string, 10))
@@ -99,9 +95,9 @@ router.get('/chart', authenticateTokenMiddleware, checkWhiteLabelModule, async (
  * GET /dashboard/stock/alerts
  * Returns: All low stock alerts
  */
-router.get('/alerts', authenticateTokenMiddleware, checkWhiteLabelModule, async (req: Request, res: Response, next: NextFunction) => {
+router.get('/alerts', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
 
     const alerts = await stockDashboardService.getLowStockAlerts(venueId)
 
@@ -121,43 +117,39 @@ router.get('/alerts', authenticateTokenMiddleware, checkWhiteLabelModule, async 
  * Configure stock alert for a category
  * Body: { categoryId, minimumStock, alertEnabled }
  */
-router.post(
-  '/alerts/configure',
-  authenticateTokenMiddleware,
-  checkWhiteLabelModule,
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { venueId } = (req as any).authContext
-      const { categoryId, minimumStock, alertEnabled } = req.body
+router.post('/alerts/configure', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { categoryId, minimumStock, alertEnabled } = req.body
 
-      if (!categoryId || typeof minimumStock !== 'number') {
-        return res.status(400).json({
-          success: false,
-          error: 'validation_error',
-          message: 'categoryId and minimumStock are required',
-        })
-      }
-
-      const result = await stockDashboardService.configureStockAlert(venueId, categoryId, minimumStock, alertEnabled ?? true)
-
-      res.json({
-        success: true,
-        data: result,
+    if (!categoryId || typeof minimumStock !== 'number') {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_error',
+        message: 'categoryId and minimumStock are required',
       })
-    } catch (error) {
-      next(error)
     }
-  },
-)
+
+    const result = await stockDashboardService.configureStockAlert(venueId, categoryId, minimumStock, alertEnabled ?? true)
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
 
 /**
  * POST /dashboard/stock/bulk-upload
  * Process CSV bulk upload for item registration
  * Body: { categoryId, csvContent }
  */
-router.post('/bulk-upload', authenticateTokenMiddleware, checkWhiteLabelModule, async (req: Request, res: Response, next: NextFunction) => {
+router.post('/bulk-upload', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId, userId } = (req as any).authContext
+    const { userId } = (req as any).authContext
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { categoryId, csvContent } = req.body
 
     if (!categoryId || !csvContent) {
@@ -184,9 +176,10 @@ router.post('/bulk-upload', authenticateTokenMiddleware, checkWhiteLabelModule, 
  * Returns: Recent stock movements (registrations, sales)
  * Query: limit (default 20)
  */
-router.get('/movements', authenticateTokenMiddleware, checkWhiteLabelModule, async (req: Request, res: Response, next: NextFunction) => {
+router.get('/movements', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId } = (req as any).authContext
+    // Use target venueId from URL params
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { limit = '20' } = req.query
 
     const movements = await stockDashboardService.getRecentMovements(venueId, parseInt(limit as string, 10))
@@ -196,6 +189,31 @@ router.get('/movements', authenticateTokenMiddleware, checkWhiteLabelModule, asy
       data: {
         movements,
       },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/stock/item-categories
+ * Returns: Item categories for white-label dashboard
+ * This is a white-label specific endpoint that bypasses checkPermission
+ * Query: includeStats (default false)
+ */
+router.get('/item-categories', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Use target venueId from URL params
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { includeStats } = req.query
+
+    const categories = await itemCategoryService.getItemCategories(venueId, {
+      includeStats: includeStats === 'true',
+    })
+
+    res.json({
+      success: true,
+      data: categories,
     })
   } catch (error) {
     next(error)
