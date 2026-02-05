@@ -3,6 +3,7 @@ import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.s
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { terminalRegistry } from '../../communication/sockets/terminal-registry'
+import { AppEnvironment, UpdateMode } from '@prisma/client'
 
 /**
  * Calculate config version for a terminal's merchant configuration
@@ -68,6 +69,80 @@ async function getMerchantConfigVersion(terminalId: string): Promise<string | nu
 }
 
 /**
+ * Check for forced updates that the terminal must install
+ *
+ * **Backend Enforcement Pattern:**
+ * This is the "cannot bypass" enforcement mechanism. Unlike the initial update check
+ * which the user can dismiss, this is included in EVERY heartbeat response.
+ *
+ * The terminal receives this every 30 seconds and MUST show the ForceUpdateDialog
+ * until the update is installed.
+ *
+ * @param currentVersion The terminal's current version string (e.g., "1.4.1-sandbox" or "1.4.1")
+ * @param currentVersionCode The terminal's current version code (e.g., 15)
+ * @returns Force update info if one exists, null otherwise
+ */
+async function checkForForcedUpdate(
+  currentVersion: string | undefined,
+  currentVersionCode: number | undefined,
+): Promise<{
+  versionName: string
+  versionCode: number
+  downloadUrl: string
+  releaseNotes: string | null
+  updateMode: string
+} | null> {
+  try {
+    // Determine environment from version string
+    // Sandbox versions end with "-sandbox" (e.g., "1.4.1-sandbox")
+    // Production versions have no suffix (e.g., "1.4.1")
+    const isSandbox = currentVersion?.toLowerCase().includes('sandbox') ?? true // Default to sandbox for safety
+    const environment: AppEnvironment = isSandbox ? 'SANDBOX' : 'PRODUCTION'
+
+    // Get current version code (try from param, then parse from version string)
+    // Version code is more reliable for comparison than version name
+    const versionCode = currentVersionCode ?? 0
+
+    // Find the latest active FORCE update for this environment
+    const forceUpdate = await prisma.appUpdate.findFirst({
+      where: {
+        environment,
+        isActive: true,
+        updateMode: UpdateMode.FORCE,
+        versionCode: { gt: versionCode }, // Only if newer than current version
+      },
+      orderBy: { versionCode: 'desc' },
+      select: {
+        versionName: true,
+        versionCode: true,
+        downloadUrl: true,
+        releaseNotes: true,
+        updateMode: true,
+      },
+    })
+
+    if (!forceUpdate) {
+      return null
+    }
+
+    logger.info(`🚨 [Heartbeat] FORCE update required: ${versionCode} → ${forceUpdate.versionCode} (${environment})`)
+
+    return {
+      versionName: forceUpdate.versionName,
+      versionCode: forceUpdate.versionCode,
+      downloadUrl: forceUpdate.downloadUrl,
+      releaseNotes: forceUpdate.releaseNotes,
+      updateMode: forceUpdate.updateMode,
+    }
+  } catch (error) {
+    logger.error('Failed to check for forced update', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return null // Non-blocking - return null if check fails
+  }
+}
+
+/**
  * Process heartbeat from TPV terminal (unauthenticated endpoint)
  * This allows terminals to report status even when authentication fails
  * and returns server status for synchronization
@@ -121,12 +196,19 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
     // This catches missed Socket.IO events (Layer 1) when terminal was offline
     const configVersion = await getMerchantConfigVersion(heartbeatData.terminalId)
 
+    // 🚨 Backend Enforcement: Check for forced updates that cannot be bypassed
+    // This is included in EVERY heartbeat response. Terminal must show ForceUpdateDialog
+    // until the update is installed. User cannot dismiss or ignore this.
+    const versionCode = heartbeatData.systemInfo?.versionCode as number | undefined
+    const forceUpdate = await checkForForcedUpdate(heartbeatData.version, versionCode)
+
     logger.debug(`Heartbeat processed, server status: ${terminalHealth.status}`, {
       terminalId: heartbeatData.terminalId,
       clientReported: heartbeatData.status,
       serverStatus: terminalHealth.status,
       pendingCommandsCount: pendingCommands.length,
       configVersion,
+      forceUpdate: forceUpdate ? `v${forceUpdate.versionCode}` : null,
     })
 
     res.status(200).json({
@@ -141,6 +223,9 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
       // Format: "{count}-{latestTimestamp}" e.g. "2-1701532800000"
       // Android should refresh merchant config if this doesn't match local cached version
       configVersion: configVersion || undefined,
+      // 🚨 Backend Enforcement: Force update that cannot be bypassed
+      // Terminal MUST install this update. Included in every heartbeat until installed.
+      forceUpdate: forceUpdate || undefined,
     })
   } catch (error) {
     logger.error(`Failed to process unauthenticated heartbeat:`, error)

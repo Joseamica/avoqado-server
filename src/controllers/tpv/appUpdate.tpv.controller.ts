@@ -27,7 +27,8 @@ const prisma = new PrismaClient()
  *
  * Response:
  * - hasUpdate: boolean
- * - update: { versionName, versionCode, downloadUrl, fileSize, checksum, releaseNotes, isRequired }
+ * - update: { versionName, versionCode, downloadUrl, fileSize, checksum, releaseNotes, updateMode }
+ *   - updateMode: "NONE" | "BANNER" | "FORCE"
  */
 export async function checkForUpdate(req: Request, res: Response) {
   try {
@@ -72,7 +73,7 @@ export async function checkForUpdate(req: Request, res: Response) {
         fileSize: true,
         checksum: true,
         releaseNotes: true,
-        isRequired: true,
+        updateMode: true,
         minAndroidSdk: true,
         createdAt: true,
       },
@@ -114,7 +115,7 @@ export async function checkForUpdate(req: Request, res: Response) {
         fileSize: latestUpdate.fileSize.toString(), // Convert BigInt to string for JSON
         checksum: latestUpdate.checksum,
         releaseNotes: latestUpdate.releaseNotes,
-        isRequired: latestUpdate.isRequired,
+        updateMode: latestUpdate.updateMode, // NONE, BANNER, or FORCE
         minAndroidSdk: latestUpdate.minAndroidSdk,
         publishedAt: latestUpdate.createdAt.toISOString(),
       },
@@ -185,7 +186,7 @@ export async function getSpecificVersion(req: Request, res: Response) {
         fileSize: true,
         checksum: true,
         releaseNotes: true,
-        isRequired: true,
+        updateMode: true,
         isActive: true,
         minAndroidSdk: true,
         createdAt: true,
@@ -223,7 +224,7 @@ export async function getSpecificVersion(req: Request, res: Response) {
         fileSize: update.fileSize.toString(),
         checksum: update.checksum,
         releaseNotes: update.releaseNotes,
-        isRequired: update.isRequired,
+        updateMode: update.updateMode,
         minAndroidSdk: update.minAndroidSdk,
         publishedAt: update.createdAt.toISOString(),
       },

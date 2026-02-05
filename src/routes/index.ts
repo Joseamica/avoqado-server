@@ -14,13 +14,14 @@ import demoRoutes from './demo.routes'
 import sdkRoutes from './sdk.routes'
 import mobileRoutes from './mobile.routes'
 import meRoutes from './me.routes'
+import { tpvVersionGate } from '../middlewares/tpv-version-gate.middleware'
 
 const router = express.Router({ mergeParams: true })
 
 router.use('/dashboard', dashboardRoutes) // All dashboard routes under /api/v1/dashboard
 router.use('/analytics', analyticsRoutes) // Executive analytics endpoints
 router.use('/organizations', organizationRoutes) // Organization-level routes for OWNER dashboard
-router.use('/tpv', tpvRoutes) // All TPV routes under /api/v1/tpv
+router.use('/tpv', tpvVersionGate, tpvRoutes) // All TPV routes under /api/v1/tpv (with version gate)
 router.use('/public', publicRoutes) // All public routes under /api/v1/public
 router.use('/pos-sync', posSyncRoutes) // All posSync routes under /api/posSync
 router.use('/invitations', invitationRoutes) // All invitation routes under /api/v1/invitations

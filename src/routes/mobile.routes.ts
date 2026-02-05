@@ -1175,6 +1175,13 @@ router.post(
 router.post('/venues/:venueId/terminal-payment', authenticateTokenMiddleware, terminalPaymentMobileController.sendTerminalPayment)
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/terminal-payment/cancel
+ * Cancel a pending terminal payment. Sends cancel signal to TPV.
+ * requestId ensures TPV only cancels if still on THAT payment (idempotency).
+ */
+router.post('/venues/:venueId/terminal-payment/cancel', authenticateTokenMiddleware, terminalPaymentMobileController.cancelTerminalPayment)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/terminals/online
  * List terminals currently connected via Socket.IO.
  */

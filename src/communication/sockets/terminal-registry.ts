@@ -106,6 +106,13 @@ class TerminalRegistry {
   isOnline(terminalId: string): boolean {
     return this.terminals.has(normalizeTerminalId(terminalId))
   }
+
+  /**
+   * Get all terminal IDs (for debugging).
+   */
+  getAllTerminalIds(): string[] {
+    return Array.from(this.terminals.keys())
+  }
 }
 
 // Singleton

@@ -46,7 +46,7 @@ const createUpdateSchema = z.object({
     versionCode: z.number({ coerce: true }).int().positive('Version code must be a positive integer').optional(),
     environment: z.enum(['SANDBOX', 'PRODUCTION']),
     releaseNotes: z.string().optional(),
-    isRequired: z.boolean().optional().default(false),
+    updateMode: z.enum(['NONE', 'BANNER', 'FORCE']).optional().default('NONE'),
     // minAndroidSdk is also auto-detected from APK if not provided
     minAndroidSdk: z.number({ coerce: true }).int().min(21).max(35).optional(),
     apkBase64: z.string().min(1, 'APK file is required (base64 encoded)'),
@@ -59,8 +59,9 @@ const updateAppUpdateSchema = z.object({
   }),
   body: z.object({
     releaseNotes: z.string().optional(),
-    isRequired: z.boolean().optional(),
+    updateMode: z.enum(['NONE', 'BANNER', 'FORCE']).optional(),
     isActive: z.boolean().optional(),
+    minAndroidSdk: z.number({ coerce: true }).int().min(21).max(35).optional(),
   }),
 })
 

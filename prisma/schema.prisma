@@ -508,6 +508,10 @@ model Staff {
   // Stock Counts
   stockCounts StockCount[] @relation("StockCountCreatedBy")
 
+  // Marketing Campaigns (superadmin)
+  emailTemplatesCreated     EmailTemplate[]     @relation("EmailTemplateCreator")
+  marketingCampaignsCreated MarketingCampaign[] @relation("MarketingCampaignCreator")
+
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
 }
@@ -6641,6 +6645,13 @@ enum AppEnvironment {
   PRODUCTION // Production builds for real terminals
 }
 
+/// Update notification mode for TPV app updates
+enum UpdateMode {
+  NONE // No notification - silent update available
+  BANNER // Persistent banner - recommended update, user can dismiss/ignore
+  FORCE // Blocking modal - critical update, app blocked until updated
+}
+
 /// Tracks TPV app versions uploaded by superadmin
 /// Enables self-managed updates independent of Blumon
 model AppUpdate {
@@ -6655,7 +6666,7 @@ model AppUpdate {
 
   // Release info
   releaseNotes String? @db.Text // Markdown changelog
-  isRequired   Boolean @default(false) // Force update (blocks app until updated)
+  updateMode   UpdateMode @default(NONE) // NONE=silent, BANNER=recommended, FORCE=blocking
 
   // File info (Firebase Storage)
   downloadUrl String // Firebase Storage signed URL or public URL
@@ -6709,4 +6720,112 @@ model VenueCryptoConfig {
   updatedAt DateTime @updatedAt
 
   @@index([venueId])
+}
+
+// ==========================================
+// MARKETING CAMPAIGNS - Superadmin mass email system
+// ==========================================
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum DeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  BOUNCED
+}
+
+/// Reusable email templates for marketing campaigns
+model EmailTemplate {
+  id       String @id @default(cuid())
+  name     String
+  subject  String
+  bodyHtml String @db.Text
+  bodyText String @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String
+  creator   Staff    @relation("EmailTemplateCreator", fields: [createdBy], references: [id])
+
+  campaigns MarketingCampaign[]
+
+  @@index([createdAt])
+}
+
+/// Marketing campaign for mass emails to venues/staff
+model MarketingCampaign {
+  id       String @id @default(cuid())
+  name     String
+  subject  String
+  bodyHtml String @db.Text
+  bodyText String @db.Text
+
+  // Template reference (optional - if created from template)
+  templateId String?
+  template   EmailTemplate? @relation(fields: [templateId], references: [id])
+
+  // Targeting
+  targetAllVenues  Boolean  @default(true)
+  targetVenueIds   String[] // Specific venue IDs if not targeting all
+  includeStaff     Boolean  @default(false)
+  targetStaffRoles String[] // OWNER, ADMIN, MANAGER, etc.
+
+  // Status
+  status       CampaignStatus @default(DRAFT)
+  scheduledFor DateTime?
+  startedAt    DateTime?
+  completedAt  DateTime?
+
+  // Stats (updated as emails are sent)
+  totalRecipients Int @default(0)
+  sentCount       Int @default(0)
+  failedCount     Int @default(0)
+  openedCount     Int @default(0) // Tracking: emails opened (via Resend webhooks)
+  clickedCount    Int @default(0) // Tracking: links clicked (via Resend webhooks)
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String
+  creator   Staff    @relation("MarketingCampaignCreator", fields: [createdBy], references: [id])
+
+  deliveries CampaignDelivery[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Individual email delivery within a campaign
+model CampaignDelivery {
+  id         String            @id @default(cuid())
+  campaignId String
+  campaign   MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  recipientEmail String
+  recipientName  String?
+  venueId        String?
+  venueName      String?
+  isStaff        Boolean @default(false)
+
+  status   DeliveryStatus @default(PENDING)
+  sentAt   DateTime?
+  error    String?
+  resendId String? // Resend email ID for tracking
+
+  // Tracking (updated via Resend webhooks)
+  openedAt     DateTime?
+  clickedAt    DateTime?
+  clickedLinks String[] // Track which links were clicked
+
+  @@index([campaignId, status])
+  @@index([recipientEmail])
+  @@index([resendId])
 }

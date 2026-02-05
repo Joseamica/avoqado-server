@@ -358,7 +358,7 @@ async function getCategoryBreakdown(
     FROM "OrderItem" oi
     JOIN "Order" o ON oi."orderId" = o.id
     LEFT JOIN "Product" p ON oi."productId" = p.id
-    LEFT JOIN "Category" c ON p."categoryId" = c.id
+    LEFT JOIN "MenuCategory" c ON p."categoryId" = c.id
     WHERE o."venueId" = ${venueId}
       AND o."createdAt" >= ${startDate}
       AND o."createdAt" <= ${endDate}
