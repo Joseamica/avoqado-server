@@ -4,6 +4,8 @@ import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { AILearningService } from './ai-learning.service'
+import { venueStartOfDay, venueEndOfDay, venueStartOfDayOffset } from '../../utils/datetime'
+import { subDays } from 'date-fns'
 
 interface AssistantQuery {
   message: string
@@ -422,26 +424,21 @@ ${JSON.stringify(liveData, null, 2)}`
     })
 
     try {
-      // Usar EXACTAMENTE la misma lógica que el dashboard Home.tsx
-      const now = new Date()
+      // Use venue timezone for all date boundaries (DEFAULT_TIMEZONE = America/Mexico_City)
+      const hoyInicio = venueStartOfDay()
+      const hoyFin = venueEndOfDay()
 
-      // HOY: desde las 00:00:00 hasta 23:59:59 de hoy
-      const hoyInicio = new Date(now.setHours(0, 0, 0, 0))
-      const hoyFin = new Date(new Date().setHours(23, 59, 59, 999))
+      // AYER
+      const ayerInicio = venueStartOfDay(undefined, subDays(new Date(), 1))
+      const ayerFin = venueEndOfDay(undefined, subDays(new Date(), 1))
 
-      // AYER: desde las 00:00:00 hasta 23:59:59 de ayer
-      const ayerInicio = new Date(hoyInicio)
-      ayerInicio.setDate(ayerInicio.getDate() - 1)
-      const ayerFin = new Date(ayerInicio)
-      ayerFin.setHours(23, 59, 59, 999)
+      // ÚLTIMOS 7 DÍAS
+      const semanaInicio = venueStartOfDayOffset(undefined, -7)
+      const semanaFin = venueEndOfDay()
 
-      // ÚLTIMOS 7 DÍAS: exactamente como en Home.tsx (líneas 140-143)
-      const semanaInicio = new Date(new Date().setHours(0, 0, 0, 0) - 7 * 24 * 60 * 60 * 1000)
-      const semanaFin = new Date(new Date().setHours(23, 59, 59, 999))
-
-      // ÚLTIMOS 30 DÍAS: similar lógica
-      const mesInicio = new Date(new Date().setHours(0, 0, 0, 0) - 30 * 24 * 60 * 60 * 1000)
-      const mesFin = new Date(new Date().setHours(23, 59, 59, 999))
+      // ÚLTIMOS 30 DÍAS
+      const mesInicio = venueStartOfDayOffset(undefined, -30)
+      const mesFin = venueEndOfDay()
 
       // IMPORTANTE: Usar Payment como en Home.tsx, NO Order
       // El dashboard suma payment.amount, no order.total
@@ -598,8 +595,7 @@ ${JSON.stringify(liveData, null, 2)}`
       })
 
       // Obtener turnos abiertos hoy
-      const today = new Date()
-      today.setHours(0, 0, 0, 0)
+      const today = venueStartOfDay()
 
       const turnosHoy = await prisma.shift.findMany({
         where: {
@@ -969,32 +965,21 @@ ${JSON.stringify(liveData, null, 2)}`
     })
 
     try {
-      // Calcular fechas según timeframe
+      // Calcular fechas según timeframe (usando timezone del venue)
       let dateFilter: any = {}
-      const now = new Date()
 
       if (timeframe) {
         if (timeframe === 'today') {
-          const todayStart = new Date(now)
-          todayStart.setHours(0, 0, 0, 0)
-          const todayEnd = new Date(now)
-          todayEnd.setHours(23, 59, 59, 999)
-          dateFilter = { gte: todayStart, lte: todayEnd }
+          dateFilter = { gte: venueStartOfDay(), lte: venueEndOfDay() }
         } else if (timeframe === 'yesterday') {
-          const yesterday = new Date(now)
-          yesterday.setDate(yesterday.getDate() - 1)
-          yesterday.setHours(0, 0, 0, 0)
-          const yesterdayEnd = new Date(yesterday)
-          yesterdayEnd.setHours(23, 59, 59, 999)
-          dateFilter = { gte: yesterday, lte: yesterdayEnd }
+          dateFilter = {
+            gte: venueStartOfDay(undefined, subDays(new Date(), 1)),
+            lte: venueEndOfDay(undefined, subDays(new Date(), 1)),
+          }
         } else if (timeframe === 'week' || timeframe.includes('7') || timeframe.includes('semana')) {
-          const weekAgo = new Date(now)
-          weekAgo.setDate(weekAgo.getDate() - 7)
-          dateFilter = { gte: weekAgo }
+          dateFilter = { gte: venueStartOfDayOffset(undefined, -7) }
         } else if (timeframe === 'month' || timeframe.includes('30') || timeframe.includes('mes')) {
-          const monthAgo = new Date(now)
-          monthAgo.setDate(monthAgo.getDate() - 30)
-          dateFilter = { gte: monthAgo }
+          dateFilter = { gte: venueStartOfDayOffset(undefined, -30) }
         }
       }
       // Obtener estadísticas generales de reseñas
@@ -1483,8 +1468,7 @@ ${JSON.stringify(liveData, null, 2)}`
     })
 
     try {
-      const today = new Date()
-      today.setHours(0, 0, 0, 0)
+      const today = venueStartOfDay()
 
       // Obtener ventas de hoy
       const ventasHoy = await prisma.order.aggregate({

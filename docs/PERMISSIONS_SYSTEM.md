@@ -24,12 +24,12 @@ Frontend (UI Only - No mapping logic)
 
 **Key Files (Centralized System):**
 
-| File | Purpose |
-|------|---------|
-| `src/lib/permissions.ts` | `DEFAULT_PERMISSIONS` by role, permission validation |
-| `src/services/access/access.service.ts` | **CENTRAL** - Permission resolution + `PERMISSION_TO_FEATURE_MAP` |
-| `src/middlewares/verifyAccess.middleware.ts` | **RECOMMENDED** - Unified route protection |
-| `src/routes/me.routes.ts` | `/me/access` endpoint for frontend |
+| File                                         | Purpose                                                           |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| `src/lib/permissions.ts`                     | `DEFAULT_PERMISSIONS` by role, permission validation              |
+| `src/services/access/access.service.ts`      | **CENTRAL** - Permission resolution + `PERMISSION_TO_FEATURE_MAP` |
+| `src/middlewares/verifyAccess.middleware.ts` | **RECOMMENDED** - Unified route protection                        |
+| `src/routes/me.routes.ts`                    | `/me/access` endpoint for frontend                                |
 
 **When adding new features, see "Adding New Permissions" section below.**
 
@@ -636,17 +636,9 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
 ```typescript
 import { verifyAccess } from '@/middlewares/verifyAccess.middleware'
 
-router.get('/newfeature',
-  authenticateTokenMiddleware,
-  verifyAccess({ permission: 'newfeature:read' }),
-  controller.list
-)
+router.get('/newfeature', authenticateTokenMiddleware, verifyAccess({ permission: 'newfeature:read' }), controller.list)
 
-router.post('/newfeature',
-  authenticateTokenMiddleware,
-  verifyAccess({ permission: 'newfeature:create' }),
-  controller.create
-)
+router.post('/newfeature', authenticateTokenMiddleware, verifyAccess({ permission: 'newfeature:create' }), controller.create)
 ```
 
 ### Step 4: Update Documentation
@@ -660,6 +652,58 @@ Run the centralization checker:
 ```bash
 bash scripts/check-permission-migration.sh
 ```
+
+## Venue Access: `StaffVenue.active` and Org-Level OWNER
+
+### Access Resolution Priority (in `getUserAccess()`)
+
+When a user accesses a venue, `getUserAccess()` resolves their role in this order:
+
+| Priority | Condition | Result |
+|----------|-----------|--------|
+| 1 | User has any `StaffVenue.role = SUPERADMIN` | SUPERADMIN — access to ALL venues |
+| 2 | User has `StaffOrganization.role = OWNER` for the venue's org | **OWNER always** — ignores StaffVenue.active |
+| 3 | User has `StaffVenue` with `active = true` | Uses the per-venue `StaffVenue.role` |
+| 4 | Everything else | **Access denied** |
+
+### Business Rules
+
+**Org-Level OWNER (StaffOrganization.role = OWNER):**
+- OWNER of an organization = OWNER of ALL venues in that org
+- Cannot be downgraded or deactivated per-venue
+- `StaffVenue.active = false` is ignored for org-level OWNERs
+- This is by design: organization ownership implies full venue authority
+
+**Non-OWNER roles (ADMIN, MANAGER, WAITER, VIEWER, etc.):**
+- Access is per-venue via `StaffVenue`
+- `StaffVenue.active = false` means **no access** to that venue
+- Role can vary per venue (e.g., ADMIN in Venue A, WAITER in Venue B)
+
+### Example
+
+```
+Jose in org "Pollos" (StaffOrganization.role = OWNER):
+  → Pollo 1: OWNER (always, even if StaffVenue.active = false)
+  → Pollo 2: OWNER (always)
+  → Pollo 3: OWNER (always)
+
+Jose in org "Patos" (StaffOrganization.role = ADMIN):
+  → Pato 1: StaffVenue.role = ADMIN, active = true  → ADMIN access
+  → Pato 2: StaffVenue.role = OWNER, active = true  → OWNER access
+  → Pato 3: StaffVenue.active = false               → NO access
+```
+
+### Scope of `getUserAccess()` enforcement
+
+`getUserAccess()` is called by:
+- `verifyAccess` middleware (white-label routes: storesAnalysis, commandCenter, promoters, stockDashboard)
+- `GET /api/v1/me/access` endpoint (frontend `useAccess()` hook)
+
+It does NOT affect:
+- `checkPermission` middleware (legacy/core routes)
+- Venue switcher (`getAuthStatus` / `switchVenueForStaff`)
+- TPV auth (PIN login)
+- Login/logout flow
 
 ## Related Documentation
 

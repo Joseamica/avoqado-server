@@ -33,8 +33,15 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
     const parsedResult = await schema.safeParseAsync(dataToParse)
 
     if (!parsedResult.success) {
-      const errorMessages = parsedResult.error.errors.map(err => `${err.path.join('.')}: ${err.message}`).join(', ')
-      return next(new BadRequestError(`Validation failed: ${errorMessages}`))
+      const errorMessages = parsedResult.error.errors
+        .map(err => {
+          // Strip internal path prefixes (body., query., params.) — users don't need to see these
+          const path = err.path.filter(p => p !== 'body' && p !== 'query' && p !== 'params')
+          const prefix = path.length > 0 ? `${path.join('.')}: ` : ''
+          return `${prefix}${err.message}`
+        })
+        .join(', ')
+      return next(new BadRequestError(`Error de validación: ${errorMessages}`))
     }
 
     // Assign the successfully parsed (and potentially transformed) data back to req.
@@ -55,8 +62,14 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
     if (error instanceof ZodError) {
       // This catch block might be redundant if safeParseAsync handles all ZodErrors from the parse call itself,
       // but good for other ZodErrors that might occur if schema manipulation was more complex.
-      const errorMessages = error.errors.map(err => `${err.path.join('.')}: ${err.message}`).join(', ')
-      return next(new BadRequestError(`Validation failed during Zod processing: ${errorMessages}`))
+      const errorMessages = error.errors
+        .map(err => {
+          const path = err.path.filter(p => p !== 'body' && p !== 'query' && p !== 'params')
+          const prefix = path.length > 0 ? `${path.join('.')}: ` : ''
+          return `${prefix}${err.message}`
+        })
+        .join(', ')
+      return next(new BadRequestError(`Error de validación: ${errorMessages}`))
     }
     return next(new InternalServerError('An unexpected error occurred during request validation.'))
   }

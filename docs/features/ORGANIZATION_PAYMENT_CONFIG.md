@@ -2,7 +2,9 @@
 
 ## Overview
 
-Allows configuring payment merchant accounts and pricing structures at the **organization level**, inherited by all venues that don't have their own config. Eliminates the need to configure 32+ venues individually when they share the same merchant account, bank, rates, and settlement rules.
+Allows configuring payment merchant accounts and pricing structures at the **organization level**, inherited by all venues that don't have
+their own config. Eliminates the need to configure 32+ venues individually when they share the same merchant account, bank, rates, and
+settlement rules.
 
 ## Resolution Pattern
 
@@ -19,21 +21,22 @@ getEffectivePaymentConfig(venueId):
 
 ## What Can Be Org-Level
 
-| Payment Readiness Step | Org-Level? | Why |
-|------------------------|-----------|-----|
-| KYC Approved | No | Per-venue legal entity |
-| Terminal Registered | No | Physical device at location |
-| Merchant Account Created | **Yes** | Shared merchant account |
-| Terminal-Merchant Linked | No | Device-specific |
-| Venue Payment Configured | **Yes** | Primary/secondary/tertiary accounts |
-| Pricing Structure Set | **Yes** | Rates (debit%, credit%, amex%, intl%) |
-| Provider Cost Structure | Already shared | Per-MerchantAccount |
+| Payment Readiness Step   | Org-Level?     | Why                                   |
+| ------------------------ | -------------- | ------------------------------------- |
+| KYC Approved             | No             | Per-venue legal entity                |
+| Terminal Registered      | No             | Physical device at location           |
+| Merchant Account Created | **Yes**        | Shared merchant account               |
+| Terminal-Merchant Linked | No             | Device-specific                       |
+| Venue Payment Configured | **Yes**        | Primary/secondary/tertiary accounts   |
+| Pricing Structure Set    | **Yes**        | Rates (debit%, credit%, amex%, intl%) |
+| Provider Cost Structure  | Already shared | Per-MerchantAccount                   |
 
 ## Schema Models
 
 ### OrganizationPaymentConfig
 
-Mirrors `VenuePaymentConfig`. Links org to merchant accounts (primary/secondary/tertiary), routingRules, preferredProcessor. `organizationId` is `@unique` (1:1 with Organization).
+Mirrors `VenuePaymentConfig`. Links org to merchant accounts (primary/secondary/tertiary), routingRules, preferredProcessor.
+`organizationId` is `@unique` (1:1 with Organization).
 
 ### OrganizationPricingStructure
 
@@ -41,28 +44,29 @@ Mirrors `VenuePricingStructure`. Org-level rates per accountType with effectiveF
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `src/services/organization-payment-config.service.ts` | Resolution service (getEffective*, getVenueConfigSources) |
-| `src/controllers/dashboard/organization-payment.superadmin.controller.ts` | CRUD controller |
-| `src/routes/superadmin/organization.routes.ts` | API routes (under `/:orgId/payment-config`) |
+| File                                                                      | Purpose                                                    |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `src/services/organization-payment-config.service.ts`                     | Resolution service (getEffective\*, getVenueConfigSources) |
+| `src/controllers/dashboard/organization-payment.superadmin.controller.ts` | CRUD controller                                            |
+| `src/routes/superadmin/organization.routes.ts`                            | API routes (under `/:orgId/payment-config`)                |
 
 ## API Endpoints
 
 Base: `/api/v1/dashboard/superadmin/organizations/:orgId/payment-config`
 
-| Method | Route | Description |
-|--------|-------|-------------|
-| GET | `/` | Org config + pricing + venue inheritance |
-| PUT | `/` | Set/update org payment config |
-| DELETE | `/` | Remove org payment config |
-| PUT | `/pricing` | Set/update org pricing structure |
-| DELETE | `/pricing/:pricingId` | Deactivate pricing structure |
-| GET | `/venues` | Venue inheritance status list |
+| Method | Route                 | Description                              |
+| ------ | --------------------- | ---------------------------------------- |
+| GET    | `/`                   | Org config + pricing + venue inheritance |
+| PUT    | `/`                   | Set/update org payment config            |
+| DELETE | `/`                   | Remove org payment config                |
+| PUT    | `/pricing`            | Set/update org pricing structure         |
+| DELETE | `/pricing/:pricingId` | Deactivate pricing structure             |
+| GET    | `/venues`             | Venue inheritance status list            |
 
 ## Readiness Service Integration
 
-`venuePaymentReadiness.service.ts` now uses the resolution service for steps 5 and 6. When config comes from the org level, status is `'inherited'` and detail shows "Heredado de organizacion". The `canProcessPayments` check treats `'inherited'` as valid.
+`venuePaymentReadiness.service.ts` now uses the resolution service for steps 5 and 6. When config comes from the org level, status is
+`'inherited'` and detail shows "Heredado de organizacion". The `canProcessPayments` check treats `'inherited'` as valid.
 
 ## Usage Example
 

@@ -268,6 +268,16 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
         throw new AppError('Se requiere nombre, apellido y contrasena para crear una cuenta nueva', 400)
       }
 
+      // Validate password format for NEW accounts only.
+      // Existing users verify via bcrypt compare, so format rules don't apply to them
+      // (their legacy password may not comply with current format requirements).
+      if (userData.password!.length < 8) {
+        throw new AppError('La contraseña debe tener al menos 8 caracteres', 400)
+      }
+      if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(userData.password!)) {
+        throw new AppError('La contraseña debe contener al menos una minúscula, una mayúscula y un número', 400)
+      }
+
       // Create staff record with all provided data
       // IMPORTANT: Normalize email to lowercase for consistent login lookups
       staff = await tx.staff.create({

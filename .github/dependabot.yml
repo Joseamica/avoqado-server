@@ -1,24 +1,24 @@
 version: 2
 updates:
-  - package-ecosystem: "npm"
-    directory: "/"
+  - package-ecosystem: 'npm'
+    directory: '/'
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: 'weekly'
+      day: 'monday'
     open-pull-requests-limit: 5
     groups:
       # Group minor and patch updates to reduce PR noise
       minor-and-patch:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
+        patterns: ['*']
+        update-types: ['minor', 'patch']
     ignore:
       # Ignore major updates for critical packages (review manually)
-      - dependency-name: "prisma"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "@prisma/client"
-        update-types: ["version-update:semver-major"]
+      - dependency-name: 'prisma'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@prisma/client'
+        update-types: ['version-update:semver-major']
 
-  - package-ecosystem: "github-actions"
-    directory: "/"
+  - package-ecosystem: 'github-actions'
+    directory: '/'
     schedule:
-      interval: "weekly"
+      interval: 'weekly'

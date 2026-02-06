@@ -369,13 +369,15 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId } = req.params
-      const { date, venueId, status } = req.query
+      const { date, venueId, status, startDate, endDate } = req.query
 
       const attendance = await organizationDashboardService.getStaffAttendance(
         orgId,
         date as string | undefined,
         venueId as string | undefined,
         status as string | undefined,
+        startDate as string | undefined,
+        endDate as string | undefined,
       )
 
       res.json({

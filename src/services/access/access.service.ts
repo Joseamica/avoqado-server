@@ -11,7 +11,7 @@
  *
  * @see docs/PERMISSIONS_SYSTEM.md for architecture details
  */
-import { StaffRole } from '@prisma/client'
+import { StaffRole, OrgRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { DEFAULT_PERMISSIONS, resolvePermissions } from '@/lib/permissions'
 import logger from '@/config/logger'
@@ -192,8 +192,8 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
   const isSuperAdmin = !!superAdminVenue
 
   // Parallel queries for performance
-  const [staffVenueData, venueData, whiteLabelModule, rolePermissions] = await Promise.all([
-    // 1. Get user's role in this venue (may be null for SUPERADMIN)
+  const [staffVenueData, venueData, whiteLabelModule, rolePermissions, ownerOrgs] = await Promise.all([
+    // 1. Get user's role in this venue (may be null for SUPERADMIN or org-level OWNER)
     prisma.staffVenue.findUnique({
       where: {
         staffId_venueId: {
@@ -203,6 +203,7 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
       },
       select: {
         role: true,
+        active: true,
         venue: {
           select: {
             organizationId: true,
@@ -211,13 +212,11 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
       },
     }),
 
-    // 2. Get venue data (needed for SUPERADMIN who may not have StaffVenue)
-    isSuperAdmin
-      ? prisma.venue.findUnique({
-          where: { id: venueId },
-          select: { organizationId: true },
-        })
-      : null,
+    // 2. Get venue's organizationId (needed for SUPERADMIN and org-level OWNER fallback)
+    prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    }),
 
     // 3. Get white-label module config (if enabled)
     prisma.venueModule.findFirst({
@@ -244,26 +243,47 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
         permissions: true,
       },
     }),
+
+    // 5. Get organizations where user is OWNER (for org-level OWNER override)
+    prisma.staffOrganization.findMany({
+      where: {
+        staffId: userId,
+        role: OrgRole.OWNER,
+        isActive: true,
+      },
+      select: { organizationId: true },
+    }),
   ])
 
   // Determine role and organizationId
   let role: StaffRole
   let organizationId: string
 
+  // Resolve organizationId from either source
+  const resolvedOrgId = staffVenueData?.venue?.organizationId || venueData?.organizationId || ''
+
+  if (!resolvedOrgId) {
+    throw new Error(`Venue ${venueId} not found`)
+  }
+
+  // Check if user is org-level OWNER for this venue's organization
+  const isOrgOwner = ownerOrgs.some(o => o.organizationId === resolvedOrgId)
+
   if (isSuperAdmin) {
     // SUPERADMIN has access to all venues
     role = StaffRole.SUPERADMIN
-    organizationId = staffVenueData?.venue?.organizationId || venueData?.organizationId || ''
-
-    if (!organizationId) {
-      throw new Error(`Venue ${venueId} not found`)
-    }
-  } else if (staffVenueData) {
-    // Regular user with StaffVenue record
+    organizationId = resolvedOrgId
+  } else if (isOrgOwner) {
+    // Org-level OWNER always gets OWNER role in all venues of their org,
+    // regardless of StaffVenue.role or StaffVenue.active
+    role = StaffRole.OWNER
+    organizationId = resolvedOrgId
+  } else if (staffVenueData && staffVenueData.active) {
+    // Regular user with active StaffVenue record — use per-venue role
     role = staffVenueData.role
-    organizationId = staffVenueData.venue.organizationId
+    organizationId = resolvedOrgId
   } else {
-    // User has no access to this venue
+    // No access: either no StaffVenue, or StaffVenue.active = false
     throw new Error(`User ${userId} has no access to venue ${venueId}`)
   }
 

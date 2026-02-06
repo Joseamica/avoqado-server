@@ -9,6 +9,7 @@
 When you fix or implement something, you MUST NOT break something else. This is the most common source of production bugs.
 
 **Before committing any change, verify:**
+
 1. New feature works correctly
 2. Existing features still work
 3. Related features are unaffected
@@ -53,18 +54,21 @@ npm run pre-deploy    # CI/CD simulation (MUST pass before push)
 ## Test Script Workflow (Temporary -> Permanent)
 
 ### Step 1: Create temporary script for rapid validation
+
 ```bash
 touch scripts/temp-test-feature.ts
 npx ts-node -r tsconfig-paths/register scripts/temp-test-feature.ts
 ```
 
 ### Step 2: Migrate to permanent Jest test
+
 ```bash
 vim tests/unit/services/dashboard/feature.service.test.ts
 npm test -- tests/unit/services/dashboard/feature.service.test.ts
 ```
 
 ### Step 3: Delete temporary script
+
 ```bash
 rm scripts/temp-test-feature.ts
 ```
@@ -79,8 +83,8 @@ If you must keep a temporary script, mark it clearly:
 
 ```typescript
 // Prefix with "temp-" or "debug-"
-scripts/temp-find-venue-id.ts
-scripts/debug-permissions.ts
+scripts / temp - find - venue - id.ts
+scripts / debug - permissions.ts
 
 // OR add DELETE comment at top
 // DELETE AFTER: Temporary debugging script
@@ -92,12 +96,12 @@ scripts/debug-permissions.ts
 
 ## Where Tests Go
 
-| Type | Directory | Characteristics |
-|------|-----------|-----------------|
-| Unit tests | `tests/unit/**/*.test.ts` | Mocked, fast, isolated. **COMMIT THESE.** |
-| API tests | `tests/api-tests/**/*.test.ts` | Real DB, integration. **COMMIT THESE.** |
-| Workflow tests | `tests/workflows/**/*.test.ts` | End-to-end flows. **COMMIT THESE.** |
-| Temp scripts | `scripts/temp-*.ts` | Quick validation. **DELETE BEFORE COMMIT.** |
+| Type           | Directory                      | Characteristics                             |
+| -------------- | ------------------------------ | ------------------------------------------- |
+| Unit tests     | `tests/unit/**/*.test.ts`      | Mocked, fast, isolated. **COMMIT THESE.**   |
+| API tests      | `tests/api-tests/**/*.test.ts` | Real DB, integration. **COMMIT THESE.**     |
+| Workflow tests | `tests/workflows/**/*.test.ts` | End-to-end flows. **COMMIT THESE.**         |
+| Temp scripts   | `scripts/temp-*.ts`            | Quick validation. **DELETE BEFORE COMMIT.** |
 
 ---
 

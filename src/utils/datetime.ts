@@ -42,13 +42,149 @@
  * ```
  */
 
-import { startOfDay, endOfDay, subDays, startOfWeek, endOfWeek, startOfMonth, endOfMonth, parseISO, isValid, formatISO } from 'date-fns'
+import {
+  startOfDay,
+  endOfDay,
+  subDays,
+  startOfWeek,
+  endOfWeek,
+  startOfMonth,
+  endOfMonth,
+  parseISO,
+  isValid,
+  formatISO,
+  subMonths,
+} from 'date-fns'
 import { fromZonedTime, toZonedTime, format as formatTz } from 'date-fns-tz'
 
 /**
  * Default timezone for Mexico (most common for Avoqado venues)
  */
 export const DEFAULT_TIMEZONE = 'America/Mexico_City'
+
+/**
+ * CRITICAL: Database Timezone Reality (verified 2026-02-06)
+ *
+ * PostgreSQL is configured with timezone = 'America/Mexico_City', and datetime
+ * columns use `timestamp without time zone`.
+ *
+ * **Prisma stores REAL UTC.** Prisma sends JavaScript Date values (which are
+ * internally UTC) as literal timestamps to PostgreSQL. PG stores them as-is
+ * in `timestamp without time zone` columns, bypassing its timezone setting.
+ * Verified: payment at 1:10 PM Mexico → DB shows 19:10 (= 1:10 PM + 6h UTC).
+ *
+ * **Raw SQL NOW() stores Mexico local time.** When PG evaluates NOW(), it
+ * applies its timezone setting and stores the local result.
+ *
+ * SOLUTION: Use fromZonedTime() to convert venue-local boundaries to real UTC.
+ * Example: "Feb 6 midnight Mexico" → fromZonedTime → 2026-02-06T06:00:00Z (UTC)
+ *
+ * IMPORTANT: Do NOT use setHours(0,0,0,0) — that creates UTC midnight, not
+ * venue midnight. Do NOT use "fake UTC" (new Date('...T00:00:00.000Z')) for
+ * Prisma-stored data — it's 6 hours off.
+ */
+
+/**
+ * Get start of day in venue timezone, converted to real UTC for Prisma queries.
+ *
+ * Example: venueStartOfDay('America/Mexico_City') on Feb 6
+ *   → midnight Mexico = 2026-02-06T06:00:00.000Z (UTC)
+ *
+ * @param timezone - Venue IANA timezone
+ * @param referenceDate - Date to get start of day for (default: now)
+ */
+export function venueStartOfDay(timezone: string = DEFAULT_TIMEZONE, referenceDate?: Date): Date {
+  const ref = referenceDate ?? new Date()
+  const venueNow = toZonedTime(ref, timezone)
+  return fromZonedTime(startOfDay(venueNow), timezone)
+}
+
+/**
+ * Get end of day in venue timezone, converted to real UTC for Prisma queries.
+ *
+ * Example: venueEndOfDay('America/Mexico_City') on Feb 6
+ *   → 23:59:59.999 Mexico = 2026-02-07T05:59:59.999Z (UTC)
+ *
+ * @param timezone - Venue IANA timezone
+ * @param referenceDate - Date to get end of day for (default: now)
+ */
+export function venueEndOfDay(timezone: string = DEFAULT_TIMEZONE, referenceDate?: Date): Date {
+  const ref = referenceDate ?? new Date()
+  const venueNow = toZonedTime(ref, timezone)
+  return fromZonedTime(endOfDay(venueNow), timezone)
+}
+
+/**
+ * Get start of day N days offset from now in venue timezone for Prisma queries.
+ * Use negative values for past dates.
+ *
+ * Example: venueStartOfDayOffset('America/Mexico_City', -7)
+ *   → midnight 7 days ago in Mexico, converted to real UTC
+ *
+ * @param timezone - Venue IANA timezone
+ * @param daysOffset - Number of days to offset (negative = past)
+ */
+export function venueStartOfDayOffset(timezone: string = DEFAULT_TIMEZONE, daysOffset: number = 0): Date {
+  const now = new Date()
+  const venueNow = toZonedTime(now, timezone)
+  const offsetDay = subDays(startOfDay(venueNow), -daysOffset)
+  return fromZonedTime(offsetDay, timezone)
+}
+
+/**
+ * Get start of month in venue timezone, converted to real UTC for Prisma queries.
+ *
+ * Example: venueStartOfMonth('America/Mexico_City') on Feb 6
+ *   → Feb 1 midnight Mexico = 2026-02-01T06:00:00.000Z (UTC)
+ *
+ * @param timezone - Venue IANA timezone
+ */
+export function venueStartOfMonth(timezone: string = DEFAULT_TIMEZONE): Date {
+  const now = new Date()
+  const venueNow = toZonedTime(now, timezone)
+  return fromZonedTime(startOfMonth(venueNow), timezone)
+}
+
+/**
+ * Parse ISO date strings from frontend and convert to real UTC range
+ * using venue timezone boundaries.
+ *
+ * Frontend sends ISO strings (e.g., "2026-02-06T06:00:00.000Z" or "2026-02-06").
+ * This function creates venue-timezone start/end-of-day boundaries in real UTC
+ * for Prisma queries.
+ *
+ * @param fromDate - ISO string or YYYY-MM-DD from frontend
+ * @param toDate - ISO string or YYYY-MM-DD from frontend
+ * @param timezone - Venue IANA timezone
+ * @param defaultDays - Fallback days if dates not provided
+ */
+export function parseDbDateRange(
+  fromDate?: string,
+  toDate?: string,
+  timezone: string = DEFAULT_TIMEZONE,
+  defaultDays: number = 1,
+): DateRange {
+  let from: Date
+  let to: Date
+
+  if (fromDate) {
+    const parsed = parseISO(fromDate)
+    if (!isValid(parsed)) throw new Error(`Invalid fromDate: ${fromDate}`)
+    from = venueStartOfDay(timezone, parsed)
+  } else {
+    from = venueStartOfDayOffset(timezone, -defaultDays)
+  }
+
+  if (toDate) {
+    const parsed = parseISO(toDate)
+    if (!isValid(parsed)) throw new Error(`Invalid toDate: ${toDate}`)
+    to = venueEndOfDay(timezone, parsed)
+  } else {
+    to = venueEndOfDay(timezone)
+  }
+
+  return { from, to }
+}
 
 /**
  * Date range type returned by all date range functions
@@ -350,19 +486,17 @@ export function getTimezoneOffset(timezone: string = DEFAULT_TIMEZONE): number {
 /**
  * Generate SQL date filter string for text-to-SQL assistant
  *
- * **CRITICAL:** This function is used by the AI chatbot to generate
- * SQL WHERE clauses that match the dashboard date filters EXACTLY.
+ * **WARNING:** These filters use NOW() and CURRENT_DATE which return Mexico
+ * local time (due to PG timezone = America/Mexico_City). This is CORRECT for
+ * querying Prisma-stored UTC data ONLY because PG applies timezone conversion
+ * when comparing `timestamp without time zone` values with `timestamptz` functions.
+ *
+ * For relative ranges (last7days, etc.) the ~6hr error is negligible.
+ * For day-boundary ranges (today, yesterday) there may be edge-case mismatches.
  *
  * @param period - Relative date period
  * @param columnName - Database column name (default: 'createdAt')
  * @returns SQL WHERE clause fragment
- *
- * @example
- * getSqlDateFilter('last7days')
- * // Returns: '"createdAt" >= NOW() - INTERVAL \'7 days\''
- *
- * getSqlDateFilter('today', '"startTime"')
- * // Returns: '"startTime" >= CURRENT_DATE AND "startTime" < CURRENT_DATE + INTERVAL \'1 day\''
  */
 export function getSqlDateFilter(period: RelativeDateRange, columnName: string = '"createdAt"'): string {
   switch (period) {

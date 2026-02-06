@@ -4,8 +4,9 @@
 
 Implementación de tipos de productos alineada con la arquitectura real de Square API, basada en análisis de su documentación oficial.
 
-**Fecha de análisis:** Enero 2026
-**Fuentes:** [Square CatalogItemProductType](https://developer.squareup.com/reference/square/enums/CatalogItemProductType), [CatalogItem Object](https://developer.squareup.com/reference/square/objects/CatalogItem)
+**Fecha de análisis:** Enero 2026 **Fuentes:**
+[Square CatalogItemProductType](https://developer.squareup.com/reference/square/enums/CatalogItemProductType),
+[CatalogItem Object](https://developer.squareup.com/reference/square/objects/CatalogItem)
 
 ---
 
@@ -32,7 +33,7 @@ enum CatalogItemProductType {
 ```typescript
 interface CatalogItem {
   product_type: 'FOOD_AND_BEV'
-  is_alcoholic: boolean  // ← Separado del tipo
+  is_alcoholic: boolean // ← Separado del tipo
 }
 ```
 
@@ -82,14 +83,14 @@ enum ProductType {
 
 ### Migración desde Enum Actual
 
-| Actual | Nuevo | Notas |
-|--------|-------|-------|
-| `FOOD` | `FOOD_AND_BEV` | + `isAlcoholic: false` |
+| Actual     | Nuevo          | Notas                  |
+| ---------- | -------------- | ---------------------- |
+| `FOOD`     | `FOOD_AND_BEV` | + `isAlcoholic: false` |
 | `BEVERAGE` | `FOOD_AND_BEV` | + `isAlcoholic: false` |
-| `ALCOHOL` | `FOOD_AND_BEV` | + `isAlcoholic: true` |
-| `RETAIL` | `REGULAR` | Renombrado |
-| `SERVICE` | `SERVICE` | Sin cambio |
-| `OTHER` | `OTHER` | Sin cambio |
+| `ALCOHOL`  | `FOOD_AND_BEV` | + `isAlcoholic: true`  |
+| `RETAIL`   | `REGULAR`      | Renombrado             |
+| `SERVICE`  | `SERVICE`      | Sin cambio             |
+| `OTHER`    | `OTHER`        | Sin cambio             |
 
 ### Nuevos Campos en Product Model
 
@@ -147,60 +148,60 @@ model Product {
 
 ### FOOD_AND_BEV (Comida y Bebida)
 
-| Campo | Uso | Requerido |
-|-------|-----|-----------|
-| `isAlcoholic` | Indica si requiere +18 | No (default: false) |
-| `kitchenName` | Nombre para cocina | No |
-| `abbreviation` | Texto corto POS | No |
-| `prepTime` | Tiempo de preparación | No |
-| `calories` | Información nutricional | No |
-| `tags` | Vegetariano, vegano, etc. | No |
-| `allergens` | Alérgenos | No |
-| `cookingNotes` | Notas de preparación | No |
+| Campo          | Uso                       | Requerido           |
+| -------------- | ------------------------- | ------------------- |
+| `isAlcoholic`  | Indica si requiere +18    | No (default: false) |
+| `kitchenName`  | Nombre para cocina        | No                  |
+| `abbreviation` | Texto corto POS           | No                  |
+| `prepTime`     | Tiempo de preparación     | No                  |
+| `calories`     | Información nutricional   | No                  |
+| `tags`         | Vegetariano, vegano, etc. | No                  |
+| `allergens`    | Alérgenos                 | No                  |
+| `cookingNotes` | Notas de preparación      | No                  |
 
 ### REGULAR (Productos Físicos)
 
-| Campo | Uso | Requerido |
-|-------|-----|-----------|
-| `trackInventory` | Seguimiento de stock | Recomendado |
-| `unit` | Unidad de medida | Si trackInventory |
-| `cost` | Costo del producto | No |
+| Campo            | Uso                  | Requerido         |
+| ---------------- | -------------------- | ----------------- |
+| `trackInventory` | Seguimiento de stock | Recomendado       |
+| `unit`           | Unidad de medida     | Si trackInventory |
+| `cost`           | Costo del producto   | No                |
 
 ### SERVICE / APPOINTMENTS_SERVICE
 
-| Campo | Uso | Requerido |
-|-------|-----|-----------|
-| `duration` | Duración en minutos | Recomendado |
-| `trackInventory` | Siempre `false` | N/A |
+| Campo            | Uso                 | Requerido   |
+| ---------------- | ------------------- | ----------- |
+| `duration`       | Duración en minutos | Recomendado |
+| `trackInventory` | Siempre `false`     | N/A         |
 
 ### EVENT
 
-| Campo | Uso | Requerido |
-|-------|-----|-----------|
-| `eventDate` | Fecha del evento | Sí |
-| `eventTime` | Hora de inicio | Sí |
-| `eventEndTime` | Hora de fin | No |
-| `eventCapacity` | Capacidad máxima | No |
-| `eventLocation` | Ubicación | No |
-| `trackInventory` | Para tickets limitados | Opcional |
+| Campo            | Uso                    | Requerido |
+| ---------------- | ---------------------- | --------- |
+| `eventDate`      | Fecha del evento       | Sí        |
+| `eventTime`      | Hora de inicio         | Sí        |
+| `eventEndTime`   | Hora de fin            | No        |
+| `eventCapacity`  | Capacidad máxima       | No        |
+| `eventLocation`  | Ubicación              | No        |
+| `trackInventory` | Para tickets limitados | Opcional  |
 
 ### DIGITAL
 
-| Campo | Uso | Requerido |
-|-------|-----|-----------|
-| `downloadUrl` | URL del archivo | Sí |
-| `downloadLimit` | Límite de descargas | No |
-| `fileSize` | Tamaño del archivo | No |
-| `trackInventory` | Siempre `false` | N/A |
+| Campo            | Uso                 | Requerido |
+| ---------------- | ------------------- | --------- |
+| `downloadUrl`    | URL del archivo     | Sí        |
+| `downloadLimit`  | Límite de descargas | No        |
+| `fileSize`       | Tamaño del archivo  | No        |
+| `trackInventory` | Siempre `false`     | N/A       |
 
 ### DONATION
 
-| Campo | Uso | Requerido |
-|-------|-----|-----------|
-| `suggestedAmounts` | Montos sugeridos | No |
-| `allowCustomAmount` | Permitir monto libre | No (default: true) |
-| `donationCause` | Descripción de la causa | No |
-| `trackInventory` | Siempre `false` | N/A |
+| Campo               | Uso                     | Requerido          |
+| ------------------- | ----------------------- | ------------------ |
+| `suggestedAmounts`  | Montos sugeridos        | No                 |
+| `allowCustomAmount` | Permitir monto libre    | No (default: true) |
+| `donationCause`     | Descripción de la causa | No                 |
+| `trackInventory`    | Siempre `false`         | N/A                |
 
 ---
 
@@ -290,8 +291,8 @@ async function migrateProductTypes() {
     where: { type: 'FOOD' },
     data: {
       type: 'FOOD_AND_BEV',
-      isAlcoholic: false
-    }
+      isAlcoholic: false,
+    },
   })
 
   // BEVERAGE → FOOD_AND_BEV + isAlcoholic: false
@@ -299,8 +300,8 @@ async function migrateProductTypes() {
     where: { type: 'BEVERAGE' },
     data: {
       type: 'FOOD_AND_BEV',
-      isAlcoholic: false
-    }
+      isAlcoholic: false,
+    },
   })
 
   // ALCOHOL → FOOD_AND_BEV + isAlcoholic: true
@@ -308,14 +309,14 @@ async function migrateProductTypes() {
     where: { type: 'ALCOHOL' },
     data: {
       type: 'FOOD_AND_BEV',
-      isAlcoholic: true
-    }
+      isAlcoholic: true,
+    },
   })
 
   // RETAIL → REGULAR
   await prisma.product.updateMany({
     where: { type: 'RETAIL' },
-    data: { type: 'REGULAR' }
+    data: { type: 'REGULAR' },
   })
 
   console.log('Migration complete!')
@@ -385,50 +386,50 @@ const productTypes = [
     type: 'FOOD_AND_BEV',
     icon: Utensils,
     gradient: 'from-orange-500/20 to-orange-500/5',
-    recommended: ['RESTAURANT', 'CAFE', 'BAR', 'FOOD_TRUCK']
+    recommended: ['RESTAURANT', 'CAFE', 'BAR', 'FOOD_TRUCK'],
   },
   {
     type: 'REGULAR',
     icon: Package,
     gradient: 'from-green-500/20 to-green-500/5',
-    recommended: ['RETAIL', 'BOUTIQUE', 'GROCERY']
+    recommended: ['RETAIL', 'BOUTIQUE', 'GROCERY'],
   },
   {
     type: 'SERVICE',
     icon: Clock,
     gradient: 'from-blue-500/20 to-blue-500/5',
-    recommended: ['SALON', 'SPA', 'GYM']
+    recommended: ['SALON', 'SPA', 'GYM'],
   },
   {
     type: 'APPOINTMENTS_SERVICE',
     icon: Calendar,
     gradient: 'from-purple-500/20 to-purple-500/5',
-    recommended: ['CLINIC', 'SALON', 'CONSULTING']
+    recommended: ['CLINIC', 'SALON', 'CONSULTING'],
   },
   {
     type: 'EVENT',
     icon: Ticket,
     gradient: 'from-pink-500/20 to-pink-500/5',
-    recommended: ['ENTERTAINMENT', 'VENUE', 'GYM']
+    recommended: ['ENTERTAINMENT', 'VENUE', 'GYM'],
   },
   {
     type: 'DIGITAL',
     icon: Download,
     gradient: 'from-cyan-500/20 to-cyan-500/5',
-    recommended: []  // Disponible para todos
+    recommended: [], // Disponible para todos
   },
   {
     type: 'DONATION',
     icon: Heart,
     gradient: 'from-red-500/20 to-red-500/5',
-    recommended: []  // Disponible para todos
+    recommended: [], // Disponible para todos
   },
   {
     type: 'OTHER',
     icon: HelpCircle,
     gradient: 'from-gray-500/20 to-gray-500/5',
-    recommended: []
-  }
+    recommended: [],
+  },
 ]
 ```
 
@@ -585,34 +586,34 @@ const productTypes = [
 
 ### Inventario
 
-| Tipo | `trackInventory` | Razón |
-|------|------------------|-------|
-| REGULAR | ✅ Permitido | Productos físicos con stock |
-| FOOD_AND_BEV | ✅ Permitido | Ingredientes y recetas |
-| SERVICE | ❌ Prohibido | No tiene stock físico |
-| APPOINTMENTS_SERVICE | ❌ Prohibido | No tiene stock físico |
-| EVENT | ⚠️ Opcional | Solo para tickets limitados |
-| DIGITAL | ❌ Prohibido | Infinito por naturaleza |
-| DONATION | ❌ Prohibido | No aplica |
+| Tipo                 | `trackInventory` | Razón                       |
+| -------------------- | ---------------- | --------------------------- |
+| REGULAR              | ✅ Permitido     | Productos físicos con stock |
+| FOOD_AND_BEV         | ✅ Permitido     | Ingredientes y recetas      |
+| SERVICE              | ❌ Prohibido     | No tiene stock físico       |
+| APPOINTMENTS_SERVICE | ❌ Prohibido     | No tiene stock físico       |
+| EVENT                | ⚠️ Opcional      | Solo para tickets limitados |
+| DIGITAL              | ❌ Prohibido     | Infinito por naturaleza     |
+| DONATION             | ❌ Prohibido     | No aplica                   |
 
 ### Validaciones +18
 
-| Tipo | Validación |
-|------|------------|
+| Tipo                               | Validación                    |
+| ---------------------------------- | ----------------------------- |
 | FOOD_AND_BEV + `isAlcoholic: true` | Requiere verificación de edad |
-| Otros | No requiere |
+| Otros                              | No requiere                   |
 
 ### Wizard Flow
 
-| Tipo | Steps |
-|------|-------|
-| FOOD_AND_BEV | Type → Basic Info + Alcohol → Inventory → Confirm |
-| REGULAR | Type → Basic Info → Inventory → Confirm |
-| SERVICE | Type → Basic Info + Duration → Confirm (skip inventory) |
-| APPOINTMENTS_SERVICE | Type → Basic Info + Duration → Confirm (skip inventory) |
-| EVENT | Type → Basic Info + Event Details → Inventory? → Confirm |
-| DIGITAL | Type → Basic Info + Download → Confirm (skip inventory) |
-| DONATION | Type → Basic Info + Amounts → Confirm (skip inventory) |
+| Tipo                 | Steps                                                    |
+| -------------------- | -------------------------------------------------------- |
+| FOOD_AND_BEV         | Type → Basic Info + Alcohol → Inventory → Confirm        |
+| REGULAR              | Type → Basic Info → Inventory → Confirm                  |
+| SERVICE              | Type → Basic Info + Duration → Confirm (skip inventory)  |
+| APPOINTMENTS_SERVICE | Type → Basic Info + Duration → Confirm (skip inventory)  |
+| EVENT                | Type → Basic Info + Event Details → Inventory? → Confirm |
+| DIGITAL              | Type → Basic Info + Download → Confirm (skip inventory)  |
+| DONATION             | Type → Basic Info + Amounts → Confirm (skip inventory)   |
 
 ---
 
@@ -630,10 +631,10 @@ Los tipos legacy (`FOOD`, `BEVERAGE`, `ALCOHOL`, `RETAIL`) se mantienen en el en
 // En queries, mapear legacy a nuevo
 function normalizeProductType(type: ProductType): ProductType {
   const legacyMap = {
-    'FOOD': 'FOOD_AND_BEV',
-    'BEVERAGE': 'FOOD_AND_BEV',
-    'ALCOHOL': 'FOOD_AND_BEV',
-    'RETAIL': 'REGULAR'
+    FOOD: 'FOOD_AND_BEV',
+    BEVERAGE: 'FOOD_AND_BEV',
+    ALCOHOL: 'FOOD_AND_BEV',
+    RETAIL: 'REGULAR',
   }
   return legacyMap[type] || type
 }
@@ -642,10 +643,12 @@ function normalizeProductType(type: ProductType): ProductType {
 ### TPV Compatibility
 
 El TPV actual usa `ProductType` para lógica de negocio:
+
 - Validación +18 para alcohol
 - Filtros por tipo
 
 **Cambio requerido en TPV:**
+
 ```kotlin
 // Antes
 if (product.type == ProductType.ALCOHOL) { requireAgeVerification() }
@@ -658,15 +661,15 @@ if (product.type == ProductType.FOOD_AND_BEV && product.isAlcoholic) { requireAg
 
 ## Timeline Estimado
 
-| Fase | Duración | Descripción |
-|------|----------|-------------|
-| **Fase 1** | 1 día | Schema migration (campos nuevos) |
-| **Fase 2** | 0.5 día | Data migration script |
-| **Fase 3** | 2 días | Backend service updates + validaciones |
-| **Fase 4** | 3 días | Frontend wizard refactor |
-| **Fase 5** | 0.5 día | Traducciones |
-| **Testing** | 2 días | E2E testing |
-| **TPV Update** | 1 día | Actualizar lógica de alcohol |
+| Fase           | Duración | Descripción                            |
+| -------------- | -------- | -------------------------------------- |
+| **Fase 1**     | 1 día    | Schema migration (campos nuevos)       |
+| **Fase 2**     | 0.5 día  | Data migration script                  |
+| **Fase 3**     | 2 días   | Backend service updates + validaciones |
+| **Fase 4**     | 3 días   | Frontend wizard refactor               |
+| **Fase 5**     | 0.5 día  | Traducciones                           |
+| **Testing**    | 2 días   | E2E testing                            |
+| **TPV Update** | 1 día    | Actualizar lógica de alcohol           |
 
 **Total: ~10 días**
 
@@ -692,6 +695,7 @@ if (product.type == ProductType.FOOD_AND_BEV && product.isAlcoholic) { requireAg
 ### Estado Actual (Enero 2026)
 
 **Backend completado:**
+
 - ✅ Prisma schema con nuevos tipos y campos
 - ✅ Migración de base de datos aplicada
 - ✅ Script de migración de datos listo (dry-run verificado)
@@ -701,6 +705,7 @@ if (product.type == ProductType.FOOD_AND_BEV && product.isAlcoholic) { requireAg
 - ✅ Documentación actualizada
 
 **Pendiente:**
+
 - ⏳ Ejecutar migración de datos en producción
 - ⏳ Frontend: ProductWizardDialog actualizado
 - ⏳ Frontend: Traducciones

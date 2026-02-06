@@ -182,56 +182,75 @@ async function main() {
   }
 
   // Manager
-  const manager = await createStaffWithOrg({
-    email: 'manager@playtelecom.mx',
-    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-    firstName: 'Manager',
-    lastName: 'PlayTelecom',
-    emailVerified: true,
-  }, org.id, 'OWNER')
+  const manager = await createStaffWithOrg(
+    {
+      email: 'manager@playtelecom.mx',
+      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+      firstName: 'Manager',
+      lastName: 'PlayTelecom',
+      emailVerified: true,
+    },
+    org.id,
+    'OWNER',
+  )
   console.log(`   ✅ Manager: ${manager.email}`)
 
   // Promoters - Centro
-  const juan = await createStaffWithOrg({
-    email: 'juan.promotor@playtelecom.mx',
-    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-    firstName: 'Juan',
-    lastName: 'Pérez',
-    emailVerified: true,
-  }, org.id)
+  const juan = await createStaffWithOrg(
+    {
+      email: 'juan.promotor@playtelecom.mx',
+      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+      firstName: 'Juan',
+      lastName: 'Pérez',
+      emailVerified: true,
+    },
+    org.id,
+  )
 
-  const maria = await createStaffWithOrg({
-    email: 'maria.promotor@playtelecom.mx',
-    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-    firstName: 'María',
-    lastName: 'García',
-    emailVerified: true,
-  }, org.id)
+  const maria = await createStaffWithOrg(
+    {
+      email: 'maria.promotor@playtelecom.mx',
+      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+      firstName: 'María',
+      lastName: 'García',
+      emailVerified: true,
+    },
+    org.id,
+  )
 
-  const carlos = await createStaffWithOrg({
-    email: 'carlos.promotor@playtelecom.mx',
-    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-    firstName: 'Carlos',
-    lastName: 'López',
-    emailVerified: true,
-  }, org.id)
+  const carlos = await createStaffWithOrg(
+    {
+      email: 'carlos.promotor@playtelecom.mx',
+      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+      firstName: 'Carlos',
+      lastName: 'López',
+      emailVerified: true,
+    },
+    org.id,
+  )
 
   // Promoters - Sur
-  const ana = await createStaffWithOrg({
-    email: 'ana.promotor@playtelecom.mx',
-    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-    firstName: 'Ana',
-    lastName: 'Martínez',
-    emailVerified: true,
-  }, org.id)
+  const ana = await createStaffWithOrg(
+    {
+      email: 'ana.promotor@playtelecom.mx',
+      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+      firstName: 'Ana',
+      lastName: 'Martínez',
+      emailVerified: true,
+    },
+    org.id,
+  )
 
-  const luis = await createStaffWithOrg({
-    email: 'luis.promotor@playtelecom.mx',
-    password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
-    firstName: 'Luis',
-    lastName: 'Hernández',
-    emailVerified: true,
-  }, org.id)
+  const luis = await createStaffWithOrg(
+    {
+      email: 'luis.promotor@playtelecom.mx',
+      password: '$2b$10$si9eIkWqDj6JR7G2ixPH5uTk8UEf2sSr/dpHmUMPjHl73oeLJze.m', // admin123
+      firstName: 'Luis',
+      lastName: 'Hernández',
+      emailVerified: true,
+    },
+    org.id,
+  )
 
   console.log(`   ✅ Created 5 promoters\n`)
 

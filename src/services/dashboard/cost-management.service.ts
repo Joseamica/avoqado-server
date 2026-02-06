@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import { TransactionCardType, ProfitStatus } from '@prisma/client'
 import logger from '../../config/logger'
+import { subDays } from 'date-fns'
 
 // ===== INTERFACES =====
 
@@ -256,7 +257,7 @@ export async function getCostStructureAnalysis(): Promise<CostStructureAnalysis[
       const transactionStats = await prisma.transactionCost.aggregate({
         where: {
           merchantAccountId: merchant.id,
-          createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }, // Last 30 days
+          createdAt: { gte: subDays(new Date(), 30) }, // Last 30 days
         },
         _sum: {
           amount: true,

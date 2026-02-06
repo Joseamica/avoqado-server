@@ -1,7 +1,8 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { IncidentStatus, SettlementStatus } from '@prisma/client'
-import { startOfDay, subDays } from 'date-fns'
+import { subDays } from 'date-fns'
+import { venueStartOfDay, DEFAULT_TIMEZONE } from '../../utils/datetime'
 
 /**
  * Settlement Incident Detection Service
@@ -22,8 +23,8 @@ export async function detectMissingSettlements(): Promise<{
     logger.info('🔍 Starting settlement detection job...')
 
     // Calculate yesterday's date range
-    const yesterday = startOfDay(subDays(new Date(), 1))
-    const today = startOfDay(new Date())
+    const yesterday = venueStartOfDay(DEFAULT_TIMEZONE, subDays(new Date(), 1))
+    const today = venueStartOfDay()
 
     logger.debug(`Looking for settlements expected on: ${yesterday.toISOString()}`)
 

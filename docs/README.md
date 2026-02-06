@@ -33,11 +33,11 @@
 
 > Operational cheat sheets auto-referenced by `.claude/rules/` and `CLAUDE.md`. Optimized for AI agent consumption.
 
-| Guide | When to read |
-|-------|-------------|
-| [guides/PERMISSIONS_GUIDE.md](./guides/PERMISSIONS_GUIDE.md) | Adding features with auth, modifying permissions |
-| [guides/PAYMENT_FLOW_GUIDE.md](./guides/PAYMENT_FLOW_GUIDE.md) | Working on order→payment→inventory flow |
-| [guides/EMAIL_STANDARDS.md](./guides/EMAIL_STANDARDS.md) | Creating or modifying email templates |
+| Guide                                                          | When to read                                     |
+| -------------------------------------------------------------- | ------------------------------------------------ |
+| [guides/PERMISSIONS_GUIDE.md](./guides/PERMISSIONS_GUIDE.md)   | Adding features with auth, modifying permissions |
+| [guides/PAYMENT_FLOW_GUIDE.md](./guides/PAYMENT_FLOW_GUIDE.md) | Working on order→payment→inventory flow          |
+| [guides/EMAIL_STANDARDS.md](./guides/EMAIL_STANDARDS.md)       | Creating or modifying email templates            |
 
 ---
 
@@ -100,8 +100,8 @@
 
 ### Products & Catalog
 
-| Document                                                                             | Description                                                   |
-| ------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| Document                                                                               | Description                                                                              |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | [features/PRODUCT_TYPES_SQUARE_ALIGNED.md](./features/PRODUCT_TYPES_SQUARE_ALIGNED.md) | **Product types aligned with Square API** (FOOD_AND_BEV, EVENT, DIGITAL, DONATION, etc.) |
 
 ### Inventory & Purchasing
@@ -127,21 +127,21 @@
 
 ### Staff & Team Management
 
-| Document                                                                   | Description                                                                |
-| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [features/TEAM_INVITATIONS.md](./features/TEAM_INVITATIONS.md)             | Team invitations, multi-venue, multi-org (StaffOrganization junction table) |
-| [features/LOGIN_SCENARIOS.md](./features/LOGIN_SCENARIOS.md)               | **Complete login & invitation scenarios reference** (all edge cases)       |
+| Document                                                       | Description                                                                 |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| [features/TEAM_INVITATIONS.md](./features/TEAM_INVITATIONS.md) | Team invitations, multi-venue, multi-org (StaffOrganization junction table) |
+| [features/LOGIN_SCENARIOS.md](./features/LOGIN_SCENARIOS.md)   | **Complete login & invitation scenarios reference** (all edge cases)        |
 
 ### Venue & Operations
 
-| Document                                                                 | Description                                                   |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| [features/FLOOR_TABLES.md](./features/FLOOR_TABLES.md)                   | Floor plans, table management, real-time status via Socket.IO |
-| [features/TIME_ENTRY_ATTENDANCE.md](./features/TIME_ENTRY_ATTENDANCE.md) | Clock in/out, PIN verification, breaks, anti-fraud photos     |
-| [features/CASH_CLOSEOUT.md](./features/CASH_CLOSEOUT.md)                 | Cash reconciliation, variance detection, deposit methods      |
-| [SHIFT_MANAGEMENT_ROADMAP.md](./SHIFT_MANAGEMENT_ROADMAP.md)             | Shift management implementation                               |
-| [features/SETTLEMENT_INCIDENTS.md](./features/SETTLEMENT_INCIDENTS.md)   | Settlement incident tracking for SOFOM                        |
-| [features/ORGANIZATION_PAYMENT_CONFIG.md](./features/ORGANIZATION_PAYMENT_CONFIG.md) | Org-level payment config with venue inheritance      |
+| Document                                                                             | Description                                                   |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| [features/FLOOR_TABLES.md](./features/FLOOR_TABLES.md)                               | Floor plans, table management, real-time status via Socket.IO |
+| [features/TIME_ENTRY_ATTENDANCE.md](./features/TIME_ENTRY_ATTENDANCE.md)             | Clock in/out, PIN verification, breaks, anti-fraud photos     |
+| [features/CASH_CLOSEOUT.md](./features/CASH_CLOSEOUT.md)                             | Cash reconciliation, variance detection, deposit methods      |
+| [SHIFT_MANAGEMENT_ROADMAP.md](./SHIFT_MANAGEMENT_ROADMAP.md)                         | Shift management implementation                               |
+| [features/SETTLEMENT_INCIDENTS.md](./features/SETTLEMENT_INCIDENTS.md)               | Settlement incident tracking for SOFOM                        |
+| [features/ORGANIZATION_PAYMENT_CONFIG.md](./features/ORGANIZATION_PAYMENT_CONFIG.md) | Org-level payment config with venue inheritance               |
 
 ### AI & Analytics
 
@@ -182,16 +182,16 @@
 
 ## Development & Operations
 
-| Document                                                                             | Description                                |
-| ------------------------------------------------------------------------------------ | ------------------------------------------ |
-| [ENVIRONMENT_SETUP_GUIDE.md](./ENVIRONMENT_SETUP_GUIDE.md)                           | Local development setup                    |
-| [DATETIME_SYNC.md](./DATETIME_SYNC.md)                                               | Timezone handling between frontend/backend |
-| [CI_CD_SETUP.md](./CI_CD_SETUP.md)                                                   | GitHub Actions, deployment                 |
-| [GITHUB_ENVIRONMENTS.md](./GITHUB_ENVIRONMENTS.md)                                   | GitHub environment configuration           |
-| [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md)             | Pre-deployment checklist                   |
-| [UNUSED_CODE_DETECTION.md](./UNUSED_CODE_DETECTION.md)                               | Dead code detection tools                  |
-| [SEED_CREDENTIALS.md](./SEED_CREDENTIALS.md)                                         | Test credentials                           |
-| [COST_MANAGEMENT_IMPLEMENTATION.md](./COST_MANAGEMENT_IMPLEMENTATION.md)             | Cost management                            |
+| Document                                                                 | Description                                |
+| ------------------------------------------------------------------------ | ------------------------------------------ |
+| [ENVIRONMENT_SETUP_GUIDE.md](./ENVIRONMENT_SETUP_GUIDE.md)               | Local development setup                    |
+| [DATETIME_SYNC.md](./DATETIME_SYNC.md)                                   | Timezone handling between frontend/backend |
+| [CI_CD_SETUP.md](./CI_CD_SETUP.md)                                       | GitHub Actions, deployment                 |
+| [GITHUB_ENVIRONMENTS.md](./GITHUB_ENVIRONMENTS.md)                       | GitHub environment configuration           |
+| [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md) | Pre-deployment checklist                   |
+| [UNUSED_CODE_DETECTION.md](./UNUSED_CODE_DETECTION.md)                   | Dead code detection tools                  |
+| [SEED_CREDENTIALS.md](./SEED_CREDENTIALS.md)                             | Test credentials                           |
+| [COST_MANAGEMENT_IMPLEMENTATION.md](./COST_MANAGEMENT_IMPLEMENTATION.md) | Cost management                            |
 
 ---
 

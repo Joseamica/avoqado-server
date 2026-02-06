@@ -4,6 +4,7 @@
  * the PlayTelecom/White-Label dashboard.
  */
 import prisma from '../../utils/prismaClient'
+import { venueStartOfDay, venueStartOfDayOffset } from '../../utils/datetime'
 
 // Types for the service responses
 export interface StockMetrics {
@@ -54,12 +55,8 @@ class StockDashboardService {
    * Get stock metrics summary for a venue
    */
   async getStockMetrics(venueId: string): Promise<StockMetrics> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
-
-    const weekStart = new Date()
-    weekStart.setDate(weekStart.getDate() - 7)
-    weekStart.setHours(0, 0, 0, 0)
+    const todayStart = venueStartOfDay()
+    const weekStart = venueStartOfDayOffset(undefined, -7)
 
     // Count totals
     const [totalPieces, availablePieces, soldToday, soldThisWeek] = await Promise.all([
@@ -114,9 +111,7 @@ class StockDashboardService {
    * Get stock info by category with coverage estimation
    */
   async getCategoryStock(venueId: string): Promise<CategoryStockInfo[]> {
-    const weekStart = new Date()
-    weekStart.setDate(weekStart.getDate() - 7)
-    weekStart.setHours(0, 0, 0, 0)
+    const weekStart = venueStartOfDayOffset(undefined, -7)
 
     // Get categories with their alert configs
     const categories = await prisma.itemCategory.findMany({
@@ -188,8 +183,7 @@ class StockDashboardService {
    */
   async getStockVsSales(venueId: string, days: number = 14): Promise<StockVsSalesPoint[]> {
     const data: StockVsSalesPoint[] = []
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
+    const today = venueStartOfDay()
 
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date(today)

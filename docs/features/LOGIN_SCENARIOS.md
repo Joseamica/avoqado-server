@@ -3,6 +3,7 @@
 This document covers ALL possible login and invitation scenarios in Avoqado.
 
 ## Table of Contents
+
 1. [Login Methods](#1-login-methods)
 2. [Login Scenarios by User State](#2-login-scenarios-by-user-state)
 3. [Invitation Types](#3-invitation-types)
@@ -14,13 +15,13 @@ This document covers ALL possible login and invitation scenarios in Avoqado.
 
 ## 1. Login Methods
 
-| Method | Service | Who Can Use |
-|--------|---------|-------------|
-| Email + Password | `auth.service.ts` | Regular users with password |
-| Google OAuth | `googleOAuth.service.ts` | Users with Google account |
-| Google One Tap | `googleOAuth.service.ts` | Users with Google account |
-| TOTP (8-digit code) | `auth.service.ts` | SUPERADMIN only (`master@avoqado.io`) |
-| PIN | `auth.tpv.service.ts` | TPV-only staff (terminal access only) |
+| Method              | Service                  | Who Can Use                           |
+| ------------------- | ------------------------ | ------------------------------------- |
+| Email + Password    | `auth.service.ts`        | Regular users with password           |
+| Google OAuth        | `googleOAuth.service.ts` | Users with Google account             |
+| Google One Tap      | `googleOAuth.service.ts` | Users with Google account             |
+| TOTP (8-digit code) | `auth.service.ts`        | SUPERADMIN only (`master@avoqado.io`) |
+| PIN                 | `auth.tpv.service.ts`    | TPV-only staff (terminal access only) |
 
 ---
 
@@ -28,12 +29,12 @@ This document covers ALL possible login and invitation scenarios in Avoqado.
 
 ### 2.1 Normal User with Venues
 
-| Scenario | Result | Token venueId |
-|----------|--------|---------------|
-| User has 1 venue | Login OK, selects that venue | `venue-id` |
-| User has N venues | Login OK, selects first venue | First venue's ID |
-| User has N venues + specifies venueId | Login OK, selects specified venue | Specified venue ID |
-| User specifies venueId they don't have access to | **ERROR**: "No tienes acceso a este establecimiento" | N/A |
+| Scenario                                         | Result                                               | Token venueId      |
+| ------------------------------------------------ | ---------------------------------------------------- | ------------------ |
+| User has 1 venue                                 | Login OK, selects that venue                         | `venue-id`         |
+| User has N venues                                | Login OK, selects first venue                        | First venue's ID   |
+| User has N venues + specifies venueId            | Login OK, selects specified venue                    | Specified venue ID |
+| User specifies venueId they don't have access to | **ERROR**: "No tienes acceso a este establecimiento" | N/A                |
 
 #### Smart Venue Selection (Stripe/Shopify Pattern)
 
@@ -58,6 +59,7 @@ const getSmartVenue = () => {
 ```
 
 **Key behaviors:**
+
 - `avoqado_current_venue_slug` persists across logout (NOT cleared by `clearAllChatStorage()`)
 - Venues switcher saves current venue to localStorage when user changes venue
 - On login, user returns to their last used venue (if still has access)
@@ -65,41 +67,41 @@ const getSmartVenue = () => {
 
 ### 2.2 OWNER Without Venues
 
-| Scenario | Result | Token venueId |
-|----------|--------|---------------|
-| OWNER + onboarding NOT completed | Login OK, redirect to onboarding | `"pending"` |
+| Scenario                                           | Result                            | Token venueId          |
+| -------------------------------------------------- | --------------------------------- | ---------------------- |
+| OWNER + onboarding NOT completed                   | Login OK, redirect to onboarding  | `"pending"`            |
 | OWNER + onboarding completed + pending invitations | Login OK + `pendingInvitations[]` | `"pending-invitation"` |
-| OWNER + onboarding completed + NO invitations | **ERROR**: NO_VENUE_ACCESS | N/A |
+| OWNER + onboarding completed + NO invitations      | **ERROR**: NO_VENUE_ACCESS        | N/A                    |
 
 **Note**: OWNER is detected by `staff.email === organization.email` (primary owner created during signup)
 
 ### 2.3 Non-OWNER Without Venues
 
-| Scenario | Result | Token venueId |
-|----------|--------|---------------|
+| Scenario                | Result                            | Token venueId          |
+| ----------------------- | --------------------------------- | ---------------------- |
 | Has pending invitations | Login OK + `pendingInvitations[]` | `"pending-invitation"` |
-| NO pending invitations | **ERROR**: NO_VENUE_ACCESS | N/A |
+| NO pending invitations  | **ERROR**: NO_VENUE_ACCESS        | N/A                    |
 
 ### 2.4 SUPERADMIN (TOTP Login)
 
-| Scenario | Result |
-|----------|--------|
-| Valid TOTP code | Login OK as synthetic `MASTER_ADMIN` user |
-| Invalid TOTP code | **ERROR**: "Codigo invalido o expirado" |
+| Scenario                          | Result                                               |
+| --------------------------------- | ---------------------------------------------------- |
+| Valid TOTP code                   | Login OK as synthetic `MASTER_ADMIN` user            |
+| Invalid TOTP code                 | **ERROR**: "Codigo invalido o expirado"              |
 | TOTP_MASTER_SECRET not configured | **ERROR**: "Sistema de autenticacion no configurado" |
 
 ### 2.5 Account State Issues
 
-| Scenario | Result |
-|----------|--------|
-| Account locked (lockedUntil > now) | **ERROR**: "Account temporarily locked... try again in X minutes" |
-| Lock expired (lockedUntil < now) | Login OK (lock cleared) |
-| Wrong password (attempts < 5) | **ERROR**: "Correo electronico o contrasena incorrectos" + increment attempts |
-| Wrong password (attempts >= 5) | **ERROR**: "Account locked" + set lockedUntil = now + 60 min |
-| Email not verified | **ERROR**: "Please verify your email before logging in" |
-| Account inactive (active = false) | **ERROR**: "Tu cuenta esta desactivada" |
-| User not found | **ERROR**: "Correo electronico o contrasena incorrectos" |
-| User has no password (Google-only) | **ERROR**: "Correo electronico o contrasena incorrectos" |
+| Scenario                           | Result                                                                        |
+| ---------------------------------- | ----------------------------------------------------------------------------- |
+| Account locked (lockedUntil > now) | **ERROR**: "Account temporarily locked... try again in X minutes"             |
+| Lock expired (lockedUntil < now)   | Login OK (lock cleared)                                                       |
+| Wrong password (attempts < 5)      | **ERROR**: "Correo electronico o contrasena incorrectos" + increment attempts |
+| Wrong password (attempts >= 5)     | **ERROR**: "Account locked" + set lockedUntil = now + 60 min                  |
+| Email not verified                 | **ERROR**: "Please verify your email before logging in"                       |
+| Account inactive (active = false)  | **ERROR**: "Tu cuenta esta desactivada"                                       |
+| User not found                     | **ERROR**: "Correo electronico o contrasena incorrectos"                      |
+| User has no password (Google-only) | **ERROR**: "Correo electronico o contrasena incorrectos"                      |
 
 ### 2.6 Venue Status & Demo Venues
 
@@ -110,18 +112,18 @@ const getSmartVenue = () => {
 
 // Can login and process payments
 OPERATIONAL_VENUE_STATUSES = [
-  LIVE_DEMO,           // Public anonymous demo
-  TRIAL,               // Private 30-day trial
-  ONBOARDING,          // Setting up (KYC pending)
-  PENDING_ACTIVATION,  // KYC complete, awaiting payment setup
-  ACTIVE,              // Fully operational
+  LIVE_DEMO, // Public anonymous demo
+  TRIAL, // Private 30-day trial
+  ONBOARDING, // Setting up (KYC pending)
+  PENDING_ACTIVATION, // KYC complete, awaiting payment setup
+  ACTIVE, // Fully operational
 ]
 
 // Cannot login (except SUPERADMIN)
 NON_OPERATIONAL_VENUE_STATUSES = [
-  SUSPENDED,           // Payment issues, user-initiated pause
-  ADMIN_SUSPENDED,     // Avoqado admin action (fraud, TOS violation)
-  CLOSED,              // Permanently closed
+  SUSPENDED, // Payment issues, user-initiated pause
+  ADMIN_SUSPENDED, // Avoqado admin action (fraud, TOS violation)
+  CLOSED, // Permanently closed
 ]
 
 // Can be hard deleted (fake data)
@@ -160,41 +162,41 @@ tokens      - Venue (status: LIVE_DEMO)
             - Session expires in 5 hours
 ```
 
-| Aspect | Behavior |
-|--------|----------|
-| Authentication | Auto-login, no password |
-| Staff email | `demo-{timestamp}@livedemo.avoqado.io` |
-| Role | OWNER |
-| Features | ALL enabled (free) |
-| Duration | 5 hours of inactivity |
-| Cleanup | Auto-deleted by cron job |
-| KYC | Auto-verified |
+| Aspect         | Behavior                               |
+| -------------- | -------------------------------------- |
+| Authentication | Auto-login, no password                |
+| Staff email    | `demo-{timestamp}@livedemo.avoqado.io` |
+| Role           | OWNER                                  |
+| Features       | ALL enabled (free)                     |
+| Duration       | 5 hours of inactivity                  |
+| Cleanup        | Auto-deleted by cron job               |
+| KYC            | Auto-verified                          |
 
 #### Trial Venue (Onboarding Demo)
 
 Private demo for registered users during onboarding:
 
-| Aspect | Behavior |
-|--------|----------|
-| Created when | User completes signup |
-| Status | `TRIAL` |
-| Duration | 30 days |
-| Features | Based on selected plan (trial) |
-| Data | Seeded demo data |
-| After trial | Convert to ACTIVE (paid) or SUSPENDED |
+| Aspect       | Behavior                              |
+| ------------ | ------------------------------------- |
+| Created when | User completes signup                 |
+| Status       | `TRIAL`                               |
+| Duration     | 30 days                               |
+| Features     | Based on selected plan (trial)        |
+| Data         | Seeded demo data                      |
+| After trial  | Convert to ACTIVE (paid) or SUSPENDED |
 
 #### Login Behavior by VenueStatus
 
-| User's Venues | Login Result |
-|---------------|--------------|
-| Only ACTIVE venues | Login OK |
-| Only TRIAL venues | Login OK |
-| Only LIVE_DEMO venues | Login OK (anonymous demo) |
-| Only ONBOARDING venues | Login OK |
-| Only SUSPENDED venues | **ERROR**: NO_VENUE_ACCESS |
-| Only CLOSED venues | **ERROR**: NO_VENUE_ACCESS |
+| User's Venues             | Login Result                 |
+| ------------------------- | ---------------------------- |
+| Only ACTIVE venues        | Login OK                     |
+| Only TRIAL venues         | Login OK                     |
+| Only LIVE_DEMO venues     | Login OK (anonymous demo)    |
+| Only ONBOARDING venues    | Login OK                     |
+| Only SUSPENDED venues     | **ERROR**: NO_VENUE_ACCESS   |
+| Only CLOSED venues        | **ERROR**: NO_VENUE_ACCESS   |
 | Mix of ACTIVE + SUSPENDED | Login OK (only ACTIVE shown) |
-| SUPERADMIN + any status | Login OK (sees ALL venues) |
+| SUPERADMIN + any status   | Login OK (sees ALL venues)   |
 
 #### Venue Status Transitions
 
@@ -230,14 +232,14 @@ Private demo for registered users during onboarding:
 
 What happens when a venue's status changes while user is logged in or between sessions:
 
-| Scenario | Behavior |
-|----------|----------|
-| User logged in, venue becomes SUSPENDED | Token still works until expiry, then NO_VENUE_ACCESS |
-| User has access token for SUSPENDED venue | API calls may still work (depends on endpoint) |
-| User refreshes token for SUSPENDED venue | Refresh fails, must re-login |
-| User's only venue deleted (LIVE_DEMO cleanup) | NO_VENUE_ACCESS on next login |
-| TRIAL expires, becomes SUSPENDED | User sees "trial expired" message, must upgrade |
-| Venue reactivated (SUSPENDED → ACTIVE) | User can login normally again |
+| Scenario                                      | Behavior                                             |
+| --------------------------------------------- | ---------------------------------------------------- |
+| User logged in, venue becomes SUSPENDED       | Token still works until expiry, then NO_VENUE_ACCESS |
+| User has access token for SUSPENDED venue     | API calls may still work (depends on endpoint)       |
+| User refreshes token for SUSPENDED venue      | Refresh fails, must re-login                         |
+| User's only venue deleted (LIVE_DEMO cleanup) | NO_VENUE_ACCESS on next login                        |
+| TRIAL expires, becomes SUSPENDED              | User sees "trial expired" message, must upgrade      |
+| Venue reactivated (SUSPENDED → ACTIVE)        | User can login normally again                        |
 
 **Token + Venue Status Check:**
 
@@ -254,7 +256,8 @@ if (!isVenueOperational(venue.status)) {
 
 ### 2.8 Multi-Venue Navigation (Post-Login)
 
-**The Problem:** JWT token contains fixed `venueId` and `role` from login time. User navigates to different venue where they have a different role.
+**The Problem:** JWT token contains fixed `venueId` and `role` from login time. User navigates to different venue where they have a
+different role.
 
 **The Solution:** Backend `checkPermission` middleware dynamically looks up role:
 
@@ -267,20 +270,21 @@ let userRole: StaffRole
 if (urlVenueId && urlVenueId !== authContext.venueId) {
   // Look up user's ACTUAL role in the target venue
   const staffVenue = await prisma.staffVenue.findUnique({
-    where: { staffId_venueId: { staffId: authContext.userId, venueId: urlVenueId } }
+    where: { staffId_venueId: { staffId: authContext.userId, venueId: urlVenueId } },
   })
 
   if (!staffVenue) {
     return 403 // No access to this venue
   }
 
-  userRole = staffVenue.role  // Use actual role, not token role
+  userRole = staffVenue.role // Use actual role, not token role
 } else {
-  userRole = authContext.role  // Same venue, use token role
+  userRole = authContext.role // Same venue, use token role
 }
 ```
 
 **Example scenario:**
+
 ```
 User logged in → Token has venueId=A, role=CASHIER
 User navigates to /venues/B/features
@@ -289,11 +293,11 @@ User navigates to /venues/B/features
 → Access granted
 ```
 
-| Navigation Scenario | Token Role | Actual Role | Result |
-|---------------------|------------|-------------|--------|
-| Same venue as token | ADMIN | ADMIN | Use token role |
-| Different venue, user is OWNER | CASHIER | OWNER | Use OWNER role |
-| Different venue, no access | ADMIN | - | **403 Forbidden** |
+| Navigation Scenario            | Token Role | Actual Role | Result            |
+| ------------------------------ | ---------- | ----------- | ----------------- |
+| Same venue as token            | ADMIN      | ADMIN       | Use token role    |
+| Different venue, user is OWNER | CASHIER    | OWNER       | Use OWNER role    |
+| Different venue, no access     | ADMIN      | -           | **403 Forbidden** |
 
 ---
 
@@ -301,10 +305,10 @@ User navigates to /venues/B/features
 
 ### 3.1 By Delivery Method
 
-| Type | Email | PIN | Dashboard Access | TPV Access | Status After Creation |
-|------|-------|-----|------------------|------------|----------------------|
-| **Con correo** (email) | Real email | Optional | Yes | Yes | `PENDING` |
-| **Solo TPV** (tpv-only) | Placeholder `@internal.avoqado.io` | Required | No | Yes | `ACCEPTED` immediately |
+| Type                    | Email                              | PIN      | Dashboard Access | TPV Access | Status After Creation  |
+| ----------------------- | ---------------------------------- | -------- | ---------------- | ---------- | ---------------------- |
+| **Con correo** (email)  | Real email                         | Optional | Yes              | Yes        | `PENDING`              |
+| **Solo TPV** (tpv-only) | Placeholder `@internal.avoqado.io` | Required | No               | Yes        | `ACCEPTED` immediately |
 
 ### 3.2 TPV-Only Details
 
@@ -321,11 +325,11 @@ Example: tpv-mi-restaurante-1704067200000-abc123@internal.avoqado.io
 
 ### 3.3 By Permission Level (InvitationType enum)
 
-| Type | Description |
-|------|-------------|
-| `ORGANIZATION_ADMIN` | Admin for entire organization |
-| `VENUE_STAFF` | Staff for specific venue (default) |
-| `VENUE_ADMIN` | Admin for specific venue |
+| Type                 | Description                        |
+| -------------------- | ---------------------------------- |
+| `ORGANIZATION_ADMIN` | Admin for entire organization      |
+| `VENUE_STAFF`        | Staff for specific venue (default) |
+| `VENUE_ADMIN`        | Admin for specific venue           |
 
 ### 3.4 OWNER Invitations with `inviteToAllVenues`
 
@@ -353,12 +357,12 @@ const shouldInviteToAllVenues = request.inviteToAllVenues && request.role === St
 permissions: shouldInviteToAllVenues ? { inviteToAllVenues: true } : undefined
 ```
 
-| Role | inviteToAllVenues | Result |
-|------|-------------------|--------|
-| OWNER | `true` | Creates/updates StaffVenue for ALL venues in org |
-| OWNER | `false` | Creates StaffVenue for invitation venue only |
-| ADMIN | `true` | **Ignored** - only applies to OWNER |
-| CASHIER | `true` | **Ignored** - only applies to OWNER |
+| Role    | inviteToAllVenues | Result                                           |
+| ------- | ----------------- | ------------------------------------------------ |
+| OWNER   | `true`            | Creates/updates StaffVenue for ALL venues in org |
+| OWNER   | `false`           | Creates StaffVenue for invitation venue only     |
+| ADMIN   | `true`            | **Ignored** - only applies to OWNER              |
+| CASHIER | `true`            | **Ignored** - only applies to OWNER              |
 
 ---
 
@@ -366,12 +370,12 @@ permissions: shouldInviteToAllVenues ? { inviteToAllVenues: true } : undefined
 
 ### 4.1 User State When Accepting
 
-| User State | Frontend Shows | Backend Behavior |
-|------------|----------------|------------------|
-| Not logged in + new user | Password creation form | Creates Staff, StaffOrg, StaffVenue |
-| Not logged in + existing user with password | Password verification form | Verifies password, adds StaffVenue |
-| Logged in + same email as invitation | "Direct Accept" button | Just adds StaffVenue |
-| Logged in + different email | "Email Mismatch Warning" | Must logout first |
+| User State                                  | Frontend Shows             | Backend Behavior                    |
+| ------------------------------------------- | -------------------------- | ----------------------------------- |
+| Not logged in + new user                    | Password creation form     | Creates Staff, StaffOrg, StaffVenue |
+| Not logged in + existing user with password | Password verification form | Verifies password, adds StaffVenue  |
+| Logged in + same email as invitation        | "Direct Accept" button     | Just adds StaffVenue                |
+| Logged in + different email                 | "Email Mismatch Warning"   | Must logout first                   |
 
 ### 4.2 Detailed Flows
 
@@ -431,21 +435,21 @@ permissions: shouldInviteToAllVenues ? { inviteToAllVenues: true } : undefined
 
 ### 4.3 Cross-Organization Invitations
 
-| Scenario | Result |
-|----------|--------|
+| Scenario                               | Result                                  |
+| -------------------------------------- | --------------------------------------- |
 | User exists in Org A, invited to Org B | Creates new StaffOrganization for Org B |
-| User already in this venue | Updates existing StaffVenue (role, PIN) |
-| PIN already used in venue | **ERROR**: "PIN no disponible" |
+| User already in this venue             | Updates existing StaffVenue (role, PIN) |
+| PIN already used in venue              | **ERROR**: "PIN no disponible"          |
 
 ### 4.4 OWNER Invitations (Special Handling)
 
 When someone is invited with `role: OWNER`:
 
-| Aspect | Behavior |
-|--------|----------|
-| OrgRole assigned | `OrgRole.OWNER` (not MEMBER) |
-| `inviteToAllVenues` flag | If `true`, assigns to ALL org venues |
-| PIN assignment | Only on primary venue (invitation.venueId) |
+| Aspect                   | Behavior                                   |
+| ------------------------ | ------------------------------------------ |
+| OrgRole assigned         | `OrgRole.OWNER` (not MEMBER)               |
+| `inviteToAllVenues` flag | If `true`, assigns to ALL org venues       |
+| PIN assignment           | Only on primary venue (invitation.venueId) |
 
 **inviteToAllVenues Flow:**
 
@@ -478,12 +482,12 @@ When someone is invited with `role: OWNER`:
 
 When `invitation.venueId` is `null`:
 
-| Aspect | Behavior |
-|--------|----------|
-| StaffVenue created? | **No** - user has org membership only |
-| StaffOrganization created? | Yes, with appropriate OrgRole |
-| Access Token generated? | Only if user has other venues |
-| Post-accept state | User may have org access but no venue dashboard |
+| Aspect                     | Behavior                                        |
+| -------------------------- | ----------------------------------------------- |
+| StaffVenue created?        | **No** - user has org membership only           |
+| StaffOrganization created? | Yes, with appropriate OrgRole                   |
+| Access Token generated?    | Only if user has other venues                   |
+| Post-accept state          | User may have org access but no venue dashboard |
 
 **When to use:**
 
@@ -513,13 +517,13 @@ if (!venueId) {
 
 When existing user in Org A accepts invitation to Org B:
 
-| Aspect | Behavior |
-|--------|----------|
-| Detects cross-org | `existingStaffOrgId !== invitation.organizationId` |
-| Creates StaffOrganization | Yes, with `isPrimary: false` |
-| OrgRole determination | OWNER invitation → `OrgRole.OWNER`, else derived from existing roles |
-| Password verification | Required (existing user) |
-| Password overwrite | **Never** - existing credentials preserved |
+| Aspect                    | Behavior                                                             |
+| ------------------------- | -------------------------------------------------------------------- |
+| Detects cross-org         | `existingStaffOrgId !== invitation.organizationId`                   |
+| Creates StaffOrganization | Yes, with `isPrimary: false`                                         |
+| OrgRole determination     | OWNER invitation → `OrgRole.OWNER`, else derived from existing roles |
+| Password verification     | Required (existing user)                                             |
+| Password overwrite        | **Never** - existing credentials preserved                           |
 
 **OrgRole derivation for non-OWNER cross-org:**
 
@@ -540,14 +544,14 @@ if (invitation.role === StaffRole.OWNER) {
 
 ### 4.7 Existing User Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| User has password, provides correct | Verification OK, add to venue |
-| User has password, provides wrong | **ERROR**: "Contrasena incorrecta" |
-| User has password, doesn't provide | **ERROR**: "Se requiere contrasena para verificar" |
-| User has no password (PIN-only upgrade) | Accept new password, add to venue |
-| User's name already set | Name NOT overwritten |
-| User's password already set | Password NOT overwritten |
+| Scenario                                | Behavior                                           |
+| --------------------------------------- | -------------------------------------------------- |
+| User has password, provides correct     | Verification OK, add to venue                      |
+| User has password, provides wrong       | **ERROR**: "Contrasena incorrecta"                 |
+| User has password, doesn't provide      | **ERROR**: "Se requiere contrasena para verificar" |
+| User has no password (PIN-only upgrade) | Accept new password, add to venue                  |
+| User's name already set                 | Name NOT overwritten                               |
+| User's password already set             | Password NOT overwritten                           |
 
 ### 4.8 Deactivated User Re-Invitation (Edge Case)
 
@@ -573,18 +577,18 @@ Timeline:
 
 **Why this happens:**
 
-| Check | Location | What it validates |
-|-------|----------|-------------------|
-| Creation | `team.dashboard.service.ts:422` | Only blocks if `active: true` |
-| Acceptance | `invitation.service.ts:334` | Overwrites role, no hierarchy check |
+| Check      | Location                        | What it validates                   |
+| ---------- | ------------------------------- | ----------------------------------- |
+| Creation   | `team.dashboard.service.ts:422` | Only blocks if `active: true`       |
+| Acceptance | `invitation.service.ts:334`     | Overwrites role, no hierarchy check |
 
 **Current behavior:**
 
-| User State | Invitation | Creation | Acceptance |
-|------------|------------|----------|------------|
-| OWNER (active) | CASHIER | **BLOCKED** | - |
-| OWNER (inactive) | CASHIER | Allowed | **Role overwritten to CASHIER** |
-| CASHIER (inactive) | OWNER | Allowed | Role upgraded to OWNER |
+| User State         | Invitation | Creation    | Acceptance                      |
+| ------------------ | ---------- | ----------- | ------------------------------- |
+| OWNER (active)     | CASHIER    | **BLOCKED** | -                               |
+| OWNER (inactive)   | CASHIER    | Allowed     | **Role overwritten to CASHIER** |
+| CASHIER (inactive) | OWNER      | Allowed     | Role upgraded to OWNER          |
 
 **Note:** This is a rare edge case. Multi-venue different roles (OWNER in venue A, CASHIER in venue B) is completely normal and expected.
 
@@ -600,11 +604,11 @@ const finalRole = newRank >= currentRank ? invitation.role : existingAssignment.
 
 ### 4.9 Post-Acceptance Token States
 
-| Scenario | accessToken | refreshToken | Frontend Behavior |
-|----------|-------------|--------------|-------------------|
-| Invitation has venueId | ✅ Generated | ✅ Generated | Redirect to venue dashboard |
-| No venueId, user has other venues | ✅ (first venue) | ✅ Generated | Redirect to first venue |
-| No venueId, user has no venues | ❌ null | ✅ Generated | Redirect to pending/invitation flow |
+| Scenario                          | accessToken      | refreshToken | Frontend Behavior                   |
+| --------------------------------- | ---------------- | ------------ | ----------------------------------- |
+| Invitation has venueId            | ✅ Generated     | ✅ Generated | Redirect to venue dashboard         |
+| No venueId, user has other venues | ✅ (first venue) | ✅ Generated | Redirect to first venue             |
+| No venueId, user has no venues    | ❌ null          | ✅ Generated | Redirect to pending/invitation flow |
 
 ---
 
@@ -612,15 +616,15 @@ const finalRole = newRank >= currentRank ? invitation.role : existingAssignment.
 
 ### 5.1 Invitation Errors
 
-| Scenario | HTTP Status | Error Message |
-|----------|-------------|---------------|
-| Token not found | 404 | "Invitacion no encontrada o ya utilizada" |
-| Invitation already used | 404 | "Invitacion no encontrada o ya utilizada" |
-| Invitation expired | 410 | "La invitacion ha expirado" |
-| PIN already in use | 409 | "PIN no disponible" |
-| Missing required fields (new user) | 400 | "Se requiere nombre, apellido y contrasena" |
-| Wrong password (existing user) | 401 | "Contrasena incorrecta" |
-| Existing user didn't provide password | 400 | "Se requiere contrasena para verificar tu identidad" |
+| Scenario                              | HTTP Status | Error Message                                        |
+| ------------------------------------- | ----------- | ---------------------------------------------------- |
+| Token not found                       | 404         | "Invitacion no encontrada o ya utilizada"            |
+| Invitation already used               | 404         | "Invitacion no encontrada o ya utilizada"            |
+| Invitation expired                    | 410         | "La invitacion ha expirado"                          |
+| PIN already in use                    | 409         | "PIN no disponible"                                  |
+| Missing required fields (new user)    | 400         | "Se requiere nombre, apellido y contrasena"          |
+| Wrong password (existing user)        | 401         | "Contrasena incorrecta"                              |
+| Existing user didn't provide password | 400         | "Se requiere contrasena para verificar tu identidad" |
 
 ### 5.2 pendingInvitations Feature
 
@@ -644,7 +648,7 @@ const finalRole = newRank >= currentRank ? invitation.role : existingAssignment.
   venueName: string | null
   organizationId: string
   organizationName: string
-  expiresAt: string (ISO)
+  expiresAt: string(ISO)
 }
 ```
 
@@ -660,21 +664,21 @@ if (data?.pendingInvitations?.length > 0) {
 
 ### 5.3 TPV-Only Staff Edge Cases
 
-| Scenario | Result |
-|----------|--------|
-| TPV-only tries dashboard login | **ERROR**: No password set |
-| TPV-only tries Google login | Not possible (email is placeholder) |
-| TPV-only has pending invitations | N/A - invitations are ACCEPTED immediately |
-| Check `isTPVOnlyEmail()` | Returns `true` for `tpv-*@internal.avoqado.io` |
+| Scenario                         | Result                                         |
+| -------------------------------- | ---------------------------------------------- |
+| TPV-only tries dashboard login   | **ERROR**: No password set                     |
+| TPV-only tries Google login      | Not possible (email is placeholder)            |
+| TPV-only has pending invitations | N/A - invitations are ACCEPTED immediately     |
+| Check `isTPVOnlyEmail()`         | Returns `true` for `tpv-*@internal.avoqado.io` |
 
 ### 5.4 Google OAuth vs Email/Password Differences
 
-| Aspect | Email/Password | Google OAuth |
-|--------|----------------|--------------|
-| Filters venues by OPERATIONAL status | Yes | **No** (potential inconsistency) |
-| SUPERADMIN sees all venues | Yes | N/A (SUPERADMIN uses TOTP) |
-| New user without invitation | Not possible | **ERROR**: NO_VENUE_ACCESS |
-| New user with invitation | Creates from invitation | Creates from invitation |
+| Aspect                               | Email/Password          | Google OAuth                     |
+| ------------------------------------ | ----------------------- | -------------------------------- |
+| Filters venues by OPERATIONAL status | Yes                     | **No** (potential inconsistency) |
+| SUPERADMIN sees all venues           | Yes                     | N/A (SUPERADMIN uses TOTP)       |
+| New user without invitation          | Not possible            | **ERROR**: NO_VENUE_ACCESS       |
+| New user with invitation             | Creates from invitation | Creates from invitation          |
 
 ---
 
@@ -684,59 +688,60 @@ if (data?.pendingInvitations?.length > 0) {
 
 File: `tests/unit/services/auth.login.scenarios.test.ts`
 
-| # | Scenario | Status |
-|---|----------|--------|
-| 1 | Normal login with venues | ✅ |
-| 2 | Login with specific venueId | ✅ |
-| 3 | OWNER without venues + onboarding incomplete | ✅ |
-| 4 | OWNER without venues + onboarding complete | ✅ |
-| 5 | Non-OWNER without venues + pending invitations | ✅ |
-| 6 | Non-OWNER without venues + no invitations | ✅ |
-| 7 | User with venues + pending invitations (normal login) | ✅ |
-| 8 | Locked account | ✅ |
-| 9 | Wrong password | ✅ |
-| 10 | Email not verified | ✅ |
-| 11 | Inactive account | ✅ |
-| 12 | White-label venue login | ✅ |
-| 13 | Multi-org user login | ✅ |
-| 14 | User not found | ✅ |
-| 15 | Expired invitations ignored | ✅ |
-| 16 | Only PENDING invitations count | ✅ |
+| #   | Scenario                                              | Status |
+| --- | ----------------------------------------------------- | ------ |
+| 1   | Normal login with venues                              | ✅     |
+| 2   | Login with specific venueId                           | ✅     |
+| 3   | OWNER without venues + onboarding incomplete          | ✅     |
+| 4   | OWNER without venues + onboarding complete            | ✅     |
+| 5   | Non-OWNER without venues + pending invitations        | ✅     |
+| 6   | Non-OWNER without venues + no invitations             | ✅     |
+| 7   | User with venues + pending invitations (normal login) | ✅     |
+| 8   | Locked account                                        | ✅     |
+| 9   | Wrong password                                        | ✅     |
+| 10  | Email not verified                                    | ✅     |
+| 11  | Inactive account                                      | ✅     |
+| 12  | White-label venue login                               | ✅     |
+| 13  | Multi-org user login                                  | ✅     |
+| 14  | User not found                                        | ✅     |
+| 15  | Expired invitations ignored                           | ✅     |
+| 16  | Only PENDING invitations count                        | ✅     |
 
 ### 6.2 Frontend Tests (11 scenarios)
 
 File: `src/context/__tests__/AuthContext.login.test.ts`
 
-| # | Scenario | Status |
-|---|----------|--------|
-| 1 | Redirect to /invite/{token} with pending invitations | ✅ |
-| 2 | Redirect to first invitation when multiple exist | ✅ |
-| 3 | Normal flow when pendingInvitations empty | ✅ |
-| 4 | Normal flow when pendingInvitations undefined | ✅ |
-| 5 | Success toast and refetch for user with venues | ✅ |
-| 6 | Clear previous login errors | ✅ |
-| 7 | Handle special characters in token | ✅ |
-| 8 | Handle org-level invitation (no venueId) | ✅ |
-| 9 | Handle user with venues AND invitations | ✅ |
-| 10 | Document user journey for pending invitations | ✅ |
-| 11 | Document active venues + new invitation scenario | ✅ |
+| #   | Scenario                                             | Status |
+| --- | ---------------------------------------------------- | ------ |
+| 1   | Redirect to /invite/{token} with pending invitations | ✅     |
+| 2   | Redirect to first invitation when multiple exist     | ✅     |
+| 3   | Normal flow when pendingInvitations empty            | ✅     |
+| 4   | Normal flow when pendingInvitations undefined        | ✅     |
+| 5   | Success toast and refetch for user with venues       | ✅     |
+| 6   | Clear previous login errors                          | ✅     |
+| 7   | Handle special characters in token                   | ✅     |
+| 8   | Handle org-level invitation (no venueId)             | ✅     |
+| 9   | Handle user with venues AND invitations              | ✅     |
+| 10  | Document user journey for pending invitations        | ✅     |
+| 11  | Document active venues + new invitation scenario     | ✅     |
 
 ### 6.3 Not Covered by Automated Tests (TODO)
 
-| Scenario | Reason | Priority |
-|----------|--------|----------|
-| SUPERADMIN TOTP login | Uses separate system | Low |
-| Google OAuth all scenarios | Code is correct, no tests written | Medium |
-| TPV PIN login | Different service (auth.tpv.service.ts) | Low |
-| OWNER invitation with `inviteToAllVenues` | New feature | High |
-| Cross-org invitation acceptance | Complex flow | High |
-| Org-level invitation (no venueId) | Edge case | Medium |
-| Multi-venue permission check (dynamic role lookup) | Backend middleware | High |
-| Smart venue selection on login | Frontend localStorage | Medium |
+| Scenario                                           | Reason                                  | Priority |
+| -------------------------------------------------- | --------------------------------------- | -------- |
+| SUPERADMIN TOTP login                              | Uses separate system                    | Low      |
+| Google OAuth all scenarios                         | Code is correct, no tests written       | Medium   |
+| TPV PIN login                                      | Different service (auth.tpv.service.ts) | Low      |
+| OWNER invitation with `inviteToAllVenues`          | New feature                             | High     |
+| Cross-org invitation acceptance                    | Complex flow                            | High     |
+| Org-level invitation (no venueId)                  | Edge case                               | Medium   |
+| Multi-venue permission check (dynamic role lookup) | Backend middleware                      | High     |
+| Smart venue selection on login                     | Frontend localStorage                   | Medium   |
 
 ### 6.4 Recommended Test Additions
 
 **Backend (invitation.service.ts):**
+
 ```typescript
 // test: OWNER invitation with inviteToAllVenues assigns to all org venues
 // test: OWNER invitation without inviteToAllVenues assigns to single venue
@@ -749,6 +754,7 @@ File: `src/context/__tests__/AuthContext.login.test.ts`
 ```
 
 **Backend (team.dashboard.service.ts):**
+
 ```typescript
 // test: Active user in venue blocks new invitation (same venue)
 // test: Inactive user in venue allows new invitation (same venue)
@@ -757,6 +763,7 @@ File: `src/context/__tests__/AuthContext.login.test.ts`
 ```
 
 **Backend (liveDemo.service.ts):**
+
 ```typescript
 // test: New session creates venue with LIVE_DEMO status
 // test: Existing session returns same venue
@@ -766,6 +773,7 @@ File: `src/context/__tests__/AuthContext.login.test.ts`
 ```
 
 **Backend (auth - venue status):**
+
 ```typescript
 // test: Login with only SUSPENDED venues returns NO_VENUE_ACCESS
 // test: Login with mix of ACTIVE + SUSPENDED returns only ACTIVE
@@ -776,6 +784,7 @@ File: `src/context/__tests__/AuthContext.login.test.ts`
 ```
 
 **Backend (checkPermission.middleware.ts):**
+
 ```typescript
 // test: Same venue as token uses token role
 // test: Different venue looks up actual role from StaffVenue
@@ -784,6 +793,7 @@ File: `src/context/__tests__/AuthContext.login.test.ts`
 ```
 
 **Frontend (AuthContext.tsx):**
+
 ```typescript
 // test: Smart venue selection returns last used venue from localStorage
 // test: Smart venue selection falls back to highest-role venue
@@ -827,31 +837,31 @@ User attempts login
 
 ### Backend (avoqado-server)
 
-| File | Purpose |
-|------|---------|
-| `src/services/dashboard/auth.service.ts` | Email/password login |
-| `src/services/dashboard/googleOAuth.service.ts` | Google OAuth login |
-| `src/services/invitation.service.ts` | Invitation acceptance |
-| `src/services/dashboard/team.dashboard.service.ts` | Create invitations |
-| `src/services/liveDemo.service.ts` | Live demo venue creation/management |
-| `src/lib/venueStatus.constants.ts` | VenueStatus categories and helpers |
-| `src/middlewares/checkPermission.middleware.ts` | Dynamic role lookup for multi-venue |
-| `src/middlewares/authenticateToken.middleware.ts` | JWT validation, authContext creation |
+| File                                               | Purpose                              |
+| -------------------------------------------------- | ------------------------------------ |
+| `src/services/dashboard/auth.service.ts`           | Email/password login                 |
+| `src/services/dashboard/googleOAuth.service.ts`    | Google OAuth login                   |
+| `src/services/invitation.service.ts`               | Invitation acceptance                |
+| `src/services/dashboard/team.dashboard.service.ts` | Create invitations                   |
+| `src/services/liveDemo.service.ts`                 | Live demo venue creation/management  |
+| `src/lib/venueStatus.constants.ts`                 | VenueStatus categories and helpers   |
+| `src/middlewares/checkPermission.middleware.ts`    | Dynamic role lookup for multi-venue  |
+| `src/middlewares/authenticateToken.middleware.ts`  | JWT validation, authContext creation |
 
 ### Frontend (avoqado-web-dashboard)
 
-| File | Purpose |
-|------|---------|
-| `src/context/AuthContext.tsx` | Auth state, smart venue selection |
-| `src/pages/InviteAccept.tsx` | Invitation acceptance UI |
+| File                                         | Purpose                                   |
+| -------------------------------------------- | ----------------------------------------- |
+| `src/context/AuthContext.tsx`                | Auth state, smart venue selection         |
+| `src/pages/InviteAccept.tsx`                 | Invitation acceptance UI                  |
 | `src/components/Sidebar/venues-switcher.tsx` | Venue switching, localStorage persistence |
-| `src/services/chatService.ts` | Chat storage (separated from user prefs) |
+| `src/services/chatService.ts`                | Chat storage (separated from user prefs)  |
 
 ### Key LocalStorage Keys
 
-| Key | Purpose | Cleared on Logout |
-|-----|---------|-------------------|
-| `avoqado_current_venue_slug` | Last used venue for smart redirect | **No** |
-| `avoqado_chat_history` | Chat conversation history | Yes |
-| `avoqado_chat_daily_usage` | Daily token usage | Yes |
-| `avoqado_chat_conversations` | Conversations list | Yes |
+| Key                          | Purpose                            | Cleared on Logout |
+| ---------------------------- | ---------------------------------- | ----------------- |
+| `avoqado_current_venue_slug` | Last used venue for smart redirect | **No**            |
+| `avoqado_chat_history`       | Chat conversation history          | Yes               |
+| `avoqado_chat_daily_usage`   | Daily token usage                  | Yes               |
+| `avoqado_chat_conversations` | Conversations list                 | Yes               |

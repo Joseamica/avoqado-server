@@ -87,7 +87,7 @@ describe('Invite to All Venues Feature', () => {
       // Should fetch all venues in organization
       expect(prismaMock.venue.findMany).toHaveBeenCalledWith({
         where: { organizationId: mockOrganizationId },
-        select: { id: true },
+        select: { id: true, name: true },
       })
 
       // Should create StaffVenue for each venue (3 venues)

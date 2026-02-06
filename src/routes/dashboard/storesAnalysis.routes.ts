@@ -57,7 +57,11 @@ router.get('/overview', whiteLabelAccess, async (req: Request, res: Response, ne
       })
     }
 
-    const summary = await organizationDashboardService.getVisionGlobalSummary(orgId)
+    const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : undefined
+    const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : undefined
+    const filterVenueId = typeof req.query.filterVenueId === 'string' ? req.query.filterVenueId : undefined
+
+    const summary = await organizationDashboardService.getVisionGlobalSummary(orgId, undefined, startDate, endDate, filterVenueId)
 
     res.json({
       success: true,
@@ -317,7 +321,16 @@ router.get('/activity-feed', whiteLabelAccess, async (req: Request, res: Respons
     }
 
     const { limit = '50' } = req.query
-    const activityFeed = await organizationDashboardService.getActivityFeed(orgId, parseInt(limit as string, 10))
+    const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : undefined
+    const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : undefined
+    const filterVenueId = typeof req.query.filterVenueId === 'string' ? req.query.filterVenueId : undefined
+    const activityFeed = await organizationDashboardService.getActivityFeed(
+      orgId,
+      parseInt(limit as string, 10),
+      startDate,
+      endDate,
+      filterVenueId,
+    )
 
     res.json({
       success: true,
@@ -347,7 +360,15 @@ router.get('/store-performance', whiteLabelAccess, async (req: Request, res: Res
     }
 
     const { limit = '10' } = req.query
-    const storePerformance = await organizationDashboardService.getStorePerformance(orgId, parseInt(limit as string, 10))
+    const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : undefined
+    const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : undefined
+    const storePerformance = await organizationDashboardService.getStorePerformance(
+      orgId,
+      parseInt(limit as string, 10),
+      undefined,
+      startDate,
+      endDate,
+    )
 
     res.json({
       success: true,
@@ -378,12 +399,14 @@ router.get('/staff-attendance', whiteLabelAccess, async (req: Request, res: Resp
       })
     }
 
-    const { date, venueId: filterVenueId, status } = req.query
+    const { date, venueId: filterVenueId, status, startDate, endDate } = req.query
     const attendance = await organizationDashboardService.getStaffAttendance(
       orgId,
       date as string | undefined,
       filterVenueId as string | undefined,
       status as string | undefined,
+      startDate as string | undefined,
+      endDate as string | undefined,
     )
 
     res.json({
@@ -415,7 +438,7 @@ router.post('/time-entry/:timeEntryId/validate', whiteLabelAccess, async (req: R
       })
     }
 
-    const { status, note } = req.body
+    const { status, note, depositAmount } = req.body
 
     if (!status || !['APPROVED', 'REJECTED'].includes(status)) {
       return res.status(400).json({
@@ -425,7 +448,43 @@ router.post('/time-entry/:timeEntryId/validate', whiteLabelAccess, async (req: R
       })
     }
 
-    const result = await organizationDashboardService.validateTimeEntry(timeEntryId, orgId, userId, status, note)
+    const result = await organizationDashboardService.validateTimeEntry(
+      timeEntryId,
+      orgId,
+      userId,
+      status,
+      note,
+      depositAmount != null ? Number(depositAmount) : undefined,
+    )
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * POST /dashboard/venues/:venueId/stores-analysis/time-entry/:timeEntryId/reset-validation
+ * Resets a time entry validation back to PENDING
+ */
+router.post('/time-entry/:timeEntryId/reset-validation', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { timeEntryId } = req.params
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({
+        success: false,
+        error: 'not_found',
+        message: 'Organization not found for this venue',
+      })
+    }
+
+    const result = await organizationDashboardService.resetTimeEntryValidation(timeEntryId, orgId)
 
     res.json({
       success: true,
@@ -580,9 +639,11 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
       orgRole: so.role,
       venues: so.staff.venues.map((v: any) => ({
         id: v.venue.id,
+        staffVenueId: v.id,
         name: v.venue.name,
         slug: v.venue.slug,
         role: v.role,
+        active: v.active,
       })),
     }))
 
@@ -615,6 +676,18 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
 
     const result = await organizationDashboardService.resetUserPassword(orgId, userId)
 
+    // Audit log
+    const authContext = (req as any).authContext
+    await prisma.activityLog.create({
+      data: {
+        staffId: authContext?.userId || null,
+        venueId,
+        action: 'PASSWORD_RESET',
+        entity: 'Staff',
+        entityId: userId,
+      },
+    })
+
     res.json({
       success: true,
       data: {
@@ -622,6 +695,143 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
         message: result.message,
       },
     })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/venues/:venueId/stores-analysis/team/:staffId/venues
+ * Sync venue assignments for a staff member within the organization.
+ * Adds new assignments and deactivates removed ones.
+ */
+router.patch('/team/:staffId/venues', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { staffId } = req.params
+    const { venueIds } = req.body as { venueIds: string[] }
+    const authContext = (req as any).authContext
+
+    if (!Array.isArray(venueIds)) {
+      return res.status(400).json({ success: false, error: 'venueIds must be an array' })
+    }
+
+    const orgId = await getOrgIdFromVenue(venueId)
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'Organization not found' })
+    }
+
+    // Get all org venues (to validate the requested venueIds belong to this org)
+    const orgVenues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true, name: true },
+    })
+    const orgVenueIds = new Set(orgVenues.map(v => v.id))
+    const validVenueIds = venueIds.filter(id => orgVenueIds.has(id))
+
+    // Get current StaffVenue records for this staff in the org
+    const currentAssignments = await prisma.staffVenue.findMany({
+      where: {
+        staffId,
+        venueId: { in: Array.from(orgVenueIds) },
+      },
+      include: { venue: { select: { name: true } } },
+    })
+
+    const currentActiveIds = new Set(currentAssignments.filter(a => a.active).map(a => a.venueId))
+    const requestedIds = new Set(validVenueIds)
+
+    // Determine what to add and remove
+    const toAdd = validVenueIds.filter(id => !currentActiveIds.has(id))
+    const toRemove = Array.from(currentActiveIds).filter(id => !requestedIds.has(id))
+
+    // Get the user's role from the requesting venue (use as default for new assignments)
+    const currentVenueAssignment = currentAssignments.find(a => a.venueId === venueId)
+    const defaultRole = currentVenueAssignment?.role || 'VIEWER'
+
+    // Add new venue assignments
+    for (const addVenueId of toAdd) {
+      await prisma.staffVenue.upsert({
+        where: { staffId_venueId: { staffId, venueId: addVenueId } },
+        update: { active: true, role: defaultRole },
+        create: { staffId, venueId: addVenueId, role: defaultRole, active: true },
+      })
+
+      const venueName = orgVenues.find(v => v.id === addVenueId)?.name || addVenueId
+      await prisma.activityLog.create({
+        data: {
+          staffId: authContext?.userId || null,
+          venueId,
+          action: 'VENUE_ASSIGNED',
+          entity: 'Staff',
+          entityId: staffId,
+          data: { venueId: addVenueId, venueName },
+        },
+      })
+    }
+
+    // Remove (deactivate) venue assignments
+    for (const removeVenueId of toRemove) {
+      await prisma.staffVenue.update({
+        where: { staffId_venueId: { staffId, venueId: removeVenueId } },
+        data: { active: false },
+      })
+
+      const venueName = orgVenues.find(v => v.id === removeVenueId)?.name || removeVenueId
+      await prisma.activityLog.create({
+        data: {
+          staffId: authContext?.userId || null,
+          venueId,
+          action: 'VENUE_REMOVED',
+          entity: 'Staff',
+          entityId: staffId,
+          data: { venueId: removeVenueId, venueName },
+        },
+      })
+    }
+
+    res.json({
+      success: true,
+      data: { added: toAdd.length, removed: toRemove.length },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/team/:staffId/activity
+ * Returns activity log entries for a specific staff member
+ */
+router.get('/team/:staffId/activity', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { staffId } = req.params
+
+    const logs = await prisma.activityLog.findMany({
+      where: {
+        entity: 'Staff',
+        entityId: staffId,
+        venueId,
+      },
+      include: {
+        staff: {
+          select: { firstName: true, lastName: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    })
+
+    const data = logs.map(log => ({
+      id: log.id,
+      action: log.action,
+      performedBy: log.staff ? `${log.staff.firstName} ${log.staff.lastName}`.trim() : 'Sistema',
+      data: log.data,
+      createdAt: log.createdAt.toISOString(),
+    }))
+
+    res.json({ success: true, data })
   } catch (error) {
     next(error)
   }

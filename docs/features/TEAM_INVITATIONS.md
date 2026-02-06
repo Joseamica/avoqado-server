@@ -34,7 +34,8 @@ system supports **multi-venue assignments** where a single staff member can belo
 └─────────────────┘
 ```
 
-**Multi-org model**: Staff can belong to multiple organizations via `StaffOrganization`. Each membership has an org-level role (`OrgRole`: OWNER, ADMIN, MEMBER, VIEWER) and a primary flag.
+**Multi-org model**: Staff can belong to multiple organizations via `StaffOrganization`. Each membership has an org-level role (`OrgRole`:
+OWNER, ADMIN, MEMBER, VIEWER) and a primary flag.
 
 ### Critical Constraint
 
@@ -339,7 +340,7 @@ AND i."expiresAt" > NOW();
 
 ## Changelog
 
-| Date       | Change                                          | Author |
-| ---------- | ----------------------------------------------- | ------ |
+| Date       | Change                                                                             | Author |
+| ---------- | ---------------------------------------------------------------------------------- | ------ |
 | 2026-01-29 | Multi-org support: StaffOrganization junction table, cross-org invitations enabled | Claude |
-| 2025-01-15 | Initial documentation + multi-venue support fix | Claude |
+| 2025-01-15 | Initial documentation + multi-venue support fix                                    | Claude |

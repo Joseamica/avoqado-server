@@ -1,12 +1,12 @@
 ---
 paths:
-  - "src/services/tpv/**/*.ts"
-  - "src/services/dashboard/rawMaterial*"
-  - "src/services/dashboard/fifoBatch*"
-  - "src/services/dashboard/productInventory*"
-  - "src/services/sdk/**/*.ts"
-  - "src/services/stripe*"
-  - "src/services/pricing/**/*.ts"
+  - 'src/services/tpv/**/*.ts'
+  - 'src/services/dashboard/rawMaterial*'
+  - 'src/services/dashboard/fifoBatch*'
+  - 'src/services/dashboard/productInventory*'
+  - 'src/services/sdk/**/*.ts'
+  - 'src/services/stripe*'
+  - 'src/services/pricing/**/*.ts'
 ---
 
 # Payment & Inventory Rules
@@ -23,13 +23,13 @@ paths:
 
 ## Key Files
 
-| File | Function |
-|------|----------|
-| `payment.tpv.service.ts` | `recordOrderPayment()` - triggers deduction |
-| `rawMaterial.service.ts` | `deductStockForRecipe()` - recipe orchestration |
-| `fifoBatch.service.ts` | `deductStockFIFO()` - FIFO batch consumption |
+| File                                     | Function                                                     |
+| ---------------------------------------- | ------------------------------------------------------------ |
+| `payment.tpv.service.ts`                 | `recordOrderPayment()` - triggers deduction                  |
+| `rawMaterial.service.ts`                 | `deductStockForRecipe()` - recipe orchestration              |
+| `fifoBatch.service.ts`                   | `deductStockFIFO()` - FIFO batch consumption                 |
 | `productInventoryIntegration.service.ts` | `getProductInventoryMethod()` - returns QUANTITY/RECIPE/null |
-| `productInventoryIntegration.service.ts` | `deductInventoryForProduct()` - strategy executor |
+| `productInventoryIntegration.service.ts` | `deductInventoryForProduct()` - strategy executor            |
 
 ## Blumon: Always Specify TPV or E-commerce
 
@@ -48,9 +48,9 @@ Triple-layer protection: `authenticateTokenMiddleware` â†’ `checkPermission()` â
 
 ## Cost Structure
 
-| Model | Meaning |
-|-------|---------|
-| `ProviderCostStructure` | What Blumon charges Avoqado |
+| Model                   | Meaning                                      |
+| ----------------------- | -------------------------------------------- |
+| `ProviderCostStructure` | What Blumon charges Avoqado                  |
 | `VenuePricingStructure` | What Avoqado charges venue (includes margin) |
 
 MCC lookup: `src/services/pricing/blumon-mcc-lookup.service.ts`

@@ -20,7 +20,8 @@ This codebase has **TWO completely different Blumon integrations** that serve di
 
 ## 1️⃣ Blumon E-commerce Integration (Web Payments)
 
-> **Note**: The e-commerce integration was refactored from hosted checkout + webhooks to direct charge (tokenize + authorize). Webhook references below are historical. Current architecture: `docs/blumon-ecommerce/REFACTORING_COMPLETE.md`
+> **Note**: The e-commerce integration was refactored from hosted checkout + webhooks to direct charge (tokenize + authorize). Webhook
+> references below are historical. Current architecture: `docs/blumon-ecommerce/REFACTORING_COMPLETE.md`
 
 ### Purpose
 

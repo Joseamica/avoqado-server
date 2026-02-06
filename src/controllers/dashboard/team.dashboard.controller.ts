@@ -118,6 +118,7 @@ export async function updateTeamMember(req: Request, res: Response, next: NextFu
     const teamMemberId: string = req.params.teamMemberId
 
     const { role, active, pin } = req.body
+    const authContext = (req as any).authContext
 
     // Validate role if provided
     if (role && !Object.values(StaffRole).includes(role)) {
@@ -129,6 +130,7 @@ export async function updateTeamMember(req: Request, res: Response, next: NextFu
       role,
       active,
       pin,
+      performedBy: authContext?.userId,
     })
 
     res.status(200).json({

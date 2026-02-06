@@ -254,9 +254,11 @@ Each venue can have different operational rules.
 
 #### **Staff**
 
-**Purpose**: Identity record representing a person on the platform. Staff can belong to **multiple organizations** via the `StaffOrganization` junction table and be assigned to **multiple venues** via the `StaffVenue` junction table.
+**Purpose**: Identity record representing a person on the platform. Staff can belong to **multiple organizations** via the
+`StaffOrganization` junction table and be assigned to **multiple venues** via the `StaffVenue` junction table.
 
-**Use Case**: Maria González works for "Grupo Avoqado Prime" (as ADMIN at Avoqado Centro, WAITER at Avoqado Sur) and is also invited to "Restaurante La Cima" (different organization). She has one Staff record, two StaffOrganization records, and three StaffVenue records.
+**Use Case**: Maria González works for "Grupo Avoqado Prime" (as ADMIN at Avoqado Centro, WAITER at Avoqado Sur) and is also invited to
+"Restaurante La Cima" (different organization). She has one Staff record, two StaffOrganization records, and three StaffVenue records.
 
 **Key Features**:
 
@@ -280,7 +282,8 @@ Each venue can have different operational rules.
 
 **Purpose**: Junction table linking Staff to Organizations. Enables multi-org membership (industry pattern: Stripe, GitHub, Slack).
 
-**Use Case**: Maria is an OWNER of "Grupo Avoqado Prime" (isPrimary: true) and a MEMBER of "Restaurante La Cima" (isPrimary: false). Each membership tracks when she joined, who invited her, and whether it's active.
+**Use Case**: Maria is an OWNER of "Grupo Avoqado Prime" (isPrimary: true) and a MEMBER of "Restaurante La Cima" (isPrimary: false). Each
+membership tracks when she joined, who invited her, and whether it's active.
 
 **Model Definition**:
 
@@ -2169,4 +2172,5 @@ improvement with user feedback on accuracy.
 
 ---
 
-_Last updated: January 2026_ _Schema version: v3.0.0 (Multi-Org StaffOrganization Junction Table + Generic Payment Providers + Cost Management)_
+_Last updated: January 2026_ _Schema version: v3.0.0 (Multi-Org StaffOrganization Junction Table + Generic Payment Providers + Cost
+Management)_

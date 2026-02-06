@@ -3,13 +3,7 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
 import { SharedQueryService } from './shared-query.service'
-
-const normalizeDateString = (value?: string): Date | undefined => {
-  if (!value) return undefined
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return undefined
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
-}
+import { parseDateRange } from '../../utils/datetime'
 
 export async function getGeneralStatsData(venueId: string, filters: GeneralStatsQuery = {}): Promise<GeneralStatsResponse> {
   // Validate venue exists
@@ -22,11 +16,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   }
 
   // Set default date range (last 7 days) if not provided
-  const normalizedFromDate = normalizeDateString(filters.fromDate)
-  const normalizedToDate = normalizeDateString(filters.toDate)
-
-  const fromDate = normalizedFromDate ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-  const toDate = normalizedToDate ?? new Date()
+  const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
 
   // Build where clause for date filtering
   const dateFilter = {
@@ -402,11 +392,7 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   }
 
   // Set default date range (last 7 days) if not provided
-  const normalizedFromDate = normalizeDateString(filters.fromDate)
-  const normalizedToDate = normalizeDateString(filters.toDate)
-
-  const fromDate = normalizedFromDate ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-  const toDate = normalizedToDate ?? new Date()
+  const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
 
   // Build where clause for date filtering
   const dateFilter = {
@@ -510,11 +496,7 @@ export async function getChartData(venueId: string, chartType: string, filters: 
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
 
-  const normalizedFromDate = normalizeDateString(filters.fromDate)
-  const normalizedToDate = normalizeDateString(filters.toDate)
-
-  const fromDate = normalizedFromDate ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-  const toDate = normalizedToDate ?? new Date()
+  const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
 
   const dateFilter = {
     createdAt: {
@@ -573,8 +555,7 @@ export async function getExtendedMetrics(venueId: string, metricType: string, fi
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
 
-  const fromDate = filters.fromDate ? new Date(filters.fromDate) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-  const toDate = filters.toDate ? new Date(filters.toDate) : new Date()
+  const { from: fromDate, to: toDate } = parseDateRange(filters.fromDate, filters.toDate, 7)
 
   switch (metricType) {
     case 'table-performance':

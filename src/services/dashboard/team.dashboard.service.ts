@@ -51,6 +51,8 @@ interface UpdateTeamMemberRequest {
   role?: StaffRole
   active?: boolean
   pin?: string
+  /** Staff ID of who is performing this action (for audit log) */
+  performedBy?: string
 }
 
 /**
@@ -709,6 +711,35 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     throw new NotFoundError('Team member not found')
   }
 
+  // Prevent modifying an org-level OWNER's role or active status per-venue
+  if (updates.role || updates.active !== undefined) {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+    if (venue) {
+      const orgMembership = await prisma.staffOrganization.findUnique({
+        where: {
+          staffId_organizationId: {
+            staffId: existingStaffVenue.staffId,
+            organizationId: venue.organizationId,
+          },
+        },
+        select: { role: true, isActive: true },
+      })
+      if (orgMembership?.role === OrgRole.OWNER && orgMembership.isActive) {
+        if (updates.role && updates.role !== StaffRole.OWNER) {
+          throw new BadRequestError(
+            'No se puede cambiar el rol de un propietario de la organización. Debe modificarse a nivel organización.',
+          )
+        }
+        if (updates.active === false) {
+          throw new BadRequestError('No se puede desactivar a un propietario de la organización. Debe modificarse a nivel organización.')
+        }
+      }
+    }
+  }
+
   // Prevent deactivating yourself if you're the only OWNER/ADMIN
   if (updates.active === false && ['OWNER', 'ADMIN'].includes(existingStaffVenue.role)) {
     const adminCount = await prisma.staffVenue.count({
@@ -776,6 +807,33 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     venueId,
     updates,
   })
+
+  // Write audit log entries
+  if (updates.role && updates.role !== existingStaffVenue.role) {
+    await prisma.activityLog.create({
+      data: {
+        staffId: updates.performedBy || null,
+        venueId,
+        action: 'ROLE_CHANGED',
+        entity: 'Staff',
+        entityId: existingStaffVenue.staffId,
+        data: { oldRole: existingStaffVenue.role, newRole: updates.role },
+      },
+    })
+  }
+
+  if (updates.active !== undefined && updates.active !== existingStaffVenue.active) {
+    await prisma.activityLog.create({
+      data: {
+        staffId: updates.performedBy || null,
+        venueId,
+        action: updates.active ? 'USER_ACTIVATED' : 'USER_DEACTIVATED',
+        entity: 'Staff',
+        entityId: existingStaffVenue.staffId,
+        data: {},
+      },
+    })
+  }
 
   return {
     id: updatedStaffVenue.id,

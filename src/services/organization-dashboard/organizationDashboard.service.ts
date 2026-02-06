@@ -7,12 +7,23 @@
  * to ensure "today", "this week", "this month" match the business's operating timezone.
  */
 import prisma from '../../utils/prismaClient'
+import { Prisma } from '@prisma/client'
+import { startOfDay, endOfDay } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
-import { DEFAULT_TIMEZONE } from '../../utils/datetime'
+import {
+  DEFAULT_TIMEZONE,
+  parseDateRange,
+  parseDbDateRange,
+  venueStartOfDay,
+  venueEndOfDay,
+  venueStartOfDayOffset,
+  venueStartOfMonth,
+} from '../../utils/datetime'
 
 // Types for organization dashboard
 export interface OrgVisionGlobalSummary {
   todaySales: number
+  todayCashSales: number
   weekSales: number
   monthSales: number
   unitsSold: number
@@ -21,6 +32,7 @@ export interface OrgVisionGlobalSummary {
   totalPromoters: number
   activeStores: number
   totalStores: number
+  approvedDeposits: number
 }
 
 export interface OrgStorePerformance {
@@ -35,6 +47,9 @@ export interface OrgStorePerformance {
   activePromoters: number
   trend: 'up' | 'down' | 'stable'
   rank: number
+  performance?: number // Goal progress percentage (0-100+)
+  goalAmount?: number // Configured goal amount
+  goalPeriod?: 'DAILY' | 'WEEKLY' | 'MONTHLY'
 }
 
 export interface OrgCrossStoreAnomaly {
@@ -163,38 +178,53 @@ class OrganizationDashboardService {
    * to ensure "today", "this week", "this month" match the business's operating timezone,
    * not the server's timezone (which may be UTC).
    */
-  async getVisionGlobalSummary(orgId: string, timezone: string = 'America/Mexico_City'): Promise<OrgVisionGlobalSummary> {
-    // Calculate dates in venue timezone, then convert to UTC for database queries
-    const now = new Date()
-    const nowInTz = toZonedTime(now, timezone)
+  async getVisionGlobalSummary(
+    orgId: string,
+    timezone: string = 'America/Mexico_City',
+    startDate?: string,
+    endDate?: string,
+    filterVenueId?: string,
+  ): Promise<OrgVisionGlobalSummary> {
+    // Calculate dates in venue timezone for DB queries.
+    // IMPORTANT: DB stores local time in `timestamp without time zone` columns
+    // (PostgreSQL timezone = America/Mexico_City). Use parseDbDateRange/venueStartOf*
+    // helpers which create Dates where UTC components = venue local time,
+    // matching the DB's storage format.
+    let todayStart: Date
+    let rangeEnd: Date | undefined
 
-    // Today start in venue timezone
-    const todayStartTz = new Date(nowInTz)
-    todayStartTz.setHours(0, 0, 0, 0)
-    const todayStart = fromZonedTime(todayStartTz, timezone)
+    if (startDate || endDate) {
+      const range = parseDbDateRange(startDate, endDate, timezone, 1)
+      todayStart = range.from
+      rangeEnd = range.to
+    } else {
+      todayStart = venueStartOfDay(timezone)
+    }
 
     // Week start (7 days ago) in venue timezone
-    const weekStartTz = new Date(nowInTz)
-    weekStartTz.setDate(weekStartTz.getDate() - 7)
-    weekStartTz.setHours(0, 0, 0, 0)
-    const weekStart = fromZonedTime(weekStartTz, timezone)
+    const weekStart = venueStartOfDayOffset(timezone, -7)
 
     // Month start in venue timezone
-    const monthStartTz = new Date(nowInTz)
-    monthStartTz.setDate(1)
-    monthStartTz.setHours(0, 0, 0, 0)
-    const monthStart = fromZonedTime(monthStartTz, timezone)
+    const monthStart = venueStartOfMonth(timezone)
 
-    // Get all venues in organization
+    // Get all venues in organization (or just the filtered one)
     const venues = await prisma.venue.findMany({
-      where: { organizationId: orgId, status: 'ACTIVE' },
+      where: {
+        organizationId: orgId,
+        status: 'ACTIVE',
+        ...(filterVenueId ? { id: filterVenueId } : {}),
+      },
       select: { id: true },
     })
     const venueIds = venues.map(v => v.id)
 
+    // Also get total venue count (unfiltered) for the totalStores metric
+    const allVenuesCount = filterVenueId ? await prisma.venue.count({ where: { organizationId: orgId, status: 'ACTIVE' } }) : venues.length
+
     if (venueIds.length === 0) {
       return {
         todaySales: 0,
+        todayCashSales: 0,
         weekSales: 0,
         monthSales: 0,
         unitsSold: 0,
@@ -203,16 +233,18 @@ class OrganizationDashboardService {
         totalPromoters: 0,
         activeStores: 0,
         totalStores: 0,
+        approvedDeposits: 0,
       }
     }
 
     // Aggregate sales from completed orders
+    const rangeFilter = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
     const [todayOrders, weekOrders, monthOrders] = await Promise.all([
       prisma.order.findMany({
         where: {
           venueId: { in: venueIds },
           status: 'COMPLETED',
-          createdAt: { gte: todayStart },
+          createdAt: rangeFilter,
         },
         select: { total: true, items: true },
       }),
@@ -238,12 +270,24 @@ class OrganizationDashboardService {
     const unitsSold = todayOrders.reduce((sum, o) => sum + (o.items?.length || 0), 0)
     const avgTicket = todayOrders.length > 0 ? todaySales / todayOrders.length : 0
 
-    // Count promoters (active check-ins today using TimeEntry)
+    // Sum CASH payments only (money physically in the field)
+    const cashPaymentsResult = await prisma.payment.aggregate({
+      where: {
+        venueId: { in: venueIds },
+        method: 'CASH',
+        status: 'COMPLETED',
+        createdAt: rangeFilter,
+      },
+      _sum: { amount: true },
+    })
+    const todayCashSales = Number(cashPaymentsResult._sum?.amount) || 0
+
+    // Count promoters (active check-ins in range using TimeEntry)
     const [activePromoters, totalPromoters] = await Promise.all([
       prisma.timeEntry.findMany({
         where: {
           venueId: { in: venueIds },
-          clockInTime: { gte: todayStart },
+          clockInTime: rangeFilter,
         },
         distinct: ['staffId'],
         select: { staffId: true },
@@ -257,18 +301,30 @@ class OrganizationDashboardService {
       }),
     ])
 
-    // Count active stores (stores with sales today)
+    // Count active stores (stores with sales in range)
     const storesWithSales = await prisma.order.groupBy({
       by: ['venueId'],
       where: {
         venueId: { in: venueIds },
         status: 'COMPLETED',
-        createdAt: { gte: todayStart },
+        createdAt: rangeFilter,
       },
     })
 
+    // Sum approved cash deposits in the date range
+    const approvedDepositsResult = await prisma.cashDeposit.aggregate({
+      where: {
+        venueId: { in: venueIds },
+        status: 'APPROVED',
+        timestamp: rangeFilter,
+      },
+      _sum: { amount: true },
+    })
+    const approvedDeposits = Number(approvedDepositsResult._sum?.amount) || 0
+
     return {
       todaySales: Math.round(todaySales * 100) / 100,
+      todayCashSales: Math.round(todayCashSales * 100) / 100,
       weekSales: Math.round((Number(weekOrders._sum?.total) || 0) * 100) / 100,
       monthSales: Math.round((Number(monthOrders._sum?.total) || 0) * 100) / 100,
       unitsSold,
@@ -276,7 +332,8 @@ class OrganizationDashboardService {
       activePromoters: activePromoters.length,
       totalPromoters,
       activeStores: storesWithSales.length,
-      totalStores: venues.length,
+      totalStores: allVenuesCount,
+      approvedDeposits: Math.round(approvedDeposits * 100) / 100,
     }
   }
 
@@ -285,27 +342,29 @@ class OrganizationDashboardService {
    *
    * IMPORTANT: Date calculations use venue timezone to match business operating hours.
    */
-  async getStorePerformance(orgId: string, limit: number = 10, timezone: string = 'America/Mexico_City'): Promise<OrgStorePerformance[]> {
-    // Calculate dates in venue timezone, then convert to UTC for database queries
-    const now = new Date()
-    const nowInTz = toZonedTime(now, timezone)
+  async getStorePerformance(
+    orgId: string,
+    limit: number = 10,
+    timezone: string = 'America/Mexico_City',
+    startDate?: string,
+    endDate?: string,
+  ): Promise<OrgStorePerformance[]> {
+    // DB stores local time in `timestamp without time zone` — use venue helpers
+    let todayStart: Date
+    let rangeEnd: Date | undefined
 
-    // Today start in venue timezone
-    const todayStartTz = new Date(nowInTz)
-    todayStartTz.setHours(0, 0, 0, 0)
-    const todayStart = fromZonedTime(todayStartTz, timezone)
+    if (startDate || endDate) {
+      const range = parseDbDateRange(startDate, endDate, timezone, 1)
+      todayStart = range.from
+      rangeEnd = range.to
+    } else {
+      todayStart = venueStartOfDay(timezone)
+    }
 
-    // Week start (7 days ago) in venue timezone
-    const weekStartTz = new Date(nowInTz)
-    weekStartTz.setDate(weekStartTz.getDate() - 7)
-    weekStartTz.setHours(0, 0, 0, 0)
-    const weekStart = fromZonedTime(weekStartTz, timezone)
+    const weekStart = venueStartOfDayOffset(timezone, -7)
+    const prevWeekStart = venueStartOfDayOffset(timezone, -14)
 
-    // Previous week start (14 days ago) in venue timezone
-    const prevWeekStartTz = new Date(nowInTz)
-    prevWeekStartTz.setDate(prevWeekStartTz.getDate() - 14)
-    prevWeekStartTz.setHours(0, 0, 0, 0)
-    const prevWeekStart = fromZonedTime(prevWeekStartTz, timezone)
+    const monthStart = venueStartOfMonth(timezone)
 
     // Get all venues
     const venues = await prisma.venue.findMany({
@@ -319,16 +378,48 @@ class OrganizationDashboardService {
       },
     })
 
+    // Fetch SalesGoals from VenueModule config for all venues (batch query)
+    const serializedModule = await prisma.module.findUnique({
+      where: { code: 'SERIALIZED_INVENTORY' },
+    })
+
+    type GoalConfig = { goal: number; period: 'DAILY' | 'WEEKLY' | 'MONTHLY' }
+    const venueGoalsMap = new Map<string, GoalConfig>()
+
+    if (serializedModule) {
+      const venueModules = await prisma.venueModule.findMany({
+        where: {
+          venueId: { in: venues.map(v => v.id) },
+          moduleId: serializedModule.id,
+        },
+        select: { venueId: true, config: true },
+      })
+
+      for (const vm of venueModules) {
+        const config = vm.config as Record<string, unknown> | null
+        const goals = Array.isArray(config?.salesGoals) ? (config.salesGoals as any[]) : []
+        // Find the active venue-wide goal (staffId = null)
+        const venueGoal = goals.find(g => g.staffId === null && g.active)
+        if (venueGoal && venueGoal.goal > 0) {
+          venueGoalsMap.set(vm.venueId, { goal: venueGoal.goal, period: venueGoal.period })
+        }
+      }
+    }
+
     const results: OrgStorePerformance[] = []
 
+    const rangeFilter = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
+
     for (const venue of venues) {
-      // Get today's and week's orders
-      const [todayOrders, weekOrders, prevWeekOrders, totalPromoters, activePromoters] = await Promise.all([
+      const goalConfig = venueGoalsMap.get(venue.id)
+
+      // Build parallel queries — add month sales query if goal is MONTHLY
+      const queries: [any, any, any, any, any, any?] = [
         prisma.order.findMany({
           where: {
             venueId: venue.id,
             status: 'COMPLETED',
-            createdAt: { gte: todayStart },
+            createdAt: rangeFilter,
           },
           include: { items: true },
         }),
@@ -358,14 +449,27 @@ class OrganizationDashboardService {
         prisma.timeEntry.findMany({
           where: {
             venueId: venue.id,
-            clockInTime: { gte: todayStart },
+            clockInTime: rangeFilter,
           },
           distinct: ['staffId'],
         }),
-      ])
+        // Only query month sales if the goal is MONTHLY
+        goalConfig?.period === 'MONTHLY'
+          ? prisma.order.aggregate({
+              where: {
+                venueId: venue.id,
+                status: 'COMPLETED',
+                createdAt: { gte: monthStart },
+              },
+              _sum: { total: true },
+            })
+          : Promise.resolve(null),
+      ]
 
-      const todaySales = todayOrders.reduce((sum, o) => sum + Number(o.total || 0), 0)
-      const unitsSold = todayOrders.reduce((sum, o) => sum + o.items.length, 0)
+      const [todayOrders, weekOrders, prevWeekOrders, totalPromoters, activePromoters, monthOrders] = await Promise.all(queries)
+
+      const todaySales = todayOrders.reduce((sum: number, o: any) => sum + Number(o.total || 0), 0)
+      const unitsSold = todayOrders.reduce((sum: number, o: any) => sum + o.items.length, 0)
       const weekSales = Number(weekOrders._sum?.total) || 0
       const prevWeekSales = Number(prevWeekOrders._sum?.total) || 0
 
@@ -375,6 +479,24 @@ class OrganizationDashboardService {
         const change = ((weekSales - prevWeekSales) / prevWeekSales) * 100
         if (change > 10) trend = 'up'
         else if (change < -10) trend = 'down'
+      }
+
+      // Calculate goal performance
+      let performance: number | undefined
+      if (goalConfig && goalConfig.goal > 0) {
+        let salesForGoal: number
+        switch (goalConfig.period) {
+          case 'DAILY':
+            salesForGoal = todaySales
+            break
+          case 'WEEKLY':
+            salesForGoal = weekSales
+            break
+          case 'MONTHLY':
+            salesForGoal = Number(monthOrders?._sum?.total) || 0
+            break
+        }
+        performance = Math.round((salesForGoal / goalConfig.goal) * 100)
       }
 
       results.push({
@@ -389,6 +511,9 @@ class OrganizationDashboardService {
         activePromoters: activePromoters.length,
         trend,
         rank: 0, // Will be set after sorting
+        performance,
+        goalAmount: goalConfig?.goal,
+        goalPeriod: goalConfig?.period,
       })
     }
 
@@ -405,12 +530,10 @@ class OrganizationDashboardService {
    * IMPORTANT: Uses venue timezone for date calculations.
    */
   async getCrossStoreAnomalies(orgId: string, timezone: string = DEFAULT_TIMEZONE): Promise<OrgCrossStoreAnomaly[]> {
-    // Calculate today start in venue timezone
+    // DB stores local time — use venue helpers
     const now = new Date()
     const nowInTz = toZonedTime(now, timezone)
-    const todayStartTz = new Date(nowInTz)
-    todayStartTz.setHours(0, 0, 0, 0)
-    const todayStart = fromZonedTime(todayStartTz, timezone)
+    const todayStart = venueStartOfDay(timezone)
 
     const anomalies: OrgCrossStoreAnomaly[] = []
 
@@ -584,18 +707,9 @@ class OrganizationDashboardService {
    * IMPORTANT: Uses venue timezone for date calculations.
    */
   async getManagerDashboard(orgId: string, managerId: string, timezone: string = DEFAULT_TIMEZONE): Promise<ManagerDashboard | null> {
-    // Calculate dates in venue timezone
-    const now = new Date()
-    const nowInTz = toZonedTime(now, timezone)
-
-    const todayStartTz = new Date(nowInTz)
-    todayStartTz.setHours(0, 0, 0, 0)
-    const todayStart = fromZonedTime(todayStartTz, timezone)
-
-    const weekStartTz = new Date(nowInTz)
-    weekStartTz.setDate(weekStartTz.getDate() - 7)
-    weekStartTz.setHours(0, 0, 0, 0)
-    const weekStart = fromZonedTime(weekStartTz, timezone)
+    // DB stores local time — use venue helpers
+    const todayStart = venueStartOfDay(timezone)
+    const weekStart = venueStartOfDayOffset(timezone, -7)
 
     // Get manager info
     const manager = await prisma.staff.findFirst({
@@ -634,11 +748,7 @@ class OrganizationDashboardService {
       },
     })
 
-    // Month start in venue timezone
-    const monthStartTz = new Date(nowInTz)
-    monthStartTz.setDate(1)
-    monthStartTz.setHours(0, 0, 0, 0)
-    const monthStart = fromZonedTime(monthStartTz, timezone)
+    const monthStart = venueStartOfMonth(timezone)
 
     const stores = await Promise.all(
       managedStores.map(async sv => {
@@ -958,14 +1068,32 @@ class OrganizationDashboardService {
    * @param orgId - Organization ID
    * @param limit - Max events to return (default 50)
    */
-  async getActivityFeed(orgId: string, limit: number = 50): Promise<OrgActivityFeed> {
-    // Get events from last 24 hours (avoids timezone issues)
-    const last24Hours = new Date()
-    last24Hours.setHours(last24Hours.getHours() - 24)
+  async getActivityFeed(
+    orgId: string,
+    limit: number = 50,
+    startDate?: string,
+    endDate?: string,
+    filterVenueId?: string,
+  ): Promise<OrgActivityFeed> {
+    let rangeStart: Date
+    let rangeEnd: Date | undefined
 
-    // Get all venues
+    if (startDate || endDate) {
+      const range = parseDbDateRange(startDate, endDate)
+      rangeStart = range.from
+      rangeEnd = range.to
+    } else {
+      // Default: today in venue timezone
+      rangeStart = venueStartOfDay()
+    }
+
+    // Get venues (filtered or all)
     const venues = await prisma.venue.findMany({
-      where: { organizationId: orgId, status: 'ACTIVE' },
+      where: {
+        organizationId: orgId,
+        status: 'ACTIVE',
+        ...(filterVenueId ? { id: filterVenueId } : {}),
+      },
       select: { id: true, name: true },
     })
     const venueIds = venues.map(v => v.id)
@@ -975,13 +1103,14 @@ class OrganizationDashboardService {
     }
 
     const events: ActivityEvent[] = []
+    const timeFilter = rangeEnd ? { gte: rangeStart, lte: rangeEnd } : { gte: rangeStart }
 
-    // Fetch recent sales (completed orders from last 24 hours)
+    // Fetch recent sales (completed orders in range)
     const recentOrders = await prisma.order.findMany({
       where: {
         venueId: { in: venueIds },
         status: 'COMPLETED',
-        createdAt: { gte: last24Hours },
+        createdAt: timeFilter,
       },
       include: {
         venue: { select: { id: true, name: true } },
@@ -1010,11 +1139,11 @@ class OrganizationDashboardService {
       })
     }
 
-    // Fetch recent check-ins and checkouts (TimeEntry from last 24 hours)
+    // Fetch recent check-ins and checkouts (TimeEntry in range)
     const recentTimeEntries = await prisma.timeEntry.findMany({
       where: {
         venueId: { in: venueIds },
-        clockInTime: { gte: last24Hours },
+        clockInTime: timeFilter,
       },
       include: {
         venue: { select: { id: true, name: true } },
@@ -1679,6 +1808,8 @@ class OrganizationDashboardService {
     dateStr?: string,
     venueId?: string,
     statusFilter?: string,
+    startDateStr?: string,
+    endDateStr?: string,
   ): Promise<{
     staff: Array<{
       id: string
@@ -1688,6 +1819,7 @@ class OrganizationDashboardService {
       venueId: string
       venueName: string
       status: 'ACTIVE' | 'INACTIVE'
+      validationStatus: 'PENDING' | 'APPROVED' | 'REJECTED'
       checkInTime?: string | null
       checkInLocation?: { lat: number; lng: number } | null
       checkInPhotoUrl?: string | null
@@ -1700,12 +1832,23 @@ class OrganizationDashboardService {
       attendancePercent: number
     }>
   }> {
-    // Parse date or use today
-    const targetDate = dateStr ? new Date(dateStr) : new Date()
-    const dayStart = new Date(targetDate)
-    dayStart.setHours(0, 0, 0, 0)
-    const dayEnd = new Date(targetDate)
-    dayEnd.setHours(23, 59, 59, 999)
+    // Parse date range — convert venue-local dates to UTC for Prisma queries.
+    // DB stores UTC (Prisma sends JS Date as UTC). Frontend sends YYYY-MM-DD venue-local dates.
+    // We convert venue midnight/end-of-day to real UTC boundaries using fromZonedTime.
+    let dayStart: Date
+    let dayEnd: Date
+    if (startDateStr && endDateStr) {
+      dayStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
+      dayEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
+    } else if (dateStr) {
+      dayStart = fromZonedTime(new Date(`${dateStr}T00:00:00`), DEFAULT_TIMEZONE)
+      dayEnd = fromZonedTime(new Date(`${dateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
+    } else {
+      // No date specified → today in venue timezone
+      const nowVenue = toZonedTime(new Date(), DEFAULT_TIMEZONE)
+      dayStart = fromZonedTime(startOfDay(nowVenue), DEFAULT_TIMEZONE)
+      dayEnd = fromZonedTime(endOfDay(nowVenue), DEFAULT_TIMEZONE)
+    }
 
     // Get all venues in organization
     const venues = await prisma.venue.findMany({
@@ -1754,6 +1897,7 @@ class OrganizationDashboardService {
         checkInPhotoUrl: true,
         checkOutPhotoUrl: true,
         status: true,
+        validationStatus: true,
       },
     })
 
@@ -1824,6 +1968,7 @@ class OrganizationDashboardService {
         clockOutLocation: te.clockOutLatitude && te.clockOutLongitude ? { lat: te.clockOutLatitude, lng: te.clockOutLongitude } : null,
         checkOutPhotoUrl: te.checkOutPhotoUrl,
         status: te.status,
+        validationStatus: te.validationStatus,
       }))
 
       // Calculate break time (time between clock out of one entry and clock in of next)
@@ -1843,6 +1988,7 @@ class OrganizationDashboardService {
       return {
         id: sv.staffId,
         timeEntryId: mostRecentEntry?.id || null,
+        validationStatus: mostRecentEntry?.validationStatus || 'PENDING',
         name: fullName,
         email: sv.staff.email,
         avatar: sv.staff.photoUrl,
@@ -1872,7 +2018,8 @@ class OrganizationDashboardService {
     })
 
     return {
-      staff: staffData.filter(s => s !== null) as any,
+      // Only return staff with actual activity (check-in or sales) for the day
+      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales > 0)) as any,
     }
   }
 
@@ -2068,7 +2215,14 @@ class OrganizationDashboardService {
   // TIME ENTRY VALIDATION
   // ==========================================
 
-  async validateTimeEntry(timeEntryId: string, orgId: string, validatedById: string, status: 'APPROVED' | 'REJECTED', note?: string) {
+  async validateTimeEntry(
+    timeEntryId: string,
+    orgId: string,
+    validatedById: string,
+    status: 'APPROVED' | 'REJECTED',
+    note?: string,
+    depositAmount?: number,
+  ) {
     // Verify the time entry belongs to a venue in this org
     const timeEntry = await prisma.timeEntry.findFirst({
       where: {
@@ -2081,14 +2235,76 @@ class OrganizationDashboardService {
       throw new Error('Time entry not found in this organization')
     }
 
-    return prisma.timeEntry.update({
-      where: { id: timeEntryId },
-      data: {
-        validationStatus: status,
-        validatedBy: validatedById,
-        validatedAt: new Date(),
-        validationNote: note || null,
+    return prisma.$transaction(async tx => {
+      const updated = await tx.timeEntry.update({
+        where: { id: timeEntryId },
+        data: {
+          validationStatus: status,
+          validatedBy: validatedById,
+          validatedAt: new Date(),
+          validationNote: note || null,
+        },
+      })
+
+      // Create CashDeposit when approving with a deposit amount
+      if (status === 'APPROVED' && depositAmount != null && depositAmount > 0) {
+        await tx.cashDeposit.create({
+          data: {
+            staffId: timeEntry.staffId,
+            venueId: timeEntry.venueId,
+            amount: new Prisma.Decimal(depositAmount),
+            method: 'BANK_TRANSFER',
+            status: 'APPROVED',
+            approvedById: validatedById,
+            approvedAt: new Date(),
+          },
+        })
+      }
+
+      return updated
+    })
+  }
+
+  /**
+   * Reset a time entry validation back to PENDING
+   * Also deletes any associated CashDeposit created during approval
+   */
+  async resetTimeEntryValidation(timeEntryId: string, orgId: string) {
+    const timeEntry = await prisma.timeEntry.findFirst({
+      where: {
+        id: timeEntryId,
+        venue: { organizationId: orgId },
       },
+    })
+
+    if (!timeEntry) {
+      throw new Error('Time entry not found in this organization')
+    }
+
+    return prisma.$transaction(async tx => {
+      // Delete any CashDeposit created around the same time as validation
+      if (timeEntry.validatedAt) {
+        const windowStart = new Date(timeEntry.validatedAt.getTime() - 5000)
+        const windowEnd = new Date(timeEntry.validatedAt.getTime() + 5000)
+        await tx.cashDeposit.deleteMany({
+          where: {
+            staffId: timeEntry.staffId,
+            venueId: timeEntry.venueId,
+            status: 'APPROVED',
+            createdAt: { gte: windowStart, lte: windowEnd },
+          },
+        })
+      }
+
+      return tx.timeEntry.update({
+        where: { id: timeEntryId },
+        data: {
+          validationStatus: 'PENDING',
+          validatedBy: null,
+          validatedAt: null,
+          validationNote: null,
+        },
+      })
     })
   }
 
@@ -2134,16 +2350,13 @@ class OrganizationDashboardService {
 
   async getClosingReportData(orgId: string, dateStr?: string, venueId?: string) {
     const timezone = 'America/Mexico_City'
-    const now = toZonedTime(new Date(), timezone)
-    const targetDate = dateStr ? new Date(dateStr) : now
+    // DB stores local time — use venue helpers
+    const targetDate = dateStr ? new Date(dateStr) : new Date()
+    const startOfDayDb = venueStartOfDay(timezone, targetDate)
+    const endOfDayDb = venueEndOfDay(timezone, targetDate)
 
-    const startOfDay = new Date(targetDate)
-    startOfDay.setHours(0, 0, 0, 0)
-    const endOfDay = new Date(targetDate)
-    endOfDay.setHours(23, 59, 59, 999)
-
-    const startUtc = fromZonedTime(startOfDay, timezone)
-    const endUtc = fromZonedTime(endOfDay, timezone)
+    const startUtc = startOfDayDb
+    const endUtc = endOfDayDb
 
     const venueWhere = venueId ? { id: venueId, organizationId: orgId } : { organizationId: orgId }
 
@@ -2186,7 +2399,7 @@ class OrganizationDashboardService {
 
     const totalAmount = rows.reduce((sum, r) => sum + r.amount, 0)
 
-    return { rows, totalAmount, date: dateStr || startOfDay.toISOString().split('T')[0] }
+    return { rows, totalAmount, date: dateStr || startOfDayDb.toISOString().split('T')[0] }
   }
 
   async exportClosingReport(orgId: string, dateStr?: string, venueId?: string): Promise<Buffer> {
