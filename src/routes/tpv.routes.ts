@@ -5733,6 +5733,18 @@ router.post('/geolocation/cell-towers', authenticateTokenMiddleware, async (req:
     const hasWifiAPs = Array.isArray(wifiAccessPoints) && wifiAccessPoints.length > 0
 
     if (!hasCellTowers && !hasWifiAPs) {
+      logger.error(`❌ [GEOLOCATION] Empty request - no cell towers or WiFi APs`, {
+        correlationId: req.correlationId,
+        rawBody: JSON.stringify(req.body),
+        cellTowersType: typeof cellTowers,
+        cellTowersIsArray: Array.isArray(cellTowers),
+        cellTowersLength: cellTowers?.length,
+        wifiAPsType: typeof wifiAccessPoints,
+        wifiAPsIsArray: Array.isArray(wifiAccessPoints),
+        wifiAPsLength: wifiAccessPoints?.length,
+        userAgent: req.headers['user-agent'],
+        appVersion: req.headers['x-app-version-code'],
+      })
       throw new AppError('cellTowers or wifiAccessPoints array is required', 400)
     }
 
