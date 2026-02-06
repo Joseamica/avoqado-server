@@ -14,6 +14,8 @@ Multi-tenant B2B SaaS for restaurant/venue management (POS, payments, inventory,
 
 When rules conflict: `.claude/rules/` wins > this file > `docs/guides/` > `docs/`
 
+**Maintaining this file:** Short rules (1-3 lines) go directly here. Detailed content (code examples, tables, >10 lines) goes in `docs/` or `.claude/rules/`. Keep this file under ~200 lines — it loads every session.
+
 Note: Some rules are **path-conditional** (e.g., `payments.md` only loads when editing payment-related files). Check each rule's YAML `paths:` frontmatter.
 
 ## Architecture
