@@ -9,6 +9,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import * as venueSettingsService from '../../services/dashboard/venueSettings.dashboard.service'
+import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
 
 /**
  * GET /venues/:venueId/settings
@@ -41,24 +42,28 @@ export async function updateVenueSettings(req: Request<{ venueId: string }>, res
 
 /**
  * GET /venues/:venueId/settings/tpv
- * @deprecated TPV settings are now per-terminal. Use GET /dashboard/tpv/:tpvId/settings
+ * Get venue-level TPV settings (applied to ALL terminals)
  */
-export async function getTpvSettings(req: Request<{ venueId: string }>, res: Response, _next: NextFunction): Promise<void> {
-  res.status(410).json({
-    error: 'Gone',
-    message: 'TPV settings are now per-terminal. Use GET /api/v1/dashboard/tpv/:tpvId/settings instead.',
-    migrationDate: '2025-11-29',
-  })
+export async function getTpvSettings(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const settings = await tpvDashboardService.getVenueTpvSettings(venueId)
+    res.status(200).json(settings)
+  } catch (error) {
+    next(error)
+  }
 }
 
 /**
  * PUT /venues/:venueId/settings/tpv
- * @deprecated TPV settings are now per-terminal. Use PUT /dashboard/tpv/:tpvId/settings
+ * Update venue-level TPV settings (bulk updates ALL terminals)
  */
-export async function updateTpvSettings(req: Request<{ venueId: string }>, res: Response, _next: NextFunction): Promise<void> {
-  res.status(410).json({
-    error: 'Gone',
-    message: 'TPV settings are now per-terminal. Use PUT /api/v1/dashboard/tpv/:tpvId/settings instead.',
-    migrationDate: '2025-11-29',
-  })
+export async function updateTpvSettings(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const settings = await tpvDashboardService.updateVenueTpvSettings(venueId, req.body)
+    res.status(200).json(settings)
+  } catch (error) {
+    next(error)
+  }
 }
