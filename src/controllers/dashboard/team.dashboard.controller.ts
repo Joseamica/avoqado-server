@@ -104,6 +104,8 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
       emailSent: result.emailSent,
       isTPVOnly: result.isTPVOnly,
       inviteLink: result.inviteLink,
+      pinConflicts: result.pinConflicts,
+      venuesAssigned: result.venuesAssigned,
     })
   } catch (error) {
     next(error)

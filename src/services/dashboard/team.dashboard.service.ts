@@ -330,7 +330,14 @@ export async function inviteTeamMember(
   venueId: string,
   inviterStaffId: string,
   request: InviteTeamMemberRequest,
-): Promise<{ invitation: any; emailSent: boolean; isTPVOnly: boolean; inviteLink?: string }> {
+): Promise<{
+  invitation: any
+  emailSent: boolean
+  isTPVOnly: boolean
+  inviteLink?: string
+  pinConflicts?: Array<{ venueId: string; venueName: string; staffVenueId: string; conflictWith: string }>
+  venuesAssigned?: number
+}> {
   // Validate role - can't invite SUPERADMIN
   if (request.role === StaffRole.SUPERADMIN) {
     throw new BadRequestError('Cannot invite SUPERADMIN role')
@@ -496,18 +503,39 @@ export async function inviteTeamMember(
     })
 
     // Get all venues for this organization if inviteToAllVenues is true
-    let venuesToAssign = [{ id: venueId }]
+    let venuesToAssign: Array<{ id: string; name: string }> = [{ id: venueId, name: venue.name }]
     if (shouldInviteToAllVenues) {
       const orgVenues = await prisma.venue.findMany({
         where: { organizationId: venue.organizationId },
-        select: { id: true },
+        select: { id: true, name: true },
       })
       venuesToAssign = orgVenues
     }
 
-    // Create StaffVenue for each venue (with PIN only for the primary venue)
+    // Try to assign PIN to all venues, track conflicts
+    const pinConflicts: Array<{ venueId: string; venueName: string; staffVenueId: string; conflictWith: string }> = []
+
     for (const v of venuesToAssign) {
-      await prisma.staffVenue.upsert({
+      let pinForVenue: string | null = request.pin!
+
+      // Check PIN conflict in this venue (skip primary — already validated above)
+      if (v.id !== venueId && request.pin) {
+        const existingPinMember = await prisma.staffVenue.findFirst({
+          where: { venueId: v.id, active: true, pin: request.pin },
+          include: { staff: { select: { firstName: true, lastName: true } } },
+        })
+        if (existingPinMember) {
+          pinForVenue = null
+          pinConflicts.push({
+            venueId: v.id,
+            venueName: v.name,
+            staffVenueId: '', // Will be set after upsert
+            conflictWith: `${existingPinMember.staff.firstName} ${existingPinMember.staff.lastName}`,
+          })
+        }
+      }
+
+      const staffVenue = await prisma.staffVenue.upsert({
         where: {
           staffId_venueId: {
             staffId: staff.id,
@@ -516,17 +544,23 @@ export async function inviteTeamMember(
         },
         update: {
           role: request.role,
-          pin: v.id === venueId ? request.pin! : null, // PIN only for primary venue
+          pin: pinForVenue,
           active: true,
         },
         create: {
           staffId: staff.id,
           venueId: v.id,
           role: request.role,
-          pin: v.id === venueId ? request.pin! : null, // PIN only for primary venue
+          pin: pinForVenue,
           active: true,
         },
       })
+
+      // Update staffVenueId for conflicts
+      const conflict = pinConflicts.find(c => c.venueId === v.id)
+      if (conflict) {
+        conflict.staffVenueId = staffVenue.id
+      }
     }
 
     // Mark invitation as accepted immediately
@@ -547,6 +581,7 @@ export async function inviteTeamMember(
       lastName: request.lastName,
       inviteToAllVenues: shouldInviteToAllVenues,
       venuesAssigned: venuesToAssign.length,
+      pinConflicts: pinConflicts.length,
     })
 
     return {
@@ -560,6 +595,8 @@ export async function inviteTeamMember(
       },
       emailSent: false,
       isTPVOnly: true,
+      pinConflicts: pinConflicts.length > 0 ? pinConflicts : undefined,
+      venuesAssigned: venuesToAssign.length,
     }
   }
 
