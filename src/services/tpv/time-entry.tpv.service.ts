@@ -11,6 +11,7 @@ interface ClockInParams {
   latitude?: number // GPS latitude at clock-in
   longitude?: number // GPS longitude at clock-in
   accuracy?: number // GPS accuracy in meters at clock-in
+  facadePhotoUrl?: string // Firebase URL: store front photo at clock-in
 }
 
 interface ClockOutParams {
@@ -21,6 +22,7 @@ interface ClockOutParams {
   latitude?: number // GPS latitude at clock-out
   longitude?: number // GPS longitude at clock-out
   accuracy?: number // GPS accuracy in meters at clock-out
+  depositPhotoUrl?: string // Firebase URL: bank deposit voucher at clock-out
 }
 
 interface BreakParams {
@@ -162,7 +164,7 @@ function calculateTotalBreakMinutes(breaks: Array<{ startTime: Date; endTime: Da
  * Clock in a staff member
  */
 export async function clockIn(params: ClockInParams) {
-  const { venueId, staffId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy } = params
+  const { venueId, staffId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, facadePhotoUrl } = params
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
@@ -196,6 +198,7 @@ export async function clockIn(params: ClockInParams) {
       clockInLatitude: latitude, // GPS latitude
       clockInLongitude: longitude, // GPS longitude
       clockInAccuracy: accuracy, // GPS accuracy in meters
+      facadePhotoUrl: facadePhotoUrl || null, // Store front photo at clock-in
       status: TimeEntryStatus.CLOCKED_IN,
       breakMinutes: 0,
     },
@@ -218,7 +221,7 @@ export async function clockIn(params: ClockInParams) {
  * Clock out a staff member
  */
 export async function clockOut(params: ClockOutParams) {
-  const { venueId, staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy } = params
+  const { venueId, staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy, depositPhotoUrl } = params
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
@@ -274,6 +277,7 @@ export async function clockOut(params: ClockOutParams) {
       clockOutLatitude: latitude, // GPS latitude
       clockOutLongitude: longitude, // GPS longitude
       clockOutAccuracy: accuracy, // GPS accuracy in meters
+      depositPhotoUrl: depositPhotoUrl || null, // Bank deposit voucher at clock-out
     },
     include: {
       staff: {

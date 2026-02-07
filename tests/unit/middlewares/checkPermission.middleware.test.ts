@@ -22,6 +22,12 @@ jest.mock('@/utils/prismaClient', () => ({
       findFirst: jest.fn(),
       findUnique: jest.fn(),
     },
+    venue: {
+      findUnique: jest.fn(),
+    },
+    staffOrganization: {
+      findUnique: jest.fn(),
+    },
     venueRolePermission: {
       findUnique: jest.fn(),
     },
@@ -74,6 +80,9 @@ describe('checkPermission Middleware', () => {
 
     // Default: not a superadmin
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
+    // Default: if venue resolution fallback is needed
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_123' })
+    ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
     // Default: no custom permissions
     ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue(null)
   })
@@ -177,7 +186,7 @@ describe('checkPermission Middleware', () => {
   describe('Multi-Venue Support', () => {
     it('should use venueId from URL params when different from token', async () => {
       mockReq.params = { venueId: 'different_venue_456' }
-      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({ role: StaffRole.ADMIN })
+      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({ role: StaffRole.ADMIN, active: true })
       ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)
 
       const middleware = checkPermission('menu:read')
@@ -191,14 +200,34 @@ describe('checkPermission Middleware', () => {
             venueId: 'different_venue_456',
           },
         },
-        select: { role: true },
+        select: { role: true, active: true },
       })
       expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.ADMIN, null, 'menu:read')
+    })
+
+    it('should allow org OWNER fallback when no direct StaffVenue exists', async () => {
+      mockReq.params = { venueId: 'different_venue_456' }
+      ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_123' })
+      ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue({
+        role: 'OWNER',
+        isActive: true,
+      })
+      ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)
+
+      const middleware = checkPermission('menu:read')
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.OWNER, null, 'menu:read')
+      expect(mockNext).toHaveBeenCalledWith()
     })
 
     it('should return 403 when user has no access to URL venue', async () => {
       mockReq.params = { venueId: 'inaccessible_venue' }
       ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_other' })
+      ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
 
       const middleware = checkPermission('menu:read')
 
@@ -261,6 +290,8 @@ describe('checkAnyPermission Middleware', () => {
 
     mockNext = jest.fn()
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_123' })
+    ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue(null)
   })
 
@@ -317,6 +348,8 @@ describe('checkAllPermissions Middleware', () => {
 
     mockNext = jest.fn()
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_123' })
+    ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue(null)
   })
 

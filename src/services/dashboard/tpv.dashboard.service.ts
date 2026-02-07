@@ -348,14 +348,15 @@ export interface TpvSettings {
   // Kiosk Mode
   kioskModeEnabled: boolean // When true, terminal can enter self-service kiosk mode
   kioskDefaultMerchantId: string | null // Default merchant for kiosk mode (null = show selection)
-  // Evidence rules (PlayTelecom config TPV)
-  clockInPhotoRule?: 'OBLIGATORIO' | 'OPCIONAL' | 'DESACTIVADO'
-  depositPhotoRule?: 'OBLIGATORIO' | 'OBLIGATORIO_ALTA_CALIDAD'
-  facadePhotoRule?: 'ALEATORIO' | 'SIEMPRE' | 'NUNCA'
+  // Evidence rules (PlayTelecom — boolean toggles)
+  requireDepositPhoto?: boolean
+  requireFacadePhoto?: boolean
   // Module toggles for TPV
   enableCashPayments?: boolean
   enableCardPayments?: boolean
   enableBarcodeScanner?: boolean
+  // Venue-level attendance toggle (sets requireClockInPhoto + requireClockInToLogin)
+  attendanceTracking?: boolean
 }
 
 /**
@@ -557,4 +558,125 @@ export async function getTerminalMerchants(tpvId: string, includeInactive = fals
     displayName: m.displayName || `Merchant ${m.id.slice(-6)}`, // Fallback to partial ID if no name
     active: m.active,
   }))
+}
+
+/**
+ * Venue-level TPV settings subset (used by TpvConfiguration page)
+ * These fields are applied uniformly to ALL terminals in a venue
+ */
+export interface VenueTpvSettings {
+  attendanceTracking: boolean
+  enableCashPayments: boolean
+  enableCardPayments: boolean
+  enableBarcodeScanner: boolean
+  requireDepositPhoto: boolean
+  requireFacadePhoto: boolean
+}
+
+const DEFAULT_VENUE_TPV_SETTINGS: VenueTpvSettings = {
+  attendanceTracking: false,
+  enableCashPayments: true,
+  enableCardPayments: true,
+  enableBarcodeScanner: true,
+  requireDepositPhoto: false,
+  requireFacadePhoto: false,
+}
+
+/**
+ * Get venue-level TPV settings
+ * Reads from the most recently updated terminal in the venue.
+ * Since terminals can diverge (edited individually on per-terminal page),
+ * we pick the latest-updated one as the "current" venue-level state.
+ * Returns defaults if no terminals exist.
+ */
+export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSettings> {
+  if (!venueId) {
+    throw new NotFoundError('El ID del Venue es requerido.')
+  }
+
+  const terminal = await prisma.terminal.findFirst({
+    where: { venueId },
+    select: { config: true },
+    orderBy: { updatedAt: 'desc' },
+  })
+
+  if (!terminal) {
+    return { ...DEFAULT_VENUE_TPV_SETTINGS }
+  }
+
+  const savedSettings = (terminal.config as any)?.settings || {}
+
+  // requireClockInPhoto is the source of truth (written by both per-terminal page and TpvConfig).
+  // Never read from stored attendanceTracking — it can be stale if the per-terminal page changed requireClockInPhoto.
+  const attendanceTracking = savedSettings.requireClockInPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.attendanceTracking
+
+  return {
+    attendanceTracking,
+    enableCashPayments: savedSettings.enableCashPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCashPayments,
+    enableCardPayments: savedSettings.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
+    enableBarcodeScanner: savedSettings.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
+    requireDepositPhoto: savedSettings.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
+    requireFacadePhoto: savedSettings.requireFacadePhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireFacadePhoto,
+  }
+}
+
+/**
+ * Update venue-level TPV settings
+ * Bulk updates ALL terminals in the venue atomically
+ */
+export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Partial<VenueTpvSettings>): Promise<VenueTpvSettings> {
+  if (!venueId) {
+    throw new NotFoundError('El ID del Venue es requerido.')
+  }
+
+  // 1. Find all terminals in the venue
+  const terminals = await prisma.terminal.findMany({
+    where: { venueId },
+    select: { id: true, config: true },
+  })
+
+  if (terminals.length === 0) {
+    throw new NotFoundError('No hay terminales en este venue.')
+  }
+
+  // 2. Build the settings to merge
+  const settingsToMerge: Partial<TpvSettings> = { ...settingsUpdate }
+
+  // When attendanceTracking changes, set clock-in photo + login requirement
+  // Note: requireClockOutPhoto is NOT set here — deposit photo replaces clock-out selfie
+  if (settingsUpdate.attendanceTracking !== undefined) {
+    settingsToMerge.requireClockInPhoto = settingsUpdate.attendanceTracking
+    settingsToMerge.requireClockInToLogin = settingsUpdate.attendanceTracking
+    settingsToMerge.attendanceTracking = settingsUpdate.attendanceTracking
+  }
+
+  // 3. Update all terminals in a transaction
+  await prisma.$transaction(
+    terminals.map(terminal => {
+      const existingConfig = (terminal.config as any) || {}
+      const existingSettings = existingConfig.settings || {}
+      const updatedConfig = {
+        ...existingConfig,
+        settings: {
+          ...existingSettings,
+          ...settingsToMerge,
+        },
+      }
+
+      return prisma.terminal.update({
+        where: { id: terminal.id },
+        data: {
+          config: updatedConfig,
+          updatedAt: new Date(),
+        },
+      })
+    }),
+  )
+
+  logger.info(`Venue-level TPV settings updated for venue ${venueId} (${terminals.length} terminals)`, {
+    settings: settingsUpdate,
+  })
+
+  // 4. Return the current full settings
+  return getVenueTpvSettings(venueId)
 }

@@ -30,6 +30,9 @@ interface TpvSettings {
   // Clock-in/out photo verification (anti-fraud, per-terminal settings from Terminal.config)
   requireClockInPhoto: boolean
   requireClockOutPhoto: boolean
+  // Additional attendance evidence photos
+  requireFacadePhoto: boolean // Panoramic store front photo at clock-in
+  requireDepositPhoto: boolean // Bank deposit voucher photo at clock-out
   requireClockInToLogin: boolean
   // Kiosk Mode (self-service terminal mode)
   kioskModeEnabled: boolean
@@ -60,6 +63,9 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   // Clock-in/out photo disabled by default (anti-fraud feature, per-terminal)
   requireClockInPhoto: false,
   requireClockOutPhoto: false,
+  // Additional attendance evidence photos disabled by default
+  requireFacadePhoto: false,
+  requireDepositPhoto: false,
   requireClockInToLogin: false,
   // Kiosk Mode disabled by default
   kioskModeEnabled: false,

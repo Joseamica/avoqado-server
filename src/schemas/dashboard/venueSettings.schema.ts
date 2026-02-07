@@ -7,7 +7,7 @@ import { z } from 'zod'
  */
 export const UpdateTpvSettingsSchema = z.object({
   params: z.object({
-    venueId: z.string().min(1, 'Venue ID is required'),
+    venueId: z.string().min(1, 'El ID del venue es requerido'),
   }),
   body: z.object({
     showReviewScreen: z.boolean().optional(),
@@ -18,6 +18,13 @@ export const UpdateTpvSettingsSchema = z.object({
     showVerificationScreen: z.boolean().optional(),
     requireVerificationPhoto: z.boolean().optional(),
     requireVerificationBarcode: z.boolean().optional(),
+    // Venue-level TPV config fields
+    attendanceTracking: z.boolean().optional(),
+    enableCashPayments: z.boolean().optional(),
+    enableCardPayments: z.boolean().optional(),
+    enableBarcodeScanner: z.boolean().optional(),
+    requireDepositPhoto: z.boolean().optional(),
+    requireFacadePhoto: z.boolean().optional(),
   }),
 })
 

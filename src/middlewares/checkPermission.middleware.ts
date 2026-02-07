@@ -1,8 +1,96 @@
 import { Request, Response, NextFunction } from 'express'
-import { StaffRole } from '@prisma/client'
+import { OrgRole, StaffRole } from '@prisma/client'
 import { hasPermission } from '@/lib/permissions'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+
+type RoleResolutionSource = 'token' | 'staffVenue' | 'orgOwner' | 'none'
+
+interface ResolvedUserRole {
+  role: StaffRole | null
+  source: RoleResolutionSource
+}
+
+/**
+ * Resolve effective role for a target venue.
+ *
+ * Priority:
+ * 1) Token role when target venue matches token venue
+ * 2) Active StaffVenue role in target venue
+ * 3) Active Org OWNER membership for target venue's organization
+ */
+async function resolveUserRoleForVenue(params: {
+  userId: string
+  targetVenueId: string
+  tokenVenueId?: string
+  tokenRole?: string
+}): Promise<ResolvedUserRole> {
+  const { userId, targetVenueId, tokenVenueId, tokenRole } = params
+
+  if (tokenVenueId && tokenVenueId === targetVenueId && tokenRole) {
+    return {
+      role: tokenRole as StaffRole,
+      source: 'token',
+    }
+  }
+
+  const staffVenue = await prisma.staffVenue.findUnique({
+    where: {
+      staffId_venueId: {
+        staffId: userId,
+        venueId: targetVenueId,
+      },
+    },
+    select: {
+      role: true,
+      active: true,
+    },
+  })
+
+  if (staffVenue?.active) {
+    return {
+      role: staffVenue.role,
+      source: 'staffVenue',
+    }
+  }
+
+  const targetVenue = await prisma.venue.findUnique({
+    where: { id: targetVenueId },
+    select: { organizationId: true },
+  })
+
+  if (!targetVenue) {
+    return {
+      role: null,
+      source: 'none',
+    }
+  }
+
+  const orgMembership = await prisma.staffOrganization.findUnique({
+    where: {
+      staffId_organizationId: {
+        staffId: userId,
+        organizationId: targetVenue.organizationId,
+      },
+    },
+    select: {
+      role: true,
+      isActive: true,
+    },
+  })
+
+  if (orgMembership?.isActive && orgMembership.role === OrgRole.OWNER) {
+    return {
+      role: StaffRole.OWNER,
+      source: 'orgOwner',
+    }
+  }
+
+  return {
+    role: null,
+    source: 'none',
+  }
+}
 
 /**
  * Middleware to check if user has required permission
@@ -74,32 +162,19 @@ export const checkPermission = (requiredPermission: string) => {
         return next()
       }
 
-      // If venueId from URL differs from token, look up user's actual role in that venue
-      let userRole: StaffRole
-      if (urlVenueId && urlVenueId !== authContext.venueId) {
-        // Look up user's role in the target venue
-        const staffVenue = await prisma.staffVenue.findUnique({
-          where: {
-            staffId_venueId: {
-              staffId: authContext.userId,
-              venueId: urlVenueId,
-            },
-          },
-          select: { role: true },
+      const { role: userRole, source: roleSource } = await resolveUserRoleForVenue({
+        userId: authContext.userId,
+        targetVenueId: venueId,
+        tokenVenueId: authContext.venueId,
+        tokenRole: authContext.role,
+      })
+
+      if (!userRole) {
+        logger.warn(`checkPermission: User ${authContext.userId} has no access to venue ${venueId}`)
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'No access to this venue',
         })
-
-        if (!staffVenue) {
-          logger.warn(`checkPermission: User ${authContext.userId} has no access to venue ${urlVenueId}`)
-          return res.status(403).json({
-            error: 'Forbidden',
-            message: 'No access to this venue',
-          })
-        }
-
-        userRole = staffVenue.role
-      } else {
-        // Use role from token (same venue)
-        userRole = authContext.role as StaffRole
       }
 
       // Load custom permissions from VenueRolePermission table
@@ -138,7 +213,9 @@ export const checkPermission = (requiredPermission: string) => {
       }
 
       // Permission granted, continue
-      logger.debug(`checkPermission: User ${authContext.userId} (${userRole}) granted '${requiredPermission}' in venue ${venueId}`)
+      logger.debug(
+        `checkPermission: User ${authContext.userId} (${userRole}) granted '${requiredPermission}' in venue ${venueId} [source=${roleSource}]`,
+      )
       next()
     } catch (error) {
       logger.error('checkPermission: Error checking permission', error)
@@ -179,28 +256,18 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
         })
       }
 
-      // Dynamic role lookup if URL venue differs from token
-      let userRole: StaffRole
-      if (urlVenueId && urlVenueId !== authContext.venueId) {
-        const staffVenue = await prisma.staffVenue.findUnique({
-          where: {
-            staffId_venueId: {
-              staffId: authContext.userId,
-              venueId: urlVenueId,
-            },
-          },
-          select: { role: true },
-        })
+      const { role: userRole } = await resolveUserRoleForVenue({
+        userId: authContext.userId,
+        targetVenueId: venueId,
+        tokenVenueId: authContext.venueId,
+        tokenRole: authContext.role,
+      })
 
-        if (!staffVenue) {
-          return res.status(403).json({
-            error: 'Forbidden',
-            message: 'No access to this venue',
-          })
-        }
-        userRole = staffVenue.role
-      } else {
-        userRole = authContext.role as StaffRole
+      if (!userRole) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'No access to this venue',
+        })
       }
 
       // Load custom permissions
@@ -279,28 +346,18 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
         })
       }
 
-      // Dynamic role lookup if URL venue differs from token
-      let userRole: StaffRole
-      if (urlVenueId && urlVenueId !== authContext.venueId) {
-        const staffVenue = await prisma.staffVenue.findUnique({
-          where: {
-            staffId_venueId: {
-              staffId: authContext.userId,
-              venueId: urlVenueId,
-            },
-          },
-          select: { role: true },
-        })
+      const { role: userRole } = await resolveUserRoleForVenue({
+        userId: authContext.userId,
+        targetVenueId: venueId,
+        tokenVenueId: authContext.venueId,
+        tokenRole: authContext.role,
+      })
 
-        if (!staffVenue) {
-          return res.status(403).json({
-            error: 'Forbidden',
-            message: 'No access to this venue',
-          })
-        }
-        userRole = staffVenue.role
-      } else {
-        userRole = authContext.role as StaffRole
+      if (!userRole) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'No access to this venue',
+        })
       }
 
       // Load custom permissions
