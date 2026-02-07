@@ -348,10 +348,9 @@ export interface TpvSettings {
   // Kiosk Mode
   kioskModeEnabled: boolean // When true, terminal can enter self-service kiosk mode
   kioskDefaultMerchantId: string | null // Default merchant for kiosk mode (null = show selection)
-  // Evidence rules (PlayTelecom config TPV)
-  clockInPhotoRule?: 'OBLIGATORIO' | 'OPCIONAL' | 'DESACTIVADO'
-  depositPhotoRule?: 'OBLIGATORIO' | 'OBLIGATORIO_ALTA_CALIDAD'
-  facadePhotoRule?: 'ALEATORIO' | 'SIEMPRE' | 'NUNCA'
+  // Evidence rules (PlayTelecom — boolean toggles)
+  requireDepositPhoto?: boolean
+  requireFacadePhoto?: boolean
   // Module toggles for TPV
   enableCashPayments?: boolean
   enableCardPayments?: boolean
@@ -570,9 +569,8 @@ export interface VenueTpvSettings {
   enableCashPayments: boolean
   enableCardPayments: boolean
   enableBarcodeScanner: boolean
-  clockInPhotoRule: 'OBLIGATORIO' | 'OPCIONAL' | 'DESACTIVADO'
-  depositPhotoRule: 'OBLIGATORIO' | 'OBLIGATORIO_ALTA_CALIDAD'
-  facadePhotoRule: 'ALEATORIO' | 'SIEMPRE' | 'NUNCA'
+  requireDepositPhoto: boolean
+  requireFacadePhoto: boolean
 }
 
 const DEFAULT_VENUE_TPV_SETTINGS: VenueTpvSettings = {
@@ -580,9 +578,8 @@ const DEFAULT_VENUE_TPV_SETTINGS: VenueTpvSettings = {
   enableCashPayments: true,
   enableCardPayments: true,
   enableBarcodeScanner: true,
-  clockInPhotoRule: 'OBLIGATORIO',
-  depositPhotoRule: 'OBLIGATORIO_ALTA_CALIDAD',
-  facadePhotoRule: 'NUNCA',
+  requireDepositPhoto: false,
+  requireFacadePhoto: false,
 }
 
 /**
@@ -618,9 +615,8 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
     enableCashPayments: savedSettings.enableCashPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCashPayments,
     enableCardPayments: savedSettings.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
     enableBarcodeScanner: savedSettings.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
-    clockInPhotoRule: savedSettings.clockInPhotoRule ?? DEFAULT_VENUE_TPV_SETTINGS.clockInPhotoRule,
-    depositPhotoRule: savedSettings.depositPhotoRule ?? DEFAULT_VENUE_TPV_SETTINGS.depositPhotoRule,
-    facadePhotoRule: savedSettings.facadePhotoRule ?? DEFAULT_VENUE_TPV_SETTINGS.facadePhotoRule,
+    requireDepositPhoto: savedSettings.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
+    requireFacadePhoto: savedSettings.requireFacadePhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireFacadePhoto,
   }
 }
 
@@ -646,10 +642,10 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
   // 2. Build the settings to merge
   const settingsToMerge: Partial<TpvSettings> = { ...settingsUpdate }
 
-  // When attendanceTracking changes, set all 3 underlying attendance fields
+  // When attendanceTracking changes, set clock-in photo + login requirement
+  // Note: requireClockOutPhoto is NOT set here — deposit photo replaces clock-out selfie
   if (settingsUpdate.attendanceTracking !== undefined) {
     settingsToMerge.requireClockInPhoto = settingsUpdate.attendanceTracking
-    settingsToMerge.requireClockOutPhoto = settingsUpdate.attendanceTracking
     settingsToMerge.requireClockInToLogin = settingsUpdate.attendanceTracking
     settingsToMerge.attendanceTracking = settingsUpdate.attendanceTracking
   }

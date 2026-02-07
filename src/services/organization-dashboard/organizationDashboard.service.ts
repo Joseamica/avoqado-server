@@ -50,6 +50,7 @@ export interface OrgStorePerformance {
   performance?: number // Goal progress percentage (0-100+)
   goalAmount?: number // Configured goal amount
   goalPeriod?: 'DAILY' | 'WEEKLY' | 'MONTHLY'
+  goalId?: string // ID of the active venue-wide sales goal
 }
 
 export interface OrgCrossStoreAnomaly {
@@ -383,7 +384,7 @@ class OrganizationDashboardService {
       where: { code: 'SERIALIZED_INVENTORY' },
     })
 
-    type GoalConfig = { goal: number; period: 'DAILY' | 'WEEKLY' | 'MONTHLY' }
+    type GoalConfig = { goal: number; period: 'DAILY' | 'WEEKLY' | 'MONTHLY'; goalId: string }
     const venueGoalsMap = new Map<string, GoalConfig>()
 
     if (serializedModule) {
@@ -401,7 +402,7 @@ class OrganizationDashboardService {
         // Find the active venue-wide goal (staffId = null)
         const venueGoal = goals.find(g => g.staffId === null && g.active)
         if (venueGoal && venueGoal.goal > 0) {
-          venueGoalsMap.set(vm.venueId, { goal: venueGoal.goal, period: venueGoal.period })
+          venueGoalsMap.set(vm.venueId, { goal: venueGoal.goal, period: venueGoal.period, goalId: venueGoal.id })
         }
       }
     }
@@ -514,6 +515,7 @@ class OrganizationDashboardService {
         performance,
         goalAmount: goalConfig?.goal,
         goalPeriod: goalConfig?.period,
+        goalId: goalConfig?.goalId,
       })
     }
 

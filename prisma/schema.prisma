@@ -1786,6 +1786,10 @@ model TimeEntry {
   clockOutLongitude Float? // GPS longitude at clock-out
   clockOutAccuracy  Float? // GPS accuracy in meters at clock-out
 
+  // Additional evidence photos
+  facadePhotoUrl  String? // Firebase URL: store front photo at clock-in
+  depositPhotoUrl String? // Firebase URL: bank deposit voucher at clock-out
+
   // Auto clock-out tracking
   autoClockOut     Boolean @default(false) // Was this entry auto-closed by the system?
   autoClockOutNote String?                 // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")

@@ -23,9 +23,8 @@ export const UpdateTpvSettingsSchema = z.object({
     enableCashPayments: z.boolean().optional(),
     enableCardPayments: z.boolean().optional(),
     enableBarcodeScanner: z.boolean().optional(),
-    clockInPhotoRule: z.enum(['OBLIGATORIO', 'OPCIONAL', 'DESACTIVADO']).optional(),
-    depositPhotoRule: z.enum(['OBLIGATORIO', 'OBLIGATORIO_ALTA_CALIDAD']).optional(),
-    facadePhotoRule: z.enum(['ALEATORIO', 'SIEMPRE', 'NUNCA']).optional(),
+    requireDepositPhoto: z.boolean().optional(),
+    requireFacadePhoto: z.boolean().optional(),
   }),
 })
 

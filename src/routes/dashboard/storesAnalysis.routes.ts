@@ -17,6 +17,7 @@ import { organizationDashboardService } from '../../services/organization-dashbo
 import { commandCenterService } from '../../services/command-center/commandCenter.service'
 import { serializedInventoryService } from '../../services/serialized-inventory/serializedInventory.service'
 import { moduleService, MODULE_CODES } from '../../services/modules/module.service'
+import * as salesGoalService from '../../services/dashboard/commission/sales-goal.service'
 import prisma from '../../utils/prismaClient'
 
 // mergeParams: true allows access to :venueId from parent route
@@ -1052,6 +1053,126 @@ router.get('/store/:storeId/inventory-summary', whiteLabelAccess, async (req: Re
         totals,
       },
     })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// =============================================================================
+// STORE GOAL ENDPOINTS
+// These endpoints manage sales goals for child stores via the parent venue.
+// They reuse salesGoalService and validate that the store belongs to the org.
+// =============================================================================
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/store/:storeId/goals
+ * Returns: Sales goals for a specific store
+ */
+router.get('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { storeId } = req.params
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
+    if (!storeVenue || storeVenue.organizationId !== orgId) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+    }
+
+    const goals = await salesGoalService.getSalesGoals(storeId)
+    res.json({ success: true, data: goals })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * POST /dashboard/venues/:venueId/stores-analysis/store/:storeId/goals
+ * Creates a new sales goal for a specific store
+ */
+router.post('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { storeId } = req.params
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
+    if (!storeVenue || storeVenue.organizationId !== orgId) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+    }
+
+    const { staffId, goal, period } = req.body
+    const created = await salesGoalService.createSalesGoal(storeId, {
+      staffId: staffId ?? null,
+      goal: Number(goal),
+      period,
+    })
+    res.status(201).json({ success: true, data: created })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/venues/:venueId/stores-analysis/store/:storeId/goals/:goalId
+ * Updates an existing sales goal for a specific store
+ */
+router.patch('/store/:storeId/goals/:goalId', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { storeId, goalId } = req.params
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
+    if (!storeVenue || storeVenue.organizationId !== orgId) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+    }
+
+    const { goal, period, active } = req.body
+    const updated = await salesGoalService.updateSalesGoal(storeId, goalId, {
+      ...(goal !== undefined && { goal: Number(goal) }),
+      ...(period !== undefined && { period }),
+      ...(active !== undefined && { active }),
+    })
+    res.json({ success: true, data: updated })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * DELETE /dashboard/venues/:venueId/stores-analysis/store/:storeId/goals/:goalId
+ * Deletes a sales goal for a specific store
+ */
+router.delete('/store/:storeId/goals/:goalId', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { storeId, goalId } = req.params
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const storeVenue = await prisma.venue.findUnique({ where: { id: storeId }, select: { organizationId: true } })
+    if (!storeVenue || storeVenue.organizationId !== orgId) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
+    }
+
+    await salesGoalService.deleteSalesGoal(storeId, goalId)
+    res.json({ success: true, data: { message: 'Goal deleted' } })
   } catch (error) {
     next(error)
   }
