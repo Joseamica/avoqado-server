@@ -62,11 +62,10 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       if (!origin || allowedOrigins.indexOf(origin) !== -1) {
         callback(null, true)
       } else if (
-        (env === 'staging' || process.env.ALLOW_PREVIEW_CORS === 'true') &&
         origin &&
-        /\.avoqado-web-dashboard.*\.pages\.dev$/.test(origin)
+        /\.(?:demo-)?avoqado-web-dashboard.*\.pages\.dev$/.test(origin)
       ) {
-        // Allow Cloudflare Pages preview deployments in staging or when explicitly enabled
+        // Allow Cloudflare Pages preview deployments (all environments)
         callback(null, true)
       } else {
         callback(new Error(`Origin ${origin} not allowed by CORS`))
