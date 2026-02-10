@@ -1160,6 +1160,11 @@ class OrganizationDashboardService {
             },
           },
         },
+        payments: {
+          take: 1,
+          orderBy: { createdAt: 'desc' as const },
+          select: { method: true, cardBrand: true },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: Math.ceil(limit * 0.6), // Allocate 60% of limit to sales
@@ -1170,6 +1175,8 @@ class OrganizationDashboardService {
       const categoryName = firstItem?.serializedItem?.category?.name || firstItem?.categoryName || undefined
       const categoryColor = firstItem?.serializedItem?.category?.color || undefined
       const iccid = firstItem?.serializedItem?.serialNumber || undefined
+
+      const firstPayment = order.payments?.[0]
 
       events.push({
         id: `sale-${order.id}`,
@@ -1188,6 +1195,8 @@ class OrganizationDashboardService {
           categoryName,
           categoryColor,
           iccid,
+          paymentMethod: firstPayment?.method || undefined,
+          cardBrand: firstPayment?.cardBrand || undefined,
         },
       })
     }
