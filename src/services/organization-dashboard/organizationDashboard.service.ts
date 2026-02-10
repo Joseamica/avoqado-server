@@ -1156,7 +1156,7 @@ class OrganizationDashboardService {
           take: 1,
           include: {
             serializedItem: {
-              select: { serialNumber: true, category: { select: { name: true } } },
+              select: { serialNumber: true, category: { select: { name: true, color: true } } },
             },
           },
         },
@@ -1168,6 +1168,7 @@ class OrganizationDashboardService {
     for (const order of recentOrders) {
       const firstItem = order.items?.[0]
       const categoryName = firstItem?.serializedItem?.category?.name || firstItem?.categoryName || undefined
+      const categoryColor = firstItem?.serializedItem?.category?.color || undefined
       const iccid = firstItem?.serializedItem?.serialNumber || undefined
 
       events.push({
@@ -1185,6 +1186,7 @@ class OrganizationDashboardService {
           orderId: order.id,
           total: order.total ? Number(order.total) : 0,
           categoryName,
+          categoryColor,
           iccid,
         },
       })
