@@ -59,6 +59,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 name: true,
                 slug: true,
                 logo: true,
+                type: true, // Business type for sector-aware UI terminology
                 status: true, // Single source of truth for venue state
                 kycStatus: true, // Include KYC status for access control
                 // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -209,6 +210,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       name: string
       slug: string
       logo: string | null
+      type?: string // Business type for sector-aware UI terminology
       role?: any
       status?: VenueStatus // Single source of truth for venue state
       kycStatus?: string | null // Include KYC verification status
@@ -236,6 +238,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       name: sv.venue.name,
       slug: sv.venue.slug,
       logo: sv.venue.logo,
+      type: sv.venue.type, // Business type for sector-aware UI
       role: sv.role,
       status: sv.venue.status, // Single source of truth
       kycStatus: sv.venue.kycStatus, // Include KYC status
@@ -279,6 +282,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
+          type: true, // Business type for sector-aware UI terminology
           status: true, // Single source of truth
           kycStatus: true, // Include KYC status
           // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -329,6 +333,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
+        type: venue.type, // Business type for sector-aware UI
         status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
@@ -383,6 +388,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             name: true,
             slug: true,
             logo: true,
+            type: true, // Business type for sector-aware UI terminology
             status: true, // Single source of truth
             kycStatus: true, // Include KYC status
             // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -433,6 +439,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: venue.name,
           slug: venue.slug,
           logo: venue.logo,
+          type: venue.type, // Business type for sector-aware UI
           status: venue.status, // Single source of truth
           kycStatus: venue.kycStatus, // Include KYC status
           features: venue.features,
