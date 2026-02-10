@@ -91,4 +91,3 @@ export function getBusinessTypesForCategory(category: BusinessCategory): Busines
     .filter(([, cat]) => cat === category)
     .map(([type]) => type as BusinessType)
 }
-
