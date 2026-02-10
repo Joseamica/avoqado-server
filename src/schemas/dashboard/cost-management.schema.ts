@@ -174,8 +174,7 @@ export const enhancedCreateVenueSchema = z.object({
     // Basic venue information
     name: z.string().min(1, 'Venue name is required'),
     type: z.string().min(1, 'Venue type is required'),
-    logo: z.string().url('Logo must be a valid URL'),
-    pos: z.string().default('SOFTRESTAURANT'),
+    logo: z.string().url('Logo must be a valid URL').optional().nullable(),
     address: z.string().min(1, 'Address is required'),
     city: z.string().min(1, 'City is required'),
     state: z.string().min(1, 'State is required'),

@@ -62,16 +62,15 @@ export async function createVenueForOrganization(orgId: string, venueData: Creat
     throw new BadRequestError(slugValidation.error || 'Invalid slug')
   }
 
-  // 2. Lógica de negocio: Verificar unicidad del slug DENTRO de la organización
+  // 2. Lógica de negocio: Verificar unicidad del slug GLOBALMENTE (DB constraint is unique on slug)
   const existingVenueWithSlug = await prisma.venue.findFirst({
-    where: {
-      organizationId: orgId,
-      slug: slugToUse,
-    },
+    where: { slug: slugToUse },
   })
 
   if (existingVenueWithSlug) {
-    throw new BadRequestError(`El slug '${slugToUse}' ya está en uso en esta organización.`)
+    // Append random suffix to make it unique
+    const suffix = Math.random().toString(36).substring(2, 6)
+    slugToUse = `${slugToUse}-${suffix}`
   }
 
   // 3. Interacción con la base de datos

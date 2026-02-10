@@ -19,7 +19,7 @@ const router = Router()
 
 const organizationIdSchema = z.object({
   params: z.object({
-    organizationId: z.string().cuid('Invalid organization ID'),
+    organizationId: z.string().min(1, 'Organization ID is required'),
   }),
 })
 
