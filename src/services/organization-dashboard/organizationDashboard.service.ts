@@ -6,21 +6,29 @@
  * IMPORTANT: All date calculations use venue timezone (America/Mexico_City by default)
  * to ensure "today", "this week", "this month" match the business's operating timezone.
  */
-import prisma from '../../utils/prismaClient'
+import logger from '@/config/logger'
 import { Prisma } from '@prisma/client'
-import { startOfDay, endOfDay } from 'date-fns'
-import { toZonedTime, fromZonedTime } from 'date-fns-tz'
+import { endOfDay, startOfDay } from 'date-fns'
+import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 import {
   DEFAULT_TIMEZONE,
-  parseDateRange,
   parseDbDateRange,
-  venueStartOfDay,
   venueEndOfDay,
+  venueStartOfDay,
   venueStartOfDayOffset,
   venueStartOfMonth,
 } from '../../utils/datetime'
+import prisma from '../../utils/prismaClient'
 
 // Types for organization dashboard
+export interface OrgCategoryBreakdown {
+  id: string
+  name: string
+  sales: number
+  units: number
+  percentage: number
+}
+
 export interface OrgVisionGlobalSummary {
   todaySales: number
   todayCashSales: number
@@ -33,6 +41,7 @@ export interface OrgVisionGlobalSummary {
   activeStores: number
   totalStores: number
   approvedDeposits: number
+  categoryBreakdown: OrgCategoryBreakdown[]
 }
 
 export interface OrgStorePerformance {
@@ -235,6 +244,7 @@ class OrganizationDashboardService {
         activeStores: 0,
         totalStores: 0,
         approvedDeposits: 0,
+        categoryBreakdown: [],
       }
     }
 
@@ -323,6 +333,29 @@ class OrganizationDashboardService {
     })
     const approvedDeposits = Number(approvedDepositsResult._sum?.amount) || 0
 
+    // Aggregate sales by category from order items
+    // For regular products: use denormalized categoryName
+    // For serialized inventory (SIMs): categoryName is null, productName IS the category
+    const categoryStats = new Map<string, { id: string; name: string; sales: number; units: number }>()
+    for (const order of todayOrders) {
+      for (const item of order.items) {
+        const catName = item.categoryName || item.productName || 'Sin categoría'
+        const existing = categoryStats.get(catName) || { id: catName, name: catName, sales: 0, units: 0 }
+        existing.units += item.quantity
+        existing.sales += Number(item.total || 0)
+        categoryStats.set(catName, existing)
+      }
+    }
+    const totalCategoryUnits = Array.from(categoryStats.values()).reduce((sum, cat) => sum + cat.units, 0)
+    const categoryBreakdown: OrgCategoryBreakdown[] = Array.from(categoryStats.values())
+      .sort((a, b) => b.units - a.units)
+      .slice(0, 5)
+      .map(cat => ({
+        ...cat,
+        sales: Math.round(cat.sales * 100) / 100,
+        percentage: totalCategoryUnits > 0 ? Math.round((cat.units / totalCategoryUnits) * 100) : 0,
+      }))
+
     return {
       todaySales: Math.round(todaySales * 100) / 100,
       todayCashSales: Math.round(todayCashSales * 100) / 100,
@@ -335,6 +368,7 @@ class OrganizationDashboardService {
       activeStores: storesWithSales.length,
       totalStores: allVenuesCount,
       approvedDeposits: Math.round(approvedDeposits * 100) / 100,
+      categoryBreakdown,
     }
   }
 
@@ -1108,6 +1142,7 @@ class OrganizationDashboardService {
     const timeFilter = rangeEnd ? { gte: rangeStart, lte: rangeEnd } : { gte: rangeStart }
 
     // Fetch recent sales (completed orders in range)
+    // Include items → serializedItem → category to get ICCID and category name
     const recentOrders = await prisma.order.findMany({
       where: {
         venueId: { in: venueIds },
@@ -1117,12 +1152,25 @@ class OrganizationDashboardService {
       include: {
         venue: { select: { id: true, name: true } },
         servedBy: { select: { id: true, firstName: true, lastName: true } },
+        items: {
+          take: 1,
+          include: {
+            serializedItem: {
+              select: { serialNumber: true, category: { select: { name: true, color: true } } },
+            },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: Math.ceil(limit * 0.6), // Allocate 60% of limit to sales
     })
 
     for (const order of recentOrders) {
+      const firstItem = order.items?.[0]
+      const categoryName = firstItem?.serializedItem?.category?.name || firstItem?.categoryName || undefined
+      const categoryColor = firstItem?.serializedItem?.category?.color || undefined
+      const iccid = firstItem?.serializedItem?.serialNumber || undefined
+
       events.push({
         id: `sale-${order.id}`,
         type: 'sale',
@@ -1137,6 +1185,9 @@ class OrganizationDashboardService {
         metadata: {
           orderId: order.id,
           total: order.total ? Number(order.total) : 0,
+          categoryName,
+          categoryColor,
+          iccid,
         },
       })
     }
@@ -1898,6 +1949,7 @@ class OrganizationDashboardService {
         clockOutLongitude: true,
         checkInPhotoUrl: true,
         checkOutPhotoUrl: true,
+        depositPhotoUrl: true,
         status: true,
         validationStatus: true,
       },
@@ -1915,12 +1967,51 @@ class OrganizationDashboardService {
       _sum: { amount: true },
     })
 
+    // Get CASH-only sales per staff (for deposit verification)
+    const cashSalesData = await prisma.payment.groupBy({
+      by: ['processedById', 'venueId'],
+      where: {
+        venueId: { in: venueIds },
+        createdAt: { gte: dayStart, lte: dayEnd },
+        status: 'COMPLETED',
+        processedById: { not: null },
+        method: 'CASH',
+      },
+      _sum: { amount: true },
+    })
+
+    // Get individual CASH payments for per-time-entry breakdown
+    const cashPayments = await prisma.payment.findMany({
+      where: {
+        venueId: { in: venueIds },
+        createdAt: { gte: dayStart, lte: dayEnd },
+        status: 'COMPLETED',
+        processedById: { not: null },
+        method: 'CASH',
+      },
+      select: {
+        processedById: true,
+        venueId: true,
+        amount: true,
+        createdAt: true,
+      },
+    })
+
     // Key: staffId:venueId -> sales amount
     const salesByStaffVenue: Record<string, number> = {}
     salesData.forEach(s => {
       if (s.processedById) {
         const key = `${s.processedById}:${s.venueId}`
         salesByStaffVenue[key] = Number(s._sum.amount) || 0
+      }
+    })
+
+    // Key: staffId:venueId -> cash sales amount
+    const cashSalesByStaffVenue: Record<string, number> = {}
+    cashSalesData.forEach(s => {
+      if (s.processedById) {
+        const key = `${s.processedById}:${s.venueId}`
+        cashSalesByStaffVenue[key] = Number(s._sum.amount) || 0
       }
     })
 
@@ -1962,16 +2053,32 @@ class OrganizationDashboardService {
       const fullName = `${sv.staff.firstName} ${sv.staff.lastName}`
 
       // Transform all time entries for this staff member
-      const allTimeEntries = staffTimeEntries.map(te => ({
-        clockInTime: te.clockInTime.toISOString(),
-        clockInLocation: te.clockInLatitude && te.clockInLongitude ? { lat: te.clockInLatitude, lng: te.clockInLongitude } : null,
-        checkInPhotoUrl: te.checkInPhotoUrl,
-        clockOutTime: te.clockOutTime?.toISOString() || null,
-        clockOutLocation: te.clockOutLatitude && te.clockOutLongitude ? { lat: te.clockOutLatitude, lng: te.clockOutLongitude } : null,
-        checkOutPhotoUrl: te.checkOutPhotoUrl,
-        status: te.status,
-        validationStatus: te.validationStatus,
-      }))
+      const staffCashPayments = cashPayments.filter(p => p.processedById === sv.staffId && p.venueId === sv.venueId)
+      const allTimeEntries = staffTimeEntries.map(te => {
+        // Calculate cash sales for this specific time entry (clockIn → clockOut)
+        const teStartMs = te.clockInTime.getTime()
+        const teEndMs = te.clockOutTime ? te.clockOutTime.getTime() : Infinity
+        const matchingPayments = staffCashPayments.filter(p => p.createdAt.getTime() >= teStartMs && p.createdAt.getTime() <= teEndMs)
+        const teCashSales = matchingPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+        // DEBUG: remove after verifying
+        logger.info(
+          `[cashSales] ${fullName} | TE ${te.id} | clockIn=${te.clockInTime.toISOString()} clockOut=${te.clockOutTime?.toISOString() ?? 'null'} | staffPayments=${staffCashPayments.length} matched=${matchingPayments.length} amount=${teCashSales}`,
+        )
+
+        return {
+          id: te.id,
+          clockInTime: te.clockInTime.toISOString(),
+          clockInLocation: te.clockInLatitude && te.clockInLongitude ? { lat: te.clockInLatitude, lng: te.clockInLongitude } : null,
+          checkInPhotoUrl: te.checkInPhotoUrl,
+          clockOutTime: te.clockOutTime?.toISOString() || null,
+          clockOutLocation: te.clockOutLatitude && te.clockOutLongitude ? { lat: te.clockOutLatitude, lng: te.clockOutLongitude } : null,
+          checkOutPhotoUrl: te.checkOutPhotoUrl,
+          depositPhotoUrl: te.depositPhotoUrl,
+          status: te.status,
+          validationStatus: te.validationStatus,
+          cashSales: teCashSales,
+        }
+      })
 
       // Calculate break time (time between clock out of one entry and clock in of next)
       let breakMinutes = 0
@@ -2013,6 +2120,7 @@ class OrganizationDashboardService {
         break: mostRecentEntry?.status === 'ON_BREAK',
         breakMinutes,
         sales: salesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
+        cashSales: cashSalesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
         attendancePercent: attendanceByStaff[sv.staffId] || 0,
         // All time entries for the day
         allTimeEntries,
