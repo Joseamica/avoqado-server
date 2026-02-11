@@ -61,6 +61,12 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       // Allow requests with no origin (like mobile apps, curl, postman)
       if (!origin || allowedOrigins.indexOf(origin) !== -1) {
         callback(null, true)
+      } else if (env === 'development' && origin && /^https?:\/\/[^/]+\.trycloudflare\.com(?::\d+)?$/i.test(origin)) {
+        // Allow Cloudflare quick tunnels in local development
+        callback(null, true)
+      } else if (env === 'development' && origin && /^https?:\/\/[^/]+\.ngrok-free\.dev(?::\d+)?$/i.test(origin)) {
+        // Allow ngrok tunnels in local development
+        callback(null, true)
       } else if (origin && /\.(?:demo-)?avoqado-web-dashboard.*\.pages\.dev$/.test(origin)) {
         // Allow Cloudflare Pages preview deployments (all environments)
         callback(null, true)

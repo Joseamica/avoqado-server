@@ -10,6 +10,78 @@ import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 
 /**
+ * Simple deep merge for module config objects.
+ * Matches the behavior of ModuleService.deepMerge for consistency.
+ */
+function deepMergeConfig(target: Record<string, any>, source: Record<string, any>): Record<string, any> {
+  const result = { ...target }
+  for (const key in source) {
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+      result[key] = deepMergeConfig((result[key] as Record<string, any>) || {}, source[key] as Record<string, any>)
+    } else {
+      result[key] = source[key]
+    }
+  }
+  return result
+}
+
+/**
+ * Enrich venues with organization-level inherited modules.
+ * When a module is enabled at org level (OrganizationModule) but the venue
+ * has no explicit VenueModule record for it, the module appears as inherited.
+ *
+ * Resolution: VenueModule (explicit, any state) → OrganizationModule (inherited) → absent
+ */
+async function enrichVenuesWithOrgModules(venues: Array<{ id?: string; organizationId?: string | null; modules?: any[] }>): Promise<void> {
+  const orgIds = [...new Set(venues.map(v => v.organizationId).filter((id): id is string => !!id))]
+  if (orgIds.length === 0) return
+
+  const orgModules = await prisma.organizationModule.findMany({
+    where: {
+      organizationId: { in: orgIds },
+      enabled: true,
+      module: { active: true },
+    },
+    select: {
+      organizationId: true,
+      config: true,
+      module: { select: { code: true, name: true, defaultConfig: true } },
+    },
+  })
+
+  // Group by orgId for O(1) lookup
+  const byOrg = new Map<string, typeof orgModules>()
+  for (const om of orgModules) {
+    if (!byOrg.has(om.organizationId)) byOrg.set(om.organizationId, [])
+    byOrg.get(om.organizationId)!.push(om)
+  }
+
+  for (const venue of venues) {
+    if (!venue.organizationId) continue
+    const inherited = byOrg.get(venue.organizationId)
+    if (!inherited) continue
+
+    // Existing module codes (including disabled overrides) prevent inheritance
+    const existingCodes = new Set((venue.modules || []).map((m: any) => m.module?.code).filter(Boolean))
+
+    for (const om of inherited) {
+      if (!existingCodes.has(om.module.code)) {
+        if (!venue.modules) venue.modules = []
+        // Deep merge: Module.defaultConfig + OrganizationModule.config (consistent with ModuleService)
+        const baseConfig = (om.module.defaultConfig as Record<string, any>) || {}
+        const orgConfig = (om.config as Record<string, any>) || {}
+        const mergedConfig = deepMergeConfig(baseConfig, orgConfig)
+        venue.modules.push({
+          enabled: true,
+          config: mergedConfig,
+          module: { code: om.module.code, name: om.module.name },
+        })
+      }
+    }
+  }
+}
+
+/**
  * Endpoint para verificar el estado de autenticación de un usuario.
  * Adaptado para el nuevo schema de Avoqado con Staff y StaffVenue.
  *
@@ -170,6 +242,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           organization: venue.organization,
           permissions: DEFAULT_PERMISSIONS[StaffRole.SUPERADMIN] || [],
         }))
+
+        // Enrich with org-level inherited modules
+        await enrichVenuesWithOrgModules(masterVenues)
 
         // Disable caching for sensitive auth status data
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
@@ -469,6 +544,10 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         }
       } // Close the else block for ownerOrgIds.length > 0
     }
+
+    // Enrich venues with org-level inherited modules (e.g., WHITE_LABEL_DASHBOARD at org level)
+    await enrichVenuesWithOrgModules(directVenues)
+    await enrichVenuesWithOrgModules(allVenues)
 
     // Determine highest role (World-Class Pattern: Detect OWNER even without venues during onboarding)
     let highestRole = staff.venues.length > 0 ? staff.venues[0].role : null

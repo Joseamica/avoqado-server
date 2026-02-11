@@ -17,6 +17,11 @@ const moduleCodeSchema = z.object({
   params: z.object({
     moduleCode: z.string().min(1, 'Module code is required'),
   }),
+  query: z
+    .object({
+      grouped: z.enum(['true', 'false']).optional(),
+    })
+    .optional(),
 })
 
 const venueIdSchema = z.object({
@@ -79,6 +84,13 @@ const updateConfigSchema = z.object({
   }),
 })
 
+const deleteVenueOverrideSchema = z.object({
+  body: z.object({
+    venueId: z.string().cuid('ID de sucursal inválido'),
+    moduleCode: z.string().min(1, 'El código de módulo es requerido'),
+  }),
+})
+
 // Routes
 
 /**
@@ -124,6 +136,14 @@ router.post('/disable', validateRequest(disableModuleSchema), moduleController.d
  * @note    MUST be defined BEFORE /:moduleId to avoid route conflict
  */
 router.patch('/config', validateRequest(updateConfigSchema), moduleController.updateModuleConfig)
+
+/**
+ * @route   DELETE /api/v1/dashboard/superadmin/modules/venue-override
+ * @desc    Delete a VenueModule override so venue falls back to org-level inheritance
+ * @access  Superadmin only
+ * @note    MUST be defined BEFORE /:moduleId to avoid route conflict
+ */
+router.delete('/venue-override', validateRequest(deleteVenueOverrideSchema), moduleController.deleteVenueModuleOverride)
 
 /**
  * @route   PATCH /api/v1/dashboard/superadmin/modules/:moduleId
