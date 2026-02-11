@@ -8,7 +8,7 @@ import * as staffService from '../../services/superadmin/staff.superadmin.servic
 
 export async function listStaff(req: Request, res: Response, next: NextFunction) {
   try {
-    const { page, pageSize, search, active, organizationId, venueId } = req.query as any
+    const { page, pageSize, search, active, organizationId, venueId, hasOrganization, hasVenue } = req.query as any
 
     const result = await staffService.listStaff({
       page: Number(page) || 1,
@@ -17,6 +17,8 @@ export async function listStaff(req: Request, res: Response, next: NextFunction)
       active: active as 'true' | 'false' | 'all' | undefined,
       organizationId: organizationId as string | undefined,
       venueId: venueId as string | undefined,
+      hasOrganization: hasOrganization === 'true',
+      hasVenue: hasVenue === 'true',
     })
 
     logger.info(`[STAFF-SUPERADMIN] Listed ${result.staff.length} staff (page ${result.pagination.page}/${result.pagination.totalPages})`)

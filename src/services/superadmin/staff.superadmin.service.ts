@@ -15,6 +15,8 @@ interface ListStaffParams {
   active?: 'true' | 'false' | 'all'
   organizationId?: string
   venueId?: string
+  hasOrganization?: boolean
+  hasVenue?: boolean
 }
 
 interface CreateStaffData {
@@ -43,7 +45,7 @@ interface UpdateStaffData {
 // ===========================================
 
 export async function listStaff(params: ListStaffParams) {
-  const { page, pageSize, search, active, organizationId, venueId } = params
+  const { page, pageSize, search, active, organizationId, venueId, hasOrganization, hasVenue } = params
   const skip = (page - 1) * pageSize
 
   // Build where clause
@@ -65,12 +67,16 @@ export async function listStaff(params: ListStaffParams) {
     where.organizations = {
       some: { organizationId, isActive: true },
     }
+  } else if (hasOrganization) {
+    where.organizations = { some: { isActive: true } }
   }
 
   if (venueId) {
     where.venues = {
       some: { venueId, active: true },
     }
+  } else if (hasVenue) {
+    where.venues = { some: { active: true } }
   }
 
   const [staff, total] = await Promise.all([
