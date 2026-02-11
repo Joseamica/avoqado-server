@@ -55,6 +55,13 @@ router.get('/:staffId', validateRequest(staffIdParamSchema), staffController.get
  */
 router.patch('/:staffId', validateRequest(updateStaffSchema), staffController.updateStaff)
 
+/**
+ * @route   DELETE /api/v1/dashboard/superadmin/staff/:staffId
+ * @desc    Hard delete a staff user (cascades org/venue memberships)
+ * @access  Superadmin only
+ */
+router.delete('/:staffId', validateRequest(staffIdParamSchema), staffController.deleteStaff)
+
 // ===========================================
 // ORGANIZATION MEMBERSHIP
 // ===========================================

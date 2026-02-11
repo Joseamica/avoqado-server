@@ -36,6 +36,9 @@ jest.mock('../../../src/utils/prismaClient', () => {
           staffOrganization: {
             create: staffOrganizationCreate,
           },
+          onboardingProgress: {
+            create: jest.fn().mockResolvedValue({}),
+          },
         }
         return cb(tx)
       }),

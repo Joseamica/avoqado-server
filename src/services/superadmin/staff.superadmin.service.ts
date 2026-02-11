@@ -552,6 +552,30 @@ export async function removeFromVenue(staffId: string, venueId: string) {
 }
 
 // ===========================================
+// DELETE STAFF (hard delete — cascades StaffVenue, StaffOrganization)
+// ===========================================
+
+export async function deleteStaff(staffId: string, currentUserId: string) {
+  if (staffId === currentUserId) {
+    const error: any = new Error('No puedes eliminarte a ti mismo')
+    error.statusCode = 400
+    throw error
+  }
+
+  const staff = await prisma.staff.findUnique({ where: { id: staffId } })
+  if (!staff) {
+    const error: any = new Error('Usuario no encontrado')
+    error.statusCode = 404
+    throw error
+  }
+
+  await prisma.staff.delete({ where: { id: staffId } })
+
+  logger.info(`[STAFF-SUPERADMIN] Deleted staff: ${staff.email}`, { staffId })
+  return { success: true }
+}
+
+// ===========================================
 // RESET PASSWORD
 // ===========================================
 

@@ -501,6 +501,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       }
     })
 
+    // V2 wizard detection: if OWNER with no venues, check OnboardingProgress for wizardVersion
+    let wizardVersion: number | null = null
+    if (highestRole === StaffRole.OWNER && enrichedVenues.length === 0) {
+      const primaryOrgId = staff.organizations[0]?.organizationId
+      if (primaryOrgId) {
+        const progress = await prisma.onboardingProgress.findUnique({
+          where: { organizationId: primaryOrgId },
+          select: { wizardVersion: true },
+        })
+        wizardVersion = progress?.wizardVersion ?? null
+      }
+    }
+
     // Formatear respuesta
     const userPayload = {
       id: staff.id,
@@ -512,6 +525,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       phone: staff.phone,
       organizationId: staff.organizations[0]?.organizationId ?? null,
       role: highestRole, // Add explicit role field
+      wizardVersion, // V2 onboarding wizard version (null = legacy/v1, 2 = new setup wizard)
       createdAt: staff.createdAt,
       lastLogin: staff.lastLoginAt,
       venues: enrichedVenues, // Use enriched venues with permissions

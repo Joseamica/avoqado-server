@@ -176,6 +176,25 @@ export async function removeFromVenue(req: Request, res: Response, next: NextFun
 }
 
 // ===========================================
+// DELETE STAFF
+// ===========================================
+
+export async function deleteStaff(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { staffId } = req.params
+    const { userId } = (req as any).authContext
+    const result = await staffService.deleteStaff(staffId, userId)
+    return res.status(200).json(result)
+  } catch (error: any) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message })
+    }
+    logger.error('[STAFF-SUPERADMIN] Error deleting staff', { error })
+    next(error)
+  }
+}
+
+// ===========================================
 // RESET PASSWORD
 // ===========================================
 

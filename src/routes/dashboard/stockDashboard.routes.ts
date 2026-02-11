@@ -6,10 +6,10 @@
  * These routes are WHITE-LABEL SPECIFIC and completely independent
  * from regular dashboard endpoints.
  *
- * Middleware: verifyAccess with requireWhiteLabel + featureCode
+ * Middleware: verifyAccess with requireWhiteLabel
  * - Validates JWT authentication
  * - Ensures WHITE_LABEL_DASHBOARD module is enabled
- * - Checks role-based access to SERIALIZED_STOCK feature
+ * - Role-based access handled by verifyAccess middleware
  */
 import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
@@ -20,13 +20,8 @@ import * as itemCategoryService from '../../services/dashboard/itemCategory.dash
 // mergeParams: true allows access to :venueId from parent route
 const router = Router({ mergeParams: true })
 
-// Feature code for role-based access control
-const FEATURE_CODE = 'SERIALIZED_STOCK'
-
 // Unified middleware for white-label stock routes
-// - requireWhiteLabel: ensures WHITE_LABEL_DASHBOARD module is enabled
-// - featureCode: checks role-based access to the feature
-const whiteLabelStockAccess = [authenticateTokenMiddleware, verifyAccess({ featureCode: FEATURE_CODE, requireWhiteLabel: true })]
+const whiteLabelStockAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true })]
 
 /**
  * GET /dashboard/stock/metrics

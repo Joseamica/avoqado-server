@@ -5,10 +5,10 @@
  * These endpoints fetch organization data based on the venue's organizationId,
  * allowing white-label role-based access control to work properly.
  *
- * Middleware: verifyAccess with requireWhiteLabel + featureCode
+ * Middleware: verifyAccess with requireWhiteLabel
  * - Validates JWT authentication
  * - Ensures WHITE_LABEL_DASHBOARD module is enabled
- * - Checks role-based access to STORES_ANALYSIS feature
+ * - Role-based access handled by verifyAccess middleware
  */
 import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
@@ -23,11 +23,8 @@ import prisma from '../../utils/prismaClient'
 // mergeParams: true allows access to :venueId from parent route
 const router = Router({ mergeParams: true })
 
-// Feature code for role-based access control
-const FEATURE_CODE = 'STORES_ANALYSIS'
-
 // Unified middleware for white-label stores analysis routes
-const whiteLabelAccess = [authenticateTokenMiddleware, verifyAccess({ featureCode: FEATURE_CODE, requireWhiteLabel: true })]
+const whiteLabelAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true })]
 
 /**
  * Helper to get organizationId from venueId

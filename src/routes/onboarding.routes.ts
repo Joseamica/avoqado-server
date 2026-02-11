@@ -24,6 +24,9 @@ import {
   UpdateStep8Schema,
   CompleteOnboardingSchema,
   GetMenuTemplateSchema,
+  V2StepParamsSchema,
+  V2AcceptTermsSchema,
+  V2CompleteSchema,
 } from '../schemas/onboarding.schema'
 
 const router = express.Router()
@@ -754,6 +757,50 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(CompleteOnboardingSchema),
   onboardingController.completeOnboarding,
+)
+
+/**
+ * GET /api/v1/onboarding/status
+ * Get current user's onboarding status (org ID + progress + v2 setup data)
+ * Used by the V2 SetupWizard to restore state on mount.
+ */
+router.get('/status', authenticateTokenMiddleware, onboardingController.getOnboardingStatus)
+
+// =============================================
+// V2 Setup Wizard Routes (Square-style)
+// =============================================
+
+/**
+ * PUT /api/v1/onboarding/organizations/:organizationId/v2/step/:stepNumber
+ * Save V2 step data (generic handler, validation per step is light)
+ */
+router.put(
+  '/organizations/:organizationId/v2/step/:stepNumber',
+  authenticateTokenMiddleware,
+  validateRequest(V2StepParamsSchema),
+  onboardingController.saveV2Step,
+)
+
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/accept-terms
+ * Record terms and privacy acceptance
+ */
+router.post(
+  '/organizations/:organizationId/v2/accept-terms',
+  authenticateTokenMiddleware,
+  validateRequest(V2AcceptTermsSchema),
+  onboardingController.acceptV2Terms,
+)
+
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/complete
+ * Complete V2 onboarding and create venue
+ */
+router.post(
+  '/organizations/:organizationId/v2/complete',
+  authenticateTokenMiddleware,
+  validateRequest(V2CompleteSchema),
+  onboardingController.completeV2Onboarding,
 )
 
 export default router

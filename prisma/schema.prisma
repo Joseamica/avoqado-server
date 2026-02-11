@@ -769,6 +769,14 @@ model OnboardingProgress {
   // Step 8: Payment configuration (CLABE)
   step8_paymentInfo Json? // {clabe, bankName, accountHolder}
 
+  // V2 Setup Wizard (Square-style onboarding)
+  wizardVersion       Int       @default(1)
+  v2SetupData         Json?     // All v2 step data as structured JSON
+  termsAcceptedAt     DateTime?
+  privacyAcceptedAt   DateTime?
+  termsVersion        String?   // e.g. "2026-02-10"
+  termsIpAddress      String?
+
   // Metadata
   startedAt   DateTime  @default(now())
   completedAt DateTime?

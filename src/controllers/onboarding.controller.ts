@@ -210,6 +210,8 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
         step5_teamInvites: progress.step5_teamInvites,
         step6_selectedFeatures: progress.step6_selectedFeatures,
         step7_kycDocuments: progress.step7_kycDocuments,
+        wizardVersion: progress.wizardVersion,
+        v2SetupData: progress.v2SetupData,
         // Don't expose step8_paymentInfo for security (contains CLABE)
       },
     })
@@ -711,6 +713,215 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
     })
   } catch (error) {
     logger.error('Error completing onboarding:', error)
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/onboarding/status
+ *
+ * Returns the current user's primary organization and onboarding progress.
+ * Used by the V2 SetupWizard to restore state and get orgId.
+ */
+export async function getOnboardingStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const staffId = (req as any).user?.sub || (req as any).user?.id
+    if (!staffId) {
+      res.status(401).json({ message: 'Not authenticated' })
+      return
+    }
+
+    // Find the user's primary organization
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { staffId, isPrimary: true, isActive: true },
+      include: {
+        organization: {
+          select: { id: true, name: true, slug: true, onboardingCompletedAt: true },
+        },
+      },
+    })
+
+    if (!staffOrg?.organization) {
+      res.status(404).json({ message: 'No organization found' })
+      return
+    }
+
+    const org = staffOrg.organization
+
+    // Get onboarding progress
+    const progress = await prisma.onboardingProgress.findUnique({
+      where: { organizationId: org.id },
+    })
+
+    res.status(200).json({
+      organization: org,
+      onboardingProgress: progress,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// =============================================
+// V2 Setup Wizard Controllers
+// =============================================
+
+/**
+ * PUT /api/v1/onboarding/organizations/:organizationId/v2/step/:stepNumber
+ *
+ * Saves V2 step data
+ */
+export async function saveV2Step(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId, stepNumber } = req.params
+    const stepData = req.body
+
+    const progress = await onboardingProgressService.saveV2StepData(organizationId, parseInt(stepNumber, 10), stepData)
+
+    logger.info(`V2 Step ${stepNumber} saved for organization: ${organizationId}`)
+
+    res.status(200).json({
+      success: true,
+      message: `Step ${stepNumber} saved successfully`,
+      currentStep: progress.currentStep,
+    })
+  } catch (error) {
+    logger.error('Error saving V2 step:', error)
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/accept-terms
+ *
+ * Records terms acceptance
+ */
+export async function acceptV2Terms(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId } = req.params
+    const { termsVersion } = req.body
+    const ipAddress = req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown'
+
+    const progress = await onboardingProgressService.acceptV2Terms(organizationId, termsVersion, ipAddress)
+
+    logger.info(`V2 Terms accepted for organization: ${organizationId}`)
+
+    res.status(200).json({
+      success: true,
+      message: 'Terms accepted successfully',
+      currentStep: progress.currentStep,
+    })
+  } catch (error) {
+    logger.error('Error accepting V2 terms:', error)
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/complete
+ *
+ * Completes V2 onboarding — creates venue from v2SetupData
+ * Uses same optimistic-locking pattern as v1 to prevent double venue creation.
+ */
+export async function completeV2Onboarding(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId } = req.params
+    const authContext = (req as any).authContext
+
+    if (!authContext || !authContext.userId) {
+      throw new BadRequestError('User authentication required')
+    }
+
+    // Extract and validate v2 setup data
+    const { businessInfo, bankInfo } = await onboardingProgressService.getV2SetupDataForCompletion(organizationId)
+
+    // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
+    // This prevents race condition where double-click creates 2 venues
+    const lockResult = await prisma.onboardingProgress.updateMany({
+      where: {
+        organizationId,
+        completedAt: null, // Only update if not already completed
+      },
+      data: {
+        completedAt: new Date(),
+        currentStep: 7,
+      },
+    })
+
+    // If no rows updated, another request already completed onboarding
+    if (lockResult.count === 0) {
+      const existingVenue = await prisma.venue.findFirst({
+        where: { organizationId },
+        select: { id: true, slug: true, name: true, status: true },
+      })
+
+      if (existingVenue) {
+        logger.info(
+          `⚠️ V2 Onboarding already completed (race condition prevented) for organization ${organizationId}, returning existing venue ${existingVenue.id}`,
+        )
+        res.status(200).json({
+          success: true,
+          message: 'Setup already completed',
+          venue: existingVenue,
+        })
+        return
+      }
+
+      // Rare edge case: completedAt is set but no venue exists — reset lock
+      logger.warn(`⚠️ V2 Onboarding marked complete but no venue found for organization ${organizationId} - resetting lock`)
+      await prisma.onboardingProgress.update({
+        where: { organizationId },
+        data: { completedAt: null },
+      })
+      throw new BadRequestError('Previous setup attempt failed. Please try again.')
+    }
+
+    logger.info(`🔒 Acquired V2 onboarding lock for organization ${organizationId}`)
+
+    // Prepare venue creation input (V2 is always REAL, no demo mode)
+    const venueInput: venueCreationService.CreateVenueInput = {
+      organizationId,
+      userId: authContext.userId,
+      onboardingType: 'REAL',
+      businessInfo,
+      paymentInfo: bankInfo?.clabe
+        ? {
+            clabe: bankInfo.clabe,
+            bankName: bankInfo.bankName || '',
+            accountHolder: bankInfo.accountHolder || '',
+          }
+        : undefined,
+      selectedFeatures: [],
+    }
+
+    // Create venue — if this fails, release the lock
+    let result: Awaited<ReturnType<typeof venueCreationService.createVenueFromOnboarding>>
+    try {
+      result = await venueCreationService.createVenueFromOnboarding(venueInput)
+    } catch (venueError) {
+      logger.error(`❌ V2 Venue creation failed for organization ${organizationId} - rolling back lock`, venueError)
+      await prisma.onboardingProgress.update({
+        where: { organizationId },
+        data: { completedAt: null },
+      })
+      throw venueError
+    }
+
+    // Mark organization as onboarding completed
+    await prisma.organization.update({
+      where: { id: organizationId },
+      data: { onboardingCompletedAt: new Date() },
+    })
+
+    logger.info(`✅ V2 Onboarding completed for organization ${organizationId}, venue: ${result.venue.id} (${result.venue.slug})`)
+
+    res.status(201).json({
+      success: true,
+      message: 'Setup completed successfully',
+      venue: result.venue,
+    })
+  } catch (error) {
+    logger.error('Error completing V2 onboarding:', error)
     next(error)
   }
 }
