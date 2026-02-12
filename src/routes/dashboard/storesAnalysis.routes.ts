@@ -18,6 +18,7 @@ import { commandCenterService } from '../../services/command-center/commandCente
 import { serializedInventoryService } from '../../services/serialized-inventory/serializedInventory.service'
 import { moduleService, MODULE_CODES } from '../../services/modules/module.service'
 import * as salesGoalService from '../../services/dashboard/commission/sales-goal.service'
+import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
 import prisma from '../../utils/prismaClient'
 
 // mergeParams: true allows access to :venueId from parent route
@@ -1080,8 +1081,8 @@ router.get('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res: 
       return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
     }
 
-    const goals = await salesGoalService.getSalesGoals(storeId)
-    res.json({ success: true, data: goals })
+    const resolvedGoals = await goalResolutionService.getEffectiveGoals(storeId)
+    res.json({ success: true, data: resolvedGoals })
   } catch (error) {
     next(error)
   }
@@ -1172,6 +1173,83 @@ router.delete('/store/:storeId/goals/:goalId', whiteLabelAccess, async (req: Req
 
     await salesGoalService.deleteSalesGoal(storeId, goalId)
     res.json({ success: true, data: { message: 'Goal deleted' } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// =============================================================================
+// ORG-LEVEL GOAL ENDPOINTS
+// Organization-level goal defaults that cascade to all venues in the org.
+// Requires goals:org-manage permission (OWNER-only by default).
+// =============================================================================
+
+const orgGoalAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true, permission: 'goals:org-manage' })]
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/org-goals
+ * Returns: All org-level sales goal configs for this venue's organization
+ */
+router.get('/org-goals', orgGoalAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const goals = await goalResolutionService.getOrgGoals(venueId)
+    res.json({ success: true, data: goals })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * POST /dashboard/venues/:venueId/stores-analysis/org-goals
+ * Creates a new org-level sales goal
+ */
+router.post('/org-goals', orgGoalAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { goal, goalType, period } = req.body
+    const created = await goalResolutionService.createOrgGoal(venueId, {
+      goal: Number(goal),
+      goalType,
+      period,
+    })
+    res.status(201).json({ success: true, data: created })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/venues/:venueId/stores-analysis/org-goals/:goalId
+ * Updates an existing org-level sales goal
+ */
+router.patch('/org-goals/:goalId', orgGoalAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { goalId } = req.params
+    const { goal, goalType, period, active } = req.body
+    const updated = await goalResolutionService.updateOrgGoal(venueId, goalId, {
+      ...(goal !== undefined && { goal: Number(goal) }),
+      ...(goalType !== undefined && { goalType }),
+      ...(period !== undefined && { period }),
+      ...(active !== undefined && { active }),
+    })
+    res.json({ success: true, data: updated })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * DELETE /dashboard/venues/:venueId/stores-analysis/org-goals/:goalId
+ * Deletes an org-level sales goal
+ */
+router.delete('/org-goals/:goalId', orgGoalAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { goalId } = req.params
+    await goalResolutionService.deleteOrgGoal(venueId, goalId)
+    res.json({ success: true, data: { message: 'Org goal deleted' } })
   } catch (error) {
     next(error)
   }

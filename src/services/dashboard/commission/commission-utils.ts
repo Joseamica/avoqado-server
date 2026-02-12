@@ -25,7 +25,7 @@ export interface RoleRates {
 
 export interface CommissionConfigWithRelations {
   id: string
-  venueId: string
+  venueId: string | null
   name: string
   priority: number
   recipient: CommissionRecipient
@@ -110,6 +110,7 @@ export async function findActiveCommissionConfig(
   venueId: string,
   effectiveDate: Date = new Date(),
 ): Promise<CommissionConfigWithRelations | null> {
+  // 1. Check venue-level configs first
   const config = await prisma.commissionConfig.findFirst({
     where: {
       venueId,
@@ -132,19 +133,57 @@ export async function findActiveCommissionConfig(
     },
   })
 
-  if (!config) {
-    logger.debug('No active commission config found', { venueId, effectiveDate })
-    return null
+  if (config) {
+    const roleRates = config.roleRates as RoleRates | null
+    return {
+      ...config,
+      roleRates,
+      tiers: config.tiers as CommissionTierData[],
+    }
   }
 
-  // Parse roleRates JSON
-  const roleRates = config.roleRates as RoleRates | null
+  // 2. Fallback: check org-level configs
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { organizationId: true },
+  })
 
-  return {
-    ...config,
-    roleRates,
-    tiers: config.tiers as CommissionTierData[],
+  if (venue?.organizationId) {
+    const orgConfig = await prisma.commissionConfig.findFirst({
+      where: {
+        orgId: venue.organizationId,
+        venueId: null, // Org-level configs have no venueId
+        active: true,
+        deletedAt: null,
+        effectiveFrom: { lte: effectiveDate },
+        OR: [
+          { effectiveTo: null },
+          { effectiveTo: { gte: effectiveDate } },
+        ],
+      },
+      include: {
+        tiers: {
+          where: { active: true },
+          orderBy: { tierLevel: 'asc' },
+        },
+      },
+      orderBy: {
+        priority: 'desc',
+      },
+    })
+
+    if (orgConfig) {
+      const roleRates = orgConfig.roleRates as RoleRates | null
+      return {
+        ...orgConfig,
+        roleRates,
+        tiers: orgConfig.tiers as CommissionTierData[],
+      }
+    }
   }
+
+  logger.debug('No active commission config found (venue or org)', { venueId, effectiveDate })
+  return null
 }
 
 /**

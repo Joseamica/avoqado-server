@@ -10,9 +10,11 @@
  * - Staff self-service (view own commissions)
  */
 
-import express from 'express'
+import express, { Request, Response, NextFunction } from 'express'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as controller from '@/controllers/dashboard/commission.dashboard.controller'
+import * as commissionResolution from '@/services/dashboard/commission/commission-resolution.service'
+import * as payoutResolution from '@/services/dashboard/commission/payout-resolution.service'
 
 const router = express.Router()
 
@@ -537,5 +539,184 @@ router.patch('/venues/:venueId/goals/:goalId', checkPermission('commissions:upda
  * @permission commissions:delete
  */
 router.delete('/venues/:venueId/goals/:goalId', checkPermission('commissions:delete'), controller.deleteSalesGoal)
+
+// ==========================================
+// ORG-LEVEL COMMISSION CONFIGS
+// Routes: /api/v1/dashboard/commissions/venues/:venueId/org-configs
+// Requires commissions:org-manage permission (OWNER by default via commissions:*)
+// ==========================================
+
+/**
+ * GET /venues/:venueId/org-configs
+ * List all org-level commission configs
+ */
+router.get(
+  '/venues/:venueId/org-configs',
+  checkPermission('commissions:org-manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const configs = await commissionResolution.getOrgCommissionConfigs(venueId)
+      res.json({ data: configs })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /venues/:venueId/effective-configs
+ * Get effective configs (resolved: venue or org fallback) with source
+ */
+router.get(
+  '/venues/:venueId/effective-configs',
+  checkPermission('commissions:read'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const resolved = await commissionResolution.getEffectiveCommissionConfigs(venueId)
+      res.json({ data: resolved })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /venues/:venueId/org-configs
+ * Create org-level commission config
+ */
+router.post(
+  '/venues/:venueId/org-configs',
+  checkPermission('commissions:org-manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const authContext = (req as any).authContext
+      const config = await commissionResolution.createOrgCommissionConfig(venueId, req.body, authContext?.userId)
+      res.status(201).json({ data: config })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * PUT /venues/:venueId/org-configs/:configId
+ * Update org-level commission config
+ */
+router.put(
+  '/venues/:venueId/org-configs/:configId',
+  checkPermission('commissions:org-manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, configId } = req.params
+      const config = await commissionResolution.updateOrgCommissionConfig(venueId, configId, req.body)
+      res.json({ data: config })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * DELETE /venues/:venueId/org-configs/:configId
+ * Soft-delete org-level commission config
+ */
+router.delete(
+  '/venues/:venueId/org-configs/:configId',
+  checkPermission('commissions:org-manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, configId } = req.params
+      const authContext = (req as any).authContext
+      await commissionResolution.deleteOrgCommissionConfig(venueId, configId, authContext?.userId)
+      res.json({ success: true, message: 'Org commission config deleted' })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ==========================================
+// ORG-LEVEL PAYOUT CONFIG
+// Routes: /api/v1/dashboard/commissions/venues/:venueId/org-payout-config
+// ==========================================
+
+/**
+ * GET /venues/:venueId/org-payout-config
+ * Get the org-level payout configuration
+ * @permission commissions:org-manage
+ */
+router.get(
+  '/venues/:venueId/org-payout-config',
+  checkPermission('commissions:org-manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const config = await payoutResolution.getOrgPayoutConfig(venueId)
+      res.json({ data: config })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /venues/:venueId/effective-payout-config
+ * Get the effective payout config (resolved: venue or org fallback)
+ * @permission commissions:read
+ */
+router.get(
+  '/venues/:venueId/effective-payout-config',
+  checkPermission('commissions:read'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const resolved = await payoutResolution.getEffectivePayoutConfig(venueId)
+      res.json({ data: resolved })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * PUT /venues/:venueId/org-payout-config
+ * Create or update the org-level payout configuration (upsert)
+ * @permission commissions:org-manage
+ */
+router.put(
+  '/venues/:venueId/org-payout-config',
+  checkPermission('commissions:org-manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      const config = await payoutResolution.upsertOrgPayoutConfig(venueId, req.body)
+      res.json({ data: config })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * DELETE /venues/:venueId/org-payout-config
+ * Delete the org-level payout configuration
+ * @permission commissions:org-manage
+ */
+router.delete(
+  '/venues/:venueId/org-payout-config',
+  checkPermission('commissions:org-manage'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId } = req.params
+      await payoutResolution.deleteOrgPayoutConfig(venueId)
+      res.json({ success: true, message: 'Org payout config deleted' })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
 
 export default router

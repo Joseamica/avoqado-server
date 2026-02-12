@@ -297,6 +297,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'commissions:payout': ['commissions:read', 'commissions:approve', 'commissions:payout'],
 
   // ===========================
+  // ORG-LEVEL MANAGEMENT
+  // ===========================
+  'goals:org-manage': ['goals:org-manage', 'commissions:read'], // Manage org-level sales goals
+  'commissions:org-manage': ['commissions:org-manage', 'commissions:read', 'teams:read'], // Manage org-level commission configs
+
+  // ===========================
   // COUPONS (Phase 2)
   // ===========================
   'coupons:read': ['coupons:read', 'discounts:read'],
@@ -711,6 +717,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
     'serialized-inventory:create', // Can register (Alta de Productos)
+    // Org-level management
+    'goals:org-manage', // Manage org-level sales goal defaults
     // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
   ],
 
@@ -1066,7 +1074,10 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'commissions:view_own',
     'commissions:approve',
     'commissions:payout',
+    'commissions:org-manage',
   ],
+  // Org-level goals management
+  goals: ['goals:org-manage'],
 }
 
 /**
