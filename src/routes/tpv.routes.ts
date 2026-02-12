@@ -5378,6 +5378,7 @@ router.get('/sales-goal', authenticateTokenMiddleware, async (req: Request, res:
       return res.status(200).json({
         salesGoal: {
           goal: salesGoal.goal.toString(),
+          goalType: salesGoal.goalType || 'AMOUNT',
           period: salesGoal.period,
           currentSales: salesGoal.currentSales.toString(),
           staffId: salesGoal.staffId,

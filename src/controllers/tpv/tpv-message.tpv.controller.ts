@@ -39,16 +39,9 @@ export async function acknowledgeMessage(req: Request, res: Response, next: Next
     const terminalId = (req as any).user?.terminalId
     const staffId = req.body.staffId
 
-    if (!terminalId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing terminalId in auth context',
-      })
-    }
-
     logger.info(`📨 TPV message acknowledge via REST: ${messageId}`, {
       messageId,
-      terminalId,
+      terminalId: terminalId || 'N/A',
       staffId,
     })
 
@@ -72,16 +65,9 @@ export async function dismissMessage(req: Request, res: Response, next: NextFunc
     const { messageId } = req.params
     const terminalId = (req as any).user?.terminalId
 
-    if (!terminalId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing terminalId in auth context',
-      })
-    }
-
     logger.info(`📨 TPV message dismiss via REST: ${messageId}`, {
       messageId,
-      terminalId,
+      terminalId: terminalId || 'N/A',
     })
 
     const delivery = await tpvMessageService.dismissMessage(messageId, terminalId)
