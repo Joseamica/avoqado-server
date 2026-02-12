@@ -5,7 +5,7 @@
 import './config/env'
 
 import http from 'http'
-import app from './app' // The configured Express application
+import app, { getAppCpuPercent, getAppActiveConnections, getAppEventLoopHistogram } from './app' // The configured Express application
 import logger from './config/logger'
 import { PORT, NODE_ENV, DATABASE_URL } from './config/env'
 import pgPool from './config/database' // Import pgPool for graceful shutdown
@@ -281,7 +281,12 @@ const startApplication = async (retries = 3) => {
       })
 
       // Start server metrics collection (health monitoring)
-      startMetricsCollection(httpServer)
+      // Wire app.ts live monitors → metrics service
+      startMetricsCollection({
+        cpuPercentFn: getAppCpuPercent,
+        activeConnectionsFn: getAppActiveConnections,
+        eventLoopHistogramFn: getAppEventLoopHistogram,
+      })
 
       // Initialize Socket.io server after HTTP server starts
       // DEMO MODE: Skip Socket.IO to save memory on free tier deployments

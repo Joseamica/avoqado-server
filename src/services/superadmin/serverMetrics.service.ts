@@ -1,4 +1,3 @@
-import os from 'os'
 import { monitorEventLoopDelay, IntervalHistogram } from 'perf_hooks'
 import logger from '../../config/logger'
 
@@ -9,36 +8,31 @@ export interface MetricsSnapshot {
   uptime: number
   memory: {
     rss: number
-    heapTotal: number
+    rssMb: number
     heapUsed: number
+    heapTotal: number
+    heapUsedMb: number
     external: number
     arrayBuffers: number
+    rssPercent: number
+    limitMb: number
   }
   cpu: {
-    user: number
-    system: number
-    percentEstimate: number
-  }
-  os: {
-    loadAvg: number[]
-    totalMemory: number
-    freeMemory: number
-    cpus: number
+    percent: number
+    limitCores: number
   }
   eventLoop: {
     lagMs: number
+    lagP99Ms: number
+    lagMaxMs: number
   }
-  requests: {
-    activeConnections: number
-  }
-  limits: {
-    memoryLimitMb: number
-    cpuLimit: number
+  connections: {
+    active: number
   }
 }
 
 export interface Alert {
-  type: 'memory' | 'heap' | 'eventLoop' | 'cpu'
+  type: 'memory' | 'eventLoop' | 'cpu'
   severity: 'warning' | 'critical'
   message: string
   value: number
@@ -51,92 +45,56 @@ export interface Alert {
 const MAX_HISTORY_SIZE = 240 // 2 hours at 30s intervals
 const COLLECTION_INTERVAL_MS = 30_000
 
-// Alert thresholds
-const ALERT_MEMORY_PCT = 80
-const ALERT_HEAP_PCT = 85
+// Alert thresholds (container-meaningful only)
+const ALERT_MEMORY_PCT = 80 // RSS vs MEMORY_LIMIT_MB
 const ALERT_EVENT_LOOP_MS = 100
-const ALERT_CPU_PCT = 90
+const ALERT_CPU_PCT = 80 // CPU % relative to container limit
 
 // --- State ---
 
 const history: MetricsSnapshot[] = []
 let collectionInterval: NodeJS.Timeout | null = null
-let connectionInterval: NodeJS.Timeout | null = null
 let histogram: IntervalHistogram | null = null
-let previousCpuUsage: NodeJS.CpuUsage | null = null
-let previousCpuTime: number = 0
-let activeConnectionCount = 0
+
+// These will be set by startMetricsCollection to read from app.ts monitoring
+let getCpuPercent: () => number = () => 0
+let getActiveConnections: () => number = () => 0
+let getEventLoopHisto: () => IntervalHistogram | null = () => histogram
 
 // --- Helpers ---
 
-function getEventLoopLagMs(): number {
-  if (!histogram) return 0
-  // mean is in nanoseconds
-  return histogram.mean / 1e6
-}
-
-function getCpuPercentEstimate(): number {
-  const currentUsage = process.cpuUsage()
-  const currentTime = Date.now()
-
-  if (!previousCpuUsage || previousCpuTime === 0) {
-    previousCpuUsage = currentUsage
-    previousCpuTime = currentTime
-    return 0
-  }
-
-  const elapsedMs = currentTime - previousCpuTime
-  if (elapsedMs === 0) return 0
-
-  const userDiff = currentUsage.user - previousCpuUsage.user
-  const systemDiff = currentUsage.system - previousCpuUsage.system
-
-  // cpuUsage is in microseconds, elapsedMs in milliseconds
-  // (userDiff + systemDiff) microseconds / (elapsedMs * 1000) microseconds * 100 = percentage
-  const cpuPercent = ((userDiff + systemDiff) / (elapsedMs * 1000)) * 100
-
-  previousCpuUsage = currentUsage
-  previousCpuTime = currentTime
-
-  return Math.min(Math.round(cpuPercent * 100) / 100, 100)
-}
-
 function collectSnapshot(): MetricsSnapshot {
   const mem = process.memoryUsage()
-  const cpuUsage = process.cpuUsage()
-  const memoryLimitMb = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
-  const cpuLimit = parseFloat(process.env.CPU_LIMIT || '0.5')
+  const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
+  const CPU_LIMIT = parseFloat(process.env.CPU_LIMIT || '0.5')
+
+  const histo = getEventLoopHisto()
 
   return {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     memory: {
       rss: mem.rss,
-      heapTotal: mem.heapTotal,
+      rssMb: Math.round(mem.rss / 1024 / 1024),
       heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
       external: mem.external,
       arrayBuffers: mem.arrayBuffers,
+      rssPercent: parseFloat(((mem.rss / (MEMORY_LIMIT_MB * 1024 * 1024)) * 100).toFixed(1)),
+      limitMb: MEMORY_LIMIT_MB,
     },
     cpu: {
-      user: cpuUsage.user,
-      system: cpuUsage.system,
-      percentEstimate: getCpuPercentEstimate(),
-    },
-    os: {
-      loadAvg: os.loadavg(),
-      totalMemory: os.totalmem(),
-      freeMemory: os.freemem(),
-      cpus: os.cpus().length,
+      percent: parseFloat(getCpuPercent().toFixed(1)),
+      limitCores: CPU_LIMIT,
     },
     eventLoop: {
-      lagMs: Math.round(getEventLoopLagMs() * 100) / 100,
+      lagMs: histo ? parseFloat((histo.mean / 1e6).toFixed(2)) : 0,
+      lagP99Ms: histo ? parseFloat((histo.percentile(99) / 1e6).toFixed(2)) : 0,
+      lagMaxMs: histo ? parseFloat((histo.max / 1e6).toFixed(2)) : 0,
     },
-    requests: {
-      activeConnections: activeConnectionCount,
-    },
-    limits: {
-      memoryLimitMb,
-      cpuLimit,
+    connections: {
+      active: getActiveConnections(),
     },
   }
 }
@@ -145,52 +103,40 @@ function evaluateAlerts(snapshot: MetricsSnapshot): Alert[] {
   const alerts: Alert[] = []
   const now = snapshot.timestamp
 
-  // Memory alert (RSS vs limit)
-  const memoryUsedMb = snapshot.memory.rss / (1024 * 1024)
-  const memoryPct = (memoryUsedMb / snapshot.limits.memoryLimitMb) * 100
-  if (memoryPct >= ALERT_MEMORY_PCT) {
+  // Memory alert (RSS vs container limit — the only memory metric that matters)
+  if (snapshot.memory.rssPercent >= ALERT_MEMORY_PCT) {
     alerts.push({
       type: 'memory',
-      severity: memoryPct >= 95 ? 'critical' : 'warning',
-      message: `RSS memory at ${memoryPct.toFixed(1)}% of ${snapshot.limits.memoryLimitMb}MB limit`,
-      value: memoryPct,
+      severity: snapshot.memory.rssPercent >= 95 ? 'critical' : 'warning',
+      message: `RSS ${snapshot.memory.rssMb}MB = ${snapshot.memory.rssPercent}% del límite de ${snapshot.memory.limitMb}MB`,
+      value: snapshot.memory.rssPercent,
       threshold: ALERT_MEMORY_PCT,
       timestamp: now,
     })
   }
 
-  // Heap alert
-  const heapPct = (snapshot.memory.heapUsed / snapshot.memory.heapTotal) * 100
-  if (heapPct >= ALERT_HEAP_PCT) {
-    alerts.push({
-      type: 'heap',
-      severity: heapPct >= 95 ? 'critical' : 'warning',
-      message: `Heap usage at ${heapPct.toFixed(1)}% (${(snapshot.memory.heapUsed / 1024 / 1024).toFixed(0)}MB / ${(snapshot.memory.heapTotal / 1024 / 1024).toFixed(0)}MB)`,
-      value: heapPct,
-      threshold: ALERT_HEAP_PCT,
-      timestamp: now,
-    })
-  }
+  // NO heap alert: heapUsed/heapTotal is V8 internal bookkeeping.
+  // heapTotal grows dynamically; 97% usage is normal V8 behavior, not a problem.
 
   // Event loop lag alert
   if (snapshot.eventLoop.lagMs >= ALERT_EVENT_LOOP_MS) {
     alerts.push({
       type: 'eventLoop',
       severity: snapshot.eventLoop.lagMs >= 500 ? 'critical' : 'warning',
-      message: `Event loop lag at ${snapshot.eventLoop.lagMs.toFixed(1)}ms`,
+      message: `Event loop lag ${snapshot.eventLoop.lagMs.toFixed(1)}ms (p99: ${snapshot.eventLoop.lagP99Ms}ms)`,
       value: snapshot.eventLoop.lagMs,
       threshold: ALERT_EVENT_LOOP_MS,
       timestamp: now,
     })
   }
 
-  // CPU alert
-  if (snapshot.cpu.percentEstimate >= ALERT_CPU_PCT) {
+  // CPU alert (relative to container limit, NOT host cores)
+  if (snapshot.cpu.percent >= ALERT_CPU_PCT) {
     alerts.push({
       type: 'cpu',
-      severity: snapshot.cpu.percentEstimate >= 95 ? 'critical' : 'warning',
-      message: `CPU usage at ${snapshot.cpu.percentEstimate.toFixed(1)}%`,
-      value: snapshot.cpu.percentEstimate,
+      severity: snapshot.cpu.percent >= 95 ? 'critical' : 'warning',
+      message: `CPU ${snapshot.cpu.percent.toFixed(1)}% del límite de ${snapshot.cpu.limitCores} cores`,
+      value: snapshot.cpu.percent,
       threshold: ALERT_CPU_PCT,
       timestamp: now,
     })
@@ -215,40 +161,30 @@ export function getActiveAlerts(): Alert[] {
 }
 
 /**
- * Update active connection count. Called from middleware or server.
- */
-export function setActiveConnectionCount(count: number): void {
-  activeConnectionCount = count
-}
-
-/**
  * Start periodic metrics collection. Call once at server startup.
+ * Receives getter functions from app.ts to read the live CPU/connection/histogram values.
  */
-export function startMetricsCollection(httpServer?: import('http').Server): void {
+export function startMetricsCollection(options?: {
+  cpuPercentFn?: () => number
+  activeConnectionsFn?: () => number
+  eventLoopHistogramFn?: () => IntervalHistogram | null
+}): void {
   if (collectionInterval) return // Already started
 
-  // Initialize event loop monitoring
-  try {
-    histogram = monitorEventLoopDelay({ resolution: 20 })
-    histogram.enable()
-  } catch (err) {
-    logger.warn('Could not initialize event loop monitoring:', err)
-  }
+  // Wire up getters from app.ts monitoring
+  if (options?.cpuPercentFn) getCpuPercent = options.cpuPercentFn
+  if (options?.activeConnectionsFn) getActiveConnections = options.activeConnectionsFn
+  if (options?.eventLoopHistogramFn) getEventLoopHisto = options.eventLoopHistogramFn
 
-  // Initialize CPU baseline
-  previousCpuUsage = process.cpuUsage()
-  previousCpuTime = Date.now()
-
-  // Keep connection count updated (runs on a faster cycle)
-  if (httpServer) {
-    const updateConnections = () => {
-      httpServer.getConnections((err, count) => {
-        if (!err) activeConnectionCount = count
-      })
+  // Fallback: initialize own histogram if not provided from app.ts
+  if (!options?.eventLoopHistogramFn) {
+    try {
+      histogram = monitorEventLoopDelay({ resolution: 20 })
+      histogram.enable()
+      getEventLoopHisto = () => histogram
+    } catch (err) {
+      logger.warn('Could not initialize event loop monitoring:', err)
     }
-    updateConnections()
-    connectionInterval = setInterval(updateConnections, 5_000)
-    connectionInterval.unref()
   }
 
   // Collect initial snapshot
@@ -279,10 +215,6 @@ export function stopMetricsCollection(): void {
   if (collectionInterval) {
     clearInterval(collectionInterval)
     collectionInterval = null
-  }
-  if (connectionInterval) {
-    clearInterval(connectionInterval)
-    connectionInterval = null
   }
   if (histogram) {
     histogram.disable()
