@@ -28,6 +28,8 @@ import { tpvCommandExecutionService } from '../../../services/tpv/command-execut
 import { terminalRegistry } from '../terminal-registry'
 // Import terminal payment service for handling payment results
 import { terminalPaymentService } from '../../../services/terminal-payment.service'
+// Import TPV message service for handling message ack/responses from terminals
+import * as tpvMessageService from '../../../services/tpv/tpv-message.service'
 import { RoomController } from '../controllers/room.controller'
 import { BusinessEventController } from '../controllers/businessEvent.controller'
 import { ObservabilityController } from '../controllers/observability.controller'
@@ -357,6 +359,49 @@ export class SocketManager implements ISocketManager {
         if (callback) callback({ success: handled })
       } catch (error) {
         logger.error('Error processing terminal payment result', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
+    })
+
+    // TPV Message Events (Terminal → Server)
+    // Handle message acknowledge/dismiss from terminal
+    socket.on(SocketEventType.TPV_MESSAGE_ACK, async (payload, callback) => {
+      try {
+        const { messageId, terminalId, action, staffId } = payload
+        logger.info('📨 TPV Message ACK received', { messageId, terminalId, action, socketId: socket.id })
+
+        if (action === 'ACKNOWLEDGED') {
+          await tpvMessageService.acknowledgeMessage(messageId, terminalId, staffId)
+        } else if (action === 'DISMISSED') {
+          await tpvMessageService.dismissMessage(messageId, terminalId)
+        }
+
+        if (callback) callback({ success: true, message: 'Message ACK processed' })
+      } catch (error) {
+        logger.error('Error processing TPV message ACK', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
+    })
+
+    // Handle survey response from terminal
+    socket.on(SocketEventType.TPV_MESSAGE_RESPONSE, async (payload, callback) => {
+      try {
+        const { messageId, terminalId, selectedOptions, staffId, staffName } = payload
+        logger.info('📨 TPV Survey response received', { messageId, terminalId, selectedOptions, socketId: socket.id })
+
+        await tpvMessageService.submitResponse(messageId, terminalId, selectedOptions, staffId, staffName)
+
+        if (callback) callback({ success: true, message: 'Survey response processed' })
+      } catch (error) {
+        logger.error('Error processing TPV survey response', {
           socketId: socket.id,
           payload,
           error: error instanceof Error ? error.message : 'Unknown error',

@@ -140,6 +140,14 @@ export enum SocketEventType {
   MENU_CATEGORY_DELETED = 'menu_category_deleted',
   PRODUCT_PRICE_CHANGED = 'product_price_changed',
 
+  // Business Events - TPV Messages (Dashboard → Terminal)
+  TPV_MESSAGE = 'tpv_message', // New message for terminal
+  TPV_MESSAGE_CANCELLED = 'tpv_message_cancelled', // Message cancelled by admin
+
+  // Terminal → Server
+  TPV_MESSAGE_ACK = 'tpv_message_ack', // Terminal acknowledged/dismissed message
+  TPV_MESSAGE_RESPONSE = 'tpv_message_response', // Terminal submitted survey response
+
   // Error Events
   ERROR = 'error',
   RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded',
@@ -540,6 +548,49 @@ export interface ShiftEventPayload extends BaseEventPayload {
   totalOtherPayments?: number
   totalProductsSold?: number
   metadata?: Record<string, any>
+}
+
+/**
+ * TPV Message Event Payloads (Dashboard → Terminal messaging)
+ */
+
+// Server → Terminal: New message
+export interface TpvMessagePayload extends BaseEventPayload {
+  messageId: string
+  type: 'ANNOUNCEMENT' | 'SURVEY' | 'ACTION'
+  title: string
+  body: string
+  priority: 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT'
+  requiresAck: boolean
+  surveyOptions?: string[]
+  surveyMultiSelect: boolean
+  actionLabel?: string
+  actionType?: string
+  expiresAt?: string
+  createdBy: string
+  createdByName: string
+}
+
+// Server → Terminal: Message cancelled
+export interface TpvMessageCancelledPayload extends BaseEventPayload {
+  messageId: string
+}
+
+// Terminal → Server: Acknowledge/dismiss
+export interface TpvMessageAckPayload extends BaseEventPayload {
+  messageId: string
+  terminalId: string
+  action: 'ACKNOWLEDGED' | 'DISMISSED'
+  staffId?: string
+}
+
+// Terminal → Server: Survey response
+export interface TpvMessageResponsePayload extends BaseEventPayload {
+  messageId: string
+  terminalId: string
+  selectedOptions: string[]
+  staffId?: string
+  staffName?: string
 }
 
 /**

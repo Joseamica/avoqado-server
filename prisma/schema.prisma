@@ -292,6 +292,11 @@ model Venue {
   stockAlertConfigs StockAlertConfig[]
   performanceGoals  PerformanceGoal[]
 
+  // ==========================================
+  // TPV MESSAGING SYSTEM
+  // ==========================================
+  tpvMessages TpvMessage[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2632,6 +2637,10 @@ model Terminal {
   // Observability relations
   logs          TerminalLog[]
   healthMetrics TerminalHealth[]
+
+  // TPV Messaging
+  messageDeliveries TpvMessageDelivery[]
+  messageResponses  TpvMessageResponse[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6840,4 +6849,136 @@ model CampaignDelivery {
   @@index([campaignId, status])
   @@index([recipientEmail])
   @@index([resendId])
+}
+
+// ==========================================
+// TPV MESSAGING SYSTEM
+// Dashboard → TPV terminal messaging (announcements, surveys, actions)
+// ==========================================
+
+/// Message sent from dashboard to TPV terminals
+model TpvMessage {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Content
+  type     TpvMessageType
+  title    String
+  body     String     @db.Text
+  priority TpvMessagePriority @default(NORMAL)
+
+  // Interaction config
+  requiresAck Boolean @default(false) // Must acknowledge vs simple dismiss
+
+  // Survey options (only for SURVEY type)
+  surveyOptions     Json?   // ["Option A", "Option B", "Option C"]
+  surveyMultiSelect Boolean @default(false)
+
+  // Action config (only for ACTION type)
+  actionLabel   String? // Button text e.g. "Update menu"
+  actionType    String? // What the TPV should do: REFRESH_MENU | SYNC_DATA | CUSTOM
+  actionPayload Json?   // Extra data for the action
+
+  // Targeting
+  targetType        TpvMessageTarget // ALL_TERMINALS | SPECIFIC_TERMINALS
+  targetTerminalIds String[]         // Terminal IDs (only when SPECIFIC_TERMINALS)
+
+  // Scheduling & expiration
+  scheduledFor DateTime? // Send at future time (null = immediate)
+  expiresAt    DateTime? // Auto-dismiss after this time
+
+  // Audit
+  createdBy     String // Staff ID who created the message
+  createdByName String // Staff name for display
+
+  // Status
+  status TpvMessageStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  deliveries TpvMessageDelivery[]
+  responses  TpvMessageResponse[]
+
+  @@index([venueId, status])
+  @@index([status, scheduledFor])
+  @@index([createdAt])
+  @@map("tpv_messages")
+}
+
+/// Per-terminal delivery tracking for a TpvMessage
+model TpvMessageDelivery {
+  id         String     @id @default(cuid())
+  messageId  String
+  message    TpvMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  terminalId String
+  terminal   Terminal   @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+
+  status         TpvMessageDeliveryStatus @default(PENDING)
+  deliveredAt    DateTime?
+  acknowledgedAt DateTime?
+  dismissedAt    DateTime?
+  acknowledgedBy String? // Staff PIN user who acknowledged
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([messageId, terminalId])
+  @@index([terminalId, status])
+  @@index([messageId, status])
+  @@map("tpv_message_deliveries")
+}
+
+/// Survey response from a terminal for a TpvMessage
+model TpvMessageResponse {
+  id         String     @id @default(cuid())
+  messageId  String
+  message    TpvMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  terminalId String
+  terminal   Terminal   @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+
+  selectedOptions String[] // Selected survey option texts
+  respondedBy     String?  // Staff ID
+  respondedByName String?  // Staff name
+
+  createdAt DateTime @default(now())
+
+  @@unique([messageId, terminalId])
+  @@index([messageId])
+  @@map("tpv_message_responses")
+}
+
+// ---- TPV Messaging Enums ----
+
+enum TpvMessageType {
+  ANNOUNCEMENT
+  SURVEY
+  ACTION
+}
+
+enum TpvMessagePriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum TpvMessageTarget {
+  ALL_TERMINALS
+  SPECIFIC_TERMINALS
+}
+
+enum TpvMessageStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum TpvMessageDeliveryStatus {
+  PENDING
+  DELIVERED
+  ACKNOWLEDGED
+  DISMISSED
 }

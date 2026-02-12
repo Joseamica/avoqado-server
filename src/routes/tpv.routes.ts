@@ -68,6 +68,7 @@ import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
 import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
 import * as cryptoController from '../controllers/tpv/crypto.tpv.controller'
+import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.controller'
 import * as productService from '../services/dashboard/product.dashboard.service'
 import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
@@ -5875,5 +5876,95 @@ async function getNetworkLocation(
     return null
   }
 }
+
+// ==========================================
+// TPV MESSAGES - Pending messages & acknowledgment
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/tpv/messages/pending:
+ *   get:
+ *     tags: [TPV Messages]
+ *     summary: Get pending messages for this terminal
+ *     description: Returns undelivered/unacknowledged messages. Used for offline recovery.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: List of pending messages }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/messages/pending', authenticateTokenMiddleware, tpvMessageController.getPendingMessages)
+
+/**
+ * @openapi
+ * /api/v1/tpv/messages/{messageId}/acknowledge:
+ *   post:
+ *     tags: [TPV Messages]
+ *     summary: Acknowledge a message
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               staffId: { type: string }
+ *     responses:
+ *       200: { description: Message acknowledged }
+ *       404: { description: Delivery not found }
+ */
+router.post('/messages/:messageId/acknowledge', authenticateTokenMiddleware, tpvMessageController.acknowledgeMessage)
+
+/**
+ * @openapi
+ * /api/v1/tpv/messages/{messageId}/dismiss:
+ *   post:
+ *     tags: [TPV Messages]
+ *     summary: Dismiss a message
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Message dismissed }
+ *       404: { description: Delivery not found }
+ */
+router.post('/messages/:messageId/dismiss', authenticateTokenMiddleware, tpvMessageController.dismissMessage)
+
+/**
+ * @openapi
+ * /api/v1/tpv/messages/{messageId}/respond:
+ *   post:
+ *     tags: [TPV Messages]
+ *     summary: Submit a survey response
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [selectedOptions]
+ *             properties:
+ *               selectedOptions: { type: array, items: { type: string } }
+ *               staffId: { type: string }
+ *               staffName: { type: string }
+ *     responses:
+ *       200: { description: Survey response submitted }
+ *       404: { description: Message not found }
+ */
+router.post('/messages/:messageId/respond', authenticateTokenMiddleware, tpvMessageController.respondToMessage)
 
 export default router
