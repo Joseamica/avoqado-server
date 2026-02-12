@@ -49,6 +49,7 @@ interface SaleVerificationDashboardResponse {
       id: string
       orderNumber: string
       total: number
+      tags: string[]
     } | null
   } | null
 }
@@ -164,6 +165,7 @@ export async function listSaleVerificationsWithDetails(
             id: true,
             orderNumber: true,
             total: true,
+            tags: true,
           },
         },
         saleVerification: {
@@ -214,6 +216,7 @@ export async function listSaleVerificationsWithDetails(
               id: p.order.id,
               orderNumber: p.order.orderNumber,
               total: Number(p.order.total),
+              tags: p.order.tags,
             }
           : null,
       },

@@ -306,10 +306,23 @@ export async function getPendingMessages(terminalId: string, venueId: string) {
 /**
  * Mark a message as acknowledged by a terminal
  */
-export async function acknowledgeMessage(messageId: string, terminalId: string, staffId?: string) {
-  const delivery = await prisma.tpvMessageDelivery.findUnique({
-    where: { messageId_terminalId: { messageId, terminalId } },
-  })
+export async function acknowledgeMessage(messageId: string, terminalId?: string, staffId?: string) {
+  // Try compound key first, fall back to messageId-only lookup
+  let delivery = terminalId
+    ? await prisma.tpvMessageDelivery.findUnique({
+        where: { messageId_terminalId: { messageId, terminalId } },
+      })
+    : null
+
+  if (!delivery) {
+    // Fallback: find any pending/delivered delivery for this message
+    delivery = await prisma.tpvMessageDelivery.findFirst({
+      where: {
+        messageId,
+        status: { in: [TpvMessageDeliveryStatus.PENDING, TpvMessageDeliveryStatus.DELIVERED] },
+      },
+    })
+  }
 
   if (!delivery) {
     throw new NotFoundError('Message delivery not found for this terminal')
@@ -324,9 +337,9 @@ export async function acknowledgeMessage(messageId: string, terminalId: string, 
     },
   })
 
-  logger.info(`📨 TPV message acknowledged: ${messageId} by terminal ${terminalId}`, {
+  logger.info(`📨 TPV message acknowledged: ${messageId} by terminal ${terminalId || 'unknown'}`, {
     messageId,
-    terminalId,
+    terminalId: terminalId || 'N/A',
     staffId,
   })
 
@@ -336,10 +349,23 @@ export async function acknowledgeMessage(messageId: string, terminalId: string, 
 /**
  * Mark a message as dismissed by a terminal
  */
-export async function dismissMessage(messageId: string, terminalId: string) {
-  const delivery = await prisma.tpvMessageDelivery.findUnique({
-    where: { messageId_terminalId: { messageId, terminalId } },
-  })
+export async function dismissMessage(messageId: string, terminalId?: string) {
+  // Try compound key first, fall back to messageId-only lookup
+  let delivery = terminalId
+    ? await prisma.tpvMessageDelivery.findUnique({
+        where: { messageId_terminalId: { messageId, terminalId } },
+      })
+    : null
+
+  if (!delivery) {
+    // Fallback: find any pending/delivered delivery for this message
+    delivery = await prisma.tpvMessageDelivery.findFirst({
+      where: {
+        messageId,
+        status: { in: [TpvMessageDeliveryStatus.PENDING, TpvMessageDeliveryStatus.DELIVERED] },
+      },
+    })
+  }
 
   if (!delivery) {
     throw new NotFoundError('Message delivery not found for this terminal')
@@ -353,9 +379,9 @@ export async function dismissMessage(messageId: string, terminalId: string) {
     },
   })
 
-  logger.info(`📨 TPV message dismissed: ${messageId} by terminal ${terminalId}`, {
+  logger.info(`📨 TPV message dismissed: ${messageId} by terminal ${terminalId || 'unknown'}`, {
     messageId,
-    terminalId,
+    terminalId: terminalId || 'N/A',
   })
 
   return updated

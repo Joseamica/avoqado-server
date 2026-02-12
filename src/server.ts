@@ -32,6 +32,8 @@ import { ensureFeaturesAreSyncedToStripe } from './startup/stripe-sync.startup'
 // Import live demo cleanup service (DEMO MODE only)
 import { CronJob } from 'cron'
 import { cleanupExpiredLiveDemos } from './services/cleanup/liveDemoCleanup.service'
+// Import server metrics collection
+import { startMetricsCollection, stopMetricsCollection } from './services/superadmin/serverMetrics.service'
 
 const httpServer = http.createServer(app)
 
@@ -105,6 +107,9 @@ const gracefulShutdown = async (signal: string) => {
           liveDemoCleanupJob.stop()
         }
       }
+
+      // Stop server metrics collection
+      stopMetricsCollection()
 
       // Close database connections
       logger.info('Closing database connections...')
@@ -274,6 +279,9 @@ const startApplication = async (retries = 3) => {
           logger.warn('⚠️  Application is running in Development mode.')
         }
       })
+
+      // Start server metrics collection (health monitoring)
+      startMetricsCollection(httpServer)
 
       // Initialize Socket.io server after HTTP server starts
       // DEMO MODE: Skip Socket.IO to save memory on free tier deployments

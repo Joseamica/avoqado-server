@@ -61,6 +61,7 @@ export interface OrgStorePerformance {
   goalType?: 'AMOUNT' | 'QUANTITY' // Type of goal (currency or unit count)
   goalPeriod?: 'DAILY' | 'WEEKLY' | 'MONTHLY'
   goalId?: string // ID of the active venue-wide sales goal
+  goalSource?: 'venue' | 'organization' // Where the goal config came from
 }
 
 export interface OrgCrossStoreAnomaly {
@@ -419,7 +420,13 @@ class OrganizationDashboardService {
       where: { code: 'SERIALIZED_INVENTORY' },
     })
 
-    type GoalConfig = { goal: number; goalType: 'AMOUNT' | 'QUANTITY'; period: 'DAILY' | 'WEEKLY' | 'MONTHLY'; goalId: string }
+    type GoalConfig = {
+      goal: number
+      goalType: 'AMOUNT' | 'QUANTITY'
+      period: 'DAILY' | 'WEEKLY' | 'MONTHLY'
+      goalId: string
+      source: 'venue' | 'organization'
+    }
     const venueGoalsMap = new Map<string, GoalConfig>()
 
     if (serializedModule) {
@@ -442,6 +449,28 @@ class OrganizationDashboardService {
             goalType: venueGoal.goalType || 'AMOUNT',
             period: venueGoal.period,
             goalId: venueGoal.id,
+            source: 'venue',
+          })
+        }
+      }
+    }
+
+    // Fallback: for venues without a goal, check org-level goals
+    const venuesWithoutGoal = venues.filter(v => !venueGoalsMap.has(v.id))
+    if (venuesWithoutGoal.length > 0) {
+      const orgGoals = await prisma.organizationSalesGoalConfig.findMany({
+        where: { organizationId: orgId, active: true },
+      })
+      // Use the first matching org goal (prefer DAILY for daily dashboards, but use any available)
+      const orgGoal = orgGoals.find(g => g.period === 'DAILY') || orgGoals.find(g => g.period === 'MONTHLY') || orgGoals[0]
+      if (orgGoal && orgGoal.goal.toNumber() > 0) {
+        for (const venue of venuesWithoutGoal) {
+          venueGoalsMap.set(venue.id, {
+            goal: orgGoal.goal.toNumber(),
+            goalType: (orgGoal.goalType as 'AMOUNT' | 'QUANTITY') || 'AMOUNT',
+            period: (orgGoal.period as 'DAILY' | 'WEEKLY' | 'MONTHLY') || 'MONTHLY',
+            goalId: orgGoal.id,
+            source: 'organization',
           })
         }
       }
@@ -578,6 +607,7 @@ class OrganizationDashboardService {
         goalType: goalConfig?.goalType,
         goalPeriod: goalConfig?.period,
         goalId: goalConfig?.goalId,
+        goalSource: goalConfig?.source,
       })
     }
 
@@ -1191,7 +1221,11 @@ class OrganizationDashboardService {
         payments: {
           take: 1,
           orderBy: { createdAt: 'desc' as const },
-          select: { method: true, cardBrand: true },
+          select: {
+            method: true,
+            cardBrand: true,
+            saleVerification: { select: { photos: true } },
+          },
         },
       },
       orderBy: { createdAt: 'desc' },
@@ -1205,6 +1239,7 @@ class OrganizationDashboardService {
       const iccid = firstItem?.serializedItem?.serialNumber || undefined
 
       const firstPayment = order.payments?.[0]
+      const photos = firstPayment?.saleVerification?.photos ?? []
 
       events.push({
         id: `sale-${order.id}`,
@@ -1225,6 +1260,8 @@ class OrganizationDashboardService {
           iccid,
           paymentMethod: firstPayment?.method || undefined,
           cardBrand: firstPayment?.cardBrand || undefined,
+          tags: order.tags?.length ? order.tags : undefined,
+          photos: photos.length ? photos : undefined,
         },
       })
     }

@@ -183,7 +183,7 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
       })
 
       expect(response.status).toBe(400)
-      expect(response.body.message).toContain('at least 8 characters')
+      expect(response.body.message).toContain('al menos 8 caracteres')
     })
 
     it('should reject missing required fields', async () => {

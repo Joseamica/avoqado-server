@@ -56,6 +56,12 @@ model Organization {
   organizationPaymentConfig   OrganizationPaymentConfig?
   organizationPricingStructures OrganizationPricingStructure[]
 
+  // Organization-level sales goal defaults (inherited by venues without custom goals)
+  organizationSalesGoalConfigs OrganizationSalesGoalConfig[]
+
+  // Organization-level payout configuration (inherited by venues without custom payout config)
+  organizationPayoutConfig OrganizationPayoutConfig?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -6128,11 +6134,11 @@ enum ClawbackReason {
 /// Main configuration for commission rates at venue level
 /// Uses effectiveFrom/effectiveTo pattern for time-bound configs
 model CommissionConfig {
-  id      String @id @default(cuid())
-  venueId String
-  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  id      String  @id @default(cuid())
+  venueId String? // Nullable: null = org-level config, set = venue-level config
+  venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  // Organization inheritance (optional)
+  // Organization reference (required for org-level configs, optional for venue-level)
   orgId String?
   org   Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
@@ -6653,6 +6659,39 @@ model OrganizationGoal {
   @@unique([organizationId, period, periodDate])
   @@index([organizationId])
   @@index([periodDate])
+}
+
+// Organization-level sales goal defaults
+// Venues without custom goals inherit these; venue goals override entirely
+model OrganizationSalesGoalConfig {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  goal     Decimal @db.Decimal(12, 2)
+  goalType String  @default("AMOUNT") // "AMOUNT" | "QUANTITY"
+  period   String  @default("MONTHLY") // "DAILY" | "WEEKLY" | "MONTHLY"
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, period, goalType])
+  @@index([organizationId])
+}
+
+// Organization-level payout configuration defaults (inherited by venues)
+model OrganizationPayoutConfig {
+  id             String       @id @default(cuid())
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  aggregationPeriod String   @default("MONTHLY") // "WEEKLY" | "BIWEEKLY" | "MONTHLY" | "QUARTERLY"
+  requireApproval   Boolean  @default(true)
+  paymentMethods    String[] @default(["CASH", "BANK_TRANSFER"])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ==========================================

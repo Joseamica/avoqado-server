@@ -74,6 +74,7 @@ import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
 import { serializedInventoryService } from '../services/serialized-inventory/serializedInventory.service'
 import * as salesGoalService from '../services/dashboard/commission/sales-goal.service'
+import * as goalResolutionService from '../services/dashboard/commission/goal-resolution.service'
 import * as orderTpvService from '../services/tpv/order.tpv.service'
 import AppError from '../errors/AppError'
 import logger from '../config/logger'
@@ -5378,6 +5379,7 @@ router.get('/sales-goal', authenticateTokenMiddleware, async (req: Request, res:
       return res.status(200).json({
         salesGoal: {
           goal: salesGoal.goal.toString(),
+          goalType: salesGoal.goalType || 'AMOUNT',
           period: salesGoal.period,
           currentSales: salesGoal.currentSales.toString(),
           staffId: salesGoal.staffId,
@@ -5394,6 +5396,63 @@ router.get('/sales-goal', authenticateTokenMiddleware, async (req: Request, res:
     return res.status(200).json({ salesGoal: null })
   } catch (error) {
     logger.error(`❌ [TPV SALES GOAL] Error getting sales goal`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
+
+// ==========================================
+// SALES GOALS (PLURAL) - All effective goals with inheritance
+// Returns all resolved goals (venue > organization hierarchy)
+// ==========================================
+
+/**
+ * GET /tpv/sales-goals
+ * Get all effective sales goals for the current venue, resolved via hierarchy:
+ * 1. If venue has its own goals → use those (source: 'venue')
+ * 2. If no venue goals → fall back to organization goals (source: 'organization')
+ *
+ * Filters to only return goals relevant to the logged-in staff member
+ * (staff-specific goals + venue-wide goals where staffId is null).
+ *
+ * Response: { salesGoals: [...] }
+ */
+router.get('/sales-goals', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, userId: staffId } = (req as any).authContext
+
+    logger.info(`🎯 [TPV SALES GOALS] Getting all effective goals`, {
+      venueId,
+      staffId,
+      correlationId: req.correlationId,
+    })
+
+    const allGoals = await goalResolutionService.getEffectiveGoals(venueId)
+
+    // Filter: only goals for this staff + venue-wide goals (staffId === null)
+    const relevantGoals = allGoals.filter(g => g.staffId === null || g.staffId === staffId)
+
+    logger.info(`✅ [TPV SALES GOALS] Found ${relevantGoals.length} goals (from ${allGoals.length} total)`, {
+      venueId,
+      staffId,
+      sources: relevantGoals.map(g => g.source),
+      correlationId: req.correlationId,
+    })
+
+    return res.status(200).json({
+      salesGoals: relevantGoals.map(g => ({
+        goal: g.goal.toString(),
+        goalType: g.goalType || 'AMOUNT',
+        period: g.period,
+        currentSales: g.currentSales.toString(),
+        staffId: g.staffId,
+        source: g.source, // 'venue' | 'organization'
+      })),
+    })
+  } catch (error) {
+    logger.error(`❌ [TPV SALES GOALS] Error getting sales goals`, {
       correlationId: req.correlationId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })
