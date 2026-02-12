@@ -1221,7 +1221,11 @@ class OrganizationDashboardService {
         payments: {
           take: 1,
           orderBy: { createdAt: 'desc' as const },
-          select: { method: true, cardBrand: true },
+          select: {
+            method: true,
+            cardBrand: true,
+            saleVerification: { select: { photos: true } },
+          },
         },
       },
       orderBy: { createdAt: 'desc' },
@@ -1235,6 +1239,7 @@ class OrganizationDashboardService {
       const iccid = firstItem?.serializedItem?.serialNumber || undefined
 
       const firstPayment = order.payments?.[0]
+      const photos = firstPayment?.saleVerification?.photos ?? []
 
       events.push({
         id: `sale-${order.id}`,
@@ -1256,6 +1261,7 @@ class OrganizationDashboardService {
           paymentMethod: firstPayment?.method || undefined,
           cardBrand: firstPayment?.cardBrand || undefined,
           tags: order.tags?.length ? order.tags : undefined,
+          photos: photos.length ? photos : undefined,
         },
       })
     }
