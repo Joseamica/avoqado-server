@@ -1106,10 +1106,11 @@ router.post('/store/:storeId/goals', whiteLabelAccess, async (req: Request, res:
       return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
     }
 
-    const { staffId, goal, period } = req.body
+    const { staffId, goal, goalType, period } = req.body
     const created = await salesGoalService.createSalesGoal(storeId, {
       staffId: staffId ?? null,
       goal: Number(goal),
+      goalType,
       period,
     })
     res.status(201).json({ success: true, data: created })
@@ -1137,9 +1138,10 @@ router.patch('/store/:storeId/goals/:goalId', whiteLabelAccess, async (req: Requ
       return res.status(403).json({ success: false, error: 'forbidden', message: 'Store does not belong to this organization' })
     }
 
-    const { goal, period, active } = req.body
+    const { goal, goalType, period, active } = req.body
     const updated = await salesGoalService.updateSalesGoal(storeId, goalId, {
       ...(goal !== undefined && { goal: Number(goal) }),
+      ...(goalType !== undefined && { goalType }),
       ...(period !== undefined && { period }),
       ...(active !== undefined && { active }),
     })

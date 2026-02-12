@@ -58,6 +58,7 @@ export interface OrgStorePerformance {
   rank: number
   performance?: number // Goal progress percentage (0-100+)
   goalAmount?: number // Configured goal amount
+  goalType?: 'AMOUNT' | 'QUANTITY' // Type of goal (currency or unit count)
   goalPeriod?: 'DAILY' | 'WEEKLY' | 'MONTHLY'
   goalId?: string // ID of the active venue-wide sales goal
 }
@@ -418,7 +419,7 @@ class OrganizationDashboardService {
       where: { code: 'SERIALIZED_INVENTORY' },
     })
 
-    type GoalConfig = { goal: number; period: 'DAILY' | 'WEEKLY' | 'MONTHLY'; goalId: string }
+    type GoalConfig = { goal: number; goalType: 'AMOUNT' | 'QUANTITY'; period: 'DAILY' | 'WEEKLY' | 'MONTHLY'; goalId: string }
     const venueGoalsMap = new Map<string, GoalConfig>()
 
     if (serializedModule) {
@@ -436,7 +437,12 @@ class OrganizationDashboardService {
         // Find the active venue-wide goal (staffId = null)
         const venueGoal = goals.find(g => g.staffId === null && g.active)
         if (venueGoal && venueGoal.goal > 0) {
-          venueGoalsMap.set(vm.venueId, { goal: venueGoal.goal, period: venueGoal.period, goalId: venueGoal.id })
+          venueGoalsMap.set(vm.venueId, {
+            goal: venueGoal.goal,
+            goalType: venueGoal.goalType || 'AMOUNT',
+            period: venueGoal.period,
+            goalId: venueGoal.id,
+          })
         }
       }
     }
@@ -519,19 +525,40 @@ class OrganizationDashboardService {
       // Calculate goal performance
       let performance: number | undefined
       if (goalConfig && goalConfig.goal > 0) {
-        let salesForGoal: number
-        switch (goalConfig.period) {
-          case 'DAILY':
-            salesForGoal = todaySales
-            break
-          case 'WEEKLY':
-            salesForGoal = weekSales
-            break
-          case 'MONTHLY':
-            salesForGoal = Number(monthOrders?._sum?.total) || 0
-            break
+        let progressValue: number
+
+        if (goalConfig.goalType === 'QUANTITY') {
+          // QUANTITY goals: count order items (units sold), not orders
+          switch (goalConfig.period) {
+            case 'DAILY':
+              progressValue = unitsSold // already calculated: sum of order items
+              break
+            case 'WEEKLY':
+              progressValue = await prisma.orderItem.count({
+                where: { order: { venueId: venue.id, status: 'COMPLETED', createdAt: { gte: weekStart } } },
+              })
+              break
+            case 'MONTHLY':
+              progressValue = await prisma.orderItem.count({
+                where: { order: { venueId: venue.id, status: 'COMPLETED', createdAt: { gte: monthStart } } },
+              })
+              break
+          }
+        } else {
+          // AMOUNT goals: use sales amounts
+          switch (goalConfig.period) {
+            case 'DAILY':
+              progressValue = todaySales
+              break
+            case 'WEEKLY':
+              progressValue = weekSales
+              break
+            case 'MONTHLY':
+              progressValue = Number(monthOrders?._sum?.total) || 0
+              break
+          }
         }
-        performance = Math.round((salesForGoal / goalConfig.goal) * 100)
+        performance = Math.round((progressValue / goalConfig.goal) * 100)
       }
 
       results.push({
@@ -548,6 +575,7 @@ class OrganizationDashboardService {
         rank: 0, // Will be set after sorting
         performance,
         goalAmount: goalConfig?.goal,
+        goalType: goalConfig?.goalType,
         goalPeriod: goalConfig?.period,
         goalId: goalConfig?.goalId,
       })
