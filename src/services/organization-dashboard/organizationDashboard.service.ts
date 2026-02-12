@@ -2070,9 +2070,6 @@ class OrganizationDashboardService {
         const matchingPayments = staffCashPayments.filter(p => p.createdAt.getTime() >= teStartMs && p.createdAt.getTime() <= teEndMs)
         const teCashSales = matchingPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
         // DEBUG: remove after verifying
-        logger.info(
-          `[cashSales] ${fullName} | TE ${te.id} | clockIn=${te.clockInTime.toISOString()} clockOut=${te.clockOutTime?.toISOString() ?? 'null'} | staffPayments=${staffCashPayments.length} matched=${matchingPayments.length} amount=${teCashSales}`,
-        )
 
         return {
           id: te.id,

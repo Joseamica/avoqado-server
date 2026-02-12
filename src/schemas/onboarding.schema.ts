@@ -12,11 +12,12 @@ import { OnboardingType, ProductType } from '@prisma/client'
  */
 export const SignupSchema = z.object({
   body: z.object({
-    email: z.string().email('Invalid email format'),
-    password: z.string().min(8, 'Password must be at least 8 characters'),
-    firstName: z.string().min(1, 'First name is required'),
-    lastName: z.string().min(1, 'Last name is required'),
-    organizationName: z.string().min(1, 'Organization name is required'),
+    email: z.string().email('Formato de correo invalido'),
+    password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres'),
+    firstName: z.string().optional().default(''),
+    lastName: z.string().optional().default(''),
+    organizationName: z.string().optional().default(''),
+    wizardVersion: z.number().optional(),
   }),
 })
 
@@ -225,5 +226,108 @@ export const CompleteOnboardingSchema = z.object({
 export const GetMenuTemplateSchema = z.object({
   query: z.object({
     format: z.enum(['csv']).default('csv'),
+  }),
+})
+
+// =============================================
+// V2 Setup Wizard Schemas (Square-style)
+// =============================================
+
+export const V2StepParamsSchema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
+    stepNumber: z.string().regex(/^[1-6]$/, 'Numero de paso invalido (1-6)'),
+  }),
+})
+
+export const V2Step2Schema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
+    stepNumber: z.literal('1'),
+  }),
+  body: z.object({
+    businessName: z.string().min(1, 'El nombre del negocio es requerido').max(100, 'El nombre del negocio es muy largo'),
+    address: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    country: z.string().optional().default('MX'),
+    zipCode: z.string().optional(),
+    latitude: z.number().optional(),
+    longitude: z.number().optional(),
+    noPhysicalAddress: z.boolean().optional().default(false),
+  }),
+})
+
+export const V2Step3Schema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
+    stepNumber: z.literal('2'),
+  }),
+  body: z.object({
+    businessType: z.string().min(1, 'El tipo de negocio es requerido'),
+    businessCategory: z.string().optional(),
+  }),
+})
+
+export const V2Step4Schema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
+    stepNumber: z.literal('3'),
+  }),
+  body: z.object({
+    entityType: z.string().min(1, 'El tipo de entidad es requerido'),
+    entitySubType: z.string().optional(),
+    commercialName: z.string().optional(),
+    phone: z.string().optional(),
+  }),
+})
+
+export const V2Step5Schema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
+    stepNumber: z.literal('4'),
+  }),
+  body: z.object({
+    legalFirstName: z.string().min(1, 'El nombre legal es requerido'),
+    legalLastName: z.string().min(1, 'El apellido legal es requerido'),
+    phone: z.string().optional(),
+    birthdate: z.string().optional(),
+    rfc: z.string().optional(),
+    curp: z.string().optional(),
+    legalAddress: z.string().optional(),
+    legalCity: z.string().optional(),
+    legalState: z.string().optional(),
+    legalCountry: z.string().optional(),
+    legalZipCode: z.string().optional(),
+  }),
+})
+
+export const V2AcceptTermsSchema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
+  }),
+  body: z.object({
+    termsAccepted: z.boolean().refine(val => val === true, { message: 'Debes aceptar los terminos de servicio' }),
+    privacyAccepted: z.boolean().refine(val => val === true, { message: 'Debes aceptar el aviso de privacidad' }),
+    termsVersion: z.string().min(1, 'La version de los terminos es requerida'),
+  }),
+})
+
+export const V2Step7Schema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
+    stepNumber: z.literal('6'),
+  }),
+  body: z.object({
+    clabe: z.string().regex(/^\d{18}$/, 'La CLABE debe tener exactamente 18 digitos'),
+    bankName: z.string().optional(),
+    accountHolder: z.string().min(1, 'El nombre del titular es requerido'),
+    accountType: z.string().optional(),
+  }),
+})
+
+export const V2CompleteSchema = z.object({
+  params: z.object({
+    organizationId: z.string().cuid('ID de organizacion invalido'),
   }),
 })

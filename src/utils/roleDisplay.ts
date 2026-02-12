@@ -18,9 +18,10 @@
  * ```
  */
 
-import { StaffRole } from '@prisma/client'
+import { StaffRole, BusinessType } from '@prisma/client'
 
 import { RoleConfigResponse } from '@/schemas/dashboard/venueRoleConfig.schema'
+import { getBusinessCategory, type BusinessCategory } from '@/utils/businessCategory'
 
 /**
  * Default display names for each role (Spanish)
@@ -55,30 +56,133 @@ export const DEFAULT_ROLE_DISPLAY_NAMES_EN: Record<StaffRole, string> = {
 }
 
 /**
+ * Sector-aware role display name defaults.
+ * Only includes roles that differ from the generic defaults.
+ */
+export const SECTOR_ROLE_DEFAULTS: Record<BusinessCategory, Record<'es' | 'en', Partial<Record<StaffRole, string>>>> = {
+  FOOD_SERVICE: {
+    es: {}, // Uses generic defaults
+    en: {},
+  },
+  RETAIL: {
+    es: {
+      [StaffRole.WAITER]: 'Vendedor',
+      [StaffRole.KITCHEN]: 'Almacen',
+      [StaffRole.HOST]: 'Recepcionista',
+    },
+    en: {
+      [StaffRole.WAITER]: 'Sales Associate',
+      [StaffRole.KITCHEN]: 'Warehouse',
+      [StaffRole.HOST]: 'Receptionist',
+    },
+  },
+  SERVICES: {
+    es: {
+      [StaffRole.WAITER]: 'Especialista',
+      [StaffRole.CASHIER]: 'Recepcionista',
+      [StaffRole.KITCHEN]: 'Area de Servicio',
+      [StaffRole.HOST]: 'Recepcionista',
+    },
+    en: {
+      [StaffRole.WAITER]: 'Specialist',
+      [StaffRole.CASHIER]: 'Receptionist',
+      [StaffRole.KITCHEN]: 'Service Area',
+      [StaffRole.HOST]: 'Receptionist',
+    },
+  },
+  HOSPITALITY: {
+    es: {
+      [StaffRole.WAITER]: 'Concierge',
+      [StaffRole.CASHIER]: 'Recepcionista',
+      [StaffRole.KITCHEN]: 'Servicio a Cuartos',
+      [StaffRole.HOST]: 'Recepcionista',
+    },
+    en: {
+      [StaffRole.WAITER]: 'Concierge',
+      [StaffRole.CASHIER]: 'Receptionist',
+      [StaffRole.KITCHEN]: 'Room Service',
+      [StaffRole.HOST]: 'Receptionist',
+    },
+  },
+  ENTERTAINMENT: {
+    es: {
+      [StaffRole.WAITER]: 'Staff',
+      [StaffRole.CASHIER]: 'Taquillero',
+      [StaffRole.KITCHEN]: 'Backstage',
+      [StaffRole.HOST]: 'Recepcionista',
+    },
+    en: {
+      [StaffRole.WAITER]: 'Staff',
+      [StaffRole.CASHIER]: 'Ticket Agent',
+      [StaffRole.KITCHEN]: 'Backstage',
+      [StaffRole.HOST]: 'Receptionist',
+    },
+  },
+  OTHER: {
+    es: {
+      [StaffRole.WAITER]: 'Asistente',
+      [StaffRole.KITCHEN]: 'Almacen',
+      [StaffRole.HOST]: 'Recepcionista',
+    },
+    en: {
+      [StaffRole.WAITER]: 'Assistant',
+      [StaffRole.KITCHEN]: 'Storage',
+      [StaffRole.HOST]: 'Receptionist',
+    },
+  },
+}
+
+/**
  * Get display name for a role (synchronous)
  *
- * Uses custom config if provided, otherwise falls back to default.
+ * Resolution: VenueRoleConfig > sector default for locale > generic Spanish default
  *
  * @param role - StaffRole enum value
  * @param configs - Optional array of venue role configs
+ * @param options - Optional sector-aware options
  * @returns Display name (custom or default)
  *
  * @example
  * ```typescript
- * // With custom configs from API
+ * // Basic usage (backward-compatible)
  * const displayName = getRoleDisplayName(StaffRole.CASHIER, venueConfigs)
  *
- * // Without configs (use default)
- * const defaultName = getRoleDisplayName(StaffRole.CASHIER)
+ * // Sector-aware usage
+ * const displayName = getRoleDisplayName(StaffRole.WAITER, venueConfigs, {
+ *   businessType: BusinessType.RETAIL_STORE,
+ *   locale: 'es',
+ * })
  * ```
  */
-export function getRoleDisplayName(role: StaffRole, configs?: RoleConfigResponse[] | null): string {
+export function getRoleDisplayName(
+  role: StaffRole,
+  configs?: RoleConfigResponse[] | null,
+  options?: { businessType?: BusinessType; locale?: 'es' | 'en' },
+): string {
+  // Priority 1: VenueRoleConfig override
   if (configs && configs.length > 0) {
     const config = configs.find(c => c.role === role)
     if (config?.displayName) {
       return config.displayName
     }
   }
+
+  // Priority 2: Sector default for locale
+  if (options?.businessType) {
+    const category = getBusinessCategory(options.businessType)
+    const locale = options.locale || 'es'
+    const sectorDefaults = SECTOR_ROLE_DEFAULTS[category]?.[locale]
+    if (sectorDefaults?.[role]) {
+      return sectorDefaults[role]!
+    }
+  }
+
+  // Priority 3: Locale-aware generic default
+  if (options?.locale === 'en') {
+    return DEFAULT_ROLE_DISPLAY_NAMES_EN[role] || role
+  }
+
+  // Priority 4: Generic Spanish default
   return DEFAULT_ROLE_DISPLAY_NAMES[role] || role
 }
 

@@ -15,6 +15,8 @@ interface ListStaffParams {
   active?: 'true' | 'false' | 'all'
   organizationId?: string
   venueId?: string
+  hasOrganization?: boolean
+  hasVenue?: boolean
 }
 
 interface CreateStaffData {
@@ -43,7 +45,7 @@ interface UpdateStaffData {
 // ===========================================
 
 export async function listStaff(params: ListStaffParams) {
-  const { page, pageSize, search, active, organizationId, venueId } = params
+  const { page, pageSize, search, active, organizationId, venueId, hasOrganization, hasVenue } = params
   const skip = (page - 1) * pageSize
 
   // Build where clause
@@ -65,12 +67,16 @@ export async function listStaff(params: ListStaffParams) {
     where.organizations = {
       some: { organizationId, isActive: true },
     }
+  } else if (hasOrganization) {
+    where.organizations = { some: { isActive: true } }
   }
 
   if (venueId) {
     where.venues = {
       some: { venueId, active: true },
     }
+  } else if (hasVenue) {
+    where.venues = { some: { active: true } }
   }
 
   const [staff, total] = await Promise.all([
@@ -549,6 +555,30 @@ export async function removeFromVenue(staffId: string, venueId: string) {
 
   logger.info(`[STAFF-SUPERADMIN] Removed staff from venue`, { staffId, venueId })
   return getStaffById(staffId)
+}
+
+// ===========================================
+// DELETE STAFF (hard delete — cascades StaffVenue, StaffOrganization)
+// ===========================================
+
+export async function deleteStaff(staffId: string, currentUserId: string) {
+  if (staffId === currentUserId) {
+    const error: any = new Error('No puedes eliminarte a ti mismo')
+    error.statusCode = 400
+    throw error
+  }
+
+  const staff = await prisma.staff.findUnique({ where: { id: staffId } })
+  if (!staff) {
+    const error: any = new Error('Usuario no encontrado')
+    error.statusCode = 404
+    throw error
+  }
+
+  await prisma.staff.delete({ where: { id: staffId } })
+
+  logger.info(`[STAFF-SUPERADMIN] Deleted staff: ${staff.email}`, { staffId })
+  return { success: true }
 }
 
 // ===========================================

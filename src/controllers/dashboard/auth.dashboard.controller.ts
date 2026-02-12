@@ -10,6 +10,78 @@ import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 
 /**
+ * Simple deep merge for module config objects.
+ * Matches the behavior of ModuleService.deepMerge for consistency.
+ */
+function deepMergeConfig(target: Record<string, any>, source: Record<string, any>): Record<string, any> {
+  const result = { ...target }
+  for (const key in source) {
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+      result[key] = deepMergeConfig((result[key] as Record<string, any>) || {}, source[key] as Record<string, any>)
+    } else {
+      result[key] = source[key]
+    }
+  }
+  return result
+}
+
+/**
+ * Enrich venues with organization-level inherited modules.
+ * When a module is enabled at org level (OrganizationModule) but the venue
+ * has no explicit VenueModule record for it, the module appears as inherited.
+ *
+ * Resolution: VenueModule (explicit, any state) → OrganizationModule (inherited) → absent
+ */
+async function enrichVenuesWithOrgModules(venues: Array<{ id?: string; organizationId?: string | null; modules?: any[] }>): Promise<void> {
+  const orgIds = [...new Set(venues.map(v => v.organizationId).filter((id): id is string => !!id))]
+  if (orgIds.length === 0) return
+
+  const orgModules = await prisma.organizationModule.findMany({
+    where: {
+      organizationId: { in: orgIds },
+      enabled: true,
+      module: { active: true },
+    },
+    select: {
+      organizationId: true,
+      config: true,
+      module: { select: { code: true, name: true, defaultConfig: true } },
+    },
+  })
+
+  // Group by orgId for O(1) lookup
+  const byOrg = new Map<string, typeof orgModules>()
+  for (const om of orgModules) {
+    if (!byOrg.has(om.organizationId)) byOrg.set(om.organizationId, [])
+    byOrg.get(om.organizationId)!.push(om)
+  }
+
+  for (const venue of venues) {
+    if (!venue.organizationId) continue
+    const inherited = byOrg.get(venue.organizationId)
+    if (!inherited) continue
+
+    // Existing module codes (including disabled overrides) prevent inheritance
+    const existingCodes = new Set((venue.modules || []).map((m: any) => m.module?.code).filter(Boolean))
+
+    for (const om of inherited) {
+      if (!existingCodes.has(om.module.code)) {
+        if (!venue.modules) venue.modules = []
+        // Deep merge: Module.defaultConfig + OrganizationModule.config (consistent with ModuleService)
+        const baseConfig = (om.module.defaultConfig as Record<string, any>) || {}
+        const orgConfig = (om.config as Record<string, any>) || {}
+        const mergedConfig = deepMergeConfig(baseConfig, orgConfig)
+        venue.modules.push({
+          enabled: true,
+          config: mergedConfig,
+          module: { code: om.module.code, name: om.module.name },
+        })
+      }
+    }
+  }
+}
+
+/**
  * Endpoint para verificar el estado de autenticación de un usuario.
  * Adaptado para el nuevo schema de Avoqado con Staff y StaffVenue.
  *
@@ -59,6 +131,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 name: true,
                 slug: true,
                 logo: true,
+                type: true, // Business type for sector-aware UI terminology
                 status: true, // Single source of truth for venue state
                 kycStatus: true, // Include KYC status for access control
                 // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -170,6 +243,9 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           permissions: DEFAULT_PERMISSIONS[StaffRole.SUPERADMIN] || [],
         }))
 
+        // Enrich with org-level inherited modules
+        await enrichVenuesWithOrgModules(masterVenues)
+
         // Disable caching for sensitive auth status data
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
         res.setHeader('Pragma', 'no-cache')
@@ -209,6 +285,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       name: string
       slug: string
       logo: string | null
+      type?: string // Business type for sector-aware UI terminology
       role?: any
       status?: VenueStatus // Single source of truth for venue state
       kycStatus?: string | null // Include KYC verification status
@@ -236,6 +313,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       name: sv.venue.name,
       slug: sv.venue.slug,
       logo: sv.venue.logo,
+      type: sv.venue.type, // Business type for sector-aware UI
       role: sv.role,
       status: sv.venue.status, // Single source of truth
       kycStatus: sv.venue.kycStatus, // Include KYC status
@@ -279,6 +357,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
+          type: true, // Business type for sector-aware UI terminology
           status: true, // Single source of truth
           kycStatus: true, // Include KYC status
           // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -329,6 +408,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
+        type: venue.type, // Business type for sector-aware UI
         status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
         features: venue.features,
@@ -383,6 +463,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             name: true,
             slug: true,
             logo: true,
+            type: true, // Business type for sector-aware UI terminology
             status: true, // Single source of truth
             kycStatus: true, // Include KYC status
             // Contact & Address fields (needed for TPV purchase wizard pre-fill)
@@ -433,6 +514,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: venue.name,
           slug: venue.slug,
           logo: venue.logo,
+          type: venue.type, // Business type for sector-aware UI
           status: venue.status, // Single source of truth
           kycStatus: venue.kycStatus, // Include KYC status
           features: venue.features,
@@ -462,6 +544,10 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         }
       } // Close the else block for ownerOrgIds.length > 0
     }
+
+    // Enrich venues with org-level inherited modules (e.g., WHITE_LABEL_DASHBOARD at org level)
+    await enrichVenuesWithOrgModules(directVenues)
+    await enrichVenuesWithOrgModules(allVenues)
 
     // Determine highest role (World-Class Pattern: Detect OWNER even without venues during onboarding)
     let highestRole = staff.venues.length > 0 ? staff.venues[0].role : null
@@ -494,6 +580,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       }
     })
 
+    // V2 wizard detection: if OWNER with no venues, check OnboardingProgress for wizardVersion
+    let wizardVersion: number | null = null
+    if (highestRole === StaffRole.OWNER && enrichedVenues.length === 0) {
+      const primaryOrgId = staff.organizations[0]?.organizationId
+      if (primaryOrgId) {
+        const progress = await prisma.onboardingProgress.findUnique({
+          where: { organizationId: primaryOrgId },
+          select: { wizardVersion: true },
+        })
+        wizardVersion = progress?.wizardVersion ?? null
+      }
+    }
+
     // Formatear respuesta
     const userPayload = {
       id: staff.id,
@@ -505,6 +604,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       phone: staff.phone,
       organizationId: staff.organizations[0]?.organizationId ?? null,
       role: highestRole, // Add explicit role field
+      wizardVersion, // V2 onboarding wizard version (null = legacy/v1, 2 = new setup wizard)
       createdAt: staff.createdAt,
       lastLogin: staff.lastLoginAt,
       venues: enrichedVenues, // Use enriched venues with permissions

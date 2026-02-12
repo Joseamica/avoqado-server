@@ -330,3 +330,148 @@ export async function uploadKycDocument(
     url: downloadUrl,
   }
 }
+
+// =============================================
+// V2 Setup Wizard Functions
+// =============================================
+
+/**
+ * Saves a V2 setup wizard step data
+ * Stores all step data in the v2SetupData JSON field
+ */
+export async function saveV2StepData(organizationId: string, stepNumber: number, stepData: Record<string, any>) {
+  const progress = await getOrCreateOnboardingProgress(organizationId)
+
+  // Merge new step data into existing v2SetupData
+  const currentData = (progress.v2SetupData as Record<string, any>) || {}
+  const updatedData = {
+    ...currentData,
+    [`step${stepNumber}`]: stepData,
+  }
+
+  // Parse completed steps
+  const completedSteps = Array.isArray(progress.completedSteps) ? (progress.completedSteps as number[]) : []
+  if (!completedSteps.includes(stepNumber)) {
+    completedSteps.push(stepNumber)
+  }
+
+  const updated = await prisma.onboardingProgress.update({
+    where: { organizationId },
+    data: {
+      wizardVersion: 2,
+      v2SetupData: updatedData as any,
+      currentStep: stepNumber + 1,
+      completedSteps: completedSteps as any,
+      updatedAt: new Date(),
+    },
+  })
+
+  // Side effects: update org name from step 2 (business info)
+  if (stepNumber === 2 && stepData.businessName) {
+    await prisma.organization.update({
+      where: { id: organizationId },
+      data: { name: stepData.businessName },
+    })
+  }
+
+  // Side effects: update staff names from step 5 (identity)
+  if (stepNumber === 5 && (stepData.legalFirstName || stepData.legalLastName)) {
+    // Find the OWNER of this organization
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { organizationId, role: 'OWNER' },
+    })
+    if (staffOrg) {
+      await prisma.staff.update({
+        where: { id: staffOrg.staffId },
+        data: {
+          ...(stepData.legalFirstName && { firstName: stepData.legalFirstName }),
+          ...(stepData.legalLastName && { lastName: stepData.legalLastName }),
+        },
+      })
+    }
+  }
+
+  return updated
+}
+
+/**
+ * Records terms and privacy acceptance
+ */
+export async function acceptV2Terms(organizationId: string, termsVersion: string, ipAddress: string) {
+  const now = new Date()
+
+  const progress = await getOrCreateOnboardingProgress(organizationId)
+
+  // Mark step 5 as completed
+  const completedSteps = Array.isArray(progress.completedSteps) ? (progress.completedSteps as number[]) : []
+  if (!completedSteps.includes(5)) {
+    completedSteps.push(5)
+  }
+
+  const updated = await prisma.onboardingProgress.update({
+    where: { organizationId },
+    data: {
+      wizardVersion: 2,
+      termsAcceptedAt: now,
+      privacyAcceptedAt: now,
+      termsVersion,
+      termsIpAddress: ipAddress,
+      currentStep: 6,
+      completedSteps: completedSteps as any,
+      updatedAt: new Date(),
+    },
+  })
+
+  return updated
+}
+
+/**
+ * Extracts V2 setup data and builds venue creation input.
+ * Does NOT create the venue — the controller handles that with optimistic locking.
+ */
+export async function getV2SetupDataForCompletion(organizationId: string) {
+  const progress = await getOnboardingProgress(organizationId)
+
+  if (!progress) {
+    throw new Error('No se encontro el progreso de onboarding')
+  }
+
+  if (progress.wizardVersion !== 2) {
+    throw new Error('Este endpoint es solo para el wizard V2')
+  }
+
+  const v2Data = (progress.v2SetupData as Record<string, any>) || {}
+
+  // Extract data from v2 steps (step numbers match frontend: 2=business, 3=type, 4=entity, 5=identity, 7=bank)
+  const businessInfo = v2Data.step2 || {}
+  const businessType = v2Data.step3 || {}
+  const entityInfo = v2Data.step4 || {}
+  const identityInfo = v2Data.step5 || {}
+  const bankInfo = v2Data.step7 || {}
+
+  // Build business info for venue creation (compatible with v1 format)
+  // businessType.businessType = VenueType enum value (e.g. RESTAURANT, BAR)
+  // businessType.businessCategory = category string (e.g. FOOD_SERVICE, RETAIL)
+  const venueBusinessInfo = {
+    name: businessInfo.businessName || 'Mi Negocio',
+    type: businessType.businessType || '',
+    venueType: businessType.businessType || '',
+    entityType: entityInfo.entityType || undefined,
+    timezone: 'America/Mexico_City',
+    address: businessInfo.address || '',
+    city: businessInfo.city || '',
+    state: businessInfo.state || '',
+    country: businessInfo.country || 'MX',
+    zipCode: businessInfo.zipCode || '',
+    phone: entityInfo.phone || '',
+    email: '', // Will be filled from org
+  }
+
+  return {
+    progress,
+    businessInfo: venueBusinessInfo,
+    bankInfo,
+    identityInfo,
+    entityInfo,
+  }
+}

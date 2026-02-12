@@ -218,16 +218,17 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
       select: { organizationId: true },
     }),
 
-    // 3. Get white-label module config (if enabled)
+    // 3. Get white-label venue module (check existence regardless of enabled state,
+    //    so we can distinguish "explicitly disabled" from "no override → inherit from org")
     prisma.venueModule.findFirst({
       where: {
         venueId: venueId,
-        enabled: true,
         module: {
           code: 'WHITE_LABEL_DASHBOARD',
         },
       },
       select: {
+        enabled: true,
         config: true,
       },
     }),
@@ -309,13 +310,32 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
   // Resolve dependencies
   const resolvedPermissions = Array.from(resolvePermissions(basePermissions))
 
+  // Resolve white-label module with organization-level inheritance
+  // Priority: VenueModule (explicit override) → OrganizationModule (inherited) → disabled
+  let resolvedWhiteLabelModule: { config: any } | null = null
+  if (whiteLabelModule) {
+    // VenueModule record exists → it's the explicit venue-level setting (wins over org)
+    resolvedWhiteLabelModule = whiteLabelModule.enabled ? { config: whiteLabelModule.config } : null
+    // If VenueModule.enabled = false, venue explicitly disabled → DON'T fall back to org
+  } else if (resolvedOrgId) {
+    // No VenueModule → check org-level inheritance
+    resolvedWhiteLabelModule = await prisma.organizationModule.findFirst({
+      where: {
+        organizationId: resolvedOrgId,
+        enabled: true,
+        module: { code: 'WHITE_LABEL_DASHBOARD' },
+      },
+      select: { config: true },
+    })
+  }
+
   // Process white-label config
-  const whiteLabelEnabled = !!whiteLabelModule
+  const whiteLabelEnabled = !!resolvedWhiteLabelModule
   const enabledFeatures: string[] = []
   const featureAccess: Record<string, FeatureAccessResult> = {}
 
-  if (whiteLabelEnabled && whiteLabelModule.config) {
-    const config = whiteLabelModule.config as {
+  if (whiteLabelEnabled && resolvedWhiteLabelModule!.config) {
+    const config = resolvedWhiteLabelModule!.config as {
       enabledFeatures?: Array<{
         code: string
         source: string

@@ -430,7 +430,7 @@ Recibo enviado por ${data.venueName} via Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
-        Avoqado Technologies S.A. de C.V.<br>
+        Servicios Tecnologicos Avo S.A. de C.V.<br>
         Ciudad de Mexico, Mexico
       </p>
       <p style="margin: 0; font-size: 12px; color: #666;">
@@ -532,7 +532,7 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
-        Avoqado Technologies S.A. de C.V.<br>
+        Servicios Tecnologicos Avo S.A. de C.V.<br>
         Ciudad de Mexico, Mexico
       </p>
       <p style="margin: 0; font-size: 12px; color: #666;">
@@ -659,7 +659,7 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
-        Avoqado Technologies S.A. de C.V.<br>
+        Servicios Tecnologicos Avo S.A. de C.V.<br>
         Ciudad de Mexico, Mexico
       </p>
       <p style="margin: 0; font-size: 12px; color: #666;">
@@ -2073,7 +2073,7 @@ Avoqado Dashboard
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
-        Avoqado Technologies S.A. de C.V.<br>
+        Servicios Tecnologicos Avo S.A. de C.V.<br>
         Ciudad de Mexico, Mexico
       </p>
       <p style="margin: 0 0 8px 0; font-size: 12px; color: #666;">
@@ -2120,7 +2120,7 @@ Comisiones: ${formatCurrency(data.metrics.platformFees)}
 Ver mas detalles en: ${data.dashboardUrl}
 
 ---
-Avoqado Technologies S.A. de C.V.
+Servicios Tecnologicos Avo S.A. de C.V.
     `
 
     return this.sendEmail({

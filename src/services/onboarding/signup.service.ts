@@ -17,9 +17,10 @@ import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
 export interface SignupInput {
   email: string
   password: string
-  firstName: string
-  lastName: string
-  organizationName: string
+  firstName?: string
+  lastName?: string
+  organizationName?: string
+  wizardVersion?: number
 }
 
 export interface SignupResult {
@@ -50,7 +51,7 @@ export interface VerifyEmailResult {
  * @returns JWT tokens and user data
  */
 export async function signupUser(input: SignupInput): Promise<SignupResult> {
-  const { email, password, firstName, lastName, organizationName } = input
+  const { email, password, firstName = '', lastName = '', organizationName = '', wizardVersion } = input
 
   // 1. Check if email already exists
   const existingStaff = await prisma.staff.findUnique({
@@ -74,7 +75,7 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
     // Create organization
     const organization = await tx.organization.create({
       data: {
-        name: organizationName,
+        name: organizationName || 'Nuevo Negocio',
         email: email.toLowerCase(), // Use user's email as organization email
         phone: '', // Placeholder, will be updated in onboarding Step 3
       },
@@ -104,6 +105,16 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
       },
     })
 
+    // Create OnboardingProgress (V2 wizard sets wizardVersion: 2)
+    await tx.onboardingProgress.create({
+      data: {
+        organizationId: organization.id,
+        currentStep: 0,
+        completedSteps: [],
+        ...(wizardVersion ? { wizardVersion } : {}),
+      },
+    })
+
     return { organization, staff }
   })
 
@@ -125,7 +136,7 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
 
   // Send verification email
   await emailService.sendEmailVerification(result.staff.email, {
-    firstName: result.staff.firstName,
+    firstName: result.staff.firstName || 'Usuario',
     verificationCode,
   })
 

@@ -163,10 +163,12 @@ export async function getAllModules(req: Request, res: Response, next: NextFunct
 /**
  * GET /modules/:moduleCode/venues
  * Get all venues with their enablement status for a specific module.
+ * Supports ?grouped=true to return venues grouped by organization with org-level module status.
  */
 export async function getVenuesForModule(req: Request, res: Response, next: NextFunction) {
   try {
     const { moduleCode } = req.params
+    const grouped = req.query.grouped === 'true'
 
     const module = await prisma.module.findUnique({
       where: { code: moduleCode },
@@ -176,7 +178,83 @@ export async function getVenuesForModule(req: Request, res: Response, next: Next
       return res.status(404).json({ error: `Module ${moduleCode} not found` })
     }
 
-    // Get all venues with their module status
+    if (grouped) {
+      // Return venues grouped by organization with org-level module status
+      const organizations = await prisma.organization.findMany({
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          organizationModules: {
+            where: { moduleId: module.id },
+            select: {
+              enabled: true,
+              config: true,
+              enabledAt: true,
+            },
+          },
+          venues: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              venueModules: {
+                where: { moduleId: module.id },
+                select: {
+                  enabled: true,
+                  config: true,
+                  enabledAt: true,
+                },
+              },
+            },
+            orderBy: { name: 'asc' },
+          },
+        },
+        orderBy: { name: 'asc' },
+      })
+
+      const orgGroups = organizations.map(org => {
+        const orgModule = org.organizationModules[0] || null
+        const orgModuleEnabled = orgModule?.enabled ?? false
+
+        const venues = org.venues.map(venue => {
+          const venueModule = venue.venueModules[0] || null
+          const hasExplicitOverride = venueModule !== null
+          const isInherited = !hasExplicitOverride && orgModuleEnabled
+          const moduleEnabled = hasExplicitOverride ? venueModule.enabled : orgModuleEnabled
+
+          return {
+            id: venue.id,
+            name: venue.name,
+            slug: venue.slug,
+            moduleEnabled,
+            hasExplicitOverride,
+            isInherited,
+            venueModuleConfig: venueModule?.config || null,
+            enabledAt: venueModule?.enabledAt || orgModule?.enabledAt || null,
+          }
+        })
+
+        return {
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          venueCount: org.venues.length,
+          orgModuleEnabled,
+          orgModuleConfig: orgModule?.config || null,
+          orgModuleEnabledAt: orgModule?.enabledAt || null,
+          venues,
+        }
+      })
+
+      logger.info(`[MODULES] Retrieved ${organizations.length} orgs (grouped) for module ${moduleCode}`)
+      return res.status(200).json({
+        module,
+        organizations: orgGroups,
+      })
+    }
+
+    // Default: flat venue list (legacy behavior)
     const venues = await prisma.venue.findMany({
       select: {
         id: true,
@@ -212,6 +290,59 @@ export async function getVenuesForModule(req: Request, res: Response, next: Next
     })
   } catch (error) {
     logger.error('[MODULES] Error getting venues for module', { error })
+    next(error)
+  }
+}
+
+/**
+ * DELETE /modules/venue-override
+ * Delete the VenueModule record so the venue falls back to org-level inheritance.
+ */
+export async function deleteVenueModuleOverride(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, moduleCode } = req.body
+
+    const module = await prisma.module.findUnique({
+      where: { code: moduleCode },
+      select: { id: true },
+    })
+
+    if (!module) {
+      return res.status(404).json({ error: `Module ${moduleCode} not found` })
+    }
+
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { id: true, name: true },
+    })
+
+    if (!venue) {
+      return res.status(404).json({ error: `Venue ${venueId} not found` })
+    }
+
+    const venueModule = await prisma.venueModule.findFirst({
+      where: { venueId, moduleId: module.id },
+    })
+
+    if (!venueModule) {
+      return res.status(404).json({ error: `No venue module override found for ${moduleCode} on venue ${venueId}` })
+    }
+
+    await prisma.venueModule.delete({
+      where: { id: venueModule.id },
+    })
+
+    logger.info(`[MODULES] Deleted venue override for ${moduleCode} on venue ${venue.name}`, {
+      venueId,
+      moduleCode,
+    })
+
+    return res.status(200).json({
+      success: true,
+      message: `Override eliminado para ${moduleCode} en ${venue.name}. Ahora hereda configuración de la organización.`,
+    })
+  } catch (error) {
+    logger.error('[MODULES] Error deleting venue module override', { error })
     next(error)
   }
 }
