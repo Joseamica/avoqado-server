@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken'
 import type { StringValue } from 'ms'
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
-import os from 'os'
+import { monitorEventLoopDelay } from 'perf_hooks'
 import { StaffRole } from '@prisma/client' // Assuming Prisma client is set up
 
 import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
@@ -25,6 +25,51 @@ import { authorizeRole } from './middlewares/authorizeRole.middleware'
 import { AvoqadoJwtPayload } from './security' // Assuming this is where the type is defined
 
 const app: Express = express()
+
+// --- Container-aware CPU + Event Loop monitoring (module-level) ---
+const eventLoopHistogram = monitorEventLoopDelay({ resolution: 20 })
+eventLoopHistogram.enable()
+
+let lastCpuUsage = process.cpuUsage()
+let lastCpuTime = Date.now()
+let cpuPercent = 0
+
+setInterval(() => {
+  const now = Date.now()
+  const elapsedMicros = (now - lastCpuTime) * 1000 // ms → μs
+  const current = process.cpuUsage()
+  const userDelta = current.user - lastCpuUsage.user
+  const sysDelta = current.system - lastCpuUsage.system
+  // Scale by CPU_LIMIT: 0.5 cores means only 50% of elapsed wall-time is available
+  const cpuLimitCores = parseFloat(process.env.CPU_LIMIT || '0.5')
+  const availableMicros = cpuLimitCores * elapsedMicros
+  cpuPercent = availableMicros > 0 ? Math.min(100, ((userDelta + sysDelta) / availableMicros) * 100) : 0
+  lastCpuUsage = current
+  lastCpuTime = now
+}, 5_000).unref()
+
+// Active HTTP connection counter (middleware-based, accurate)
+let activeConnections = 0
+app.use((req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+  activeConnections++
+  const onDone = () => {
+    activeConnections = Math.max(0, activeConnections - 1)
+  }
+  res.once('finish', onDone)
+  res.once('close', onDone)
+  next()
+})
+
+// Getters for the metrics service to read live values
+export function getAppCpuPercent() {
+  return cpuPercent
+}
+export function getAppActiveConnections() {
+  return activeConnections
+}
+export function getAppEventLoopHistogram() {
+  return eventLoopHistogram
+}
 
 // ⚠️ IMPORTANT: Webhook routes MUST be mounted BEFORE configureCoreMiddlewares
 // Stripe webhooks require raw body (not JSON parsed) for signature verification
@@ -131,36 +176,38 @@ app.get('/api/public/healthcheck', async (req: ExpressRequest, res: ExpressRespo
   }
 })
 
-// Public server metrics endpoint (no auth required, lightweight)
+// Public server metrics endpoint (no auth required, container-aware)
 app.get('/api/public/metrics', (req: ExpressRequest, res: ExpressResponse) => {
   const mem = process.memoryUsage()
-  const cpuUsage = process.cpuUsage()
-  const memoryLimitMb = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
-  const cpuLimit = parseFloat(process.env.CPU_LIMIT || '0.5')
+  const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
+  const CPU_LIMIT = parseFloat(process.env.CPU_LIMIT || '0.5')
 
   res.status(200).json({
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     memory: {
       rss: mem.rss,
-      heapTotal: mem.heapTotal,
+      rssMb: Math.round(mem.rss / 1024 / 1024),
       heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
       external: mem.external,
       arrayBuffers: mem.arrayBuffers,
+      rssPercent: parseFloat(((mem.rss / (MEMORY_LIMIT_MB * 1024 * 1024)) * 100).toFixed(1)),
+      limitMb: MEMORY_LIMIT_MB,
     },
     cpu: {
-      user: cpuUsage.user,
-      system: cpuUsage.system,
+      percent: parseFloat(cpuPercent.toFixed(1)),
+      limitCores: CPU_LIMIT,
+      raw: process.cpuUsage(),
     },
-    os: {
-      loadAvg: os.loadavg(),
-      totalMemory: os.totalmem(),
-      freeMemory: os.freemem(),
-      cpus: os.cpus().length,
+    eventLoop: {
+      lagMs: parseFloat((eventLoopHistogram.mean / 1e6).toFixed(2)),
+      lagP99Ms: parseFloat((eventLoopHistogram.percentile(99) / 1e6).toFixed(2)),
+      lagMaxMs: parseFloat((eventLoopHistogram.max / 1e6).toFixed(2)),
     },
-    limits: {
-      memoryLimitMb,
-      cpuLimit,
+    connections: {
+      active: activeConnections,
     },
   })
 })
