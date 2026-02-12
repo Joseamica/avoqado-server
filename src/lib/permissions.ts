@@ -353,6 +353,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
 
   // Factory Reset (CRITICAL - Destructive)
   'tpv-factory-reset:execute': ['tpv-factory-reset:execute', 'tpv:read'],
+
+  // ===========================
+  // TPV MESSAGES (Dashboard → Terminal messaging)
+  // ===========================
+  'tpv-messages:read': ['tpv-messages:read', 'tpv:read'],
+  'tpv-messages:send': ['tpv-messages:send', 'tpv-messages:read', 'tpv:read'],
 }
 
 /**
@@ -573,9 +579,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:write', // Can create products on-the-fly (Scan & Go)
     'tpv-reports:pay-later-aging', // Can view pay-later aging report
     'notifications:send', // Can send push notifications to staff
+    // TPV Messages
+    'tpv-messages:read', // Can view message delivery status
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
     'serialized-inventory:create', // Can register (Alta de Productos)
+    // NO: tpv-messages:send (ADMIN+ only)
     // NO: tpv-terminal:settings (ADMIN+ only)
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
     // NO: tpv-factory-reset (OWNER only)
@@ -639,6 +648,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-reports:pay-later-aging', // Can view pay-later aging report
     'tpv-products:read',
     'tpv-products:write',
+    'tpv-messages:read', // Can view messages
+    'tpv-messages:send', // Can send messages to terminals
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
@@ -694,6 +705,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-reports:pay-later-aging', // Can view pay-later aging report
     'tpv-products:read',
     'tpv-products:write',
+    'tpv-messages:read', // Can view messages
+    'tpv-messages:send', // Can send messages to terminals
     'tpv-factory-reset:execute', // ⚠️ CRITICAL: Can factory reset terminal (destructive)
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
@@ -1038,6 +1051,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tpv-time-entries': ['tpv-time-entries:read', 'tpv-time-entries:write'],
   'tpv-reports': ['tpv-reports:read', 'tpv-reports:export', 'tpv-reports:pay-later-aging'],
   'tpv-products': ['tpv-products:read', 'tpv-products:write'],
+  'tpv-messages': ['tpv-messages:read', 'tpv-messages:send'],
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
   // Serialized Inventory (SIMs, jewelry, etc.)
   'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],

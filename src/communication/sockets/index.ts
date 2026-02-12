@@ -533,6 +533,56 @@ export function broadcastTpvBulkOperationProgress(
 }
 
 /**
+ * Broadcast TPV message to terminals in a venue
+ * Used by the dashboard when sending messages (announcements, surveys, actions) to TPV terminals
+ */
+export function broadcastTpvMessage(venueId: string, message: any, options?: BroadcastOptions): void {
+  try {
+    if (socketManager.getServer()) {
+      socketManager.broadcastToVenue(
+        venueId,
+        'tpv_message' as any,
+        {
+          messageId: message.id,
+          type: message.type,
+          title: message.title,
+          body: message.body,
+          priority: message.priority,
+          requiresAck: message.requiresAck,
+          surveyOptions: message.surveyOptions,
+          surveyMultiSelect: message.surveyMultiSelect,
+          actionLabel: message.actionLabel,
+          actionType: message.actionType,
+          expiresAt: message.expiresAt ? new Date(message.expiresAt).toISOString() : null,
+          createdBy: message.createdBy,
+          createdByName: message.createdByName,
+          venueId,
+          timestamp: new Date().toISOString(),
+        },
+        options,
+      )
+
+      logger.info(`📨 TPV message broadcast: "${message.title}" (${message.type}) → venue ${venueId}`, {
+        messageId: message.id,
+        venueId,
+        type: message.type,
+      })
+    } else {
+      logger.warn('Socket server not initialized for TPV message broadcast', {
+        messageId: message.id,
+        venueId,
+      })
+    }
+  } catch (error) {
+    logger.error('Error broadcasting TPV message', {
+      messageId: message.id,
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Get connection statistics
  * Useful for monitoring and analytics
  */

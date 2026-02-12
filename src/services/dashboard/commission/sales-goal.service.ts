@@ -21,14 +21,16 @@ import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 // ==========================================
 
 export type SalesGoalPeriod = 'DAILY' | 'WEEKLY' | 'MONTHLY'
+export type SalesGoalType = 'AMOUNT' | 'QUANTITY'
 
 export interface SalesGoal {
   id: string
   venueId: string
   staffId: string | null // null = venue-wide goal
   goal: number
+  goalType: SalesGoalType // 'AMOUNT' = currency target, 'QUANTITY' = unit count target
   period: SalesGoalPeriod
-  currentSales: number // Calculated dynamically
+  currentSales: number // Calculated dynamically (amount or count depending on goalType)
   active: boolean
   createdAt: string
   updatedAt: string
@@ -42,11 +44,13 @@ export interface SalesGoal {
 export interface CreateSalesGoalInput {
   staffId?: string | null
   goal: number
+  goalType?: SalesGoalType // Defaults to 'AMOUNT' for backward compatibility
   period: SalesGoalPeriod
 }
 
 export interface UpdateSalesGoalInput {
   goal?: number
+  goalType?: SalesGoalType
   period?: SalesGoalPeriod
   active?: boolean
 }
@@ -56,6 +60,7 @@ interface StoredSalesGoal {
   id: string
   staffId: string | null
   goal: number
+  goalType: SalesGoalType
   period: SalesGoalPeriod
   active: boolean
   createdAt: string
@@ -138,9 +143,16 @@ function getSalesGoalsFromConfig(config: Prisma.JsonValue): StoredSalesGoal[] {
 }
 
 /**
- * Calculate current sales for a goal based on period
+ * Calculate current sales for a goal based on period and goal type
+ * - AMOUNT: sums Payment.amount (currency total)
+ * - QUANTITY: counts order items (units/products sold)
  */
-async function calculateCurrentSales(venueId: string, staffId: string | null, period: SalesGoalPeriod): Promise<number> {
+async function calculateCurrentSales(
+  venueId: string,
+  staffId: string | null,
+  period: SalesGoalPeriod,
+  goalType: SalesGoalType = 'AMOUNT',
+): Promise<number> {
   const now = new Date()
   let startDate: Date
 
@@ -158,7 +170,7 @@ async function calculateCurrentSales(venueId: string, staffId: string | null, pe
       break
   }
 
-  // Query payments to get total sales
+  // Query payments
   const whereClause: Prisma.PaymentWhereInput = {
     venueId,
     status: 'COMPLETED',
@@ -172,6 +184,22 @@ async function calculateCurrentSales(venueId: string, staffId: string | null, pe
     whereClause.processedById = staffId
   }
 
+  if (goalType === 'QUANTITY') {
+    // Count order items (units sold) from completed orders in this venue/period
+    const count = await prisma.orderItem.count({
+      where: {
+        order: {
+          venueId,
+          status: 'COMPLETED',
+          createdAt: { gte: startDate },
+          ...(staffId ? { payments: { some: { processedById: staffId } } } : {}),
+        },
+      },
+    })
+    return count
+  }
+
+  // AMOUNT: sum of payment amounts
   const result = await prisma.payment.aggregate({
     where: whereClause,
     _sum: {
@@ -195,10 +223,12 @@ async function enrichGoal(venueId: string, storedGoal: StoredSalesGoal): Promise
     staff = staffRecord
   }
 
-  const currentSales = await calculateCurrentSales(venueId, storedGoal.staffId, storedGoal.period)
+  const goalType = storedGoal.goalType || 'AMOUNT' // Backward compat: old goals default to AMOUNT
+  const currentSales = await calculateCurrentSales(venueId, storedGoal.staffId, storedGoal.period, goalType)
 
   return {
     ...storedGoal,
+    goalType,
     venueId,
     currentSales,
     staff,
@@ -268,6 +298,7 @@ export async function createSalesGoal(venueId: string, input: CreateSalesGoalInp
     id: `goal_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
     staffId: input.staffId || null,
     goal: input.goal,
+    goalType: input.goalType || 'AMOUNT',
     period: input.period,
     active: true,
     createdAt: now,
@@ -306,7 +337,9 @@ export async function updateSalesGoal(venueId: string, goalId: string, input: Up
   const now = new Date().toISOString()
   const updatedGoal: StoredSalesGoal = {
     ...storedGoals[goalIndex],
+    goalType: storedGoals[goalIndex].goalType || 'AMOUNT', // Ensure backward compat
     ...(input.goal !== undefined && { goal: input.goal }),
+    ...(input.goalType !== undefined && { goalType: input.goalType }),
     ...(input.period !== undefined && { period: input.period }),
     ...(input.active !== undefined && { active: input.active }),
     updatedAt: now,

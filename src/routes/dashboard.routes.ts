@@ -52,6 +52,7 @@ import * as venueKycController from '../controllers/dashboard/venueKyc.controlle
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
 import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.dashboard.controller'
+import * as tpvMessageController from '../controllers/dashboard/tpv-message.dashboard.controller'
 import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
 import {
   dateRangeQuerySchema,
@@ -10163,6 +10164,167 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   saleVerificationController.getStaffWithVerifications,
+)
+
+// ==========================================
+// TPV MESSAGES - Dashboard → Terminal messaging
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/messages:
+ *   post:
+ *     tags: [TPV Messages]
+ *     summary: Create and send a message to TPV terminals
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [type, title, body, targetType]
+ *             properties:
+ *               type: { type: string, enum: [ANNOUNCEMENT, SURVEY, ACTION] }
+ *               title: { type: string }
+ *               body: { type: string }
+ *               priority: { type: string, enum: [LOW, NORMAL, HIGH, URGENT] }
+ *               requiresAck: { type: boolean }
+ *               surveyOptions: { type: array, items: { type: string } }
+ *               surveyMultiSelect: { type: boolean }
+ *               actionLabel: { type: string }
+ *               actionType: { type: string }
+ *               targetType: { type: string, enum: [ALL_TERMINALS, SPECIFIC_TERMINALS] }
+ *               targetTerminalIds: { type: array, items: { type: string } }
+ *               expiresAt: { type: string, format: date-time }
+ *     responses:
+ *       201: { description: Message created and sent }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.post(
+  '/venues/:venueId/messages',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-messages:send'),
+  tpvMessageController.createMessage,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/messages:
+ *   get:
+ *     tags: [TPV Messages]
+ *     summary: List messages for a venue (paginated)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [ACTIVE, EXPIRED, CANCELLED] }
+ *       - in: query
+ *         name: type
+ *         schema: { type: string, enum: [ANNOUNCEMENT, SURVEY, ACTION] }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200: { description: Paginated message list }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/venues/:venueId/messages', authenticateTokenMiddleware, checkPermission('tpv-messages:read'), tpvMessageController.getMessages)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/messages/{messageId}:
+ *   get:
+ *     tags: [TPV Messages]
+ *     summary: Get a message with delivery status details
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Message with delivery details }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { description: Message not found }
+ */
+router.get(
+  '/venues/:venueId/messages/:messageId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-messages:read'),
+  tpvMessageController.getMessage,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/messages/{messageId}/responses:
+ *   get:
+ *     tags: [TPV Messages]
+ *     summary: Get survey responses for a message
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Survey responses }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { description: Message not found }
+ */
+router.get(
+  '/venues/:venueId/messages/:messageId/responses',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-messages:read'),
+  tpvMessageController.getMessageResponses,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/messages/{messageId}:
+ *   delete:
+ *     tags: [TPV Messages]
+ *     summary: Cancel an active message
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Message cancelled }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       404: { description: Message not found }
+ */
+router.delete(
+  '/venues/:venueId/messages/:messageId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-messages:send'),
+  tpvMessageController.cancelMessage,
 )
 
 export default router
