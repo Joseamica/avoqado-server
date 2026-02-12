@@ -156,10 +156,7 @@ export async function findActiveCommissionConfig(
         active: true,
         deletedAt: null,
         effectiveFrom: { lte: effectiveDate },
-        OR: [
-          { effectiveTo: null },
-          { effectiveTo: { gte: effectiveDate } },
-        ],
+        OR: [{ effectiveTo: null }, { effectiveTo: { gte: effectiveDate } }],
       },
       include: {
         tiers: {
