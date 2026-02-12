@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 import type { StringValue } from 'ms'
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
+import os from 'os'
 import { StaffRole } from '@prisma/client' // Assuming Prisma client is set up
 
 import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
@@ -128,6 +129,40 @@ app.get('/api/public/healthcheck', async (req: ExpressRequest, res: ExpressRespo
       },
     })
   }
+})
+
+// Public server metrics endpoint (no auth required, lightweight)
+app.get('/api/public/metrics', (req: ExpressRequest, res: ExpressResponse) => {
+  const mem = process.memoryUsage()
+  const cpuUsage = process.cpuUsage()
+  const memoryLimitMb = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
+  const cpuLimit = parseFloat(process.env.CPU_LIMIT || '0.5')
+
+  res.status(200).json({
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: {
+      rss: mem.rss,
+      heapTotal: mem.heapTotal,
+      heapUsed: mem.heapUsed,
+      external: mem.external,
+      arrayBuffers: mem.arrayBuffers,
+    },
+    cpu: {
+      user: cpuUsage.user,
+      system: cpuUsage.system,
+    },
+    os: {
+      loadAvg: os.loadavg(),
+      totalMemory: os.totalmem(),
+      freeMemory: os.freemem(),
+      cpus: os.cpus().length,
+    },
+    limits: {
+      memoryLimitMb,
+      cpuLimit,
+    },
+  })
 })
 
 // --- Development Only Endpoints ---

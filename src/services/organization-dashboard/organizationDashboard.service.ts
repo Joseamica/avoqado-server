@@ -1255,6 +1255,7 @@ class OrganizationDashboardService {
           iccid,
           paymentMethod: firstPayment?.method || undefined,
           cardBrand: firstPayment?.cardBrand || undefined,
+          tags: order.tags?.length ? order.tags : undefined,
         },
       })
     }

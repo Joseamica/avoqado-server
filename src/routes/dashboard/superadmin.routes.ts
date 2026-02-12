@@ -3,6 +3,7 @@ import * as superadminController from '../../controllers/dashboard/superadmin.co
 import * as costManagementController from '../../controllers/dashboard/cost-management.controller'
 import * as venuePaymentReadinessController from '../../controllers/dashboard/venuePaymentReadiness.controller'
 import * as venuesSuperadminController from '../../controllers/dashboard/venues.superadmin.controller'
+import * as serverMetricsController from '../../controllers/dashboard/serverMetrics.controller'
 
 import { validateRequest } from '../../middlewares/validation'
 
@@ -264,6 +265,9 @@ router.use('/staff', staffRoutes)
 
 // Payment Readiness Check (for superadmin dashboard)
 router.get('/payment-readiness', venuePaymentReadinessController.getMultipleVenuesPaymentReadiness)
+
+// Server Metrics (health monitoring)
+router.get('/server-metrics', serverMetricsController.getServerMetrics)
 
 // Master TOTP Setup (QR code for Google Authenticator)
 router.get('/master-totp/setup', superadminController.getMasterTotpSetup)
