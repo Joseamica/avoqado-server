@@ -23,6 +23,7 @@ import { authorizeRole } from './middlewares/authorizeRole.middleware'
 
 // Types (could be moved to a central types file)
 import { AvoqadoJwtPayload } from './security' // Assuming this is where the type is defined
+import { CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT_MB } from './utils/containerLimits'
 
 const app: Express = express()
 
@@ -40,9 +41,8 @@ setInterval(() => {
   const current = process.cpuUsage()
   const userDelta = current.user - lastCpuUsage.user
   const sysDelta = current.system - lastCpuUsage.system
-  // Scale by CPU_LIMIT: 0.5 cores means only 50% of elapsed wall-time is available
-  const cpuLimitCores = parseFloat(process.env.CPU_LIMIT || '0.5')
-  const availableMicros = cpuLimitCores * elapsedMicros
+  // Scale by container CPU limit: 0.5 cores means only 50% of elapsed wall-time is available
+  const availableMicros = CONTAINER_CPU_LIMIT * elapsedMicros
   cpuPercent = availableMicros > 0 ? Math.min(100, ((userDelta + sysDelta) / availableMicros) * 100) : 0
   lastCpuUsage = current
   lastCpuTime = now
@@ -179,8 +179,6 @@ app.get('/api/public/healthcheck', async (req: ExpressRequest, res: ExpressRespo
 // Public server metrics endpoint (no auth required, container-aware)
 app.get('/api/public/metrics', (req: ExpressRequest, res: ExpressResponse) => {
   const mem = process.memoryUsage()
-  const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
-  const CPU_LIMIT = parseFloat(process.env.CPU_LIMIT || '0.5')
 
   res.status(200).json({
     timestamp: new Date().toISOString(),
@@ -193,12 +191,12 @@ app.get('/api/public/metrics', (req: ExpressRequest, res: ExpressResponse) => {
       heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
       external: mem.external,
       arrayBuffers: mem.arrayBuffers,
-      rssPercent: parseFloat(((mem.rss / (MEMORY_LIMIT_MB * 1024 * 1024)) * 100).toFixed(1)),
-      limitMb: MEMORY_LIMIT_MB,
+      rssPercent: parseFloat(((mem.rss / (CONTAINER_MEMORY_LIMIT_MB * 1024 * 1024)) * 100).toFixed(1)),
+      limitMb: CONTAINER_MEMORY_LIMIT_MB,
     },
     cpu: {
       percent: parseFloat(cpuPercent.toFixed(1)),
-      limitCores: CPU_LIMIT,
+      limitCores: CONTAINER_CPU_LIMIT,
       raw: process.cpuUsage(),
     },
     eventLoop: {

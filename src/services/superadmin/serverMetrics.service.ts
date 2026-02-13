@@ -1,5 +1,6 @@
 import { monitorEventLoopDelay, IntervalHistogram } from 'perf_hooks'
 import logger from '../../config/logger'
+import { CONTAINER_MEMORY_LIMIT_MB, CONTAINER_CPU_LIMIT } from '../../utils/containerLimits'
 
 // --- Types ---
 
@@ -65,8 +66,6 @@ let getEventLoopHisto: () => IntervalHistogram | null = () => histogram
 
 function collectSnapshot(): MetricsSnapshot {
   const mem = process.memoryUsage()
-  const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
-  const CPU_LIMIT = parseFloat(process.env.CPU_LIMIT || '0.5')
 
   const histo = getEventLoopHisto()
 
@@ -81,12 +80,12 @@ function collectSnapshot(): MetricsSnapshot {
       heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
       external: mem.external,
       arrayBuffers: mem.arrayBuffers,
-      rssPercent: parseFloat(((mem.rss / (MEMORY_LIMIT_MB * 1024 * 1024)) * 100).toFixed(1)),
-      limitMb: MEMORY_LIMIT_MB,
+      rssPercent: parseFloat(((mem.rss / (CONTAINER_MEMORY_LIMIT_MB * 1024 * 1024)) * 100).toFixed(1)),
+      limitMb: CONTAINER_MEMORY_LIMIT_MB,
     },
     cpu: {
       percent: parseFloat(getCpuPercent().toFixed(1)),
-      limitCores: CPU_LIMIT,
+      limitCores: CONTAINER_CPU_LIMIT,
     },
     eventLoop: {
       lagMs: histo ? parseFloat((histo.mean / 1e6).toFixed(2)) : 0,
