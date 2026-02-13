@@ -177,6 +177,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
             id: true,
             name: true,
             type: true,
+            timezone: true,
           },
         },
       },
