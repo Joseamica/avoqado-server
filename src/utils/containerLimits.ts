@@ -1,74 +1,82 @@
 import { readFileSync } from 'fs'
+import os from 'os'
 import logger from '../config/logger'
 
 function detectMemoryLimitMb(): number {
   // cgroups v2
   try {
-    const v2 = readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim()
-    if (v2 !== 'max') {
-      const mb = Math.round(parseInt(v2) / 1024 / 1024)
-      logger.info(`Container memory limit detected (cgroups v2): ${mb} MB`)
+    const raw = readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim()
+    logger.info(`[containerLimits] /sys/fs/cgroup/memory.max = "${raw}"`)
+    if (raw !== 'max') {
+      const mb = Math.round(parseInt(raw) / 1024 / 1024)
+      logger.info(`[containerLimits] Memory limit (cgroups v2): ${mb} MB`)
       return mb
     }
-  } catch {
-    // cgroup file not available (non-container environment)
+  } catch (err: any) {
+    logger.info(`[containerLimits] cgroups v2 memory: ${err.code || err.message}`)
   }
 
   // cgroups v1
   try {
-    const v1 = readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim()
-    const bytes = parseInt(v1)
-    // Values near or above 1e15 mean "no limit" in cgroups v1
+    const raw = readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim()
+    logger.info(`[containerLimits] /sys/fs/cgroup/memory/memory.limit_in_bytes = "${raw}"`)
+    const bytes = parseInt(raw)
     if (bytes < 1e15) {
       const mb = Math.round(bytes / 1024 / 1024)
-      logger.info(`Container memory limit detected (cgroups v1): ${mb} MB`)
+      logger.info(`[containerLimits] Memory limit (cgroups v1): ${mb} MB`)
       return mb
     }
-  } catch {
-    // cgroup file not available
+  } catch (err: any) {
+    logger.info(`[containerLimits] cgroups v1 memory: ${err.code || err.message}`)
   }
 
-  // Fallback to env var
-  const fallback = parseInt(process.env.MEMORY_LIMIT_MB || '512', 10)
-  logger.info(`Container memory limit: ${fallback} MB (env fallback)`)
-  return fallback
+  // os.totalmem() - on modern Linux (5.x+) with cgroup v2, /proc/meminfo reflects container limits
+  const osMemMb = Math.round(os.totalmem() / 1024 / 1024)
+  logger.info(`[containerLimits] Memory limit (os.totalmem fallback): ${osMemMb} MB`)
+  return osMemMb
 }
 
 function detectCpuLimit(): number {
-  // cgroups v2: "quota period" e.g. "50000 100000" = 0.5 CPU
+  // cgroups v2: "quota period" e.g. "100000 100000" = 1.0 CPU
   try {
-    const v2 = readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim()
-    if (!v2.startsWith('max')) {
-      const [quota, period] = v2.split(' ').map(Number)
+    const raw = readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim()
+    logger.info(`[containerLimits] /sys/fs/cgroup/cpu.max = "${raw}"`)
+    if (!raw.startsWith('max')) {
+      const [quota, period] = raw.split(' ').map(Number)
       if (quota > 0 && period > 0) {
         const cores = parseFloat((quota / period).toFixed(2))
-        logger.info(`Container CPU limit detected (cgroups v2): ${cores} cores`)
+        logger.info(`[containerLimits] CPU limit (cgroups v2): ${cores} cores`)
         return cores
       }
     }
-  } catch {
-    // cgroup file not available (non-container environment)
+  } catch (err: any) {
+    logger.info(`[containerLimits] cgroups v2 cpu: ${err.code || err.message}`)
   }
 
   // cgroups v1
   try {
-    const quota = parseInt(readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'utf8').trim())
-    const period = parseInt(readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'utf8').trim())
+    const quotaRaw = readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'utf8').trim()
+    const periodRaw = readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'utf8').trim()
+    logger.info(`[containerLimits] cgroups v1 cpu: quota=${quotaRaw}, period=${periodRaw}`)
+    const quota = parseInt(quotaRaw)
+    const period = parseInt(periodRaw)
     if (quota > 0 && period > 0) {
       const cores = parseFloat((quota / period).toFixed(2))
-      logger.info(`Container CPU limit detected (cgroups v1): ${cores} cores`)
+      logger.info(`[containerLimits] CPU limit (cgroups v1): ${cores} cores`)
       return cores
     }
-  } catch {
-    // cgroup file not available
+  } catch (err: any) {
+    logger.info(`[containerLimits] cgroups v1 cpu: ${err.code || err.message}`)
   }
 
-  // Fallback to env var
-  const fallback = parseFloat(process.env.CPU_LIMIT || '0.5')
-  logger.info(`Container CPU limit: ${fallback} cores (env fallback)`)
-  return fallback
+  // os.cpus().length as last resort - may report host CPUs in containers
+  // Use 1 as minimum to avoid misleadingly low CPU percentages
+  const cpuCount = os.cpus().length
+  logger.info(`[containerLimits] CPU (os.cpus fallback): ${cpuCount} host cores detected`)
+  return cpuCount
 }
 
 // Resolve once at import time
 export const CONTAINER_MEMORY_LIMIT_MB = detectMemoryLimitMb()
 export const CONTAINER_CPU_LIMIT = detectCpuLimit()
+logger.info(`[containerLimits] Final: memory=${CONTAINER_MEMORY_LIMIT_MB}MB, cpu=${CONTAINER_CPU_LIMIT} cores`)
