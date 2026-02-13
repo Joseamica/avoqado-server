@@ -35,7 +35,7 @@ export async function registerDevice(req: Request, res: Response, next: NextFunc
     if (!staffId) {
       return res.status(401).json({
         success: false,
-        error: 'Authentication required',
+        error: 'Autenticación requerida',
       })
     }
 
@@ -48,8 +48,8 @@ export async function registerDevice(req: Request, res: Response, next: NextFunc
     if (!staff) {
       return res.status(404).json({
         success: false,
-        error: 'Staff not found',
-        message: 'Your account no longer exists. Please contact support.',
+        error: 'Empleado no encontrado',
+        message: 'Tu cuenta ya no existe. Contacta a soporte.',
       })
     }
 
@@ -58,7 +58,7 @@ export async function registerDevice(req: Request, res: Response, next: NextFunc
     if (!validation.success) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid request',
+        error: 'Solicitud inválida',
         details: validation.error.errors,
       })
     }
@@ -100,7 +100,7 @@ export async function unregisterDevice(req: Request, res: Response, next: NextFu
     if (!validation.success) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid request',
+        error: 'Solicitud inválida',
         details: validation.error.errors,
       })
     }
@@ -128,7 +128,7 @@ export async function getMyDevices(req: Request, res: Response, next: NextFuncti
     if (!staffId) {
       return res.status(401).json({
         success: false,
-        error: 'Authentication required',
+        error: 'Autenticación requerida',
       })
     }
 
@@ -161,7 +161,7 @@ export async function sendTestPush(req: Request, res: Response, next: NextFuncti
     if (!staffId) {
       return res.status(401).json({
         success: false,
-        error: 'Authentication required',
+        error: 'Autenticación requerida',
       })
     }
 

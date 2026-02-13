@@ -94,10 +94,18 @@ class TerminalRegistry {
   }
 
   /**
-   * Get all online terminals for a venue.
+   * Get all online terminals for a venue (includes terminals without socket).
    */
   getOnlineTerminals(venueId: string): TerminalEntry[] {
     return Array.from(this.terminals.values()).filter(t => t.venueId === venueId)
+  }
+
+  /**
+   * Get terminals that are ready to receive payments (have active socket connection).
+   * Use this for the iOS "online terminals" endpoint — only show terminals that can actually process payments.
+   */
+  getPaymentReadyTerminals(venueId: string): TerminalEntry[] {
+    return Array.from(this.terminals.values()).filter(t => t.venueId === venueId && t.socketId !== null)
   }
 
   /**

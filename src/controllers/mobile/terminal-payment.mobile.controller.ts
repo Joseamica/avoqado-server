@@ -26,14 +26,14 @@ export async function sendTerminalPayment(req: Request, res: Response) {
     if (!terminalId || !amountCents) {
       return res.status(400).json({
         success: false,
-        message: 'terminalId and amountCents are required',
+        message: 'terminalId y amountCents son requeridos',
       })
     }
 
     if (amountCents <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'amountCents must be positive',
+        message: 'El monto debe ser mayor a 0',
       })
     }
 
@@ -42,7 +42,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
     if (terminal && terminal.venueId !== venueId) {
       return res.status(403).json({
         success: false,
-        message: 'Terminal does not belong to this venue',
+        message: 'La terminal no pertenece a este establecimiento',
       })
     }
 
@@ -75,11 +75,19 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       ...result,
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error'
+    const message = error instanceof Error ? error.message : 'Error desconocido'
 
     // Terminal not online → 404
-    if (message.includes('not online')) {
+    if (message.includes('no está conectada')) {
       return res.status(404).json({
+        success: false,
+        message,
+      })
+    }
+
+    // Terminal registered via HTTP heartbeat but no socket → 422
+    if (message.includes('no tiene conexión de socket')) {
+      return res.status(422).json({
         success: false,
         message,
       })
@@ -95,7 +103,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
 
     return res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: 'Error interno del servidor',
     })
   }
 }
@@ -127,16 +135,16 @@ export async function cancelTerminalPayment(req: Request, res: Response) {
 
     return res.json({
       success: cancelled,
-      message: cancelled ? 'Cancel sent to terminal' : 'Terminal not online',
+      message: cancelled ? 'Cancelación enviada a la terminal' : 'Terminal no conectada',
     })
   } catch (error) {
     logger.error('Error in cancelTerminalPayment', {
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: error instanceof Error ? error.message : 'Error desconocido',
     })
 
     return res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: 'Error interno del servidor',
     })
   }
 }
@@ -150,9 +158,9 @@ export async function getOnlineTerminals(req: Request, res: Response) {
   try {
     const { venueId } = req.params
 
-    const terminals = terminalRegistry.getOnlineTerminals(venueId)
+    const terminals = terminalRegistry.getPaymentReadyTerminals(venueId)
 
-    logger.info(`📡 [API] getOnlineTerminals for venue ${venueId}: found ${terminals.length}`, {
+    logger.info(`📡 [API] getOnlineTerminals for venue ${venueId}: found ${terminals.length} payment-ready`, {
       venueId,
       terminalIds: terminals.map(t => t.terminalId),
     })
@@ -163,19 +171,20 @@ export async function getOnlineTerminals(req: Request, res: Response) {
         terminalId: t.terminalId,
         name: t.name || `Terminal ${t.terminalId}`,
         isOnline: true,
+        hasSocket: t.socketId !== null,
         lastHeartbeat: t.lastHeartbeat.toISOString(),
         registeredAt: t.registeredAt.toISOString(),
       })),
     })
   } catch (error) {
     logger.error('Error in getOnlineTerminals', {
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: error instanceof Error ? error.message : 'Error desconocido',
       venueId: req.params.venueId,
     })
 
     return res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: 'Error interno del servidor',
     })
   }
 }

@@ -77,11 +77,11 @@ class TerminalPaymentService {
         terminalId,
         registeredTerminals: terminalRegistry.getAllTerminalIds(),
       })
-      throw new Error(`Terminal ${terminalId} is not online`)
+      throw new Error(`La terminal ${terminalId} no está conectada`)
     }
     const socketId = terminalEntry.socketId
     if (!socketId) {
-      throw new Error(`Terminal ${terminalId} is online but has no socket connection`)
+      throw new Error(`La terminal ${terminalId} está registrada pero no tiene conexión de socket. Reinicia la app de la terminal.`)
     }
 
     logger.info(`✅ [TerminalPayment] Terminal found`, {
@@ -105,7 +105,7 @@ class TerminalPaymentService {
     // Emit to the specific terminal's socket
     const io = socketManager.getServer()
     if (!io) {
-      throw new Error('Socket.IO server not initialized')
+      throw new Error('Servidor de Socket.IO no inicializado')
     }
 
     return new Promise<TerminalPaymentResult>((resolve, reject) => {
@@ -116,7 +116,7 @@ class TerminalPaymentService {
         resolve({
           requestId,
           status: 'timeout',
-          errorMessage: 'Terminal did not respond within 60 seconds',
+          errorMessage: 'La terminal no respondió en 60 segundos',
         })
       }, PAYMENT_TIMEOUT_MS)
 
@@ -200,7 +200,7 @@ class TerminalPaymentService {
     io.to(terminalEntry.socketId).emit('terminal:payment_cancel', {
       terminalId,
       requestId, // TPV checks: if currentRequestId !== requestId, ignore cancel
-      reason: reason || 'Cancelled by user',
+      reason: reason || 'Cancelado por el usuario',
       timestamp: new Date().toISOString(),
     })
 
@@ -213,7 +213,7 @@ class TerminalPaymentService {
         pending.resolve({
           requestId,
           status: 'failed',
-          errorMessage: 'Cancelled by user',
+          errorMessage: 'Cancelado por el usuario',
         })
       }
     }
