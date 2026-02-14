@@ -566,73 +566,86 @@ class CommandCenterService {
     previousPeriodStart.setDate(previousPeriodStart.getDate() - periodDuration + 1)
     previousPeriodStart.setHours(0, 0, 0, 0)
 
-    // Get current period orders with item counts (not full items)
-    const currentOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: { gte: currentPeriodStart, lte: currentPeriodEnd },
-      },
-      select: {
-        total: true,
-        createdAt: true,
-        _count: { select: { items: true } },
-      },
-    })
-
-    // Previous period: only need totals for comparison, not per-day breakdown
-    const [prevAgg, prevItemCount] = await Promise.all([
+    // Aggregate current period per day in SQL (avoids loading all orders+items into memory)
+    const [dailyData, prevAgg, prevUnitsAgg] = await Promise.all([
+      // Current period: sales + transactions + units per day via subquery
+      // Inner query groups by order to get correct total + unit sum per order,
+      // outer query aggregates per day
+      prisma.$queryRaw<Array<{ date_key: Date; sales: any; transactions: any; units: any }>>`
+        SELECT
+          sub.date_key,
+          SUM(sub.total) as sales,
+          COUNT(*) as transactions,
+          SUM(sub.units) as units
+        FROM (
+          SELECT
+            DATE(o."createdAt") as date_key,
+            o.total,
+            COALESCE(SUM(oi.quantity), 0) as units
+          FROM "Order" o
+          LEFT JOIN "OrderItem" oi ON oi."orderId" = o.id
+          WHERE o."venueId" = ${venueId}
+            AND o.status = 'COMPLETED'
+            AND o."createdAt" >= ${currentPeriodStart}
+            AND o."createdAt" <= ${currentPeriodEnd}
+          GROUP BY o.id, DATE(o."createdAt"), o.total
+        ) sub
+        GROUP BY sub.date_key
+        ORDER BY sub.date_key
+      `,
+      // Previous period totals
       prisma.order.aggregate({
         where: { venueId, status: 'COMPLETED', createdAt: { gte: previousPeriodStart, lte: previousPeriodEnd } },
         _sum: { total: true },
         _count: true,
       }),
-      prisma.orderItem.count({
+      prisma.orderItem.aggregate({
         where: { order: { venueId, status: 'COMPLETED', createdAt: { gte: previousPeriodStart, lte: previousPeriodEnd } } },
+        _sum: { quantity: true },
       }),
     ])
 
-    // Build trend data grouped by day
-    const trendMap = new Map<string, SalesTrendPoint>()
+    // Build daily data lookup
+    const dailyMap = new Map<string, { sales: number; units: number; transactions: number }>()
+    for (const row of dailyData) {
+      const key = row.date_key.toISOString().split('T')[0]
+      dailyMap.set(key, {
+        sales: Number(row.sales) || 0,
+        units: Number(row.units) || 0,
+        transactions: Number(row.transactions) || 0,
+      })
+    }
 
-    // Initialize all days in range
+    // Build trend data for all days in range (including days with zero)
+    const trendMap = new Map<string, SalesTrendPoint>()
     const iterDate = new Date(currentPeriodStart)
     while (iterDate <= currentPeriodEnd) {
       const dateKey = iterDate.toISOString().split('T')[0]
       const displayDate = iterDate.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' })
+      const dayData = dailyMap.get(dateKey) || { sales: 0, units: 0, transactions: 0 }
       trendMap.set(dateKey, {
         date: displayDate,
-        sales: 0,
-        units: 0,
-        transactions: 0,
+        sales: Math.round(dayData.sales * 100) / 100,
+        units: dayData.units,
+        transactions: dayData.transactions,
       })
       iterDate.setDate(iterDate.getDate() + 1)
     }
 
-    // Aggregate current period data
-    for (const order of currentOrders) {
-      const dateKey = order.createdAt.toISOString().split('T')[0]
-      const existing = trendMap.get(dateKey)
-      if (existing) {
-        existing.sales += Number(order.total || 0)
-        existing.units += order._count.items
-        existing.transactions += 1
-      }
+    const trend = Array.from(trendMap.values())
+
+    // Calculate totals from daily aggregates (no in-memory order iteration)
+    let currentTotalSales = 0
+    let currentTotalUnits = 0
+    let currentTotalTransactions = 0
+    for (const day of dailyMap.values()) {
+      currentTotalSales += day.sales
+      currentTotalUnits += day.units
+      currentTotalTransactions += day.transactions
     }
 
-    // Round sales values
-    const trend = Array.from(trendMap.values()).map(point => ({
-      ...point,
-      sales: Math.round(point.sales * 100) / 100,
-    }))
-
-    // Calculate totals for comparison
-    const currentTotalSales = currentOrders.reduce((sum, o) => sum + Number(o.total || 0), 0)
-    const currentTotalUnits = currentOrders.reduce((sum, o) => sum + o._count.items, 0)
-    const currentTotalTransactions = currentOrders.length
-
     const previousTotalSales = Number(prevAgg._sum.total) || 0
-    const previousTotalUnits = prevItemCount
+    const previousTotalUnits = Number(prevUnitsAgg._sum.quantity) || 0
     const previousTotalTransactions = prevAgg._count
 
     // Calculate percentage changes

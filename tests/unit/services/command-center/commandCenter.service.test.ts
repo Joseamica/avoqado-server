@@ -147,17 +147,17 @@ describe('CommandCenterService', () => {
 
   describe('getStockVsSales', () => {
     it('should return trend array and comparison with current + previous data', async () => {
-      const now = new Date()
+      const today = new Date()
+      const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate())
 
-      prismaMock.order.findMany.mockResolvedValue([
-        { total: 100, createdAt: now, _count: { items: 3 } },
-        { total: 200, createdAt: now, _count: { items: 5 } },
-      ])
+      // Current period: daily SQL aggregation (returns per-day rows)
+      prismaMock.$queryRaw.mockResolvedValue([{ date_key: todayDate, sales: 300, transactions: BigInt(2), units: 8 }])
+      // Previous period
       prismaMock.order.aggregate.mockResolvedValue({
         _sum: { total: 80 },
         _count: 2,
       })
-      prismaMock.orderItem.count.mockResolvedValue(4)
+      prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { quantity: 4 } })
 
       const result = await commandCenterService.getStockVsSales(venueId, { days: 7 })
 
@@ -170,12 +170,15 @@ describe('CommandCenterService', () => {
     })
 
     it('should return zero comparisons when previous period has no data', async () => {
-      prismaMock.order.findMany.mockResolvedValue([{ total: 100, createdAt: new Date(), _count: { items: 2 } }])
+      const today = new Date()
+      const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+
+      prismaMock.$queryRaw.mockResolvedValue([{ date_key: todayDate, sales: 100, transactions: BigInt(1), units: 2 }])
       prismaMock.order.aggregate.mockResolvedValue({
         _sum: { total: null },
         _count: 0,
       })
-      prismaMock.orderItem.count.mockResolvedValue(0)
+      prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { quantity: 0 } })
 
       const result = await commandCenterService.getStockVsSales(venueId, { days: 7 })
 
@@ -185,12 +188,12 @@ describe('CommandCenterService', () => {
     })
 
     it('should return trend with zero values for empty current period', async () => {
-      prismaMock.order.findMany.mockResolvedValue([])
+      prismaMock.$queryRaw.mockResolvedValue([]) // no daily data
       prismaMock.order.aggregate.mockResolvedValue({
         _sum: { total: null },
         _count: 0,
       })
-      prismaMock.orderItem.count.mockResolvedValue(0)
+      prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { quantity: 0 } })
 
       const result = await commandCenterService.getStockVsSales(venueId, { days: 3 })
 

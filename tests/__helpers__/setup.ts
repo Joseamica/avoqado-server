@@ -99,6 +99,14 @@ const prismaMock: any = {
   timeEntry: createMockModel(),
   timeEntryBreak: createMockModel(),
   venueSettings: createMockModel(),
+  // Organization dashboard models
+  cashDeposit: createMockModel(),
+  stockAlertConfig: createMockModel(),
+  serializedItem: createMockModel(),
+  performanceGoal: createMockModel(),
+  module: createMockModel(),
+  venueModule: createMockModel(),
+  organizationSalesGoalConfig: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

@@ -2,14 +2,6 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  roots: ['<rootDir>/tests', '<rootDir>/src'],
-
-  // 🔥 UPDATED: New test patterns for our structure
-  testMatch: [
-    '<rootDir>/tests/**/*.test.ts', // Unit tests
-    '<rootDir>/tests/**/*.api.test.ts', // API tests
-    '<rootDir>/tests/**/*.workflow.test.ts', // Workflow tests
-  ],
 
   collectCoverageFrom: [
     'src/**/*.ts',
@@ -24,7 +16,6 @@ module.exports = {
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
 
-  // 🔥 NEW: Coverage thresholds
   coverageThreshold: {
     global: {
       branches: 70,
@@ -32,7 +23,6 @@ module.exports = {
       lines: 70,
       statements: 70,
     },
-    // Higher thresholds for critical services
     'src/services/dashboard/': {
       branches: 80,
       functions: 80,
@@ -47,20 +37,12 @@ module.exports = {
     },
   },
 
-  setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
-
-  moduleNameMapper: {
-    '^@/(.*)$': '<rootDir>/src/$1',
-    '^@tests/(.*)$': '<rootDir>/tests/$1',
-    '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
-  },
-
-  // 🔥 NEW: Test configuration
   verbose: true,
   detectOpenHandles: true,
   forceExit: true,
 
-  // 🔥 NEW: Project-based configuration for better organization
+  // Project-based configuration — each project defines its own
+  // setupFilesAfterEnv, moduleNameMapper, and testMatch
   projects: [
     {
       displayName: 'unit',
