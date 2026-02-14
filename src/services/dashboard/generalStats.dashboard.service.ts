@@ -26,34 +26,23 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
     },
   }
 
-  // Fetch payments with order status to filter out cancelled orders
-  const payments = await prisma.payment.findMany({
+  // Fetch only valid payments: COMPLETED status, non-cancelled orders
+  // Filters applied at database level to avoid loading unnecessary data
+  const validPayments = await prisma.payment.findMany({
     where: {
       venueId,
+      status: TransactionStatus.COMPLETED,
       createdAt: {
         gte: fromDate,
         lte: toDate,
       },
-    },
-    include: {
       order: {
-        select: {
-          status: true,
-        },
+        status: { not: OrderStatus.CANCELLED },
       },
     },
     orderBy: {
       createdAt: 'desc',
     },
-  })
-
-  // Filter out:
-  // 1. Pending/Failed payments (only COMPLETED should count as sales)
-  // 2. Payments from cancelled orders (should not count towards total sales)
-  const validPayments = payments.filter(p => {
-    if (p.status !== TransactionStatus.COMPLETED) return false
-    if (p.order?.status === OrderStatus.CANCELLED) return false
-    return true
   })
 
   // Fetch reviews data
@@ -402,14 +391,18 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
     },
   }
 
-  // Fetch only essential data for basic metrics
-  // Include order relationship to filter out payments from cancelled orders
-  const payments = await prisma.payment.findMany({
+  // Fetch only valid payments: COMPLETED status, non-cancelled orders
+  // Filters applied at database level to avoid loading unnecessary data
+  const validPayments = await prisma.payment.findMany({
     where: {
       venueId,
+      status: TransactionStatus.COMPLETED,
       createdAt: {
         gte: fromDate,
         lte: toDate,
+      },
+      order: {
+        status: { not: OrderStatus.CANCELLED },
       },
     },
     select: {
@@ -417,28 +410,11 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
       amount: true,
       method: true,
       tipAmount: true,
-      status: true,
       createdAt: true,
-      order: {
-        select: {
-          status: true,
-        },
-      },
     },
     orderBy: {
       createdAt: 'desc',
     },
-  })
-
-  // Filter out:
-  // 1. Pending/Failed payments (only COMPLETED should count as sales)
-  // 2. Payments from cancelled orders (should not count towards total sales)
-  const validPayments = payments.filter(p => {
-    // Only include completed payments
-    if (p.status !== TransactionStatus.COMPLETED) return false
-    // Exclude payments from cancelled orders
-    if (p.order?.status === OrderStatus.CANCELLED) return false
-    return true
   })
 
   // Fetch reviews for star rating
@@ -640,19 +616,16 @@ async function getTipsOverTimeData(venueId: string, dateFilter: any) {
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
+      status: TransactionStatus.COMPLETED,
       ...dateFilter,
     },
     select: {
       tipAmount: true,
       createdAt: true,
-      status: true,
     },
   })
 
-  // Only include COMPLETED payments (exclude PENDING, FAILED, etc.)
-  const validPayments = payments.filter(p => p.status === TransactionStatus.COMPLETED)
-
-  const transformedPayments = validPayments.map(payment => ({
+  const transformedPayments = payments.map(payment => ({
     createdAt: payment.createdAt.toISOString(),
     tips: [{ amount: Number(payment.tipAmount) }],
   }))
@@ -664,20 +637,17 @@ async function getSalesByPaymentMethodData(venueId: string, dateFilter: any) {
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
+      status: TransactionStatus.COMPLETED,
       ...dateFilter,
     },
     select: {
       amount: true,
       method: true,
       createdAt: true,
-      status: true,
     },
   })
 
-  // Only include COMPLETED payments (exclude PENDING, FAILED, etc.)
-  const validPayments = payments.filter(p => p.status === TransactionStatus.COMPLETED)
-
-  const transformedPayments = validPayments.map(payment => ({
+  const transformedPayments = payments.map(payment => ({
     amount: Number(payment.amount),
     method: mapPaymentMethod(payment.method),
     createdAt: payment.createdAt.toISOString(),
@@ -710,7 +680,10 @@ async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Dat
       },
     },
     include: {
-      payments: true,
+      payments: {
+        where: { status: TransactionStatus.COMPLETED },
+        select: { amount: true },
+      },
     },
   })
 
@@ -718,10 +691,7 @@ async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Dat
 
   orders.forEach(order => {
     const dateStr = order.createdAt.toISOString().split('T')[0]
-    const revenue = order.payments
-      .filter(payment => payment.status === TransactionStatus.COMPLETED)
-      .reduce((sum, payment) => sum + Number(payment.amount), 0)
-
+    const revenue = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
     revenueByDate.set(dateStr, (revenueByDate.get(dateStr) || 0) + revenue)
   })
 
@@ -750,7 +720,10 @@ async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
       },
     },
     include: {
-      payments: true,
+      payments: {
+        where: { status: TransactionStatus.COMPLETED },
+        select: { amount: true },
+      },
     },
   })
 
@@ -758,9 +731,7 @@ async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
 
   orders.forEach(order => {
     const dateStr = order.createdAt.toISOString().split('T')[0]
-    const revenue = order.payments
-      .filter(payment => payment.status === TransactionStatus.COMPLETED)
-      .reduce((sum, payment) => sum + Number(payment.amount), 0)
+    const revenue = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
 
     if (revenue > 0) {
       const existing = aovByDate.get(dateStr) || { total: 0, count: 0 }

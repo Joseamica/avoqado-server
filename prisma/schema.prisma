@@ -1759,6 +1759,8 @@ model Shift {
   @@index([staffId])
   @@index([status])
   @@index([startTime])
+  @@index([venueId, createdAt])
+  @@index([staffId, createdAt])
 }
 
 // ==========================================
@@ -1826,6 +1828,8 @@ model TimeEntry {
   @@index([venueId, clockInTime])
   @@index([status])
   @@index([validationStatus])
+  @@index([venueId, createdAt])
+  @@index([staffId, createdAt])
   @@map("time_entries")
 }
 
@@ -1949,6 +1953,8 @@ model Order {
   @@index([terminalId])
   @@index([venueId, tableId, paymentStatus])
   @@index([venueId, customerIdentifier, paymentStatus])
+  @@index([venueId, createdAt])
+  @@index([venueId, status, createdAt])
 }
 
 // Junction table for many-to-many Order <-> Customer relationship
@@ -2242,6 +2248,9 @@ model Payment {
   @@index([shiftId])
   @@index([method])
   @@index([status])
+  @@index([venueId, createdAt])
+  @@index([venueId, status, createdAt])
+  @@index([merchantAccountId, createdAt])
 }
 
 model PaymentAllocation {
@@ -2369,6 +2378,7 @@ model VenueTransaction {
   @@index([status])
   @@index([createdAt])
   @@index([estimatedSettlementDate])
+  @@index([venueId, status, estimatedSettlementDate])
 }
 
 // ==========================================
@@ -2561,6 +2571,7 @@ model Review {
   @@index([terminalId]) // ✅ Nuevo índice
   @@index([paymentId]) // ✅ Nuevo índice
   @@index([servedById]) // ✅ Nuevo índice
+  @@index([venueId, createdAt])
 }
 
 // ==========================================

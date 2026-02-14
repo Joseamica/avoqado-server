@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { TransactionCardType } from '@prisma/client'
+import { TransactionCardType, Prisma } from '@prisma/client'
 
 /**
  * PaymentAnalytics Service
@@ -77,6 +77,7 @@ interface ProfitMetrics {
 
 /**
  * Get comprehensive profit metrics for a date range
+ * Uses aggregate/groupBy/raw SQL instead of loading all rows into memory.
  * @param dateRange Optional date range (defaults to current month)
  * @returns Aggregated profit metrics
  */
@@ -85,142 +86,141 @@ export async function getProfitMetrics(dateRange?: DateRange): Promise<ProfitMet
 
   logger.info('Calculating profit metrics', { startDate, endDate })
 
-  // Get all transaction costs in the date range
-  const transactionCosts = await prisma.transactionCost.findMany({
-    where: {
-      createdAt: {
-        gte: startDate,
-        lte: endDate,
-      },
-    },
-    include: {
-      payment: {
-        include: {
-          venue: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      },
-      merchantAccount: {
-        include: {
-          provider: {
-            select: {
-              id: true,
-              code: true,
-              name: true,
-            },
-          },
-        },
-      },
-    },
-  })
+  const dateFilter = { createdAt: { gte: startDate, lte: endDate } }
 
-  // Calculate overall metrics
-  const totalTransactions = transactionCosts.length
-  const totalVolume = transactionCosts.reduce((sum, tc) => sum + parseFloat(tc.amount.toString()), 0)
-  const totalProviderCost = transactionCosts.reduce(
-    (sum, tc) => sum + parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString()),
-    0,
-  )
-  const totalVenueCharge = transactionCosts.reduce(
-    (sum, tc) => sum + parseFloat(tc.venueChargeAmount.toString()) + parseFloat(tc.venueFixedFee.toString()),
-    0,
-  )
-  const totalProfit = transactionCosts.reduce((sum, tc) => sum + parseFloat(tc.grossProfit.toString()), 0)
+  // 1. Overall totals via aggregate (single query, no row loading)
+  // 2. By card type via groupBy
+  // 3. Top venues via raw SQL (need venue name from join)
+  // 4. Top providers via raw SQL (need provider name from join)
+  const [totals, byCardTypeRaw, topVenuesRaw, topProvidersRaw] = await Promise.all([
+    prisma.transactionCost.aggregate({
+      where: dateFilter,
+      _count: true,
+      _sum: {
+        amount: true,
+        providerCostAmount: true,
+        providerFixedFee: true,
+        venueChargeAmount: true,
+        venueFixedFee: true,
+        grossProfit: true,
+      },
+    }),
+    prisma.transactionCost.groupBy({
+      by: ['transactionType'],
+      where: dateFilter,
+      _count: true,
+      _sum: {
+        amount: true,
+        providerCostAmount: true,
+        providerFixedFee: true,
+        venueChargeAmount: true,
+        venueFixedFee: true,
+        grossProfit: true,
+      },
+    }),
+    prisma.$queryRaw<
+      Array<{
+        venueId: string
+        venueName: string
+        transactions: bigint
+        volume: Prisma.Decimal
+        venueCharge: Prisma.Decimal
+        profit: Prisma.Decimal
+      }>
+    >`
+      SELECT
+        v.id as "venueId",
+        v.name as "venueName",
+        COUNT(*) as transactions,
+        COALESCE(SUM(tc.amount), 0) as volume,
+        COALESCE(SUM(tc."venueChargeAmount" + tc."venueFixedFee"), 0) as "venueCharge",
+        COALESCE(SUM(tc."grossProfit"), 0) as profit
+      FROM "TransactionCost" tc
+      JOIN "Payment" p ON tc."paymentId" = p.id
+      JOIN "Venue" v ON p."venueId" = v.id
+      WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+      GROUP BY v.id, v.name
+      ORDER BY profit DESC
+      LIMIT 10
+    `,
+    prisma.$queryRaw<
+      Array<{
+        providerId: string
+        providerCode: string
+        providerName: string
+        transactions: bigint
+        volume: Prisma.Decimal
+        cost: Prisma.Decimal
+      }>
+    >`
+      SELECT
+        pp.id as "providerId",
+        pp.code as "providerCode",
+        pp.name as "providerName",
+        COUNT(*) as transactions,
+        COALESCE(SUM(tc.amount), 0) as volume,
+        COALESCE(SUM(tc."providerCostAmount" + tc."providerFixedFee"), 0) as cost
+      FROM "TransactionCost" tc
+      JOIN "MerchantAccount" ma ON tc."merchantAccountId" = ma.id
+      JOIN "PaymentProvider" pp ON ma."providerId" = pp.id
+      WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+      GROUP BY pp.id, pp.code, pp.name
+      ORDER BY volume DESC
+      LIMIT 10
+    `,
+  ])
 
+  const totalTransactions = totals._count
+  const totalVolume = Number(totals._sum.amount) || 0
+  const totalProviderCost = (Number(totals._sum.providerCostAmount) || 0) + (Number(totals._sum.providerFixedFee) || 0)
+  const totalVenueCharge = (Number(totals._sum.venueChargeAmount) || 0) + (Number(totals._sum.venueFixedFee) || 0)
+  const totalProfit = Number(totals._sum.grossProfit) || 0
   const averageTransactionSize = totalTransactions > 0 ? totalVolume / totalTransactions : 0
   const averageMargin = totalVenueCharge > 0 ? totalProfit / totalVenueCharge : 0
 
-  // Group by card type
+  // Map groupBy results by card type
+  const cardTypeMap = new Map(byCardTypeRaw.map(r => [r.transactionType, r]))
   const byCardType = Object.values(TransactionCardType).map(type => {
-    const typeCosts = transactionCosts.filter(tc => tc.transactionType === type)
-    const typeVolume = typeCosts.reduce((sum, tc) => sum + parseFloat(tc.amount.toString()), 0)
-    const typeProviderCost = typeCosts.reduce(
-      (sum, tc) => sum + parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString()),
-      0,
-    )
-    const typeVenueCharge = typeCosts.reduce(
-      (sum, tc) => sum + parseFloat(tc.venueChargeAmount.toString()) + parseFloat(tc.venueFixedFee.toString()),
-      0,
-    )
-    const typeProfit = typeCosts.reduce((sum, tc) => sum + parseFloat(tc.grossProfit.toString()), 0)
-
+    const row = cardTypeMap.get(type)
+    if (!row) return { type, transactions: 0, volume: 0, providerCost: 0, venueCharge: 0, profit: 0, margin: 0 }
+    const volume = Number(row._sum.amount) || 0
+    const providerCost = (Number(row._sum.providerCostAmount) || 0) + (Number(row._sum.providerFixedFee) || 0)
+    const venueCharge = (Number(row._sum.venueChargeAmount) || 0) + (Number(row._sum.venueFixedFee) || 0)
+    const profit = Number(row._sum.grossProfit) || 0
     return {
       type,
-      transactions: typeCosts.length,
-      volume: typeVolume,
-      providerCost: typeProviderCost,
-      venueCharge: typeVenueCharge,
-      profit: typeProfit,
-      margin: typeVenueCharge > 0 ? typeProfit / typeVenueCharge : 0,
+      transactions: row._count,
+      volume,
+      providerCost,
+      venueCharge,
+      profit,
+      margin: venueCharge > 0 ? profit / venueCharge : 0,
     }
   })
 
-  // Group by venue
-  const venueMap = new Map<string, any>()
-  transactionCosts.forEach(tc => {
-    const venueId = tc.payment.venue.id
-    if (!venueMap.has(venueId)) {
-      venueMap.set(venueId, {
-        venueId,
-        venueName: tc.payment.venue.name,
-        transactions: 0,
-        volume: 0,
-        providerCost: 0,
-        venueCharge: 0,
-        profit: 0,
-      })
+  const topVenues = topVenuesRaw.map(v => {
+    const venueCharge = Number(v.venueCharge)
+    const profit = Number(v.profit)
+    return {
+      venueId: v.venueId,
+      venueName: v.venueName,
+      transactions: Number(v.transactions),
+      volume: Number(v.volume),
+      profit,
+      margin: venueCharge > 0 ? profit / venueCharge : 0,
     }
-
-    const venue = venueMap.get(venueId)
-    venue.transactions++
-    venue.volume += parseFloat(tc.amount.toString())
-    venue.providerCost += parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString())
-    venue.venueCharge += parseFloat(tc.venueChargeAmount.toString()) + parseFloat(tc.venueFixedFee.toString())
-    venue.profit += parseFloat(tc.grossProfit.toString())
   })
 
-  const topVenues = Array.from(venueMap.values())
-    .map(v => ({
-      ...v,
-      margin: v.venueCharge > 0 ? v.profit / v.venueCharge : 0,
-    }))
-    .sort((a, b) => b.profit - a.profit)
-    .slice(0, 10)
+  const topProviders = topProvidersRaw.map(p => ({
+    providerId: p.providerId,
+    providerCode: p.providerCode,
+    providerName: p.providerName,
+    transactions: Number(p.transactions),
+    volume: Number(p.volume),
+    cost: Number(p.cost),
+  }))
 
-  // Group by provider
-  const providerMap = new Map<string, any>()
-  transactionCosts.forEach(tc => {
-    const providerId = tc.merchantAccount.provider.id
-    if (!providerMap.has(providerId)) {
-      providerMap.set(providerId, {
-        providerId,
-        providerCode: tc.merchantAccount.provider.code,
-        providerName: tc.merchantAccount.provider.name,
-        transactions: 0,
-        volume: 0,
-        cost: 0,
-      })
-    }
-
-    const provider = providerMap.get(providerId)
-    provider.transactions++
-    provider.volume += parseFloat(tc.amount.toString())
-    provider.cost += parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString())
-  })
-
-  const topProviders = Array.from(providerMap.values())
-    .sort((a, b) => b.volume - a.volume)
-    .slice(0, 10)
-
-  logger.info('Profit metrics calculated', {
-    totalTransactions,
-    totalProfit,
-    averageMargin,
-  })
+  logger.info('Profit metrics calculated', { totalTransactions, totalProfit, averageMargin })
 
   return {
     totalTransactions,
@@ -238,6 +238,7 @@ export async function getProfitMetrics(dateRange?: DateRange): Promise<ProfitMet
 
 /**
  * Get venue-specific profit metrics
+ * Uses aggregate/groupBy + raw SQL instead of loading all rows.
  * @param venueId Venue ID
  * @param dateRange Optional date range
  * @returns Venue profit metrics
@@ -247,76 +248,88 @@ export async function getVenueProfitMetrics(venueId: string, dateRange?: DateRan
 
   logger.info('Calculating venue profit metrics', { venueId, startDate, endDate })
 
-  const transactionCosts = await prisma.transactionCost.findMany({
-    where: {
-      payment: {
-        venueId,
-      },
-      createdAt: {
-        gte: startDate,
-        lte: endDate,
-      },
-    },
-    include: {
-      payment: true,
-      merchantAccount: {
-        include: {
-          provider: true,
-        },
-      },
-    },
-  })
+  const dateFilter = {
+    payment: { venueId },
+    createdAt: { gte: startDate, lte: endDate },
+  }
 
-  const totalTransactions = transactionCosts.length
-  const totalVolume = transactionCosts.reduce((sum, tc) => sum + parseFloat(tc.amount.toString()), 0)
-  const totalProviderCost = transactionCosts.reduce(
-    (sum, tc) => sum + parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString()),
-    0,
-  )
-  const totalVenueCharge = transactionCosts.reduce(
-    (sum, tc) => sum + parseFloat(tc.venueChargeAmount.toString()) + parseFloat(tc.venueFixedFee.toString()),
-    0,
-  )
-  const totalProfit = transactionCosts.reduce((sum, tc) => sum + parseFloat(tc.grossProfit.toString()), 0)
+  // Run all aggregations in parallel
+  const [totals, byCardTypeRaw, byProviderRaw] = await Promise.all([
+    // 1. Overall totals
+    prisma.transactionCost.aggregate({
+      where: dateFilter,
+      _count: true,
+      _sum: {
+        amount: true,
+        providerCostAmount: true,
+        providerFixedFee: true,
+        venueChargeAmount: true,
+        venueFixedFee: true,
+        grossProfit: true,
+      },
+    }),
+    // 2. By card type
+    prisma.transactionCost.groupBy({
+      by: ['transactionType'],
+      where: dateFilter,
+      _count: true,
+      _sum: { amount: true, grossProfit: true },
+    }),
+    // 3. By provider via raw SQL (need provider name/code from join)
+    prisma.$queryRaw<
+      Array<{
+        providerId: string
+        providerCode: string
+        providerName: string
+        transactions: bigint
+        volume: Prisma.Decimal
+        cost: Prisma.Decimal
+      }>
+    >`
+      SELECT
+        pp.id as "providerId",
+        pp.code as "providerCode",
+        pp.name as "providerName",
+        COUNT(*) as transactions,
+        COALESCE(SUM(tc.amount), 0) as volume,
+        COALESCE(SUM(tc."providerCostAmount" + tc."providerFixedFee"), 0) as cost
+      FROM "TransactionCost" tc
+      JOIN "Payment" p ON tc."paymentId" = p.id
+      JOIN "MerchantAccount" ma ON tc."merchantAccountId" = ma.id
+      JOIN "PaymentProvider" pp ON ma."providerId" = pp.id
+      WHERE p."venueId" = ${venueId}
+        AND tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+      GROUP BY pp.id, pp.code, pp.name
+    `,
+  ])
 
+  const totalTransactions = totals._count
+  const totalVolume = Number(totals._sum.amount) || 0
+  const totalProviderCost = (Number(totals._sum.providerCostAmount) || 0) + (Number(totals._sum.providerFixedFee) || 0)
+  const totalVenueCharge = (Number(totals._sum.venueChargeAmount) || 0) + (Number(totals._sum.venueFixedFee) || 0)
+  const totalProfit = Number(totals._sum.grossProfit) || 0
   const averageMargin = totalVenueCharge > 0 ? totalProfit / totalVenueCharge : 0
 
-  // By card type
+  const cardTypeMap = new Map(byCardTypeRaw.map(r => [r.transactionType, r]))
   const byCardType = Object.values(TransactionCardType).map(type => {
-    const typeCosts = transactionCosts.filter(tc => tc.transactionType === type)
-    const typeVolume = typeCosts.reduce((sum, tc) => sum + parseFloat(tc.amount.toString()), 0)
-    const typeProfit = typeCosts.reduce((sum, tc) => sum + parseFloat(tc.grossProfit.toString()), 0)
-
+    const row = cardTypeMap.get(type)
+    if (!row) return { type, transactions: 0, volume: 0, profit: 0 }
     return {
       type,
-      transactions: typeCosts.length,
-      volume: typeVolume,
-      profit: typeProfit,
+      transactions: row._count,
+      volume: Number(row._sum.amount) || 0,
+      profit: Number(row._sum.grossProfit) || 0,
     }
   })
 
-  // By provider
-  const providerMap = new Map<string, any>()
-  transactionCosts.forEach(tc => {
-    const providerId = tc.merchantAccount.provider.id
-    if (!providerMap.has(providerId)) {
-      providerMap.set(providerId, {
-        providerId,
-        providerCode: tc.merchantAccount.provider.code,
-        providerName: tc.merchantAccount.provider.name,
-        transactions: 0,
-        volume: 0,
-        cost: 0,
-      })
-    }
-
-    const provider = providerMap.get(providerId)
-    provider.transactions++
-    provider.volume += parseFloat(tc.amount.toString())
-    provider.cost += parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString())
-  })
-
-  const byProvider = Array.from(providerMap.values())
+  const byProvider = byProviderRaw.map(p => ({
+    providerId: p.providerId,
+    providerCode: p.providerCode,
+    providerName: p.providerName,
+    transactions: Number(p.transactions),
+    volume: Number(p.volume),
+    cost: Number(p.cost),
+  }))
 
   return {
     venueId,
@@ -332,7 +345,7 @@ export async function getVenueProfitMetrics(venueId: string, dateRange?: DateRan
 }
 
 /**
- * Get time-series profit data (daily aggregation)
+ * Get time-series profit data via raw SQL with DATE_TRUNC.
  * @param dateRange Date range
  * @param granularity Aggregation granularity (daily, weekly, monthly)
  * @returns Time-series data
@@ -342,57 +355,52 @@ export async function getProfitTimeSeries(dateRange?: DateRange, granularity: 'd
 
   logger.info('Calculating profit time series', { startDate, endDate, granularity })
 
-  // Fetch all transaction costs in range
-  const transactionCosts = await prisma.transactionCost.findMany({
-    where: {
-      createdAt: {
-        gte: startDate,
-        lte: endDate,
-      },
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-  })
+  // Map TS enum to safe SQL keywords (no user input in these values)
+  const truncInterval = granularity === 'weekly' ? 'week' : granularity === 'monthly' ? 'month' : 'day'
+  const dateFormat = granularity === 'monthly' ? 'YYYY-MM' : 'YYYY-MM-DD'
 
-  // Group by date
-  const dataByDate = new Map<string, any>()
+  const rows = await prisma.$queryRaw<
+    Array<{
+      date: string
+      transactions: bigint
+      volume: Prisma.Decimal
+      providerCost: Prisma.Decimal
+      venueCharge: Prisma.Decimal
+      profit: Prisma.Decimal
+    }>
+  >(
+    Prisma.sql`
+      SELECT
+        TO_CHAR(DATE_TRUNC(${Prisma.raw(`'${truncInterval}'`)}, "createdAt"), ${Prisma.raw(`'${dateFormat}'`)}) as date,
+        COUNT(*) as transactions,
+        COALESCE(SUM(amount), 0) as volume,
+        COALESCE(SUM("providerCostAmount" + "providerFixedFee"), 0) as "providerCost",
+        COALESCE(SUM("venueChargeAmount" + "venueFixedFee"), 0) as "venueCharge",
+        COALESCE(SUM("grossProfit"), 0) as profit
+      FROM "TransactionCost"
+      WHERE "createdAt" >= ${startDate} AND "createdAt" <= ${endDate}
+      GROUP BY date
+      ORDER BY date
+    `,
+  )
 
-  transactionCosts.forEach(tc => {
-    const dateKey = getDateKey(tc.createdAt, granularity)
-
-    if (!dataByDate.has(dateKey)) {
-      dataByDate.set(dateKey, {
-        date: dateKey,
-        transactions: 0,
-        volume: 0,
-        providerCost: 0,
-        venueCharge: 0,
-        profit: 0,
-      })
+  return rows.map(d => {
+    const venueCharge = Number(d.venueCharge)
+    const profit = Number(d.profit)
+    return {
+      date: d.date,
+      transactions: Number(d.transactions),
+      volume: Number(d.volume),
+      providerCost: Number(d.providerCost),
+      venueCharge,
+      profit,
+      margin: venueCharge > 0 ? profit / venueCharge : 0,
     }
-
-    const data = dataByDate.get(dateKey)
-    data.transactions++
-    data.volume += parseFloat(tc.amount.toString())
-    data.providerCost += parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString())
-    data.venueCharge += parseFloat(tc.venueChargeAmount.toString()) + parseFloat(tc.venueFixedFee.toString())
-    data.profit += parseFloat(tc.grossProfit.toString())
   })
-
-  const timeSeries = Array.from(dataByDate.values())
-    .map(d => ({
-      ...d,
-      margin: d.venueCharge > 0 ? d.profit / d.venueCharge : 0,
-    }))
-    .sort((a, b) => a.date.localeCompare(b.date))
-
-  return timeSeries
 }
 
 /**
- * Get provider comparison data
- * Shows cost comparison across all providers
+ * Get provider comparison data via raw SQL with 2-dimensional grouping (provider x cardType).
  * @param dateRange Optional date range
  * @returns Provider comparison metrics
  */
@@ -401,71 +409,88 @@ export async function getProviderComparison(dateRange?: DateRange) {
 
   logger.info('Calculating provider comparison', { startDate, endDate })
 
-  const transactionCosts = await prisma.transactionCost.findMany({
-    where: {
-      createdAt: {
-        gte: startDate,
-        lte: endDate,
-      },
-    },
-    include: {
-      merchantAccount: {
-        include: {
-          provider: true,
-        },
-      },
-    },
-  })
+  // Single query with provider + card type grouping
+  const rows = await prisma.$queryRaw<
+    Array<{
+      providerId: string
+      providerCode: string
+      providerName: string
+      transactionType: string
+      transactions: bigint
+      volume: Prisma.Decimal
+      cost: Prisma.Decimal
+    }>
+  >`
+    SELECT
+      pp.id as "providerId",
+      pp.code as "providerCode",
+      pp.name as "providerName",
+      tc."transactionType" as "transactionType",
+      COUNT(*) as transactions,
+      COALESCE(SUM(tc.amount), 0) as volume,
+      COALESCE(SUM(tc."providerCostAmount" + tc."providerFixedFee"), 0) as cost
+    FROM "TransactionCost" tc
+    JOIN "MerchantAccount" ma ON tc."merchantAccountId" = ma.id
+    JOIN "PaymentProvider" pp ON ma."providerId" = pp.id
+    WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
+    GROUP BY pp.id, pp.code, pp.name, tc."transactionType"
+  `
 
-  const providerMap = new Map<string, any>()
+  // Aggregate rows by provider, nesting card types
+  const providerMap = new Map<
+    string,
+    {
+      providerId: string
+      providerCode: string
+      providerName: string
+      transactions: number
+      volume: number
+      totalCost: number
+      byCardType: Record<string, { transactions: number; volume: number; cost: number }>
+    }
+  >()
 
-  transactionCosts.forEach(tc => {
-    const providerId = tc.merchantAccount.provider.id
-    if (!providerMap.has(providerId)) {
-      providerMap.set(providerId, {
-        providerId,
-        providerCode: tc.merchantAccount.provider.code,
-        providerName: tc.merchantAccount.provider.name,
+  for (const row of rows) {
+    if (!providerMap.has(row.providerId)) {
+      const byCardType: Record<string, { transactions: number; volume: number; cost: number }> = {}
+      for (const ct of Object.values(TransactionCardType)) {
+        byCardType[ct] = { transactions: 0, volume: 0, cost: 0 }
+      }
+      providerMap.set(row.providerId, {
+        providerId: row.providerId,
+        providerCode: row.providerCode,
+        providerName: row.providerName,
         transactions: 0,
         volume: 0,
         totalCost: 0,
-        byCardType: {
-          [TransactionCardType.DEBIT]: { transactions: 0, volume: 0, cost: 0 },
-          [TransactionCardType.CREDIT]: { transactions: 0, volume: 0, cost: 0 },
-          [TransactionCardType.AMEX]: { transactions: 0, volume: 0, cost: 0 },
-          [TransactionCardType.INTERNATIONAL]: { transactions: 0, volume: 0, cost: 0 },
-          [TransactionCardType.OTHER]: { transactions: 0, volume: 0, cost: 0 },
-        },
+        byCardType,
       })
     }
 
-    const provider = providerMap.get(providerId)
-    const cost = parseFloat(tc.providerCostAmount.toString()) + parseFloat(tc.providerFixedFee.toString())
-    const volume = parseFloat(tc.amount.toString())
+    const p = providerMap.get(row.providerId)!
+    const txns = Number(row.transactions)
+    const vol = Number(row.volume)
+    const cost = Number(row.cost)
+    p.transactions += txns
+    p.volume += vol
+    p.totalCost += cost
+    if (p.byCardType[row.transactionType]) {
+      p.byCardType[row.transactionType].transactions += txns
+      p.byCardType[row.transactionType].volume += vol
+      p.byCardType[row.transactionType].cost += cost
+    }
+  }
 
-    provider.transactions++
-    provider.volume += volume
-    provider.totalCost += cost
-
-    // By card type
-    const cardType = tc.transactionType
-    provider.byCardType[cardType].transactions++
-    provider.byCardType[cardType].volume += volume
-    provider.byCardType[cardType].cost += cost
-  })
-
-  const providers = Array.from(providerMap.values()).map(p => ({
+  return Array.from(providerMap.values()).map(p => ({
     ...p,
     averageCostPerTransaction: p.transactions > 0 ? p.totalCost / p.transactions : 0,
     effectiveRate: p.volume > 0 ? p.totalCost / p.volume : 0,
-    byCardType: Object.entries(p.byCardType).map(([type, data]: [string, any]) => ({
+    byCardType: Object.entries(p.byCardType).map(([type, data]) => ({
       type,
       ...data,
       effectiveRate: data.volume > 0 ? data.cost / data.volume : 0,
     })),
   }))
-
-  return providers
 }
 
 /**
@@ -484,33 +509,9 @@ function getDateRange(dateRange?: DateRange): { startDate: Date; endDate: Date }
 }
 
 /**
- * Helper: Get date key for grouping
- */
-function getDateKey(date: Date, granularity: 'daily' | 'weekly' | 'monthly'): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-
-  switch (granularity) {
-    case 'daily':
-      return `${year}-${month}-${day}`
-    case 'weekly':
-      const weekStart = new Date(date)
-      weekStart.setDate(date.getDate() - date.getDay())
-      const weekYear = weekStart.getFullYear()
-      const weekMonth = String(weekStart.getMonth() + 1).padStart(2, '0')
-      const weekDay = String(weekStart.getDate()).padStart(2, '0')
-      return `${weekYear}-${weekMonth}-${weekDay}`
-    case 'monthly':
-      return `${year}-${month}`
-    default:
-      return `${year}-${month}-${day}`
-  }
-}
-
-/**
  * Export profit data for a date range
- * Returns data in a format suitable for CSV/Excel export
+ * Returns data in a format suitable for CSV/Excel export.
+ * NOTE: This function intentionally loads all rows — export needs per-row detail.
  * @param dateRange Date range
  * @returns Export data
  */

@@ -1,7 +1,5 @@
-import { PrismaClient } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
 import { getEffectivePaymentConfig, getEffectivePricing } from '@/services/organization-payment-config.service'
-
-const prisma = new PrismaClient()
 
 interface VenuePaymentConfigCreateInput {
   venueId: string

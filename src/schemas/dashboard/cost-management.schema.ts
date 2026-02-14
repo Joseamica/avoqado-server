@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { TransactionCardType, AccountType, ProfitStatus } from '@prisma/client'
+import { zTimezone } from '@/utils/sanitizeTimezone'
 
 // ===== QUERY SCHEMAS =====
 
@@ -204,7 +205,7 @@ export const enhancedCreateVenueSchema = z.object({
 
     // Business configuration
     currency: z.string().default('MXN'),
-    timezone: z.string().default('America/Mexico_City'),
+    timezone: zTimezone,
     businessType: z.string().default('RESTAURANT'),
 
     // User context

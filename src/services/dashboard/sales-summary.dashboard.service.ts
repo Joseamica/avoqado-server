@@ -28,6 +28,7 @@
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 
 // ============================================================
 // Types
@@ -344,35 +345,38 @@ async function calculateTimePeriodMetrics(
   reportType: ReportType,
   timezone: string,
 ): Promise<TimePeriodMetrics[]> {
+  // SECURITY: Sanitize timezone to prevent SQL injection
+  const safeTz = sanitizeTimezone(timezone)
+
   // Determine SQL grouping based on reportType
   let groupByExpression: string
   let orderByExpression: string
 
   switch (reportType) {
     case 'hours':
-      groupByExpression = `DATE_TRUNC('hour', "createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('hour', "createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'days':
-      groupByExpression = `DATE_TRUNC('day', "createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('day', "createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'weeks':
-      groupByExpression = `DATE_TRUNC('week', "createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('week', "createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'months':
-      groupByExpression = `DATE_TRUNC('month', "createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('month', "createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'hourlySum':
       // Group by hour of day (0-23)
-      groupByExpression = `EXTRACT(HOUR FROM "createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `EXTRACT(HOUR FROM "createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'dailySum':
       // Group by day of week (0=Sunday, 6=Saturday)
-      groupByExpression = `EXTRACT(DOW FROM "createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `EXTRACT(DOW FROM "createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     default:

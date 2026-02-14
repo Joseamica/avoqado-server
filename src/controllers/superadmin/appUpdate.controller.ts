@@ -1,12 +1,11 @@
 // src/controllers/superadmin/appUpdate.controller.ts
 import { Request, Response } from 'express'
-import { PrismaClient, AppEnvironment, UpdateMode } from '@prisma/client'
+import { AppEnvironment, UpdateMode } from '@prisma/client'
 import { getStorageBucket } from '../../config/firebase'
 import logger from '../../config/logger'
 import crypto from 'crypto'
 import { extractApkMetadata, validatePackageName } from '../../services/apk-parser.service'
-
-const prisma = new PrismaClient()
+import prisma from '../../utils/prismaClient'
 
 /**
  * AppUpdate Controller

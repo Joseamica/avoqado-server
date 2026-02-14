@@ -103,30 +103,34 @@ export async function getItemCategories(
     }
   }
 
-  // Get stats for each category
-  const categoriesWithStats = await Promise.all(
-    categories.map(async category => {
-      const [totalItems, availableItems, soldItems] = await Promise.all([
-        prisma.serializedItem.count({
-          where: { categoryId: category.id },
-        }),
-        prisma.serializedItem.count({
-          where: { categoryId: category.id, status: 'AVAILABLE' },
-        }),
-        prisma.serializedItem.count({
-          where: { categoryId: category.id, status: 'SOLD' },
-        }),
-      ])
+  // Single groupBy for all categories (avoids 3N queries)
+  const categoryIds = categories.map(c => c.id)
+  const countsByStatus = await prisma.serializedItem.groupBy({
+    by: ['categoryId', 'status'],
+    where: { categoryId: { in: categoryIds } },
+    _count: true,
+  })
 
-      return {
-        ...category,
-        suggestedPrice: category.suggestedPrice ? Number(category.suggestedPrice) : null,
-        totalItems,
-        availableItems,
-        soldItems,
-      }
-    }),
-  )
+  // Build lookup: categoryId → { total, available, sold }
+  const statsMap = new Map<string, { total: number; available: number; sold: number }>()
+  for (const row of countsByStatus) {
+    const existing = statsMap.get(row.categoryId) || { total: 0, available: 0, sold: 0 }
+    existing.total += row._count
+    if (row.status === 'AVAILABLE') existing.available = row._count
+    if (row.status === 'SOLD') existing.sold = row._count
+    statsMap.set(row.categoryId, existing)
+  }
+
+  const categoriesWithStats = categories.map(category => {
+    const stats = statsMap.get(category.id) || { total: 0, available: 0, sold: 0 }
+    return {
+      ...category,
+      suggestedPrice: category.suggestedPrice ? Number(category.suggestedPrice) : null,
+      totalItems: stats.total,
+      availableItems: stats.available,
+      soldItems: stats.sold,
+    }
+  })
 
   return { categories: categoriesWithStats }
 }

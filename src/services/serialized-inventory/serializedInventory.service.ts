@@ -237,22 +237,26 @@ export class SerializedInventoryService {
       orderBy: { sortOrder: 'asc' },
     })
 
-    const results = await Promise.all(
-      categories.map(async category => {
-        const [available, sold] = await Promise.all([
-          this.db.serializedItem.count({
-            where: { venueId, categoryId: category.id, status: 'AVAILABLE' },
-          }),
-          this.db.serializedItem.count({
-            where: { venueId, categoryId: category.id, status: 'SOLD' },
-          }),
-        ])
+    // Single groupBy for all categories (avoids 2N queries)
+    const categoryIds = categories.map(c => c.id)
+    const countsByStatus = await this.db.serializedItem.groupBy({
+      by: ['categoryId', 'status'],
+      where: { venueId, categoryId: { in: categoryIds }, status: { in: ['AVAILABLE', 'SOLD'] } },
+      _count: true,
+    })
 
-        return { category, available, sold }
-      }),
-    )
+    const statsMap = new Map<string, { available: number; sold: number }>()
+    for (const row of countsByStatus) {
+      const existing = statsMap.get(row.categoryId) || { available: 0, sold: 0 }
+      if (row.status === 'AVAILABLE') existing.available = row._count
+      if (row.status === 'SOLD') existing.sold = row._count
+      statsMap.set(row.categoryId, existing)
+    }
 
-    return results
+    return categories.map(category => {
+      const stats = statsMap.get(category.id) || { available: 0, sold: 0 }
+      return { category, available: stats.available, sold: stats.sold }
+    })
   }
 
   /**

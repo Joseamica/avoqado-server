@@ -6,7 +6,6 @@
  * IMPORTANT: All date calculations use venue timezone (America/Mexico_City by default)
  * to ensure "today", "this week", "this month" match the business's operating timezone.
  */
-import logger from '@/config/logger'
 import { Prisma } from '@prisma/client'
 import { endOfDay, startOfDay } from 'date-fns'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
@@ -280,7 +279,7 @@ class OrganizationDashboardService {
     ])
 
     const todaySales = todayOrders.reduce((sum, o) => sum + Number(o.total || 0), 0)
-    const unitsSold = todayOrders.reduce((sum, o) => sum + (o.items?.length || 0), 0)
+    const unitsSold = todayOrders.reduce((sum, o) => sum + (o.items?.reduce((s: number, i: any) => s + (i.quantity || 0), 0) || 0), 0)
     const avgTicket = todayOrders.length > 0 ? todaySales / todayOrders.length : 0
 
     // Sum CASH payments only (money physically in the field)
@@ -476,72 +475,140 @@ class OrganizationDashboardService {
       }
     }
 
-    const results: OrgStorePerformance[] = []
+    const venueIds = venues.map(v => v.id)
 
-    const rangeFilter = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
+    if (venueIds.length === 0) {
+      return []
+    }
 
-    for (const venue of venues) {
+    // Determine which conditional queries we need based on goal configs
+    const goalConfigs = [...venueGoalsMap.values()]
+    const needsMonthSales = goalConfigs.some(g => g.period === 'MONTHLY' && g.goalType === 'AMOUNT')
+    const needsWeekUnits = goalConfigs.some(g => g.period === 'WEEKLY' && g.goalType === 'QUANTITY')
+    const needsMonthUnits = goalConfigs.some(g => g.period === 'MONTHLY' && g.goalType === 'QUANTITY')
+
+    const todayCreatedAtWhere = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
+
+    // Bulk queries — replaces N per-venue loops with a constant number of queries
+    const [
+      todaySalesByVenue,
+      todayUnitsByVenue,
+      weekSalesByVenue,
+      prevWeekSalesByVenue,
+      staffCountsByVenue,
+      activePromoterEntries,
+      monthSalesByVenue,
+      weekUnitsByVenue,
+      monthUnitsByVenue,
+    ] = await Promise.all([
+      // 1. Today sales per venue
+      prisma.order.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: todayCreatedAtWhere },
+        _sum: { total: true },
+      }),
+      // 2. Today units per venue (SUM quantity — OrderItem has no venueId, needs raw SQL)
+      rangeEnd
+        ? prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
+            SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as "unitsSold"
+            FROM "Order" o
+            JOIN "OrderItem" oi ON oi."orderId" = o.id
+            WHERE o."venueId" IN (${Prisma.join(venueIds)})
+              AND o.status = 'COMPLETED'
+              AND o."createdAt" >= ${todayStart}
+              AND o."createdAt" <= ${rangeEnd}
+            GROUP BY o."venueId"
+          `
+        : prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
+            SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as "unitsSold"
+            FROM "Order" o
+            JOIN "OrderItem" oi ON oi."orderId" = o.id
+            WHERE o."venueId" IN (${Prisma.join(venueIds)})
+              AND o.status = 'COMPLETED'
+              AND o."createdAt" >= ${todayStart}
+            GROUP BY o."venueId"
+          `,
+      // 3. Week sales per venue
+      prisma.order.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        _sum: { total: true },
+      }),
+      // 4. Previous week sales per venue (for trend calculation)
+      prisma.order.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: prevWeekStart, lt: weekStart } },
+        _sum: { total: true },
+      }),
+      // 5. Staff counts per venue
+      prisma.staffVenue.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds }, active: true, role: { in: ['CASHIER', 'WAITER'] } },
+        _count: true,
+      }),
+      // 6. Active promoters per venue (distinct staffId entries)
+      prisma.timeEntry.findMany({
+        where: { venueId: { in: venueIds }, clockInTime: todayCreatedAtWhere },
+        distinct: ['staffId', 'venueId'] as any,
+        select: { staffId: true, venueId: true },
+      }),
+      // 7. Month sales per venue (conditional — only if MONTHLY AMOUNT goals exist)
+      needsMonthSales
+        ? prisma.order.groupBy({
+            by: ['venueId'],
+            where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: monthStart } },
+            _sum: { total: true },
+          })
+        : Promise.resolve([] as any[]),
+      // 8. Week units per venue (conditional — only if QUANTITY WEEKLY goals exist)
+      needsWeekUnits
+        ? prisma.$queryRaw<Array<{ venueId: string; units: any }>>`
+            SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as units
+            FROM "Order" o
+            JOIN "OrderItem" oi ON oi."orderId" = o.id
+            WHERE o."venueId" IN (${Prisma.join(venueIds)})
+              AND o.status = 'COMPLETED'
+              AND o."createdAt" >= ${weekStart}
+            GROUP BY o."venueId"
+          `
+        : Promise.resolve([] as any[]),
+      // 9. Month units per venue (conditional — only if QUANTITY MONTHLY goals exist)
+      needsMonthUnits
+        ? prisma.$queryRaw<Array<{ venueId: string; units: any }>>`
+            SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as units
+            FROM "Order" o
+            JOIN "OrderItem" oi ON oi."orderId" = o.id
+            WHERE o."venueId" IN (${Prisma.join(venueIds)})
+              AND o.status = 'COMPLETED'
+              AND o."createdAt" >= ${monthStart}
+            GROUP BY o."venueId"
+          `
+        : Promise.resolve([] as any[]),
+    ])
+
+    // Build lookup maps for O(1) access
+    const todaySalesMap = new Map(todaySalesByVenue.map(r => [r.venueId, Number(r._sum.total) || 0]))
+    const todayUnitsMap = new Map(todayUnitsByVenue.map((r: any) => [r.venueId, Number(r.unitsSold)]))
+    const weekSalesMap = new Map(weekSalesByVenue.map(r => [r.venueId, Number(r._sum.total) || 0]))
+    const prevWeekSalesMap = new Map(prevWeekSalesByVenue.map(r => [r.venueId, Number(r._sum.total) || 0]))
+    const staffCountsMap = new Map(staffCountsByVenue.map(r => [r.venueId, r._count]))
+    const monthSalesMap = new Map((monthSalesByVenue as any[]).map(r => [r.venueId, Number(r._sum?.total) || 0]))
+    const weekUnitsMap = new Map((weekUnitsByVenue as any[]).map(r => [r.venueId, Number(r.units)]))
+    const monthUnitsMap = new Map((monthUnitsByVenue as any[]).map(r => [r.venueId, Number(r.units)]))
+
+    // Count distinct active promoters per venue
+    const activePromotersMap = new Map<string, number>()
+    for (const entry of activePromoterEntries) {
+      activePromotersMap.set(entry.venueId, (activePromotersMap.get(entry.venueId) || 0) + 1)
+    }
+
+    // Map venues to results — no DB calls in this loop
+    const results: OrgStorePerformance[] = venues.map(venue => {
       const goalConfig = venueGoalsMap.get(venue.id)
-
-      // Build parallel queries — add month sales query if goal is MONTHLY
-      const queries: [any, any, any, any, any, any?] = [
-        prisma.order.findMany({
-          where: {
-            venueId: venue.id,
-            status: 'COMPLETED',
-            createdAt: rangeFilter,
-          },
-          include: { items: true },
-        }),
-        prisma.order.aggregate({
-          where: {
-            venueId: venue.id,
-            status: 'COMPLETED',
-            createdAt: { gte: weekStart },
-          },
-          _sum: { total: true },
-        }),
-        prisma.order.aggregate({
-          where: {
-            venueId: venue.id,
-            status: 'COMPLETED',
-            createdAt: { gte: prevWeekStart, lt: weekStart },
-          },
-          _sum: { total: true },
-        }),
-        prisma.staffVenue.count({
-          where: {
-            venueId: venue.id,
-            active: true,
-            role: { in: ['CASHIER', 'WAITER'] },
-          },
-        }),
-        prisma.timeEntry.findMany({
-          where: {
-            venueId: venue.id,
-            clockInTime: rangeFilter,
-          },
-          distinct: ['staffId'],
-        }),
-        // Only query month sales if the goal is MONTHLY
-        goalConfig?.period === 'MONTHLY'
-          ? prisma.order.aggregate({
-              where: {
-                venueId: venue.id,
-                status: 'COMPLETED',
-                createdAt: { gte: monthStart },
-              },
-              _sum: { total: true },
-            })
-          : Promise.resolve(null),
-      ]
-
-      const [todayOrders, weekOrders, prevWeekOrders, totalPromoters, activePromoters, monthOrders] = await Promise.all(queries)
-
-      const todaySales = todayOrders.reduce((sum: number, o: any) => sum + Number(o.total || 0), 0)
-      const unitsSold = todayOrders.reduce((sum: number, o: any) => sum + o.items.length, 0)
-      const weekSales = Number(weekOrders._sum?.total) || 0
-      const prevWeekSales = Number(prevWeekOrders._sum?.total) || 0
+      const todaySales = todaySalesMap.get(venue.id) || 0
+      const unitsSold = todayUnitsMap.get(venue.id) || 0
+      const weekSales = weekSalesMap.get(venue.id) || 0
+      const prevWeekSales = prevWeekSalesMap.get(venue.id) || 0
 
       // Determine trend
       let trend: 'up' | 'down' | 'stable' = 'stable'
@@ -554,27 +621,21 @@ class OrganizationDashboardService {
       // Calculate goal performance
       let performance: number | undefined
       if (goalConfig && goalConfig.goal > 0) {
-        let progressValue: number
+        let progressValue = 0
 
         if (goalConfig.goalType === 'QUANTITY') {
-          // QUANTITY goals: count order items (units sold), not orders
           switch (goalConfig.period) {
             case 'DAILY':
-              progressValue = unitsSold // already calculated: sum of order items
+              progressValue = unitsSold
               break
             case 'WEEKLY':
-              progressValue = await prisma.orderItem.count({
-                where: { order: { venueId: venue.id, status: 'COMPLETED', createdAt: { gte: weekStart } } },
-              })
+              progressValue = weekUnitsMap.get(venue.id) || 0
               break
             case 'MONTHLY':
-              progressValue = await prisma.orderItem.count({
-                where: { order: { venueId: venue.id, status: 'COMPLETED', createdAt: { gte: monthStart } } },
-              })
+              progressValue = monthUnitsMap.get(venue.id) || 0
               break
           }
         } else {
-          // AMOUNT goals: use sales amounts
           switch (goalConfig.period) {
             case 'DAILY':
               progressValue = todaySales
@@ -583,14 +644,14 @@ class OrganizationDashboardService {
               progressValue = weekSales
               break
             case 'MONTHLY':
-              progressValue = Number(monthOrders?._sum?.total) || 0
+              progressValue = monthSalesMap.get(venue.id) || 0
               break
           }
         }
         performance = Math.round((progressValue / goalConfig.goal) * 100)
       }
 
-      results.push({
+      return {
         id: venue.id,
         name: venue.name,
         slug: venue.slug,
@@ -598,8 +659,8 @@ class OrganizationDashboardService {
         todaySales: Math.round(todaySales * 100) / 100,
         weekSales: Math.round(weekSales * 100) / 100,
         unitsSold,
-        promoterCount: totalPromoters,
-        activePromoters: activePromoters.length,
+        promoterCount: staffCountsMap.get(venue.id) || 0,
+        activePromoters: activePromotersMap.get(venue.id) || 0,
         trend,
         rank: 0, // Will be set after sorting
         performance,
@@ -608,8 +669,8 @@ class OrganizationDashboardService {
         goalPeriod: goalConfig?.period,
         goalId: goalConfig?.goalId,
         goalSource: goalConfig?.source,
-      })
-    }
+      }
+    })
 
     // Sort by week sales and assign ranks
     results.sort((a, b) => b.weekSales - a.weekSales)
@@ -637,17 +698,76 @@ class OrganizationDashboardService {
       select: { id: true, name: true, latitude: true, longitude: true },
     })
 
-    for (const venue of venues) {
-      // Check for no check-ins after 10 AM in venue timezone (using TimeEntry)
-      const currentHour = nowInTz.getHours()
-      if (currentHour >= 10) {
-        const checkIns = await prisma.timeEntry.count({
-          where: {
-            venueId: venue.id,
-            clockInTime: { gte: todayStart },
-          },
-        })
+    const venueIds = venues.map(v => v.id)
+    const venuesWithGps = venues.filter(v => v.latitude && v.longitude)
+    const venuesWithGpsIds = venuesWithGps.map(v => v.id)
 
+    // 5 bulk queries replace all per-venue queries
+    const [checkInsByVenue, pendingDepositsByVenue, allAlertConfigs, stockLevelsByVenueCategory, gpsEntries] = await Promise.all([
+      // 1. Check-in counts per venue
+      prisma.timeEntry.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds }, clockInTime: { gte: todayStart } },
+        _count: true,
+      }),
+      // 2. Pending deposits per venue
+      prisma.cashDeposit.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds }, status: 'PENDING' },
+        _count: true,
+      }),
+      // 3. All stock alert configs across venues (replaces count + findMany per venue)
+      prisma.stockAlertConfig.findMany({
+        where: { venueId: { in: venueIds }, alertEnabled: true },
+        include: { category: true },
+      }),
+      // 4. Available stock per venue+category (replaces N×serializedItem.count)
+      prisma.serializedItem.groupBy({
+        by: ['venueId', 'categoryId'],
+        where: { venueId: { in: venueIds }, status: 'AVAILABLE' },
+        _count: true,
+      }),
+      // 5. GPS entries for venues with coordinates
+      venuesWithGpsIds.length > 0
+        ? prisma.timeEntry.findMany({
+            where: {
+              venueId: { in: venuesWithGpsIds },
+              clockInTime: { gte: todayStart },
+              status: 'CLOCKED_IN',
+              clockInLatitude: { not: null },
+              clockInLongitude: { not: null },
+            },
+            include: {
+              staff: {
+                select: { firstName: true, lastName: true },
+              },
+            },
+          })
+        : Promise.resolve([] as any[]),
+    ])
+
+    // Build lookup maps
+    const checkInsMap = new Map(checkInsByVenue.map(r => [r.venueId, r._count]))
+    const depositsMap = new Map(pendingDepositsByVenue.map(r => [r.venueId, r._count]))
+
+    // Group alert configs by venueId
+    const alertConfigsByVenue = new Map<string, typeof allAlertConfigs>()
+    for (const config of allAlertConfigs) {
+      const list = alertConfigsByVenue.get(config.venueId) || []
+      list.push(config)
+      alertConfigsByVenue.set(config.venueId, list)
+    }
+
+    // Stock levels map: "venueId:categoryId" → count
+    const stockMap = new Map(stockLevelsByVenueCategory.map(r => [`${r.venueId}:${r.categoryId}`, r._count]))
+
+    // Process anomalies from bulk data — no DB calls in this loop
+    const currentHour = nowInTz.getHours()
+
+    for (const venue of venues) {
+      // 1. No check-ins after 10 AM
+      if (currentHour >= 10) {
+        const checkIns = checkInsMap.get(venue.id) || 0
         if (checkIns === 0) {
           anomalies.push({
             id: `no-checkins-${venue.id}`,
@@ -661,104 +781,61 @@ class OrganizationDashboardService {
         }
       }
 
-      // Check for pending deposits
-      const pendingDeposits = await prisma.cashDeposit.count({
-        where: {
-          venueId: venue.id,
-          status: 'PENDING',
-        },
-      })
-
-      if (pendingDeposits > 5) {
+      // 2. Pending deposits
+      const pendingCount = depositsMap.get(venue.id) || 0
+      if (pendingCount > 5) {
         anomalies.push({
           id: `pending-deposits-${venue.id}`,
           type: 'PENDING_DEPOSITS',
-          severity: pendingDeposits > 10 ? 'CRITICAL' : 'WARNING',
+          severity: pendingCount > 10 ? 'CRITICAL' : 'WARNING',
           storeId: venue.id,
           storeName: venue.name,
           title: 'Depósitos Pendientes',
-          description: `${venue.name} tiene ${pendingDeposits} depósitos pendientes`,
+          description: `${venue.name} tiene ${pendingCount} depósitos pendientes`,
         })
       }
 
-      // Check for low stock alerts
-      const lowStockAlerts = await prisma.stockAlertConfig.count({
-        where: {
-          venueId: venue.id,
-          alertEnabled: true,
-        },
-      })
-
-      if (lowStockAlerts > 0) {
-        // Check actual stock levels
-        const configs = await prisma.stockAlertConfig.findMany({
-          where: { venueId: venue.id, alertEnabled: true },
-          include: { category: true },
-        })
-
-        for (const config of configs) {
-          const available = await prisma.serializedItem.count({
-            where: {
-              venueId: venue.id,
-              categoryId: config.categoryId,
-              status: 'AVAILABLE',
-            },
+      // 3. Low stock alerts
+      const configs = alertConfigsByVenue.get(venue.id) || []
+      for (const config of configs) {
+        const available = stockMap.get(`${venue.id}:${config.categoryId}`) || 0
+        if (available <= config.minimumStock) {
+          anomalies.push({
+            id: `low-stock-${venue.id}-${config.categoryId}`,
+            type: 'LOW_STOCK',
+            severity: available === 0 ? 'CRITICAL' : 'WARNING',
+            storeId: venue.id,
+            storeName: venue.name,
+            title: 'Stock Bajo',
+            description: `${venue.name}: ${config.category.name} tiene ${available} unidades`,
           })
-
-          if (available <= config.minimumStock) {
-            anomalies.push({
-              id: `low-stock-${venue.id}-${config.categoryId}`,
-              type: 'LOW_STOCK',
-              severity: available === 0 ? 'CRITICAL' : 'WARNING',
-              storeId: venue.id,
-              storeName: venue.name,
-              title: 'Stock Bajo',
-              description: `${venue.name}: ${config.category.name} tiene ${available} unidades`,
-            })
-          }
         }
       }
+    }
 
-      // Check for GPS violations (check-ins outside geofence)
-      if (venue.latitude && venue.longitude) {
-        const gpsViolations = await prisma.timeEntry.findMany({
-          where: {
-            venueId: venue.id,
-            clockInTime: { gte: todayStart },
-            status: 'CLOCKED_IN',
-            clockInLatitude: { not: null },
-            clockInLongitude: { not: null },
-          },
-          include: {
-            staff: {
-              select: { firstName: true, lastName: true },
-            },
-          },
+    // 4. GPS violations (process from bulk gpsEntries)
+    const venueGpsMap = new Map(venuesWithGps.map(v => [v.id, v]))
+    for (const entry of gpsEntries) {
+      const venue = venueGpsMap.get(entry.venueId)
+      if (!venue || !entry.clockInLatitude || !entry.clockInLongitude) continue
+
+      const distance = this.calculateDistance(
+        Number(venue.latitude),
+        Number(venue.longitude),
+        Number(entry.clockInLatitude),
+        Number(entry.clockInLongitude),
+      )
+
+      if (distance > 0.5) {
+        anomalies.push({
+          id: `gps-violation-${entry.id}`,
+          type: 'GPS_VIOLATION',
+          severity: distance > 1 ? 'CRITICAL' : 'WARNING',
+          storeId: venue.id,
+          storeName: venue.name,
+          title: 'Violación GPS',
+          description: `${entry.staff.firstName} ${entry.staff.lastName} hizo check-in ${distance.toFixed(1)}km fuera del rango en ${venue.name}`,
         })
-
-        for (const entry of gpsViolations) {
-          if (entry.clockInLatitude && entry.clockInLongitude) {
-            const distance = this.calculateDistance(
-              Number(venue.latitude),
-              Number(venue.longitude),
-              Number(entry.clockInLatitude),
-              Number(entry.clockInLongitude),
-            )
-
-            // Alert if check-in is more than 500m from venue (0.5km)
-            if (distance > 0.5) {
-              anomalies.push({
-                id: `gps-violation-${entry.id}`,
-                type: 'GPS_VIOLATION',
-                severity: distance > 1 ? 'CRITICAL' : 'WARNING',
-                storeId: venue.id,
-                storeName: venue.name,
-                title: 'Violación GPS',
-                description: `${entry.staff.firstName} ${entry.staff.lastName} hizo check-in ${distance.toFixed(1)}km fuera del rango en ${venue.name}`,
-              })
-            }
-          }
-        }
       }
     }
 
@@ -843,72 +920,68 @@ class OrganizationDashboardService {
     })
 
     const monthStart = venueStartOfMonth(timezone)
+    const allVenueIds = managedStores.map(sv => sv.venueId)
 
-    const stores = await Promise.all(
-      managedStores.map(async sv => {
-        const [todayOrders, weekOrders, promoterCount, activePromoters, goal] = await Promise.all([
-          prisma.order.aggregate({
-            where: {
-              venueId: sv.venueId,
-              status: 'COMPLETED',
-              createdAt: { gte: todayStart },
-            },
-            _sum: { total: true },
-          }),
-          prisma.order.aggregate({
-            where: {
-              venueId: sv.venueId,
-              status: 'COMPLETED',
-              createdAt: { gte: weekStart },
-            },
-            _sum: { total: true },
-          }),
-          prisma.staffVenue.count({
-            where: {
-              venueId: sv.venueId,
-              active: true,
-              role: { in: ['CASHIER', 'WAITER'] },
-            },
-          }),
-          prisma.timeEntry.findMany({
-            where: {
-              venueId: sv.venueId,
-              clockInTime: { gte: todayStart },
-            },
-            distinct: ['staffId'],
-          }),
-          prisma.performanceGoal.findFirst({
-            where: {
-              staffId: managerId,
-              venueId: sv.venueId,
-              month: monthStart,
-            },
-          }),
-        ])
-
-        const todaySales = Number(todayOrders._sum?.total) || 0
-        const weekSales = Number(weekOrders._sum?.total) || 0
-        const monthGoal = goal ? Number(goal.salesGoal) : 50000 // Default goal
-
-        // Calculate approximate month sales for goal progress
-        const _daysInMonth = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getDate()
-        const dayOfMonth = new Date().getDate()
-        const estimatedMonthSales = (weekSales / 7) * dayOfMonth
-        const goalProgress = monthGoal > 0 ? (estimatedMonthSales / monthGoal) * 100 : 0
-
-        return {
-          id: sv.venue.id,
-          name: sv.venue.name,
-          slug: sv.venue.slug,
-          todaySales: Math.round(todaySales * 100) / 100,
-          weekSales: Math.round(weekSales * 100) / 100,
-          promoterCount,
-          activePromoters: activePromoters.length,
-          monthGoal: Math.round(monthGoal * 100) / 100,
-          goalProgress: Math.round(goalProgress),
-        }
+    // 5 bulk queries instead of 5N (avoids N+1 per store)
+    const [todayByVenue, weekByVenue, promotersByVenue, activeEntries, goals] = await Promise.all([
+      prisma.order.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: allVenueIds }, status: 'COMPLETED', createdAt: { gte: todayStart } },
+        _sum: { total: true },
       }),
-    )
+      prisma.order.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: allVenueIds }, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        _sum: { total: true },
+      }),
+      prisma.staffVenue.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: allVenueIds }, active: true, role: { in: ['CASHIER', 'WAITER'] } },
+        _count: true,
+      }),
+      prisma.timeEntry.findMany({
+        where: { venueId: { in: allVenueIds }, clockInTime: { gte: todayStart } },
+        distinct: ['staffId', 'venueId'],
+        select: { staffId: true, venueId: true },
+      }),
+      prisma.performanceGoal.findMany({
+        where: { staffId: managerId, venueId: { in: allVenueIds }, month: monthStart },
+      }),
+    ])
+
+    const todayMap = new Map(todayByVenue.map(o => [o.venueId, Number(o._sum.total) || 0]))
+    const weekMap = new Map(weekByVenue.map(o => [o.venueId, Number(o._sum.total) || 0]))
+    const promoterMap = new Map(promotersByVenue.map(p => [p.venueId, p._count]))
+    const goalMap = new Map(goals.map(g => [g.venueId, g]))
+
+    // Count distinct active staff per venue
+    const activeByVenue = new Map<string, number>()
+    for (const entry of activeEntries) {
+      activeByVenue.set(entry.venueId, (activeByVenue.get(entry.venueId) || 0) + 1)
+    }
+
+    const stores = managedStores.map(sv => {
+      const todaySales = todayMap.get(sv.venueId) || 0
+      const weekSales = weekMap.get(sv.venueId) || 0
+      const goal = goalMap.get(sv.venueId)
+      const monthGoal = goal ? Number(goal.salesGoal) : 50000
+
+      const dayOfMonth = new Date().getDate()
+      const estimatedMonthSales = (weekSales / 7) * dayOfMonth
+      const goalProgress = monthGoal > 0 ? (estimatedMonthSales / monthGoal) * 100 : 0
+
+      return {
+        id: sv.venue.id,
+        name: sv.venue.name,
+        slug: sv.venue.slug,
+        todaySales: Math.round(todaySales * 100) / 100,
+        weekSales: Math.round(weekSales * 100) / 100,
+        promoterCount: promoterMap.get(sv.venueId) || 0,
+        activePromoters: activeByVenue.get(sv.venueId) || 0,
+        monthGoal: Math.round(monthGoal * 100) / 100,
+        goalProgress: Math.round(goalProgress),
+      }
+    })
 
     // Calculate aggregate metrics
     const aggregateMetrics = {
@@ -943,102 +1016,94 @@ class OrganizationDashboardService {
 
     const venueIds = venues.map(v => v.id)
 
-    // Get total stock
-    const totalPieces = await prisma.serializedItem.count({
-      where: {
-        venueId: { in: venueIds },
-        status: 'AVAILABLE',
-      },
-    })
+    // Single groupBy query gives us counts per venue+category (replaces all nested loops)
+    const [countsByVenueCategory, categories, alertConfigs] = await Promise.all([
+      prisma.serializedItem.groupBy({
+        by: ['venueId', 'categoryId'],
+        where: {
+          venueId: { in: venueIds },
+          status: 'AVAILABLE',
+        },
+        _count: true,
+      }),
+      prisma.itemCategory.findMany({
+        where: { venueId: { in: venueIds }, active: true },
+        select: { id: true, venueId: true, suggestedPrice: true },
+      }),
+      prisma.stockAlertConfig.findMany({
+        where: { venueId: { in: venueIds }, alertEnabled: true },
+      }),
+    ])
 
-    // Calculate total value
-    const categories = await prisma.itemCategory.findMany({
-      where: { venueId: { in: venueIds }, active: true },
-      select: { id: true, venueId: true, suggestedPrice: true },
-    })
+    // Build lookup: "venueId:categoryId" → count
+    const countMap = new Map<string, number>()
+    let totalPieces = 0
+    const venueCountMap = new Map<string, number>()
 
+    for (const row of countsByVenueCategory) {
+      const key = `${row.venueId}:${row.categoryId}`
+      countMap.set(key, row._count)
+      totalPieces += row._count
+      venueCountMap.set(row.venueId, (venueCountMap.get(row.venueId) || 0) + row._count)
+    }
+
+    // Calculate total value using pre-fetched counts
     let totalValue = 0
     for (const cat of categories) {
       if (cat.suggestedPrice) {
-        const count = await prisma.serializedItem.count({
-          where: { categoryId: cat.id, status: 'AVAILABLE' },
-        })
+        const count = countMap.get(`${cat.venueId}:${cat.id}`) || 0
         totalValue += count * Number(cat.suggestedPrice)
       }
     }
 
-    // Get alert counts
-    const alertConfigs = await prisma.stockAlertConfig.findMany({
-      where: { venueId: { in: venueIds }, alertEnabled: true },
-    })
-
+    // Calculate alert counts using pre-fetched counts
     let lowStockAlerts = 0
     let criticalAlerts = 0
 
     for (const config of alertConfigs) {
-      const available = await prisma.serializedItem.count({
-        where: {
-          venueId: config.venueId,
-          categoryId: config.categoryId,
-          status: 'AVAILABLE',
-        },
-      })
-
+      const available = countMap.get(`${config.venueId}:${config.categoryId}`) || 0
       if (available <= config.minimumStock) {
         lowStockAlerts++
         if (available === 0) criticalAlerts++
       }
     }
 
-    // Get store breakdown
-    const storeBreakdown = await Promise.all(
-      venues.map(async venue => {
-        const available = await prisma.serializedItem.count({
-          where: { venueId: venue.id, status: 'AVAILABLE' },
-        })
+    // Build store breakdown using pre-fetched counts (no additional queries)
+    const storeBreakdown = venues.map(venue => {
+      const available = venueCountMap.get(venue.id) || 0
 
-        // Calculate value for this store
-        const storeCats = categories.filter(c => c.venueId === venue.id)
-        let storeValue = 0
-        for (const cat of storeCats) {
-          if (cat.suggestedPrice) {
-            const count = await prisma.serializedItem.count({
-              where: { categoryId: cat.id, status: 'AVAILABLE' },
-            })
-            storeValue += count * Number(cat.suggestedPrice)
-          }
+      // Calculate value for this store
+      const storeCats = categories.filter(c => c.venueId === venue.id)
+      let storeValue = 0
+      for (const cat of storeCats) {
+        if (cat.suggestedPrice) {
+          const count = countMap.get(`${cat.venueId}:${cat.id}`) || 0
+          storeValue += count * Number(cat.suggestedPrice)
         }
+      }
 
-        // Check if any alert is triggered
-        const storeAlerts = alertConfigs.filter(a => a.venueId === venue.id)
-        let alertLevel: 'OK' | 'WARNING' | 'CRITICAL' = 'OK'
+      // Check alert level using pre-fetched counts
+      const storeAlerts = alertConfigs.filter(a => a.venueId === venue.id)
+      let alertLevel: 'OK' | 'WARNING' | 'CRITICAL' = 'OK'
 
-        for (const config of storeAlerts) {
-          const catAvailable = await prisma.serializedItem.count({
-            where: {
-              venueId: venue.id,
-              categoryId: config.categoryId,
-              status: 'AVAILABLE',
-            },
-          })
-          if (catAvailable === 0) {
-            alertLevel = 'CRITICAL'
-            break // CRITICAL is highest severity, stop checking
-          } else if (catAvailable <= config.minimumStock) {
-            alertLevel = 'WARNING'
-            // Continue checking - might find a CRITICAL
-          }
+      for (const config of storeAlerts) {
+        const catAvailable = countMap.get(`${venue.id}:${config.categoryId}`) || 0
+        if (catAvailable === 0) {
+          alertLevel = 'CRITICAL'
+          break
+        } else if (catAvailable <= config.minimumStock) {
+          alertLevel = 'WARNING'
         }
+      }
 
-        return {
-          storeId: venue.id,
-          storeName: venue.name,
-          available,
-          value: Math.round(storeValue * 100) / 100,
-          alertLevel,
-        }
-      }),
-    )
+      return {
+        storeId: venue.id,
+        storeName: venue.name,
+        available,
+        value: Math.round(storeValue * 100) / 100,
+        alertLevel,
+      }
+    })
 
     return {
       totalPieces,
@@ -1119,28 +1184,26 @@ class OrganizationDashboardService {
       role: entry.jobRole || 'Staff',
     }))
 
-    // Group by venue for breakdown
-    const byVenueMap = new Map<string, { venueId: string; venueName: string; onlineCount: number; totalCount: number }>()
+    // Bulk query: staff counts per venue (replaces N individual count queries)
+    const staffCountsByVenue = await prisma.staffVenue.groupBy({
+      by: ['venueId'],
+      where: { venueId: { in: venueIds }, active: true, role: { in: ['CASHIER', 'WAITER'] } },
+      _count: true,
+    })
+    const staffCountsMap = new Map(staffCountsByVenue.map(r => [r.venueId, r._count]))
 
-    for (const venue of venues) {
-      const venueOnlineCount = activeTimeEntries.filter(e => e.venueId === venue.id).length
-      const venueTotalCount = await prisma.staffVenue.count({
-        where: {
-          venueId: venue.id,
-          active: true,
-          role: { in: ['CASHIER', 'WAITER'] },
-        },
-      })
-
-      byVenueMap.set(venue.id, {
-        venueId: venue.id,
-        venueName: venue.name,
-        onlineCount: venueOnlineCount,
-        totalCount: venueTotalCount,
-      })
+    // Pre-build online counts per venue from in-memory data
+    const onlineCountsByVenue = new Map<string, number>()
+    for (const entry of activeTimeEntries) {
+      onlineCountsByVenue.set(entry.venueId, (onlineCountsByVenue.get(entry.venueId) || 0) + 1)
     }
 
-    const byVenue = Array.from(byVenueMap.values())
+    const byVenue = venues.map(venue => ({
+      venueId: venue.id,
+      venueName: venue.name,
+      onlineCount: onlineCountsByVenue.get(venue.id) || 0,
+      totalCount: staffCountsMap.get(venue.id) || 0,
+    }))
 
     return {
       onlineCount: activeTimeEntries.length,
@@ -1735,39 +1798,43 @@ class OrganizationDashboardService {
       managerMap.set(m.staffId, existing)
     }
 
-    // Calculate metrics for each manager
-    const results = await Promise.all(
-      Array.from(managerMap.entries()).map(async ([staffId, data]) => {
-        // Get stores with sales today
-        const storesWithSales = await prisma.order.groupBy({
-          by: ['venueId'],
-          where: {
-            venueId: { in: data.venues },
-            status: 'COMPLETED',
-            createdAt: { gte: todayStart },
-          },
-        })
+    // Single bulk query for all managers' venues (avoids 2M queries)
+    const allVenueIds = Array.from(managerMap.values()).flatMap(d => d.venues)
 
-        // Get total sales
-        const sales = await prisma.order.aggregate({
-          where: {
-            venueId: { in: data.venues },
-            status: 'COMPLETED',
-            createdAt: { gte: todayStart },
-          },
-          _sum: { total: true },
-        })
+    const salesByVenue = await prisma.order.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: allVenueIds },
+        status: 'COMPLETED',
+        createdAt: { gte: todayStart },
+      },
+      _sum: { total: true },
+    })
 
-        return {
-          id: staffId,
-          name: `${data.staff.firstName} ${data.staff.lastName}`.trim(),
-          email: data.staff.email,
-          storeCount: data.venues.length,
-          activeStores: storesWithSales.length,
-          todaySales: Math.round((Number(sales._sum?.total) || 0) * 100) / 100,
+    const venueSalesMap = new Map(salesByVenue.map(s => [s.venueId, Number(s._sum.total) || 0]))
+
+    // Distribute results per manager based on their venues
+    const results = Array.from(managerMap.entries()).map(([staffId, data]) => {
+      let todaySales = 0
+      let activeStores = 0
+
+      for (const venueId of data.venues) {
+        const sales = venueSalesMap.get(venueId)
+        if (sales && sales > 0) {
+          todaySales += sales
+          activeStores++
         }
-      }),
-    )
+      }
+
+      return {
+        id: staffId,
+        name: `${data.staff.firstName} ${data.staff.lastName}`.trim(),
+        email: data.staff.email,
+        storeCount: data.venues.length,
+        activeStores,
+        todaySales: Math.round(todaySales * 100) / 100,
+      }
+    })
 
     // Sort by today's sales descending
     return results.sort((a, b) => b.todaySales - a.todaySales)
@@ -1880,42 +1947,46 @@ class OrganizationDashboardService {
 
     if (venues.length === 0) return null
 
-    // Calculate attendance for each venue
-    const venueAttendance = await Promise.all(
-      venues.map(async venue => {
-        // Total staff in venue - use StaffVenue junction table
-        const totalStaff = await prisma.staffVenue.count({
-          where: {
-            venueId: venue.id,
-            active: true, // Only count active staff assignments
-          },
-        })
+    // Bulk queries: staff count and active entries per venue (avoids 2V queries)
+    const venueIds = venues.map(v => v.id)
 
-        if (totalStaff === 0) return null
-
-        // Active staff (with TimeEntry today and no clockOut)
-        // TimeEntry has venueId directly
-        const activeStaff = await prisma.timeEntry.count({
-          where: {
-            venueId: venue.id,
-            clockInTime: { gte: todayStart },
-            clockOutTime: null,
-          },
-        })
-
-        const absences = totalStaff - activeStaff
-        const attendanceRate = totalStaff > 0 ? (activeStaff / totalStaff) * 100 : 0
-
-        return {
-          venueId: venue.id,
-          venueName: venue.name,
-          totalStaff,
-          activeStaff,
-          absences,
-          attendanceRate: Math.round(attendanceRate * 10) / 10,
-        }
+    const [staffByVenue, activeByVenue] = await Promise.all([
+      prisma.staffVenue.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds }, active: true },
+        _count: true,
       }),
-    )
+      prisma.timeEntry.groupBy({
+        by: ['venueId'],
+        where: {
+          venueId: { in: venueIds },
+          clockInTime: { gte: todayStart },
+          clockOutTime: null,
+        },
+        _count: true,
+      }),
+    ])
+
+    const staffMap = new Map(staffByVenue.map(s => [s.venueId, s._count]))
+    const activeMap = new Map(activeByVenue.map(a => [a.venueId, a._count]))
+
+    const venueAttendance = venues.map(venue => {
+      const totalStaff = staffMap.get(venue.id) || 0
+      if (totalStaff === 0) return null
+
+      const activeStaff = activeMap.get(venue.id) || 0
+      const absences = totalStaff - activeStaff
+      const attendanceRate = totalStaff > 0 ? (activeStaff / totalStaff) * 100 : 0
+
+      return {
+        venueId: venue.id,
+        venueName: venue.name,
+        totalStaff,
+        activeStaff,
+        absences,
+        attendanceRate: Math.round(attendanceRate * 10) / 10,
+      }
+    })
 
     // Filter out nulls and find worst attendance
     const validVenues = venueAttendance.filter(v => v !== null)

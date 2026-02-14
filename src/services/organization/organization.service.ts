@@ -343,44 +343,49 @@ export async function getOrganizationOverview(orgId: string, filter?: DateRangeF
     where: { organizations: { some: { organizationId: orgId } } },
   })
 
-  // Get metrics per venue
-  const venueMetrics: VenueMetrics[] = await Promise.all(
-    venues.map(async venue => {
-      const venuePayments = await prisma.payment.aggregate({
-        where: {
-          venueId: venue.id,
-          status: TransactionStatus.COMPLETED,
-          createdAt: { gte: from, lte: to },
-        },
-        _sum: { amount: true },
-        _count: true,
-      })
-
-      const venueOrders = await prisma.order.count({
-        where: {
-          venueId: venue.id,
-          createdAt: { gte: from, lte: to },
-        },
-      })
-
-      const venueStaff = await prisma.staffVenue.count({
-        where: { venueId: venue.id },
-      })
-
-      return {
-        id: venue.id,
-        name: venue.name,
-        slug: venue.slug,
-        logo: venue.logo,
-        city: venue.city,
-        status: venue.status,
-        revenue: venuePayments._sum.amount?.toNumber() || 0,
-        orderCount: venueOrders,
-        paymentCount: venuePayments._count,
-        staffCount: venueStaff,
-      }
+  // Get metrics per venue using bulk groupBy queries (avoids N+1)
+  const [paymentsByVenue, ordersByVenue, staffByVenue] = await Promise.all([
+    prisma.payment.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        status: TransactionStatus.COMPLETED,
+        createdAt: { gte: from, lte: to },
+      },
+      _sum: { amount: true },
+      _count: true,
     }),
-  )
+    prisma.order.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        createdAt: { gte: from, lte: to },
+      },
+      _count: true,
+    }),
+    prisma.staffVenue.groupBy({
+      by: ['venueId'],
+      where: { venueId: { in: venueIds } },
+      _count: true,
+    }),
+  ])
+
+  const paymentsMap = new Map(paymentsByVenue.map(p => [p.venueId, p]))
+  const ordersMap = new Map(ordersByVenue.map(o => [o.venueId, o]))
+  const staffMap = new Map(staffByVenue.map(s => [s.venueId, s]))
+
+  const venueMetrics: VenueMetrics[] = venues.map(venue => ({
+    id: venue.id,
+    name: venue.name,
+    slug: venue.slug,
+    logo: venue.logo,
+    city: venue.city,
+    status: venue.status,
+    revenue: paymentsMap.get(venue.id)?._sum.amount?.toNumber() || 0,
+    orderCount: ordersMap.get(venue.id)?._count || 0,
+    paymentCount: paymentsMap.get(venue.id)?._count || 0,
+    staffCount: staffMap.get(venue.id)?._count || 0,
+  }))
 
   return {
     id: organization.id,
@@ -640,71 +645,80 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
   })
   const venueIds = venues.map(v => v.id)
 
-  // Get daily aggregated data for current period
-  const currentPeriodPayments = await prisma.payment.findMany({
-    where: {
-      venueId: { in: venueIds },
-      status: TransactionStatus.COMPLETED,
-      createdAt: { gte: from, lte: to },
-    },
-    select: {
-      amount: true,
-      createdAt: true,
-    },
-  })
+  // Early-return if organization has no venues
+  if (venueIds.length === 0) {
+    return {
+      currentPeriod: {
+        from,
+        to,
+        dataPoints: [],
+        totals: { revenue: 0, orders: 0 },
+      },
+      previousPeriod: {
+        from: previousPeriodDates.from,
+        to: previousPeriodDates.to,
+        dataPoints: [],
+        totals: { revenue: 0, orders: 0 },
+      },
+      comparison: {
+        revenueChange: 0,
+        ordersChange: 0,
+      },
+    }
+  }
 
-  const currentPeriodOrders = await prisma.order.findMany({
-    where: {
-      venueId: { in: venueIds },
-      createdAt: { gte: from, lte: to },
-    },
-    select: {
-      createdAt: true,
-    },
-  })
+  // Aggregate by date at database level (avoids loading all rows into memory)
+  const [currentRevenueByDate, currentOrdersByDate, previousRevenueByDate, previousOrdersByDate] = await Promise.all([
+    prisma.$queryRaw<Array<{ date: string; revenue: number }>>`
+      SELECT TO_CHAR(p."createdAt", 'YYYY-MM-DD') as date,
+             COALESCE(SUM(p.amount), 0) as revenue
+      FROM "Payment" p
+      WHERE p."venueId" = ANY(${venueIds})
+        AND p.status = 'COMPLETED'
+        AND p."createdAt" >= ${from} AND p."createdAt" <= ${to}
+      GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
+      ORDER BY date`,
+    prisma.$queryRaw<Array<{ date: string; count: bigint }>>`
+      SELECT TO_CHAR("createdAt", 'YYYY-MM-DD') as date,
+             COUNT(*) as count
+      FROM "Order"
+      WHERE "venueId" = ANY(${venueIds})
+        AND "createdAt" >= ${from} AND "createdAt" <= ${to}
+      GROUP BY TO_CHAR("createdAt", 'YYYY-MM-DD')`,
+    prisma.$queryRaw<Array<{ date: string; revenue: number }>>`
+      SELECT TO_CHAR(p."createdAt", 'YYYY-MM-DD') as date,
+             COALESCE(SUM(p.amount), 0) as revenue
+      FROM "Payment" p
+      WHERE p."venueId" = ANY(${venueIds})
+        AND p.status = 'COMPLETED'
+        AND p."createdAt" >= ${previousPeriodDates.from} AND p."createdAt" <= ${previousPeriodDates.to}
+      GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
+      ORDER BY date`,
+    prisma.$queryRaw<Array<{ date: string; count: bigint }>>`
+      SELECT TO_CHAR("createdAt", 'YYYY-MM-DD') as date,
+             COUNT(*) as count
+      FROM "Order"
+      WHERE "venueId" = ANY(${venueIds})
+        AND "createdAt" >= ${previousPeriodDates.from} AND "createdAt" <= ${previousPeriodDates.to}
+      GROUP BY TO_CHAR("createdAt", 'YYYY-MM-DD')`,
+  ])
 
-  // Get daily aggregated data for previous period
-  const previousPeriodPayments = await prisma.payment.findMany({
-    where: {
-      venueId: { in: venueIds },
-      status: TransactionStatus.COMPLETED,
-      createdAt: { gte: previousPeriodDates.from, lte: previousPeriodDates.to },
-    },
-    select: {
-      amount: true,
-      createdAt: true,
-    },
-  })
-
-  const previousPeriodOrders = await prisma.order.findMany({
-    where: {
-      venueId: { in: venueIds },
-      createdAt: { gte: previousPeriodDates.from, lte: previousPeriodDates.to },
-    },
-    select: {
-      createdAt: true,
-    },
-  })
-
-  // Aggregate by date
-  const aggregateByDate = (payments: Array<{ amount: any; createdAt: Date }>, orders: Array<{ createdAt: Date }>): TrendDataPoint[] => {
+  // Merge revenue and order counts by date
+  const mergeTrend = (
+    revenueRows: Array<{ date: string; revenue: number }>,
+    orderRows: Array<{ date: string; count: bigint }>,
+  ): TrendDataPoint[] => {
     const dateMap = new Map<string, { revenue: number; orders: number }>()
 
-    payments.forEach(p => {
-      const dateKey = p.createdAt.toISOString().split('T')[0]
-      const existing = dateMap.get(dateKey) || { revenue: 0, orders: 0 }
-      existing.revenue += p.amount?.toNumber() || 0
-      dateMap.set(dateKey, existing)
-    })
+    for (const row of revenueRows) {
+      dateMap.set(row.date, { revenue: Number(row.revenue), orders: 0 })
+    }
+    for (const row of orderRows) {
+      const existing = dateMap.get(row.date) || { revenue: 0, orders: 0 }
+      existing.orders = Number(row.count)
+      dateMap.set(row.date, existing)
+    }
 
-    orders.forEach(o => {
-      const dateKey = o.createdAt.toISOString().split('T')[0]
-      const existing = dateMap.get(dateKey) || { revenue: 0, orders: 0 }
-      existing.orders += 1
-      dateMap.set(dateKey, existing)
-    })
-
-    // Sort by date and return
     return Array.from(dateMap.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([date, data]) => ({
@@ -714,8 +728,8 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
       }))
   }
 
-  const currentDataPoints = aggregateByDate(currentPeriodPayments, currentPeriodOrders)
-  const previousDataPoints = aggregateByDate(previousPeriodPayments, previousPeriodOrders)
+  const currentDataPoints = mergeTrend(currentRevenueByDate, currentOrdersByDate)
+  const previousDataPoints = mergeTrend(previousRevenueByDate, previousOrdersByDate)
 
   // Calculate totals
   const currentTotals = currentDataPoints.reduce(
@@ -865,39 +879,46 @@ export async function getVenueBenchmarks(orgId: string, filter?: DateRangeFilter
     },
   })
 
-  // Get metrics for each venue
-  const venueMetricsPromises = venues.map(async venue => {
-    const [payments, orders] = await Promise.all([
-      prisma.payment.aggregate({
-        where: {
-          venueId: venue.id,
-          status: TransactionStatus.COMPLETED,
-          createdAt: { gte: from, lte: to },
-        },
-        _sum: { amount: true },
-        _count: true,
-      }),
-      prisma.order.count({
-        where: {
-          venueId: venue.id,
-          createdAt: { gte: from, lte: to },
-        },
-      }),
-    ])
+  // Get metrics for all venues using bulk groupBy queries (avoids N+1)
+  const venueIds = venues.map(v => v.id)
 
-    const revenue = payments._sum.amount?.toNumber() || 0
+  const [paymentsByVenue, ordersByVenue] = await Promise.all([
+    prisma.payment.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        status: TransactionStatus.COMPLETED,
+        createdAt: { gte: from, lte: to },
+      },
+      _sum: { amount: true },
+      _count: true,
+    }),
+    prisma.order.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        createdAt: { gte: from, lte: to },
+      },
+      _count: true,
+    }),
+  ])
+
+  const paymentsMap = new Map(paymentsByVenue.map(p => [p.venueId, p]))
+  const ordersMap = new Map(ordersByVenue.map(o => [o.venueId, o]))
+
+  const venueMetricsData = venues.map(venue => {
+    const revenue = paymentsMap.get(venue.id)?._sum.amount?.toNumber() || 0
+    const orders = ordersMap.get(venue.id)?._count || 0
     const averageTicketSize = orders > 0 ? revenue / orders : 0
 
     return {
       venue,
       revenue,
       orders,
-      payments: payments._count,
+      payments: paymentsMap.get(venue.id)?._count || 0,
       averageTicketSize,
     }
   })
-
-  const venueMetricsData = await Promise.all(venueMetricsPromises)
 
   // Calculate organization averages
   const totalVenues = venueMetricsData.length
@@ -979,65 +1000,73 @@ export async function getOrganizationVenues(orgId: string, filter?: DateRangeFil
     orderBy: { name: 'asc' },
   })
 
-  return Promise.all(
-    venues.map(async venue => {
-      // Current period metrics
-      const currentPayments = await prisma.payment.aggregate({
-        where: {
-          venueId: venue.id,
-          status: TransactionStatus.COMPLETED,
-          createdAt: { gte: from, lte: to },
-        },
-        _sum: { amount: true },
-        _count: true,
-      })
+  // Bulk queries for all venues (avoids 4N queries → 4 queries)
+  const venueIds = venues.map(v => v.id)
 
-      const currentOrders = await prisma.order.count({
-        where: {
-          venueId: venue.id,
-          createdAt: { gte: from, lte: to },
-        },
-      })
-
-      // Previous period metrics for growth calculation
-      const previousPayments = await prisma.payment.aggregate({
-        where: {
-          venueId: venue.id,
-          status: TransactionStatus.COMPLETED,
-          createdAt: { gte: previousFrom, lte: previousTo },
-        },
-        _sum: { amount: true },
-      })
-
-      const staffCount = await prisma.staffVenue.count({
-        where: { venueId: venue.id },
-      })
-
-      // Calculate growth percentage
-      const currentRevenue = currentPayments._sum.amount?.toNumber() || 0
-      const previousRevenue = previousPayments._sum.amount?.toNumber() || 0
-      const growth = previousRevenue > 0 ? ((currentRevenue - previousRevenue) / previousRevenue) * 100 : currentRevenue > 0 ? 100 : 0
-
-      return {
-        id: venue.id,
-        name: venue.name,
-        slug: venue.slug,
-        logo: venue.logo,
-        address: venue.address,
-        city: venue.city,
-        state: venue.state,
-        status: venue.status,
-        createdAt: venue.createdAt,
-        metrics: {
-          revenue: currentRevenue,
-          orderCount: currentOrders,
-          paymentCount: currentPayments._count,
-          staffCount,
-          growth: Math.round(growth * 100) / 100, // Round to 2 decimal places
-        },
-      }
+  const [currentPaymentsByVenue, currentOrdersByVenue, previousPaymentsByVenue, staffByVenue] = await Promise.all([
+    prisma.payment.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        status: TransactionStatus.COMPLETED,
+        createdAt: { gte: from, lte: to },
+      },
+      _sum: { amount: true },
+      _count: true,
     }),
-  )
+    prisma.order.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        createdAt: { gte: from, lte: to },
+      },
+      _count: true,
+    }),
+    prisma.payment.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        status: TransactionStatus.COMPLETED,
+        createdAt: { gte: previousFrom, lte: previousTo },
+      },
+      _sum: { amount: true },
+    }),
+    prisma.staffVenue.groupBy({
+      by: ['venueId'],
+      where: { venueId: { in: venueIds } },
+      _count: true,
+    }),
+  ])
+
+  const currentPaymentsMap = new Map(currentPaymentsByVenue.map(p => [p.venueId, p]))
+  const currentOrdersMap = new Map(currentOrdersByVenue.map(o => [o.venueId, o]))
+  const previousPaymentsMap = new Map(previousPaymentsByVenue.map(p => [p.venueId, p]))
+  const staffCountMap = new Map(staffByVenue.map(s => [s.venueId, s]))
+
+  return venues.map(venue => {
+    const currentRevenue = currentPaymentsMap.get(venue.id)?._sum.amount?.toNumber() || 0
+    const previousRevenue = previousPaymentsMap.get(venue.id)?._sum.amount?.toNumber() || 0
+    const growth = previousRevenue > 0 ? ((currentRevenue - previousRevenue) / previousRevenue) * 100 : currentRevenue > 0 ? 100 : 0
+
+    return {
+      id: venue.id,
+      name: venue.name,
+      slug: venue.slug,
+      logo: venue.logo,
+      address: venue.address,
+      city: venue.city,
+      state: venue.state,
+      status: venue.status,
+      createdAt: venue.createdAt,
+      metrics: {
+        revenue: currentRevenue,
+        orderCount: currentOrdersMap.get(venue.id)?._count || 0,
+        paymentCount: currentPaymentsMap.get(venue.id)?._count || 0,
+        staffCount: staffCountMap.get(venue.id)?._count || 0,
+        growth: Math.round(growth * 100) / 100,
+      },
+    }
+  })
 }
 
 /**

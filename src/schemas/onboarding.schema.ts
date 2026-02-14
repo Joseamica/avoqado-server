@@ -6,6 +6,7 @@
 
 import { z } from 'zod'
 import { OnboardingType, ProductType } from '@prisma/client'
+import { zTimezone } from '@/utils/sanitizeTimezone'
 
 /**
  * Validates signup request (creates user + organization)
@@ -84,7 +85,7 @@ export const UpdateStep3Schema = z.object({
         errorMap: () => ({ message: 'Entity type must be PERSONA_FISICA or PERSONA_MORAL' }),
       })
       .optional(),
-    timezone: z.string().default('America/Mexico_City'),
+    timezone: zTimezone,
     address: z.string().optional(),
     city: z.string().optional(),
     state: z.string().optional(),

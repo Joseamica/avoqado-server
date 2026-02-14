@@ -83,52 +83,52 @@ class CommandCenterService {
     weekStart.setDate(weekStart.getDate() - 7)
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
 
-    // Get today's orders with items and creator info
+    // Get today's orders with lean item data (for category breakdown) and creator info
     const todayOrders = await prisma.order.findMany({
       where: {
         venueId,
         status: 'COMPLETED',
         createdAt: { gte: todayStart },
       },
-      include: {
-        items: true,
+      select: {
+        total: true,
         createdBy: {
           select: { id: true, firstName: true, lastName: true, photoUrl: true },
+        },
+        items: {
+          select: { categoryName: true, productId: true, quantity: true, total: true },
         },
       },
     })
 
     const todaySales = todayOrders.reduce((sum, order) => sum + Number(order.total || 0), 0)
-    const todayUnits = todayOrders.reduce((sum, order) => sum + order.items.length, 0)
+    const todayUnits = todayOrders.reduce((sum, order) => sum + order.items.reduce((s, i) => s + i.quantity, 0), 0)
     const avgTicket = todayOrders.length > 0 ? todaySales / todayOrders.length : 0
 
-    // Get week orders with items for units calculation
-    const weekOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: { gte: weekStart },
-      },
-      include: {
-        items: true,
-      },
-    })
-    const weekSales = weekOrders.reduce((sum, order) => sum + Number(order.total || 0), 0)
-    const weekUnits = weekOrders.reduce((sum, order) => sum + order.items.length, 0)
+    // Week/month: use aggregate for sales + SUM(quantity) for real unit counts
+    const [weekAgg, weekUnitsAgg, monthAgg, monthUnitsAgg] = await Promise.all([
+      prisma.order.aggregate({
+        where: { venueId, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        _sum: { total: true },
+      }),
+      prisma.orderItem.aggregate({
+        where: { order: { venueId, status: 'COMPLETED', createdAt: { gte: weekStart } } },
+        _sum: { quantity: true },
+      }),
+      prisma.order.aggregate({
+        where: { venueId, status: 'COMPLETED', createdAt: { gte: monthStart } },
+        _sum: { total: true },
+      }),
+      prisma.orderItem.aggregate({
+        where: { order: { venueId, status: 'COMPLETED', createdAt: { gte: monthStart } } },
+        _sum: { quantity: true },
+      }),
+    ])
 
-    // Get month orders with items for units calculation
-    const monthOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: { gte: monthStart },
-      },
-      include: {
-        items: true,
-      },
-    })
-    const monthSales = monthOrders.reduce((sum, order) => sum + Number(order.total || 0), 0)
-    const monthUnits = monthOrders.reduce((sum, order) => sum + order.items.length, 0)
+    const weekSales = Number(weekAgg._sum.total) || 0
+    const weekUnits = Number(weekUnitsAgg._sum.quantity) || 0
+    const monthSales = Number(monthAgg._sum.total) || 0
+    const monthUnits = Number(monthUnitsAgg._sum.quantity) || 0
 
     // Get active promoters (checked in today) - using TimeEntry model
     const activePromotersRecords = await prisma.timeEntry.findMany({
@@ -162,7 +162,7 @@ class CommandCenterService {
         units: 0,
       }
       existing.sales += Number(order.total || 0)
-      existing.units += order.items.length
+      existing.units += order.items.reduce((s, i) => s + i.quantity, 0)
       sellerStats.set(sellerId, existing)
     }
     const topSellers: TopSeller[] = Array.from(sellerStats.values())
@@ -461,7 +461,7 @@ class CommandCenterService {
       }
 
       existing.sales += Number(order.total || 0)
-      existing.units += order.items.length
+      existing.units += order.items.reduce((s, i) => s + i.quantity, 0)
       sellerStats.set(sellerId, existing)
     }
 
@@ -566,31 +566,31 @@ class CommandCenterService {
     previousPeriodStart.setDate(previousPeriodStart.getDate() - periodDuration + 1)
     previousPeriodStart.setHours(0, 0, 0, 0)
 
-    // Get current period orders
+    // Get current period orders with item counts (not full items)
     const currentOrders = await prisma.order.findMany({
       where: {
         venueId,
         status: 'COMPLETED',
-        createdAt: {
-          gte: currentPeriodStart,
-          lte: currentPeriodEnd,
-        },
+        createdAt: { gte: currentPeriodStart, lte: currentPeriodEnd },
       },
-      include: { items: true },
+      select: {
+        total: true,
+        createdAt: true,
+        _count: { select: { items: true } },
+      },
     })
 
-    // Get previous period orders for comparison
-    const previousOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: {
-          gte: previousPeriodStart,
-          lte: previousPeriodEnd,
-        },
-      },
-      include: { items: true },
-    })
+    // Previous period: only need totals for comparison, not per-day breakdown
+    const [prevAgg, prevItemCount] = await Promise.all([
+      prisma.order.aggregate({
+        where: { venueId, status: 'COMPLETED', createdAt: { gte: previousPeriodStart, lte: previousPeriodEnd } },
+        _sum: { total: true },
+        _count: true,
+      }),
+      prisma.orderItem.count({
+        where: { order: { venueId, status: 'COMPLETED', createdAt: { gte: previousPeriodStart, lte: previousPeriodEnd } } },
+      }),
+    ])
 
     // Build trend data grouped by day
     const trendMap = new Map<string, SalesTrendPoint>()
@@ -599,7 +599,6 @@ class CommandCenterService {
     const iterDate = new Date(currentPeriodStart)
     while (iterDate <= currentPeriodEnd) {
       const dateKey = iterDate.toISOString().split('T')[0]
-      // Format as "DD MMM" for display
       const displayDate = iterDate.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' })
       trendMap.set(dateKey, {
         date: displayDate,
@@ -616,7 +615,7 @@ class CommandCenterService {
       const existing = trendMap.get(dateKey)
       if (existing) {
         existing.sales += Number(order.total || 0)
-        existing.units += order.items.length
+        existing.units += order._count.items
         existing.transactions += 1
       }
     }
@@ -629,12 +628,12 @@ class CommandCenterService {
 
     // Calculate totals for comparison
     const currentTotalSales = currentOrders.reduce((sum, o) => sum + Number(o.total || 0), 0)
-    const currentTotalUnits = currentOrders.reduce((sum, o) => sum + o.items.length, 0)
+    const currentTotalUnits = currentOrders.reduce((sum, o) => sum + o._count.items, 0)
     const currentTotalTransactions = currentOrders.length
 
-    const previousTotalSales = previousOrders.reduce((sum, o) => sum + Number(o.total || 0), 0)
-    const previousTotalUnits = previousOrders.reduce((sum, o) => sum + o.items.length, 0)
-    const previousTotalTransactions = previousOrders.length
+    const previousTotalSales = Number(prevAgg._sum.total) || 0
+    const previousTotalUnits = prevItemCount
+    const previousTotalTransactions = prevAgg._count
 
     // Calculate percentage changes
     const salesChange = previousTotalSales > 0 ? ((currentTotalSales - previousTotalSales) / previousTotalSales) * 100 : 0
