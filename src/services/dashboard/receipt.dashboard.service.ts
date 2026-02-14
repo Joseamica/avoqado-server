@@ -66,26 +66,34 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
     throw new NotFoundError('Order not found')
   }
 
-  // Get order items separately
-  const orderItems = await prisma.orderItem.findMany({
-    where: { orderId: payment.orderId },
-    include: {
-      product: true,
-    },
-  })
-
-  // Get modifiers for each order item
-  const orderItemsWithModifiers = await Promise.all(
-    orderItems.map(async item => {
-      const modifiers = await prisma.orderItemModifier.findMany({
-        where: { orderItemId: item.id },
-        include: {
-          modifier: true,
-        },
-      })
-      return { ...item, modifiers }
+  // Get order items and all their modifiers in 2 queries (avoids N+1)
+  const [orderItems, allModifiers] = await Promise.all([
+    prisma.orderItem.findMany({
+      where: { orderId: payment.orderId },
+      include: {
+        product: true,
+      },
     }),
-  )
+    prisma.orderItemModifier.findMany({
+      where: { orderItem: { orderId: payment.orderId } },
+      include: {
+        modifier: true,
+      },
+    }),
+  ])
+
+  // Group modifiers by orderItemId
+  const modifiersByItemId = new Map<string, typeof allModifiers>()
+  for (const mod of allModifiers) {
+    const existing = modifiersByItemId.get(mod.orderItemId) || []
+    existing.push(mod)
+    modifiersByItemId.set(mod.orderItemId, existing)
+  }
+
+  const orderItemsWithModifiers = orderItems.map(item => ({
+    ...item,
+    modifiers: modifiersByItemId.get(item.id) || [],
+  }))
 
   // Try to get customer info if available
   let customer = null

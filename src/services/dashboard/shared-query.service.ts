@@ -39,6 +39,7 @@
 
 import prisma from '@/utils/prismaClient'
 import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
+import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { Prisma } from '@prisma/client'
 
 /**
@@ -349,18 +350,13 @@ export class SharedQueryService {
     const isShortPeriod = periodName === 'today' || periodName === 'yesterday'
     const granularity: 'hour' | 'day' = isShortPeriod ? 'hour' : 'day'
 
-    // SECURITY: Sanitize timezone to prevent SQL injection
-    // Only allow valid IANA timezone format (e.g., 'America/Mexico_City')
-    const sanitizedTimezone = venueTimezone.replace(/[^a-zA-Z0-9_/\-+:]/g, '')
-    if (sanitizedTimezone !== venueTimezone) {
-      throw new Error(`Invalid timezone format: ${venueTimezone}`)
-    }
+    const safeTz = sanitizeTimezone(venueTimezone)
 
     // SQL for grouping by date or hour
     const dateGroupSql =
       granularity === 'hour'
-        ? `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'HH24:00')`
-        : `TO_CHAR("createdAt" AT TIME ZONE '${sanitizedTimezone}', 'YYYY-MM-DD')`
+        ? `TO_CHAR("createdAt" AT TIME ZONE '${safeTz}', 'HH24:00')`
+        : `TO_CHAR("createdAt" AT TIME ZONE '${safeTz}', 'YYYY-MM-DD')`
 
     const dataPoints = await prisma.$queryRaw<
       Array<{
@@ -805,33 +801,51 @@ export class SharedQueryService {
       },
     })
 
-    // Get order counts for each shift
-    const shiftInfos: ActiveShiftInfo[] = await Promise.all(
-      shifts.map(async shift => {
-        const ordersCount = await prisma.order.count({
-          where: {
-            venueId,
-            createdById: shift.staffId,
-            createdAt: { gte: shift.startTime },
-          },
-        })
+    // Fetch all relevant orders in one query, then count per-shift in memory
+    // Each shift has its own startTime, so we fetch since the earliest and filter per shift
+    if (shifts.length === 0) return []
 
-        const salesTotal = (shift.totalCashPayments?.toNumber() || 0) + (shift.totalCardPayments?.toNumber() || 0)
-        const durationMinutes = Math.floor((now.getTime() - shift.startTime.getTime()) / (1000 * 60))
+    const earliestStart = shifts.reduce((min, s) => (s.startTime < min ? s.startTime : min), shifts[0].startTime)
+    const staffIds = shifts.map(s => s.staffId)
 
-        return {
-          shiftId: shift.id,
-          staffId: shift.staffId,
-          staffName: `${shift.staff.firstName} ${shift.staff.lastName}`.trim(),
-          role: shift.staff.venues[0]?.role || 'STAFF',
-          startTime: shift.startTime,
-          durationMinutes,
-          salesTotal,
-          ordersCount,
-          tipsTotal: shift.totalTips?.toNumber() || 0,
-        }
-      }),
-    )
+    const allOrders = await prisma.order.findMany({
+      where: {
+        venueId,
+        createdById: { in: staffIds },
+        createdAt: { gte: earliestStart },
+      },
+      select: { createdById: true, createdAt: true },
+    })
+
+    // Index orders by staffId for O(1) lookup instead of O(n*m) full scan
+    const ordersByStaff = new Map<string, Array<{ createdAt: Date }>>()
+    for (const order of allOrders) {
+      if (!order.createdById) continue
+      const arr = ordersByStaff.get(order.createdById)
+      if (arr) arr.push(order)
+      else ordersByStaff.set(order.createdById, [order])
+    }
+
+    const shiftInfos: ActiveShiftInfo[] = shifts.map(shift => {
+      // Count only orders created after THIS shift's startTime
+      const staffOrders = ordersByStaff.get(shift.staffId) || []
+      const ordersCount = staffOrders.filter(o => o.createdAt >= shift.startTime).length
+
+      const salesTotal = (shift.totalCashPayments?.toNumber() || 0) + (shift.totalCardPayments?.toNumber() || 0)
+      const durationMinutes = Math.floor((now.getTime() - shift.startTime.getTime()) / (1000 * 60))
+
+      return {
+        shiftId: shift.id,
+        staffId: shift.staffId,
+        staffName: `${shift.staff.firstName} ${shift.staff.lastName}`.trim(),
+        role: shift.staff.venues[0]?.role || 'STAFF',
+        startTime: shift.startTime,
+        durationMinutes,
+        salesTotal,
+        ordersCount,
+        tipsTotal: shift.totalTips?.toNumber() || 0,
+      }
+    })
 
     return shiftInfos.sort((a, b) => b.salesTotal - a.salesTotal)
   }

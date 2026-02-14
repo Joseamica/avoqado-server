@@ -556,6 +556,59 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     },
   })
 
+  // Also fetch orphan payments (shiftId = null) — venues without shifts module
+  // These payments exist but aren't associated with any shift
+  const orphanPaymentWhere: any = {
+    venueId,
+    shiftId: null,
+    status: 'COMPLETED',
+    ...(staffId ? { processedById: staffId } : {}),
+    ...(parsedStartTime || parsedEndTime
+      ? {
+          createdAt: {
+            ...(parsedStartTime ? { gte: parsedStartTime } : {}),
+            ...(parsedEndTime ? { lte: parsedEndTime } : {}),
+          },
+        }
+      : {}),
+  }
+
+  const orphanPayments = await prisma.payment.findMany({
+    where: orphanPaymentWhere,
+    select: {
+      id: true,
+      amount: true,
+      tipAmount: true,
+      processedById: true,
+      createdAt: true,
+      method: true,
+      processedBy: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+        },
+      },
+    },
+  })
+
+  // Also count orphan orders (shiftId = null, with completed payments)
+  const orphanOrderCount = await prisma.order.count({
+    where: {
+      venueId,
+      shiftId: null,
+      status: 'COMPLETED',
+      ...(parsedStartTime || parsedEndTime
+        ? {
+            createdAt: {
+              ...(parsedStartTime ? { gte: parsedStartTime } : {}),
+              ...(parsedEndTime ? { lte: parsedEndTime } : {}),
+            },
+          }
+        : {}),
+    },
+  })
+
   // Calculate summary data
   let totalTips = 0
   let totalSales = 0
@@ -613,6 +666,46 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
               count: 1,
             })
           }
+        }
+      }
+    }
+  }
+
+  // Process orphan payments (no shift association)
+  totalOrders += orphanOrderCount
+  for (const payment of orphanPayments) {
+    const paymentAmount = Number(payment.amount || 0)
+    const tipAmount = Number(payment.tipAmount || 0)
+
+    if (!isNaN(paymentAmount)) {
+      totalSales += paymentAmount
+
+      const method = payment.method || 'OTHER'
+      paymentMethodMap.set(method, (paymentMethodMap.get(method) || 0) + paymentAmount)
+
+      allPayments.push({
+        createdAt: payment.createdAt,
+        amount: paymentAmount,
+      })
+    }
+
+    if (!isNaN(tipAmount)) {
+      totalTips += tipAmount
+
+      const pStaffId = payment.processedById
+      const staffName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Unknown'
+
+      if (pStaffId) {
+        if (staffTipsMap.has(pStaffId)) {
+          const staffData = staffTipsMap.get(pStaffId)!
+          staffData.amount += tipAmount
+          staffData.count += 1
+        } else {
+          staffTipsMap.set(pStaffId, {
+            name: staffName,
+            amount: tipAmount,
+            count: 1,
+          })
         }
       }
     }

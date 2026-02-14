@@ -1,9 +1,8 @@
 // src/controllers/tpv/appUpdate.tpv.controller.ts
 import { Request, Response } from 'express'
-import { PrismaClient, AppEnvironment } from '@prisma/client'
+import { AppEnvironment } from '@prisma/client'
 import logger from '../../config/logger'
-
-const prisma = new PrismaClient()
+import prisma from '../../utils/prismaClient'
 
 /**
  * TPV App Update Controller

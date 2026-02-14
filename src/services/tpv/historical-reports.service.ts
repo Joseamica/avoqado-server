@@ -14,6 +14,8 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
+import { BadRequestError } from '@/errors/AppError'
 import { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
@@ -61,17 +63,20 @@ export interface PaginatedHistoricalData {
  * Get DATE_TRUNC expression based on grouping type
  */
 function getTruncateExpression(grouping: HistoricalGrouping, timezone: string): string {
+  // SECURITY: Sanitize timezone to prevent SQL injection
+  const safeTz = sanitizeTimezone(timezone)
+
   switch (grouping) {
     case HistoricalGrouping.DAILY:
-      return `DATE_TRUNC('day', o."createdAt" AT TIME ZONE '${timezone}')`
+      return `DATE_TRUNC('day', o."createdAt" AT TIME ZONE '${safeTz}')`
     case HistoricalGrouping.WEEKLY:
-      return `DATE_TRUNC('week', o."createdAt" AT TIME ZONE '${timezone}')`
+      return `DATE_TRUNC('week', o."createdAt" AT TIME ZONE '${safeTz}')`
     case HistoricalGrouping.MONTHLY:
-      return `DATE_TRUNC('month', o."createdAt" AT TIME ZONE '${timezone}')`
+      return `DATE_TRUNC('month', o."createdAt" AT TIME ZONE '${safeTz}')`
     case HistoricalGrouping.QUARTERLY:
-      return `DATE_TRUNC('quarter', o."createdAt" AT TIME ZONE '${timezone}')`
+      return `DATE_TRUNC('quarter', o."createdAt" AT TIME ZONE '${safeTz}')`
     case HistoricalGrouping.YEARLY:
-      return `DATE_TRUNC('year', o."createdAt" AT TIME ZONE '${timezone}')`
+      return `DATE_TRUNC('year', o."createdAt" AT TIME ZONE '${safeTz}')`
   }
 }
 
@@ -156,16 +161,11 @@ function calculatePercentageChange(current: number, previous: number): number | 
 }
 
 /**
- * Calculate previous period metrics for comparison
+ * Calculate the start date of the previous period (pure function, no DB call)
  */
-async function calculatePreviousPeriod(
-  venueId: string,
-  periodStart: Date,
-  grouping: HistoricalGrouping,
-): Promise<{ total_sales: number; total_orders: number }> {
+function calculatePreviousStart(periodStart: Date, grouping: HistoricalGrouping): Date {
   const previousStart = new Date(periodStart)
 
-  // Calculate previous period start
   switch (grouping) {
     case HistoricalGrouping.DAILY:
       previousStart.setDate(previousStart.getDate() - 1)
@@ -184,28 +184,70 @@ async function calculatePreviousPeriod(
       break
   }
 
-  const previousEnd = getPeriodEnd(previousStart, grouping)
+  return previousStart
+}
 
-  // Query previous period data
-  const result = await prisma.$queryRaw<Array<{ total_sales: Decimal; total_orders: bigint }>>`
+/**
+ * Bulk-calculate previous period metrics for all periods in a single query.
+ * Replaces N individual queries with 1 aggregated query using DATE_TRUNC grouping.
+ */
+async function calculatePreviousPeriodsBulk(
+  venueId: string,
+  periods: Array<{ period_start: Date }>,
+  grouping: HistoricalGrouping,
+  timezone: string,
+): Promise<Map<string, { total_sales: number; total_orders: number }>> {
+  if (periods.length === 0) {
+    return new Map()
+  }
+
+  // Calculate the date range covering all previous periods
+  let earliestPrevStart: Date | null = null
+  let latestPrevEnd: Date | null = null
+
+  for (const period of periods) {
+    const prevStart = calculatePreviousStart(period.period_start, grouping)
+    const prevEnd = getPeriodEnd(prevStart, grouping)
+
+    if (!earliestPrevStart || prevStart < earliestPrevStart) {
+      earliestPrevStart = prevStart
+    }
+    if (!latestPrevEnd || prevEnd > latestPrevEnd) {
+      latestPrevEnd = prevEnd
+    }
+  }
+
+  if (!earliestPrevStart || !latestPrevEnd) {
+    return new Map()
+  }
+
+  // Single query: aggregate all previous periods grouped by DATE_TRUNC
+  const truncateExpr = getTruncateExpression(grouping, timezone)
+
+  const rows = await prisma.$queryRaw<Array<{ period_start: Date; total_sales: Decimal; total_orders: bigint }>>`
     SELECT
+      ${Prisma.raw(truncateExpr)} as period_start,
       COALESCE(SUM(o.total), 0) as total_sales,
       COALESCE(COUNT(DISTINCT o.id), 0) as total_orders
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${previousStart}
-      AND o."createdAt" < ${previousEnd}
+      AND o."createdAt" >= ${earliestPrevStart}
+      AND o."createdAt" < ${latestPrevEnd}
       AND o.status = 'COMPLETED'
+    GROUP BY period_start
   `
 
-  if (result.length === 0) {
-    return { total_sales: 0, total_orders: 0 }
+  // Build lookup map keyed by period_start date string (YYYY-MM-DD)
+  const map = new Map<string, { total_sales: number; total_orders: number }>()
+  for (const row of rows) {
+    const key = row.period_start.toISOString().split('T')[0]
+    map.set(key, {
+      total_sales: new Decimal(row.total_sales).toNumber(),
+      total_orders: Number(row.total_orders),
+    })
   }
 
-  return {
-    total_sales: new Decimal(result[0].total_sales).toNumber(),
-    total_orders: Number(result[0].total_orders),
-  }
+  return map
 }
 
 /**
@@ -242,8 +284,16 @@ export async function getHistoricalSummaries(
   // 2. Build SQL query with DATE_TRUNC grouping
   const truncateExpr = getTruncateExpression(grouping, timezone)
 
-  // Cursor condition (pagination)
-  const cursorCondition = cursor ? `AND ${truncateExpr} < ${`'${cursor}'`}::timestamp` : ''
+  // Cursor condition (pagination) — validate cursor as ISO timestamp to prevent SQL injection
+  let cursorCondition = ''
+  if (cursor) {
+    const cursorDate = new Date(cursor)
+    if (isNaN(cursorDate.getTime())) {
+      throw new BadRequestError('Invalid cursor format. Must be a valid ISO 8601 timestamp.')
+    }
+    // Use validated ISO string to prevent injection
+    cursorCondition = `AND ${truncateExpr} < '${cursorDate.toISOString()}'::timestamp`
+  }
 
   // 3. Query aggregated data by period
   const periodsRaw = await prisma.$queryRaw<
@@ -275,31 +325,32 @@ export async function getHistoricalSummaries(
   const hasMore = periodsRaw.length > limit
   const periods = hasMore ? periodsRaw.slice(0, limit) : periodsRaw
 
-  // 4. For each period, calculate previous period for comparison
-  const periodsWithComparison = await Promise.all(
-    periods.map(async period => {
-      const previousPeriod = await calculatePreviousPeriod(venueId, period.period_start, grouping)
+  // 4. Bulk-fetch all previous period metrics in ONE query (instead of N)
+  const prevMap = await calculatePreviousPeriodsBulk(venueId, periods, grouping, timezone)
 
-      const totalSales = new Decimal(period.total_sales).toNumber()
-      const totalOrders = Number(period.total_orders)
-      const totalProducts = Number(period.total_products)
-      const averageOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0
+  const periodsWithComparison = periods.map(period => {
+    const prevKey = calculatePreviousStart(period.period_start, grouping).toISOString().split('T')[0]
+    const previousPeriod = prevMap.get(prevKey) || { total_sales: 0, total_orders: 0 }
 
-      return {
-        periodStart: period.period_start,
-        periodEnd: getPeriodEnd(period.period_start, grouping),
-        grouping,
-        label: formatPeriodLabel(period.period_start, grouping),
-        subtitle: formatPeriodSubtitle(period.period_start, grouping),
-        totalSales,
-        totalOrders,
-        totalProducts,
-        averageOrderValue,
-        salesChange: calculatePercentageChange(totalSales, previousPeriod.total_sales),
-        ordersChange: calculatePercentageChange(totalOrders, previousPeriod.total_orders),
-      }
-    }),
-  )
+    const totalSales = new Decimal(period.total_sales).toNumber()
+    const totalOrders = Number(period.total_orders)
+    const totalProducts = Number(period.total_products)
+    const averageOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0
+
+    return {
+      periodStart: period.period_start,
+      periodEnd: getPeriodEnd(period.period_start, grouping),
+      grouping,
+      label: formatPeriodLabel(period.period_start, grouping),
+      subtitle: formatPeriodSubtitle(period.period_start, grouping),
+      totalSales,
+      totalOrders,
+      totalProducts,
+      averageOrderValue,
+      salesChange: calculatePercentageChange(totalSales, previousPeriod.total_sales),
+      ordersChange: calculatePercentageChange(totalOrders, previousPeriod.total_orders),
+    }
+  })
 
   // 5. Build pagination cursor (last period start timestamp)
   const nextCursor = hasMore && periods.length > 0 ? periods[periods.length - 1].period_start.toISOString() : null

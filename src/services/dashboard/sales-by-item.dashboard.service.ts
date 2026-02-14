@@ -16,6 +16,7 @@
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 
 // ============================================================
 // Types
@@ -86,7 +87,18 @@ export interface SalesByItemResponse {
  * Get sales by item for a venue within a date range
  */
 export async function getSalesByItem(venueId: string, filters: SalesByItemFilters): Promise<SalesByItemResponse> {
-  const { startDate, endDate, reportType = 'summary', groupBy = 'none', timezone = 'America/Mexico_City', startHour, endHour } = filters
+  const {
+    startDate,
+    endDate,
+    reportType = 'summary',
+    groupBy = 'none',
+    timezone: rawTimezone = 'America/Mexico_City',
+    startHour,
+    endHour,
+  } = filters
+
+  // SECURITY: Sanitize timezone to prevent SQL injection
+  const timezone = sanitizeTimezone(rawTimezone)
 
   // Validate dates
   const parsedStartDate = new Date(startDate)
@@ -269,35 +281,38 @@ async function calculateTimePeriodItemMetrics(
   startHour?: string,
   endHour?: string,
 ): Promise<TimePeriodItemMetrics[]> {
+  // SECURITY: Sanitize timezone to prevent SQL injection
+  const safeTz = sanitizeTimezone(timezone)
+
   // Determine SQL grouping based on reportType
   let groupByExpression: string
   let orderByExpression: string
 
   switch (reportType) {
     case 'hours':
-      groupByExpression = `DATE_TRUNC('hour', o."createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('hour', o."createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'days':
-      groupByExpression = `DATE_TRUNC('day', o."createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('day', o."createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'weeks':
-      groupByExpression = `DATE_TRUNC('week', o."createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('week', o."createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'months':
-      groupByExpression = `DATE_TRUNC('month', o."createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `DATE_TRUNC('month', o."createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'hourlySum':
       // Group by hour of day (0-23)
-      groupByExpression = `EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     case 'dailySum':
       // Group by day of week (0=Sunday, 6=Saturday)
-      groupByExpression = `EXTRACT(DOW FROM o."createdAt" AT TIME ZONE '${timezone}')`
+      groupByExpression = `EXTRACT(DOW FROM o."createdAt" AT TIME ZONE '${safeTz}')`
       orderByExpression = 'period'
       break
     default:
@@ -311,8 +326,8 @@ async function calculateTimePeriodItemMetrics(
     const [endH] = endHour.split(':').map(Number)
     if (!isNaN(startH) && !isNaN(endH)) {
       hourFilterClause = `
-        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${timezone}') >= ${startH}
-        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${timezone}') <= ${endH}
+        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${safeTz}') >= ${startH}
+        AND EXTRACT(HOUR FROM o."createdAt" AT TIME ZONE '${safeTz}') <= ${endH}
       `
     }
   }

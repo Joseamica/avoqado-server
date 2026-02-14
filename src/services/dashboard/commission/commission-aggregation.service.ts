@@ -70,35 +70,41 @@ export async function aggregateVenueCommissions(venueId: string, period: TierPer
   let summariesUpdated = 0
   let calculationsAggregated = 0
 
-  for (const group of pendingByStaff) {
-    // Check if summary already exists for this staff/period
-    const existingSummary = await prisma.commissionSummary.findFirst({
+  // Pre-fetch existing summaries and milestone bonuses for all staff (avoids 2N queries)
+  const staffIds = pendingByStaff.map(g => g.staffId)
+
+  const [existingSummaries, milestoneBonusesByStaff] = await Promise.all([
+    prisma.commissionSummary.findMany({
       where: {
         venueId,
-        staffId: group.staffId,
+        staffId: { in: staffIds },
         periodStart,
         periodEnd,
       },
-    })
+    }),
+    prisma.milestoneAchievement.groupBy({
+      by: ['staffId'],
+      where: {
+        staffId: { in: staffIds },
+        venueId,
+        achievedAt: { gte: periodStart, lte: periodEnd },
+        includedInSummaryId: null,
+      },
+      _sum: { bonusAmount: true },
+    }),
+  ])
+
+  const summaryByStaff = new Map(existingSummaries.map(s => [s.staffId, s]))
+  const bonusesByStaff = new Map(milestoneBonusesByStaff.map(b => [b.staffId, b._sum.bonusAmount]))
+
+  for (const group of pendingByStaff) {
+    const existingSummary = summaryByStaff.get(group.staffId) || null
 
     const totalSales = decimalToNumber(group._sum.baseAmount)
     const totalCommissions = decimalToNumber(group._sum.netCommission)
     const paymentCount = group._count.id
 
-    // Get milestone bonuses for this period
-    const milestoneBonuses = await prisma.milestoneAchievement.aggregate({
-      where: {
-        staffId: group.staffId,
-        venueId,
-        achievedAt: { gte: periodStart, lte: periodEnd },
-        includedInSummaryId: null, // Not yet included in any summary
-      },
-      _sum: {
-        bonusAmount: true,
-      },
-    })
-
-    const totalBonuses = decimalToNumber(milestoneBonuses._sum?.bonusAmount)
+    const totalBonuses = decimalToNumber(bonusesByStaff.get(group.staffId))
     const grossAmount = totalCommissions + totalBonuses
 
     if (existingSummary) {

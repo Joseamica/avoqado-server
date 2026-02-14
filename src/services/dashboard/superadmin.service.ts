@@ -141,29 +141,24 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
       prisma.staff.count(),
     ])
 
-    // Get transaction data for revenue calculations (exclude demo venues)
-    const payments = await prisma.payment.findMany({
+    // Aggregate revenue at database level (avoids loading all payments into memory)
+    const paymentAgg = await prisma.payment.aggregate({
       where: {
         createdAt: {
           gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
         },
+        status: 'COMPLETED',
         order: {
           venue: PRODUCTION_VENUE_FILTER,
         },
       },
-      include: {
-        order: {
-          include: {
-            venue: true,
-          },
-        },
-      },
+      _sum: { amount: true },
+      _count: true,
     })
 
-    // Calculate revenue metrics
-    const totalRevenue = payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
-    const monthlyRecurringRevenue = totalRevenue // Simplified for now
-    const transactionCount = payments.length
+    const totalRevenue = paymentAgg._sum.amount?.toNumber() || 0
+    const monthlyRecurringRevenue = totalRevenue
+    const transactionCount = paymentAgg._count
     const _averageRevenuePerUser = totalUsers > 0 ? totalRevenue / totalUsers : 0
 
     // Calculate commission (assuming 15% average commission rate)
@@ -248,6 +243,9 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
  */
 export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<SuperadminVenue[]> {
   try {
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+
+    // Fetch venues without loading all orders+payments into memory
     const venues = await prisma.venue.findMany({
       where: includeDemos ? undefined : PRODUCTION_VENUE_FILTER,
       include: {
@@ -276,26 +274,30 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
           },
           take: 1,
         },
-        orders: {
-          where: {
-            createdAt: {
-              gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
-            },
-          },
-          include: {
-            payments: true,
-          },
-        },
       },
     })
 
+    const venueIds = venues.map(v => v.id)
+
+    // Aggregate revenue and transaction counts at the database level (avoids loading 100K+ rows)
+    // Both use payment.createdAt as the temporal base to ensure consistent AOV calculation
+    const revenueByVenue = await prisma.payment.groupBy({
+      by: ['venueId'],
+      where: {
+        venueId: { in: venueIds },
+        status: 'COMPLETED',
+        createdAt: { gte: monthStart },
+      },
+      _sum: { amount: true },
+      _count: true,
+    })
+
+    const revenueMap = new Map(revenueByVenue.map(r => [r.venueId, r._sum.amount?.toNumber() || 0]))
+    const ordersMap = new Map(revenueByVenue.map(r => [r.venueId, r._count]))
+
     return venues.map(venue => {
-      const monthlyOrders = venue.orders
-      const monthlyRevenue = monthlyOrders.reduce(
-        (sum, order) => sum + order.payments.reduce((paySum, payment) => paySum + Number(payment.amount), 0),
-        0,
-      )
-      const totalTransactions = monthlyOrders.length
+      const monthlyRevenue = revenueMap.get(venue.id) || 0
+      const totalTransactions = ordersMap.get(venue.id) || 0
       const averageOrderValue = totalTransactions > 0 ? monthlyRevenue / totalTransactions : 0
       const ownerRel = venue.staff[0]
       const owner = ownerRel?.staff
@@ -312,12 +314,12 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
         id: venue.id,
         name: venue.name,
         slug: venue.slug || venue.name.toLowerCase().replace(/\s+/g, '-'),
-        status: venue.status, // Use actual status from database
-        subscriptionPlan: 'PROFESSIONAL', // Would come from subscription model
+        status: venue.status,
+        subscriptionPlan: 'PROFESSIONAL',
         monthlyRevenue,
-        commissionRate: 15, // Default commission rate
+        commissionRate: 15,
         totalTransactions,
-        totalRevenue: monthlyRevenue, // Simplified for now
+        totalRevenue: monthlyRevenue,
         organizationId: venue.organizationId,
         organization: {
           id: venue.organization.id,
@@ -326,7 +328,7 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
           phone: venue.organization.phone,
         },
         owner: owner ? { ...owner, phone: owner.phone ?? undefined } : owner,
-        features: [], // Would come from feature assignments
+        features: [],
         analytics: {
           monthlyTransactions: totalTransactions,
           monthlyRevenue,
@@ -341,9 +343,9 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
           totalMonthlyBill: 299,
           paymentStatus: 'PAID',
         },
-        kycStatus: venue.kycStatus || null, // Include KYC status for superadmin review
-        statusChangedAt: venue.statusChangedAt?.toISOString() || null, // When status changed
-        suspensionReason: venue.suspensionReason || null, // Why suspended (if applicable)
+        kycStatus: venue.kycStatus || null,
+        statusChangedAt: venue.statusChangedAt?.toISOString() || null,
+        suspensionReason: venue.suspensionReason || null,
         createdAt: venue.createdAt.toISOString(),
         updatedAt: venue.updatedAt.toISOString(),
       }
@@ -576,16 +578,13 @@ export async function getVenuesByStatus(status?: VenueStatus): Promise<{ status:
       return [{ status, count }]
     }
 
-    // Get counts for all statuses
-    const allStatuses = Object.values(VenueStatus)
-    const counts = await Promise.all(
-      allStatuses.map(async s => ({
-        status: s,
-        count: await prisma.venue.count({ where: { status: s } }),
-      })),
-    )
+    // Get counts for all statuses in a single query
+    const grouped = await prisma.venue.groupBy({
+      by: ['status'],
+      _count: true,
+    })
 
-    return counts.filter(c => c.count > 0)
+    return grouped.filter(g => g._count > 0).map(g => ({ status: g.status, count: g._count }))
   } catch (error) {
     logger.error('Error getting venues by status:', error)
     throw new Error('Failed to get venues by status')
@@ -872,30 +871,19 @@ export async function getRevenueMetrics(startDate?: Date, endDate?: Date): Promi
     const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1)
     const end = endDate || new Date()
 
-    // Get all payments in the date range (exclude demo venues)
-    const payments = await prisma.payment.findMany({
+    // Aggregate at database level (avoids loading all payments into memory)
+    const paymentAgg = await prisma.payment.aggregate({
       where: {
-        createdAt: {
-          gte: start,
-          lte: end,
-        },
-        status: 'COMPLETED', // Only count completed payments
-        order: {
-          venue: PRODUCTION_VENUE_FILTER,
-        },
+        createdAt: { gte: start, lte: end },
+        status: 'COMPLETED',
+        order: { venue: PRODUCTION_VENUE_FILTER },
       },
-      include: {
-        order: {
-          include: {
-            venue: true,
-          },
-        },
-      },
+      _sum: { amount: true },
+      _count: true,
     })
 
-    // Calculate base metrics
-    const totalRevenue = payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
-    const transactionCount = payments.length
+    const totalRevenue = paymentAgg._sum.amount?.toNumber() || 0
+    const transactionCount = paymentAgg._count
     const averageOrderValue = transactionCount > 0 ? totalRevenue / transactionCount : 0
 
     // Calculate commission (varies by venue plan, defaulting to 15%)
@@ -1051,20 +1039,16 @@ async function calculateGrowthRate(startDate: Date, endDate: Date): Promise<numb
  * Get revenue for a specific period (exclude demo venues)
  */
 async function getRevenueForPeriod(startDate: Date, endDate: Date): Promise<number> {
-  const payments = await prisma.payment.findMany({
+  const result = await prisma.payment.aggregate({
     where: {
-      createdAt: {
-        gte: startDate,
-        lte: endDate,
-      },
+      createdAt: { gte: startDate, lte: endDate },
       status: 'COMPLETED',
-      order: {
-        venue: PRODUCTION_VENUE_FILTER,
-      },
+      order: { venue: PRODUCTION_VENUE_FILTER },
     },
+    _sum: { amount: true },
   })
 
-  return payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
+  return result._sum.amount?.toNumber() || 0
 }
 
 /**
@@ -1072,57 +1056,43 @@ async function getRevenueForPeriod(startDate: Date, endDate: Date): Promise<numb
  */
 async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueRevenue[]> {
   try {
-    const payments = await prisma.payment.findMany({
+    // Use groupBy to aggregate at the database level instead of loading all payments into memory
+    const revenueByVenue = await prisma.payment.groupBy({
+      by: ['venueId'],
       where: {
-        createdAt: {
-          gte: startDate,
-          lte: endDate,
-        },
+        createdAt: { gte: startDate, lte: endDate },
         status: 'COMPLETED',
-        order: {
-          venue: PRODUCTION_VENUE_FILTER,
-        },
+        venue: PRODUCTION_VENUE_FILTER,
       },
-      include: {
-        order: {
-          include: {
-            venue: true,
-          },
-        },
-      },
+      _sum: { amount: true },
+      _count: true,
     })
 
-    const venueRevenueMap = new Map<string, VenueRevenue>()
+    if (revenueByVenue.length === 0) return []
 
-    payments.forEach(payment => {
-      const venue = payment.order.venue
-      const venueId = venue.id
-      const amount = Number(payment.amount)
+    // Get venue names in a single query
+    const venueIds = revenueByVenue.map(r => r.venueId)
+    const venues = await prisma.venue.findMany({
+      where: { id: { in: venueIds } },
+      select: { id: true, name: true },
+    })
+    const venueNameMap = new Map(venues.map(v => [v.id, v.name]))
 
-      if (!venueRevenueMap.has(venueId)) {
-        venueRevenueMap.set(venueId, {
-          venueId,
-          venueName: venue.name,
-          revenue: 0,
-          commission: 0,
-          transactionCount: 0,
-          averageOrderValue: 0,
+    return revenueByVenue
+      .map(group => {
+        const revenue = group._sum.amount?.toNumber() || 0
+        const transactionCount = group._count
+        return {
+          venueId: group.venueId,
+          venueName: venueNameMap.get(group.venueId) || 'Unknown',
+          revenue,
+          commission: revenue * 0.15,
+          transactionCount,
+          averageOrderValue: transactionCount > 0 ? revenue / transactionCount : 0,
           growth: 0,
-        })
-      }
-
-      const venueRevenue = venueRevenueMap.get(venueId)!
-      venueRevenue.revenue += amount
-      venueRevenue.commission += amount * 0.15 // 15% commission
-      venueRevenue.transactionCount += 1
-    })
-
-    // Calculate average order values
-    venueRevenueMap.forEach(venueRevenue => {
-      venueRevenue.averageOrderValue = venueRevenue.transactionCount > 0 ? venueRevenue.revenue / venueRevenue.transactionCount : 0
-    })
-
-    return Array.from(venueRevenueMap.values()).sort((a, b) => b.revenue - a.revenue)
+        }
+      })
+      .sort((a, b) => b.revenue - a.revenue)
   } catch (error) {
     logger.error('Error getting revenue by venue:', error)
     return []
@@ -1134,43 +1104,39 @@ async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueR
  */
 async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<PeriodRevenue[]> {
   try {
-    const payments = await prisma.payment.findMany({
-      where: {
-        createdAt: {
-          gte: startDate,
-          lte: endDate,
-        },
-        status: 'COMPLETED',
-        order: {
-          venue: PRODUCTION_VENUE_FILTER,
-        },
-      },
-    })
+    // Use raw SQL to group by date at the database level
+    const results = await prisma.$queryRaw<
+      Array<{
+        period_date: string
+        total_revenue: number
+        transaction_count: bigint
+      }>
+    >`
+      SELECT
+        TO_CHAR(p."createdAt", 'YYYY-MM-DD') as period_date,
+        COALESCE(SUM(p.amount), 0) as total_revenue,
+        COUNT(p.id) as transaction_count
+      FROM "Payment" p
+      INNER JOIN "Order" o ON o.id = p."orderId"
+      INNER JOIN "Venue" v ON v.id = o."venueId"
+      WHERE p."createdAt" >= ${startDate}
+        AND p."createdAt" <= ${endDate}
+        AND p.status = 'COMPLETED'
+        AND v.status NOT IN ('LIVE_DEMO', 'TRIAL')
+      GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
+      ORDER BY period_date ASC
+    `
 
-    const periodMap = new Map<string, PeriodRevenue>()
-
-    payments.forEach(payment => {
-      const date = payment.createdAt
-      const periodKey = date.toISOString().split('T')[0] // Group by day
-      const amount = Number(payment.amount)
-
-      if (!periodMap.has(periodKey)) {
-        periodMap.set(periodKey, {
-          period: periodKey,
-          revenue: 0,
-          commission: 0,
-          transactionCount: 0,
-          date: periodKey,
-        })
+    return results.map(row => {
+      const revenue = Number(row.total_revenue)
+      return {
+        period: row.period_date,
+        revenue,
+        commission: revenue * 0.15,
+        transactionCount: Number(row.transaction_count),
+        date: row.period_date,
       }
-
-      const periodRevenue = periodMap.get(periodKey)!
-      periodRevenue.revenue += amount
-      periodRevenue.commission += amount * 0.15
-      periodRevenue.transactionCount += 1
     })
-
-    return Array.from(periodMap.values()).sort((a, b) => a.date.localeCompare(b.date))
   } catch (error) {
     logger.error('Error getting revenue by period:', error)
     return []

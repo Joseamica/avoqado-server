@@ -4,9 +4,8 @@ import { BroadcastingService } from '../services/broadcasting.service'
 import { terminalRegistry } from '../terminal-registry'
 import logger from '../../../config/logger'
 import { v4 as uuidv4 } from 'uuid'
-import { PrismaClient, LogLevel } from '@prisma/client'
-
-const prisma = new PrismaClient()
+import { LogLevel } from '@prisma/client'
+import prisma from '../../../utils/prismaClient'
 
 /**
  * Observability Controller

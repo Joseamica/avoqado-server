@@ -1,5 +1,6 @@
 import { EntityType, VenueType } from '@prisma/client' // Importa enums directamente de Prisma
 import { z } from 'zod'
+import { zTimezone } from '@/utils/sanitizeTimezone'
 
 // Schema de Zod para la creación de Venues
 export const createVenueSchema = z.object({
@@ -21,7 +22,7 @@ export const createVenueSchema = z.object({
 
     type: z.nativeEnum(VenueType, { errorMap: () => ({ message: 'Tipo de venue inválido.' }) }).default(VenueType.RESTAURANT),
 
-    timezone: z.string().optional().default('America/Mexico_City'),
+    timezone: zTimezone,
     currency: z.string().min(3).max(3).optional().default('MXN'),
 
     address: z.string().min(5, { message: 'La dirección debe tener al menos 5 caracteres.' }).optional().nullable(),
