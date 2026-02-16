@@ -22,7 +22,7 @@ model Organization {
   email String
   phone String
   taxId String?
-  type  BusinessType @default(RESTAURANT)
+  type  BusinessType @default(OTHER)
 
   // Billing configuration
   billingEmail   String?
@@ -53,7 +53,7 @@ model Organization {
   zones Zone[]
 
   // Organization-level payment configuration (inherited by venues)
-  organizationPaymentConfig   OrganizationPaymentConfig?
+  organizationPaymentConfig     OrganizationPaymentConfig?
   organizationPricingStructures OrganizationPricingStructure[]
 
   // Organization-level sales goal defaults (inherited by venues without custom goals)
@@ -348,7 +348,7 @@ model VenueSettings {
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
   autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled Boolean @default(false) // Enable max shift duration enforcement
-  maxShiftDurationHours   Int     @default(12)    // Max hours before auto clock-out
+  maxShiftDurationHours   Int     @default(12) // Max hours before auto clock-out
 
   // Reviews
   autoReplyReviews    Boolean  @default(false)
@@ -433,8 +433,8 @@ model Staff {
   organizations     StaffOrganization[]
   venues            StaffVenue[]
   shifts            Shift[]
-  ordersCreated     Order[]       @relation("OrderCreatedBy")
-  ordersServed      Order[]       @relation("OrderServedBy")
+  ordersCreated     Order[]             @relation("OrderCreatedBy")
+  ordersServed      Order[]             @relation("OrderServedBy")
   paymentsProcessed Payment[]
   activities        ActivityLog[]
   reviewsReceived   Review[]
@@ -581,9 +581,9 @@ model StaffOrganization {
   organizationId String
   organization   Organization @relation("StaffOrganizations", fields: [organizationId], references: [id], onDelete: Cascade)
 
-  role      OrgRole  @default(MEMBER)
-  isActive  Boolean  @default(true)
-  isPrimary Boolean  @default(false) // Primary org for token generation fallback
+  role      OrgRole @default(MEMBER)
+  isActive  Boolean @default(true)
+  isPrimary Boolean @default(false) // Primary org for token generation fallback
 
   joinedAt   DateTime  @default(now())
   joinedById String? // Staff who invited this member
@@ -781,12 +781,12 @@ model OnboardingProgress {
   step8_paymentInfo Json? // {clabe, bankName, accountHolder}
 
   // V2 Setup Wizard (Square-style onboarding)
-  wizardVersion       Int       @default(1)
-  v2SetupData         Json?     // All v2 step data as structured JSON
-  termsAcceptedAt     DateTime?
-  privacyAcceptedAt   DateTime?
-  termsVersion        String?   // e.g. "2026-02-10"
-  termsIpAddress      String?
+  wizardVersion     Int       @default(1)
+  v2SetupData       Json? // All v2 step data as structured JSON
+  termsAcceptedAt   DateTime?
+  privacyAcceptedAt DateTime?
+  termsVersion      String? // e.g. "2026-02-10"
+  termsIpAddress    String?
 
   // Metadata
   startedAt   DateTime  @default(now())
@@ -1499,15 +1499,15 @@ model StockCount {
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  type   StockCountType   // CYCLE or FULL
+  type   StockCountType // CYCLE or FULL
   status StockCountStatus @default(IN_PROGRESS)
   note   String?
 
   items StockCountItem[]
 
   createdById   String?
-  createdByUser Staff?   @relation("StockCountCreatedBy", fields: [createdById], references: [id])
-  createdAt     DateTime @default(now())
+  createdByUser Staff?    @relation("StockCountCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime  @default(now())
   completedAt   DateTime?
 
   @@index([venueId])
@@ -1532,7 +1532,7 @@ model StockCountItem {
 
 enum StockCountType {
   CYCLE // Partial - specific items
-  FULL  // All inventory items
+  FULL // All inventory items
 }
 
 enum StockCountStatus {
@@ -1813,7 +1813,7 @@ model TimeEntry {
 
   // Auto clock-out tracking
   autoClockOut     Boolean @default(false) // Was this entry auto-closed by the system?
-  autoClockOutNote String?                 // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")
+  autoClockOutNote String? // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")
 
   // Manager validation (approve/reject clock-in/out evidence)
   validationStatus TimeEntryValidation @default(PENDING)
@@ -2848,9 +2848,9 @@ model MerchantAccount {
   blumonMerchantId   String? // Blumon's merchant identifier
 
   // Relations
-  venueConfigsPrimary   VenuePaymentConfig[]      @relation("PrimaryAccount")
-  venueConfigsSecondary VenuePaymentConfig[]      @relation("SecondaryAccount")
-  venueConfigsTertiary  VenuePaymentConfig[]      @relation("TertiaryAccount")
+  venueConfigsPrimary   VenuePaymentConfig[]        @relation("PrimaryAccount")
+  venueConfigsSecondary VenuePaymentConfig[]        @relation("SecondaryAccount")
+  venueConfigsTertiary  VenuePaymentConfig[]        @relation("TertiaryAccount")
   orgConfigsPrimary     OrganizationPaymentConfig[] @relation("OrgPrimaryAccount")
   orgConfigsSecondary   OrganizationPaymentConfig[] @relation("OrgSecondaryAccount")
   orgConfigsTertiary    OrganizationPaymentConfig[] @relation("OrgTertiaryAccount")
@@ -6736,7 +6736,7 @@ model AppUpdate {
   environment AppEnvironment
 
   // Release info
-  releaseNotes String? @db.Text // Markdown changelog
+  releaseNotes String?    @db.Text // Markdown changelog
   updateMode   UpdateMode @default(NONE) // NONE=silent, BANNER=recommended, FORCE=blocking
 
   // File info (Firebase Storage)
@@ -6915,24 +6915,24 @@ model TpvMessage {
   // Content
   type     TpvMessageType
   title    String
-  body     String     @db.Text
+  body     String             @db.Text
   priority TpvMessagePriority @default(NORMAL)
 
   // Interaction config
   requiresAck Boolean @default(false) // Must acknowledge vs simple dismiss
 
   // Survey options (only for SURVEY type)
-  surveyOptions     Json?   // ["Option A", "Option B", "Option C"]
+  surveyOptions     Json? // ["Option A", "Option B", "Option C"]
   surveyMultiSelect Boolean @default(false)
 
   // Action config (only for ACTION type)
   actionLabel   String? // Button text e.g. "Update menu"
   actionType    String? // What the TPV should do: REFRESH_MENU | SYNC_DATA | CUSTOM
-  actionPayload Json?   // Extra data for the action
+  actionPayload Json? // Extra data for the action
 
   // Targeting
   targetType        TpvMessageTarget // ALL_TERMINALS | SPECIFIC_TERMINALS
-  targetTerminalIds String[]         // Terminal IDs (only when SPECIFIC_TERMINALS)
+  targetTerminalIds String[] // Terminal IDs (only when SPECIFIC_TERMINALS)
 
   // Scheduling & expiration
   scheduledFor DateTime? // Send at future time (null = immediate)
@@ -6990,8 +6990,8 @@ model TpvMessageResponse {
   terminal   Terminal   @relation(fields: [terminalId], references: [id], onDelete: Cascade)
 
   selectedOptions String[] // Selected survey option texts
-  respondedBy     String?  // Staff ID
-  respondedByName String?  // Staff name
+  respondedBy     String? // Staff ID
+  respondedByName String? // Staff name
 
   createdAt DateTime @default(now())
 
