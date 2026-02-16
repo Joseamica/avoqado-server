@@ -30,6 +30,36 @@ export async function getPendingMessages(req: Request, res: Response, next: Next
 }
 
 /**
+ * Get message history for this terminal (all messages, including handled)
+ * GET /api/v1/tpv/messages/history
+ */
+export async function getMessageHistory(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = (req as any).user?.venueId
+    const terminalId = (req as any).user?.terminalId
+
+    if (!venueId || !terminalId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing venueId or terminalId in auth context',
+      })
+    }
+
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100)
+    const offset = parseInt(req.query.offset as string) || 0
+
+    const result = await tpvMessageService.getTerminalMessageHistory(terminalId, venueId, limit, offset)
+
+    res.status(200).json({
+      success: true,
+      ...result,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * Acknowledge a message
  * POST /api/v1/tpv/messages/:messageId/acknowledge
  */

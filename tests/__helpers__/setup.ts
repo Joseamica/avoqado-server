@@ -93,7 +93,14 @@ const prismaMock: any = {
   recipeLine: createMockModel(),
   stockBatch: createMockModel(),
   rawMaterialMovement: createMockModel(),
-  // Payment analytics models
+  // Payment config & analytics models
+  merchantAccount: createMockModel(),
+  providerCostStructure: createMockModel(),
+  venuePaymentConfig: createMockModel(),
+  organizationPaymentConfig: createMockModel(),
+  venuePricingStructure: createMockModel(),
+  organizationPricingStructure: createMockModel(),
+  settlementConfiguration: createMockModel(),
   transactionCost: createMockModel(),
   // Time entry models
   timeEntry: createMockModel(),

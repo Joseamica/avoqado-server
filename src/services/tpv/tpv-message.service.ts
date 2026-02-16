@@ -447,6 +447,41 @@ export async function submitResponse(
 }
 
 /**
+ * Get all message history for a terminal (including already-handled messages)
+ * Used by the TPV inbox UI to show full message history with delivery status
+ */
+export async function getTerminalMessageHistory(terminalId: string, venueId: string, limit: number = 50, offset: number = 0) {
+  const [deliveries, total] = await prisma.$transaction([
+    prisma.tpvMessageDelivery.findMany({
+      where: {
+        terminalId,
+        message: { venueId },
+      },
+      include: {
+        message: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.tpvMessageDelivery.count({
+      where: {
+        terminalId,
+        message: { venueId },
+      },
+    }),
+  ])
+
+  const data = deliveries.map(d => ({
+    ...d.message,
+    deliveryStatus: d.status,
+    acknowledgedAt: d.acknowledgedAt?.toISOString() ?? null,
+  }))
+
+  return { data, total, limit, offset }
+}
+
+/**
  * Mark a delivery as delivered (when socket event reaches terminal)
  */
 export async function markDelivered(messageId: string, terminalId: string) {
