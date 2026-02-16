@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/
 import logger from '../../config/logger'
 import emailService from '../email.service'
 import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
+import { ROLE_HIERARCHY } from '../../lib/permissions'
 
 interface TeamMember {
   id: string
@@ -412,8 +413,8 @@ export async function inviteTeamMember(
     where: { email },
   })
 
-  // Only OWNER role can use inviteToAllVenues - calculate early for validation
-  const shouldInviteToAllVenues = request.inviteToAllVenues && request.role === StaffRole.OWNER
+  // Allow inviteToAllVenues for ADMIN and above
+  const shouldInviteToAllVenues = request.inviteToAllVenues && ROLE_HIERARCHY[request.role] >= ROLE_HIERARCHY[StaffRole.ADMIN]
 
   if (staff && !isTPVOnly) {
     // Check if already assigned to this venue
@@ -537,6 +538,19 @@ export async function inviteTeamMember(
         }
       }
 
+      // Check existing role to prevent downgrade when inviting to all venues
+      const existingStaffVenue = shouldInviteToAllVenues
+        ? await prisma.staffVenue.findUnique({
+            where: { staffId_venueId: { staffId: staff.id, venueId: v.id } },
+          })
+        : null
+
+      // Only assign the requested role if it's >= the existing role (never downgrade)
+      const effectiveRole =
+        existingStaffVenue && ROLE_HIERARCHY[existingStaffVenue.role] > ROLE_HIERARCHY[request.role]
+          ? existingStaffVenue.role
+          : request.role
+
       const staffVenue = await prisma.staffVenue.upsert({
         where: {
           staffId_venueId: {
@@ -545,14 +559,14 @@ export async function inviteTeamMember(
           },
         },
         update: {
-          role: request.role,
+          role: effectiveRole,
           pin: pinForVenue,
           active: true,
         },
         create: {
           staffId: staff.id,
           venueId: v.id,
-          role: request.role,
+          role: effectiveRole,
           pin: pinForVenue,
           active: true,
         },

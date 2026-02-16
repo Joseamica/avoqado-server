@@ -5942,6 +5942,27 @@ async function getNetworkLocation(
 
 /**
  * @openapi
+ * /api/v1/tpv/messages/history:
+ *   get:
+ *     tags: [TPV Messages]
+ *     summary: Get message history for this terminal
+ *     description: Returns all messages delivered to this terminal with delivery status. Used for inbox UI.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200: { description: Paginated message history with delivery statuses }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/messages/history', authenticateTokenMiddleware, tpvMessageController.getMessageHistory)
+
+/**
+ * @openapi
  * /api/v1/tpv/messages/pending:
  *   get:
  *     tags: [TPV Messages]

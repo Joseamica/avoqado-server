@@ -93,12 +93,27 @@ const prismaMock: any = {
   recipeLine: createMockModel(),
   stockBatch: createMockModel(),
   rawMaterialMovement: createMockModel(),
-  // Payment analytics models
+  // Payment config & analytics models
+  merchantAccount: createMockModel(),
+  providerCostStructure: createMockModel(),
+  venuePaymentConfig: createMockModel(),
+  organizationPaymentConfig: createMockModel(),
+  venuePricingStructure: createMockModel(),
+  organizationPricingStructure: createMockModel(),
+  settlementConfiguration: createMockModel(),
   transactionCost: createMockModel(),
   // Time entry models
   timeEntry: createMockModel(),
   timeEntryBreak: createMockModel(),
   venueSettings: createMockModel(),
+  // Organization dashboard models
+  cashDeposit: createMockModel(),
+  stockAlertConfig: createMockModel(),
+  serializedItem: createMockModel(),
+  performanceGoal: createMockModel(),
+  module: createMockModel(),
+  venueModule: createMockModel(),
+  organizationSalesGoalConfig: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

@@ -348,6 +348,13 @@ export interface TpvSettings {
   // Kiosk Mode
   kioskModeEnabled: boolean // When true, terminal can enter self-service kiosk mode
   kioskDefaultMerchantId: string | null // Default merchant for kiosk mode (null = show selection)
+  // Home screen button visibility
+  showQuickPayment: boolean
+  showOrderManagement: boolean
+  showReports: boolean
+  showPayments: boolean
+  showSupport: boolean
+  showGoals: boolean
   // Evidence rules (PlayTelecom — boolean toggles)
   requireDepositPhoto?: boolean
   requireFacadePhoto?: boolean
@@ -380,6 +387,13 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   // Kiosk Mode disabled by default
   kioskModeEnabled: false,
   kioskDefaultMerchantId: null, // null = show merchant selection screen
+  // Home screen buttons enabled by default
+  showQuickPayment: true,
+  showOrderManagement: true,
+  showReports: true,
+  showPayments: true,
+  showSupport: true,
+  showGoals: true,
 }
 
 /**

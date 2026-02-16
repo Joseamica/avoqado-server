@@ -55,6 +55,19 @@ router.post('/blumon/auto-fetch', merchantAccountController.autoFetchBlumonCrede
 // Batch auto-fetch for multiple terminals at once (e.g., 10 terminals to Cancún)
 router.post('/blumon/batch-auto-fetch', merchantAccountController.batchAutoFetchBlumonCredentials)
 
+// POST /api/v1/superadmin/merchant-accounts/blumon/full-setup
+// Complete wizard setup: auto-fetch → assign terminals → cost structure → payment config → pricing → settlement
+router.post('/blumon/full-setup', merchantAccountController.fullSetupBlumonMerchant)
+
+// GET /api/v1/superadmin/merchant-accounts/payment-setup/summary
+// Get full payment setup summary for a venue or organization
+// Query: ?targetType=venue&targetId=xxx OR ?targetType=organization&targetId=xxx
+router.get('/payment-setup/summary', merchantAccountController.getPaymentSetupSummary)
+
+// POST /api/v1/superadmin/merchant-accounts/:id/batch-assign-terminals
+// Batch assign terminals to a merchant account
+router.post('/:id/batch-assign-terminals', merchantAccountController.batchAssignTerminals)
+
 // PUT /api/v1/superadmin/merchant-accounts/:id
 router.put('/:id', merchantAccountController.updateMerchantAccount)
 

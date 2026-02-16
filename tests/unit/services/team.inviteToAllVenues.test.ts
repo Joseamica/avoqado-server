@@ -1,10 +1,11 @@
 /**
  * Tests for "Invite to All Venues" feature
  *
- * When inviting someone as OWNER with inviteToAllVenues=true:
+ * When inviting someone with inviteToAllVenues=true (ADMIN role and above):
  * 1. Creates StaffVenue for ALL venues in the organization
- * 2. Sets OrgRole.OWNER in StaffOrganization
+ * 2. Sets OrgRole.OWNER in StaffOrganization (for OWNER role)
  * 3. Works for both TPV-only and email invitations
+ * 4. Roles below ADMIN (WAITER, CASHIER, etc.) are ignored
  */
 
 import { StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
@@ -134,17 +135,37 @@ describe('Invite to All Venues Feature', () => {
       expect(prismaMock.staffVenue.upsert).toHaveBeenCalledTimes(1)
     })
 
-    it('should ignore inviteToAllVenues for non-OWNER roles', async () => {
+    it('should allow inviteToAllVenues for ADMIN role', async () => {
       await inviteTeamMember(mockVenueId, mockInviterStaffId, {
         firstName: 'Admin',
         lastName: 'Staff',
-        role: StaffRole.ADMIN, // Not OWNER
+        role: StaffRole.ADMIN,
+        type: 'tpv-only',
+        pin: '1234',
+        inviteToAllVenues: true,
+      })
+
+      // ADMIN is allowed — should fetch all venues in organization
+      expect(prismaMock.venue.findMany).toHaveBeenCalledWith({
+        where: { organizationId: mockOrganizationId },
+        select: { id: true, name: true },
+      })
+
+      // Should create StaffVenue for each venue (3 venues)
+      expect(prismaMock.staffVenue.upsert).toHaveBeenCalledTimes(3)
+    })
+
+    it('should ignore inviteToAllVenues for roles below ADMIN', async () => {
+      await inviteTeamMember(mockVenueId, mockInviterStaffId, {
+        firstName: 'Waiter',
+        lastName: 'Staff',
+        role: StaffRole.WAITER, // Below ADMIN
         type: 'tpv-only',
         pin: '1234',
         inviteToAllVenues: true, // Should be ignored
       })
 
-      // Should NOT fetch all venues (inviteToAllVenues ignored for non-OWNER)
+      // Should NOT fetch all venues (inviteToAllVenues ignored for roles below ADMIN)
       expect(prismaMock.venue.findMany).not.toHaveBeenCalled()
 
       // Should only create StaffVenue for primary venue
@@ -177,7 +198,7 @@ describe('Invite to All Venues Feature', () => {
       })
     })
 
-    it('should NOT store permissions when inviteToAllVenues is false or non-OWNER role', async () => {
+    it('should store permissions when ADMIN uses inviteToAllVenues', async () => {
       prismaMock.staff.findUnique.mockResolvedValueOnce(mockInviter as any).mockResolvedValueOnce(null)
 
       await inviteTeamMember(mockVenueId, mockInviterStaffId, {
@@ -186,10 +207,30 @@ describe('Invite to All Venues Feature', () => {
         lastName: 'User',
         role: StaffRole.ADMIN,
         type: 'email',
-        inviteToAllVenues: false,
+        inviteToAllVenues: true,
       })
 
-      // Should create invitation without permissions
+      // ADMIN with inviteToAllVenues should store the flag
+      expect(prismaMock.invitation.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          permissions: { inviteToAllVenues: true },
+        }),
+      })
+    })
+
+    it('should NOT store permissions when inviteToAllVenues is false', async () => {
+      prismaMock.staff.findUnique.mockResolvedValueOnce(mockInviter as any).mockResolvedValueOnce(null)
+
+      await inviteTeamMember(mockVenueId, mockInviterStaffId, {
+        email: 'waiter@example.com',
+        firstName: 'Waiter',
+        lastName: 'User',
+        role: StaffRole.WAITER,
+        type: 'email',
+        inviteToAllVenues: true, // Should be ignored for WAITER
+      })
+
+      // Should create invitation without permissions (role below ADMIN)
       expect(prismaMock.invitation.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           permissions: undefined,

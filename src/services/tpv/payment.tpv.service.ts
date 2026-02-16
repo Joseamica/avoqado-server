@@ -15,6 +15,7 @@ import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
+import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -1141,8 +1142,7 @@ interface PaymentCreationData {
  */
 async function resolveBlumonSerialToMerchantId(venueId: string, blumonSerialNumber: string): Promise<string | undefined> {
   try {
-    // Find merchant account with matching blumonSerialNumber
-    // that is configured for the given venue
+    // 1. Check venue-level configs
     const merchant = await prisma.merchantAccount.findFirst({
       where: {
         blumonSerialNumber,
@@ -1155,14 +1155,38 @@ async function resolveBlumonSerialToMerchantId(venueId: string, blumonSerialNumb
     })
 
     if (merchant) {
-      logger.info(`✅ Resolved blumonSerialNumber ${blumonSerialNumber} → merchantAccountId ${merchant.id}`)
+      logger.info(`Resolved blumonSerialNumber ${blumonSerialNumber} → merchantAccountId ${merchant.id} (venue config)`)
       return merchant.id
     }
 
-    logger.warn(`⚠️ Could not resolve blumonSerialNumber ${blumonSerialNumber} for venue ${venueId}`)
+    // 2. Fallback: check org-level configs via inheritance
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
+    if (venue?.organizationId) {
+      const orgMerchant = await prisma.merchantAccount.findFirst({
+        where: {
+          blumonSerialNumber,
+          OR: [
+            { orgConfigsPrimary: { some: { organizationId: venue.organizationId } } },
+            { orgConfigsSecondary: { some: { organizationId: venue.organizationId } } },
+            { orgConfigsTertiary: { some: { organizationId: venue.organizationId } } },
+          ],
+        },
+      })
+
+      if (orgMerchant) {
+        logger.info(`Resolved blumonSerialNumber ${blumonSerialNumber} → merchantAccountId ${orgMerchant.id} (org config)`)
+        return orgMerchant.id
+      }
+    }
+
+    logger.warn(`Could not resolve blumonSerialNumber ${blumonSerialNumber} for venue ${venueId}`)
     return undefined
   } catch (error) {
-    logger.error(`❌ Error resolving blumonSerialNumber ${blumonSerialNumber}:`, error)
+    logger.error(`Error resolving blumonSerialNumber ${blumonSerialNumber}:`, error)
     return undefined
   }
 }
@@ -2347,45 +2371,28 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
  * @returns Array of available merchant accounts with display info
  */
 export async function getVenueMerchantAccounts(venueId: string, _orgId?: string): Promise<any[]> {
-  // First validate that the venue exists and belongs to the organization
+  // Validate venue exists
   const venue = await prisma.venue.findFirst({
-    where: {
-      id: venueId,
-    },
-    include: {
-      paymentConfig: {
-        include: {
-          primaryAccount: {
-            include: {
-              provider: true,
-            },
-          },
-          secondaryAccount: {
-            include: {
-              provider: true,
-            },
-          },
-          tertiaryAccount: {
-            include: {
-              provider: true,
-            },
-          },
-        },
-      },
-    },
+    where: { id: venueId },
+    select: { id: true },
   })
 
   if (!venue) {
     throw new NotFoundError('Venue not found or not accessible')
   }
 
-  if (!venue.paymentConfig) {
-    logger.warn('No payment configuration found for venue', { venueId })
+  // Use inheritance: venue config → org config fallback
+  const effective = await getEffectivePaymentConfig(venueId)
+
+  if (!effective) {
+    logger.warn('No payment configuration found for venue (checked venue + org)', { venueId })
     return []
   }
 
+  const { config: paymentConfig, source } = effective
+  logger.info('Resolved payment config for venue', { venueId, source })
+
   const accounts = []
-  const { paymentConfig } = venue
 
   // Helper function to create account response object
   const createAccountResponse = (account: any, accountType: string) => {
@@ -2472,48 +2479,30 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
     amount: routingData.amount,
   })
 
-  // First validate that the venue exists and get its payment configuration
+  // Validate venue exists
   const venue = await prisma.venue.findFirst({
-    where: {
-      id: venueId,
-    },
-    include: {
-      paymentConfig: {
-        include: {
-          primaryAccount: {
-            include: {
-              provider: true,
-            },
-          },
-          secondaryAccount: {
-            include: {
-              provider: true,
-            },
-          },
-          tertiaryAccount: {
-            include: {
-              provider: true,
-            },
-          },
-        },
-      },
-    },
+    where: { id: venueId },
+    select: { id: true },
   })
 
   if (!venue) {
     throw new NotFoundError('Venue not found or not accessible')
   }
 
-  if (!venue.paymentConfig) {
-    throw new BadRequestError('Venue payment configuration not found')
+  // Use inheritance: venue config → org config fallback
+  const effective = await getEffectivePaymentConfig(venueId)
+
+  if (!effective) {
+    throw new BadRequestError('Venue payment configuration not found (checked venue + org)')
   }
+
+  const { config: paymentConfig, source } = effective
+  logger.info('Resolved payment config for routing', { venueId, source })
 
   // Find the specific merchant account by ID from the venue's configured accounts
   // The user has already selected which account they want to use (primary/secondary/tertiary)
   let selectedAccount: any = null
   let accountType: string = 'UNKNOWN'
-
-  const { paymentConfig } = venue
 
   if (paymentConfig.primaryAccount?.id === routingData.merchantAccountId) {
     selectedAccount = paymentConfig.primaryAccount

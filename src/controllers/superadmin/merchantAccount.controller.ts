@@ -1353,3 +1353,649 @@ export async function batchAutoFetchBlumonCredentials(req: Request, res: Respons
     next(error)
   }
 }
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/:id/batch-assign-terminals
+ * Batch assign multiple terminals to a merchant account
+ *
+ * Body: { terminalIds: string[] }
+ * Response: { attached: number, alreadyAttached: number, errors: string[] }
+ */
+export async function batchAssignTerminals(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id: merchantAccountId } = req.params
+    const { terminalIds } = req.body
+
+    if (!Array.isArray(terminalIds) || terminalIds.length === 0) {
+      throw new BadRequestError('terminalIds es requerido y debe ser un array no vacío')
+    }
+
+    if (terminalIds.length > 100) {
+      throw new BadRequestError('Máximo 100 terminales por solicitud')
+    }
+
+    // Verify merchant account exists
+    const merchantAccount = await prisma.merchantAccount.findUnique({
+      where: { id: merchantAccountId },
+    })
+
+    if (!merchantAccount) {
+      throw new BadRequestError(`Cuenta merchant ${merchantAccountId} no encontrada`)
+    }
+
+    let attached = 0
+    let alreadyAttached = 0
+    const errors: string[] = []
+
+    for (const terminalId of terminalIds) {
+      try {
+        const terminal = await prisma.terminal.findUnique({
+          where: { id: terminalId },
+          select: { id: true, name: true, assignedMerchantIds: true },
+        })
+
+        if (!terminal) {
+          errors.push(`Terminal ${terminalId} no encontrada`)
+          continue
+        }
+
+        if (terminal.assignedMerchantIds.includes(merchantAccountId)) {
+          alreadyAttached++
+          continue
+        }
+
+        await prisma.terminal.update({
+          where: { id: terminalId },
+          data: {
+            assignedMerchantIds: {
+              push: merchantAccountId,
+            },
+          },
+        })
+        attached++
+      } catch (err: any) {
+        errors.push(`Error asignando terminal ${terminalId}: ${err.message}`)
+      }
+    }
+
+    // Notify terminals if any were attached
+    if (attached > 0) {
+      await merchantAccountService.notifyAffectedTerminals(
+        merchantAccountId,
+        merchantAccount.displayName || merchantAccountId,
+        'MERCHANT_ADDED',
+        false,
+      )
+    }
+
+    logger.info('[Batch Assign Terminals] Completed', {
+      merchantAccountId,
+      attached,
+      alreadyAttached,
+      errors: errors.length,
+    })
+
+    res.json({
+      success: true,
+      data: { attached, alreadyAttached, errors },
+      message: `${attached} terminales asignadas, ${alreadyAttached} ya estaban asignadas`,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/superadmin/payment-setup/summary
+ * Get full payment setup summary for a venue or organization
+ *
+ * Query: ?targetType=venue&targetId=xxx OR ?targetType=organization&targetId=xxx
+ * Returns: merchants, terminals, costs, pricing, settlements — all in one response
+ */
+export async function getPaymentSetupSummary(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { targetType, targetId } = req.query
+
+    if (!targetType || !targetId) {
+      throw new BadRequestError('targetType y targetId son requeridos')
+    }
+
+    if (targetType !== 'venue' && targetType !== 'organization') {
+      throw new BadRequestError('targetType debe ser "venue" o "organization"')
+    }
+
+    const id = targetId as string
+
+    if (targetType === 'venue') {
+      // Fetch venue payment config
+      const config = await prisma.venuePaymentConfig.findUnique({
+        where: { venueId: id },
+        include: {
+          primaryAccount: {
+            include: {
+              provider: true,
+              costStructures: { where: { active: true }, orderBy: { effectiveFrom: 'desc' }, take: 1 },
+              settlementConfigs: { where: { effectiveTo: null }, orderBy: { cardType: 'asc' } },
+            },
+          },
+          secondaryAccount: {
+            include: {
+              provider: true,
+              costStructures: { where: { active: true }, orderBy: { effectiveFrom: 'desc' }, take: 1 },
+              settlementConfigs: { where: { effectiveTo: null }, orderBy: { cardType: 'asc' } },
+            },
+          },
+          tertiaryAccount: {
+            include: {
+              provider: true,
+              costStructures: { where: { active: true }, orderBy: { effectiveFrom: 'desc' }, take: 1 },
+              settlementConfigs: { where: { effectiveTo: null }, orderBy: { cardType: 'asc' } },
+            },
+          },
+        },
+      })
+
+      // Fetch terminals for the venue
+      const terminals = await prisma.terminal.findMany({
+        where: { venueId: id },
+        select: {
+          id: true,
+          name: true,
+          serialNumber: true,
+          type: true,
+          brand: true,
+          model: true,
+          assignedMerchantIds: true,
+          status: true,
+        },
+      })
+
+      // Fetch pricing structures for the venue
+      const pricingStructures = await prisma.venuePricingStructure.findMany({
+        where: { venueId: id, active: true },
+        orderBy: { effectiveFrom: 'desc' },
+      })
+
+      res.json({
+        success: true,
+        data: {
+          targetType: 'venue',
+          targetId: id,
+          config,
+          terminals,
+          pricingStructures,
+        },
+      })
+    } else {
+      // Organization-level
+      const config = await prisma.organizationPaymentConfig.findUnique({
+        where: { organizationId: id },
+        include: {
+          primaryAccount: {
+            include: {
+              provider: true,
+              costStructures: { where: { active: true }, orderBy: { effectiveFrom: 'desc' }, take: 1 },
+              settlementConfigs: { where: { effectiveTo: null }, orderBy: { cardType: 'asc' } },
+            },
+          },
+          secondaryAccount: {
+            include: {
+              provider: true,
+              costStructures: { where: { active: true }, orderBy: { effectiveFrom: 'desc' }, take: 1 },
+              settlementConfigs: { where: { effectiveTo: null }, orderBy: { cardType: 'asc' } },
+            },
+          },
+          tertiaryAccount: {
+            include: {
+              provider: true,
+              costStructures: { where: { active: true }, orderBy: { effectiveFrom: 'desc' }, take: 1 },
+              settlementConfigs: { where: { effectiveTo: null }, orderBy: { cardType: 'asc' } },
+            },
+          },
+        },
+      })
+
+      // Fetch all venues in the org to get terminals
+      const venues = await prisma.venue.findMany({
+        where: { organizationId: id },
+        select: { id: true, name: true, slug: true },
+      })
+
+      const venueIds = venues.map(v => v.id)
+
+      const terminals = await prisma.terminal.findMany({
+        where: { venueId: { in: venueIds } },
+        select: {
+          id: true,
+          name: true,
+          serialNumber: true,
+          type: true,
+          brand: true,
+          model: true,
+          assignedMerchantIds: true,
+          status: true,
+          venueId: true,
+        },
+      })
+
+      // Fetch org pricing structures
+      const pricingStructures = await prisma.organizationPricingStructure.findMany({
+        where: { organizationId: id, active: true },
+        orderBy: { effectiveFrom: 'desc' },
+      })
+
+      // Fetch venue-level pricing overrides
+      const venuePricingStructures = await prisma.venuePricingStructure.findMany({
+        where: { venueId: { in: venueIds }, active: true },
+        orderBy: { effectiveFrom: 'desc' },
+      })
+
+      res.json({
+        success: true,
+        data: {
+          targetType: 'organization',
+          targetId: id,
+          config,
+          venues,
+          terminals,
+          pricingStructures,
+          venuePricingStructures,
+        },
+      })
+    }
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/blumon/full-setup
+ * Complete wizard setup: auto-fetch → assign terminals → cost structure → payment config → pricing → settlement
+ *
+ * Orchestrates the entire payment setup in one call for the wizard flow.
+ */
+export async function fullSetupBlumonMerchant(req: Request, res: Response, next: NextFunction) {
+  try {
+    const {
+      // Merchant info
+      serialNumber,
+      brand,
+      model,
+      displayName,
+      environment = 'SANDBOX',
+      businessCategory,
+
+      // Terminal assignments (additional beyond auto-match)
+      additionalTerminalIds = [],
+
+      // Cost structure overrides
+      costStructureOverrides,
+
+      // Target assignment
+      target,
+      accountSlot = 'PRIMARY',
+
+      // Venue pricing
+      venuePricing,
+
+      // Settlement config
+      settlementConfig,
+    } = req.body
+
+    // Validate required fields
+    if (!serialNumber || typeof serialNumber !== 'string') {
+      throw new BadRequestError('serialNumber es requerido')
+    }
+    if (!brand || typeof brand !== 'string') {
+      throw new BadRequestError('brand es requerido (e.g., "PAX")')
+    }
+    if (!model || typeof model !== 'string') {
+      throw new BadRequestError('model es requerido (e.g., "A910S")')
+    }
+    if (!target || !target.type || !target.id) {
+      throw new BadRequestError('target es requerido con type ("venue" o "organization") e id')
+    }
+    if (environment !== 'SANDBOX' && environment !== 'PRODUCTION') {
+      throw new BadRequestError('environment debe ser "SANDBOX" o "PRODUCTION"')
+    }
+
+    logger.info('[Full Setup] Starting complete payment setup', {
+      serialNumber,
+      brand,
+      model,
+      environment,
+      target,
+      accountSlot,
+    })
+
+    // Step 1: Auto-fetch Blumon credentials
+    const blumonTpvService = createBlumonTpvService(environment as 'SANDBOX' | 'PRODUCTION')
+    const merchantInfo = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
+
+    logger.info('[Full Setup] Step 1: Credentials fetched', {
+      posId: merchantInfo.posId,
+      dukptKeysAvailable: merchantInfo.dukptKeysAvailable,
+    })
+
+    // Step 2: Check if merchant already exists
+    const blumonProvider = await prisma.paymentProvider.findUnique({
+      where: { code: 'BLUMON' },
+    })
+
+    if (!blumonProvider) {
+      throw new BadRequestError('Proveedor Blumon no encontrado en la base de datos')
+    }
+
+    const externalMerchantId = `blumon_${serialNumber}`
+    const existingAccount = await prisma.merchantAccount.findFirst({
+      where: { providerId: blumonProvider.id, externalMerchantId },
+    })
+
+    let merchantCreated = false
+    let merchantAccountId: string
+    let merchantDisplayName: string | null
+
+    if (!existingAccount) {
+      // Create new merchant account
+      const merchantAccountData = {
+        providerId: blumonProvider.id,
+        externalMerchantId,
+        displayName: displayName || `Blumon ${brand} ${model} - ${serialNumber}`,
+        active: true,
+        displayOrder: 0,
+        blumonSerialNumber: merchantInfo.serialNumber,
+        blumonPosId: merchantInfo.posId,
+        blumonEnvironment: environment,
+        blumonMerchantId: externalMerchantId,
+        credentials: {
+          oauthAccessToken: merchantInfo.credentials.oauthAccessToken,
+          oauthRefreshToken: merchantInfo.credentials.oauthRefreshToken,
+          oauthExpiresAt: merchantInfo.credentials.oauthExpiresAt,
+          rsaId: merchantInfo.credentials.rsaId,
+          rsaKey: merchantInfo.credentials.rsaKey,
+          ...(merchantInfo.dukptKeysAvailable && {
+            dukptKsn: merchantInfo.credentials.dukptKsn,
+            dukptKey: merchantInfo.credentials.dukptKey,
+            dukptKeyCrc32: merchantInfo.credentials.dukptKeyCrc32,
+            dukptKeyCheckValue: merchantInfo.credentials.dukptKeyCheckValue,
+          }),
+        },
+        providerConfig: {
+          brand,
+          model,
+          environment,
+          autoFetched: true,
+          autoFetchedAt: new Date().toISOString(),
+          dukptKeysAvailable: merchantInfo.dukptKeysAvailable,
+        },
+        clabeNumber: null,
+        bankName: null,
+        accountHolder: null,
+      }
+
+      const created = await merchantAccountService.createMerchantAccount(merchantAccountData)
+      merchantAccountId = created.id
+      merchantDisplayName = created.displayName
+      merchantCreated = true
+      logger.info('[Full Setup] Step 2: Merchant account created', { id: merchantAccountId })
+    } else {
+      merchantAccountId = existingAccount.id
+      merchantDisplayName = existingAccount.displayName
+      logger.info('[Full Setup] Step 2: Merchant account already exists', { id: merchantAccountId })
+    }
+
+    // Step 3: Auto-attach terminals by serial + batch assign additional
+    const autoAttached: string[] = []
+    const terminalsWithSerial = await prisma.terminal.findMany({
+      where: {
+        OR: [{ serialNumber }, { serialNumber: { endsWith: serialNumber } }, { serialNumber: { contains: serialNumber } }],
+      },
+      select: { id: true, name: true, assignedMerchantIds: true },
+    })
+
+    for (const terminal of terminalsWithSerial) {
+      if (!terminal.assignedMerchantIds.includes(merchantAccountId)) {
+        await prisma.terminal.update({
+          where: { id: terminal.id },
+          data: { assignedMerchantIds: { push: merchantAccountId } },
+        })
+        autoAttached.push(terminal.id)
+      }
+    }
+
+    // Batch assign additional terminals
+    let batchAttached = 0
+    if (additionalTerminalIds.length > 0) {
+      for (const terminalId of additionalTerminalIds) {
+        const terminal = await prisma.terminal.findUnique({
+          where: { id: terminalId },
+          select: { id: true, assignedMerchantIds: true },
+        })
+        if (terminal && !terminal.assignedMerchantIds.includes(merchantAccountId)) {
+          await prisma.terminal.update({
+            where: { id: terminalId },
+            data: { assignedMerchantIds: { push: merchantAccountId } },
+          })
+          batchAttached++
+        }
+      }
+    }
+
+    if (autoAttached.length > 0 || batchAttached > 0) {
+      await merchantAccountService.notifyAffectedTerminals(
+        merchantAccountId,
+        merchantDisplayName || externalMerchantId,
+        'MERCHANT_ADDED',
+        false,
+      )
+    }
+
+    logger.info('[Full Setup] Step 3: Terminals assigned', {
+      autoAttached: autoAttached.length,
+      batchAttached,
+    })
+
+    // Step 4: Cost structure (auto-create or with overrides)
+    let costStructureResult: any = null
+    // Determine venueType from target venue
+    let venueType: string | null = null
+    if (target.type === 'venue') {
+      const venue = await prisma.venue.findUnique({
+        where: { id: target.id },
+        select: { type: true },
+      })
+      venueType = venue?.type || null
+    }
+
+    if (costStructureOverrides) {
+      // Create with overrides
+      const rates = {
+        debitRate: costStructureOverrides.debitRate / 100,
+        creditRate: costStructureOverrides.creditRate / 100,
+        amexRate: costStructureOverrides.amexRate / 100,
+        internationalRate: costStructureOverrides.internationalRate / 100,
+      }
+
+      // Check if one already exists
+      const existing = await prisma.providerCostStructure.findFirst({
+        where: { merchantAccountId: merchantAccountId, active: true },
+      })
+
+      if (!existing) {
+        costStructureResult = await prisma.providerCostStructure.create({
+          data: {
+            providerId: blumonProvider.id,
+            merchantAccountId: merchantAccountId,
+            ...rates,
+            fixedCostPerTransaction: costStructureOverrides.fixedCostPerTransaction || 0,
+            monthlyFee: costStructureOverrides.monthlyFee || null,
+            effectiveFrom: new Date(),
+            active: true,
+            proposalReference: `WIZARD-SETUP-${Date.now()}`,
+            notes: 'Creado via Payment Setup Wizard con tasas personalizadas',
+          },
+        })
+      }
+    } else if (venueType || businessCategory) {
+      // Auto-create via MCC lookup
+      costStructureResult = await merchantAccountService.autoCreateProviderCostStructure(merchantAccountId, blumonProvider.id, {
+        venueType,
+        businessCategory: typeof businessCategory === 'string' ? businessCategory : null,
+      })
+      if (costStructureResult) {
+        costStructureResult = costStructureResult.costStructure
+      }
+    }
+
+    logger.info('[Full Setup] Step 4: Cost structure', {
+      created: !!costStructureResult,
+    })
+
+    // Step 5: Create/update payment config (venue or org)
+    let paymentConfig: any = null
+    const accountSlotField =
+      accountSlot === 'PRIMARY' ? 'primaryAccountId' : accountSlot === 'SECONDARY' ? 'secondaryAccountId' : 'tertiaryAccountId'
+
+    if (target.type === 'venue') {
+      const existingConfig = await prisma.venuePaymentConfig.findUnique({
+        where: { venueId: target.id },
+      })
+
+      if (existingConfig) {
+        paymentConfig = await prisma.venuePaymentConfig.update({
+          where: { venueId: target.id },
+          data: { [accountSlotField]: merchantAccountId },
+        })
+      } else {
+        // primaryAccountId is required for create — set to merchantAccountId if PRIMARY slot, otherwise need a primary
+        paymentConfig = await prisma.venuePaymentConfig.create({
+          data: {
+            venueId: target.id,
+            primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
+            ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
+            ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
+          },
+        })
+      }
+    } else {
+      const existingConfig = await prisma.organizationPaymentConfig.findUnique({
+        where: { organizationId: target.id },
+      })
+
+      if (existingConfig) {
+        paymentConfig = await prisma.organizationPaymentConfig.update({
+          where: { organizationId: target.id },
+          data: { [accountSlotField]: merchantAccountId },
+        })
+      } else {
+        paymentConfig = await prisma.organizationPaymentConfig.create({
+          data: {
+            organizationId: target.id,
+            primaryAccountId: accountSlot === 'PRIMARY' ? merchantAccountId : '',
+            ...(accountSlot === 'SECONDARY' && { secondaryAccountId: merchantAccountId }),
+            ...(accountSlot === 'TERTIARY' && { tertiaryAccountId: merchantAccountId }),
+          },
+        })
+      }
+    }
+
+    logger.info('[Full Setup] Step 5: Payment config saved', {
+      configId: paymentConfig?.id,
+      slot: accountSlot,
+    })
+
+    // Step 6: Create venue/org pricing structure
+    let pricingStructure: any = null
+    if (venuePricing) {
+      const pricingData = {
+        accountType: accountSlot as 'PRIMARY' | 'SECONDARY' | 'TERTIARY',
+        debitRate: venuePricing.debitRate / 100,
+        creditRate: venuePricing.creditRate / 100,
+        amexRate: venuePricing.amexRate / 100,
+        internationalRate: venuePricing.internationalRate / 100,
+        fixedFeePerTransaction: venuePricing.fixedFeePerTransaction || null,
+        monthlyServiceFee: venuePricing.monthlyServiceFee || null,
+        effectiveFrom: new Date(),
+        active: true,
+        notes: 'Creado via Payment Setup Wizard',
+      }
+
+      if (target.type === 'venue') {
+        pricingStructure = await prisma.venuePricingStructure.create({
+          data: { venueId: target.id, ...pricingData },
+        })
+      } else {
+        pricingStructure = await prisma.organizationPricingStructure.create({
+          data: { organizationId: target.id, ...pricingData },
+        })
+      }
+    }
+
+    logger.info('[Full Setup] Step 6: Pricing structure', {
+      created: !!pricingStructure,
+    })
+
+    // Step 7: Create settlement configurations
+    let settlementsCreated = 0
+    if (settlementConfig) {
+      const cardTypes = ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL', 'OTHER'] as const
+      const daysMap: Record<string, number> = {
+        DEBIT: settlementConfig.debitDays ?? 1,
+        CREDIT: settlementConfig.creditDays ?? 2,
+        AMEX: settlementConfig.amexDays ?? 3,
+        INTERNATIONAL: settlementConfig.internationalDays ?? 3,
+        OTHER: settlementConfig.otherDays ?? 2,
+      }
+
+      for (const cardType of cardTypes) {
+        try {
+          await settlementConfigService.createSettlementConfiguration({
+            merchantAccountId: merchantAccountId,
+            cardType,
+            settlementDays: daysMap[cardType],
+            settlementDayType: settlementConfig.dayType || 'BUSINESS_DAYS',
+            cutoffTime: settlementConfig.cutoffTime || '23:00',
+            cutoffTimezone: settlementConfig.cutoffTimezone || 'America/Mexico_City',
+            effectiveFrom: new Date(),
+          })
+          settlementsCreated++
+        } catch (err) {
+          logger.warn(`[Full Setup] Settlement config for ${cardType} may already exist`, { error: err })
+        }
+      }
+    }
+
+    logger.info('[Full Setup] Step 7: Settlement configs', { created: settlementsCreated })
+
+    // Build summary
+    const summary = {
+      merchantAccount: {
+        id: merchantAccountId,
+        displayName: merchantDisplayName,
+        created: merchantCreated,
+        alreadyExisted: !merchantCreated,
+      },
+      terminals: {
+        autoAttached: autoAttached.length,
+        batchAttached,
+        total: autoAttached.length + batchAttached,
+      },
+      costStructure: costStructureResult ? { id: costStructureResult.id } : null,
+      paymentConfig: paymentConfig ? { id: paymentConfig.id, slot: accountSlot } : null,
+      pricingStructure: pricingStructure ? { id: pricingStructure.id } : null,
+      settlements: { created: settlementsCreated },
+    }
+
+    res.status(201).json({
+      success: true,
+      data: summary,
+      message: `Setup completo: merchant ${merchantCreated ? 'creado' : 'existente'}, ${summary.terminals.total} terminales, pricing y settlement configurados`,
+    })
+  } catch (error: any) {
+    logger.error('[Full Setup] Failed', {
+      error: error instanceof Error ? error.message : error,
+      stack: error instanceof Error ? error.stack : undefined,
+    })
+    next(error)
+  }
+}

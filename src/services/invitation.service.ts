@@ -6,6 +6,7 @@ import AppError from '../errors/AppError'
 import { generateAccessToken, generateRefreshToken } from '../jwt.service'
 import logger from '../config/logger'
 import { getRoleDisplayName } from './dashboard/venueRoleConfig.dashboard.service'
+import { ROLE_HIERARCHY } from '../lib/permissions'
 import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganizationIdFromVenue } from './staffOrganization.service'
 
 interface AcceptInvitationData {
@@ -340,11 +341,15 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
         })
 
         if (existingAssignment) {
+          // Only upgrade role, never downgrade (protects existing higher-role assignments)
+          const effectiveRole =
+            ROLE_HIERARCHY[existingAssignment.role] > ROLE_HIERARCHY[invitation.role] ? existingAssignment.role : invitation.role
+
           // Update existing assignment
           await tx.staffVenue.update({
             where: { id: existingAssignment.id },
             data: {
-              role: invitation.role,
+              role: effectiveRole,
               pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
               active: true,
               startDate: new Date(),

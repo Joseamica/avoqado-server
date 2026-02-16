@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { PaymentMethod, CardBrand, TransactionCardType, OriginSystem } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
+import { getEffectivePaymentConfig, getEffectivePricing } from '../organization-payment-config.service'
 
 /**
  * TransactionCost Service
@@ -98,27 +99,19 @@ export async function findActiveVenuePricingStructure(
   accountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY',
   effectiveDate: Date = new Date(),
 ) {
-  const pricingStructure = await prisma.venuePricingStructure.findFirst({
-    where: {
-      venueId,
-      accountType,
-      active: true,
-      effectiveFrom: { lte: effectiveDate },
-      OR: [
-        { effectiveTo: null }, // No end date (current)
-        { effectiveTo: { gte: effectiveDate } },
-      ],
-    },
-    orderBy: {
-      effectiveFrom: 'desc', // Get most recent if multiple match
-    },
-  })
+  // Use inheritance: venue pricing → org pricing fallback
+  const effective = await getEffectivePricing(venueId, accountType)
 
-  if (!pricingStructure) {
-    logger.warn('No active venue pricing structure found', { venueId, accountType, effectiveDate })
+  if (!effective) {
+    logger.warn('No active pricing structure found (checked venue + org)', { venueId, accountType, effectiveDate })
+    return null
   }
 
-  return pricingStructure
+  const { pricing, source } = effective
+  logger.info('Resolved pricing structure', { venueId, accountType, source, count: pricing.length })
+
+  // Return the most recent pricing structure (already ordered by effectiveFrom desc)
+  return pricing[0] || null
 }
 
 /**
@@ -166,21 +159,11 @@ export async function createTransactionCost(paymentId: string): Promise<{
 } | null> {
   logger.info('Creating TransactionCost', { paymentId })
 
-  // Fetch payment with all necessary relations
+  // Fetch payment with venue info
   const payment = await prisma.payment.findUnique({
     where: { id: paymentId },
     include: {
-      venue: {
-        include: {
-          paymentConfig: {
-            include: {
-              primaryAccount: true,
-              secondaryAccount: true,
-              tertiaryAccount: true,
-            },
-          },
-        },
-      },
+      venue: { select: { id: true, organizationId: true } },
     },
   })
 
@@ -232,13 +215,15 @@ export async function createTransactionCost(paymentId: string): Promise<{
   })
 
   // ========================================
-  // Step 2: Find Merchant Account
+  // Step 2: Find Merchant Account (venue → org inheritance)
   // ========================================
 
-  const paymentConfig = payment.venue.paymentConfig
-  if (!paymentConfig) {
-    throw new BadRequestError(`Venue ${payment.venueId} has no payment configuration`)
+  const effective = await getEffectivePaymentConfig(payment.venueId)
+  if (!effective) {
+    throw new BadRequestError(`Venue ${payment.venueId} has no payment configuration (checked venue + org)`)
   }
+
+  const { config: paymentConfig, source: configSource } = effective
 
   // Use PRIMARY account by default (TODO: support routing to SECONDARY/TERTIARY based on BIN/amount)
   const merchantAccount = paymentConfig.primaryAccount
@@ -252,6 +237,7 @@ export async function createTransactionCost(paymentId: string): Promise<{
     paymentId,
     merchantAccountId: merchantAccount.id,
     accountType,
+    configSource,
   })
 
   // ========================================
