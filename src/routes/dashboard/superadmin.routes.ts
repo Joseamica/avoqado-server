@@ -26,6 +26,7 @@ import organizationRoutes from '../superadmin/organization.routes'
 import pushNotificationsRoutes from '../superadmin/pushNotifications.routes'
 import marketingRoutes from '../superadmin/marketing.routes'
 import staffRoutes from '../superadmin/staff.routes'
+import trainingRoutes from '../superadmin/training.routes'
 
 // Import cost management validation schemas
 import {
@@ -262,6 +263,9 @@ router.use('/marketing', marketingRoutes)
 
 // Staff Management (CRUD + Org/Venue Assignment)
 router.use('/staff', staffRoutes)
+
+// Training / LMS Management
+router.use('/trainings', trainingRoutes)
 
 // Payment Readiness Check (for superadmin dashboard)
 router.get('/payment-readiness', venuePaymentReadinessController.getMultipleVenuesPaymentReadiness)

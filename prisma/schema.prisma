@@ -62,6 +62,9 @@ model Organization {
   // Organization-level payout configuration (inherited by venues without custom payout config)
   organizationPayoutConfig OrganizationPayoutConfig?
 
+  // Training modules created for this organization (null organizationId = global)
+  trainingModules TrainingModule[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -7031,4 +7034,122 @@ enum TpvMessageDeliveryStatus {
   DELIVERED
   ACKNOWLEDGED
   DISMISSED
+}
+
+// ==========================================
+// TRAINING / LMS SYSTEM
+// ==========================================
+
+model TrainingModule {
+  id             String   @id @default(cuid())
+  organizationId String?  // null = global (available to all orgs)
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  title            String
+  description      String   @db.Text
+  coverImageUrl    String?
+  category         TrainingCategory   @default(GENERAL)
+  difficulty       TrainingDifficulty @default(BASIC)
+  estimatedMinutes Int      @default(5)
+  isRequired       Boolean  @default(false)
+  position         Int      @default(0)
+  status           TrainingStatus @default(DRAFT)
+
+  // Feature tags for auto-filtering (e.g., ["SERIALIZED_INVENTORY", "PAYMENTS"])
+  // Empty = shown to ALL orgs. Non-empty = only shown if org has at least one matching module
+  featureTags    String[] @default([])
+
+  // Venue-level filtering: if non-empty, only these venues see the training
+  // Empty = all venues in the org (or all venues globally if organizationId is null)
+  venueIds       String[] @default([])
+
+  createdBy      String
+  createdByName  String
+
+  steps          TrainingStep[]
+  quizQuestions  TrainingQuizQuestion[]
+  progress       TrainingProgress[]
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("training_modules")
+}
+
+model TrainingStep {
+  id               String   @id @default(cuid())
+  trainingModuleId String
+  trainingModule   TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
+
+  stepNumber       Int
+  title            String
+  instruction      String   @db.Text
+  mediaType        TrainingMediaType @default(IMAGE)
+  mediaUrl         String?
+  thumbnailUrl     String?
+  tipText          String?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([trainingModuleId, stepNumber])
+  @@map("training_steps")
+}
+
+model TrainingQuizQuestion {
+  id               String   @id @default(cuid())
+  trainingModuleId String
+  trainingModule   TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
+
+  question         String
+  options          String[]
+  correctIndex     Int
+  position         Int      @default(0)
+
+  createdAt        DateTime @default(now())
+
+  @@map("training_quiz_questions")
+}
+
+model TrainingProgress {
+  id               String   @id @default(cuid())
+  trainingModuleId String
+  trainingModule   TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
+  staffId          String
+  venueId          String
+
+  lastStepViewed   Int      @default(0)
+  isCompleted      Boolean  @default(false)
+  quizScore        Int?
+  quizTotal        Int?
+  quizPassed       Boolean?
+
+  startedAt        DateTime @default(now())
+  completedAt      DateTime?
+
+  @@unique([trainingModuleId, staffId])
+  @@map("training_progress")
+}
+
+enum TrainingCategory {
+  VENTAS
+  INVENTARIO
+  PAGOS
+  ATENCION_CLIENTE
+  GENERAL
+}
+
+enum TrainingDifficulty {
+  BASIC
+  INTERMEDIATE
+}
+
+enum TrainingStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum TrainingMediaType {
+  IMAGE
+  VIDEO
 }

@@ -4,17 +4,17 @@ import logger from '../../config/logger'
 
 /**
  * Get pending messages for this terminal
- * GET /api/v1/tpv/messages/pending
+ * GET /api/v1/tpv/messages/pending?terminalId=xxx
  */
 export async function getPendingMessages(req: Request, res: Response, next: NextFunction) {
   try {
-    const venueId = (req as any).user?.venueId
-    const terminalId = (req as any).user?.terminalId
+    const venueId = req.authContext?.venueId
+    const terminalId = (req.query.terminalId as string) || undefined
 
     if (!venueId || !terminalId) {
       return res.status(400).json({
         success: false,
-        message: 'Missing venueId or terminalId in auth context',
+        message: 'Missing venueId (from auth) or terminalId (query param)',
       })
     }
 
@@ -31,17 +31,17 @@ export async function getPendingMessages(req: Request, res: Response, next: Next
 
 /**
  * Get message history for this terminal (all messages, including handled)
- * GET /api/v1/tpv/messages/history
+ * GET /api/v1/tpv/messages/history?terminalId=xxx&limit=50&offset=0
  */
 export async function getMessageHistory(req: Request, res: Response, next: NextFunction) {
   try {
-    const venueId = (req as any).user?.venueId
-    const terminalId = (req as any).user?.terminalId
+    const venueId = req.authContext?.venueId
+    const terminalId = (req.query.terminalId as string) || undefined
 
     if (!venueId || !terminalId) {
       return res.status(400).json({
         success: false,
-        message: 'Missing venueId or terminalId in auth context',
+        message: 'Missing venueId (from auth) or terminalId (query param)',
       })
     }
 
@@ -66,7 +66,7 @@ export async function getMessageHistory(req: Request, res: Response, next: NextF
 export async function acknowledgeMessage(req: Request, res: Response, next: NextFunction) {
   try {
     const { messageId } = req.params
-    const terminalId = (req as any).user?.terminalId
+    const terminalId = req.body.terminalId || (req.query.terminalId as string) || undefined
     const staffId = req.body.staffId
 
     logger.info(`📨 TPV message acknowledge via REST: ${messageId}`, {
@@ -93,7 +93,7 @@ export async function acknowledgeMessage(req: Request, res: Response, next: Next
 export async function dismissMessage(req: Request, res: Response, next: NextFunction) {
   try {
     const { messageId } = req.params
-    const terminalId = (req as any).user?.terminalId
+    const terminalId = req.body.terminalId || (req.query.terminalId as string) || undefined
 
     logger.info(`📨 TPV message dismiss via REST: ${messageId}`, {
       messageId,
@@ -118,13 +118,13 @@ export async function dismissMessage(req: Request, res: Response, next: NextFunc
 export async function respondToMessage(req: Request, res: Response, next: NextFunction) {
   try {
     const { messageId } = req.params
-    const terminalId = (req as any).user?.terminalId
+    const terminalId = req.body.terminalId || (req.query.terminalId as string) || undefined
     const { selectedOptions, staffId, staffName } = req.body
 
     if (!terminalId) {
       return res.status(400).json({
         success: false,
-        message: 'Missing terminalId in auth context',
+        message: 'Missing terminalId in request body or query param',
       })
     }
 
