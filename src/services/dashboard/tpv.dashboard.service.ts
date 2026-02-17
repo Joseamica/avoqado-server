@@ -1,8 +1,8 @@
-import prisma from '../../utils/prismaClient'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
-import { PaginatedTerminalsResponse, UpdateTpvBody, CreateTpvBody } from '../../schemas/dashboard/tpv.schema'
-import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import logger from '@/config/logger'
+import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
+import prisma from '../../utils/prismaClient'
 import emailService from '../email.service'
 
 /**
@@ -355,6 +355,8 @@ export interface TpvSettings {
   showPayments: boolean
   showSupport: boolean
   showGoals: boolean
+  showMessages: boolean
+  showTrainings: boolean
   // Evidence rules (PlayTelecom — boolean toggles)
   requireDepositPhoto?: boolean
   requireFacadePhoto?: boolean
@@ -394,6 +396,8 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showPayments: true,
   showSupport: true,
   showGoals: true,
+  showMessages: true,
+  showTrainings: true,
 }
 
 /**

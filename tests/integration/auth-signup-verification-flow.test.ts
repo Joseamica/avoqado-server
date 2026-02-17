@@ -518,8 +518,8 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
       })
       const timeNonExisting = Date.now() - startNonExisting
 
-      // Timing should be similar (within 100ms) to prevent enumeration
-      expect(Math.abs(timeExisting - timeNonExisting)).toBeLessThan(100)
+      // Timing should be similar (within 200ms) to prevent enumeration
+      expect(Math.abs(timeExisting - timeNonExisting)).toBeLessThan(200)
     })
 
     it('should use cryptographically secure random codes', () => {

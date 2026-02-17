@@ -7087,6 +7087,9 @@ model TrainingModule {
   // Empty = all venues in the org (or all venues globally if organizationId is null)
   venueIds       String[] @default([])
 
+  quizPassThreshold  Int      @default(70)   // Percentage needed to pass (1-100)
+  quizMaxAttempts    Int      @default(0)    // 0 = unlimited
+
   createdBy      String
   createdByName  String
 
@@ -7125,10 +7128,13 @@ model TrainingQuizQuestion {
   trainingModuleId String
   trainingModule   TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
 
+  questionType     TrainingQuestionType @default(MULTIPLE_CHOICE)
   question         String
   options          String[]
   correctIndex     Int
+  correctIndices   Int[]    @default([])  // For MULTI_SELECT: multiple correct answers
   position         Int      @default(0)
+  explanation      String?    // Explanation shown after quiz submission
 
   createdAt        DateTime @default(now())
 
@@ -7147,6 +7153,7 @@ model TrainingProgress {
   quizScore        Int?
   quizTotal        Int?
   quizPassed       Boolean?
+  attemptNumber    Int      @default(1)
 
   startedAt        DateTime @default(now())
   completedAt      DateTime?
@@ -7176,4 +7183,10 @@ enum TrainingStatus {
 enum TrainingMediaType {
   IMAGE
   VIDEO
+}
+
+enum TrainingQuestionType {
+  MULTIPLE_CHOICE
+  TRUE_FALSE
+  MULTI_SELECT
 }

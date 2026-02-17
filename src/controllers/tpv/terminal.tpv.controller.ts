@@ -1,9 +1,9 @@
-import { Request, Response, NextFunction } from 'express'
+import { NextFunction, Request, Response } from 'express'
 
+import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
+import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
-import prisma from '@/utils/prismaClient'
-import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 
 /**
  * Terminal TPV Controller
@@ -41,6 +41,8 @@ interface TpvSettings {
   // Home screen button visibility (controlled from dashboard)
   showQuickPayment: boolean // Show "Pago rápido" button on home screen
   showOrderManagement: boolean // Show "Órdenes" button on home screen
+  showMessages: boolean // Show "Mensajes" button on home screen
+  showTrainings: boolean // Show "Entrenamientos" button on home screen
   // Crypto payment option (B4Bit integration)
   showCryptoOption: boolean
 }
@@ -74,6 +76,8 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   // Home screen buttons enabled by default
   showQuickPayment: true,
   showOrderManagement: true,
+  showMessages: true,
+  showTrainings: true,
   // Crypto payment disabled by default
   showCryptoOption: false,
 }

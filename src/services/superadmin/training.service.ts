@@ -1,7 +1,7 @@
 // src/services/superadmin/training.service.ts
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { TrainingCategory, TrainingDifficulty, TrainingStatus, TrainingMediaType } from '@prisma/client'
+import { TrainingCategory, TrainingDifficulty, TrainingStatus, TrainingMediaType, TrainingQuestionType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 
 // ===== TYPES =====
@@ -19,6 +19,8 @@ interface CreateTrainingModuleData {
   featureTags?: string[]
   venueIds?: string[]
   organizationId?: string
+  quizPassThreshold?: number
+  quizMaxAttempts?: number
   createdBy: string
   createdByName: string
 }
@@ -36,6 +38,8 @@ interface UpdateTrainingModuleData {
   featureTags?: string[]
   venueIds?: string[]
   organizationId?: string | null
+  quizPassThreshold?: number
+  quizMaxAttempts?: number
 }
 
 interface CreateStepData {
@@ -59,17 +63,23 @@ interface UpdateStepData {
 }
 
 interface CreateQuizQuestionData {
+  questionType?: TrainingQuestionType
   question: string
   options: string[]
   correctIndex: number
+  correctIndices?: number[]
   position?: number
+  explanation?: string
 }
 
 interface UpdateQuizQuestionData {
+  questionType?: TrainingQuestionType
   question?: string
   options?: string[]
   correctIndex?: number
+  correctIndices?: number[]
   position?: number
+  explanation?: string | null
 }
 
 interface ListFilters {
@@ -189,6 +199,8 @@ export async function createTrainingModule(data: CreateTrainingModuleData) {
       featureTags: data.featureTags || [],
       venueIds: data.venueIds || [],
       organizationId: data.organizationId || null,
+      quizPassThreshold: data.quizPassThreshold ?? 70,
+      quizMaxAttempts: data.quizMaxAttempts ?? 0,
       createdBy: data.createdBy,
       createdByName: data.createdByName,
     },
@@ -233,6 +245,8 @@ export async function updateTrainingModule(trainingId: string, data: UpdateTrain
       ...(data.featureTags !== undefined && { featureTags: data.featureTags }),
       ...(data.venueIds !== undefined && { venueIds: data.venueIds }),
       ...(data.organizationId !== undefined && { organizationId: data.organizationId }),
+      ...(data.quizPassThreshold !== undefined && { quizPassThreshold: data.quizPassThreshold }),
+      ...(data.quizMaxAttempts !== undefined && { quizMaxAttempts: data.quizMaxAttempts }),
     },
     include: {
       organization: { select: { id: true, name: true } },
@@ -365,13 +379,25 @@ export async function addQuizQuestion(trainingId: string, data: CreateQuizQuesti
     throw new BadRequestError('correctIndex must be a valid index within options array')
   }
 
+  // Validate correctIndices for MULTI_SELECT
+  if (data.correctIndices && data.correctIndices.length > 0) {
+    for (const idx of data.correctIndices) {
+      if (idx < 0 || idx >= data.options.length) {
+        throw new BadRequestError('All correctIndices must be valid indices within options array')
+      }
+    }
+  }
+
   const question = await prisma.trainingQuizQuestion.create({
     data: {
       trainingModuleId: trainingId,
+      questionType: data.questionType || 'MULTIPLE_CHOICE',
       question: data.question,
       options: data.options,
       correctIndex: data.correctIndex,
+      correctIndices: data.correctIndices || [],
       position: data.position || 0,
+      explanation: data.explanation || null,
     },
   })
 
@@ -401,8 +427,11 @@ export async function updateQuizQuestion(trainingId: string, questionId: string,
     data: {
       ...(data.question !== undefined && { question: data.question }),
       ...(data.options !== undefined && { options: data.options }),
+      ...(data.questionType !== undefined && { questionType: data.questionType }),
       ...(data.correctIndex !== undefined && { correctIndex: data.correctIndex }),
+      ...(data.correctIndices !== undefined && { correctIndices: data.correctIndices }),
       ...(data.position !== undefined && { position: data.position }),
+      ...(data.explanation !== undefined && { explanation: data.explanation }),
     },
   })
 
@@ -556,6 +585,7 @@ export async function updateProgress(
     quizScore?: number
     quizTotal?: number
     quizPassed?: boolean
+    attemptNumber?: number
   },
 ) {
   const training = await prisma.trainingModule.findUnique({ where: { id: trainingId } })
@@ -576,6 +606,7 @@ export async function updateProgress(
       quizScore: data.quizScore ?? null,
       quizTotal: data.quizTotal ?? null,
       quizPassed: data.quizPassed ?? null,
+      attemptNumber: data.attemptNumber ?? 1,
       completedAt: data.isCompleted ? new Date() : null,
     },
     update: {
@@ -584,6 +615,7 @@ export async function updateProgress(
       ...(data.quizScore !== undefined && { quizScore: data.quizScore }),
       ...(data.quizTotal !== undefined && { quizTotal: data.quizTotal }),
       ...(data.quizPassed !== undefined && { quizPassed: data.quizPassed }),
+      ...(data.attemptNumber !== undefined && { attemptNumber: data.attemptNumber }),
       ...(data.isCompleted && { completedAt: new Date() }),
     },
   })

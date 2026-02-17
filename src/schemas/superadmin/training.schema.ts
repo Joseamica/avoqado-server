@@ -52,6 +52,8 @@ export const createTrainingSchema = z.object({
     featureTags: z.array(z.string()).optional(),
     venueIds: z.array(z.string()).optional(),
     organizationId: z.string().optional().nullable(),
+    quizPassThreshold: z.number().int().min(1).max(100).optional(),
+    quizMaxAttempts: z.number().int().min(0).max(10).optional(),
   }),
 })
 
@@ -72,6 +74,8 @@ export const updateTrainingSchema = z.object({
     featureTags: z.array(z.string()).optional(),
     venueIds: z.array(z.string()).optional(),
     organizationId: z.string().optional().nullable(),
+    quizPassThreshold: z.number().int().min(1).max(100).optional(),
+    quizMaxAttempts: z.number().int().min(0).max(10).optional(),
   }),
 })
 
@@ -115,10 +119,13 @@ export const createQuizQuestionSchema = z.object({
     trainingId: z.string().min(1, 'Training ID is required'),
   }),
   body: z.object({
+    questionType: z.enum(['MULTIPLE_CHOICE', 'TRUE_FALSE', 'MULTI_SELECT']).optional(),
     question: z.string().min(1, 'Question is required'),
     options: z.array(z.string().min(1)).min(2, 'At least 2 options required').max(6),
     correctIndex: z.number().int().min(0),
+    correctIndices: z.array(z.number().int().min(0)).optional(),
     position: z.number().int().min(0).optional(),
+    explanation: z.string().optional(),
   }),
 })
 
@@ -128,10 +135,13 @@ export const updateQuizQuestionSchema = z.object({
     questionId: z.string().min(1, 'Question ID is required'),
   }),
   body: z.object({
+    questionType: z.enum(['MULTIPLE_CHOICE', 'TRUE_FALSE', 'MULTI_SELECT']).optional(),
     question: z.string().min(1).optional(),
     options: z.array(z.string().min(1)).min(2).max(6).optional(),
     correctIndex: z.number().int().min(0).optional(),
+    correctIndices: z.array(z.number().int().min(0)).optional(),
     position: z.number().int().min(0).optional(),
+    explanation: z.string().optional().nullable(),
   }),
 })
 
@@ -148,6 +158,7 @@ export const updateProgressSchema = z.object({
     quizScore: z.number().int().min(0).optional(),
     quizTotal: z.number().int().min(0).optional(),
     quizPassed: z.boolean().optional(),
+    attemptNumber: z.number().int().min(1).optional(),
   }),
 })
 
