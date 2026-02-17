@@ -65,6 +65,10 @@ model Organization {
   // Training modules created for this organization (null organizationId = global)
   trainingModules TrainingModule[]
 
+  // Organization-level item categories & serialized items (shared across all org venues)
+  itemCategories  ItemCategory[]
+  serializedItems SerializedItem[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -281,8 +285,9 @@ model Venue {
   // MODULE SYSTEM - Multi-tenant feature management
   // ==========================================
   venueModules    VenueModule[] // Modules enabled for this venue
-  itemCategories  ItemCategory[] // Categories for serialized items
-  serializedItems SerializedItem[] // Items with unique barcodes (SIMs, etc.)
+  itemCategories      ItemCategory[] // Categories for serialized items
+  serializedItems     SerializedItem[] // Items with unique barcodes (SIMs, etc.)
+  soldSerializedItems SerializedItem[] @relation("SoldItems") // Items sold at this venue (org-level items)
 
   // ==========================================
   // COMMISSION SYSTEM
@@ -5940,10 +5945,15 @@ model OrganizationModule {
 
 /// Categories for SerializedItems (NOT to be confused with MenuCategory).
 /// Represents sales channels, types, or classifications.
+/// Can be venue-scoped (venueId set) or org-scoped (organizationId set, venueId null).
 model ItemCategory {
   id      String @id @default(cuid())
-  venueId String
-  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venueId String? // Nullable: null = org-level category
+  venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Organization scope (for org-level categories shared across all venues)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   name        String // "Negra", "Blanca", "Roja" or "Diamante", "Rubí"
   description String?
@@ -5968,17 +5978,28 @@ model ItemCategory {
   serializedItems   SerializedItem[]
   stockAlertConfigs StockAlertConfig[]
 
-  @@unique([venueId, name])
+  @@unique([venueId, name])            // Venue-level uniqueness (NULL venueId won't conflict)
+  @@unique([organizationId, name])     // Org-level uniqueness
   @@index([venueId])
+  @@index([organizationId])
 }
 
 /// Product with UNIQUE barcode.
 /// DOES NOT HAVE PRICE - price is defined at the moment of sale.
 /// Applies to: SIMs, jewelry, electronics, etc.
+/// Can be venue-scoped (venueId set) or org-scoped (organizationId set, venueId null).
 model SerializedItem {
   id      String @id @default(cuid())
-  venueId String
-  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venueId String? // Nullable: null = org-level item
+  venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Organization scope (for org-level items shared across all venues)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Venue that sold this item (for org-level items sold at a specific venue)
+  sellingVenueId String?
+  sellingVenue   Venue? @relation("SoldItems", fields: [sellingVenueId], references: [id])
 
   // Category
   categoryId String
@@ -5999,9 +6020,12 @@ model SerializedItem {
   createdAt DateTime @default(now())
   createdBy String // Staff ID that registered the item
 
-  @@unique([venueId, serialNumber])
+  @@unique([venueId, serialNumber])            // Legacy venue-level uniqueness
+  @@unique([organizationId, serialNumber])     // Org-level uniqueness
   @@index([venueId, categoryId])
   @@index([venueId, status])
+  @@index([organizationId, categoryId])
+  @@index([organizationId, status])
   @@index([serialNumber])
 }
 

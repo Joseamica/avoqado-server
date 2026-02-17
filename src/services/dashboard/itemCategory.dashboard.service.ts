@@ -14,6 +14,7 @@
 import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import AppError from '@/errors/AppError'
+import { getMergedCategories, type CategorySource } from './category-resolution.service'
 
 // ===========================================
 // TYPES
@@ -66,6 +67,7 @@ export interface CategoryWithStats {
   active: boolean
   createdAt: Date
   updatedAt: Date
+  source?: CategorySource
   // Stats
   totalItems: number
   availableItems: number
@@ -77,62 +79,33 @@ export interface CategoryWithStats {
 // ===========================================
 
 /**
- * Get all item categories for a venue
+ * Get all item categories for a venue (merged: venue + org-level)
  */
 export async function getItemCategories(
   venueId: string,
   options: { includeStats?: boolean } = {},
 ): Promise<{ categories: CategoryWithStats[] }> {
-  const categories = await prisma.itemCategory.findMany({
-    where: {
-      venueId,
-      active: true,
-    },
-    orderBy: { sortOrder: 'asc' },
-  })
+  const merged = await getMergedCategories(venueId, { includeStats: options.includeStats })
 
-  if (!options.includeStats) {
-    return {
-      categories: categories.map(cat => ({
-        ...cat,
-        suggestedPrice: cat.suggestedPrice ? Number(cat.suggestedPrice) : null,
-        totalItems: 0,
-        availableItems: 0,
-        soldItems: 0,
-      })),
-    }
+  return {
+    categories: merged.map(cat => ({
+      id: cat.id,
+      name: cat.name,
+      description: cat.description,
+      color: cat.color,
+      sortOrder: cat.sortOrder,
+      requiresPreRegistration: cat.requiresPreRegistration,
+      suggestedPrice: cat.suggestedPrice,
+      barcodePattern: cat.barcodePattern,
+      active: cat.active,
+      createdAt: cat.createdAt,
+      updatedAt: cat.updatedAt,
+      source: cat.source,
+      totalItems: cat.totalItems || 0,
+      availableItems: cat.availableItems || 0,
+      soldItems: cat.soldItems || 0,
+    })),
   }
-
-  // Single groupBy for all categories (avoids 3N queries)
-  const categoryIds = categories.map(c => c.id)
-  const countsByStatus = await prisma.serializedItem.groupBy({
-    by: ['categoryId', 'status'],
-    where: { categoryId: { in: categoryIds } },
-    _count: true,
-  })
-
-  // Build lookup: categoryId → { total, available, sold }
-  const statsMap = new Map<string, { total: number; available: number; sold: number }>()
-  for (const row of countsByStatus) {
-    const existing = statsMap.get(row.categoryId) || { total: 0, available: 0, sold: 0 }
-    existing.total += row._count
-    if (row.status === 'AVAILABLE') existing.available = row._count
-    if (row.status === 'SOLD') existing.sold = row._count
-    statsMap.set(row.categoryId, existing)
-  }
-
-  const categoriesWithStats = categories.map(category => {
-    const stats = statsMap.get(category.id) || { total: 0, available: 0, sold: 0 }
-    return {
-      ...category,
-      suggestedPrice: category.suggestedPrice ? Number(category.suggestedPrice) : null,
-      totalItems: stats.total,
-      availableItems: stats.available,
-      soldItems: stats.sold,
-    }
-  })
-
-  return { categories: categoriesWithStats }
 }
 
 /**
@@ -330,11 +303,16 @@ export async function deleteItemCategory(venueId: string, categoryId: string): P
  * Bulk upload serialized items to a category
  */
 export async function bulkUploadItems(venueId: string, categoryId: string, data: BulkUploadDto): Promise<BulkUploadResult> {
-  // Verify category exists and belongs to venue
+  // Verify category exists and belongs to venue or its org
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { organizationId: true },
+  })
+
   const category = await prisma.itemCategory.findFirst({
     where: {
       id: categoryId,
-      venueId,
+      OR: [{ venueId }, { organizationId: venue?.organizationId, venueId: null }],
     },
   })
 
@@ -359,11 +337,11 @@ export async function bulkUploadItems(venueId: string, categoryId: string, data:
     throw new AppError('No serial numbers provided', 400)
   }
 
-  // Check for duplicates within the venue (not just category)
+  // Check for duplicates within the venue AND org (not just category)
   const existingItems = await prisma.serializedItem.findMany({
     where: {
-      category: { venueId },
       serialNumber: { in: serialNumbers },
+      OR: [{ category: { venueId } }, ...(venue ? [{ organizationId: venue.organizationId }] : [])],
     },
     select: { serialNumber: true },
   })
@@ -416,11 +394,16 @@ export async function getCategoryItems(
     search?: string
   } = {},
 ) {
-  // Verify category belongs to venue
+  // Verify category belongs to venue or its organization
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { organizationId: true },
+  })
+
   const category = await prisma.itemCategory.findFirst({
     where: {
       id: categoryId,
-      venueId,
+      OR: [{ venueId }, { organizationId: venue?.organizationId, venueId: null }],
     },
   })
 

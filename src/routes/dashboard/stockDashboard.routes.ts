@@ -167,6 +167,37 @@ router.post('/bulk-upload', whiteLabelStockAccess, async (req: Request, res: Res
 })
 
 /**
+ * POST /dashboard/stock/org-bulk-upload
+ * Process CSV bulk upload for org-level item registration
+ * Body: { categoryId, csvContent }
+ * Requires: inventory:org-manage permission
+ */
+router.post('/org-bulk-upload', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { userId } = (req as any).authContext
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { categoryId, csvContent } = req.body
+
+    if (!categoryId || !csvContent) {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_error',
+        message: 'categoryId and csvContent are required',
+      })
+    }
+
+    const result = await stockDashboardService.processBulkUploadOrg(venueId, categoryId, csvContent, userId)
+
+    res.json({
+      success: result.success,
+      data: result,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
  * GET /dashboard/stock/movements
  * Returns: Recent stock movements (registrations, sales)
  * Query: limit (default 20)

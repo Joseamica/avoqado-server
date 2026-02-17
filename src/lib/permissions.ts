@@ -301,6 +301,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'goals:org-manage': ['goals:org-manage', 'commissions:read'], // Manage org-level sales goals
   'commissions:org-manage': ['commissions:org-manage', 'commissions:read', 'teams:read'], // Manage org-level commission configs
+  'inventory:org-manage': ['inventory:org-manage', 'inventory:read', 'serialized-inventory:create'], // Manage org-level item categories & serialized items
 
   // ===========================
   // COUPONS (Phase 2)
@@ -616,6 +617,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
     'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
+    'inventory:org-manage', // Manage org-level item categories & serialized items
     // Commission System (can manage but NOT payout - OWNER only)
     'commissions:read',
     'commissions:create',
@@ -719,6 +721,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'serialized-inventory:create', // Can register (Alta de Productos)
     // Org-level management
     'goals:org-manage', // Manage org-level sales goal defaults
+    'inventory:org-manage', // Manage org-level item categories & serialized items
     // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
   ],
 
@@ -1030,7 +1033,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'tpv:command:schedule',
     'tpv:command:geofence',
   ],
-  inventory: ['inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete', 'inventory:adjust'],
+  inventory: ['inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete', 'inventory:adjust', 'inventory:org-manage'],
   reviews: ['reviews:read', 'reviews:respond'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   tables: ['tables:read', 'tables:update'],
