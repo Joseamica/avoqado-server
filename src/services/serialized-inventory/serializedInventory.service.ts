@@ -1,6 +1,7 @@
 import { PrismaClient, SerializedItem, SerializedItemStatus, ItemCategory, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
+import { getMergedCategories } from '../dashboard/category-resolution.service'
 
 // ==========================================
 // SCAN RESULT TYPES
@@ -66,7 +67,7 @@ export class SerializedInventoryService {
       }
     }
 
-    // Search for existing item
+    // 1. Search for existing item at venue level
     const item = await this.db.serializedItem.findUnique({
       where: { venueId_serialNumber: { venueId, serialNumber } },
       include: { category: true },
@@ -92,7 +93,30 @@ export class SerializedInventoryService {
       }
     }
 
-    // Item not found - try to categorize by pattern
+    // 2. Fallback: search for org-level item
+    const orgItem = await this.findOrgItem(venueId, serialNumber)
+
+    if (orgItem) {
+      if (orgItem.status === 'SOLD') {
+        return {
+          found: true,
+          item: orgItem,
+          category: orgItem.category,
+          status: 'already_sold',
+          suggestedPrice: null,
+        }
+      }
+
+      return {
+        found: true,
+        item: orgItem,
+        category: orgItem.category,
+        status: 'available',
+        suggestedPrice: orgItem.category.suggestedPrice ? Number(orgItem.category.suggestedPrice) : null,
+      }
+    }
+
+    // 3. Item not found - try to categorize by pattern (venue + org categories)
     const matchedCategory = await this.findCategoryByPattern(venueId, serialNumber)
 
     return {
@@ -173,6 +197,39 @@ export class SerializedInventoryService {
    */
   async markAsSold(venueId: string, serialNumber: string, orderItemId: string, tx?: Prisma.TransactionClient): Promise<SerializedItem> {
     const client = tx || this.db
+
+    // 1. Try venue-level item first
+    const venueItem = await client.serializedItem.findUnique({
+      where: { venueId_serialNumber: { venueId, serialNumber } },
+    })
+
+    if (venueItem) {
+      return client.serializedItem.update({
+        where: { id: venueItem.id },
+        data: {
+          status: 'SOLD',
+          soldAt: new Date(),
+          orderItemId,
+        },
+      })
+    }
+
+    // 2. Fallback: find org-level item
+    const orgItem = await this.findOrgItem(venueId, serialNumber, client)
+
+    if (orgItem) {
+      return client.serializedItem.update({
+        where: { id: orgItem.id },
+        data: {
+          status: 'SOLD',
+          soldAt: new Date(),
+          orderItemId,
+          sellingVenueId: venueId,
+        },
+      })
+    }
+
+    // If neither found, the original update will throw a not-found error (preserves legacy behavior)
     return client.serializedItem.update({
       where: { venueId_serialNumber: { venueId, serialNumber } },
       data: {
@@ -229,19 +286,40 @@ export class SerializedInventoryService {
   }
 
   /**
-   * Gets available stock by category.
+   * Gets available stock by category (merged: venue + org-level).
    */
   async getStockByCategory(venueId: string): Promise<Array<{ category: ItemCategory; available: number; sold: number }>> {
+    // Get venue's org ID for merged lookup
+    const venue = await this.db.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
     const categories = await this.db.itemCategory.findMany({
-      where: { venueId, active: true },
+      where: {
+        active: true,
+        OR: [{ venueId }, ...(venue ? [{ organizationId: venue.organizationId, venueId: null }] : [])],
+      },
       orderBy: { sortOrder: 'asc' },
     })
 
+    // Deduplicate: venue category overrides org category with same name
+    const seen = new Map<string, (typeof categories)[0]>()
+    for (const cat of categories) {
+      const key = cat.name.toLowerCase()
+      const existing = seen.get(key)
+      // If venue-scoped, it always wins; org-level only added if no venue override
+      if (!existing || cat.venueId) {
+        seen.set(key, cat)
+      }
+    }
+    const mergedCategories = Array.from(seen.values())
+
     // Single groupBy for all categories (avoids 2N queries)
-    const categoryIds = categories.map(c => c.id)
+    const categoryIds = mergedCategories.map(c => c.id)
     const countsByStatus = await this.db.serializedItem.groupBy({
       by: ['categoryId', 'status'],
-      where: { venueId, categoryId: { in: categoryIds }, status: { in: ['AVAILABLE', 'SOLD'] } },
+      where: { categoryId: { in: categoryIds }, status: { in: ['AVAILABLE', 'SOLD'] } },
       _count: true,
     })
 
@@ -253,20 +331,34 @@ export class SerializedInventoryService {
       statsMap.set(row.categoryId, existing)
     }
 
-    return categories.map(category => {
+    return mergedCategories.map(category => {
       const stats = statsMap.get(category.id) || { available: 0, sold: 0 }
       return { category, available: stats.available, sold: stats.sold }
     })
   }
 
   /**
-   * Gets all categories for a venue.
+   * Gets all categories for a venue (merged: venue + org-level).
    */
   async getCategories(venueId: string): Promise<ItemCategory[]> {
-    return this.db.itemCategory.findMany({
-      where: { venueId, active: true },
-      orderBy: { sortOrder: 'asc' },
-    })
+    // Use merged categories (venue + org) for backward compatibility
+    const merged = await getMergedCategories(venueId)
+    // Return as ItemCategory-compatible objects (strip extra fields)
+    return merged.map(c => ({
+      id: c.id,
+      venueId: null, // org-level categories have null venueId
+      organizationId: null,
+      name: c.name,
+      description: c.description,
+      color: c.color,
+      sortOrder: c.sortOrder,
+      requiresPreRegistration: c.requiresPreRegistration,
+      suggestedPrice: c.suggestedPrice !== null ? new Prisma.Decimal(c.suggestedPrice) : null,
+      barcodePattern: c.barcodePattern,
+      active: c.active,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+    })) as ItemCategory[]
   }
 
   /**
@@ -397,11 +489,100 @@ export class SerializedInventoryService {
   }
 
   /**
-   * Finds category by barcode pattern match.
+   * Registers multiple items at org level (shared across all venues in the org).
+   */
+  async registerBatchOrg(data: {
+    organizationId: string
+    categoryId: string
+    serialNumbers: string[]
+    createdBy: string
+  }): Promise<RegisterBatchResult> {
+    const duplicates: string[] = []
+    let created = 0
+
+    await this.db.$transaction(async tx => {
+      for (const serialNumber of data.serialNumbers) {
+        // Check org-level duplicates
+        const existingOrg = await tx.serializedItem.findFirst({
+          where: { organizationId: data.organizationId, serialNumber },
+        })
+
+        if (existingOrg) {
+          duplicates.push(serialNumber)
+          continue
+        }
+
+        // Also check legacy venue-level items in same org
+        const existingVenue = await tx.serializedItem.findFirst({
+          where: {
+            serialNumber,
+            venue: { organizationId: data.organizationId },
+          },
+        })
+
+        if (existingVenue) {
+          duplicates.push(serialNumber)
+          continue
+        }
+
+        await tx.serializedItem.create({
+          data: {
+            organizationId: data.organizationId,
+            venueId: null,
+            categoryId: data.categoryId,
+            serialNumber,
+            createdBy: data.createdBy,
+            status: 'AVAILABLE',
+          },
+        })
+        created++
+      }
+    })
+
+    return { created, duplicates }
+  }
+
+  /**
+   * Finds an org-level item by serial number for a venue's organization.
+   */
+  private async findOrgItem(
+    venueId: string,
+    serialNumber: string,
+    client?: Prisma.TransactionClient,
+  ): Promise<(SerializedItem & { category: ItemCategory }) | null> {
+    const db = client || this.db
+    const venue = await db.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+    if (!venue) return null
+
+    return db.serializedItem.findFirst({
+      where: {
+        organizationId: venue.organizationId,
+        venueId: null,
+        serialNumber,
+      },
+      include: { category: true },
+    })
+  }
+
+  /**
+   * Finds category by barcode pattern match (searches venue + org categories).
    */
   private async findCategoryByPattern(venueId: string, serialNumber: string): Promise<ItemCategory | null> {
+    // Get venue's org ID for org-level category search
+    const venue = await this.db.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
     const categories = await this.db.itemCategory.findMany({
-      where: { venueId, active: true, barcodePattern: { not: null } },
+      where: {
+        active: true,
+        barcodePattern: { not: null },
+        OR: [{ venueId }, ...(venue ? [{ organizationId: venue.organizationId, venueId: null }] : [])],
+      },
     })
 
     for (const category of categories) {

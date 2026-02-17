@@ -50,6 +50,7 @@ import {
   getCryptoPaymentStatusSchema,
 } from '../schemas/tpv.schema'
 import { activateTerminalSchema } from '../schemas/activation.schema'
+import { trainingIdParamSchema, updateProgressSchema, getStaffProgressQuerySchema } from '../schemas/superadmin/training.schema'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
@@ -69,6 +70,7 @@ import * as saleVerificationController from '../controllers/tpv/sale-verificatio
 import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
 import * as cryptoController from '../controllers/tpv/crypto.tpv.controller'
 import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.controller'
+import * as trainingController from '../controllers/tpv/training.tpv.controller'
 import * as productService from '../services/dashboard/product.dashboard.service'
 import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
@@ -6046,5 +6048,102 @@ router.post('/messages/:messageId/dismiss', authenticateTokenMiddleware, tpvMess
  *       404: { description: Message not found }
  */
 router.post('/messages/:messageId/respond', authenticateTokenMiddleware, tpvMessageController.respondToMessage)
+
+// ==========================================
+// TPV TRAINING / LMS - Training modules & progress
+// ==========================================
+
+/**
+ * @openapi
+ * /api/v1/tpv/trainings:
+ *   get:
+ *     tags: [TPV Training]
+ *     summary: List available trainings (auto-filtered by org modules)
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: List of available training modules }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.get('/trainings', authenticateTokenMiddleware, trainingController.getTrainings)
+
+/**
+ * @openapi
+ * /api/v1/tpv/trainings/progress:
+ *   get:
+ *     tags: [TPV Training]
+ *     summary: Get all progress for current staff member
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: staffId
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Staff training progress }
+ */
+router.get(
+  '/trainings/progress',
+  authenticateTokenMiddleware,
+  validateRequest(getStaffProgressQuerySchema),
+  trainingController.getStaffProgress,
+)
+
+/**
+ * @openapi
+ * /api/v1/tpv/trainings/{trainingId}:
+ *   get:
+ *     tags: [TPV Training]
+ *     summary: Get training detail with steps and quiz
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: trainingId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Training detail with steps and quiz }
+ *       404: { description: Training not found }
+ */
+router.get(
+  '/trainings/:trainingId',
+  authenticateTokenMiddleware,
+  validateRequest(trainingIdParamSchema),
+  trainingController.getTrainingDetail,
+)
+
+/**
+ * @openapi
+ * /api/v1/tpv/trainings/{trainingId}/progress:
+ *   post:
+ *     tags: [TPV Training]
+ *     summary: Update training progress for staff member
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: trainingId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               staffId: { type: string }
+ *               lastStepViewed: { type: integer }
+ *               isCompleted: { type: boolean }
+ *               quizScore: { type: integer }
+ *               quizTotal: { type: integer }
+ *               quizPassed: { type: boolean }
+ *     responses:
+ *       200: { description: Progress updated }
+ *       404: { description: Training not found }
+ */
+router.post(
+  '/trainings/:trainingId/progress',
+  authenticateTokenMiddleware,
+  validateRequest(updateProgressSchema),
+  trainingController.updateProgress,
+)
 
 export default router

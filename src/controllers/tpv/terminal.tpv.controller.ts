@@ -1,8 +1,9 @@
-import { Request, Response, NextFunction } from 'express'
+import { NextFunction, Request, Response } from 'express'
 
+import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
+import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
-import prisma from '@/utils/prismaClient'
 
 /**
  * Terminal TPV Controller
@@ -40,6 +41,8 @@ interface TpvSettings {
   // Home screen button visibility (controlled from dashboard)
   showQuickPayment: boolean // Show "Pago rápido" button on home screen
   showOrderManagement: boolean // Show "Órdenes" button on home screen
+  showMessages: boolean // Show "Mensajes" button on home screen
+  showTrainings: boolean // Show "Entrenamientos" button on home screen
   // Crypto payment option (B4Bit integration)
   showCryptoOption: boolean
 }
@@ -73,6 +76,8 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   // Home screen buttons enabled by default
   showQuickPayment: true,
   showOrderManagement: true,
+  showMessages: true,
+  showTrainings: true,
   // Crypto payment disabled by default
   showCryptoOption: false,
 }
@@ -194,24 +199,60 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       assignedMerchantCount: terminal.assignedMerchantIds.length,
     })
 
-    // Step 2: Fetch assigned merchant accounts with Blumon config
-    const merchantAccounts = await prisma.merchantAccount.findMany({
-      where: {
-        id: { in: terminal.assignedMerchantIds },
-        active: true, // Only return active merchants
-      },
-      select: {
-        id: true,
-        displayName: true,
-        active: true,
-        blumonSerialNumber: true,
-        blumonPosId: true,
-        blumonEnvironment: true,
-        blumonMerchantId: true,
-        credentialsEncrypted: true, // Encrypted credentials
-        providerConfig: true,
-      },
-    })
+    // Step 2: Fetch merchant accounts — use assignedMerchantIds if populated,
+    // otherwise fall back to effective payment config (org→venue inheritance)
+    const merchantSelect = {
+      id: true,
+      displayName: true,
+      active: true,
+      blumonSerialNumber: true,
+      blumonPosId: true,
+      blumonEnvironment: true,
+      blumonMerchantId: true,
+      credentialsEncrypted: true,
+      providerConfig: true,
+    }
+
+    let merchantAccounts: any[]
+
+    if (terminal.assignedMerchantIds.length > 0) {
+      // Terminal has explicit assignments — use them (managed by wizard reconciliation)
+      merchantAccounts = await prisma.merchantAccount.findMany({
+        where: {
+          id: { in: terminal.assignedMerchantIds },
+          active: true,
+        },
+        select: merchantSelect,
+      })
+    } else {
+      // No explicit assignments — fall back to venue/org inheritance
+      const effective = await getEffectivePaymentConfig(terminal.venueId)
+      if (effective) {
+        const { config } = effective
+        const accountIds = [config.primaryAccount?.id, config.secondaryAccount?.id, config.tertiaryAccount?.id].filter(Boolean) as string[]
+
+        merchantAccounts =
+          accountIds.length > 0
+            ? await prisma.merchantAccount.findMany({
+                where: { id: { in: accountIds }, active: true },
+                select: merchantSelect,
+              })
+            : []
+
+        logger.info('[Terminal Config] Used inheritance fallback for merchant accounts', {
+          terminalId: terminal.id,
+          venueId: terminal.venueId,
+          source: effective.source,
+          resolvedCount: merchantAccounts.length,
+        })
+      } else {
+        merchantAccounts = []
+        logger.warn('[Terminal Config] No merchant accounts: terminal has no assignments and no payment config', {
+          terminalId: terminal.id,
+          venueId: terminal.venueId,
+        })
+      }
+    }
 
     logger.debug('[Terminal Config] Merchant accounts fetched', {
       count: merchantAccounts.length,

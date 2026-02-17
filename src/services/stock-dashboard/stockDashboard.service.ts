@@ -319,12 +319,20 @@ class StockDashboardService {
       }
     }
 
-    // Validate category exists
-    const category = await prisma.itemCategory.findUnique({
-      where: { id: categoryId },
+    // Validate category exists and belongs to venue or its org
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
     })
 
-    if (!category || category.venueId !== venueId) {
+    const category = await prisma.itemCategory.findFirst({
+      where: {
+        id: categoryId,
+        OR: [{ venueId }, { organizationId: venue?.organizationId, venueId: null }],
+      },
+    })
+
+    if (!category) {
       return {
         success: false,
         created: 0,
@@ -451,6 +459,100 @@ class StockDashboardService {
 
     // Sort by timestamp descending and limit
     return movements.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()).slice(0, limit)
+  }
+
+  /**
+   * Process CSV upload for org-level bulk item registration
+   */
+  async processBulkUploadOrg(venueId: string, categoryId: string, csvContent: string, createdBy: string): Promise<BulkUploadResult> {
+    // Get org ID from venue
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+
+    if (!venue) {
+      return { success: false, created: 0, duplicates: [], errors: ['Venue not found'], total: 0 }
+    }
+
+    const organizationId = venue.organizationId
+
+    // Validate category is org-level
+    const category = await prisma.itemCategory.findFirst({
+      where: { id: categoryId, organizationId, venueId: null },
+    })
+
+    if (!category) {
+      return { success: false, created: 0, duplicates: [], errors: ['Invalid org-level category'], total: 0 }
+    }
+
+    // Parse CSV content
+    const lines = csvContent
+      .split(/[\r\n,]+/)
+      .map(l => l.trim())
+      .filter(l => l.length > 0)
+
+    if (lines.length === 0) {
+      return { success: false, created: 0, duplicates: [], errors: ['No serial numbers found'], total: 0 }
+    }
+
+    const duplicates: string[] = []
+    const errors: string[] = []
+    let created = 0
+
+    const batchSize = 100
+    for (let i = 0; i < lines.length; i += batchSize) {
+      const batch = lines.slice(i, i + batchSize)
+
+      await prisma.$transaction(async tx => {
+        for (const serialNumber of batch) {
+          if (serialNumber.length < 3 || serialNumber.length > 100) {
+            errors.push(`Invalid serial number: ${serialNumber}`)
+            continue
+          }
+
+          // Check org-level duplicates
+          const existingOrg = await tx.serializedItem.findFirst({
+            where: { organizationId, serialNumber },
+          })
+
+          if (existingOrg) {
+            duplicates.push(serialNumber)
+            continue
+          }
+
+          // Check legacy venue-level duplicates in same org
+          const existingVenue = await tx.serializedItem.findFirst({
+            where: { serialNumber, venue: { organizationId } },
+          })
+
+          if (existingVenue) {
+            duplicates.push(serialNumber)
+            continue
+          }
+
+          await tx.serializedItem.create({
+            data: {
+              organizationId,
+              venueId: null,
+              categoryId,
+              serialNumber,
+              createdBy,
+              status: 'AVAILABLE',
+            },
+          })
+          created++
+        }
+      })
+    }
+
+    return {
+      success: created > 0 || (errors.length === 0 && duplicates.length === lines.length),
+      created,
+      duplicates,
+      errors,
+      total: lines.length,
+    }
   }
 }
 

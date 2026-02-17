@@ -10,15 +10,15 @@ import { AppEnvironment, UpdateMode } from '@prisma/client'
  * Part of the 3-layer cache invalidation strategy (Layer 2: PULL via heartbeat)
  *
  * Version is based on:
- * - Number of assigned merchants
- * - Most recent updatedAt timestamp of any assigned merchant
+ * - Number of effective merchants (from assignedMerchantIds OR payment config inheritance)
+ * - Most recent updatedAt timestamp of any merchant OR payment config
  *
  * This allows Android to compare its cached config version with the server's
  * and refresh if they don't match (handles missed Socket.IO events)
  */
 async function getMerchantConfigVersion(terminalId: string): Promise<string | null> {
   try {
-    // Find terminal and its assigned merchants
+    // Find terminal with venue info for inheritance fallback
     const terminal = await prisma.terminal.findFirst({
       where: {
         OR: [
@@ -29,36 +29,79 @@ async function getMerchantConfigVersion(terminalId: string): Promise<string | nu
       },
       select: {
         assignedMerchantIds: true,
+        venueId: true,
       },
     })
 
-    if (!terminal || terminal.assignedMerchantIds.length === 0) {
-      return null // No merchants assigned
+    if (!terminal) {
+      return null
     }
 
-    // Get the latest updatedAt from all assigned merchants
+    let merchantIds: string[] = terminal.assignedMerchantIds
+
+    // If no explicit assignments, resolve from payment config inheritance
+    if (merchantIds.length === 0 && terminal.venueId) {
+      // Check venue payment config first, then org
+      const venueConfig = await prisma.venuePaymentConfig.findUnique({
+        where: { venueId: terminal.venueId },
+        select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true, updatedAt: true },
+      })
+
+      if (venueConfig) {
+        merchantIds = [venueConfig.primaryAccountId, venueConfig.secondaryAccountId, venueConfig.tertiaryAccountId].filter(
+          Boolean,
+        ) as string[]
+      } else {
+        // Check org config
+        const venue = await prisma.venue.findUnique({
+          where: { id: terminal.venueId },
+          select: { organizationId: true },
+        })
+        if (venue?.organizationId) {
+          const orgConfig = await prisma.organizationPaymentConfig.findUnique({
+            where: { organizationId: venue.organizationId },
+            select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true, updatedAt: true },
+          })
+          if (orgConfig) {
+            merchantIds = [orgConfig.primaryAccountId, orgConfig.secondaryAccountId, orgConfig.tertiaryAccountId].filter(
+              Boolean,
+            ) as string[]
+          }
+        }
+      }
+    }
+
+    if (merchantIds.length === 0) {
+      return null
+    }
+
+    // Get the latest updatedAt from all resolved merchants
     const merchants = await prisma.merchantAccount.findMany({
-      where: {
-        id: { in: terminal.assignedMerchantIds },
-      },
-      select: {
-        id: true,
-        updatedAt: true,
-      },
-      orderBy: {
-        updatedAt: 'desc',
-      },
-      take: 1, // Only need the most recent
+      where: { id: { in: merchantIds } },
+      select: { id: true, updatedAt: true },
+      orderBy: { updatedAt: 'desc' },
+      take: 1,
     })
 
     if (merchants.length === 0) {
       return null
     }
 
+    // Also factor in payment config updatedAt for change detection
+    let latestTimestamp = merchants[0].updatedAt.getTime()
+
+    if (terminal.venueId) {
+      const venueConfig = await prisma.venuePaymentConfig.findUnique({
+        where: { venueId: terminal.venueId },
+        select: { updatedAt: true },
+      })
+      if (venueConfig) {
+        latestTimestamp = Math.max(latestTimestamp, venueConfig.updatedAt.getTime())
+      }
+    }
+
     // Version format: "{count}-{latestTimestamp}"
-    // Example: "2-1701532800000" means 2 merchants, latest update at timestamp
-    const latestTimestamp = merchants[0].updatedAt.getTime()
-    return `${terminal.assignedMerchantIds.length}-${latestTimestamp}`
+    return `${merchantIds.length}-${latestTimestamp}`
   } catch (error) {
     logger.error('Failed to calculate merchant config version', {
       terminalId,

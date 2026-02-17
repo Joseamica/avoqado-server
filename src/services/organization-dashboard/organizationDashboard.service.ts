@@ -1041,10 +1041,12 @@ class OrganizationDashboardService {
     const venueCountMap = new Map<string, number>()
 
     for (const row of countsByVenueCategory) {
-      const key = `${row.venueId}:${row.categoryId}`
+      const vid = row.venueId // always non-null here (filtered by venueId IN)
+      if (!vid) continue
+      const key = `${vid}:${row.categoryId}`
       countMap.set(key, row._count)
       totalPieces += row._count
-      venueCountMap.set(row.venueId, (venueCountMap.get(row.venueId) || 0) + row._count)
+      venueCountMap.set(vid, (venueCountMap.get(vid) || 0) + row._count)
     }
 
     // Calculate total value using pre-fetched counts
