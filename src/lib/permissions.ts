@@ -722,6 +722,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Org-level management
     'goals:org-manage', // Manage org-level sales goal defaults
     'inventory:org-manage', // Manage org-level item categories & serialized items
+    'attendance:org-manage', // Manage org-level attendance defaults (check-in time, lateness, geofence)
     // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
   ],
 

@@ -6,9 +6,10 @@
  * IMPORTANT: All date calculations use venue timezone (America/Mexico_City by default)
  * to ensure "today", "this week", "this month" match the business's operating timezone.
  */
-import { Prisma } from '@prisma/client'
-import { endOfDay, startOfDay } from 'date-fns'
+import { Prisma, StaffRole } from '@prisma/client'
+import { eachDayOfInterval, endOfDay, format, startOfDay } from 'date-fns'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { ROLE_HIERARCHY } from '../../lib/permissions'
 import {
   DEFAULT_TIMEZONE,
   parseDbDateRange,
@@ -695,12 +696,17 @@ class OrganizationDashboardService {
     // Get all venues
     const venues = await prisma.venue.findMany({
       where: { organizationId: orgId, status: 'ACTIVE' },
-      select: { id: true, name: true, latitude: true, longitude: true },
+      select: { id: true, name: true, latitude: true, longitude: true, settings: { select: { geofenceRadiusMeters: true } } },
     })
 
     const venueIds = venues.map(v => v.id)
     const venuesWithGps = venues.filter(v => v.latitude && v.longitude)
     const venuesWithGpsIds = venuesWithGps.map(v => v.id)
+
+    // Fetch org attendance config for geofence fallback
+    const orgAttendanceConfig = await prisma.organizationAttendanceConfig.findUnique({
+      where: { organizationId: orgId },
+    })
 
     // 5 bulk queries replace all per-venue queries
     const [checkInsByVenue, pendingDepositsByVenue, allAlertConfigs, stockLevelsByVenueCategory, gpsEntries] = await Promise.all([
@@ -826,11 +832,14 @@ class OrganizationDashboardService {
         Number(entry.clockInLongitude),
       )
 
-      if (distance > 0.5) {
+      // Resolve geofence: venue config > org config > 500m default
+      const radiusKm = ((venue as any).settings?.geofenceRadiusMeters ?? orgAttendanceConfig?.geofenceRadiusMeters ?? 500) / 1000
+
+      if (distance > radiusKm) {
         anomalies.push({
           id: `gps-violation-${entry.id}`,
           type: 'GPS_VIOLATION',
-          severity: distance > 1 ? 'CRITICAL' : 'WARNING',
+          severity: distance > radiusKm * 2 ? 'CRITICAL' : 'WARNING',
           storeId: venue.id,
           storeName: venue.name,
           title: 'Violación GPS',
@@ -2699,6 +2708,409 @@ class OrganizationDashboardService {
     })
 
     return { tempPassword, message: 'Password reset successfully. Share the temporary password securely.' }
+  }
+
+  // ==========================================
+  // HEATMAPS (Attendance & Sales)
+  // ==========================================
+
+  /**
+   * Get scoped staff/venues for heatmap queries based on requesting user's role.
+   * - SUPERADMIN/OWNER: All staff in org
+   * - ADMIN: All staff with role < ADMIN
+   * - MANAGER: Only staff in their assigned venues with role < MANAGER
+   */
+  private async getHeatmapScope(orgId: string, requestingRole: string, requestingStaffId: string, filterVenueId?: string) {
+    const roleHierarchyValue = ROLE_HIERARCHY[requestingRole as StaffRole] ?? 0
+
+    // Determine which venues this user can see
+    let allowedVenueIds: string[]
+
+    if (roleHierarchyValue >= ROLE_HIERARCHY.OWNER) {
+      // OWNER/SUPERADMIN: all venues in org
+      const venues = await prisma.venue.findMany({
+        where: { organizationId: orgId },
+        select: { id: true },
+      })
+      allowedVenueIds = venues.map(v => v.id)
+    } else if (requestingRole === 'ADMIN') {
+      // ADMIN: all venues in org
+      const venues = await prisma.venue.findMany({
+        where: { organizationId: orgId },
+        select: { id: true },
+      })
+      allowedVenueIds = venues.map(v => v.id)
+    } else {
+      // MANAGER or below: only their assigned venues
+      const myVenues = await prisma.staffVenue.findMany({
+        where: { staffId: requestingStaffId, venue: { organizationId: orgId }, active: true },
+        select: { venueId: true },
+      })
+      allowedVenueIds = myVenues.map(v => v.venueId)
+    }
+
+    // Apply venue filter if provided
+    if (filterVenueId) {
+      allowedVenueIds = allowedVenueIds.filter(id => id === filterVenueId)
+    }
+
+    if (allowedVenueIds.length === 0) {
+      return { staffVenues: [], venueSettingsMap: new Map(), orgAttendanceConfig: null }
+    }
+
+    // Fetch staff in allowed venues, filtering by role hierarchy
+    const staffVenues = await prisma.staffVenue.findMany({
+      where: {
+        venueId: { in: allowedVenueIds },
+        active: true,
+        // MANAGER: only see staff with lower role
+        ...(roleHierarchyValue < ROLE_HIERARCHY.OWNER
+          ? { role: { in: Object.keys(ROLE_HIERARCHY).filter(r => ROLE_HIERARCHY[r as StaffRole] < roleHierarchyValue) as StaffRole[] } }
+          : {}),
+      },
+      select: {
+        staffId: true,
+        venueId: true,
+        role: true,
+        staff: { select: { firstName: true, lastName: true } },
+        venue: { select: { name: true, state: true, timezone: true } },
+      },
+    })
+
+    // Fetch venue settings + org attendance config for lateness thresholds
+    const [settings, orgAttendanceConfig] = await Promise.all([
+      prisma.venueSettings.findMany({
+        where: { venueId: { in: allowedVenueIds } },
+        select: { venueId: true, expectedCheckInTime: true, latenessThresholdMinutes: true },
+      }),
+      prisma.organizationAttendanceConfig.findUnique({
+        where: { organizationId: orgId },
+      }),
+    ])
+    // Resolve: venue config > org config > hardcoded defaults
+    const venueSettingsMap = new Map(
+      settings.map(s => [s.venueId, {
+        expectedCheckInTime: s.expectedCheckInTime ?? orgAttendanceConfig?.expectedCheckInTime ?? '09:00',
+        latenessThresholdMinutes: s.latenessThresholdMinutes ?? orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
+      }]),
+    )
+
+    const mapped = staffVenues.map(sv => ({
+      staffId: sv.staffId,
+      staffName: `${sv.staff.firstName} ${sv.staff.lastName}`,
+      venueId: sv.venueId,
+      venueName: sv.venue.name,
+      venueState: sv.venue.state || '',
+      venueTimezone: sv.venue.timezone || DEFAULT_TIMEZONE,
+    }))
+
+    return { staffVenues: mapped, venueSettingsMap, orgAttendanceConfig }
+  }
+
+  /**
+   * Attendance Heatmap — matrix of staff × day showing present/late/absent
+   */
+  async getAttendanceHeatmap(
+    orgId: string,
+    startDateStr: string,
+    endDateStr: string,
+    requestingRole: string,
+    requestingStaffId: string,
+    filterVenueId?: string,
+  ) {
+    // Guard: max 90 days
+    const start = new Date(startDateStr)
+    const end = new Date(endDateStr)
+    const diffDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))
+    if (diffDays > 90) {
+      throw new Error('Date range cannot exceed 90 days')
+    }
+
+    const { staffVenues, venueSettingsMap, orgAttendanceConfig } = await this.getHeatmapScope(orgId, requestingRole, requestingStaffId, filterVenueId)
+
+    if (staffVenues.length === 0) {
+      return { staff: [], summary: { byDay: [] } }
+    }
+
+    const staffIds = [...new Set(staffVenues.map(sv => sv.staffId))]
+    const venueIds = [...new Set(staffVenues.map(sv => sv.venueId))]
+
+    // Convert date range to UTC for query (use DEFAULT_TIMEZONE for the range boundaries)
+    const rangeStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
+    const rangeEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
+
+    // Fetch all time entries in range
+    const timeEntries = await prisma.timeEntry.findMany({
+      where: {
+        staffId: { in: staffIds },
+        venueId: { in: venueIds },
+        clockInTime: { gte: rangeStart, lte: rangeEnd },
+      },
+      select: {
+        staffId: true,
+        venueId: true,
+        clockInTime: true,
+        clockOutTime: true,
+      },
+    })
+
+    // Enumerate all days in the range
+    const allDays = eachDayOfInterval({ start, end })
+    const dayStrings = allDays.map(d => format(d, 'yyyy-MM-dd'))
+
+    // Index time entries by staffId:venueId:date
+    const entryIndex = new Map<string, { clockInTime: Date; clockOutTime: Date | null }>()
+    for (const te of timeEntries) {
+      // Get the venue timezone for proper day assignment
+      const sv = staffVenues.find(s => s.staffId === te.staffId && s.venueId === te.venueId)
+      const tz = sv?.venueTimezone || DEFAULT_TIMEZONE
+      const localDate = format(toZonedTime(te.clockInTime, tz), 'yyyy-MM-dd')
+      const key = `${te.staffId}:${te.venueId}:${localDate}`
+      // Keep the earliest entry per day
+      if (!entryIndex.has(key)) {
+        entryIndex.set(key, { clockInTime: te.clockInTime, clockOutTime: te.clockOutTime })
+      }
+    }
+
+    // Today in venue timezone (to detect future days)
+    const todayStr = format(toZonedTime(new Date(), DEFAULT_TIMEZONE), 'yyyy-MM-dd')
+
+    // Build staff rows
+    const staffRows = staffVenues.map(sv => {
+      const settings = venueSettingsMap.get(sv.venueId) || {
+        expectedCheckInTime: orgAttendanceConfig?.expectedCheckInTime ?? '09:00',
+        latenessThresholdMinutes: orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
+      }
+      const [expectedHour, expectedMin] = settings.expectedCheckInTime.split(':').map(Number)
+      const thresholdMinutes = settings.latenessThresholdMinutes
+
+      const days = dayStrings.map(dateStr => {
+        const key = `${sv.staffId}:${sv.venueId}:${dateStr}`
+        const entry = entryIndex.get(key)
+
+        // Future day
+        if (dateStr > todayStr) {
+          return { date: dateStr, status: 'future' as const, clockInTime: null, clockOutTime: null }
+        }
+
+        if (!entry) {
+          return { date: dateStr, status: 'absent' as const, clockInTime: null, clockOutTime: null }
+        }
+
+        // Determine lateness: convert clockInTime to venue local time
+        const localClockIn = toZonedTime(entry.clockInTime, sv.venueTimezone)
+        const clockInMinutes = localClockIn.getHours() * 60 + localClockIn.getMinutes()
+        const deadlineMinutes = expectedHour * 60 + expectedMin + thresholdMinutes
+
+        const status = clockInMinutes > deadlineMinutes ? ('late' as const) : ('present' as const)
+
+        return {
+          date: dateStr,
+          status,
+          clockInTime: entry.clockInTime.toISOString(),
+          clockOutTime: entry.clockOutTime?.toISOString() || null,
+        }
+      })
+
+      return {
+        staffId: sv.staffId,
+        staffName: sv.staffName,
+        venueId: sv.venueId,
+        venueName: sv.venueName,
+        venueState: sv.venueState,
+        days,
+      }
+    })
+
+    // Build summary by day
+    const byDay = dayStrings.map(dateStr => {
+      let present = 0
+      let late = 0
+      let absent = 0
+      for (const row of staffRows) {
+        const day = row.days.find(d => d.date === dateStr)
+        if (day?.status === 'present') present++
+        else if (day?.status === 'late') late++
+        else if (day?.status === 'absent') absent++
+      }
+      return { date: dateStr, present, late, absent }
+    })
+
+    return { staff: staffRows, summary: { byDay } }
+  }
+
+  /**
+   * Sales Heatmap — matrix of staff × day showing sales count & amount
+   */
+  async getSalesHeatmap(
+    orgId: string,
+    startDateStr: string,
+    endDateStr: string,
+    requestingRole: string,
+    requestingStaffId: string,
+    filterVenueId?: string,
+  ) {
+    // Guard: max 90 days
+    const start = new Date(startDateStr)
+    const end = new Date(endDateStr)
+    const diffDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))
+    if (diffDays > 90) {
+      throw new Error('Date range cannot exceed 90 days')
+    }
+
+    const { staffVenues } = await this.getHeatmapScope(orgId, requestingRole, requestingStaffId, filterVenueId)
+
+    if (staffVenues.length === 0) {
+      return { staff: [], summary: { byDay: [], byVenue: [] } }
+    }
+
+    const staffIds = [...new Set(staffVenues.map(sv => sv.staffId))]
+    const venueIds = [...new Set(staffVenues.map(sv => sv.venueId))]
+
+    // Convert date range to UTC
+    const rangeStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
+    const rangeEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
+
+    // Fetch completed payments
+    const payments = await prisma.payment.findMany({
+      where: {
+        processedById: { in: staffIds, not: null },
+        venueId: { in: venueIds },
+        status: 'COMPLETED',
+        createdAt: { gte: rangeStart, lte: rangeEnd },
+      },
+      select: {
+        processedById: true,
+        venueId: true,
+        amount: true,
+        createdAt: true,
+      },
+    })
+
+    // Enumerate days
+    const allDays = eachDayOfInterval({ start, end })
+    const dayStrings = allDays.map(d => format(d, 'yyyy-MM-dd'))
+
+    // Index payments by staffId:venueId:date
+    const salesIndex = new Map<string, { count: number; amount: number }>()
+    for (const p of payments) {
+      if (!p.processedById) continue
+      // Find the venue timezone
+      const sv = staffVenues.find(s => s.staffId === p.processedById && s.venueId === p.venueId)
+      const tz = sv?.venueTimezone || DEFAULT_TIMEZONE
+      const localDate = format(toZonedTime(p.createdAt, tz), 'yyyy-MM-dd')
+      const key = `${p.processedById}:${p.venueId}:${localDate}`
+      const existing = salesIndex.get(key) || { count: 0, amount: 0 }
+      existing.count++
+      existing.amount += Number(p.amount) || 0
+      salesIndex.set(key, existing)
+    }
+
+    // Build staff rows
+    const staffRows = staffVenues.map(sv => {
+      const days = dayStrings.map(dateStr => {
+        const key = `${sv.staffId}:${sv.venueId}:${dateStr}`
+        const sales = salesIndex.get(key) || { count: 0, amount: 0 }
+        return { date: dateStr, salesCount: sales.count, salesAmount: sales.amount }
+      })
+
+      const totalSales = days.reduce((sum, d) => sum + d.salesAmount, 0)
+      const totalCount = days.reduce((sum, d) => sum + d.salesCount, 0)
+      const workingDays = days.filter(d => d.salesCount > 0).length
+      const avgDailySales = workingDays > 0 ? totalSales / workingDays : 0
+
+      return {
+        staffId: sv.staffId,
+        staffName: sv.staffName,
+        venueId: sv.venueId,
+        venueName: sv.venueName,
+        venueState: sv.venueState,
+        days,
+        totalSales,
+        totalCount,
+        avgDailySales,
+      }
+    })
+
+    // Summary by day
+    const byDay = dayStrings.map(dateStr => {
+      let totalCount = 0
+      let totalAmount = 0
+      for (const row of staffRows) {
+        const day = row.days.find(d => d.date === dateStr)
+        if (day) {
+          totalCount += day.salesCount
+          totalAmount += day.salesAmount
+        }
+      }
+      return { date: dateStr, totalCount, totalAmount }
+    })
+
+    // Summary by venue
+    const venueMap = new Map<
+      string,
+      { venueId: string; venueName: string; total: number; byDay: Array<{ date: string; totalCount: number; totalAmount: number }> }
+    >()
+    for (const row of staffRows) {
+      if (!venueMap.has(row.venueId)) {
+        venueMap.set(row.venueId, {
+          venueId: row.venueId,
+          venueName: row.venueName,
+          total: 0,
+          byDay: dayStrings.map(d => ({ date: d, totalCount: 0, totalAmount: 0 })),
+        })
+      }
+      const venue = venueMap.get(row.venueId)!
+      venue.total += row.totalSales
+      for (const day of row.days) {
+        const vDay = venue.byDay.find(vd => vd.date === day.date)
+        if (vDay) {
+          vDay.totalCount += day.salesCount
+          vDay.totalAmount += day.salesAmount
+        }
+      }
+    }
+
+    return {
+      staff: staffRows,
+      summary: {
+        byDay,
+        byVenue: Array.from(venueMap.values()),
+      },
+    }
+  }
+  // ==========================================================================
+  // ORG ATTENDANCE CONFIG
+  // ==========================================================================
+
+  async getOrgAttendanceConfig(orgId: string) {
+    return prisma.organizationAttendanceConfig.findUnique({
+      where: { organizationId: orgId },
+    })
+  }
+
+  async upsertOrgAttendanceConfig(
+    orgId: string,
+    data: {
+      expectedCheckInTime?: string
+      latenessThresholdMinutes?: number
+      geofenceRadiusMeters?: number
+    },
+  ) {
+    return prisma.organizationAttendanceConfig.upsert({
+      where: { organizationId: orgId },
+      create: {
+        organizationId: orgId,
+        ...data,
+      },
+      update: data,
+    })
+  }
+
+  async deleteOrgAttendanceConfig(orgId: string) {
+    await prisma.organizationAttendanceConfig.deleteMany({
+      where: { organizationId: orgId },
+    })
   }
 }
 

@@ -589,6 +589,10 @@ export interface VenueTpvSettings {
   enableBarcodeScanner: boolean
   requireDepositPhoto: boolean
   requireFacadePhoto: boolean
+  // Attendance — lateness detection (stored in VenueSettings, not TpvConfig)
+  expectedCheckInTime: string
+  latenessThresholdMinutes: number
+  geofenceRadiusMeters: number
 }
 
 const DEFAULT_VENUE_TPV_SETTINGS: VenueTpvSettings = {
@@ -598,6 +602,9 @@ const DEFAULT_VENUE_TPV_SETTINGS: VenueTpvSettings = {
   enableBarcodeScanner: true,
   requireDepositPhoto: false,
   requireFacadePhoto: false,
+  expectedCheckInTime: '09:00',
+  latenessThresholdMinutes: 30,
+  geofenceRadiusMeters: 500,
 }
 
 /**
@@ -612,14 +619,25 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
     throw new NotFoundError('El ID del Venue es requerido.')
   }
 
-  const terminal = await prisma.terminal.findFirst({
-    where: { venueId },
-    select: { config: true },
-    orderBy: { updatedAt: 'desc' },
-  })
+  const [terminal, venueSettings] = await Promise.all([
+    prisma.terminal.findFirst({
+      where: { venueId },
+      select: { config: true },
+      orderBy: { updatedAt: 'desc' },
+    }),
+    prisma.venueSettings.findFirst({
+      where: { venueId },
+      select: { expectedCheckInTime: true, latenessThresholdMinutes: true, geofenceRadiusMeters: true },
+    }),
+  ])
 
   if (!terminal) {
-    return { ...DEFAULT_VENUE_TPV_SETTINGS }
+    return {
+      ...DEFAULT_VENUE_TPV_SETTINGS,
+      expectedCheckInTime: venueSettings?.expectedCheckInTime ?? DEFAULT_VENUE_TPV_SETTINGS.expectedCheckInTime,
+      latenessThresholdMinutes: venueSettings?.latenessThresholdMinutes ?? DEFAULT_VENUE_TPV_SETTINGS.latenessThresholdMinutes,
+      geofenceRadiusMeters: venueSettings?.geofenceRadiusMeters ?? DEFAULT_VENUE_TPV_SETTINGS.geofenceRadiusMeters,
+    }
   }
 
   const savedSettings = (terminal.config as any)?.settings || {}
@@ -635,6 +653,9 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
     enableBarcodeScanner: savedSettings.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
     requireDepositPhoto: savedSettings.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
     requireFacadePhoto: savedSettings.requireFacadePhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireFacadePhoto,
+    expectedCheckInTime: venueSettings?.expectedCheckInTime ?? DEFAULT_VENUE_TPV_SETTINGS.expectedCheckInTime,
+    latenessThresholdMinutes: venueSettings?.latenessThresholdMinutes ?? DEFAULT_VENUE_TPV_SETTINGS.latenessThresholdMinutes,
+    geofenceRadiusMeters: venueSettings?.geofenceRadiusMeters ?? DEFAULT_VENUE_TPV_SETTINGS.geofenceRadiusMeters,
   }
 }
 
@@ -657,39 +678,56 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
     throw new NotFoundError('No hay terminales en este venue.')
   }
 
-  // 2. Build the settings to merge
-  const settingsToMerge: Partial<TpvSettings> = { ...settingsUpdate }
+  // 2. Separate venue-level VenueSettings fields from TpvConfig fields
+  const { expectedCheckInTime, latenessThresholdMinutes, geofenceRadiusMeters, ...tpvFields } = settingsUpdate
+  const settingsToMerge: Partial<TpvSettings> = { ...tpvFields }
 
   // When attendanceTracking changes, set clock-in photo + login requirement
   // Note: requireClockOutPhoto is NOT set here — deposit photo replaces clock-out selfie
-  if (settingsUpdate.attendanceTracking !== undefined) {
-    settingsToMerge.requireClockInPhoto = settingsUpdate.attendanceTracking
-    settingsToMerge.requireClockInToLogin = settingsUpdate.attendanceTracking
-    settingsToMerge.attendanceTracking = settingsUpdate.attendanceTracking
+  if (tpvFields.attendanceTracking !== undefined) {
+    settingsToMerge.requireClockInPhoto = tpvFields.attendanceTracking
+    settingsToMerge.requireClockInToLogin = tpvFields.attendanceTracking
+    settingsToMerge.attendanceTracking = tpvFields.attendanceTracking
   }
 
-  // 3. Update all terminals in a transaction
-  await prisma.$transaction(
-    terminals.map(terminal => {
-      const existingConfig = (terminal.config as any) || {}
-      const existingSettings = existingConfig.settings || {}
-      const updatedConfig = {
-        ...existingConfig,
-        settings: {
-          ...existingSettings,
-          ...settingsToMerge,
-        },
-      }
+  // 3. Update VenueSettings if attendance config fields are provided
+  const venueSettingsData: Record<string, any> = {}
+  if (expectedCheckInTime !== undefined) venueSettingsData.expectedCheckInTime = expectedCheckInTime
+  if (latenessThresholdMinutes !== undefined) venueSettingsData.latenessThresholdMinutes = latenessThresholdMinutes
+  if (geofenceRadiusMeters !== undefined) venueSettingsData.geofenceRadiusMeters = geofenceRadiusMeters
 
-      return prisma.terminal.update({
-        where: { id: terminal.id },
-        data: {
-          config: updatedConfig,
-          updatedAt: new Date(),
-        },
-      })
-    }),
-  )
+  if (Object.keys(venueSettingsData).length > 0) {
+    await prisma.venueSettings.upsert({
+      where: { venueId },
+      update: venueSettingsData,
+      create: { venueId, ...venueSettingsData },
+    })
+  }
+
+  // 4. Update all terminals in a transaction (only if TpvConfig fields changed)
+  if (Object.keys(settingsToMerge).length > 0) {
+    await prisma.$transaction(
+      terminals.map(terminal => {
+        const existingConfig = (terminal.config as any) || {}
+        const existingSettings = existingConfig.settings || {}
+        const updatedConfig = {
+          ...existingConfig,
+          settings: {
+            ...existingSettings,
+            ...settingsToMerge,
+          },
+        }
+
+        return prisma.terminal.update({
+          where: { id: terminal.id },
+          data: {
+            config: updatedConfig,
+            updatedAt: new Date(),
+          },
+        })
+      }),
+    )
+  }
 
   logger.info(`Venue-level TPV settings updated for venue ${venueId} (${terminals.length} terminals)`, {
     settings: settingsUpdate,

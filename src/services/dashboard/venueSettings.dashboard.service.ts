@@ -28,6 +28,11 @@ export const DEFAULT_VENUE_SETTINGS = {
   enableShifts: true, // Enable/disable shift system for venue
   requirePinLogin: true,
 
+  // Attendance — lateness detection
+  expectedCheckInTime: '09:00', // "HH:mm" — expected check-in time
+  latenessThresholdMinutes: 30, // Minutes of tolerance after expectedCheckInTime
+  geofenceRadiusMeters: 500, // Max distance (meters) from venue for valid clock-in
+
   // Auto Clock-Out (HR automation - Square-style)
   autoClockOutEnabled: false, // Enable automatic clock-out at fixed time
   autoClockOutTime: null as string | null, // "HH:mm" format - e.g., "03:00" for 3 AM
@@ -123,6 +128,9 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     shiftDuration: DEFAULT_VENUE_SETTINGS.shiftDuration,
     enableShifts: DEFAULT_VENUE_SETTINGS.enableShifts,
     requirePinLogin: DEFAULT_VENUE_SETTINGS.requirePinLogin,
+    // Attendance — lateness detection
+    expectedCheckInTime: DEFAULT_VENUE_SETTINGS.expectedCheckInTime,
+    latenessThresholdMinutes: DEFAULT_VENUE_SETTINGS.latenessThresholdMinutes,
     // Auto Clock-Out
     autoClockOutEnabled: DEFAULT_VENUE_SETTINGS.autoClockOutEnabled,
     autoClockOutTime: DEFAULT_VENUE_SETTINGS.autoClockOutTime,

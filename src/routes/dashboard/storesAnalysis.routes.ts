@@ -1255,4 +1255,157 @@ router.delete('/org-goals/:goalId', orgGoalAccess, async (req: Request, res: Res
   }
 })
 
+// =============================================================================
+// ORG-LEVEL ATTENDANCE CONFIG ENDPOINTS
+// Organization-level attendance defaults (check-in time, lateness, geofence).
+// Requires attendance:org-manage permission (OWNER-only by default).
+// =============================================================================
+
+const orgAttendanceAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true, permission: 'attendance:org-manage' })]
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/org-attendance-config
+ * Returns: Org-level attendance config (or null if not set)
+ */
+router.get('/org-attendance-config', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const config = await organizationDashboardService.getOrgAttendanceConfig(orgId)
+    res.json({ success: true, data: config })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PUT /dashboard/venues/:venueId/stores-analysis/org-attendance-config
+ * Creates or updates org-level attendance config
+ */
+router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const { expectedCheckInTime, latenessThresholdMinutes, geofenceRadiusMeters } = req.body
+    const config = await organizationDashboardService.upsertOrgAttendanceConfig(orgId, {
+      ...(expectedCheckInTime !== undefined && { expectedCheckInTime }),
+      ...(latenessThresholdMinutes !== undefined && { latenessThresholdMinutes: Number(latenessThresholdMinutes) }),
+      ...(geofenceRadiusMeters !== undefined && { geofenceRadiusMeters: Number(geofenceRadiusMeters) }),
+    })
+    res.json({ success: true, data: config })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * DELETE /dashboard/venues/:venueId/stores-analysis/org-attendance-config
+ * Deletes org-level attendance config (venues fall back to hardcoded defaults)
+ */
+router.delete('/org-attendance-config', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    await organizationDashboardService.deleteOrgAttendanceConfig(orgId)
+    res.json({ success: true, data: { message: 'Org attendance config deleted' } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// =============================================================================
+// HEATMAP ENDPOINTS
+// Attendance and sales heatmaps for supervisor view (staff × day matrix)
+// =============================================================================
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/attendance-heatmap
+ * Returns: Staff × day matrix with present/late/absent status
+ * Query: startDate (required), endDate (required), filterVenueId (optional)
+ */
+router.get('/attendance-heatmap', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const { startDate, endDate, filterVenueId } = req.query
+    if (!startDate || !endDate) {
+      return res.status(400).json({ success: false, error: 'missing_params', message: 'startDate and endDate are required' })
+    }
+
+    // SUPERADMIN bypass: req.access is undefined for SUPERADMIN
+    const role = (req as any).access?.role ?? 'SUPERADMIN'
+    const staffId = (req as any).authContext?.staffId || (req as any).authContext?.userId
+
+    const data = await organizationDashboardService.getAttendanceHeatmap(
+      orgId,
+      startDate as string,
+      endDate as string,
+      role,
+      staffId,
+      filterVenueId as string | undefined,
+    )
+
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/sales-heatmap
+ * Returns: Staff × day matrix with sales count and amount
+ * Query: startDate (required), endDate (required), filterVenueId (optional)
+ */
+router.get('/sales-heatmap', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const { startDate, endDate, filterVenueId } = req.query
+    if (!startDate || !endDate) {
+      return res.status(400).json({ success: false, error: 'missing_params', message: 'startDate and endDate are required' })
+    }
+
+    const role = (req as any).access?.role ?? 'SUPERADMIN'
+    const staffId = (req as any).authContext?.staffId || (req as any).authContext?.userId
+
+    const data = await organizationDashboardService.getSalesHeatmap(
+      orgId,
+      startDate as string,
+      endDate as string,
+      role,
+      staffId,
+      filterVenueId as string | undefined,
+    )
+
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+})
+
 export default router

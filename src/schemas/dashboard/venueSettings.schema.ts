@@ -45,6 +45,14 @@ export const UpdateVenueSettingsSchema = z.object({
     requirePinLogin: z.boolean().optional(),
     requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
 
+    // Attendance — lateness detection
+    expectedCheckInTime: z
+      .string()
+      .regex(/^\d{2}:\d{2}$/)
+      .optional(),
+    latenessThresholdMinutes: z.number().int().min(0).max(120).optional(),
+    geofenceRadiusMeters: z.number().int().min(50).max(5000).optional(),
+
     // Reviews
     autoReplyReviews: z.boolean().optional(),
     notifyBadReviews: z.boolean().optional(),

@@ -104,6 +104,7 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'inventory:read': 'AVOQADO_INVENTORY',
   'inventory:write': 'AVOQADO_INVENTORY',
   'inventory:org-manage': 'SERIALIZED_INVENTORY',
+  'attendance:org-manage': 'STORES_ANALYSIS',
 
   // Customers
   'customers:read': 'AVOQADO_CUSTOMERS',

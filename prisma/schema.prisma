@@ -69,6 +69,9 @@ model Organization {
   itemCategories  ItemCategory[]
   serializedItems SerializedItem[]
 
+  // Organization-level attendance config defaults (inherited by venues without custom config)
+  attendanceConfig OrganizationAttendanceConfig?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -351,6 +354,11 @@ model VenueSettings {
 
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
+
+  // Attendance — lateness detection (nullable = inherit from org config)
+  expectedCheckInTime      String? // "HH:mm" — expected check-in time (null = use org default)
+  latenessThresholdMinutes Int?    // Minutes of tolerance after expectedCheckInTime (null = use org default)
+  geofenceRadiusMeters     Int?    // Max distance (meters) from venue for valid clock-in (null = use org default)
 
   // Auto Clock-Out (HR automation - Square-style)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
@@ -6716,6 +6724,21 @@ model OrganizationSalesGoalConfig {
 
   @@unique([organizationId, period, goalType])
   @@index([organizationId])
+}
+
+// Organization-level attendance config defaults (inherited by venues without custom config)
+// Venues with null attendance fields inherit from this; venues with explicit values override
+model OrganizationAttendanceConfig {
+  id             String       @id @default(cuid())
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  expectedCheckInTime      String @default("09:00") // "HH:mm" — expected check-in time
+  latenessThresholdMinutes Int    @default(30)       // Minutes of tolerance after expectedCheckInTime
+  geofenceRadiusMeters     Int    @default(500)      // Max distance (meters) from venue for valid clock-in
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // Organization-level payout configuration defaults (inherited by venues)
