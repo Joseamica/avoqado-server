@@ -158,9 +158,9 @@ export async function getOnlineTerminals(req: Request, res: Response) {
   try {
     const { venueId } = req.params
 
-    const terminals = terminalRegistry.getPaymentReadyTerminals(venueId)
+    const terminals = terminalRegistry.getOnlineTerminals(venueId)
 
-    logger.info(`📡 [API] getOnlineTerminals for venue ${venueId}: found ${terminals.length} payment-ready`, {
+    logger.info(`📡 [API] getOnlineTerminals for venue ${venueId}: found ${terminals.length}`, {
       venueId,
       terminalIds: terminals.map(t => t.terminalId),
     })
