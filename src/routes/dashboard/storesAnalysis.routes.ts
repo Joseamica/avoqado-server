@@ -1296,11 +1296,27 @@ router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
       return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
     }
 
-    const { expectedCheckInTime, latenessThresholdMinutes, geofenceRadiusMeters } = req.body
+    const {
+      expectedCheckInTime,
+      latenessThresholdMinutes,
+      geofenceRadiusMeters,
+      attendanceTracking,
+      requireFacadePhoto,
+      requireDepositPhoto,
+      enableCashPayments,
+      enableCardPayments,
+      enableBarcodeScanner,
+    } = req.body
     const config = await organizationDashboardService.upsertOrgAttendanceConfig(orgId, {
       ...(expectedCheckInTime !== undefined && { expectedCheckInTime }),
       ...(latenessThresholdMinutes !== undefined && { latenessThresholdMinutes: Number(latenessThresholdMinutes) }),
       ...(geofenceRadiusMeters !== undefined && { geofenceRadiusMeters: Number(geofenceRadiusMeters) }),
+      ...(attendanceTracking !== undefined && { attendanceTracking: Boolean(attendanceTracking) }),
+      ...(requireFacadePhoto !== undefined && { requireFacadePhoto: Boolean(requireFacadePhoto) }),
+      ...(requireDepositPhoto !== undefined && { requireDepositPhoto: Boolean(requireDepositPhoto) }),
+      ...(enableCashPayments !== undefined && { enableCashPayments: Boolean(enableCashPayments) }),
+      ...(enableCardPayments !== undefined && { enableCardPayments: Boolean(enableCardPayments) }),
+      ...(enableBarcodeScanner !== undefined && { enableBarcodeScanner: Boolean(enableBarcodeScanner) }),
     })
     res.json({ success: true, data: config })
   } catch (error) {

@@ -619,7 +619,7 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
     throw new NotFoundError('El ID del Venue es requerido.')
   }
 
-  const [terminal, venueSettings] = await Promise.all([
+  const [terminal, venueSettings, venue] = await Promise.all([
     prisma.terminal.findFirst({
       where: { venueId },
       select: { config: true },
@@ -629,33 +629,53 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
       where: { venueId },
       select: { expectedCheckInTime: true, latenessThresholdMinutes: true, geofenceRadiusMeters: true },
     }),
+    prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    }),
   ])
 
+  // Fetch org config as intermediate fallback (terminal → org → hardcoded)
+  const orgConfig = venue?.organizationId
+    ? await prisma.organizationAttendanceConfig.findUnique({ where: { organizationId: venue.organizationId } })
+    : null
+
+  // Resolve defaults: org config → hardcoded defaults
+  const defaults: VenueTpvSettings = {
+    attendanceTracking: orgConfig?.attendanceTracking ?? DEFAULT_VENUE_TPV_SETTINGS.attendanceTracking,
+    enableCashPayments: orgConfig?.enableCashPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCashPayments,
+    enableCardPayments: orgConfig?.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
+    enableBarcodeScanner: orgConfig?.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
+    requireDepositPhoto: orgConfig?.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
+    requireFacadePhoto: orgConfig?.requireFacadePhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireFacadePhoto,
+    expectedCheckInTime:
+      venueSettings?.expectedCheckInTime ?? orgConfig?.expectedCheckInTime ?? DEFAULT_VENUE_TPV_SETTINGS.expectedCheckInTime,
+    latenessThresholdMinutes:
+      venueSettings?.latenessThresholdMinutes ?? orgConfig?.latenessThresholdMinutes ?? DEFAULT_VENUE_TPV_SETTINGS.latenessThresholdMinutes,
+    geofenceRadiusMeters:
+      venueSettings?.geofenceRadiusMeters ?? orgConfig?.geofenceRadiusMeters ?? DEFAULT_VENUE_TPV_SETTINGS.geofenceRadiusMeters,
+  }
+
   if (!terminal) {
-    return {
-      ...DEFAULT_VENUE_TPV_SETTINGS,
-      expectedCheckInTime: venueSettings?.expectedCheckInTime ?? DEFAULT_VENUE_TPV_SETTINGS.expectedCheckInTime,
-      latenessThresholdMinutes: venueSettings?.latenessThresholdMinutes ?? DEFAULT_VENUE_TPV_SETTINGS.latenessThresholdMinutes,
-      geofenceRadiusMeters: venueSettings?.geofenceRadiusMeters ?? DEFAULT_VENUE_TPV_SETTINGS.geofenceRadiusMeters,
-    }
+    return defaults
   }
 
   const savedSettings = (terminal.config as any)?.settings || {}
 
   // requireClockInPhoto is the source of truth (written by both per-terminal page and TpvConfig).
   // Never read from stored attendanceTracking — it can be stale if the per-terminal page changed requireClockInPhoto.
-  const attendanceTracking = savedSettings.requireClockInPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.attendanceTracking
+  const attendanceTracking = savedSettings.requireClockInPhoto ?? defaults.attendanceTracking
 
   return {
     attendanceTracking,
-    enableCashPayments: savedSettings.enableCashPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCashPayments,
-    enableCardPayments: savedSettings.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
-    enableBarcodeScanner: savedSettings.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
-    requireDepositPhoto: savedSettings.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
-    requireFacadePhoto: savedSettings.requireFacadePhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireFacadePhoto,
-    expectedCheckInTime: venueSettings?.expectedCheckInTime ?? DEFAULT_VENUE_TPV_SETTINGS.expectedCheckInTime,
-    latenessThresholdMinutes: venueSettings?.latenessThresholdMinutes ?? DEFAULT_VENUE_TPV_SETTINGS.latenessThresholdMinutes,
-    geofenceRadiusMeters: venueSettings?.geofenceRadiusMeters ?? DEFAULT_VENUE_TPV_SETTINGS.geofenceRadiusMeters,
+    enableCashPayments: savedSettings.enableCashPayments ?? defaults.enableCashPayments,
+    enableCardPayments: savedSettings.enableCardPayments ?? defaults.enableCardPayments,
+    enableBarcodeScanner: savedSettings.enableBarcodeScanner ?? defaults.enableBarcodeScanner,
+    requireDepositPhoto: savedSettings.requireDepositPhoto ?? defaults.requireDepositPhoto,
+    requireFacadePhoto: savedSettings.requireFacadePhoto ?? defaults.requireFacadePhoto,
+    expectedCheckInTime: defaults.expectedCheckInTime,
+    latenessThresholdMinutes: defaults.latenessThresholdMinutes,
+    geofenceRadiusMeters: defaults.geofenceRadiusMeters,
   }
 }
 

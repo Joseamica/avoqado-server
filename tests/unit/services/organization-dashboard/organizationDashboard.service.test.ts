@@ -158,6 +158,7 @@ describe('OrganizationDashboardService', () => {
     ]
 
     it('should detect no-checkins, pending deposits, and low stock in bulk', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
       prismaMock.venue.findMany.mockResolvedValue(venues)
 
       // checkInsByVenue: v1 has 0 check-ins (not in result), v2 has 3
@@ -207,6 +208,7 @@ describe('OrganizationDashboardService', () => {
     })
 
     it('should return empty array when no anomalies exist', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
       prismaMock.venue.findMany.mockResolvedValue([{ id: 'v1', name: 'Good Store', latitude: null, longitude: null }])
 
       // All check-ins present, no pending deposits, no stock alerts

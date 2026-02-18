@@ -6737,6 +6737,14 @@ model OrganizationAttendanceConfig {
   latenessThresholdMinutes Int    @default(30)       // Minutes of tolerance after expectedCheckInTime
   geofenceRadiusMeters     Int    @default(500)      // Max distance (meters) from venue for valid clock-in
 
+  // Module defaults (inherited by venues without terminal-level overrides)
+  attendanceTracking   Boolean @default(false)
+  requireFacadePhoto   Boolean @default(false)
+  requireDepositPhoto  Boolean @default(false)
+  enableCashPayments   Boolean @default(true)
+  enableCardPayments   Boolean @default(true)
+  enableBarcodeScanner Boolean @default(true)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

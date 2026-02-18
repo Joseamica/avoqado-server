@@ -2789,10 +2789,13 @@ class OrganizationDashboardService {
     ])
     // Resolve: venue config > org config > hardcoded defaults
     const venueSettingsMap = new Map(
-      settings.map(s => [s.venueId, {
-        expectedCheckInTime: s.expectedCheckInTime ?? orgAttendanceConfig?.expectedCheckInTime ?? '09:00',
-        latenessThresholdMinutes: s.latenessThresholdMinutes ?? orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
-      }]),
+      settings.map(s => [
+        s.venueId,
+        {
+          expectedCheckInTime: s.expectedCheckInTime ?? orgAttendanceConfig?.expectedCheckInTime ?? '09:00',
+          latenessThresholdMinutes: s.latenessThresholdMinutes ?? orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
+        },
+      ]),
     )
 
     const mapped = staffVenues.map(sv => ({
@@ -2826,7 +2829,12 @@ class OrganizationDashboardService {
       throw new Error('Date range cannot exceed 90 days')
     }
 
-    const { staffVenues, venueSettingsMap, orgAttendanceConfig } = await this.getHeatmapScope(orgId, requestingRole, requestingStaffId, filterVenueId)
+    const { staffVenues, venueSettingsMap, orgAttendanceConfig } = await this.getHeatmapScope(
+      orgId,
+      requestingRole,
+      requestingStaffId,
+      filterVenueId,
+    )
 
     if (staffVenues.length === 0) {
       return { staff: [], summary: { byDay: [] } }
@@ -3095,6 +3103,12 @@ class OrganizationDashboardService {
       expectedCheckInTime?: string
       latenessThresholdMinutes?: number
       geofenceRadiusMeters?: number
+      attendanceTracking?: boolean
+      requireFacadePhoto?: boolean
+      requireDepositPhoto?: boolean
+      enableCashPayments?: boolean
+      enableCardPayments?: boolean
+      enableBarcodeScanner?: boolean
     },
   ) {
     return prisma.organizationAttendanceConfig.upsert({
