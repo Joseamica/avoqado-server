@@ -5866,20 +5866,34 @@ type WifiInput = {
 type GeoResult = { latitude: number; longitude: number; accuracy: number }
 
 /**
- * Get network location using multiple providers with fallback chain:
- * 1. Unwired Labs (204M towers — best coverage for Mexican carriers)
- * 2. Google Geolocation API (fallback, with considerIp: false)
+ * Smart provider routing based on WiFi availability:
+ * - WITH WiFi  → Google first (best WiFi database from Android phones) → Unwired Labs fallback
+ * - WITHOUT WiFi → Unwired Labs first (204M cell towers, better coverage) → Google fallback
  *
  * Returns the first successful result with accuracy <= 1000m.
  */
 async function getNetworkLocation(cellTowers: CellTowerInput[], wifiAccessPoints: WifiInput[]): Promise<GeoResult | null> {
-  // Try Unwired Labs first (better coverage for MNC 50 / AT&T Mexico)
-  const unwiredResult = await getLocationFromUnwiredLabs(cellTowers, wifiAccessPoints)
-  if (unwiredResult) return unwiredResult
+  const hasWifi = wifiAccessPoints.length > 0
 
-  // Fallback to Google Geolocation API
-  const googleResult = await getLocationFromGoogle(cellTowers, wifiAccessPoints)
-  if (googleResult) return googleResult
+  if (hasWifi) {
+    // WiFi available → Google has the best WiFi database (billions of Android phones)
+    logger.info(`📍 [GEOLOCATION] WiFi detected (${wifiAccessPoints.length} APs) → trying Google first`)
+    const googleResult = await getLocationFromGoogle(cellTowers, wifiAccessPoints)
+    if (googleResult) return googleResult
+
+    // Fallback to Unwired Labs
+    const unwiredResult = await getLocationFromUnwiredLabs(cellTowers, wifiAccessPoints)
+    if (unwiredResult) return unwiredResult
+  } else {
+    // No WiFi → Unwired Labs has better cell tower coverage (204M towers)
+    logger.info(`📍 [GEOLOCATION] No WiFi → trying Unwired Labs first`)
+    const unwiredResult = await getLocationFromUnwiredLabs(cellTowers, wifiAccessPoints)
+    if (unwiredResult) return unwiredResult
+
+    // Fallback to Google (with considerIp: false)
+    const googleResult = await getLocationFromGoogle(cellTowers, wifiAccessPoints)
+    if (googleResult) return googleResult
+  }
 
   logger.warn('📍 [GEOLOCATION] All providers failed to determine location')
   return null
