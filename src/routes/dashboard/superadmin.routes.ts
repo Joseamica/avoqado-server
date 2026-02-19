@@ -8,6 +8,7 @@ import * as serverMetricsController from '../../controllers/dashboard/serverMetr
 import { validateRequest } from '../../middlewares/validation'
 
 import { z } from 'zod'
+import { VenueType, FeeType, TerminalType, EntityType, SettlementDayType } from '@prisma/client'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 
@@ -157,6 +158,105 @@ const transferVenueSchema = z.object({
   }),
 })
 
+// Schema for bulk venue creation
+const venueSettingsSchema = z
+  .object({
+    paymentTiming: z.enum(['PAY_BEFORE', 'PAY_AFTER'], { message: 'Valor inválido para paymentTiming' }).optional(),
+    inventoryDeduction: z.enum(['ON_ORDER_CREATE', 'ON_PAYMENT'], { message: 'Valor inválido para inventoryDeduction' }).optional(),
+    trackInventory: z.boolean().optional(),
+    enableShifts: z.boolean().optional(),
+    acceptCash: z.boolean().optional(),
+    acceptCard: z.boolean().optional(),
+    acceptDigitalWallet: z.boolean().optional(),
+  })
+  .strict()
+
+const terminalItemSchema = z.object({
+  serialNumber: z.string().min(1, 'El número de serie es requerido'),
+  name: z.string().min(1, 'El nombre del terminal es requerido'),
+  type: z.nativeEnum(TerminalType, { message: 'Tipo de terminal inválido' }),
+  brand: z.string().optional(),
+  model: z.string().optional(),
+})
+
+const pricingSchema = z
+  .object({
+    debitRate: z.number().min(0, 'La tasa no puede ser negativa').max(1, 'La tasa no puede ser mayor a 1'),
+    creditRate: z.number().min(0, 'La tasa no puede ser negativa').max(1, 'La tasa no puede ser mayor a 1'),
+    amexRate: z.number().min(0, 'La tasa no puede ser negativa').max(1, 'La tasa no puede ser mayor a 1'),
+    internationalRate: z.number().min(0, 'La tasa no puede ser negativa').max(1, 'La tasa no puede ser mayor a 1'),
+    fixedFeePerTransaction: z.number().min(0, 'La cuota fija no puede ser negativa').optional(),
+    monthlyServiceFee: z.number().min(0, 'La cuota mensual no puede ser negativa').optional(),
+  })
+  .strict()
+
+const settlementSchema = z
+  .object({
+    debitDays: z.number().int().min(0, 'Los días no pueden ser negativos'),
+    creditDays: z.number().int().min(0, 'Los días no pueden ser negativos'),
+    amexDays: z.number().int().min(0, 'Los días no pueden ser negativos'),
+    internationalDays: z.number().int().min(0, 'Los días no pueden ser negativos'),
+    otherDays: z.number().int().min(0, 'Los días no pueden ser negativos'),
+    dayType: z.nativeEnum(SettlementDayType, { message: 'Tipo de día inválido' }),
+    cutoffTime: z.string().optional(),
+    cutoffTimezone: z.string().optional(),
+  })
+  .strict()
+
+const venueItemSchema = z.object({
+  name: z.string().min(1, 'El nombre del venue es requerido'),
+  type: z.nativeEnum(VenueType, { message: 'Tipo de venue inválido' }).optional(),
+  address: z.string().optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  country: z.string().optional(),
+  zipCode: z.string().optional(),
+  phone: z.string().optional(),
+  email: z.string().email('Email inválido').optional(),
+  timezone: z.string().optional(),
+  currency: z.string().optional(),
+  feeType: z.nativeEnum(FeeType, { message: 'Tipo de fee inválido' }).optional(),
+  feeValue: z.number().min(0, 'El fee no puede ser negativo').max(1, 'El fee no puede ser mayor a 1').optional(),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  entityType: z.nativeEnum(EntityType, { message: 'Tipo de entidad inválido' }).optional(),
+  rfc: z.string().optional(),
+  legalName: z.string().optional(),
+  website: z.string().optional(),
+  settings: venueSettingsSchema.optional(),
+  terminals: z.array(terminalItemSchema).optional(),
+  merchantAccountId: z.string().cuid('ID de cuenta de comerciante inválido').optional(),
+  pricing: pricingSchema.optional(),
+  settlement: settlementSchema.optional(),
+})
+
+const bulkCreateVenuesSchema = z.object({
+  body: z
+    .object({
+      organizationId: z.string().cuid('ID de organización inválido').optional(),
+      organizationSlug: z.string().min(1, 'Slug de organización requerido').optional(),
+      defaults: z
+        .object({
+          type: z.nativeEnum(VenueType, { message: 'Tipo de venue inválido' }).optional(),
+          timezone: z.string().optional(),
+          currency: z.string().optional(),
+          country: z.string().optional(),
+          feeType: z.nativeEnum(FeeType, { message: 'Tipo de fee inválido' }).optional(),
+          feeValue: z.number().min(0, 'El fee no puede ser negativo').max(1, 'El fee no puede ser mayor a 1').optional(),
+          entityType: z.nativeEnum(EntityType, { message: 'Tipo de entidad inválido' }).optional(),
+          settings: venueSettingsSchema.optional(),
+        })
+        .optional(),
+      defaultMerchantAccountId: z.string().cuid('ID de cuenta de comerciante inválido').optional(),
+      defaultPricing: pricingSchema.optional(),
+      defaultSettlement: settlementSchema.optional(),
+      venues: z.array(venueItemSchema).min(1, 'Se requiere al menos 1 venue').max(100, 'Máximo 100 venues por lote'),
+    })
+    .refine(data => data.organizationId || data.organizationSlug, {
+      message: 'Se requiere organizationId o organizationSlug',
+    }),
+})
+
 // Dashboard overview
 router.get('/dashboard', superadminController.getDashboardData)
 
@@ -167,6 +267,7 @@ router.get('/venues/:venueId', superadminController.getVenueDetails)
 router.post('/venues/:venueId/approve', superadminController.approveVenue)
 router.post('/venues/:venueId/suspend', validateRequest(suspendVenueSchema), superadminController.suspendVenue)
 router.patch('/venues/:venueId/status', validateRequest(changeVenueStatusSchema), superadminController.changeVenueStatus)
+router.post('/venues/bulk', validateRequest(bulkCreateVenuesSchema), venuesSuperadminController.bulkCreateVenues)
 router.post('/venues', validateRequest(createVenueSchema), venuesSuperadminController.createVenue)
 router.patch('/venues/:venueId/transfer', validateRequest(transferVenueSchema), venuesSuperadminController.transferVenue)
 

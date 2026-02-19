@@ -2,6 +2,10 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { generateValidatedSlug } from '../../utils/slugify'
+import {
+  bulkCreateVenues as bulkCreateVenuesService,
+  ValidationError as BulkValidationError,
+} from '../../services/superadmin/bulkVenueCreation.service'
 
 /**
  * Venues Superadmin Controller
@@ -178,6 +182,41 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
     })
   } catch (error) {
     logger.error('[VENUES_SUPERADMIN] Error transferring venue', { error })
+    next(error)
+  }
+}
+
+/**
+ * POST /venues/bulk
+ * Create multiple venues in a single request (all-or-nothing).
+ */
+export async function bulkCreateVenues(req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await bulkCreateVenuesService(req.body)
+
+    logger.info(`[VENUES_SUPERADMIN] Bulk creation: ${result.summary.venuesCreated} venues created`, {
+      venuesCreated: result.summary.venuesCreated,
+      terminalsCreated: result.summary.terminalsCreated,
+      paymentConfigsCreated: result.summary.paymentConfigsCreated,
+    })
+
+    return res.status(201).json(result)
+  } catch (error) {
+    if (error instanceof BulkValidationError) {
+      return res.status(400).json({
+        success: false,
+        summary: {
+          venuesCreated: 0,
+          venuesFailed: 0,
+          terminalsCreated: 0,
+          terminalsFailed: 0,
+          paymentConfigsCreated: 0,
+        },
+        venues: [],
+        errors: [{ index: error.index, field: error.field, error: error.message }],
+      })
+    }
+    logger.error('[VENUES_SUPERADMIN] Error in bulk venue creation', { error })
     next(error)
   }
 }
