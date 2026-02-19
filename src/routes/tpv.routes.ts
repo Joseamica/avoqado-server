@@ -5817,7 +5817,7 @@ router.post('/geolocation/cell-towers', authenticateTokenMiddleware, async (req:
       correlationId: req.correlationId,
     })
 
-    // Call Google Geolocation API
+    // Call geolocation providers (Unwired Labs → Google fallback)
     const result = await getNetworkLocation(cellTowers || [], wifiAccessPoints || [])
 
     if (!result) {
@@ -5842,49 +5842,162 @@ router.post('/geolocation/cell-towers', authenticateTokenMiddleware, async (req:
 })
 
 /**
- * Call Google Geolocation API to convert cell tower + WiFi info to coordinates.
- * WiFi dramatically improves accuracy (from km to ~20-50m).
- * https://developers.google.com/maps/documentation/geolocation/overview
+ * Maximum acceptable accuracy in meters.
+ * Locations with accuracy worse than this are rejected as unreliable.
+ * - GPS: 5-20m, Cell + WiFi: 20-50m, Cell only: 100-1000m
+ * - IP-based fallback: 2,000,000+ meters (GARBAGE — must reject!)
  */
-async function getNetworkLocation(
-  cellTowers: Array<{
-    radioType: string
-    mobileCountryCode: number
-    mobileNetworkCode: number
-    locationAreaCode: number
-    cellId: number
-  }>,
-  wifiAccessPoints: Array<{
-    macAddress: string
-    signalStrength: number
-    channel: number
-  }>,
-): Promise<{ latitude: number; longitude: number; accuracy: number } | null> {
-  const apiKey = process.env.GOOGLE_GEOLOCATION_API_KEY
+const MAX_ACCURACY_METERS = 1000
 
-  if (!apiKey) {
-    logger.error('📍 [GEOLOCATION] GOOGLE_GEOLOCATION_API_KEY not configured')
+type CellTowerInput = {
+  radioType: string
+  mobileCountryCode: number
+  mobileNetworkCode: number
+  locationAreaCode: number
+  cellId: number
+}
+
+type WifiInput = {
+  macAddress: string
+  signalStrength: number
+  channel: number
+}
+
+type GeoResult = { latitude: number; longitude: number; accuracy: number }
+
+/**
+ * Get network location using multiple providers with fallback chain:
+ * 1. Unwired Labs (204M towers — best coverage for Mexican carriers)
+ * 2. Google Geolocation API (fallback, with considerIp: false)
+ *
+ * Returns the first successful result with accuracy <= 1000m.
+ */
+async function getNetworkLocation(cellTowers: CellTowerInput[], wifiAccessPoints: WifiInput[]): Promise<GeoResult | null> {
+  // Try Unwired Labs first (better coverage for MNC 50 / AT&T Mexico)
+  const unwiredResult = await getLocationFromUnwiredLabs(cellTowers, wifiAccessPoints)
+  if (unwiredResult) return unwiredResult
+
+  // Fallback to Google Geolocation API
+  const googleResult = await getLocationFromGoogle(cellTowers, wifiAccessPoints)
+  if (googleResult) return googleResult
+
+  logger.warn('📍 [GEOLOCATION] All providers failed to determine location')
+  return null
+}
+
+/**
+ * Unwired Labs LocationAPI — primary geolocation provider.
+ * 204M cell towers globally (5x more than OpenCellID).
+ * No IP fallback by default — returns error instead of garbage data.
+ * https://unwiredlabs.com/
+ */
+async function getLocationFromUnwiredLabs(cellTowers: CellTowerInput[], wifiAccessPoints: WifiInput[]): Promise<GeoResult | null> {
+  const token = process.env.UNWIRED_LABS_API_TOKEN
+
+  if (!token) {
+    logger.warn('📍 [GEOLOCATION] UNWIRED_LABS_API_TOKEN not configured, skipping Unwired Labs')
     return null
   }
 
   try {
-    // Build request body for Google Geolocation API
-    const requestBody: {
-      cellTowers?: Array<{
-        cellId: number
-        locationAreaCode: number
-        mobileCountryCode: number
-        mobileNetworkCode: number
-        radioType: string
-      }>
-      wifiAccessPoints?: Array<{
-        macAddress: string
-        signalStrength: number
-        channel: number
-      }>
-    } = {}
+    // Determine radio type from first cell tower
+    const radioType = cellTowers[0]?.radioType || 'lte'
 
-    // Add cell towers if available
+    const requestBody: Record<string, unknown> = {
+      token,
+      radio: radioType,
+      mcc: cellTowers[0]?.mobileCountryCode,
+      mnc: cellTowers[0]?.mobileNetworkCode,
+      // ipf: 0 = no IP fallback, lacf: 1 = allow LAC-level fallback (area-level, ~few km)
+      fallbacks: { ipf: 0, lacf: 1 },
+    }
+
+    // Add cell towers
+    if (cellTowers.length > 0) {
+      requestBody.cells = cellTowers.map(tower => ({
+        lac: tower.locationAreaCode,
+        cid: tower.cellId,
+        radio: tower.radioType,
+      }))
+    }
+
+    // Add WiFi access points
+    if (wifiAccessPoints.length > 0) {
+      requestBody.wifi = wifiAccessPoints.map(wifi => ({
+        bssid: wifi.macAddress,
+        signal: wifi.signalStrength,
+        channel: wifi.channel,
+      }))
+    }
+
+    const response = await fetch('https://us1.unwiredlabs.com/v2/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    })
+
+    const data = (await response.json()) as {
+      status: string
+      lat?: number
+      lon?: number
+      accuracy?: number
+      balance?: number
+      fallback?: string
+    }
+
+    if (data.status !== 'ok' || data.lat == null || data.lon == null) {
+      logger.warn(`📍 [GEOLOCATION] Unwired Labs: no result`, { status: data.status, balance: data.balance })
+      return null
+    }
+
+    const accuracy = data.accuracy || 9999
+
+    // Reject locations with poor accuracy
+    if (accuracy > MAX_ACCURACY_METERS) {
+      logger.warn(`📍 [GEOLOCATION] Unwired Labs: rejected poor accuracy ${accuracy}m`, {
+        lat: data.lat,
+        lon: data.lon,
+        accuracy,
+        fallback: data.fallback,
+      })
+      return null
+    }
+
+    logger.info(`📍 [GEOLOCATION] Unwired Labs: success`, {
+      lat: data.lat,
+      lon: data.lon,
+      accuracy,
+      fallback: data.fallback || 'none',
+      balance: data.balance,
+    })
+
+    return { latitude: data.lat, longitude: data.lon, accuracy }
+  } catch (error) {
+    logger.error(`📍 [GEOLOCATION] Unwired Labs: failed`, {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return null
+  }
+}
+
+/**
+ * Google Geolocation API — fallback provider.
+ * considerIp: false prevents using the SERVER's IP (Oregon) as location fallback.
+ * https://developers.google.com/maps/documentation/geolocation/overview
+ */
+async function getLocationFromGoogle(cellTowers: CellTowerInput[], wifiAccessPoints: WifiInput[]): Promise<GeoResult | null> {
+  const apiKey = process.env.GOOGLE_GEOLOCATION_API_KEY
+
+  if (!apiKey) {
+    logger.warn('📍 [GEOLOCATION] GOOGLE_GEOLOCATION_API_KEY not configured, skipping Google')
+    return null
+  }
+
+  try {
+    const requestBody: Record<string, unknown> = {
+      considerIp: false,
+    }
+
     if (cellTowers.length > 0) {
       requestBody.cellTowers = cellTowers.map(tower => ({
         cellId: tower.cellId,
@@ -5895,7 +6008,6 @@ async function getNetworkLocation(
       }))
     }
 
-    // Add WiFi access points if available (dramatically improves accuracy!)
     if (wifiAccessPoints.length > 0) {
       requestBody.wifiAccessPoints = wifiAccessPoints.map(wifi => ({
         macAddress: wifi.macAddress,
@@ -5906,17 +6018,13 @@ async function getNetworkLocation(
 
     const response = await fetch(`https://www.googleapis.com/geolocation/v1/geolocate?key=${apiKey}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestBody),
     })
 
     if (!response.ok) {
       const errorBody = await response.text()
-      logger.error(`📍 [GEOLOCATION] Google API error: ${response.status}`, {
-        errorBody,
-      })
+      logger.warn(`📍 [GEOLOCATION] Google: API error ${response.status}`, { errorBody })
       return null
     }
 
@@ -5925,13 +6033,28 @@ async function getNetworkLocation(
       accuracy: number
     }
 
+    if (data.accuracy > MAX_ACCURACY_METERS) {
+      logger.warn(`📍 [GEOLOCATION] Google: rejected poor accuracy ${data.accuracy}m`, {
+        lat: data.location.lat,
+        lng: data.location.lng,
+        accuracy: data.accuracy,
+      })
+      return null
+    }
+
+    logger.info(`📍 [GEOLOCATION] Google: success (fallback)`, {
+      lat: data.location.lat,
+      lng: data.location.lng,
+      accuracy: data.accuracy,
+    })
+
     return {
       latitude: data.location.lat,
       longitude: data.location.lng,
       accuracy: data.accuracy,
     }
   } catch (error) {
-    logger.error(`📍 [GEOLOCATION] Failed to call Google API`, {
+    logger.error(`📍 [GEOLOCATION] Google: failed`, {
       error: error instanceof Error ? error.message : 'Unknown error',
     })
     return null

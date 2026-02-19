@@ -482,6 +482,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-payments:pay-later', // Can create pay-later orders
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
+    'serialized-inventory:create', // Can register (Alta de Productos)
   ],
 
   /**

@@ -739,7 +739,6 @@ class OrganizationDashboardService {
             where: {
               venueId: { in: venuesWithGpsIds },
               clockInTime: { gte: todayStart },
-              status: 'CLOCKED_IN',
               clockInLatitude: { not: null },
               clockInLongitude: { not: null },
             },
