@@ -196,6 +196,29 @@ export class ObservabilityController {
 
       const { health } = payload
 
+      // Resolve serial number → database CUID
+      // TPV sends device serial (e.g. "AVQD-2840744192") but DB expects Terminal.id (CUID)
+      const terminal = await prisma.terminal.findFirst({
+        where: {
+          OR: [
+            { id: payload.terminalId },
+            { serialNumber: { equals: payload.terminalId, mode: 'insensitive' } },
+            { serialNumber: { equals: `AVQD-${payload.terminalId}`, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true, venueId: true },
+      })
+
+      if (!terminal) {
+        logger.warn(`📡 [Heartbeat] Terminal not found: ${payload.terminalId}`)
+        if (callback) {
+          callback({ success: false, error: `Terminal not found: ${payload.terminalId}` })
+        }
+        return
+      }
+
+      const resolvedTerminalId = terminal.id
+
       // Register terminal in registry (for Socket.IO payment routing)
       logger.info(`📡 [Heartbeat] Registering terminal ${payload.terminalId} (socket: ${socket.id}, venue: ${payload.venueId})`)
       terminalRegistry.register(payload.terminalId, socket.id, payload.venueId)
@@ -204,7 +227,7 @@ export class ObservabilityController {
       const terminalHealth = await prisma.terminalHealth.create({
         data: {
           venueId: payload.venueId,
-          terminalId: payload.terminalId,
+          terminalId: resolvedTerminalId,
           healthScore: payload.healthScore,
 
           // Memory
@@ -247,7 +270,7 @@ export class ObservabilityController {
 
       // Update terminal lastHeartbeat
       await prisma.terminal.update({
-        where: { id: payload.terminalId },
+        where: { id: resolvedTerminalId },
         data: { lastHeartbeat: new Date() },
       })
 
