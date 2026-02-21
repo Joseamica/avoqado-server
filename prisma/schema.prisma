@@ -6745,6 +6745,10 @@ model OrganizationAttendanceConfig {
   enableCardPayments   Boolean @default(true)
   enableBarcodeScanner Boolean @default(true)
 
+  // Full TPV terminal settings (all 35 fields as JSON)
+  // Source of truth for org-level defaults. Individual columns above kept for backward compat.
+  settings Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

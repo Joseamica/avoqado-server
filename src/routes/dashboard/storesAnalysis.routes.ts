@@ -1345,6 +1345,78 @@ router.delete('/org-attendance-config', orgAttendanceAccess, async (req: Request
 })
 
 // =============================================================================
+// ORG-LEVEL TPV DEFAULTS ENDPOINTS
+// Full TpvSettings JSON for org-level terminal configuration.
+// Uses same middleware as attendance config (requireWhiteLabel + attendance:org-manage).
+// =============================================================================
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/org-tpv-defaults
+ * Returns: Full TpvSettings JSON for the org (or null if not set)
+ */
+router.get('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const settings = await organizationDashboardService.getOrgTpvDefaults(orgId)
+    res.json({ success: true, data: settings })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PUT /dashboard/venues/:venueId/stores-analysis/org-tpv-defaults
+ * Saves full TpvSettings JSON and pushes to ALL terminals in the org.
+ * kioskDefaultMerchantId is preserved per-terminal.
+ */
+router.put('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const { settings } = req.body
+    if (!settings || typeof settings !== 'object') {
+      return res.status(400).json({ success: false, error: 'bad_request', message: 'settings object is required' })
+    }
+
+    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings)
+    res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/venues/:venueId/stores-analysis/org-tpv-defaults/stats
+ * Returns: Terminal counts per venue in the org
+ */
+router.get('/org-tpv-defaults/stats', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const orgId = await getOrgIdFromVenue(venueId)
+
+    if (!orgId) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
+    }
+
+    const stats = await organizationDashboardService.getOrgTpvStats(orgId)
+    res.json({ success: true, data: stats })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// =============================================================================
 // HEATMAP ENDPOINTS
 // Attendance and sales heatmaps for supervisor view (staff × day matrix)
 // =============================================================================

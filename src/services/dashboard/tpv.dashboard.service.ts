@@ -640,20 +640,38 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
     ? await prisma.organizationAttendanceConfig.findUnique({ where: { organizationId: venue.organizationId } })
     : null
 
-  // Resolve defaults: org config → hardcoded defaults
+  // Read org-level settings JSON (preferred) with fallback to individual columns
+  const orgSettings = (orgConfig?.settings as Record<string, unknown>) || {}
+
+  // Resolve defaults: org config (JSON first, then columns) → hardcoded defaults
   const defaults: VenueTpvSettings = {
-    attendanceTracking: orgConfig?.attendanceTracking ?? DEFAULT_VENUE_TPV_SETTINGS.attendanceTracking,
-    enableCashPayments: orgConfig?.enableCashPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCashPayments,
-    enableCardPayments: orgConfig?.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
-    enableBarcodeScanner: orgConfig?.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
-    requireDepositPhoto: orgConfig?.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
-    requireFacadePhoto: orgConfig?.requireFacadePhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireFacadePhoto,
+    attendanceTracking:
+      (orgSettings.attendanceTracking as boolean) ?? orgConfig?.attendanceTracking ?? DEFAULT_VENUE_TPV_SETTINGS.attendanceTracking,
+    enableCashPayments:
+      (orgSettings.enableCashPayments as boolean) ?? orgConfig?.enableCashPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCashPayments,
+    enableCardPayments:
+      (orgSettings.enableCardPayments as boolean) ?? orgConfig?.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
+    enableBarcodeScanner:
+      (orgSettings.enableBarcodeScanner as boolean) ?? orgConfig?.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
+    requireDepositPhoto:
+      (orgSettings.requireDepositPhoto as boolean) ?? orgConfig?.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
+    requireFacadePhoto:
+      (orgSettings.requireFacadePhoto as boolean) ?? orgConfig?.requireFacadePhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireFacadePhoto,
     expectedCheckInTime:
-      venueSettings?.expectedCheckInTime ?? orgConfig?.expectedCheckInTime ?? DEFAULT_VENUE_TPV_SETTINGS.expectedCheckInTime,
+      venueSettings?.expectedCheckInTime ??
+      (orgSettings.expectedCheckInTime as string) ??
+      orgConfig?.expectedCheckInTime ??
+      DEFAULT_VENUE_TPV_SETTINGS.expectedCheckInTime,
     latenessThresholdMinutes:
-      venueSettings?.latenessThresholdMinutes ?? orgConfig?.latenessThresholdMinutes ?? DEFAULT_VENUE_TPV_SETTINGS.latenessThresholdMinutes,
+      venueSettings?.latenessThresholdMinutes ??
+      (orgSettings.latenessThresholdMinutes as number) ??
+      orgConfig?.latenessThresholdMinutes ??
+      DEFAULT_VENUE_TPV_SETTINGS.latenessThresholdMinutes,
     geofenceRadiusMeters:
-      venueSettings?.geofenceRadiusMeters ?? orgConfig?.geofenceRadiusMeters ?? DEFAULT_VENUE_TPV_SETTINGS.geofenceRadiusMeters,
+      venueSettings?.geofenceRadiusMeters ??
+      (orgSettings.geofenceRadiusMeters as number) ??
+      orgConfig?.geofenceRadiusMeters ??
+      DEFAULT_VENUE_TPV_SETTINGS.geofenceRadiusMeters,
   }
 
   if (!terminal) {

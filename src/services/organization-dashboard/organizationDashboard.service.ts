@@ -439,7 +439,7 @@ class OrganizationDashboardService {
       })
 
       for (const vm of venueModules) {
-        const config = vm.config as Record<string, unknown> | null
+        const config = vm.config as Record<string, any> | null
         const goals = Array.isArray(config?.salesGoals) ? (config.salesGoals as any[]) : []
         // Find the active venue-wide goal (staffId = null)
         const venueGoal = goals.find(g => g.staffId === null && g.active)
@@ -3087,7 +3087,7 @@ class OrganizationDashboardService {
     }
   }
   // ==========================================================================
-  // ORG ATTENDANCE CONFIG
+  // ORG ATTENDANCE CONFIG (9 individual columns — backward compat for PlayTelecom)
   // ==========================================================================
 
   async getOrgAttendanceConfig(orgId: string) {
@@ -3110,13 +3110,36 @@ class OrganizationDashboardService {
       enableBarcodeScanner?: boolean
     },
   ) {
+    // Also sync individual columns → settings JSON for consistency
+    const existing = await prisma.organizationAttendanceConfig.findUnique({
+      where: { organizationId: orgId },
+      select: { settings: true },
+    })
+    const existingSettings = (existing?.settings as Record<string, any>) || {}
+    const settingsSync: Record<string, any> = { ...existingSettings }
+
+    if (data.attendanceTracking !== undefined) {
+      settingsSync.attendanceTracking = data.attendanceTracking
+      settingsSync.requireClockInPhoto = data.attendanceTracking
+      settingsSync.requireClockInToLogin = data.attendanceTracking
+    }
+    if (data.requireFacadePhoto !== undefined) settingsSync.requireFacadePhoto = data.requireFacadePhoto
+    if (data.requireDepositPhoto !== undefined) settingsSync.requireDepositPhoto = data.requireDepositPhoto
+    if (data.enableCashPayments !== undefined) settingsSync.enableCashPayments = data.enableCashPayments
+    if (data.enableCardPayments !== undefined) settingsSync.enableCardPayments = data.enableCardPayments
+    if (data.enableBarcodeScanner !== undefined) settingsSync.enableBarcodeScanner = data.enableBarcodeScanner
+
     return prisma.organizationAttendanceConfig.upsert({
       where: { organizationId: orgId },
       create: {
         organizationId: orgId,
         ...data,
+        settings: settingsSync,
       },
-      update: data,
+      update: {
+        ...data,
+        settings: settingsSync,
+      },
     })
   }
 
@@ -3124,6 +3147,135 @@ class OrganizationDashboardService {
     await prisma.organizationAttendanceConfig.deleteMany({
       where: { organizationId: orgId },
     })
+  }
+
+  // ==========================================================================
+  // ORG TPV DEFAULTS (full TpvSettings JSON — all 35 fields)
+  // ==========================================================================
+
+  /**
+   * Get org-level TPV defaults (full settings JSON)
+   */
+  async getOrgTpvDefaults(orgId: string) {
+    const config = await prisma.organizationAttendanceConfig.findUnique({
+      where: { organizationId: orgId },
+      select: { settings: true },
+    })
+    return (config?.settings as Record<string, any>) || null
+  }
+
+  /**
+   * Save org-level TPV defaults and push to ALL terminals in the org.
+   * This overwrites terminal settings with the merged result (system defaults + org defaults).
+   * kioskDefaultMerchantId is preserved per-terminal (not overwritten by org push).
+   */
+  async upsertOrgTpvDefaults(
+    orgId: string,
+    settings: Record<string, any>,
+  ): Promise<{ config: Record<string, any>; terminalsUpdated: number }> {
+    // 1. Get existing settings to merge
+    const existing = await prisma.organizationAttendanceConfig.findUnique({
+      where: { organizationId: orgId },
+      select: { settings: true },
+    })
+    const existingSettings = (existing?.settings as Record<string, any>) || {}
+    const mergedSettings = { ...existingSettings, ...settings }
+
+    // 2. Sync attendance-related fields: attendanceTracking → requireClockInPhoto + requireClockInToLogin
+    if (settings.attendanceTracking !== undefined) {
+      mergedSettings.requireClockInPhoto = settings.attendanceTracking
+      mergedSettings.requireClockInToLogin = settings.attendanceTracking
+    }
+
+    // 3. Sync individual columns for backward compatibility (PlayTelecom reads these)
+    const columnSync: Record<string, any> = {}
+    if (mergedSettings.attendanceTracking !== undefined) columnSync.attendanceTracking = Boolean(mergedSettings.attendanceTracking)
+    if (mergedSettings.requireFacadePhoto !== undefined) columnSync.requireFacadePhoto = Boolean(mergedSettings.requireFacadePhoto)
+    if (mergedSettings.requireDepositPhoto !== undefined) columnSync.requireDepositPhoto = Boolean(mergedSettings.requireDepositPhoto)
+    if (mergedSettings.enableCashPayments !== undefined) columnSync.enableCashPayments = Boolean(mergedSettings.enableCashPayments)
+    if (mergedSettings.enableCardPayments !== undefined) columnSync.enableCardPayments = Boolean(mergedSettings.enableCardPayments)
+    if (mergedSettings.enableBarcodeScanner !== undefined) columnSync.enableBarcodeScanner = Boolean(mergedSettings.enableBarcodeScanner)
+    if (mergedSettings.expectedCheckInTime !== undefined) columnSync.expectedCheckInTime = String(mergedSettings.expectedCheckInTime)
+    if (mergedSettings.latenessThresholdMinutes !== undefined)
+      columnSync.latenessThresholdMinutes = Number(mergedSettings.latenessThresholdMinutes)
+    if (mergedSettings.geofenceRadiusMeters !== undefined) columnSync.geofenceRadiusMeters = Number(mergedSettings.geofenceRadiusMeters)
+
+    // 4. Upsert the org config
+    await prisma.organizationAttendanceConfig.upsert({
+      where: { organizationId: orgId },
+      create: {
+        organizationId: orgId,
+        settings: mergedSettings,
+        ...columnSync,
+      },
+      update: {
+        settings: mergedSettings,
+        ...columnSync,
+      },
+    })
+
+    // 5. Push to all terminals in the org
+    const terminals = await prisma.terminal.findMany({
+      where: { venue: { organizationId: orgId } },
+      select: { id: true, config: true },
+    })
+
+    if (terminals.length > 0) {
+      const BATCH_SIZE = 50
+      for (let i = 0; i < terminals.length; i += BATCH_SIZE) {
+        const batch = terminals.slice(i, i + BATCH_SIZE)
+        await prisma.$transaction(
+          batch.map(terminal => {
+            const existingConfig = (terminal.config as Record<string, any>) || {}
+            const existingTerminalSettings = (existingConfig.settings as Record<string, any>) || {}
+
+            // Preserve kioskDefaultMerchantId (per-terminal field)
+            const pushSettings = {
+              ...existingTerminalSettings,
+              ...mergedSettings,
+              kioskDefaultMerchantId: existingTerminalSettings.kioskDefaultMerchantId ?? null,
+            }
+
+            return prisma.terminal.update({
+              where: { id: terminal.id },
+              data: {
+                config: { ...existingConfig, settings: pushSettings },
+                updatedAt: new Date(),
+              },
+            })
+          }),
+        )
+      }
+    }
+
+    return { config: mergedSettings, terminalsUpdated: terminals.length }
+  }
+
+  /**
+   * Get stats: how many terminals per venue, total in org
+   */
+  async getOrgTpvStats(orgId: string) {
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        _count: { select: { terminals: true } },
+      },
+    })
+
+    const totalTerminals = venues.reduce((sum, v) => sum + v._count.terminals, 0)
+
+    return {
+      totalTerminals,
+      venues: venues.map(v => ({
+        id: v.id,
+        name: v.name,
+        slug: v.slug,
+        terminalCount: v._count.terminals,
+      })),
+    }
   }
 }
 

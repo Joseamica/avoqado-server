@@ -659,6 +659,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:write',
     'tpv-messages:read', // Can view messages
     'tpv-messages:send', // Can send messages to terminals
+    // NO: tpv-settings:* (OWNER only - org-level TPV config)
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
@@ -694,6 +695,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (ALL including factory-reset)
+    'tpv-settings:*', // Can read/update org-level TPV terminal config
     'tpv-terminal:settings',
     'tpv-devices:manage', // Can link external devices (iPad, tablets) for BLE payments
     'tpv-kiosk:enable', // Can enable/disable kiosk mode

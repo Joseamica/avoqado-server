@@ -304,4 +304,265 @@ describe('OrganizationDashboardService', () => {
       expect(result.onlineStaff).toEqual([])
     })
   })
+
+  // ─── Org TPV Defaults ──────────────────────────────────────
+
+  describe('getOrgTpvDefaults', () => {
+    it('should return null when no org config exists', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+
+      const result = await organizationDashboardService.getOrgTpvDefaults(orgId)
+
+      expect(result).toBeNull()
+      expect(prismaMock.organizationAttendanceConfig.findUnique).toHaveBeenCalledWith({
+        where: { organizationId: orgId },
+        select: { settings: true },
+      })
+    })
+
+    it('should return settings JSON when org config exists', async () => {
+      const mockSettings = { showTipScreen: false, requirePinLogin: true }
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+        settings: mockSettings,
+      } as any)
+
+      const result = await organizationDashboardService.getOrgTpvDefaults(orgId)
+
+      expect(result).toEqual(mockSettings)
+    })
+
+    it('should return null when config exists but settings is null', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+        settings: null,
+      } as any)
+
+      const result = await organizationDashboardService.getOrgTpvDefaults(orgId)
+
+      expect(result).toBeNull()
+    })
+  })
+
+  describe('upsertOrgTpvDefaults', () => {
+    it('should save settings JSON and sync individual columns', async () => {
+      // No existing config
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+      // No terminals to push to
+      prismaMock.terminal.findMany.mockResolvedValue([])
+
+      const settings = {
+        showTipScreen: false,
+        attendanceTracking: true,
+        enableCashPayments: false,
+      }
+
+      const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings)
+
+      // Should upsert with merged settings
+      expect(prismaMock.organizationAttendanceConfig.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { organizationId: orgId },
+          create: expect.objectContaining({
+            organizationId: orgId,
+            settings: expect.objectContaining({
+              showTipScreen: false,
+              attendanceTracking: true,
+              enableCashPayments: false,
+              // attendanceTracking syncs to requireClockInPhoto + requireClockInToLogin
+              requireClockInPhoto: true,
+              requireClockInToLogin: true,
+            }),
+            // Individual columns synced
+            attendanceTracking: true,
+            enableCashPayments: false,
+          }),
+        }),
+      )
+
+      expect(result.terminalsUpdated).toBe(0)
+    })
+
+    it('should merge with existing settings (not overwrite)', async () => {
+      // Existing config has some settings
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+        settings: { showTipScreen: true, showReviewScreen: false, requirePinLogin: true },
+      } as any)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+      prismaMock.terminal.findMany.mockResolvedValue([])
+
+      // Only updating showTipScreen
+      await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+      const upsertCall = prismaMock.organizationAttendanceConfig.upsert.mock.calls[0][0]
+      const savedSettings = upsertCall.create.settings
+
+      // showTipScreen should be updated
+      expect(savedSettings.showTipScreen).toBe(false)
+      // showReviewScreen should be preserved from existing
+      expect(savedSettings.showReviewScreen).toBe(false)
+      // requirePinLogin should be preserved from existing
+      expect(savedSettings.requirePinLogin).toBe(true)
+    })
+
+    it('should push settings to ALL terminals in the org', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+
+      // 3 terminals across 2 venues
+      const terminals = [
+        { id: 't1', config: { settings: { showTipScreen: true } } },
+        { id: 't2', config: { settings: { showTipScreen: true } } },
+        { id: 't3', config: { settings: { showTipScreen: true, kioskDefaultMerchantId: 'merchant-123' } } },
+      ]
+      prismaMock.terminal.findMany.mockResolvedValue(terminals as any)
+      prismaMock.$transaction.mockResolvedValue([{}, {}, {}])
+
+      const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+      expect(result.terminalsUpdated).toBe(3)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+
+      // Verify the transaction calls
+      const transactionArg = prismaMock.$transaction.mock.calls[0][0]
+      expect(transactionArg).toHaveLength(3)
+    })
+
+    it('should preserve kioskDefaultMerchantId per-terminal when pushing', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+
+      const terminals = [
+        { id: 't1', config: { settings: { kioskDefaultMerchantId: 'merchant-abc' } } },
+      ]
+      prismaMock.terminal.findMany.mockResolvedValue(terminals as any)
+
+      // Mock terminal.update to capture what gets written
+      let capturedUpdate: any = null
+      prismaMock.terminal.update.mockImplementation((args: any) => {
+        capturedUpdate = args
+        return Promise.resolve({} as any)
+      })
+      prismaMock.$transaction.mockImplementation(async (updates: any) => {
+        // Execute each update to capture the calls
+        for (const u of updates) await u
+        return []
+      })
+
+      await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+      // kioskDefaultMerchantId should be preserved from the terminal's existing settings
+      expect(capturedUpdate.data.config.settings.kioskDefaultMerchantId).toBe('merchant-abc')
+      // New org setting should be applied
+      expect(capturedUpdate.data.config.settings.showTipScreen).toBe(false)
+    })
+
+    it('should batch terminals in groups of 50', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+
+      // Create 120 terminals
+      const terminals = Array.from({ length: 120 }, (_, i) => ({
+        id: `t${i}`,
+        config: { settings: {} },
+      }))
+      prismaMock.terminal.findMany.mockResolvedValue(terminals as any)
+      prismaMock.$transaction.mockResolvedValue([])
+
+      await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+      // Should be 3 batches: 50 + 50 + 20
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
+    })
+
+    it('should sync attendanceTracking → requireClockInPhoto + requireClockInToLogin', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+      prismaMock.terminal.findMany.mockResolvedValue([])
+
+      await organizationDashboardService.upsertOrgTpvDefaults(orgId, { attendanceTracking: true })
+
+      const upsertCall = prismaMock.organizationAttendanceConfig.upsert.mock.calls[0][0]
+      const savedSettings = upsertCall.create.settings
+
+      expect(savedSettings.attendanceTracking).toBe(true)
+      expect(savedSettings.requireClockInPhoto).toBe(true)
+      expect(savedSettings.requireClockInToLogin).toBe(true)
+    })
+  })
+
+  describe('getOrgTpvStats', () => {
+    it('should return terminal counts per venue', async () => {
+      prismaMock.venue.findMany.mockResolvedValue([
+        { id: 'v1', name: 'Store A', slug: 'store-a', _count: { terminals: 3 } },
+        { id: 'v2', name: 'Store B', slug: 'store-b', _count: { terminals: 1 } },
+      ] as any)
+
+      const result = await organizationDashboardService.getOrgTpvStats(orgId)
+
+      expect(result.totalTerminals).toBe(4)
+      expect(result.venues).toHaveLength(2)
+      expect(result.venues[0]).toEqual({
+        id: 'v1',
+        name: 'Store A',
+        slug: 'store-a',
+        terminalCount: 3,
+      })
+    })
+
+    it('should return zero when org has no venues', async () => {
+      prismaMock.venue.findMany.mockResolvedValue([])
+
+      const result = await organizationDashboardService.getOrgTpvStats(orgId)
+
+      expect(result.totalTerminals).toBe(0)
+      expect(result.venues).toEqual([])
+    })
+  })
+
+  // ─── upsertOrgAttendanceConfig (backward compat sync) ──────
+
+  describe('upsertOrgAttendanceConfig — settings JSON sync', () => {
+    it('should sync individual columns to settings JSON', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+
+      await organizationDashboardService.upsertOrgAttendanceConfig(orgId, {
+        attendanceTracking: true,
+        enableCashPayments: false,
+      })
+
+      const upsertCall = prismaMock.organizationAttendanceConfig.upsert.mock.calls[0][0]
+
+      // Individual columns should be set
+      expect(upsertCall.create.attendanceTracking).toBe(true)
+      expect(upsertCall.create.enableCashPayments).toBe(false)
+
+      // Settings JSON should also be synced
+      expect(upsertCall.create.settings.attendanceTracking).toBe(true)
+      expect(upsertCall.create.settings.enableCashPayments).toBe(false)
+      // attendanceTracking syncs to requireClockInPhoto/requireClockInToLogin
+      expect(upsertCall.create.settings.requireClockInPhoto).toBe(true)
+      expect(upsertCall.create.settings.requireClockInToLogin).toBe(true)
+    })
+
+    it('should merge with existing settings JSON (not overwrite)', async () => {
+      prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+        settings: { showTipScreen: false, enableCashPayments: true },
+      } as any)
+      prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+
+      await organizationDashboardService.upsertOrgAttendanceConfig(orgId, {
+        enableBarcodeScanner: false,
+      })
+
+      const upsertCall = prismaMock.organizationAttendanceConfig.upsert.mock.calls[0][0]
+      const savedSettings = upsertCall.create.settings
+
+      // New field should be added
+      expect(savedSettings.enableBarcodeScanner).toBe(false)
+      // Existing fields should be preserved
+      expect(savedSettings.showTipScreen).toBe(false)
+      expect(savedSettings.enableCashPayments).toBe(true)
+    })
+  })
 })

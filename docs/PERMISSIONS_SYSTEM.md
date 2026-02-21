@@ -659,22 +659,24 @@ bash scripts/check-permission-migration.sh
 
 When a user accesses a venue, `getUserAccess()` resolves their role in this order:
 
-| Priority | Condition | Result |
-|----------|-----------|--------|
-| 1 | User has any `StaffVenue.role = SUPERADMIN` | SUPERADMIN — access to ALL venues |
-| 2 | User has `StaffOrganization.role = OWNER` for the venue's org | **OWNER always** — ignores StaffVenue.active |
-| 3 | User has `StaffVenue` with `active = true` | Uses the per-venue `StaffVenue.role` |
-| 4 | Everything else | **Access denied** |
+| Priority | Condition                                                     | Result                                       |
+| -------- | ------------------------------------------------------------- | -------------------------------------------- |
+| 1        | User has any `StaffVenue.role = SUPERADMIN`                   | SUPERADMIN — access to ALL venues            |
+| 2        | User has `StaffOrganization.role = OWNER` for the venue's org | **OWNER always** — ignores StaffVenue.active |
+| 3        | User has `StaffVenue` with `active = true`                    | Uses the per-venue `StaffVenue.role`         |
+| 4        | Everything else                                               | **Access denied**                            |
 
 ### Business Rules
 
 **Org-Level OWNER (StaffOrganization.role = OWNER):**
+
 - OWNER of an organization = OWNER of ALL venues in that org
 - Cannot be downgraded or deactivated per-venue
 - `StaffVenue.active = false` is ignored for org-level OWNERs
 - This is by design: organization ownership implies full venue authority
 
 **Non-OWNER roles (ADMIN, MANAGER, WAITER, VIEWER, etc.):**
+
 - Access is per-venue via `StaffVenue`
 - `StaffVenue.active = false` means **no access** to that venue
 - Role can vary per venue (e.g., ADMIN in Venue A, WAITER in Venue B)
@@ -696,10 +698,12 @@ Jose in org "Patos" (StaffOrganization.role = ADMIN):
 ### Scope of `getUserAccess()` enforcement
 
 `getUserAccess()` is called by:
+
 - `verifyAccess` middleware (white-label routes: storesAnalysis, commandCenter, promoters, stockDashboard)
 - `GET /api/v1/me/access` endpoint (frontend `useAccess()` hook)
 
 It does NOT affect:
+
 - `checkPermission` middleware (legacy/core routes)
 - Venue switcher (`getAuthStatus` / `switchVenueForStaff`)
 - TPV auth (PIN login)
