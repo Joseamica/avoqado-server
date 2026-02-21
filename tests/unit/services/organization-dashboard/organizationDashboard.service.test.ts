@@ -431,9 +431,7 @@ describe('OrganizationDashboardService', () => {
       prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
       prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
 
-      const terminals = [
-        { id: 't1', config: { settings: { kioskDefaultMerchantId: 'merchant-abc' } } },
-      ]
+      const terminals = [{ id: 't1', config: { settings: { kioskDefaultMerchantId: 'merchant-abc' } } }]
       prismaMock.terminal.findMany.mockResolvedValue(terminals as any)
 
       // Mock terminal.update to capture what gets written
