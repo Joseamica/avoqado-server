@@ -1,5 +1,5 @@
 import logger from '@/config/logger'
-import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
+import { Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import prisma from '../../utils/prismaClient'
@@ -424,48 +424,130 @@ export async function getTpvSettings(tpvId: string): Promise<TpvSettings> {
 }
 
 /**
- * Update TPV settings for a specific terminal
- * Performs partial update, merging with existing settings
+ * Update TPV settings for a specific terminal.
+ * Computes the diff against org defaults and stores only overrides in configOverrides.
+ * Full merged settings are saved to config.settings for TPV Android compatibility.
  */
 export async function updateTpvSettings(tpvId: string, settingsUpdate: Partial<TpvSettings>): Promise<TpvSettings> {
-  // 1. Get current terminal to access existing config
+  // 1. Get terminal with venue → org relationship for org defaults lookup
   const terminal = await prisma.terminal.findUnique({
     where: { id: tpvId },
-    select: { config: true },
+    select: {
+      config: true,
+      configOverrides: true,
+      venue: { select: { organizationId: true } },
+    },
   })
 
   if (!terminal) {
     throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
   }
 
-  // 2. Get current settings (defaults + saved)
-  const currentSettings = await getTpvSettings(tpvId)
+  // 2. Get org defaults (if org exists)
+  const orgDefaults = await getOrgDefaultsForTerminal(terminal.venue.organizationId)
 
-  // 3. Merge with update
+  // 3. Build full merged settings
+  const existingConfig = (terminal.config as any) || {}
+  const existingSettings = existingConfig.settings || {}
   const newSettings: TpvSettings = {
-    ...currentSettings,
+    ...DEFAULT_TPV_SETTINGS,
+    ...existingSettings,
     ...settingsUpdate,
   }
 
-  // 4. Update config field with new settings
-  const existingConfig = (terminal.config as any) || {}
-  const updatedConfig = {
-    ...existingConfig,
-    settings: newSettings,
-  }
+  // 4. Compute overrides: only fields that differ from org defaults
+  const baseSettings = { ...DEFAULT_TPV_SETTINGS, ...orgDefaults }
+  const overrides = computeOverrides(newSettings, baseSettings)
 
-  // 5. Save to database
+  // 5. Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
   await prisma.terminal.update({
     where: { id: tpvId },
     data: {
-      config: updatedConfig,
+      config: { ...existingConfig, settings: newSettings },
+      configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
       updatedAt: new Date(),
     },
   })
 
-  logger.info(`TPV settings updated for terminal ${tpvId}`, { settings: newSettings })
+  logger.info(`TPV settings updated for terminal ${tpvId}`, {
+    overrides: Object.keys(overrides),
+    overrideCount: Object.keys(overrides).length,
+  })
 
   return newSettings
+}
+
+/**
+ * Get org-level TPV defaults for a terminal's organization.
+ * Returns the settings JSON from OrganizationAttendanceConfig, or empty object.
+ */
+export async function getOrgDefaultsForTerminal(organizationId: string | null): Promise<Record<string, any>> {
+  if (!organizationId) return {}
+  const config = await prisma.organizationAttendanceConfig.findUnique({
+    where: { organizationId },
+    select: { settings: true },
+  })
+  return (config?.settings as Record<string, any>) || {}
+}
+
+/**
+ * Compute the diff between terminal settings and org base settings.
+ * Returns only the fields that differ (the overrides).
+ * kioskDefaultMerchantId is always included if non-null (always per-terminal).
+ */
+export function computeOverrides(terminalSettings: Record<string, any>, baseSettings: Record<string, any>): Record<string, any> {
+  const overrides: Record<string, any> = {}
+  for (const [key, value] of Object.entries(terminalSettings)) {
+    // kioskDefaultMerchantId is always per-terminal
+    if (key === 'kioskDefaultMerchantId') {
+      if (value != null) overrides[key] = value
+      continue
+    }
+    // Only store if different from base
+    if (JSON.stringify(value) !== JSON.stringify(baseSettings[key])) {
+      overrides[key] = value
+    }
+  }
+  return overrides
+}
+
+/**
+ * Reset a terminal's settings to org defaults.
+ * Clears configOverrides and recomputes config.settings from org defaults.
+ */
+export async function resetTerminalToDefaults(tpvId: string): Promise<TpvSettings> {
+  const terminal = await prisma.terminal.findUnique({
+    where: { id: tpvId },
+    select: { config: true, venue: { select: { organizationId: true } } },
+  })
+
+  if (!terminal) {
+    throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
+  }
+
+  const orgDefaults = await getOrgDefaultsForTerminal(terminal.venue.organizationId)
+  const existingConfig = (terminal.config as any) || {}
+  const existingSettings = existingConfig.settings || {}
+
+  // Recompute from org defaults, preserving only kioskDefaultMerchantId
+  const resetSettings: TpvSettings = {
+    ...DEFAULT_TPV_SETTINGS,
+    ...orgDefaults,
+    kioskDefaultMerchantId: existingSettings.kioskDefaultMerchantId ?? null,
+  }
+
+  await prisma.terminal.update({
+    where: { id: tpvId },
+    data: {
+      config: { ...existingConfig, settings: resetSettings },
+      configOverrides: Prisma.JsonNull,
+      updatedAt: new Date(),
+    },
+  })
+
+  logger.info(`Terminal ${tpvId} reset to org defaults`)
+
+  return resetSettings
 }
 
 /**
@@ -709,7 +791,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
   // 1. Find all terminals in the venue
   const terminals = await prisma.terminal.findMany({
     where: { venueId },
-    select: { id: true, config: true },
+    select: { id: true, config: true, configOverrides: true },
   })
 
   if (terminals.length === 0) {
@@ -742,17 +824,23 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
     })
   }
 
-  // 4. Update all terminals in a transaction (only if TpvConfig fields changed)
+  // 4. Update all terminals in a transaction (cascade: venue settings + per-terminal overrides)
   if (Object.keys(settingsToMerge).length > 0) {
     await prisma.$transaction(
       terminals.map(terminal => {
         const existingConfig = (terminal.config as any) || {}
         const existingSettings = existingConfig.settings || {}
+        const overrides = (terminal.configOverrides as Record<string, any>) || {}
+
+        // Cascade: existing base + venue update + per-terminal overrides
         const updatedConfig = {
           ...existingConfig,
           settings: {
             ...existingSettings,
             ...settingsToMerge,
+            ...overrides,
+            // kioskDefaultMerchantId is always per-terminal
+            kioskDefaultMerchantId: overrides.kioskDefaultMerchantId ?? existingSettings.kioskDefaultMerchantId ?? null,
           },
         }
 

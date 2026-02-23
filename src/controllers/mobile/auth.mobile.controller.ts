@@ -11,6 +11,7 @@
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import * as authMobileService from '../../services/mobile/auth.mobile.service'
+import { requestPasswordReset } from '../../services/dashboard/auth.service'
 
 // ============================================================================
 // EMAIL/PASSWORD AUTHENTICATION
@@ -177,5 +178,44 @@ export const passkeyVerify = async (req: Request, res: Response, next: NextFunct
   } catch (error) {
     logger.error('Error in passkeyVerify controller:', error)
     next(error)
+  }
+}
+
+// ============================================================================
+// PASSWORD RESET
+// ============================================================================
+
+/**
+ * Request password reset email
+ * PUBLIC endpoint - no authentication required
+ * Sends a reset link to the user's email (if account exists)
+ *
+ * @route POST /api/v1/mobile/auth/request-reset
+ */
+export const requestReset = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { email } = req.body
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email es requerido',
+      })
+    }
+
+    const result = await requestPasswordReset({ email })
+
+    // Always return success (security: don't reveal if email exists)
+    res.status(200).json({
+      success: true,
+      message: result.message,
+    })
+  } catch (error) {
+    logger.error('Error in mobile requestReset controller:', error)
+    // Security: don't reveal internal errors
+    res.status(200).json({
+      success: true,
+      message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.',
+    })
   }
 }

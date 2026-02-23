@@ -2617,7 +2617,8 @@ model Terminal {
   ipAddress  String? // Last known IP address
 
   // Configuration
-  config Json?
+  config          Json?
+  configOverrides Json? // Per-terminal overrides (cascade: orgDefaults + overrides = config.settings)
 
   // 🆕 Multi-Merchant Support (2025-11-05)
   // Array of MerchantAccount IDs this terminal can use for payment processing

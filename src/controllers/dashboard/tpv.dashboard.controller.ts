@@ -321,6 +321,23 @@ export async function updateTpvSettings(req: Request<{ tpvId: string }>, res: Re
 }
 
 /**
+ * Reset terminal settings to org defaults.
+ * Clears configOverrides and recomputes config.settings.
+ * @permission tpv-settings:update (ADMIN+)
+ */
+export async function resetTpvToDefaults(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { tpvId } = req.params
+
+    const resetSettings = await tpvDashboardService.resetTerminalToDefaults(tpvId)
+
+    res.status(200).json(resetSettings)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * Activate a terminal by registering its hardware serial number
  * @permission tpv:update (MANAGER+)
  */

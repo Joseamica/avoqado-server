@@ -1,6 +1,8 @@
 import { NextFunction, Request, Response } from 'express'
 
+import { Prisma } from '@prisma/client'
 import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
+import { computeOverrides, getOrgDefaultsForTerminal } from '@/services/dashboard/tpv.dashboard.service'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
@@ -371,40 +373,34 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
       settingsUpdate,
     })
 
-    // Step 1: Find terminal by serial number (include venueId for enableShifts)
+    // Step 1: Find terminal by serial number (include venue → org for cascade)
     const terminal = await prisma.terminal.findFirst({
       where: { serialNumber },
-      select: { id: true, config: true, venueId: true },
+      select: { id: true, config: true, configOverrides: true, venueId: true, venue: { select: { organizationId: true } } },
     })
 
     if (!terminal) {
       throw new NotFoundError(`Terminal not found with serial number: ${serialNumber}`)
     }
 
-    // Step 2: Get current settings (merge with defaults)
+    // Step 2: Get org defaults for cascade comparison
+    const orgDefaults = await getOrgDefaultsForTerminal(terminal.venue.organizationId)
+    const baseSettings = { ...DEFAULT_TPV_SETTINGS, ...orgDefaults }
+
+    // Step 3: Get current settings and merge with update
     const existingConfig = (terminal.config as any) || {}
-    const currentSettings = {
-      ...DEFAULT_TPV_SETTINGS,
-      ...(existingConfig.settings || {}),
-    }
+    const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...(existingConfig.settings || {}) }
+    const newSettings: TpvSettings = { ...currentSettings, ...settingsUpdate }
 
-    // Step 3: Merge with update (partial update support)
-    const newSettings: TpvSettings = {
-      ...currentSettings,
-      ...settingsUpdate,
-    }
+    // Step 4: Compute overrides (diff vs org defaults)
+    const overrides = computeOverrides(newSettings, baseSettings)
 
-    // Step 4: Update config field with new settings
-    const updatedConfig = {
-      ...existingConfig,
-      settings: newSettings,
-    }
-
-    // Step 5: Save terminal-level settings to database
+    // Step 5: Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
     await prisma.terminal.update({
       where: { id: terminal.id },
       data: {
-        config: updatedConfig,
+        config: { ...existingConfig, settings: newSettings },
+        configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
         updatedAt: new Date(),
       },
     })

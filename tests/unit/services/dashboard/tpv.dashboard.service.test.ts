@@ -1,5 +1,5 @@
 import { prismaMock } from '@tests/__helpers__/setup'
-import { getVenueTpvSettings } from '@/services/dashboard/tpv.dashboard.service'
+import { getVenueTpvSettings, computeOverrides } from '@/services/dashboard/tpv.dashboard.service'
 
 const venueId = 'venue-123'
 const orgId = 'org-456'
@@ -288,5 +288,68 @@ describe('getVenueTpvSettings — inheritance tests', () => {
 
   it('should throw NotFoundError when venueId is empty', async () => {
     await expect(getVenueTpvSettings('')).rejects.toThrow('El ID del Venue es requerido.')
+  })
+})
+
+describe('computeOverrides — cascade diff computation', () => {
+  const baseSettings = {
+    showTipScreen: true,
+    showReviewScreen: true,
+    enableCashPayments: true,
+    enableCardPayments: true,
+    kioskDefaultMerchantId: null,
+  }
+
+  it('should return empty object when terminal matches org defaults', () => {
+    const terminalSettings = { ...baseSettings }
+    const overrides = computeOverrides(terminalSettings, baseSettings)
+    expect(overrides).toEqual({})
+  })
+
+  it('should return only the fields that differ from base', () => {
+    const terminalSettings = {
+      ...baseSettings,
+      showTipScreen: false, // different
+      enableCashPayments: false, // different
+    }
+    const overrides = computeOverrides(terminalSettings, baseSettings)
+    expect(overrides).toEqual({
+      showTipScreen: false,
+      enableCashPayments: false,
+    })
+  })
+
+  it('should always include kioskDefaultMerchantId when non-null', () => {
+    const terminalSettings = {
+      ...baseSettings,
+      kioskDefaultMerchantId: 'merchant-abc',
+    }
+    const overrides = computeOverrides(terminalSettings, baseSettings)
+    expect(overrides).toEqual({
+      kioskDefaultMerchantId: 'merchant-abc',
+    })
+  })
+
+  it('should not include kioskDefaultMerchantId when null', () => {
+    const terminalSettings = {
+      ...baseSettings,
+      kioskDefaultMerchantId: null,
+    }
+    const overrides = computeOverrides(terminalSettings, baseSettings)
+    expect(overrides).toEqual({})
+  })
+
+  it('should detect array differences (tipSuggestions)', () => {
+    const base = { ...baseSettings, tipSuggestions: [15, 18, 20, 25] }
+    const terminal = { ...base, tipSuggestions: [10, 15, 20] }
+    const overrides = computeOverrides(terminal, base)
+    expect(overrides).toEqual({ tipSuggestions: [10, 15, 20] })
+  })
+
+  it('should not flag arrays that match', () => {
+    const base = { ...baseSettings, tipSuggestions: [15, 18, 20, 25] }
+    const terminal = { ...base, tipSuggestions: [15, 18, 20, 25] }
+    const overrides = computeOverrides(terminal, base)
+    expect(overrides).toEqual({})
   })
 })

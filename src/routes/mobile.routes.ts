@@ -16,7 +16,9 @@ import * as terminalPaymentMobileController from '../controllers/mobile/terminal
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
+import * as productMobileController from '../controllers/mobile/product.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 
@@ -358,6 +360,18 @@ router.post('/auth/passkey/challenge', authMobileController.passkeyChallenge)
 router.post('/auth/passkey/verify', authMobileController.passkeyVerify)
 
 // ============================================================================
+// PASSWORD RESET
+// Public endpoint - no authentication required
+// ============================================================================
+
+/**
+ * POST /api/v1/mobile/auth/request-reset
+ * Request a password reset email.
+ * Always returns success (security: no user enumeration).
+ */
+router.post('/auth/request-reset', authMobileController.requestReset)
+
+// ============================================================================
 // ORDER MANAGEMENT
 // Authenticated endpoints - requires valid JWT
 // ============================================================================
@@ -474,7 +488,7 @@ router.post('/auth/passkey/verify', authMobileController.passkeyVerify)
  *       401:
  *         description: Not authenticated
  */
-router.post('/venues/:venueId/orders', authenticateTokenMiddleware, orderMobileController.createOrder)
+router.post('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermission('orders:create'), orderMobileController.createOrder)
 
 /**
  * @openapi
@@ -502,7 +516,7 @@ router.post('/venues/:venueId/orders', authenticateTokenMiddleware, orderMobileC
  *       404:
  *         description: Order not found
  */
-router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, orderMobileController.getOrder)
+router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, checkPermission('orders:read'), orderMobileController.getOrder)
 
 /**
  * @openapi
@@ -593,7 +607,12 @@ router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, orde
  *       404:
  *         description: Order not found
  */
-router.post('/venues/:venueId/orders/:orderId/pay', authenticateTokenMiddleware, orderMobileController.payCash)
+router.post(
+  '/venues/:venueId/orders/:orderId/pay',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  orderMobileController.payCash,
+)
 
 /**
  * @openapi
@@ -632,7 +651,12 @@ router.post('/venues/:venueId/orders/:orderId/pay', authenticateTokenMiddleware,
  *       404:
  *         description: Order not found
  */
-router.delete('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, orderMobileController.cancelOrder)
+router.delete(
+  '/venues/:venueId/orders/:orderId',
+  authenticateTokenMiddleware,
+  checkPermission('orders:cancel'),
+  orderMobileController.cancelOrder,
+)
 
 // ============================================================================
 // TRANSACTIONS
@@ -690,7 +714,12 @@ router.delete('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, o
  *       401:
  *         description: Not authenticated
  */
-router.get('/venues/:venueId/transactions', authenticateTokenMiddleware, transactionMobileController.listTransactions)
+router.get(
+  '/venues/:venueId/transactions',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  transactionMobileController.listTransactions,
+)
 
 /**
  * @openapi
@@ -720,7 +749,12 @@ router.get('/venues/:venueId/transactions', authenticateTokenMiddleware, transac
  *       401:
  *         description: Not authenticated
  */
-router.get('/venues/:venueId/transactions/:paymentId', authenticateTokenMiddleware, transactionMobileController.getTransaction)
+router.get(
+  '/venues/:venueId/transactions/:paymentId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  transactionMobileController.getTransaction,
+)
 
 // ============================================================================
 // TIME CLOCK (Reloj Checador)
@@ -1055,7 +1089,7 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *       200:
  *         description: List of customers
  */
-router.get('/venues/:venueId/customers', authenticateTokenMiddleware, customerController.getCustomers)
+router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), customerController.getCustomers)
 
 /**
  * @openapi
@@ -1090,7 +1124,12 @@ router.get('/venues/:venueId/customers', authenticateTokenMiddleware, customerCo
  *       201:
  *         description: Customer created
  */
-router.post('/venues/:venueId/customers', authenticateTokenMiddleware, customerController.createCustomer)
+router.post(
+  '/venues/:venueId/customers',
+  authenticateTokenMiddleware,
+  checkPermission('customers:create'),
+  customerController.createCustomer,
+)
 
 /**
  * @openapi
@@ -1110,7 +1149,12 @@ router.post('/venues/:venueId/customers', authenticateTokenMiddleware, customerC
  *       200:
  *         description: List of customer groups
  */
-router.get('/venues/:venueId/customer-groups', authenticateTokenMiddleware, customerGroupController.getCustomerGroups)
+router.get(
+  '/venues/:venueId/customer-groups',
+  authenticateTokenMiddleware,
+  checkPermission('customers:read'),
+  customerGroupController.getCustomerGroups,
+)
 
 // ============================================================================
 // PAYMENTS
@@ -1157,6 +1201,7 @@ router.get('/venues/:venueId/customer-groups', authenticateTokenMiddleware, cust
 router.post(
   '/venues/:venueId/fast',
   authenticateTokenMiddleware,
+  checkPermission('payments:create'),
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentMobileController.recordFastPayment,
@@ -1172,20 +1217,46 @@ router.post(
  * Send payment request to a TPV terminal via Socket.IO.
  * Long-polls until terminal responds (max 60s).
  */
-router.post('/venues/:venueId/terminal-payment', authenticateTokenMiddleware, terminalPaymentMobileController.sendTerminalPayment)
+router.post(
+  '/venues/:venueId/terminal-payment',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  terminalPaymentMobileController.sendTerminalPayment,
+)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/terminal-payment/cancel
  * Cancel a pending terminal payment. Sends cancel signal to TPV.
  * requestId ensures TPV only cancels if still on THAT payment (idempotency).
  */
-router.post('/venues/:venueId/terminal-payment/cancel', authenticateTokenMiddleware, terminalPaymentMobileController.cancelTerminalPayment)
+router.post(
+  '/venues/:venueId/terminal-payment/cancel',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  terminalPaymentMobileController.cancelTerminalPayment,
+)
 
 /**
  * GET /api/v1/mobile/venues/:venueId/terminals/online
  * List terminals currently connected via Socket.IO.
  */
-router.get('/venues/:venueId/terminals/online', authenticateTokenMiddleware, terminalPaymentMobileController.getOnlineTerminals)
+router.get(
+  '/venues/:venueId/terminals/online',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  terminalPaymentMobileController.getOnlineTerminals,
+)
+
+// ============================================================================
+// PRODUCTS & CATEGORIES
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/categories
+ * List categories for product creation (simplified payload).
+ */
+router.get('/venues/:venueId/categories', authenticateTokenMiddleware, checkPermission('menu:read'), productMobileController.listCategories)
 
 // ============================================================================
 // INVENTORY
@@ -1196,25 +1267,45 @@ router.get('/venues/:venueId/terminals/online', authenticateTokenMiddleware, ter
  * GET /api/v1/mobile/venues/:venueId/inventory/stock-overview
  * List products with inventory tracking and stock levels.
  */
-router.get('/venues/:venueId/inventory/stock-overview', authenticateTokenMiddleware, inventoryMobileController.getStockOverview)
+router.get(
+  '/venues/:venueId/inventory/stock-overview',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  inventoryMobileController.getStockOverview,
+)
 
 /**
  * GET /api/v1/mobile/venues/:venueId/inventory/stock-counts
  * List stock counts for a venue.
  */
-router.get('/venues/:venueId/inventory/stock-counts', authenticateTokenMiddleware, inventoryMobileController.getStockCounts)
+router.get(
+  '/venues/:venueId/inventory/stock-counts',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  inventoryMobileController.getStockCounts,
+)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/inventory/stock-counts
  * Create a new stock count (CYCLE or FULL).
  */
-router.post('/venues/:venueId/inventory/stock-counts', authenticateTokenMiddleware, inventoryMobileController.createStockCount)
+router.post(
+  '/venues/:venueId/inventory/stock-counts',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:create'),
+  inventoryMobileController.createStockCount,
+)
 
 /**
  * PUT /api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId
  * Update stock count items (set counted quantities).
  */
-router.put('/venues/:venueId/inventory/stock-counts/:countId', authenticateTokenMiddleware, inventoryMobileController.updateStockCount)
+router.put(
+  '/venues/:venueId/inventory/stock-counts/:countId',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:update'),
+  inventoryMobileController.updateStockCount,
+)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId/confirm
@@ -1223,6 +1314,7 @@ router.put('/venues/:venueId/inventory/stock-counts/:countId', authenticateToken
 router.post(
   '/venues/:venueId/inventory/stock-counts/:countId/confirm',
   authenticateTokenMiddleware,
+  checkPermission('inventory:adjust'),
   inventoryMobileController.confirmStockCount,
 )
 

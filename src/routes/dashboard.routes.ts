@@ -4039,6 +4039,36 @@ router.put('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission(
 
 /**
  * @openapi
+ * /api/v1/dashboard/tpv/{tpvId}/reset-to-defaults:
+ *   post:
+ *     tags: [TPV Settings]
+ *     summary: Reset terminal settings to organization defaults
+ *     description: Clears per-terminal overrides and recomputes settings from org defaults.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: tpvId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Settings reset to org defaults
+ *       403:
+ *         description: Forbidden (missing tpv-settings:update permission)
+ *       404:
+ *         description: Terminal not found
+ */
+router.post(
+  '/tpv/:tpvId/reset-to-defaults',
+  authenticateTokenMiddleware,
+  checkPermission('tpv-settings:update'),
+  tpvController.resetTpvToDefaults,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/tpv/{tpvId}/merchants:
  *   get:
  *     tags: [TPV Settings]
