@@ -3214,10 +3214,10 @@ class OrganizationDashboardService {
       },
     })
 
-    // 5. Push to all terminals in the org
+    // 5. Push to all terminals in the org (cascade: orgDefaults + per-terminal overrides)
     const terminals = await prisma.terminal.findMany({
       where: { venue: { organizationId: orgId } },
-      select: { id: true, config: true },
+      select: { id: true, config: true, configOverrides: true },
     })
 
     if (terminals.length > 0) {
@@ -3227,13 +3227,17 @@ class OrganizationDashboardService {
         await prisma.$transaction(
           batch.map(terminal => {
             const existingConfig = (terminal.config as Record<string, any>) || {}
-            const existingTerminalSettings = (existingConfig.settings as Record<string, any>) || {}
+            const overrides = (terminal.configOverrides as Record<string, any>) || {}
 
-            // Preserve kioskDefaultMerchantId (per-terminal field)
+            // Cascade merge: org defaults → per-terminal overrides
+            // Terminals with no overrides (null) get full org defaults
+            // Terminals with overrides keep their customized fields
             const pushSettings = {
-              ...existingTerminalSettings,
               ...mergedSettings,
-              kioskDefaultMerchantId: existingTerminalSettings.kioskDefaultMerchantId ?? null,
+              ...overrides,
+              // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
+              kioskDefaultMerchantId:
+                overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
             }
 
             return prisma.terminal.update({

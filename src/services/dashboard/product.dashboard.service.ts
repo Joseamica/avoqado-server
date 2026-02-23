@@ -266,7 +266,7 @@ export async function getProducts(
         include: {
           group: {
             include: {
-              modifiers: true,
+              modifiers: { where: { active: true } },
             },
           },
         },
@@ -336,7 +336,7 @@ export async function getProduct(venueId: string, productId: string): Promise<an
         include: {
           group: {
             include: {
-              modifiers: true,
+              modifiers: { where: { active: true } },
             },
           },
         },
@@ -834,7 +834,7 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
         include: {
           group: {
             include: {
-              modifiers: true,
+              modifiers: { where: { active: true } },
             },
           },
         },
@@ -934,7 +934,7 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
         include: {
           group: {
             include: {
-              modifiers: true,
+              modifiers: { where: { active: true } },
             },
           },
         },

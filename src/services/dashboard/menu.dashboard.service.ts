@@ -460,7 +460,7 @@ export async function getMenuById(venueId: string, menuId: string): Promise<Menu
                     include: {
                       group: {
                         include: {
-                          modifiers: true,
+                          modifiers: { where: { active: true } },
                         },
                       },
                     },
