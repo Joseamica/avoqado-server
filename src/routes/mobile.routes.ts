@@ -14,6 +14,7 @@ import * as transactionMobileController from '../controllers/mobile/transaction.
 import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
 import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
+import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
 import * as productMobileController from '../controllers/mobile/product.mobile.controller'
@@ -1316,6 +1317,35 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('inventory:adjust'),
   inventoryMobileController.confirmStockCount,
+)
+
+// ============================================================================
+// RECEIPTS (Digital Receipt Sending)
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/receipts/send-email
+ * Send a digital receipt via email.
+ * Body: { receiptAccessKey: string, email: string }
+ */
+router.post(
+  '/venues/:venueId/receipts/send-email',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  receiptMobileController.sendReceiptEmail,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/receipts/send-whatsapp
+ * Send a digital receipt via WhatsApp Business API.
+ * Body: { receiptAccessKey: string, phone: string }
+ */
+router.post(
+  '/venues/:venueId/receipts/send-whatsapp',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  receiptMobileController.sendReceiptWhatsapp,
 )
 
 export default router

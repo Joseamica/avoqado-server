@@ -314,6 +314,13 @@ model Venue {
   // ==========================================
   tpvMessages TpvMessage[]
 
+  // ==========================================
+  // RESERVATION / BOOKING SYSTEM
+  // ==========================================
+  reservations        Reservation[]
+  waitlistEntries     ReservationWaitlistEntry[]
+  reservationSettings ReservationSettings?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -506,6 +513,10 @@ model Staff {
   commissionPayoutsProcessed  CommissionPayout[]      @relation("CommissionPayoutProcessedBy")
   commissionClawbacksCreated  CommissionClawback[]    @relation("CommissionClawbackCreatedBy")
   milestoneAchievements       MilestoneAchievement[]
+
+  // Reservations
+  reservationsAssigned Reservation[] @relation("ReservationStaff")
+  reservationsCreated  Reservation[] @relation("ReservationCreatedBy")
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -1026,6 +1037,9 @@ model Product {
 
   // Stock Counts
   stockCountItems StockCountItem[]
+
+  // Reservations (product-based appointments/classes)
+  reservations Reservation[]
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -1660,6 +1674,9 @@ model Table {
 
   // Order history (all orders ever assigned to this table)
   orders Order[] @relation("TableOrderHistory")
+
+  // Reservations
+  reservations Reservation[]
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -2308,6 +2325,7 @@ model DigitalReceipt {
   // Tracking del envío
   status         ReceiptStatus @default(PENDING)
   recipientEmail String?
+  recipientPhone String?
   sentAt         DateTime?
   viewedAt       DateTime? // Se puede actualizar cuando se accede al link
 
@@ -3740,6 +3758,10 @@ model Customer {
 
   // Multi-customer support (N:N relationship with orders)
   orderAssociations OrderCustomer[]
+
+  // Reservations
+  reservations    Reservation[]
+  waitlistEntries ReservationWaitlistEntry[]
 
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
@@ -7225,4 +7247,207 @@ enum TrainingQuestionType {
   MULTIPLE_CHOICE
   TRUE_FALSE
   MULTI_SELECT
+}
+
+// ==========================================
+// RESERVATION / BOOKING SYSTEM
+// ==========================================
+
+enum ReservationStatus {
+  PENDING    // Created, awaiting confirmation
+  CONFIRMED  // Confirmed (auto or manual)
+  CHECKED_IN // Guest arrived
+  COMPLETED  // Service delivered
+  CANCELLED  // Cancelled by customer, staff, or system (expired)
+  NO_SHOW    // Guest didn't arrive within grace period
+}
+
+enum ReservationChannel {
+  DASHBOARD   // Created by staff
+  WEB         // Customer self-service (booking page/widget)
+  PHONE       // Phone booking logged by staff
+  WHATSAPP    // WhatsApp integration
+  APP         // Mobile app
+  WALK_IN     // Walk-in converted to reservation
+  THIRD_PARTY // External sync (Google Reserve, etc.)
+}
+
+enum DepositStatus {
+  PENDING   // Deposit requested, not yet paid
+  CARD_HOLD // Card captured via Stripe SetupIntent, not yet charged
+  PAID      // Payment received
+  REFUNDED  // Deposit returned to customer
+  FORFEITED // Lost due to no-show/late cancel
+}
+
+enum WaitlistStatus {
+  WAITING   // In queue
+  NOTIFIED  // Slot opened, customer notified
+  PROMOTED  // Converted to reservation
+  EXPIRED   // No response within window
+  CANCELLED // Left waitlist
+}
+
+model Reservation {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Human-readable confirmation code (e.g., "RES-A3X7K2") — for display/phone/WhatsApp
+  confirmationCode String
+  // Cryptographic token for public view/cancel (UUID v4 — NOT guessable like confirmationCode)
+  cancelSecret     String @default(uuid())
+
+  // Classification
+  status  ReservationStatus  @default(PENDING)
+  channel ReservationChannel @default(DASHBOARD)
+
+  // Timing (all UTC — Prisma pattern)
+  startsAt DateTime
+  endsAt   DateTime
+  duration Int // Minutes (denormalized for queries)
+
+  // Guest info (linked Customer or anonymous)
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  guestName  String?
+  guestPhone String?
+  guestEmail String?
+  partySize  Int       @default(1)
+
+  // Direct resource references (NO junction tables for MVP)
+  tableId         String?
+  table           Table?   @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  productId       String?
+  product         Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  assignedStaffId String?
+  assignedStaff   Staff?   @relation("ReservationStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+
+  // Deposit (direct fields — avoids synthetic Orders that pollute KPIs)
+  depositAmount       Decimal?       @db.Decimal(10, 2)
+  depositStatus       DepositStatus?
+  depositProcessorRef String? // Stripe PaymentIntent ID or processor reference
+  depositPaidAt       DateTime?
+  depositRefundedAt   DateTime?
+
+  // Staff assignment
+  createdById String?
+  createdBy   Staff? @relation("ReservationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  // Status timestamps (audit trail for MVP — proper ReservationHistory in Phase 2)
+  confirmedAt DateTime?
+  checkedInAt DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+  noShowAt    DateTime?
+
+  // Cancellation details
+  cancelledBy        String? // Staff ID, "CUSTOMER", or "SYSTEM"
+  cancellationReason String? @db.Text
+
+  // Notes
+  specialRequests String?  @db.Text
+  internalNotes   String?  @db.Text
+  tags            String[] @default([])
+
+  // Simple JSON audit log for MVP (proper model in Phase 2)
+  statusLog Json? // [{ status, at, by, reason? }]
+
+  // Relations (Phase 2)
+  waitlistPromotion ReservationWaitlistEntry?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Indexes
+  @@unique([venueId, confirmationCode])
+  @@index([venueId, status, startsAt])
+  @@index([venueId, startsAt, endsAt])
+  @@index([venueId, tableId, startsAt])
+  @@index([venueId, productId, startsAt])
+  @@index([venueId, assignedStaffId, startsAt])
+  @@index([customerId])
+  @@index([cancelSecret])
+}
+
+model ReservationWaitlistEntry {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  guestName  String?
+  guestPhone String?
+
+  partySize      Int            @default(1)
+  desiredStartAt DateTime
+  desiredEndAt   DateTime?
+  status         WaitlistStatus @default(WAITING)
+  position       Int // Queue position (party-size-aware, not pure FIFO)
+
+  notifiedAt       DateTime?
+  responseDeadline DateTime?
+
+  // If converted to reservation
+  promotedReservationId String?      @unique
+  promotedReservation   Reservation? @relation(fields: [promotedReservationId], references: [id], onDelete: SetNull)
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, status, desiredStartAt])
+  @@index([venueId, status, partySize])
+}
+
+model ReservationSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Scheduling
+  slotIntervalMin    Int     @default(15)
+  defaultDurationMin Int     @default(60)
+  autoConfirm        Boolean @default(true)
+  maxAdvanceDays     Int     @default(60)
+  minNoticeMin       Int     @default(60)
+  noShowGraceMin     Int     @default(15)
+
+  // Pacing
+  pacingMaxPerSlot      Int? // null = no pacing limit
+  onlineCapacityPercent Int  @default(100)
+
+  // Deposits
+  depositMode          String   @default("none") // none | card_hold | deposit | prepaid
+  depositFixedAmount   Decimal? @db.Decimal(10, 2)
+  depositPercentage    Int? // percentage of service price
+  depositPartySizeGte  Int? // require deposit for parties >= this size
+  depositPaymentWindow Int? // hours to complete payment
+
+  // Waitlist
+  waitlistEnabled      Boolean @default(true)
+  waitlistMaxSize      Int     @default(50)
+  waitlistPriorityMode String  @default("fifo") // fifo | party_size | broadcast
+  waitlistNotifyWindow Int     @default(30) // minutes
+
+  // Public booking
+  publicBookingEnabled Boolean @default(false)
+  requirePhone         Boolean @default(true)
+  requireEmail         Boolean @default(false)
+
+  // Cancellation
+  allowCustomerCancel   Boolean @default(true)
+  minHoursBeforeCancel  Int?    @default(2) // minimum hours before start to allow cancellation
+  forfeitDeposit        Boolean @default(false)
+  noShowFeePercent      Int? // percentage of deposit/service charged on no-show
+
+  // Reminders
+  remindersEnabled  Boolean  @default(true)
+  reminderChannels  String[] @default(["EMAIL"])
+  reminderMinBefore Int[]    @default([1440, 120]) // minutes before reservation
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
