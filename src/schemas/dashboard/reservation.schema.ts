@@ -291,7 +291,7 @@ export const publicCreateReservationBodySchema = z
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }).optional(),
     duration: z.number().int().min(5).max(480).optional(),
     guestName: z.string().min(1, 'El nombre es requerido').max(200),
-    guestPhone: z.string().min(1, 'El telefono es requerido').max(20),
+    guestPhone: z.string().min(1, 'El telefono es requerido').max(20).optional(),
     guestEmail: z.string().email('Email invalido').max(200).optional(),
     partySize: z.number().int().min(1).max(100).optional(),
     productId: z.string().optional(),

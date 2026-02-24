@@ -161,6 +161,9 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
   if (newStartsAt || newEndsAt) {
     const effectiveStart = newStartsAt || session.startsAt
     const effectiveEnd = newEndsAt || session.endsAt
+    if (effectiveEnd <= effectiveStart) {
+      throw new BadRequestError('La hora de inicio debe ser anterior a la hora de fin')
+    }
     updateData.duration = Math.round((effectiveEnd.getTime() - effectiveStart.getTime()) / 60000)
   }
   if (data.capacity !== undefined) updateData.capacity = data.capacity

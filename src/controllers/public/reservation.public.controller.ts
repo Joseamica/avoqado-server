@@ -150,6 +150,17 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('El email es requerido')
     }
 
+    // If productId points to a CLASS product, classSessionId is mandatory
+    if (req.body.productId && !req.body.classSessionId) {
+      const product = await prisma.product.findFirst({
+        where: { id: req.body.productId, venueId: venue.id },
+        select: { type: true },
+      })
+      if (product?.type === 'CLASS') {
+        throw new BadRequestError('classSessionId es requerido para reservar una clase')
+      }
+    }
+
     // CLASS bookings use a dedicated code path with ClassSession capacity checks
     if (req.body.classSessionId) {
       const reservation = await createClassReservation(venue.id, req.body, settings)
