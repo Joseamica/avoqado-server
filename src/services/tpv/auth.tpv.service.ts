@@ -152,6 +152,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     role: staffVenue.role,
     permissions: staffVenue.permissions,
     correlationId,
+    terminalSerialNumber: serialNumber, // Auto-attribute orders/payments to this terminal
   }
 
   const accessToken = generateAccessToken(tokenPayload)
@@ -225,7 +226,7 @@ export async function refreshAccessToken(refreshToken: string) {
   }
 
   // Extract user information from token
-  const { sub: userId, venueId, orgId } = decoded
+  const { sub: userId, venueId, orgId, terminalSerialNumber } = decoded as any
 
   // Verify user still exists and is active
   const staffVenue = await prisma.staffVenue.findFirst({
@@ -274,6 +275,7 @@ export async function refreshAccessToken(refreshToken: string) {
     role: staffVenue.role,
     permissions: staffVenue.permissions,
     correlationId,
+    ...(terminalSerialNumber && { terminalSerialNumber }),
   }
 
   const newAccessToken = generateAccessToken(tokenPayload)
@@ -503,6 +505,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
     role: StaffRole.SUPERADMIN,
     permissions: ['*'], // Full permissions
     correlationId,
+    terminalSerialNumber: serialNumber, // Auto-attribute orders/payments to this terminal
   }
 
   const accessToken = generateAccessToken(tokenPayload)

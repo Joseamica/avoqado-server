@@ -154,6 +154,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         role: StaffRole.WAITER,
         permissions: null,
         correlationId: expect.any(String),
+        terminalSerialNumber: 'SERIAL-001',
       })
 
       expect(security.generateRefreshToken).toHaveBeenCalledWith({
@@ -164,6 +165,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         role: StaffRole.WAITER,
         permissions: null,
         correlationId: expect.any(String),
+        terminalSerialNumber: 'SERIAL-001',
       })
     })
 

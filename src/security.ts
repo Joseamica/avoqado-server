@@ -13,6 +13,7 @@ export interface AvoqadoJwtPayload extends jwt.JwtPayload {
   orgId: string // Organization ID (derived from venue or StaffOrganization)
   venueId: string // Venue actual de operación
   role: StaffRole // StaffVenue.role para el venueId actual
+  terminalSerialNumber?: string // Terminal serial (e.g., "AVQD-2841548417") for auto-attribution
   // permissions?: string[]; // Opcional
 }
 
@@ -24,6 +25,7 @@ export interface AuthContext {
   orgId: string
   venueId: string
   role: StaffRole
+  terminalSerialNumber?: string // Terminal serial from JWT (for auto-attribution on orders/payments)
 }
 
 /**
@@ -67,6 +69,7 @@ export interface TokenPayload {
   role: StaffRole
   permissions?: any
   correlationId?: string
+  terminalSerialNumber?: string // Terminal serial for auto-attribution
 }
 
 /**
@@ -241,6 +244,7 @@ export function protectRoute(allowedRoles: StaffRole[]) {
       orgId: jwtPayload.orgId,
       venueId: jwtPayload.venueId,
       role: jwtPayload.role,
+      ...(jwtPayload.terminalSerialNumber && { terminalSerialNumber: jwtPayload.terminalSerialNumber }),
     }
 
     // Augmentar el objeto Request de Express. Asume que `express.d.ts` está configurado.
@@ -263,6 +267,7 @@ export function generateAccessToken(payload: TokenPayload): string {
     orgId: payload.orgId,
     venueId: payload.venueId,
     role: payload.role,
+    ...(payload.terminalSerialNumber && { terminalSerialNumber: payload.terminalSerialNumber }),
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 60 * 60, // 1 hour expiry
   }
@@ -290,6 +295,7 @@ export function generateRefreshToken(payload: TokenPayload): string {
     orgId: payload.orgId,
     venueId: payload.venueId,
     type: 'refresh',
+    ...(payload.terminalSerialNumber && { terminalSerialNumber: payload.terminalSerialNumber }),
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7, // 7 days expiry
   }

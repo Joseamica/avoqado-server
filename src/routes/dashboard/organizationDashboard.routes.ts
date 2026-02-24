@@ -5,7 +5,20 @@
  */
 import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
+import { validateRequest } from '../../middlewares/validation'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
+import * as orgTerminalsService from '../../services/organization-dashboard/orgTerminals.service'
+import {
+  GetOrgTerminalSchema,
+  CreateOrgTerminalSchema,
+  UpdateOrgTerminalSchema,
+  DeleteOrgTerminalSchema,
+  GenerateActivationCodeSchema,
+  RemoteActivateSchema,
+  SendOrgCommandSchema,
+  AssignMerchantsSchema,
+  GetOrgMerchantAccountsSchema,
+} from '../../schemas/dashboard/orgTerminals.schema'
 
 const router = Router()
 
@@ -570,6 +583,282 @@ router.delete(
       const { zoneId } = req.params
       await organizationDashboardService.deleteZone(zoneId)
       res.json({ success: true })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ==========================================
+// TERMINALS (Read-Only Fleet View)
+// ==========================================
+
+/**
+ * GET /dashboard/organizations/:orgId/terminals
+ * Returns: All terminals across org venues with filters and pagination
+ * Query: page, pageSize, venueId, status, type, search
+ */
+router.get('/:orgId/terminals', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+    const { page, pageSize, venueId, status, type, search } = req.query
+
+    const result = await organizationDashboardService.getOrgTerminals(orgId, {
+      page: page ? parseInt(page as string, 10) : undefined,
+      pageSize: pageSize ? parseInt(pageSize as string, 10) : undefined,
+      venueId: venueId as string | undefined,
+      status: status as string | undefined,
+      type: type as string | undefined,
+      search: search as string | undefined,
+    })
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// ==========================================
+// TERMINAL MANAGEMENT (Org-Level CRUD + Commands)
+// ==========================================
+
+/**
+ * GET /dashboard/organizations/:orgId/terminals/:terminalId
+ * Returns: Single terminal detail
+ */
+router.get(
+  '/:orgId/terminals/:terminalId',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(GetOrgTerminalSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+
+      const terminal = await orgTerminalsService.getTerminalForOrg(orgId, terminalId)
+
+      res.json({
+        success: true,
+        data: terminal,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals
+ * Creates a new terminal for a venue within the organization
+ */
+router.post(
+  '/:orgId/terminals',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(CreateOrgTerminalSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { userId } = (req as any).authContext
+
+      const result = await orgTerminalsService.createTerminalForOrg(orgId, req.body, userId)
+
+      res.status(201).json({
+        success: true,
+        data: result,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * PATCH /dashboard/organizations/:orgId/terminals/:terminalId
+ * Updates terminal metadata
+ */
+router.patch(
+  '/:orgId/terminals/:terminalId',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(UpdateOrgTerminalSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+
+      const terminal = await orgTerminalsService.updateTerminalForOrg(orgId, terminalId, req.body)
+
+      res.json({
+        success: true,
+        data: terminal,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * DELETE /dashboard/organizations/:orgId/terminals/:terminalId
+ * Deletes a terminal (only if not active)
+ */
+router.delete(
+  '/:orgId/terminals/:terminalId',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(DeleteOrgTerminalSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+
+      await orgTerminalsService.deleteTerminalForOrg(orgId, terminalId)
+
+      res.json({
+        success: true,
+        data: { deleted: true },
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/:terminalId/generate-activation-code
+ * Generates activation code for a terminal
+ */
+router.post(
+  '/:orgId/terminals/:terminalId/generate-activation-code',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(GenerateActivationCodeSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const { userId } = (req as any).authContext
+
+      const result = await orgTerminalsService.generateActivationCodeForOrg(orgId, terminalId, userId)
+
+      res.json({
+        success: true,
+        data: result,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/:terminalId/remote-activate
+ * Sends remote activation command
+ */
+router.post(
+  '/:orgId/terminals/:terminalId/remote-activate',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(RemoteActivateSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const { userId } = (req as any).authContext
+
+      const result = await orgTerminalsService.sendRemoteActivationForOrg(orgId, terminalId, userId)
+
+      res.json({
+        success: true,
+        data: result,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/:terminalId/command
+ * Sends a remote command to a terminal (org-level safe commands only)
+ */
+router.post(
+  '/:orgId/terminals/:terminalId/command',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(SendOrgCommandSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const { userId } = (req as any).authContext
+      const { command } = req.body
+
+      // Get staff name for audit trail
+      const staff = await (
+        await import('../../utils/prismaClient')
+      ).default.staff.findUnique({
+        where: { id: userId },
+        select: { firstName: true, lastName: true },
+      })
+      const staffName = staff ? `${staff.firstName} ${staff.lastName}`.trim() : undefined
+
+      const result = await orgTerminalsService.sendCommandForOrg(orgId, terminalId, command, userId, staffName)
+
+      res.json({
+        success: true,
+        data: result,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * PUT /dashboard/organizations/:orgId/terminals/:terminalId/merchants
+ * Assigns merchant accounts to a terminal
+ */
+router.put(
+  '/:orgId/terminals/:terminalId/merchants',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(AssignMerchantsSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const { merchantIds } = req.body
+
+      const terminal = await orgTerminalsService.assignMerchantsForOrg(orgId, terminalId, merchantIds)
+
+      res.json({
+        success: true,
+        data: terminal,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/merchant-accounts
+ * Returns: Merchant accounts available to the organization
+ */
+router.get(
+  '/:orgId/merchant-accounts',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(GetOrgMerchantAccountsSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+
+      const merchants = await orgTerminalsService.getOrgMerchantAccounts(orgId)
+
+      res.json({
+        success: true,
+        data: { merchants },
+      })
     } catch (error) {
       next(error)
     }

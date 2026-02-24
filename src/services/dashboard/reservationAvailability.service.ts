@@ -223,6 +223,72 @@ function resolveVenueCalendarDate(
   }
 }
 
+// ==========================================
+// CLASS SESSION SLOTS — For CLASS products
+// ==========================================
+
+export interface ClassSlot {
+  classSessionId: string
+  startsAt: Date
+  endsAt: Date
+  duration: number
+  capacity: number
+  enrolled: number
+  remaining: number
+  available: boolean
+}
+
+/**
+ * Generate available slots for a CLASS product from its ClassSession records.
+ * Unlike operating-hours-based slots, these come directly from the sessions the venue has created.
+ */
+export async function getClassSessionSlots(
+  venueId: string,
+  productId: string,
+  date: Date | string,
+  onlineCapacityPercent: number,
+  venueTimezone: string = 'America/Mexico_City',
+): Promise<ClassSlot[]> {
+  const { dateStr } = resolveVenueCalendarDate(date, venueTimezone)
+
+  // Date range for the requested day in venue timezone
+  const dayStart = fromZonedTime(new Date(`${dateStr}T00:00:00`), venueTimezone)
+  const dayEnd = fromZonedTime(new Date(`${dateStr}T23:59:59.999`), venueTimezone)
+
+  const sessions = await prisma.classSession.findMany({
+    where: {
+      venueId,
+      productId,
+      status: 'SCHEDULED',
+      startsAt: { gte: dayStart, lte: dayEnd },
+    },
+    include: {
+      reservations: {
+        where: { status: { in: ACTIVE_STATUSES } },
+        select: { partySize: true },
+      },
+    },
+    orderBy: { startsAt: 'asc' },
+  })
+
+  return sessions.map(session => {
+    const enrolled = session.reservations.reduce((sum, r) => sum + r.partySize, 0)
+    const effectiveCapacity = Math.floor((session.capacity * onlineCapacityPercent) / 100)
+    const remaining = Math.max(0, effectiveCapacity - enrolled)
+
+    return {
+      classSessionId: session.id,
+      startsAt: session.startsAt,
+      endsAt: session.endsAt,
+      duration: session.duration,
+      capacity: effectiveCapacity,
+      enrolled,
+      remaining,
+      available: remaining > 0,
+    }
+  })
+}
+
 /**
  * Check if a proposed time range conflicts with existing reservations.
  */

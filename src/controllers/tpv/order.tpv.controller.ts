@@ -86,6 +86,7 @@ export async function createOrder(
       waiterId,
       orderType: orderType as 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP',
       terminalId, // Track which terminal created this order
+      deviceSerialNumber: req.authContext?.terminalSerialNumber, // Auto-resolve terminalId from JWT if terminalId not provided
       source: source as 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS', // KIOSK orders excluded from pay-later lists
       externalId,
     })

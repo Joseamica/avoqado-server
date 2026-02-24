@@ -58,6 +58,11 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
     // Extract payment data from request body (already validated by schema)
     const paymentData = req.body
 
+    // Auto-inject deviceSerialNumber from JWT if not provided by client
+    if (!paymentData.deviceSerialNumber && req.authContext?.terminalSerialNumber) {
+      paymentData.deviceSerialNumber = req.authContext.terminalSerialNumber
+    }
+
     // Call service to record the payment
     const result = await paymentTpvService.recordOrderPayment(venueId, orderId, paymentData, userId, orgId)
 
@@ -86,6 +91,11 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
 
     // Extract payment data from request body (already validated by schema)
     const paymentData = req.body
+
+    // Auto-inject deviceSerialNumber from JWT if not provided by client
+    if (!paymentData.deviceSerialNumber && req.authContext?.terminalSerialNumber) {
+      paymentData.deviceSerialNumber = req.authContext.terminalSerialNumber
+    }
 
     // Call service to record the fast payment
     const result = await paymentTpvService.recordFastPayment(venueId, paymentData, userId, orgId)

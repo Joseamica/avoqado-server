@@ -287,22 +287,44 @@ export const updateReservationSettingsBodySchema = z
 
 export const publicCreateReservationBodySchema = z
   .object({
-    startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }),
-    endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
-    duration: z.number().int().min(5).max(480),
+    startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }).optional(),
+    endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }).optional(),
+    duration: z.number().int().min(5).max(480).optional(),
     guestName: z.string().min(1, 'El nombre es requerido').max(200),
     guestPhone: z.string().min(1, 'El telefono es requerido').max(20),
     guestEmail: z.string().email('Email invalido').max(200).optional(),
     partySize: z.number().int().min(1).max(100).optional(),
     productId: z.string().optional(),
+    classSessionId: z.string().optional(),
     specialRequests: z.string().max(2000).optional(),
-  })
-  .refine(data => data.endsAt > data.startsAt, {
-    message: 'La fecha de fin debe ser posterior a la fecha de inicio',
-    path: ['endsAt'],
   })
   .refine(
     data => {
+      // CLASS bookings get times from the session — startsAt/endsAt/duration not required
+      if (data.classSessionId) return true
+      return data.startsAt != null && data.endsAt != null && data.duration != null
+    },
+    {
+      message: 'startsAt, endsAt y duration son requeridos para reservaciones sin classSessionId',
+      path: ['startsAt'],
+    },
+  )
+  .refine(
+    data => {
+      if (data.classSessionId) return true
+      if (!data.startsAt || !data.endsAt) return true // validated above
+      return data.endsAt > data.startsAt
+    },
+    {
+      message: 'La fecha de fin debe ser posterior a la fecha de inicio',
+      path: ['endsAt'],
+    },
+  )
+  .refine(
+    data => {
+      // Skip duration check for CLASS bookings — duration comes from the session
+      if (data.classSessionId) return true
+      if (!data.startsAt || !data.endsAt || data.duration == null) return true // validated above
       const diffMin = Math.round((data.endsAt.getTime() - data.startsAt.getTime()) / 60000)
       return Math.abs(diffMin - data.duration) <= 1
     },

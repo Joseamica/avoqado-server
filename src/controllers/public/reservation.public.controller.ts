@@ -2,8 +2,10 @@ import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings } from '../../services/dashboard/reservationSettings.service'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
+import { ReservationStatus } from '@prisma/client'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -45,8 +47,8 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         address: true,
         phone: true,
         products: {
-          where: { active: true, type: { in: ['APPOINTMENTS_SERVICE', 'EVENT'] } },
-          select: { id: true, name: true, price: true, duration: true, eventCapacity: true },
+          where: { active: true, type: { in: ['APPOINTMENTS_SERVICE', 'EVENT', 'CLASS'] } },
+          select: { id: true, name: true, price: true, duration: true, eventCapacity: true, type: true, maxParticipants: true },
           orderBy: { name: 'asc' },
         },
       },
@@ -75,13 +77,40 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
     const { date, duration, partySize, productId } = req.query as any
 
     const settings = await getReservationSettings(venue.id)
+    const tz = venue.timezone || 'America/Mexico_City'
 
+    // Check if requesting availability for a CLASS product
+    if (productId) {
+      const product = await prisma.product.findFirst({
+        where: { id: productId, venueId: venue.id, active: true },
+        select: { type: true },
+      })
+
+      if (product?.type === 'CLASS') {
+        const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
+        const classSlots = await availabilityService.getClassSessionSlots(venue.id, productId, date, onlinePercent, tz)
+        return res.json({
+          date,
+          slots: classSlots.map(s => ({
+            startsAt: s.startsAt,
+            endsAt: s.endsAt,
+            available: s.available,
+            classSessionId: s.classSessionId,
+            capacity: s.capacity,
+            enrolled: s.enrolled,
+            remaining: s.remaining,
+          })),
+        })
+      }
+    }
+
+    // Default: operating-hours-based availability (APPOINTMENTS_SERVICE, EVENT)
     const slots = await availabilityService.getAvailableSlots(
       venue.id,
       date,
       { duration: duration ? Number(duration) : undefined, partySize: partySize ? Number(partySize) : undefined, productId },
       settings,
-      venue.timezone || 'America/Mexico_City',
+      tz,
     )
 
     // Public response: simplified (no internal table/staff IDs)
@@ -119,6 +148,20 @@ export async function createReservation(req: Request, res: Response, next: NextF
     }
     if (settings.publicBooking.requireEmail && !req.body.guestEmail) {
       throw new BadRequestError('El email es requerido')
+    }
+
+    // CLASS bookings use a dedicated code path with ClassSession capacity checks
+    if (req.body.classSessionId) {
+      const reservation = await createClassReservation(venue.id, req.body, settings)
+      return res.status(201).json({
+        confirmationCode: reservation.confirmationCode,
+        cancelSecret: reservation.cancelSecret,
+        startsAt: reservation.startsAt,
+        endsAt: reservation.endsAt,
+        status: reservation.status,
+        depositRequired: false,
+        depositAmount: null,
+      })
     }
 
     const reservation = await reservationService.createReservation(
@@ -214,4 +257,113 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
   } catch (error) {
     next(error)
   }
+}
+
+// ==========================================
+// CLASS Reservation — Serializable transaction with capacity check
+// ==========================================
+
+async function createClassReservation(
+  venueId: string,
+  body: {
+    classSessionId: string
+    guestName: string
+    guestPhone: string
+    guestEmail?: string
+    partySize?: number
+    specialRequests?: string
+  },
+  moduleConfig: any,
+) {
+  const requestedPartySize = body.partySize ?? 1
+  const onlinePercent = moduleConfig?.scheduling?.onlineCapacityPercent ?? 100
+  const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
+  const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
+
+  return reservationService.withSerializableRetry(async tx => {
+    // Lock the ClassSession row and verify it exists + belongs to venue
+    const sessions = await tx.$queryRaw<
+      { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
+    >`
+      SELECT id, "productId", "startsAt", "endsAt", duration, capacity, status
+      FROM "ClassSession"
+      WHERE id = ${body.classSessionId}
+        AND "venueId" = ${venueId}
+      FOR UPDATE
+    `
+    if (sessions.length === 0) {
+      throw new NotFoundError('Sesion de clase no encontrada')
+    }
+    const session = sessions[0]
+
+    if (session.status !== 'SCHEDULED') {
+      throw new BadRequestError('Esta sesion de clase ya no acepta reservaciones')
+    }
+
+    // Verify the product is CLASS and active
+    const product = await tx.product.findFirst({
+      where: { id: session.productId, venueId },
+      select: { type: true, active: true },
+    })
+    if (!product || product.type !== 'CLASS') {
+      throw new BadRequestError('El producto asociado no es una clase valida')
+    }
+    if (!product.active) {
+      throw new BadRequestError('Este servicio ya no esta disponible')
+    }
+
+    // Sum enrolled from active reservations
+    // Note: FOR UPDATE cannot be used with aggregate functions in PostgreSQL.
+    // The ClassSession row lock above + SERIALIZABLE isolation is sufficient.
+    const enrolledResult = await tx.$queryRaw<{ total: bigint }[]>`
+      SELECT COALESCE(SUM("partySize"), 0) as total
+      FROM "Reservation"
+      WHERE "classSessionId" = ${body.classSessionId}
+        AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
+    `
+    const enrolled = Number(enrolledResult[0].total)
+    const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
+
+    if (enrolled + requestedPartySize > effectiveCapacity) {
+      throw new ConflictError(
+        `No hay suficientes lugares disponibles. Disponibles: ${effectiveCapacity - enrolled}, solicitados: ${requestedPartySize}`,
+      )
+    }
+
+    const confirmationCode = reservationService.generateConfirmationCode()
+
+    // Ensure uniqueness
+    const existing = await tx.reservation.findUnique({
+      where: { venueId_confirmationCode: { venueId, confirmationCode } },
+      select: { id: true },
+    })
+    const finalCode = existing ? reservationService.generateConfirmationCode() : confirmationCode
+
+    const reservation = await tx.reservation.create({
+      data: {
+        venueId,
+        confirmationCode: finalCode,
+        classSessionId: body.classSessionId,
+        productId: session.productId,
+        startsAt: session.startsAt,
+        endsAt: session.endsAt,
+        duration: session.duration,
+        status: initialStatus,
+        channel: 'WEB',
+        guestName: body.guestName,
+        guestPhone: body.guestPhone,
+        guestEmail: body.guestEmail ?? null,
+        partySize: requestedPartySize,
+        specialRequests: body.specialRequests ?? null,
+        confirmedAt: autoConfirm ? new Date() : null,
+        statusLog: [{ status: initialStatus, at: new Date().toISOString(), by: null }],
+      },
+    })
+
+    logger.info(
+      `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}`,
+    )
+
+    return reservation
+  })
 }

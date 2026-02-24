@@ -343,21 +343,44 @@ describe('ClassSession Dashboard Service', () => {
       customerId: null,
     }
 
+    const sessionRow = {
+      id: SESSION_ID,
+      productId: PRODUCT_ID,
+      startsAt: new Date('2026-03-01T10:00:00Z'),
+      endsAt: new Date('2026-03-01T11:00:00Z'),
+      duration: 60,
+      capacity: 10,
+      status: 'SCHEDULED',
+    }
+
+    beforeEach(() => {
+      jest.clearAllMocks()
+      // Re-setup $transaction mock after clearAllMocks
+      prismaMock.$transaction = jest.fn((callback: any) => callback(prismaMock))
+    })
+
+    // Helper: mock the raw SQL queries used inside the serializable transaction
+    function mockSessionAndEnrolled(sessionRowData: Record<string, any> | null, enrolled: number) {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce(sessionRowData ? [sessionRowData] : []) // ClassSession FOR UPDATE
+        .mockResolvedValueOnce([{ total: BigInt(enrolled) }]) // Enrolled count FOR UPDATE
+    }
+
     it('should create a CONFIRMED reservation linked to the session', async () => {
-      const session = makeSession({ capacity: 10, reservations: [{ partySize: 3 }] })
       const createdReservation = makeReservation({ status: 'CONFIRMED', classSessionId: SESSION_ID })
 
-      prismaMock.classSession.findFirst.mockResolvedValue(session)
+      mockSessionAndEnrolled(sessionRow, 3)
       prismaMock.reservation.create.mockResolvedValue(createdReservation)
 
       const result = await addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)
 
+      expect(prismaMock.$transaction).toHaveBeenCalled()
       expect(prismaMock.reservation.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             venueId: VENUE_ID,
             classSessionId: SESSION_ID,
-            productId: session.productId,
+            productId: PRODUCT_ID,
             status: 'CONFIRMED',
             channel: 'DASHBOARD',
             guestName: 'Ana Lopez',
@@ -371,8 +394,7 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should default partySize to 1 when not specified', async () => {
-      const session = makeSession({ capacity: 10, reservations: [] })
-      prismaMock.classSession.findFirst.mockResolvedValue(session)
+      mockSessionAndEnrolled(sessionRow, 0)
       prismaMock.reservation.create.mockResolvedValue(makeReservation({ partySize: 1 }))
 
       await addAttendee(VENUE_ID, SESSION_ID, { guestName: 'Test' } as any, STAFF_ID)
@@ -385,17 +407,27 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should throw NotFoundError when session not found', async () => {
-      prismaMock.classSession.findFirst.mockResolvedValue(null)
+      prismaMock.$queryRaw.mockResolvedValue([]) // Always return empty for this test
 
       await expect(addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)).rejects.toThrow(NotFoundError)
-      await expect(addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)).rejects.toThrow('Sesión no encontrada')
       expect(prismaMock.reservation.create).not.toHaveBeenCalled()
     })
 
+    it('should throw NotFoundError with correct message', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]) // Always return empty
+
+      await expect(addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)).rejects.toThrow('Sesión no encontrada')
+    })
+
     it('should throw BadRequestError when session is not SCHEDULED', async () => {
-      prismaMock.classSession.findFirst.mockResolvedValue(makeSession({ status: 'CANCELLED' }))
+      prismaMock.$queryRaw.mockResolvedValue([{ ...sessionRow, status: 'CANCELLED' }])
 
       await expect(addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)).rejects.toThrow(BadRequestError)
+    })
+
+    it('should throw BadRequestError when session is CANCELLED with correct message', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([{ ...sessionRow, status: 'CANCELLED' }])
+
       await expect(addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)).rejects.toThrow(
         'Solo se pueden añadir asistentes a sesiones programadas',
       )
@@ -403,20 +435,21 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should throw BadRequestError when session status is COMPLETED', async () => {
-      prismaMock.classSession.findFirst.mockResolvedValue(makeSession({ status: 'COMPLETED' }))
+      prismaMock.$queryRaw.mockResolvedValue([{ ...sessionRow, status: 'COMPLETED' }])
 
       await expect(addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)).rejects.toThrow(BadRequestError)
     })
 
     it('should throw ConflictError when no capacity available', async () => {
       // capacity=10, 9 already enrolled, partySize=2 → would exceed by 1
-      const session = makeSession({
-        capacity: 10,
-        reservations: [{ partySize: 9 }],
-      })
-      prismaMock.classSession.findFirst.mockResolvedValue(session)
+      mockSessionAndEnrolled(sessionRow, 9)
 
       await expect(addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, partySize: 2 } as any, STAFF_ID)).rejects.toThrow(ConflictError)
+    })
+
+    it('should throw ConflictError with correct message', async () => {
+      mockSessionAndEnrolled(sessionRow, 9)
+
       await expect(addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, partySize: 2 } as any, STAFF_ID)).rejects.toThrow(
         'Sin capacidad suficiente',
       )
@@ -424,12 +457,8 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should throw ConflictError when session is exactly full', async () => {
-      // capacity=5, all 5 spots taken
-      const session = makeSession({
-        capacity: 5,
-        reservations: [{ partySize: 5 }],
-      })
-      prismaMock.classSession.findFirst.mockResolvedValue(session)
+      // capacity=10 (from sessionRow), all 10 spots taken
+      mockSessionAndEnrolled(sessionRow, 10)
 
       await expect(addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, partySize: 1 } as any, STAFF_ID)).rejects.toThrow(ConflictError)
     })

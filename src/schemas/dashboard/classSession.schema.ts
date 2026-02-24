@@ -46,6 +46,12 @@ export const listClassSessionsQuerySchema = z.object({
   status: z.enum(['SCHEDULED', 'CANCELLED', 'COMPLETED']).optional(),
 })
 
+export const attendeeParamsSchema = z.object({
+  venueId: z.string().cuid('Venue ID inválido'),
+  sessionId: z.string().cuid('Session ID inválido'),
+  reservationId: z.string().cuid('Reservation ID inválido'),
+})
+
 export const addAttendeeSchema = z.object({
   guestName: z.string().min(1, 'El nombre es requerido').max(255),
   guestPhone: z.string().min(6, 'Teléfono inválido').optional().nullable(),

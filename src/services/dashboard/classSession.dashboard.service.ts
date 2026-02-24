@@ -9,6 +9,7 @@ import type {
   ListClassSessionsQuery,
 } from '../../schemas/dashboard/classSession.schema'
 import { ReservationStatus } from '@prisma/client'
+import { withSerializableRetry } from './reservation.dashboard.service'
 
 // ==========================================
 // CLASS SESSION SERVICE
@@ -94,6 +95,15 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
   if (!product) throw new NotFoundError('Producto no encontrado')
   if (product.type !== 'CLASS') throw new BadRequestError('El producto debe ser de tipo Clase')
 
+  // Validate assignedStaffId belongs to this venue
+  if (data.assignedStaffId) {
+    const staffVenue = await prisma.staffVenue.findFirst({
+      where: { staffId: data.assignedStaffId, venueId },
+      select: { id: true },
+    })
+    if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
+  }
+
   const startsAt = new Date(data.startsAt)
   const endsAt = new Date(data.endsAt)
   const duration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
@@ -133,11 +143,25 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
     }
   }
 
+  // Validate assignedStaffId belongs to this venue
+  if (data.assignedStaffId) {
+    const staffVenue = await prisma.staffVenue.findFirst({
+      where: { staffId: data.assignedStaffId, venueId },
+      select: { id: true },
+    })
+    if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
+  }
+
   const updateData: any = {}
-  if (data.startsAt) updateData.startsAt = new Date(data.startsAt)
-  if (data.endsAt) updateData.endsAt = new Date(data.endsAt)
-  if (data.startsAt && data.endsAt) {
-    updateData.duration = Math.round((new Date(data.endsAt).getTime() - new Date(data.startsAt).getTime()) / 60000)
+  const newStartsAt = data.startsAt ? new Date(data.startsAt) : null
+  const newEndsAt = data.endsAt ? new Date(data.endsAt) : null
+  if (newStartsAt) updateData.startsAt = newStartsAt
+  if (newEndsAt) updateData.endsAt = newEndsAt
+  // Recalculate duration whenever either time field changes
+  if (newStartsAt || newEndsAt) {
+    const effectiveStart = newStartsAt || session.startsAt
+    const effectiveEnd = newEndsAt || session.endsAt
+    updateData.duration = Math.round((effectiveEnd.getTime() - effectiveStart.getTime()) / 60000)
   }
   if (data.capacity !== undefined) updateData.capacity = data.capacity
   if ('assignedStaffId' in data) updateData.assignedStaffId = data.assignedStaffId ?? null
@@ -183,50 +207,77 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
 // ---- Add attendee ----
 
 export async function addAttendee(venueId: string, sessionId: string, data: AddAttendeeDto, staffId: string) {
-  const session = await prisma.classSession.findFirst({
-    where: { id: sessionId, venueId },
-    include: {
-      product: { select: { id: true, name: true } },
-      reservations: {
-        where: { status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] as ReservationStatus[] } },
-        select: { partySize: true },
-      },
-    },
-  })
-  if (!session) throw new NotFoundError('Sesión no encontrada')
-  if (session.status !== 'SCHEDULED') throw new BadRequestError('Solo se pueden añadir asistentes a sesiones programadas')
-
-  const enrolled = session.reservations.reduce((sum, r) => sum + r.partySize, 0)
   const partySize = data.partySize ?? 1
-  if (enrolled + partySize > session.capacity) {
-    throw new ConflictError(`Sin capacidad suficiente — disponibles: ${session.capacity - enrolled}, solicitadas: ${partySize}`)
+
+  // Validate customerId belongs to this venue
+  if (data.customerId) {
+    const customer = await prisma.customer.findFirst({
+      where: { id: data.customerId, venueId },
+      select: { id: true },
+    })
+    if (!customer) throw new BadRequestError('El cliente no pertenece a este negocio')
   }
 
-  const confirmationCode = generateConfirmationCode()
+  // Use serializable transaction to prevent race conditions on capacity
+  return withSerializableRetry(async tx => {
+    // Lock the ClassSession row and verify it exists + belongs to venue
+    const sessions = await tx.$queryRaw<
+      { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
+    >`
+      SELECT id, "productId", "startsAt", "endsAt", duration, capacity, status
+      FROM "ClassSession"
+      WHERE id = ${sessionId}
+        AND "venueId" = ${venueId}
+      FOR UPDATE
+    `
+    if (sessions.length === 0) throw new NotFoundError('Sesión no encontrada')
+    const session = sessions[0]
 
-  return prisma.reservation.create({
-    data: {
-      venueId,
-      confirmationCode,
-      classSessionId: sessionId,
-      productId: session.productId,
-      startsAt: session.startsAt,
-      endsAt: session.endsAt,
-      duration: session.duration,
-      status: 'CONFIRMED',
-      channel: 'DASHBOARD',
-      guestName: data.guestName,
-      guestPhone: data.guestPhone ?? null,
-      guestEmail: data.guestEmail ?? null,
-      partySize,
-      specialRequests: data.specialRequests ?? null,
-      customerId: data.customerId ?? null,
-      createdById: staffId,
-      confirmedAt: new Date(),
-    },
-    include: {
-      customer: { select: { id: true, firstName: true, lastName: true } },
-    },
+    if (session.status !== 'SCHEDULED') {
+      throw new BadRequestError('Solo se pueden añadir asistentes a sesiones programadas')
+    }
+
+    // Sum enrolled from active reservations
+    // Note: FOR UPDATE cannot be used with aggregate functions in PostgreSQL.
+    // The ClassSession row lock above + SERIALIZABLE isolation is sufficient.
+    const enrolledResult = await tx.$queryRaw<{ total: bigint }[]>`
+      SELECT COALESCE(SUM("partySize"), 0) as total
+      FROM "Reservation"
+      WHERE "classSessionId" = ${sessionId}
+        AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
+    `
+    const enrolled = Number(enrolledResult[0].total)
+
+    if (enrolled + partySize > session.capacity) {
+      throw new ConflictError(`Sin capacidad suficiente — disponibles: ${session.capacity - enrolled}, solicitadas: ${partySize}`)
+    }
+
+    const confirmationCode = generateConfirmationCode()
+
+    return tx.reservation.create({
+      data: {
+        venueId,
+        confirmationCode,
+        classSessionId: sessionId,
+        productId: session.productId,
+        startsAt: session.startsAt,
+        endsAt: session.endsAt,
+        duration: session.duration,
+        status: 'CONFIRMED',
+        channel: 'DASHBOARD',
+        guestName: data.guestName,
+        guestPhone: data.guestPhone ?? null,
+        guestEmail: data.guestEmail ?? null,
+        partySize,
+        specialRequests: data.specialRequests ?? null,
+        customerId: data.customerId ?? null,
+        createdById: staffId,
+        confirmedAt: new Date(),
+      },
+      include: {
+        customer: { select: { id: true, firstName: true, lastName: true } },
+      },
+    })
   })
 }
 

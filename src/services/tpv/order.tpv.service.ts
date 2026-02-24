@@ -290,6 +290,7 @@ interface CreateOrderInput {
   waiterId?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   terminalId?: string | null // Terminal that created this order (for sales attribution)
+  deviceSerialNumber?: string // Auto-resolve terminalId from serial if terminalId not provided
   source?: 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS' // Order source - KIOSK orders are excluded from pay-later lists
   externalId?: string | null // Idempotency key (client order ID)
 }
@@ -372,6 +373,19 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
   // Generate order number (sequential timestamp-based)
   const orderNumber = `ORD-${Date.now()}`
 
+  // Resolve terminalId: use explicit terminalId, or auto-resolve from deviceSerialNumber (JWT)
+  let resolvedTerminalId = input.terminalId || null
+  if (!resolvedTerminalId && input.deviceSerialNumber) {
+    const terminal = await prisma.terminal.findFirst({
+      where: { serialNumber: input.deviceSerialNumber, venueId },
+      select: { id: true },
+    })
+    if (terminal) {
+      resolvedTerminalId = terminal.id
+      logger.debug(`✅ [ORDER] Auto-resolved deviceSerialNumber ${input.deviceSerialNumber} → terminalId ${terminal.id}`)
+    }
+  }
+
   // Create order
   const order = await prisma.order.create({
     data: {
@@ -381,7 +395,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
       orderNumber,
       servedById: input.waiterId || null,
       createdById: input.waiterId || null,
-      terminalId: input.terminalId || null, // Track which terminal created this order
+      terminalId: resolvedTerminalId, // Track which terminal created this order
       status: 'PENDING',
       paymentStatus: 'PENDING',
       kitchenStatus: 'PENDING',

@@ -36,6 +36,7 @@ export const authenticateTokenMiddleware = (req: Request, res: Response, next: N
       orgId: decoded.orgId,
       venueId: decoded.venueId,
       role: decoded.role,
+      ...(decoded.terminalSerialNumber && { terminalSerialNumber: decoded.terminalSerialNumber }),
     }
 
     req.authContext = authContext

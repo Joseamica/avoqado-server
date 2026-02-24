@@ -30,7 +30,7 @@ function validateTransition(current: ReservationStatus, target: ReservationStatu
 
 const CODE_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // No 0/O/1/I confusion
 
-function generateConfirmationCode(): string {
+export function generateConfirmationCode(): string {
   const bytes = crypto.randomBytes(6)
   let code = ''
   for (let i = 0; i < 6; i++) {
@@ -70,7 +70,7 @@ function appendStatusLog(
 
 const MAX_RETRIES = 5
 
-async function withSerializableRetry<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, timeoutMs = 10000): Promise<T> {
+export async function withSerializableRetry<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, timeoutMs = 10000): Promise<T> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       return await prisma.$transaction(fn, {

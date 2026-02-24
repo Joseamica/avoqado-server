@@ -3258,6 +3258,137 @@ class OrganizationDashboardService {
   /**
    * Get stats: how many terminals per venue, total in org
    */
+  /**
+   * Get all terminals across organization venues with filters and pagination.
+   * Read-only view for org-level terminal fleet monitoring.
+   */
+  async getOrgTerminals(
+    orgId: string,
+    filters?: {
+      page?: number
+      pageSize?: number
+      venueId?: string
+      status?: string
+      type?: string
+      search?: string
+    },
+  ) {
+    const page = filters?.page || 1
+    const pageSize = filters?.pageSize || 20
+    const skip = (page - 1) * pageSize
+
+    // Get all venue IDs in the organization
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId, status: 'ACTIVE' },
+      select: { id: true },
+    })
+    const venueIds = venues.map(v => v.id)
+
+    if (venueIds.length === 0) {
+      return {
+        terminals: [],
+        pagination: { page, pageSize, total: 0, totalPages: 0 },
+        summary: { total: 0, online: 0, offline: 0, byStatus: {}, byType: {} },
+      }
+    }
+
+    // Build where clause
+    const where: Prisma.TerminalWhereInput = {
+      venueId: filters?.venueId ? { equals: filters.venueId, in: venueIds } : { in: venueIds },
+    }
+
+    if (filters?.status) {
+      where.status = filters.status as any
+    }
+
+    if (filters?.type) {
+      where.type = filters.type as any
+    }
+
+    if (filters?.search) {
+      where.OR = [
+        { name: { contains: filters.search, mode: 'insensitive' } },
+        { serialNumber: { contains: filters.search, mode: 'insensitive' } },
+      ]
+    }
+
+    // Fetch terminals + count in parallel
+    const [terminals, total] = await prisma.$transaction([
+      prisma.terminal.findMany({
+        where,
+        include: {
+          venue: { select: { id: true, name: true, slug: true } },
+          healthMetrics: { take: 1, orderBy: { createdAt: 'desc' }, select: { healthScore: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: pageSize,
+      }),
+      prisma.terminal.count({ where }),
+    ])
+
+    // Summary stats (all terminals in org, unfiltered by search/pagination)
+    const allWhere: Prisma.TerminalWhereInput = { venueId: { in: venueIds } }
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000)
+
+    const [allTerminals, onlineCount] = await prisma.$transaction([
+      prisma.terminal.groupBy({
+        by: ['status', 'type'],
+        where: allWhere,
+        orderBy: { status: 'asc' },
+        _count: true,
+      }),
+      prisma.terminal.count({
+        where: { ...allWhere, lastHeartbeat: { gte: fiveMinAgo } },
+      }),
+    ])
+
+    const totalAll = allTerminals.reduce((sum, g) => sum + (typeof g._count === 'number' ? g._count : 0), 0)
+
+    const byStatus: Record<string, number> = {}
+    const byType: Record<string, number> = {}
+    for (const g of allTerminals) {
+      const count = typeof g._count === 'number' ? g._count : 0
+      byStatus[g.status] = (byStatus[g.status] || 0) + count
+      byType[g.type] = (byType[g.type] || 0) + count
+    }
+
+    return {
+      terminals: terminals.map(t => ({
+        id: t.id,
+        name: t.name,
+        serialNumber: t.serialNumber,
+        type: t.type,
+        status: t.status,
+        brand: t.brand,
+        model: t.model,
+        version: t.version,
+        lastHeartbeat: t.lastHeartbeat,
+        ipAddress: t.ipAddress,
+        healthScore: t.healthMetrics[0]?.healthScore ?? null,
+        isLocked: (t as any).isLocked ?? false,
+        assignedMerchantIds: (t as any).assignedMerchantIds ?? [],
+        activatedAt: (t as any).activatedAt ?? null,
+        activationCode: (t as any).activationCode ?? null,
+        activationCodeExpiry: (t as any).activationCodeExpiry ?? null,
+        venue: t.venue,
+      })),
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize),
+      },
+      summary: {
+        total: totalAll,
+        online: onlineCount,
+        offline: totalAll - onlineCount,
+        byStatus,
+        byType,
+      },
+    }
+  }
+
   async getOrgTpvStats(orgId: string) {
     const venues = await prisma.venue.findMany({
       where: { organizationId: orgId },

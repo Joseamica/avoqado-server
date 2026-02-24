@@ -5,6 +5,7 @@ import { validateRequest } from '../../middlewares/validation'
 import * as controller from '../../controllers/dashboard/classSession.dashboard.controller'
 import {
   sessionParamsSchema,
+  attendeeParamsSchema,
   createClassSessionSchema,
   updateClassSessionSchema,
   listClassSessionsQuerySchema,
@@ -71,6 +72,11 @@ router.post(
   controller.addAttendee,
 )
 
-router.delete('/:sessionId/attendees/:reservationId', checkPermission('reservations:cancel'), controller.removeAttendee)
+router.delete(
+  '/:sessionId/attendees/:reservationId',
+  checkPermission('reservations:cancel'),
+  validateRequest(z.object({ params: attendeeParamsSchema })),
+  controller.removeAttendee,
+)
 
 export default router
