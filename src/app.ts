@@ -17,6 +17,7 @@ import { getCorsConfig, Environment } from './config/corsOptions'
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
 import webhookRoutes from './routes/webhook.routes'
+import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
@@ -91,6 +92,10 @@ app.use(
   authorizeRole([StaffRole.SUPERADMIN]),
   appUpdateRoutes,
 )
+
+// ⚠️ Public booking/receipt routes — mounted BEFORE global CORS so wildcard origin works for widget embedding
+// These are unauthenticated endpoints (no credentials needed), safe to allow any origin
+app.use('/api/v1/public', express.json(), cookieParser(), publicRoutes)
 
 // Configure core middlewares (helmet, cors, compression, body-parsers, cookie-parser, session, request-logger)
 configureCoreMiddlewares(app)

@@ -203,6 +203,7 @@ import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 import reportsRoutes from './dashboard/reports.routes'
 import commissionRoutes from './dashboard/commission.routes'
+import reservationRoutes from './dashboard/reservation.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
 // Command Center routes for PlayTelecom/White-Label dashboard
@@ -3455,6 +3456,9 @@ router.get('/crypto/devices', authenticateTokenMiddleware, checkPermission('syst
 
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
+
+// Reservation / Booking System (core feature, permission-gated)
+router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, reservationRoutes)
 
 // @temporary - Serialized Inventory Demo routes (delete after final implementation)
 // For PlayTelecom SIM sales visualization demo

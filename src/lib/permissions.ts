@@ -239,17 +239,10 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   // RESERVATIONS
   // ===========================
-  'reservations:read': [
-    'reservations:read',
-    'tables:read', // Reservations are for tables
-  ],
-  'reservations:create': ['reservations:read', 'reservations:create', 'tables:read'],
+  'reservations:read': ['reservations:read'],
+  'reservations:create': ['reservations:read', 'reservations:create'],
   'reservations:update': ['reservations:read', 'reservations:update'],
-  'reservations:cancel': [
-    'reservations:read',
-    'reservations:cancel',
-    'tables:read', // Need to see table when canceling
-  ],
+  'reservations:cancel': ['reservations:read', 'reservations:cancel'],
 
   // ===========================
   // SETTINGS

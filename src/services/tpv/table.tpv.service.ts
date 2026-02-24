@@ -155,6 +155,11 @@ export async function assignTable(
     throw new BadRequestError(`Staff member not found or not assigned to this venue`)
   }
 
+  // Reserved tables can only be opened through reservation check-in flow
+  if (table.status === TableStatus.RESERVED) {
+    throw new BadRequestError('Mesa reservada para una reservacion proxima')
+  }
+
   // If table already has an active order, return it
   if (table.currentOrder && table.status === 'OCCUPIED') {
     logger.info(`✅ [TABLE SERVICE] Table ${table.number} already has order ${table.currentOrder.orderNumber}`)

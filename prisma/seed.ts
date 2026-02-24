@@ -524,14 +524,6 @@ async function main() {
       category: FeatureCategory.INTEGRATIONS,
       monthlyPrice: 99.0, // MXN
     },
-    // TEMPORARILY DISABLED - Re-enable when ready for launch
-    // {
-    //   code: 'RESERVATIONS',
-    //   name: 'Sistema de Reservas',
-    //   description: 'Gestión de reservas de mesas con confirmación automática.',
-    //   category: FeatureCategory.OPERATIONS,
-    //   monthlyPrice: 399.0, // MXN
-    // },
     {
       code: 'AVAILABLE_BALANCE',
       name: 'Saldo Disponible',

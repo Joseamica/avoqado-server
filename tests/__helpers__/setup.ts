@@ -116,6 +116,10 @@ const prismaMock: any = {
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
+  // Reservation / Booking models
+  reservation: createMockModel(),
+  reservationWaitlistEntry: createMockModel(),
+  table: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

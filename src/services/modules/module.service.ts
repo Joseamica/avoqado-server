@@ -1,4 +1,6 @@
 import { PrismaClient, Module, VenueModule, OrganizationModule, Prisma } from '@prisma/client'
+import Ajv from 'ajv'
+import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 
 // ==========================================
@@ -10,7 +12,6 @@ export const MODULE_CODES = {
   SERIALIZED_INVENTORY: 'SERIALIZED_INVENTORY',
   ATTENDANCE_TRACKING: 'ATTENDANCE_TRACKING',
   WHITE_LABEL_DASHBOARD: 'WHITE_LABEL_DASHBOARD',
-  // Add more modules here as needed
 } as const
 
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]
@@ -38,7 +39,11 @@ export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]
 // USE THIS instead of conditional checks by venue/industry.
 // ==========================================
 export class ModuleService {
-  constructor(private db: PrismaClient = prisma) {}
+  private readonly ajv: any
+
+  constructor(private db: PrismaClient = prisma) {
+    this.ajv = new Ajv({ allErrors: true })
+  }
 
   /**
    * Verifies if a module is enabled for a venue.
@@ -289,8 +294,13 @@ export class ModuleService {
     let finalConfig: Prisma.InputJsonValue | undefined = config as Prisma.InputJsonValue | undefined
     if (preset && module.presets) {
       const presets = module.presets as Record<string, Prisma.InputJsonValue>
+      if (!(preset in presets)) {
+        throw new BadRequestError(`Preset ${preset} not found for module ${moduleCode}`)
+      }
       finalConfig = presets[preset]
     }
+
+    this.validateModuleConfig(module, finalConfig)
 
     return this.db.venueModule.upsert({
       where: { venueId_moduleId: { venueId, moduleId: module.id } },
@@ -345,6 +355,8 @@ export class ModuleService {
     })
 
     if (!venueModule) return null
+
+    this.validateModuleConfig(module, config as Prisma.InputJsonValue)
 
     return this.db.venueModule.update({
       where: { id: venueModule.id },
@@ -416,8 +428,13 @@ export class ModuleService {
     let finalConfig: Prisma.InputJsonValue | undefined = config as Prisma.InputJsonValue | undefined
     if (preset && module.presets) {
       const presets = module.presets as Record<string, Prisma.InputJsonValue>
+      if (!(preset in presets)) {
+        throw new BadRequestError(`Preset ${preset} not found for module ${moduleCode}`)
+      }
       finalConfig = presets[preset]
     }
+
+    this.validateModuleConfig(module, finalConfig)
 
     return this.db.organizationModule.upsert({
       where: { organizationId_moduleId: { organizationId, moduleId: module.id } },
@@ -479,6 +496,8 @@ export class ModuleService {
 
     if (!orgModule) return null
 
+    this.validateModuleConfig(module, config as Prisma.InputJsonValue)
+
     return this.db.organizationModule.update({
       where: { id: orgModule.id },
       data: { config: config as Prisma.InputJsonValue },
@@ -526,6 +545,39 @@ export class ModuleService {
   /**
    * Deep merge utility for configuration objects.
    */
+  private validateModuleConfig(module: Module, config?: Prisma.InputJsonValue): void {
+    if (config === undefined || (config as unknown) === (Prisma.JsonNull as unknown) || !module.configSchema) {
+      return
+    }
+
+    if (typeof module.configSchema !== 'object' || module.configSchema === null || Array.isArray(module.configSchema)) {
+      throw new BadRequestError(`Invalid config schema for module ${module.code}`)
+    }
+
+    try {
+      const validator = this.ajv.compile(module.configSchema as Record<string, unknown>)
+      const isValid = validator(config as unknown)
+
+      if (!isValid) {
+        throw new BadRequestError(this.formatConfigErrors(module.code, validator.errors ?? []))
+      }
+    } catch (error) {
+      if (error instanceof BadRequestError) {
+        throw error
+      }
+      throw new BadRequestError(`Could not validate config for module ${module.code}`)
+    }
+  }
+
+  private formatConfigErrors(moduleCode: string, errors: Array<{ dataPath?: string; message?: string }>): string {
+    const details = errors
+      .slice(0, 5)
+      .map(error => `${error.dataPath || '/'} ${error.message || 'invalid'}`)
+      .join('; ')
+
+    return `Invalid config for module ${moduleCode}: ${details}`
+  }
+
   private deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
     const result = { ...target }
     for (const key in source) {

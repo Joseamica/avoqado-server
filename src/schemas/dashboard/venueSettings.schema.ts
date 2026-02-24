@@ -66,7 +66,6 @@ export const UpdateVenueSettingsSchema = z.object({
     costingMethod: z.enum(['FIFO', 'LIFO', 'AVERAGE']).optional(),
 
     // Customer features
-    allowReservations: z.boolean().optional(),
     allowTakeout: z.boolean().optional(),
     allowDelivery: z.boolean().optional(),
 

@@ -7448,6 +7448,9 @@ model ReservationSettings {
   reminderChannels  String[] @default(["EMAIL"])
   reminderMinBefore Int[]    @default([1440, 120]) // minutes before reservation
 
+  // Operating hours (per-day weekly schedule, venue local time)
+  operatingHours Json? // null = use defaults (Mon-Sat 09:00-22:00, Sunday closed)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

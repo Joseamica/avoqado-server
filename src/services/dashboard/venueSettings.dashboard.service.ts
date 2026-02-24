@@ -52,7 +52,6 @@ export const DEFAULT_VENUE_SETTINGS = {
   costingMethod: 'FIFO' as const,
 
   // Customer features
-  allowReservations: false,
   allowTakeout: false,
   allowDelivery: false,
 
@@ -144,7 +143,6 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     lowStockAlert: DEFAULT_VENUE_SETTINGS.lowStockAlert,
     lowStockThreshold: DEFAULT_VENUE_SETTINGS.lowStockThreshold,
     costingMethod: DEFAULT_VENUE_SETTINGS.costingMethod,
-    allowReservations: DEFAULT_VENUE_SETTINGS.allowReservations,
     allowTakeout: DEFAULT_VENUE_SETTINGS.allowTakeout,
     allowDelivery: DEFAULT_VENUE_SETTINGS.allowDelivery,
     acceptCash: DEFAULT_VENUE_SETTINGS.acceptCash,
