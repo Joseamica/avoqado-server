@@ -122,66 +122,81 @@ export const ProductSchema = z.object({
   updatedAt: z.date(),
 })
 
+// Base object — shared between Create and Update (allows .partial())
+const ProductBodyBase = z.object({
+  sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
+  gtin: z.string().max(14).optional().nullable(),
+  name: z.string().min(1, 'Name is required').max(255),
+  description: z.string().optional().nullable(),
+  categoryId: z.string().cuid('Invalid category ID format'),
+  type: z.nativeEnum(ProductType).default(ProductType.FOOD), // Keep FOOD default for backwards compatibility
+  price: z.number().positive('Price must be positive').multipleOf(0.01),
+  cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
+  taxRate: z.number().min(0).max(1).optional(),
+  imageUrl: z.string().url().nullable().optional(),
+  displayOrder: z.number().int().min(0).optional(),
+  featured: z.boolean().optional(),
+  tags: z.array(z.string()).optional(),
+  allergens: z.array(z.string()).optional(),
+  calories: z.number().int().positive().optional().nullable(),
+  prepTime: z.number().int().positive().optional().nullable(),
+  cookingNotes: z.string().optional().nullable(),
+  trackInventory: z.boolean().optional(),
+  inventoryMethod: z.enum(['QUANTITY', 'RECIPE']).optional().nullable(),
+  unit: z.string().optional().nullable(),
+  active: z.boolean().optional(),
+  availableFrom: z.string().datetime().optional().nullable(),
+  availableUntil: z.string().datetime().optional().nullable(),
+  modifierGroupIds: z.array(z.string().cuid()).optional(),
+
+  // ═══════════════════════════════════════════════════════════════
+  // Square-aligned contextual fields
+  // ═══════════════════════════════════════════════════════════════
+  isAlcoholic: z.boolean().optional(),
+  kitchenName: z.string().max(50, 'Kitchen name must be 50 characters o menos').optional().nullable(),
+  abbreviation: z.string().max(24, 'Abbreviation must be 24 characters o menos').optional().nullable(),
+  duration: z.number().int().min(1).max(1440).optional().nullable(),
+
+  // Class fields (for CLASS type)
+  maxParticipants: z.number().int().min(1).optional().nullable(),
+
+  // Event fields (for EVENT type)
+  eventDate: z.string().datetime().optional().nullable(),
+  eventTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Formato de hora inválido. Se esperaba HH:mm')
+    .optional()
+    .nullable(),
+  eventEndTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Formato de hora inválido. Se esperaba HH:mm')
+    .optional()
+    .nullable(),
+  eventCapacity: z.number().int().min(1).optional().nullable(),
+  eventLocation: z.string().max(500).optional().nullable(),
+
+  // Digital fields (for DIGITAL type)
+  downloadUrl: z.string().url().optional().nullable(),
+  downloadLimit: z.number().int().min(1).optional().nullable(),
+  fileSize: z.string().max(50).optional().nullable(),
+
+  // Donation fields (for DONATION type)
+  suggestedAmounts: z.array(z.number().positive('El monto de donación debe ser positivo')).optional(),
+  allowCustomAmount: z.boolean().optional(),
+  donationCause: z.string().max(500).optional().nullable(),
+})
+
+const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) => {
+  const nonInventoriableTypes = ['CLASS', 'APPOINTMENTS_SERVICE', 'DIGITAL', 'DONATION']
+  return !(nonInventoriableTypes.includes(data.type ?? '') && data.trackInventory === true)
+}
+const nonInventoriableMessage = {
+  message: 'Este tipo de producto no puede tener seguimiento de inventario',
+  path: ['trackInventory'],
+}
+
 export const CreateProductSchema = z.object({
-  body: z.object({
-    sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
-    gtin: z.string().max(14).optional().nullable(),
-    name: z.string().min(1, 'Name is required').max(255),
-    description: z.string().optional().nullable(),
-    categoryId: z.string().cuid('Invalid category ID format'),
-    type: z.nativeEnum(ProductType).default(ProductType.FOOD), // Keep FOOD default for backwards compatibility
-    price: z.number().positive('Price must be positive').multipleOf(0.01),
-    cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
-    taxRate: z.number().min(0).max(1).optional(),
-    imageUrl: z.string().url().nullable().optional(),
-    displayOrder: z.number().int().min(0).optional(),
-    featured: z.boolean().optional(),
-    tags: z.array(z.string()).optional(),
-    allergens: z.array(z.string()).optional(),
-    calories: z.number().int().positive().optional().nullable(),
-    prepTime: z.number().int().positive().optional().nullable(),
-    cookingNotes: z.string().optional().nullable(),
-    trackInventory: z.boolean().optional(),
-    inventoryMethod: z.enum(['QUANTITY', 'RECIPE']).optional().nullable(),
-    unit: z.string().optional().nullable(),
-    active: z.boolean().optional(),
-    availableFrom: z.string().datetime().optional().nullable(),
-    availableUntil: z.string().datetime().optional().nullable(),
-    modifierGroupIds: z.array(z.string().cuid()).optional(), // Modifier groups to assign
-
-    // ═══════════════════════════════════════════════════════════════
-    // Square-aligned contextual fields
-    // ═══════════════════════════════════════════════════════════════
-    isAlcoholic: z.boolean().optional(), // Only for FOOD_AND_BEV
-    kitchenName: z.string().max(50, 'Kitchen name must be 50 characters or less').optional().nullable(),
-    abbreviation: z.string().max(24, 'Abbreviation must be 24 characters or less').optional().nullable(),
-    duration: z.number().int().min(1).max(1440).optional().nullable(), // Minutes (1 min to 24 hours)
-
-    // Event fields (for EVENT type)
-    eventDate: z.string().datetime().optional().nullable(),
-    eventTime: z
-      .string()
-      .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Invalid time format. Expected HH:mm')
-      .optional()
-      .nullable(),
-    eventEndTime: z
-      .string()
-      .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'Invalid time format. Expected HH:mm')
-      .optional()
-      .nullable(),
-    eventCapacity: z.number().int().min(1).optional().nullable(),
-    eventLocation: z.string().max(500).optional().nullable(),
-
-    // Digital fields (for DIGITAL type)
-    downloadUrl: z.string().url().optional().nullable(),
-    downloadLimit: z.number().int().min(1).optional().nullable(),
-    fileSize: z.string().max(50).optional().nullable(),
-
-    // Donation fields (for DONATION type)
-    suggestedAmounts: z.array(z.number().positive('Donation amount must be positive')).optional(),
-    allowCustomAmount: z.boolean().optional(),
-    donationCause: z.string().max(500).optional().nullable(),
-  }),
+  body: ProductBodyBase.refine(nonInventoriableRefine, nonInventoriableMessage),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),
@@ -189,7 +204,7 @@ export const CreateProductSchema = z.object({
 export type CreateProductDto = z.infer<typeof CreateProductSchema>['body']
 
 export const UpdateProductSchema = z.object({
-  body: CreateProductSchema.shape.body.partial(),
+  body: ProductBodyBase.partial().refine(nonInventoriableRefine, nonInventoriableMessage),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     productId: z.string().cuid('Invalid product ID format'),
@@ -589,6 +604,7 @@ export const ImportMenuSchema = z.object({
                 'REGULAR',
                 'FOOD_AND_BEV',
                 'APPOINTMENTS_SERVICE',
+                'CLASS',
                 'EVENT',
                 'DIGITAL',
                 'DONATION',

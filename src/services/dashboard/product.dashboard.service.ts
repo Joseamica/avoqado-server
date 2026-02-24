@@ -103,7 +103,7 @@ export interface QuickAddProductDto {
 /**
  * Types that CANNOT track inventory (services, digital, donations)
  */
-const _NO_INVENTORY_TYPES: ProductType[] = ['SERVICE', 'APPOINTMENTS_SERVICE', 'DIGITAL', 'DONATION']
+const _NO_INVENTORY_TYPES: ProductType[] = ['SERVICE', 'APPOINTMENTS_SERVICE', 'CLASS', 'DIGITAL', 'DONATION']
 
 /**
  * Validate product data based on its type (Square-aligned rules)
@@ -1036,6 +1036,16 @@ const PRODUCT_TYPE_CONFIGS: ProductTypeConfig[] = [
     icon: 'Calendar',
   },
   {
+    code: 'CLASS' as ProductType,
+    label: 'Class / Workshop',
+    labelEs: 'Clase / Taller',
+    description: 'Group sessions with a fixed capacity — yoga, fitness, courses',
+    descriptionEs: 'Sesiones grupales con cupo fijo — yoga, fitness, cursos',
+    fields: ['maxParticipants'],
+    canTrackInventory: false,
+    icon: 'Users',
+  },
+  {
     code: 'EVENT' as ProductType,
     label: 'Event Ticket',
     labelEs: 'Boleto de Evento',
@@ -1090,8 +1100,8 @@ const INDUSTRY_TYPE_MATRIX: Record<string, ProductType[]> = {
 
   // Services
   SALON: ['APPOINTMENTS_SERVICE', 'REGULAR', 'DONATION'],
-  SPA: ['APPOINTMENTS_SERVICE', 'REGULAR', 'DONATION'],
-  GYM: ['APPOINTMENTS_SERVICE', 'REGULAR', 'EVENT', 'DONATION'],
+  SPA: ['APPOINTMENTS_SERVICE', 'CLASS', 'REGULAR', 'DONATION'],
+  GYM: ['CLASS', 'APPOINTMENTS_SERVICE', 'REGULAR', 'EVENT', 'DONATION'],
   CLINIC: ['APPOINTMENTS_SERVICE', 'REGULAR'],
 
   // Entertainment
@@ -1103,7 +1113,7 @@ const INDUSTRY_TYPE_MATRIX: Record<string, ProductType[]> = {
   TELECOM: ['REGULAR', 'DIGITAL', 'APPOINTMENTS_SERVICE'],
 
   // Default (all types available)
-  OTHER: ['REGULAR', 'FOOD_AND_BEV', 'APPOINTMENTS_SERVICE', 'EVENT', 'DIGITAL', 'DONATION'],
+  OTHER: ['REGULAR', 'FOOD_AND_BEV', 'APPOINTMENTS_SERVICE', 'CLASS', 'EVENT', 'DIGITAL', 'DONATION'],
 }
 
 /**

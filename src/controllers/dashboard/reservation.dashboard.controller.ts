@@ -4,6 +4,7 @@ import * as availabilityService from '../../services/dashboard/reservationAvaila
 import { getReservationSettings, updateReservationSettings } from '../../services/dashboard/reservationSettings.service'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
+import { fromZonedTime } from 'date-fns-tz'
 
 // ==========================================
 // RESERVATION DASHBOARD CONTROLLER
@@ -71,7 +72,17 @@ export async function getCalendar(req: Request, res: Response, next: NextFunctio
     const venueId = resolveVenueId(req)
     const { dateFrom, dateTo, groupBy } = req.query as any
 
-    const result = await reservationService.getReservationsCalendar(venueId, new Date(dateFrom), new Date(dateTo), groupBy)
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+    const tz = venue?.timezone ?? 'America/Mexico_City'
+
+    // dateFrom/dateTo are Date objects (Zod coerced from YYYY-MM-DD query strings, UTC midnight)
+    // Extract YYYY-MM-DD and re-interpret as venue-local boundaries
+    const fromISO = (dateFrom as Date).toISOString().slice(0, 10)
+    const toISO = (dateTo as Date).toISOString().slice(0, 10)
+    const from = fromZonedTime(`${fromISO}T00:00:00`, tz)
+    const to = fromZonedTime(`${toISO}T23:59:59.999`, tz)
+
+    const result = await reservationService.getReservationsCalendar(venueId, from, to, groupBy)
     res.json(result)
   } catch (error) {
     next(error)

@@ -1095,6 +1095,7 @@ interface ImportMenuData {
         | 'REGULAR'
         | 'FOOD_AND_BEV'
         | 'APPOINTMENTS_SERVICE'
+        | 'CLASS'
         | 'EVENT'
         | 'DIGITAL'
         | 'DONATION'

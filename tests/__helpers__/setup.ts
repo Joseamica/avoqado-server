@@ -118,6 +118,7 @@ const prismaMock: any = {
   terminal: createMockModel(),
   // Reservation / Booking models
   reservation: createMockModel(),
+  classSession: createMockModel(),
   reservationWaitlistEntry: createMockModel(),
   table: createMockModel(),
   // Add $connect and $disconnect for connection management

@@ -318,6 +318,7 @@ model Venue {
   // RESERVATION / BOOKING SYSTEM
   // ==========================================
   reservations        Reservation[]
+  classSessions       ClassSession[]
   waitlistEntries     ReservationWaitlistEntry[]
   reservationSettings ReservationSettings?
 
@@ -515,8 +516,10 @@ model Staff {
   milestoneAchievements       MilestoneAchievement[]
 
   // Reservations
-  reservationsAssigned Reservation[] @relation("ReservationStaff")
-  reservationsCreated  Reservation[] @relation("ReservationCreatedBy")
+  reservationsAssigned  Reservation[]  @relation("ReservationStaff")
+  reservationsCreated   Reservation[]  @relation("ReservationCreatedBy")
+  classSessionsAssigned ClassSession[] @relation("ClassSessionStaff")
+  classSessionsCreated  ClassSession[] @relation("ClassSessionCreatedBy")
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -986,6 +989,9 @@ model Product {
   // Service-specific (SERVICE, APPOINTMENTS_SERVICE)
   duration Int? // Duration in minutes (1-1440)
 
+  // Class-specific (CLASS)
+  maxParticipants Int? // Default capacity per session (can be overridden per ClassSession)
+
   // Event-specific (EVENT)
   eventDate     DateTime? // Event date
   eventTime     String? // Start time "HH:mm" format
@@ -1039,7 +1045,8 @@ model Product {
   stockCountItems StockCountItem[]
 
   // Reservations (product-based appointments/classes)
-  reservations Reservation[]
+  reservations  Reservation[]
+  classSessions ClassSession[]
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -4439,7 +4446,8 @@ enum ProductType {
   REGULAR // Physical products (retail, merchandise) - DEFAULT for new products
   FOOD_AND_BEV // Food AND beverage (use isAlcoholic boolean for alcohol)
   APPOINTMENTS_SERVICE // Bookable services (haircuts, massages, appointments)
-  EVENT // Event tickets (concerts, classes, experiences)
+  CLASS // Group classes/workshops with capacity per session (yoga, pilates, cooking)
+  EVENT // Event tickets (concerts, experiences)
   DIGITAL // Digital products (ebooks, courses, downloads)
   DONATION // Donations (tips, causes, roundup)
 
@@ -7317,11 +7325,13 @@ model Reservation {
 
   // Direct resource references (NO junction tables for MVP)
   tableId         String?
-  table           Table?   @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  table           Table?        @relation(fields: [tableId], references: [id], onDelete: SetNull)
   productId       String?
-  product         Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  product         Product?      @relation(fields: [productId], references: [id], onDelete: SetNull)
+  classSessionId  String?
+  classSession    ClassSession? @relation(fields: [classSessionId], references: [id], onDelete: SetNull)
   assignedStaffId String?
-  assignedStaff   Staff?   @relation("ReservationStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  assignedStaff   Staff?        @relation("ReservationStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
 
   // Deposit (direct fields — avoids synthetic Orders that pollute KPIs)
   depositAmount       Decimal?       @db.Decimal(10, 2)
@@ -7365,9 +7375,55 @@ model Reservation {
   @@index([venueId, startsAt, endsAt])
   @@index([venueId, tableId, startsAt])
   @@index([venueId, productId, startsAt])
+  @@index([venueId, classSessionId])
   @@index([venueId, assignedStaffId, startsAt])
   @@index([customerId])
   @@index([cancelSecret])
+}
+
+enum ClassSessionStatus {
+  SCHEDULED  // Open for bookings
+  CANCELLED  // Cancelled — no new bookings allowed
+  COMPLETED  // Session already happened
+}
+
+model ClassSession {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // Schedule
+  startsAt DateTime
+  endsAt   DateTime
+  duration Int      // Minutes (denormalized for queries)
+
+  // Capacity — overrides product.maxParticipants for this session
+  capacity Int
+
+  // Staff
+  assignedStaffId String?
+  assignedStaff   Staff?  @relation("ClassSessionStaff", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+
+  status ClassSessionStatus @default(SCHEDULED)
+
+  // Internal notes
+  internalNotes String? @db.Text
+
+  // Relations
+  reservations Reservation[]
+
+  createdById String?
+  createdBy   Staff? @relation("ClassSessionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, startsAt])
+  @@index([venueId, productId, startsAt])
+  @@index([venueId, status, startsAt])
 }
 
 model ReservationWaitlistEntry {

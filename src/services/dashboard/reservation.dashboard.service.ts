@@ -688,8 +688,7 @@ export async function getReservationsCalendar(venueId: string, dateFrom: Date, d
   const reservations = await prisma.reservation.findMany({
     where: {
       venueId,
-      startsAt: { gte: dateFrom },
-      endsAt: { lte: dateTo },
+      startsAt: { gte: dateFrom, lte: dateTo },
       status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
     },
     include: RESERVATION_INCLUDE,
