@@ -151,7 +151,7 @@
     "@types/helmet": "^0.0.48",
     "@types/jest": "^29.5.14",
     "@types/jsonwebtoken": "^9.0.9",
-    "@types/node": "^22.15.29",
+    "@types/node": "^25.3.0",
     "@types/node-sql-parser": "^1.0.0",
     "@types/nodemailer": "^6.4.17",
     "@types/papaparse": "^5.3.16",
