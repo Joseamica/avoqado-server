@@ -18,6 +18,12 @@ export interface WizardStep1Data {
   price: number
   categoryId: string
   imageUrl?: string
+  // Product type (defaults to FOOD if omitted)
+  type?: string
+  // Service-specific (SERVICE, APPOINTMENTS_SERVICE)
+  duration?: number
+  // Class-specific (CLASS)
+  maxParticipants?: number
 }
 
 export interface WizardStep2Data {
@@ -76,6 +82,9 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data)
       price: new Decimal(data.price),
       imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
       active: true,
+      ...(data.type && { type: data.type as any }),
+      ...(data.duration && { duration: data.duration }),
+      ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
       externalData: {
         wizardCompleted: false,
         inventoryConfigured: false,

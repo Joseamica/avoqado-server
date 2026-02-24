@@ -751,9 +751,28 @@ export const CreateProductWithInventorySchema = z.object({
     product: z.object({
       name: z.string().min(1),
       description: z.string().optional(),
-      price: z.number().positive(),
+      price: z.number().min(0),
       categoryId: z.string().cuid(),
       imageUrl: z.union([z.string().url(), z.literal('')]).optional(),
+      type: z
+        .enum([
+          'FOOD',
+          'BEVERAGE',
+          'ALCOHOL',
+          'RETAIL',
+          'SERVICE',
+          'OTHER',
+          'REGULAR',
+          'FOOD_AND_BEV',
+          'APPOINTMENTS_SERVICE',
+          'CLASS',
+          'EVENT',
+          'DIGITAL',
+          'DONATION',
+        ])
+        .optional(),
+      duration: z.number().int().min(1).max(1440).optional(),
+      maxParticipants: z.number().int().min(1).optional(),
     }),
     inventory: z.object({
       useInventory: z.boolean(),
