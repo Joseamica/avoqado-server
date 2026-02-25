@@ -296,6 +296,7 @@ export const publicCreateReservationBodySchema = z
     partySize: z.number().int().min(1).max(100).optional(),
     productId: z.string().optional(),
     classSessionId: z.string().optional(),
+    spotIds: z.array(z.string().min(1)).max(100).optional(),
     specialRequests: z.string().max(2000).optional(),
   })
   .refine(
