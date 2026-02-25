@@ -5814,20 +5814,31 @@ router.post('/geolocation/cell-towers', authenticateTokenMiddleware, async (req:
       cellTowersCount: cellTowers?.length || 0,
       wifiAPsCount: wifiAccessPoints?.length || 0,
       firstTower: cellTowers?.[0],
+      allTowers: cellTowers?.map(
+        (t: CellTowerInput) =>
+          `${t.radioType} MCC=${t.mobileCountryCode} MNC=${t.mobileNetworkCode} LAC=${t.locationAreaCode} CID=${t.cellId}`,
+      ),
+      wifiAPs: wifiAccessPoints?.map((w: WifiInput) => `${w.macAddress} signal=${w.signalStrength} ch=${w.channel}`),
       correlationId: req.correlationId,
     })
 
-    // Call geolocation providers (Unwired Labs → Google fallback)
+    // Call geolocation providers (smart routing: WiFi → Google first, no WiFi → Unwired Labs first)
     const result = await getNetworkLocation(cellTowers || [], wifiAccessPoints || [])
 
     if (!result) {
+      logger.warn(`📍 [GEOLOCATION] All providers failed — no location determined`, {
+        cellTowersCount: cellTowers?.length || 0,
+        wifiAPsCount: wifiAccessPoints?.length || 0,
+        correlationId: req.correlationId,
+      })
       throw new AppError('Could not determine location from network data', 404)
     }
 
-    logger.info(`📍 [GEOLOCATION] Location determined`, {
+    logger.info(`📍 [GEOLOCATION] ✅ Location determined via ${result.provider}`, {
       latitude: result.latitude,
       longitude: result.longitude,
-      accuracy: result.accuracy,
+      accuracy: `${result.accuracy}m`,
+      provider: result.provider,
       correlationId: req.correlationId,
     })
 
@@ -5855,6 +5866,7 @@ type CellTowerInput = {
   mobileNetworkCode: number
   locationAreaCode: number
   cellId: number
+  signalStrength?: number // dBm — helps triangulation accuracy
 }
 
 type WifiInput = {
@@ -5863,12 +5875,12 @@ type WifiInput = {
   channel: number
 }
 
-type GeoResult = { latitude: number; longitude: number; accuracy: number }
+type GeoResult = { latitude: number; longitude: number; accuracy: number; provider: string }
 
 /**
  * Smart provider routing based on WiFi availability:
- * - WITH WiFi  → Google first (best WiFi database from Android phones) → Unwired Labs fallback
- * - WITHOUT WiFi → Unwired Labs first (204M cell towers, better coverage) → Google fallback
+ * - WITH WiFi  → Google first (best WiFi DB) → Unwired Labs
+ * - WITHOUT WiFi → Unwired Labs first (204M cell towers) → Google
  *
  * Returns the first successful result with accuracy <= 1000m.
  */
@@ -5885,7 +5897,7 @@ async function getNetworkLocation(cellTowers: CellTowerInput[], wifiAccessPoints
     const unwiredResult = await getLocationFromUnwiredLabs(cellTowers, wifiAccessPoints)
     if (unwiredResult) return unwiredResult
   } else {
-    // No WiFi → Unwired Labs has better cell tower coverage (204M towers)
+    // No WiFi → Unwired Labs first (204M cell towers, best cell-only coverage)
     logger.info(`📍 [GEOLOCATION] No WiFi → trying Unwired Labs first`)
     const unwiredResult = await getLocationFromUnwiredLabs(cellTowers, wifiAccessPoints)
     if (unwiredResult) return unwiredResult
@@ -5900,7 +5912,7 @@ async function getNetworkLocation(cellTowers: CellTowerInput[], wifiAccessPoints
 }
 
 /**
- * Unwired Labs LocationAPI — primary geolocation provider.
+ * Unwired Labs LocationAPI — cell tower geolocation provider.
  * 204M cell towers globally (5x more than OpenCellID).
  * No IP fallback by default — returns error instead of garbage data.
  * https://unwiredlabs.com/
@@ -5932,6 +5944,7 @@ async function getLocationFromUnwiredLabs(cellTowers: CellTowerInput[], wifiAcce
         lac: tower.locationAreaCode,
         cid: tower.cellId,
         radio: tower.radioType,
+        ...(tower.signalStrength != null && { signal: tower.signalStrength }),
       }))
     }
 
@@ -5980,12 +5993,12 @@ async function getLocationFromUnwiredLabs(cellTowers: CellTowerInput[], wifiAcce
     logger.info(`📍 [GEOLOCATION] Unwired Labs: success`, {
       lat: data.lat,
       lon: data.lon,
-      accuracy,
+      accuracy: `${accuracy}m`,
       fallback: data.fallback || 'none',
       balance: data.balance,
     })
 
-    return { latitude: data.lat, longitude: data.lon, accuracy }
+    return { latitude: data.lat, longitude: data.lon, accuracy, provider: 'unwired-labs' }
   } catch (error) {
     logger.error(`📍 [GEOLOCATION] Unwired Labs: failed`, {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -6019,6 +6032,7 @@ async function getLocationFromGoogle(cellTowers: CellTowerInput[], wifiAccessPoi
         mobileCountryCode: tower.mobileCountryCode,
         mobileNetworkCode: tower.mobileNetworkCode,
         radioType: tower.radioType,
+        ...(tower.signalStrength != null && { signalStrength: tower.signalStrength }),
       }))
     }
 
@@ -6056,16 +6070,17 @@ async function getLocationFromGoogle(cellTowers: CellTowerInput[], wifiAccessPoi
       return null
     }
 
-    logger.info(`📍 [GEOLOCATION] Google: success (fallback)`, {
+    logger.info(`📍 [GEOLOCATION] Google: success`, {
       lat: data.location.lat,
       lng: data.location.lng,
-      accuracy: data.accuracy,
+      accuracy: `${data.accuracy}m`,
     })
 
     return {
       latitude: data.location.lat,
       longitude: data.location.lng,
       accuracy: data.accuracy,
+      provider: 'google',
     }
   } catch (error) {
     logger.error(`📍 [GEOLOCATION] Google: failed`, {

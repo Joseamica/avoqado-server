@@ -159,6 +159,24 @@ const ProductBodyBase = z.object({
 
   // Class fields (for CLASS type)
   maxParticipants: z.number().int().min(1).optional().nullable(),
+  layoutConfig: z
+    .object({
+      iconType: z.enum(['circle', 'bike', 'mat', 'reformer', 'bed', 'chair', 'generic']),
+      rows: z.number().int().min(1).max(20),
+      cols: z.number().int().min(1).max(20),
+      showInstructor: z.boolean().optional(),
+      spots: z.array(
+        z.object({
+          id: z.string().min(1),
+          row: z.number().int().min(0),
+          col: z.number().int().min(0),
+          label: z.string().min(1),
+          enabled: z.boolean(),
+        }),
+      ),
+    })
+    .optional()
+    .nullable(),
 
   // Event fields (for EVENT type)
   eventDate: z.string().datetime().optional().nullable(),

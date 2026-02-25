@@ -236,6 +236,8 @@ export interface ClassSlot {
   enrolled: number
   remaining: number
   available: boolean
+  takenSpotIds: string[]
+  instructor?: { firstName: string; lastName: string } | null
 }
 
 /**
@@ -263,9 +265,12 @@ export async function getClassSessionSlots(
       startsAt: { gte: dayStart, lte: dayEnd },
     },
     include: {
+      assignedStaff: {
+        select: { firstName: true, lastName: true },
+      },
       reservations: {
         where: { status: { in: ACTIVE_STATUSES } },
-        select: { partySize: true },
+        select: { partySize: true, spotIds: true },
       },
     },
     orderBy: { startsAt: 'asc' },
@@ -276,6 +281,14 @@ export async function getClassSessionSlots(
     const effectiveCapacity = Math.floor((session.capacity * onlineCapacityPercent) / 100)
     const remaining = Math.max(0, effectiveCapacity - enrolled)
 
+    // Collect all taken spot IDs across active reservations
+    const takenSpotIds: string[] = []
+    for (const r of session.reservations) {
+      if (r.spotIds && r.spotIds.length > 0) {
+        takenSpotIds.push(...r.spotIds)
+      }
+    }
+
     return {
       classSessionId: session.id,
       startsAt: session.startsAt,
@@ -285,6 +298,8 @@ export async function getClassSessionSlots(
       enrolled,
       remaining,
       available: remaining > 0,
+      takenSpotIds,
+      instructor: session.assignedStaff ?? null,
     }
   })
 }

@@ -48,7 +48,16 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         phone: true,
         products: {
           where: { active: true, type: { in: ['APPOINTMENTS_SERVICE', 'EVENT', 'CLASS'] } },
-          select: { id: true, name: true, price: true, duration: true, eventCapacity: true, type: true, maxParticipants: true },
+          select: {
+            id: true,
+            name: true,
+            price: true,
+            duration: true,
+            eventCapacity: true,
+            type: true,
+            maxParticipants: true,
+            layoutConfig: true,
+          },
           orderBy: { name: 'asc' },
         },
       },
@@ -99,6 +108,8 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
             capacity: s.capacity,
             enrolled: s.enrolled,
             remaining: s.remaining,
+            takenSpotIds: s.takenSpotIds ?? [],
+            instructor: s.instructor ?? null,
           })),
         })
       }
@@ -282,11 +293,14 @@ async function createClassReservation(
     guestPhone: string
     guestEmail?: string
     partySize?: number
+    spotIds?: string[]
     specialRequests?: string
   },
   moduleConfig: any,
 ) {
-  const requestedPartySize = body.partySize ?? 1
+  const requestedSpotIds = body.spotIds ?? []
+  // If spotIds provided, partySize = number of spots selected
+  const requestedPartySize = requestedSpotIds.length > 0 ? requestedSpotIds.length : (body.partySize ?? 1)
   const onlinePercent = moduleConfig?.scheduling?.onlineCapacityPercent ?? 100
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
@@ -314,7 +328,7 @@ async function createClassReservation(
     // Verify the product is CLASS and active
     const product = await tx.product.findFirst({
       where: { id: session.productId, venueId },
-      select: { type: true, active: true },
+      select: { type: true, active: true, layoutConfig: true },
     })
     if (!product || product.type !== 'CLASS') {
       throw new BadRequestError('El producto asociado no es una clase valida')
@@ -341,6 +355,32 @@ async function createClassReservation(
       )
     }
 
+    // Validate spotIds against product layout (if layout exists and spots were selected)
+    if (requestedSpotIds.length > 0 && product.layoutConfig) {
+      const layout = product.layoutConfig as { spots?: { id: string; enabled: boolean }[] }
+      const validSpotIds = new Set((layout.spots ?? []).filter(s => s.enabled).map(s => s.id))
+
+      for (const spotId of requestedSpotIds) {
+        if (!validSpotIds.has(spotId)) {
+          throw new BadRequestError(`Lugar "${spotId}" no es valido`)
+        }
+      }
+
+      // Check that requested spots are not already taken
+      const takenReservations = await tx.reservation.findMany({
+        where: {
+          classSessionId: body.classSessionId,
+          status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+          spotIds: { hasSome: requestedSpotIds },
+        },
+        select: { spotIds: true },
+      })
+      if (takenReservations.length > 0) {
+        const takenIds = takenReservations.flatMap(r => r.spotIds).filter(id => requestedSpotIds.includes(id))
+        throw new ConflictError(`Los lugares ${takenIds.join(', ')} ya estan reservados`)
+      }
+    }
+
     const confirmationCode = reservationService.generateConfirmationCode()
 
     // Ensure uniqueness
@@ -365,6 +405,7 @@ async function createClassReservation(
         guestPhone: body.guestPhone,
         guestEmail: body.guestEmail ?? null,
         partySize: requestedPartySize,
+        spotIds: requestedSpotIds,
         specialRequests: body.specialRequests ?? null,
         confirmedAt: autoConfirm ? new Date() : null,
         statusLog: [{ status: initialStatus, at: new Date().toISOString(), by: null }],

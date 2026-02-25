@@ -991,6 +991,7 @@ model Product {
 
   // Class-specific (CLASS)
   maxParticipants Int? // Default capacity per session (can be overridden per ClassSession)
+  layoutConfig    Json? // Seat map layout: { iconType, rows, cols, instructorPosition?, spots[] }
 
   // Event-specific (EVENT)
   eventDate     DateTime? // Event date
@@ -7322,6 +7323,7 @@ model Reservation {
   guestPhone String?
   guestEmail String?
   partySize  Int       @default(1)
+  spotIds    String[]  @default([]) // Specific seat/spot IDs from product.layoutConfig
 
   // Direct resource references (NO junction tables for MVP)
   tableId         String?

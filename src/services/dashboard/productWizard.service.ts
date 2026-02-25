@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
-import { Unit } from '@prisma/client'
+import { Prisma, Unit } from '@prisma/client'
 import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
 import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
@@ -24,6 +24,7 @@ export interface WizardStep1Data {
   duration?: number
   // Class-specific (CLASS)
   maxParticipants?: number
+  layoutConfig?: Record<string, unknown> | null
 }
 
 export interface WizardStep2Data {
@@ -85,6 +86,9 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data)
       ...(data.type && { type: data.type as any }),
       ...(data.duration && { duration: data.duration }),
       ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
+      ...(data.layoutConfig !== undefined && {
+        layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
+      }),
       externalData: {
         wizardCompleted: false,
         inventoryConfigured: false,
