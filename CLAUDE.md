@@ -76,6 +76,10 @@ After editing code: `npm run format && npm run lint:fix`
 Stock deduction ONLY when fully paid, FIFO (oldest first), non-blocking. Full rules auto-load via `.claude/rules/payments.md` when editing
 payment files. Deep dive: `docs/guides/PAYMENT_FLOW_GUIDE.md`
 
+## Module Config Schemas (CRITICAL - Common Bug)
+
+When modifying module configs (especially `WHITE_LABEL_DASHBOARD`), **ALWAYS check the `configSchema`** stored in the `Module` table. AJV validates configs at runtime against this schema. If you add/rename fields in the config object but don't update the schema, the API will reject the update with cryptic "should have required property" errors. Schema is defined in `scripts/setup-modules.ts` — after editing, re-run the script to update the DB.
+
 ## Cross-Repo (TPV Android)
 
 Backend ALWAYS supports old TPV versions. NEVER remove API response fields. New fields must be optional with defaults. Deploy backend first,

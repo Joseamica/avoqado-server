@@ -137,6 +137,10 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   // Balance/Settlements
   'settlements:read': 'AVOQADO_BALANCE',
   'settlements:write': 'AVOQADO_BALANCE',
+
+  // Reservations
+  'reservations:read': 'AVOQADO_RESERVATIONS',
+  'reservations:write': 'AVOQADO_RESERVATIONS',
 }
 
 /**

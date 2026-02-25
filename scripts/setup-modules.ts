@@ -486,7 +486,7 @@ async function main() {
               required: ['code', 'source'],
               properties: {
                 code: { type: 'string' },
-                source: { enum: ['builtin', 'custom'] },
+                source: { enum: ['builtin', 'custom', 'avoqado_core', 'module_specific'] },
               },
             },
           },
@@ -494,18 +494,21 @@ async function main() {
             type: 'object',
             required: ['layout', 'items'],
             properties: {
-              layout: { enum: ['sidebar-left', 'sidebar-right', 'top-nav'] },
+              layout: { type: 'string' },
               items: {
                 type: 'array',
                 items: {
                   type: 'object',
-                  required: ['id', 'label', 'route', 'order'],
+                  required: ['id', 'order'],
                   properties: {
                     id: { type: 'string' },
                     label: { type: 'string' },
                     icon: { type: 'string' },
                     route: { type: 'string' },
+                    featureCode: { type: 'string' },
                     order: { type: 'number' },
+                    type: { type: 'string' },
+                    roles: { type: 'array', items: { type: 'string' } },
                   },
                 },
               },
@@ -657,7 +660,7 @@ async function main() {
               required: ['code', 'source'],
               properties: {
                 code: { type: 'string' },
-                source: { enum: ['builtin', 'custom'] },
+                source: { enum: ['builtin', 'custom', 'avoqado_core', 'module_specific'] },
               },
             },
           },
@@ -665,18 +668,21 @@ async function main() {
             type: 'object',
             required: ['layout', 'items'],
             properties: {
-              layout: { enum: ['sidebar-left', 'sidebar-right', 'top-nav'] },
+              layout: { type: 'string' },
               items: {
                 type: 'array',
                 items: {
                   type: 'object',
-                  required: ['id', 'label', 'route', 'order'],
+                  required: ['id', 'order'],
                   properties: {
                     id: { type: 'string' },
                     label: { type: 'string' },
                     icon: { type: 'string' },
                     route: { type: 'string' },
+                    featureCode: { type: 'string' },
                     order: { type: 'number' },
+                    type: { type: 'string' },
+                    roles: { type: 'array', items: { type: 'string' } },
                   },
                 },
               },
