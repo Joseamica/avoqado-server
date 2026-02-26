@@ -16,6 +16,7 @@ import logger from '../../../config/logger'
 import { Prisma, ClawbackReason, CommissionCalcStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber } from './commission-utils'
+import { logAction } from '../activity-log.service'
 
 // ============================================
 // Type Definitions
@@ -267,6 +268,15 @@ export async function createClawback(calculationId: string, venueId: string, dat
     createdById,
   })
 
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'COMMISSION_CLAWBACK_CREATED',
+    entity: 'CommissionClawback',
+    entityId: clawback.id,
+    data: { calculationId, amount: clawbackAmount, reason: data.reason },
+  })
+
   return clawback
 }
 
@@ -457,6 +467,15 @@ export async function voidClawback(clawbackId: string, venueId: string, voidedBy
     venueId,
     voidedById,
     reason,
+  })
+
+  logAction({
+    staffId: voidedById,
+    venueId,
+    action: 'COMMISSION_CLAWBACK_VOIDED',
+    entity: 'CommissionClawback',
+    entityId: clawbackId,
+    data: { reason },
   })
 }
 

@@ -4,6 +4,7 @@ import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@pri
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
+import { logAction } from './activity-log.service'
 
 export interface PaymentFilters {
   merchantAccountId?: string
@@ -229,6 +230,14 @@ export async function updatePayment(paymentId: string, data: UpdatePaymentData) 
     },
   })
 
+  logAction({
+    venueId: updatedPayment.venueId,
+    action: 'PAYMENT_UPDATED',
+    entity: 'Payment',
+    entityId: updatedPayment.id,
+    data: { status: updatedPayment.status, method: updatedPayment.method, amount: updatedPayment.amount },
+  })
+
   return updatedPayment
 }
 
@@ -267,5 +276,13 @@ export async function deletePayment(paymentId: string): Promise<void> {
     await tx.payment.delete({
       where: { id: paymentId },
     })
+  })
+
+  logAction({
+    venueId: payment.venueId,
+    action: 'PAYMENT_DELETED',
+    entity: 'Payment',
+    entityId: paymentId,
+    data: { amount: payment.amount, method: payment.method },
   })
 }

@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { DateFilter } from '../../schemas/dashboard/home.schema'
 import { NotFoundError } from '../../errors/AppError'
 import { Review } from '@prisma/client'
+import { logAction } from './activity-log.service'
 
 export async function getReviewsData(venueId: string, dateFilter: DateFilter): Promise<{ reviews: Review[] }> {
   // Verificar que el venue existe
@@ -47,5 +48,13 @@ export async function deleteReview(reviewId: string): Promise<void> {
   // Delete the review
   await prisma.review.delete({
     where: { id: reviewId },
+  })
+
+  logAction({
+    venueId: review.venueId,
+    action: 'REVIEW_DELETED',
+    entity: 'Review',
+    entityId: reviewId,
+    data: { rating: review.overallRating },
   })
 }

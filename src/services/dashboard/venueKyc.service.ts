@@ -10,6 +10,7 @@ import { uploadFileToStorage, buildStoragePath } from '@/services/storage.servic
 
 import { notifySuperadminsNewKycSubmission } from '@/services/superadmin/kycReview.service'
 import { BadRequestError, ForbiddenError } from '@/errors/AppError'
+import { logAction } from './activity-log.service'
 
 interface UploadedFile {
   buffer: Buffer
@@ -123,6 +124,15 @@ export async function uploadSingleKycDocument(venueId: string, userId: string, d
       data: updateData,
     })
 
+    logAction({
+      staffId: userId,
+      venueId,
+      action: 'KYC_DOCUMENT_UPLOADED',
+      entity: 'Venue',
+      entityId: venueId,
+      data: { documentKey },
+    })
+
     logger.info(`  ✅ Uploaded ${cleanName}: ${downloadUrl}`)
 
     return {
@@ -211,6 +221,14 @@ export async function submitKycForReview(venueId: string, userId: string, userRo
         kycRejectedDocuments: [],
         kycVerifiedBy: null,
       },
+    })
+
+    logAction({
+      staffId: userId,
+      venueId,
+      action: 'KYC_SUBMITTED',
+      entity: 'Venue',
+      entityId: venueId,
     })
 
     logger.info(`✅ KYC submitted for venue: ${venue.name}`)
@@ -368,6 +386,14 @@ export async function resubmitKycDocuments(venueId: string, userId: string, file
         kycRejectedDocuments: [], // Clear rejected documents list
         kycVerifiedBy: null, // Clear previous verifier
       },
+    })
+
+    logAction({
+      staffId: userId,
+      venueId,
+      action: 'KYC_RESUBMITTED',
+      entity: 'Venue',
+      entityId: venueId,
     })
 
     logger.info(`✅ KYC documents ${isFirstSubmission ? 'submitted' : 'resubmitted'} for venue: ${venue.name}`)

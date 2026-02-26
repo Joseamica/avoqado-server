@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/
 import { generateAccessToken, generateRefreshToken, verifyToken, StaffRole } from '../../security'
 import { v4 as uuidv4 } from 'uuid'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+import { logAction } from '../dashboard/activity-log.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
 /**
@@ -435,17 +436,15 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
     logger.warn(`🔑 [MASTER LOGIN] FAILED - Invalid TOTP code for venue ${venueId}, terminal ${serialNumber}`)
 
     // Audit log for security monitoring
-    await prisma.activityLog.create({
+    logAction({
+      venueId,
+      action: 'MASTER_LOGIN_FAILED',
+      entity: 'Terminal',
+      entityId: serialNumber,
       data: {
-        action: 'MASTER_LOGIN_FAILED',
-        entity: 'Terminal',
-        entityId: serialNumber,
-        venueId,
-        data: {
-          serialNumber,
-          reason: 'Invalid TOTP code',
-          timestamp: new Date().toISOString(),
-        },
+        serialNumber,
+        reason: 'Invalid TOTP code',
+        timestamp: new Date().toISOString(),
       },
     })
 
@@ -512,18 +511,16 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
   const refreshToken = generateRefreshToken(tokenPayload)
 
   // Audit log for successful master login
-  await prisma.activityLog.create({
+  logAction({
+    venueId,
+    action: 'MASTER_LOGIN_SUCCESS',
+    entity: 'Terminal',
+    entityId: serialNumber,
     data: {
-      action: 'MASTER_LOGIN_SUCCESS',
-      entity: 'Terminal',
-      entityId: serialNumber,
-      venueId,
-      data: {
-        venueName: venue.name,
-        terminalName: terminal.name,
-        correlationId,
-        timestamp: new Date().toISOString(),
-      },
+      venueName: venue.name,
+      terminalName: terminal.name,
+      correlationId,
+      timestamp: new Date().toISOString(),
     },
   })
 

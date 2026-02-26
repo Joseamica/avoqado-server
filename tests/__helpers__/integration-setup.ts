@@ -46,6 +46,11 @@ jest.mock('@/config/logger', () => ({
   },
 }))
 
+// Mock activity log service (fire-and-forget, not relevant for integration test assertions)
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+}))
+
 console.log('Integration test setup loaded (using REAL Prisma client)')
 
 // Note: We do NOT mock Prisma for integration tests

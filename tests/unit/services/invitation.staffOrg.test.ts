@@ -8,6 +8,11 @@
 
 import { InvitationStatus, OrgRole, StaffRole } from '@prisma/client'
 
+// Mock activity log service
+jest.mock('../../../src/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+}))
+
 const mockStaffOrganizationCreate = jest.fn().mockResolvedValue({})
 // const mockStaffOrganizationUpsert = jest.fn().mockResolvedValue({})
 

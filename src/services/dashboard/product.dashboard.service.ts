@@ -4,6 +4,7 @@ import AppError from '../../errors/AppError'
 import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
+import { logAction } from './activity-log.service'
 
 export interface CreateProductDto {
   name: string
@@ -495,6 +496,8 @@ export async function createProduct(venueId: string, productData: CreateProductD
     })
   }
 
+  logAction({ venueId, action: 'PRODUCT_CREATED', entity: 'Product', entityId: product.id, data: { name: product.name } })
+
   return product
 }
 
@@ -660,6 +663,8 @@ export async function updateProduct(venueId: string, productId: string, productD
     })
   }
 
+  logAction({ venueId, action: 'PRODUCT_UPDATED', entity: 'Product', entityId: product.id, data: { changes: Object.keys(productData) } })
+
   return product
 }
 
@@ -725,6 +730,15 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
       categoryId: existingProduct.categoryId,
     })
   }
+
+  logAction({
+    staffId: userId,
+    venueId,
+    action: 'PRODUCT_DELETED',
+    entity: 'Product',
+    entityId: productId,
+    data: { name: existingProduct.name },
+  })
 }
 
 /**
@@ -976,6 +990,14 @@ export async function createQuickAddProduct(venueId: string, quickAddData: Quick
       barcode,
     })
   }
+
+  logAction({
+    venueId,
+    action: 'PRODUCT_CREATED',
+    entity: 'Product',
+    entityId: product.id,
+    data: { name: product.name, source: 'quick-add' },
+  })
 
   return product
 }

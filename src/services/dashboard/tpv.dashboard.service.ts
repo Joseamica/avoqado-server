@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import prisma from '../../utils/prismaClient'
 import emailService from '../email.service'
+import { logAction } from './activity-log.service'
 
 /**
  * Obtiene los datos de las terminales para un venue, con paginación y filtros.
@@ -144,6 +145,14 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
     data: updatePayload,
   })
 
+  logAction({
+    venueId,
+    action: 'TPV_UPDATED',
+    entity: 'Terminal',
+    entityId: updatedTerminal.id,
+    data: { name: updatedTerminal.name },
+  })
+
   return updatedTerminal
 }
 
@@ -227,6 +236,14 @@ export async function createTpv(venueId: string, payload: CreateTpvBody): Promis
     }
   }
 
+  logAction({
+    venueId,
+    action: 'TPV_CREATED',
+    entity: 'Terminal',
+    entityId: created.id,
+    data: { name: created.name },
+  })
+
   return created
 }
 
@@ -272,6 +289,14 @@ export async function deleteTpv(venueId: string, tpvId: string): Promise<void> {
     where: {
       id: tpvId,
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'TPV_DELETED',
+    entity: 'Terminal',
+    entityId: tpvId,
+    data: { name: existingTerminal.name },
   })
 
   logger.info(`Terminal ${tpvId} eliminada del venue ${venueId}`)
@@ -320,6 +345,14 @@ export async function deactivateTpv(venueId: string, tpvId: string): Promise<Ter
       activatedAt: null,
       updatedAt: new Date(),
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'TPV_DEACTIVATED',
+    entity: 'Terminal',
+    entityId: tpvId,
+    data: { name: deactivatedTerminal.name },
   })
 
   logger.info(`Terminal ${tpvId} desactivada en venue ${venueId}. Se puede generar nuevo código de activación.`)
@@ -433,6 +466,7 @@ export async function updateTpvSettings(tpvId: string, settingsUpdate: Partial<T
   const terminal = await prisma.terminal.findUnique({
     where: { id: tpvId },
     select: {
+      venueId: true,
       config: true,
       configOverrides: true,
       venue: { select: { organizationId: true } },
@@ -467,6 +501,13 @@ export async function updateTpvSettings(tpvId: string, settingsUpdate: Partial<T
       configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
       updatedAt: new Date(),
     },
+  })
+
+  logAction({
+    venueId: terminal.venueId,
+    action: 'TPV_SETTINGS_UPDATED',
+    entity: 'Terminal',
+    entityId: tpvId,
   })
 
   logger.info(`TPV settings updated for terminal ${tpvId}`, {
@@ -597,6 +638,14 @@ export async function activateTerminal(venueId: string, tpvId: string, serialNum
       status: 'ACTIVE',
       updatedAt: new Date(),
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'TPV_ACTIVATED',
+    entity: 'Terminal',
+    entityId: tpvId,
+    data: { name: updatedTerminal.name, serialNumber },
   })
 
   logger.info(`Terminal ${tpvId} activated with serial number ${serialNumber}`)
@@ -854,6 +903,13 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
       }),
     )
   }
+
+  logAction({
+    venueId,
+    action: 'VENUE_TPV_SETTINGS_UPDATED',
+    entity: 'Venue',
+    entityId: venueId,
+  })
 
   logger.info(`Venue-level TPV settings updated for venue ${venueId} (${terminals.length} terminals)`, {
     settings: settingsUpdate,

@@ -17,6 +17,7 @@ import logger from '@/config/logger'
 import PDFDocument from 'pdfkit'
 import { getLabelTemplate, calculateLabelPosition } from '../labels/labelTemplates'
 import { generateBarcode, getRecommendedBarcodeFormat } from '../labels/barcodeGenerator'
+import { logAction } from './activity-log.service'
 
 async function getStaffSummary(staffId?: string | null) {
   if (!staffId) return null
@@ -363,6 +364,15 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
     logger.error(`Failed to send Purchase Order email for PO ${purchaseOrder.orderNumber}:`, error)
   })
 
+  logAction({
+    staffId,
+    venueId,
+    action: 'PURCHASE_ORDER_CREATED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrder.id,
+    data: { orderNumber: purchaseOrder.orderNumber, supplierId: purchaseOrder.supplierId },
+  })
+
   return purchaseOrder as any
 }
 
@@ -457,6 +467,14 @@ export async function updatePurchaseOrder(
     },
   })
 
+  logAction({
+    venueId,
+    action: 'PURCHASE_ORDER_UPDATED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrder.id,
+    data: { orderNumber: purchaseOrder.orderNumber, status: purchaseOrder.status },
+  })
+
   return purchaseOrder as any
 }
 
@@ -487,6 +505,14 @@ export async function deletePurchaseOrder(venueId: string, purchaseOrderId: stri
     prisma.purchaseOrderItem.deleteMany({ where: { purchaseOrderId } }),
     prisma.purchaseOrder.delete({ where: { id: purchaseOrderId } }),
   ])
+
+  logAction({
+    venueId,
+    action: 'PURCHASE_ORDER_DELETED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: { orderNumber: existingOrder.orderNumber },
+  })
 
   return existingOrder as any
 }
@@ -528,6 +554,15 @@ export async function approvePurchaseOrder(venueId: string, purchaseOrderId: str
         },
       },
     },
+  })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'PURCHASE_ORDER_APPROVED',
+    entity: 'PurchaseOrder',
+    entityId: updatedOrder.id,
+    data: { orderNumber: updatedOrder.orderNumber },
   })
 
   return updatedOrder as any
@@ -687,6 +722,15 @@ export async function receivePurchaseOrder(
     },
   })
 
+  logAction({
+    staffId,
+    venueId,
+    action: 'PURCHASE_ORDER_RECEIVED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: { orderNumber: order.orderNumber, itemCount: data.items.length },
+  })
+
   return updatedOrder as any
 }
 
@@ -728,6 +772,14 @@ export async function cancelPurchaseOrder(
         },
       },
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'PURCHASE_ORDER_CANCELLED',
+    entity: 'PurchaseOrder',
+    entityId: updatedOrder.id,
+    data: { orderNumber: updatedOrder.orderNumber, reason },
   })
 
   return updatedOrder as any

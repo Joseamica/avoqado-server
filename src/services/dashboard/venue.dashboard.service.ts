@@ -47,6 +47,7 @@ import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.servi
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
 import { OPERATIONAL_VENUE_STATUSES, canDeleteVenue, isDemoVenue, isTrialVenue } from '@/lib/venueStatus.constants'
+import { logAction } from './activity-log.service'
 
 export async function createVenueForOrganization(orgId: string, venueData: CreateVenueDto): Promise<Venue> {
   let slugToUse = venueData.slug
@@ -277,6 +278,14 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     },
   })
 
+  logAction({
+    venueId,
+    action: 'VENUE_UPDATED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { changes: Object.keys(venueUpdateData) },
+  })
+
   return updatedVenue
 }
 
@@ -308,6 +317,14 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
     venueId,
     status: existingVenue.status, // Single source of truth
     isDemoVenue: isDemoVenue(existingVenue.status),
+  })
+
+  logAction({
+    venueId,
+    action: 'VENUE_DELETED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { name: existingVenue.name, slug: existingVenue.slug },
   })
 
   // Delete all Firebase Storage files for this venue BEFORE deleting database records
@@ -679,6 +696,15 @@ export async function createEnhancedVenue(orgId: string, userId: string, venueDa
       venueId: newVenue.id,
       paymentProcessing: venueData.enablePaymentProcessing,
       pricingStructure: venueData.setupPricingStructure,
+    })
+
+    logAction({
+      staffId: userId,
+      venueId: newVenue.id,
+      action: 'VENUE_CREATED',
+      entity: 'Venue',
+      entityId: newVenue.id,
+      data: { name: newVenue.name, slug: newVenue.slug },
     })
 
     return {

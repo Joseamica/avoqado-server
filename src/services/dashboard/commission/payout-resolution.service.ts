@@ -10,6 +10,7 @@
 
 import prisma from '../../../utils/prismaClient'
 import { NotFoundError } from '../../../errors/AppError'
+import { logAction } from '../activity-log.service'
 
 // ==========================================
 // TYPES
@@ -129,7 +130,7 @@ export async function getOrgPayoutConfig(venueId: string) {
 export async function upsertOrgPayoutConfig(venueId: string, input: OrgPayoutConfigInput) {
   const orgId = await getOrgIdFromVenue(venueId)
 
-  return prisma.organizationPayoutConfig.upsert({
+  const result = await prisma.organizationPayoutConfig.upsert({
     where: { organizationId: orgId },
     create: {
       organizationId: orgId,
@@ -143,14 +144,32 @@ export async function upsertOrgPayoutConfig(venueId: string, input: OrgPayoutCon
       ...(input.paymentMethods !== undefined && { paymentMethods: input.paymentMethods }),
     },
   })
+
+  logAction({
+    venueId,
+    action: 'ORG_PAYOUT_CONFIG_UPDATED',
+    entity: 'OrganizationPayoutConfig',
+    entityId: result.id,
+    data: { changes: Object.keys(input) },
+  })
+
+  return result
 }
 
 export async function deleteOrgPayoutConfig(venueId: string) {
   const orgId = await getOrgIdFromVenue(venueId)
 
-  return prisma.organizationPayoutConfig.delete({
+  const result = await prisma.organizationPayoutConfig.delete({
     where: { organizationId: orgId },
   })
+
+  logAction({
+    venueId,
+    action: 'ORG_PAYOUT_CONFIG_DELETED',
+    entity: 'OrganizationPayoutConfig',
+  })
+
+  return result
 }
 
 export const payoutResolutionService = {

@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import { CreatePricingPolicyDto, UpdatePricingPolicyDto } from '../../schemas/dashboard/inventory.schema'
 import { Decimal } from '@prisma/client/runtime/library'
+import { logAction } from './activity-log.service'
 
 /**
  * Get pricing policy for a product
@@ -139,6 +140,13 @@ export async function createPricingPolicy(venueId: string, productId: string, da
     },
   })
 
+  logAction({
+    venueId,
+    action: 'PRICING_POLICY_CREATED',
+    entity: 'PricingPolicy',
+    entityId: policy.id,
+  })
+
   return policy as any
 }
 
@@ -210,6 +218,13 @@ export async function updatePricingPolicy(venueId: string, productId: string, da
     include: {
       product: true,
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'PRICING_POLICY_UPDATED',
+    entity: 'PricingPolicy',
+    entityId: policy.id,
   })
 
   return policy as any

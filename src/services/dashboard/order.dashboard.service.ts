@@ -7,6 +7,7 @@ import logger from '../../config/logger'
 import { Order, OrderStatus } from '@prisma/client'
 import { deductInventoryForProduct } from './productInventoryIntegration.service'
 import { OrderModifierForInventory } from './rawMaterial.service'
+import { logAction } from './activity-log.service'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -271,6 +272,14 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
     }
   }
 
+  logAction({
+    venueId: updatedOrder.venueId,
+    action: 'ORDER_UPDATED',
+    entity: 'Order',
+    entityId: updatedOrder.id,
+    data: { status: updatedOrder.status },
+  })
+
   return updatedOrder
 }
 
@@ -279,12 +288,22 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
  */
 export async function deleteOrder(orderId: string) {
   // Podrías añadir lógica aquí para asegurar que solo se borren órdenes canceladas, etc.
-  return prisma.order.update({
+  const cancelledOrder = await prisma.order.update({
     where: { id: orderId },
     data: {
       status: 'CANCELLED',
     },
   })
+
+  logAction({
+    venueId: cancelledOrder.venueId,
+    action: 'ORDER_CANCELLED',
+    entity: 'Order',
+    entityId: cancelledOrder.id,
+    data: { status: cancelledOrder.status },
+  })
+
+  return cancelledOrder
 }
 
 /**
@@ -373,6 +392,14 @@ export async function settleOrder(
     orderNumber: order.orderNumber,
     settledAmount: remainingBalance,
     notes,
+  })
+
+  logAction({
+    venueId,
+    action: 'ORDER_SETTLED',
+    entity: 'Order',
+    entityId: order.id,
+    data: { settledAmount: remainingBalance, orderNumber: order.orderNumber },
   })
 
   return {

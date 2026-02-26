@@ -16,6 +16,7 @@ import logger from '../../../config/logger'
 import { Prisma, CommissionRecipient, CommissionTrigger, CommissionCalcType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { validateRate, RoleRates } from './commission-utils'
+import { logAction } from '../activity-log.service'
 
 // ============================================
 // Type Definitions
@@ -257,6 +258,15 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
     createdById,
   })
 
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'COMMISSION_CONFIG_CREATED',
+    entity: 'CommissionConfig',
+    entityId: config.id,
+    data: { name: config.name, defaultRate: config.defaultRate },
+  })
+
   return config
 }
 
@@ -365,6 +375,14 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
     changes: Object.keys(data),
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_CONFIG_UPDATED',
+    entity: 'CommissionConfig',
+    entityId: configId,
+    data: { changes: Object.keys(data) },
+  })
+
   return config
 }
 
@@ -423,6 +441,14 @@ export async function softDeleteCommissionConfig(configId: string, venueId: stri
     configId,
     venueId,
     deletedById,
+  })
+
+  logAction({
+    staffId: deletedById,
+    venueId,
+    action: 'COMMISSION_CONFIG_DELETED',
+    entity: 'CommissionConfig',
+    entityId: configId,
   })
 }
 

@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/
 import logger from '../../config/logger'
 import emailService from '../email.service'
 import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
+import { logAction } from './activity-log.service'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
 
 interface TeamMember {
@@ -824,28 +825,23 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
 
   // Write audit log entries
   if (updates.role && updates.role !== existingStaffVenue.role) {
-    await prisma.activityLog.create({
-      data: {
-        staffId: updates.performedBy || null,
-        venueId,
-        action: 'ROLE_CHANGED',
-        entity: 'Staff',
-        entityId: existingStaffVenue.staffId,
-        data: { oldRole: existingStaffVenue.role, newRole: updates.role },
-      },
+    logAction({
+      staffId: updates.performedBy || null,
+      venueId,
+      action: 'ROLE_CHANGED',
+      entity: 'Staff',
+      entityId: existingStaffVenue.staffId,
+      data: { oldRole: existingStaffVenue.role, newRole: updates.role },
     })
   }
 
   if (updates.active !== undefined && updates.active !== existingStaffVenue.active) {
-    await prisma.activityLog.create({
-      data: {
-        staffId: updates.performedBy || null,
-        venueId,
-        action: updates.active ? 'USER_ACTIVATED' : 'USER_DEACTIVATED',
-        entity: 'Staff',
-        entityId: existingStaffVenue.staffId,
-        data: {},
-      },
+    logAction({
+      staffId: updates.performedBy || null,
+      venueId,
+      action: updates.active ? 'USER_ACTIVATED' : 'USER_DEACTIVATED',
+      entity: 'Staff',
+      entityId: existingStaffVenue.staffId,
     })
   }
 

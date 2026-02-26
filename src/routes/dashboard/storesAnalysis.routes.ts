@@ -20,6 +20,7 @@ import { moduleService, MODULE_CODES } from '../../services/modules/module.servi
 import * as salesGoalService from '../../services/dashboard/commission/sales-goal.service'
 import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
 import prisma from '../../utils/prismaClient'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 // mergeParams: true allows access to :venueId from parent route
 const router = Router({ mergeParams: true })
@@ -677,14 +678,12 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
 
     // Audit log
     const authContext = (req as any).authContext
-    await prisma.activityLog.create({
-      data: {
-        staffId: authContext?.userId || null,
-        venueId,
-        action: 'PASSWORD_RESET',
-        entity: 'Staff',
-        entityId: userId,
-      },
+    logAction({
+      staffId: authContext?.userId || null,
+      venueId,
+      action: 'PASSWORD_RESET',
+      entity: 'Staff',
+      entityId: userId,
     })
 
     res.json({
@@ -757,15 +756,13 @@ router.patch('/team/:staffId/venues', whiteLabelAccess, async (req: Request, res
       })
 
       const venueName = orgVenues.find(v => v.id === addVenueId)?.name || addVenueId
-      await prisma.activityLog.create({
-        data: {
-          staffId: authContext?.userId || null,
-          venueId,
-          action: 'VENUE_ASSIGNED',
-          entity: 'Staff',
-          entityId: staffId,
-          data: { venueId: addVenueId, venueName },
-        },
+      logAction({
+        staffId: authContext?.userId || null,
+        venueId,
+        action: 'VENUE_ASSIGNED',
+        entity: 'Staff',
+        entityId: staffId,
+        data: { venueId: addVenueId, venueName },
       })
     }
 
@@ -777,15 +774,13 @@ router.patch('/team/:staffId/venues', whiteLabelAccess, async (req: Request, res
       })
 
       const venueName = orgVenues.find(v => v.id === removeVenueId)?.name || removeVenueId
-      await prisma.activityLog.create({
-        data: {
-          staffId: authContext?.userId || null,
-          venueId,
-          action: 'VENUE_REMOVED',
-          entity: 'Staff',
-          entityId: staffId,
-          data: { venueId: removeVenueId, venueName },
-        },
+      logAction({
+        staffId: authContext?.userId || null,
+        venueId,
+        action: 'VENUE_REMOVED',
+        entity: 'Staff',
+        entityId: staffId,
+        data: { venueId: removeVenueId, venueName },
       })
     }
 

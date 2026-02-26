@@ -2,6 +2,7 @@ import { LowStockAlert, AlertStatus, AlertType, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import { sendLowStockAlertNotification } from './notification.service'
+import { logAction } from './activity-log.service'
 
 /**
  * Get all alerts for a venue
@@ -136,6 +137,14 @@ export async function acknowledgeAlert(venueId: string, alertId: string, staffId
     },
   })
 
+  logAction({
+    staffId,
+    venueId,
+    action: 'ALERT_ACKNOWLEDGED',
+    entity: 'LowStockAlert',
+    entityId: alertId,
+  })
+
   return updatedAlert as any
 }
 
@@ -179,6 +188,14 @@ export async function resolveAlert(venueId: string, alertId: string, staffId?: s
     include: {
       rawMaterial: true,
     },
+  })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'ALERT_RESOLVED',
+    entity: 'LowStockAlert',
+    entityId: alertId,
   })
 
   return updatedAlert as any

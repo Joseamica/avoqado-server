@@ -16,6 +16,7 @@ import logger from '../../../config/logger'
 import { Prisma, CommissionCalcStatus, CommissionSummaryStatus, TierPeriod } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber, getPeriodDateRange } from './commission-utils'
+import { logAction } from '../activity-log.service'
 
 // ============================================
 // Type Definitions
@@ -465,6 +466,15 @@ export async function approveSummary(summaryId: string, venueId: string, approve
     approvedById,
   })
 
+  logAction({
+    staffId: approvedById,
+    venueId,
+    action: 'COMMISSION_SUMMARY_APPROVED',
+    entity: 'CommissionSummary',
+    entityId: summaryId,
+    data: { staffId: summary.staffId, netAmount: Number(summary.netAmount) },
+  })
+
   return updated
 }
 
@@ -505,6 +515,15 @@ export async function disputeSummary(summaryId: string, venueId: string, dispute
     venueId,
     disputedById,
     reason,
+  })
+
+  logAction({
+    staffId: disputedById,
+    venueId,
+    action: 'COMMISSION_SUMMARY_DISPUTED',
+    entity: 'CommissionSummary',
+    entityId: summaryId,
+    data: { reason },
   })
 
   return updated
@@ -573,6 +592,14 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
     netAmount,
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_SUMMARY_RECALCULATED',
+    entity: 'CommissionSummary',
+    entityId: summaryId,
+    data: { totalSales, totalCommissions, netAmount },
+  })
+
   return updated
 }
 
@@ -614,6 +641,14 @@ export async function applyDeduction(summaryId: string, venueId: string, amount:
     newNetAmount,
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_DEDUCTION_APPLIED',
+    entity: 'CommissionSummary',
+    entityId: summaryId,
+    data: { amount, reason, newNetAmount },
+  })
+
   return updated
 }
 
@@ -645,6 +680,14 @@ export async function bulkApproveSummaries(summaryIds: string[], venueId: string
     requested: summaryIds.length,
     approved: result.count,
     approvedById,
+  })
+
+  logAction({
+    staffId: approvedById,
+    venueId,
+    action: 'COMMISSION_BULK_APPROVED',
+    entity: 'CommissionSummary',
+    data: { requested: summaryIds.length, approved: result.count },
   })
 
   return result.count

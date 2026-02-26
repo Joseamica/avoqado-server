@@ -1,6 +1,7 @@
 import { PurchaseOrderStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
+import { logAction } from './activity-log.service'
 
 /**
  * Valid state transitions for Purchase Orders
@@ -91,11 +92,10 @@ export async function submitForApproval(venueId: string, purchaseOrderId: string
     throw new AppError('Cannot submit purchase order without items', 400)
   }
 
-  return prisma.purchaseOrder.update({
+  const result = await prisma.purchaseOrder.update({
     where: { id: purchaseOrderId },
     data: {
       status: PurchaseOrderStatus.PENDING_APPROVAL,
-      // Clear any previous approval/rejection data
       approvedBy: null,
       approvedAt: null,
       rejectedBy: null,
@@ -111,6 +111,17 @@ export async function submitForApproval(venueId: string, purchaseOrderId: string
       },
     },
   })
+
+  logAction({
+    staffId: _staffId,
+    venueId,
+    action: 'PURCHASE_ORDER_SUBMITTED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: { status: 'PENDING_APPROVAL' },
+  })
+
+  return result
 }
 
 /**
@@ -136,7 +147,6 @@ export async function approvePurchaseOrder(venueId: string, purchaseOrderId: str
       status: autoSend ? PurchaseOrderStatus.SENT : PurchaseOrderStatus.APPROVED,
       approvedBy: staffId,
       approvedAt: new Date(),
-      // Clear rejection data if re-approving
       rejectedBy: null,
       rejectedAt: null,
       rejectionReason: null,
@@ -149,6 +159,15 @@ export async function approvePurchaseOrder(venueId: string, purchaseOrderId: str
         },
       },
     },
+  })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'PURCHASE_ORDER_APPROVED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: { autoSend },
   })
 
   return updatedOrder
@@ -174,14 +193,13 @@ export async function rejectPurchaseOrder(venueId: string, purchaseOrderId: stri
     throw new AppError('Rejection reason is required', 400)
   }
 
-  return prisma.purchaseOrder.update({
+  const result = await prisma.purchaseOrder.update({
     where: { id: purchaseOrderId },
     data: {
       status: PurchaseOrderStatus.REJECTED,
       rejectedBy: staffId,
       rejectedAt: new Date(),
       rejectionReason: reason,
-      // Clear approval data
       approvedBy: null,
       approvedAt: null,
     },
@@ -194,6 +212,17 @@ export async function rejectPurchaseOrder(venueId: string, purchaseOrderId: stri
       },
     },
   })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'PURCHASE_ORDER_REJECTED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: { reason },
+  })
+
+  return result
 }
 
 /**
@@ -359,7 +388,7 @@ export async function transitionToStatus(
     updateData.notes = order.notes ? `${order.notes}\n${metadata.notes}` : metadata.notes
   }
 
-  return prisma.purchaseOrder.update({
+  const result = await prisma.purchaseOrder.update({
     where: { id: purchaseOrderId },
     data: updateData,
     include: {
@@ -371,6 +400,17 @@ export async function transitionToStatus(
       },
     },
   })
+
+  logAction({
+    staffId: metadata?.staffId,
+    venueId,
+    action: `PURCHASE_ORDER_${newStatus}`,
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: { from: order.status, to: newStatus, reason: metadata?.reason },
+  })
+
+  return result
 }
 
 /**

@@ -16,6 +16,7 @@ import logger from '../../../config/logger'
 import { Prisma, TierType, TierPeriod, CommissionCalcType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { validateRate, getPeriodDateRange, decimalToNumber } from './commission-utils'
+import { logAction } from '../activity-log.service'
 
 // ============================================
 // Type Definitions
@@ -186,6 +187,14 @@ export async function createCommissionTier(configId: string, venueId: string, da
     rate: data.rate,
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_TIER_CREATED',
+    entity: 'CommissionTier',
+    entityId: tier.id,
+    data: { name: data.name, tierLevel: data.tierLevel, rate: data.rate },
+  })
+
   return tier
 }
 
@@ -254,6 +263,13 @@ export async function createTiersBatch(configId: string, venueId: string, tiers:
   logger.info('Commission tiers batch created', {
     configId,
     count: createdTiers.length,
+  })
+
+  logAction({
+    venueId,
+    action: 'COMMISSION_TIERS_BATCH_CREATED',
+    entity: 'CommissionTier',
+    data: { configId, count: createdTiers.length },
   })
 
   return createdTiers
@@ -326,6 +342,14 @@ export async function updateCommissionTier(tierId: string, venueId: string, data
     changes: Object.keys(data),
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_TIER_UPDATED',
+    entity: 'CommissionTier',
+    entityId: tierId,
+    data: { changes: Object.keys(data) },
+  })
+
   return tier
 }
 
@@ -357,6 +381,13 @@ export async function deactivateTier(tierId: string, venueId: string): Promise<v
   })
 
   logger.info('Commission tier deactivated', { tierId, venueId })
+
+  logAction({
+    venueId,
+    action: 'COMMISSION_TIER_DEACTIVATED',
+    entity: 'CommissionTier',
+    entityId: tierId,
+  })
 }
 
 /**
@@ -382,6 +413,13 @@ export async function deleteTier(tierId: string, venueId: string): Promise<void>
   })
 
   logger.info('Commission tier deleted', { tierId, venueId })
+
+  logAction({
+    venueId,
+    action: 'COMMISSION_TIER_DELETED',
+    entity: 'CommissionTier',
+    entityId: tierId,
+  })
 }
 
 // ============================================

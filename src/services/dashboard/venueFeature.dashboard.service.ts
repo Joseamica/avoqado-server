@@ -9,6 +9,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { cancelSubscription, createTrialSubscriptions } from '../stripe.service'
+import { logAction } from './activity-log.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -163,6 +164,14 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
       },
     })
 
+    logAction({
+      venueId,
+      action: 'FEATURES_ADDED',
+      entity: 'VenueFeature',
+      entityId: venueId,
+      data: { featureCodes: newFeatureCodes },
+    })
+
     return createdFeatures
   } catch (error) {
     logger.error('❌ Error adding features to venue', {
@@ -224,6 +233,14 @@ export async function removeFeatureFromVenue(venueId: string, featureId: string)
   await prisma.venueFeature.update({
     where: { id: venueFeature.id },
     data: { active: false },
+  })
+
+  logAction({
+    venueId,
+    action: 'FEATURE_REMOVED',
+    entity: 'VenueFeature',
+    entityId: featureId,
+    data: { featureCode: venueFeature.feature.code },
   })
 
   logger.info('✅ Feature removed from venue', {

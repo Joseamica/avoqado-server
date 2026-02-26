@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // RESERVATION SETTINGS — Typed config from ReservationSettings model
@@ -193,11 +194,21 @@ export async function ensureReservationSettings(venueId: string) {
 export async function updateReservationSettings(venueId: string, data: ReservationSettingsUpdateInput) {
   const normalized = normalizeReservationSettingsUpdate(data)
 
-  return prisma.reservationSettings.upsert({
+  const settings = await prisma.reservationSettings.upsert({
     where: { venueId },
     create: { venueId, ...(normalized as any) },
     update: normalized,
   })
+
+  logAction({
+    venueId,
+    action: 'RESERVATION_SETTINGS_UPDATED',
+    entity: 'ReservationSettings',
+    entityId: settings.id,
+    data: { venueId },
+  })
+
+  return settings
 }
 
 function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput): Prisma.ReservationSettingsUpdateInput {

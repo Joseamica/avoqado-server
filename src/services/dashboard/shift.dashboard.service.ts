@@ -1,6 +1,7 @@
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { logAction } from './activity-log.service'
 
 interface ShiftFilters {
   staffId?: string
@@ -697,6 +698,14 @@ export async function deleteShift(venueId: string, shiftId: string): Promise<boo
     })
 
     logger.info('Shift deleted successfully', { venueId, shiftId })
+
+    logAction({
+      venueId,
+      action: 'SHIFT_DELETED',
+      entity: 'Shift',
+      entityId: shiftId,
+    })
+
     return true
   } catch (error) {
     logger.error('Error deleting shift', { venueId, shiftId, error })
@@ -811,6 +820,13 @@ export async function updateShift(venueId: string, shiftId: string, data: Update
   const effectiveStatus = updatedShift.endTime && updatedShift.endTime < now ? 'CLOSED' : updatedShift.status
 
   logger.info('Shift updated successfully', { venueId, shiftId })
+
+  logAction({
+    venueId,
+    action: 'SHIFT_UPDATED',
+    entity: 'Shift',
+    entityId: shiftId,
+  })
 
   return {
     id: updatedShift.id,

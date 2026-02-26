@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import { IncidentStatus, SettlementStatus } from '@prisma/client'
 import { subDays } from 'date-fns'
 import { venueStartOfDay, DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { logAction } from './activity-log.service'
 
 /**
  * Settlement Incident Detection Service
@@ -280,6 +281,14 @@ export async function confirmSettlementIncident(
       resolutionDate: settlementArrived ? new Date() : null,
       resolvedBy: settlementArrived ? confirmedBy : null,
     },
+  })
+
+  logAction({
+    staffId: confirmedBy,
+    venueId: incident.venueId,
+    action: 'SETTLEMENT_INCIDENT_CONFIRMED',
+    entity: 'SettlementIncident',
+    entityId: incidentId,
   })
 
   return { incident: updatedIncident, confirmation }

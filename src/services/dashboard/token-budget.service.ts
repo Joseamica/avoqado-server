@@ -16,6 +16,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { TokenQueryType, TokenPurchaseType, TokenPurchaseStatus } from '@prisma/client'
 import Stripe from 'stripe'
+import { logAction } from './activity-log.service'
 
 // Re-export enum for convenience
 export { TokenQueryType }
@@ -397,6 +398,17 @@ class TokenBudgetService {
         stripePaymentIntentId,
       })
 
+      if (purchaseType === TokenPurchaseType.MANUAL) {
+        logAction({
+          staffId: userId,
+          venueId,
+          action: 'TOKENS_PURCHASED',
+          entity: 'TokenPurchase',
+          entityId: purchase.id,
+          data: { tokenAmount, amountPaid, currency },
+        })
+      }
+
       return {
         success: true,
         purchase: {
@@ -674,6 +686,14 @@ class TokenBudgetService {
         autoRechargeThreshold: settings.threshold ?? budget.autoRechargeThreshold,
         autoRechargeAmount: settings.amount ?? budget.autoRechargeAmount,
       },
+    })
+
+    logAction({
+      venueId,
+      action: 'AUTO_RECHARGE_SETTINGS_UPDATED',
+      entity: 'ChatbotTokenBudget',
+      entityId: budget.id,
+      data: { changes: settings },
     })
 
     return this.getBudgetStatus(venueId)

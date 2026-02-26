@@ -13,6 +13,7 @@
  */
 
 import prisma from '../../utils/prismaClient'
+import { logAction } from '../dashboard/activity-log.service'
 import { NotFoundError } from '../../errors/AppError'
 import { Prisma, VenueStatus, TransactionStatus } from '@prisma/client'
 
@@ -1136,10 +1137,19 @@ export async function updateOrganization(
     throw new NotFoundError(`Organization with ID ${orgId} not found`)
   }
 
-  return prisma.organization.update({
+  const updated = await prisma.organization.update({
     where: { id: orgId },
     data,
   })
+
+  logAction({
+    action: 'ORGANIZATION_UPDATED',
+    entity: 'Organization',
+    entityId: orgId,
+    data: { changes: Object.keys(data) },
+  })
+
+  return updated
 }
 
 /**

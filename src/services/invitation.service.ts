@@ -8,6 +8,7 @@ import logger from '../config/logger'
 import { getRoleDisplayName } from './dashboard/venueRoleConfig.dashboard.service'
 import { ROLE_HIERARCHY } from '../lib/permissions'
 import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganizationIdFromVenue } from './staffOrganization.service'
+import { logAction } from './dashboard/activity-log.service'
 
 interface AcceptInvitationData {
   firstName?: string
@@ -121,8 +122,13 @@ export async function getInvitationByToken(token: string) {
 }
 
 export async function acceptInvitation(token: string, userData: AcceptInvitationData): Promise<AcceptInvitationResult> {
+  // Capture venueId, staffId, and role for activity log (outside transaction)
+  let acceptedVenueId: string | null = null
+  let acceptedStaffId: string | null = null
+  let acceptedRole: string | null = null
+
   // Start a transaction to ensure data consistency
-  return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+  const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     // Get and validate invitation
     const invitation = await tx.invitation.findFirst({
       where: {
@@ -419,6 +425,11 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
       role: invitation.role,
     })
 
+    // Capture for post-transaction activity log
+    acceptedVenueId = invitation.venueId
+    acceptedStaffId = staff.id
+    acceptedRole = invitation.role
+
     return {
       user: {
         id: staff.id,
@@ -430,4 +441,16 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
       tokens,
     }
   })
+
+  if (acceptedVenueId) {
+    logAction({
+      staffId: acceptedStaffId,
+      venueId: acceptedVenueId,
+      action: 'INVITATION_ACCEPTED',
+      entity: 'Invitation',
+      data: { role: acceptedRole },
+    })
+  }
+
+  return result
 }

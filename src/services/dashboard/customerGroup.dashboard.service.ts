@@ -22,6 +22,7 @@
 
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { logAction } from './activity-log.service'
 
 /**
  * Get all customer groups for a venue with pagination and search
@@ -187,6 +188,14 @@ export async function createCustomerGroup(
     },
   })
 
+  logAction({
+    venueId,
+    action: 'CUSTOMER_GROUP_CREATED',
+    entity: 'CustomerGroup',
+    entityId: group.id,
+    data: { name: group.name },
+  })
+
   return {
     ...group,
     customerCount: group._count.customers,
@@ -253,6 +262,14 @@ export async function updateCustomerGroup(
     },
   })
 
+  logAction({
+    venueId,
+    action: 'CUSTOMER_GROUP_UPDATED',
+    entity: 'CustomerGroup',
+    entityId: group.id,
+    data: { name: group.name },
+  })
+
   return {
     ...group,
     customerCount: group._count.customers,
@@ -279,6 +296,14 @@ export async function deleteCustomerGroup(venueId: string, groupId: string) {
   await prisma.customerGroup.update({
     where: { id: groupId },
     data: { active: false },
+  })
+
+  logAction({
+    venueId,
+    action: 'CUSTOMER_GROUP_DELETED',
+    entity: 'CustomerGroup',
+    entityId: groupId,
+    data: { name: group.name },
   })
 
   return { success: true, message: 'Customer group deleted successfully' }

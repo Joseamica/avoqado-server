@@ -1,5 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import { getEffectivePaymentConfig, getEffectivePricing } from '@/services/organization-payment-config.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 interface VenuePaymentConfigCreateInput {
   venueId: string
@@ -113,6 +114,14 @@ export async function createVenuePaymentConfig(data: VenuePaymentConfigCreateInp
     },
   })
 
+  logAction({
+    venueId: data.venueId,
+    action: 'VENUE_PAYMENT_CONFIG_CREATED',
+    entity: 'VenuePaymentConfig',
+    entityId: config.id,
+    data: { primaryAccountId: data.primaryAccountId, preferredProcessor: data.preferredProcessor },
+  })
+
   return config
 }
 
@@ -196,6 +205,14 @@ export async function updateVenuePaymentConfig(configId: string, data: VenuePaym
     },
   })
 
+  logAction({
+    venueId: existingConfig.venueId,
+    action: 'VENUE_PAYMENT_CONFIG_UPDATED',
+    entity: 'VenuePaymentConfig',
+    entityId: configId,
+    data: { changes: Object.keys(data) },
+  })
+
   return config
 }
 
@@ -215,6 +232,13 @@ export async function deleteVenuePaymentConfig(configId: string) {
   // Delete payment config
   await prisma.venuePaymentConfig.delete({
     where: { id: configId },
+  })
+
+  logAction({
+    venueId: existingConfig.venueId,
+    action: 'VENUE_PAYMENT_CONFIG_DELETED',
+    entity: 'VenuePaymentConfig',
+    entityId: configId,
   })
 
   return { success: true }

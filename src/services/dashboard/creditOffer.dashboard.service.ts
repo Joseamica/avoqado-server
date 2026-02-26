@@ -11,6 +11,7 @@
 
 import prisma from '../../utils/prismaClient'
 import { CreditOfferStatus } from '@prisma/client'
+import { logAction } from './activity-log.service'
 
 export interface VenueCreditOffer {
   id: string
@@ -109,6 +110,14 @@ export async function expressInterestInOffer(venueId: string, offerId: string, s
       notes: `Interest expressed by staff ${staffId} on ${new Date().toISOString()}`,
     },
   })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'CREDIT_OFFER_INTEREST',
+    entity: 'CreditOffer',
+    entityId: offerId,
+  })
 }
 
 /**
@@ -134,5 +143,12 @@ export async function declineOffer(venueId: string, offerId: string, reason?: st
       rejectedAt: new Date(),
       rejectionReason: reason || 'Declined by venue',
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'CREDIT_OFFER_DECLINED',
+    entity: 'CreditOffer',
+    entityId: offerId,
   })
 }

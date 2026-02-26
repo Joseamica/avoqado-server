@@ -10,6 +10,7 @@
 
 import prisma from '../../../utils/prismaClient'
 import { NotFoundError } from '../../../errors/AppError'
+import { logAction } from '../activity-log.service'
 
 export type CommissionConfigSource = 'venue' | 'organization'
 
@@ -87,7 +88,7 @@ export async function getOrgCommissionConfigs(venueId: string) {
 export async function createOrgCommissionConfig(venueId: string, data: any, createdById: string) {
   const organizationId = await getOrgIdFromVenue(venueId)
 
-  return prisma.commissionConfig.create({
+  const result = await prisma.commissionConfig.create({
     data: {
       ...data,
       orgId: organizationId,
@@ -96,6 +97,17 @@ export async function createOrgCommissionConfig(venueId: string, data: any, crea
     },
     include: configInclude,
   })
+
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'ORG_COMMISSION_CONFIG_CREATED',
+    entity: 'CommissionConfig',
+    entityId: result.id,
+    data: { name: data.name },
+  })
+
+  return result
 }
 
 /**
@@ -110,11 +122,20 @@ export async function updateOrgCommissionConfig(venueId: string, configId: strin
   })
   if (!existing) throw new NotFoundError('Org commission config not found')
 
-  return prisma.commissionConfig.update({
+  const result = await prisma.commissionConfig.update({
     where: { id: configId },
     data,
     include: configInclude,
   })
+
+  logAction({
+    venueId,
+    action: 'ORG_COMMISSION_CONFIG_UPDATED',
+    entity: 'CommissionConfig',
+    entityId: configId,
+  })
+
+  return result
 }
 
 /**
@@ -128,8 +149,18 @@ export async function deleteOrgCommissionConfig(venueId: string, configId: strin
   })
   if (!existing) throw new NotFoundError('Org commission config not found')
 
-  return prisma.commissionConfig.update({
+  const result = await prisma.commissionConfig.update({
     where: { id: configId },
     data: { active: false, deletedAt: new Date(), deletedBy },
   })
+
+  logAction({
+    staffId: deletedBy,
+    venueId,
+    action: 'ORG_COMMISSION_CONFIG_DELETED',
+    entity: 'CommissionConfig',
+    entityId: configId,
+  })
+
+  return result
 }

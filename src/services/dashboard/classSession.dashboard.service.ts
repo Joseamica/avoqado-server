@@ -10,6 +10,7 @@ import type {
 } from '../../schemas/dashboard/classSession.schema'
 import { ReservationStatus } from '@prisma/client'
 import { withSerializableRetry } from './reservation.dashboard.service'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // CLASS SESSION SERVICE
@@ -108,7 +109,7 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
   const endsAt = new Date(data.endsAt)
   const duration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
 
-  return prisma.classSession.create({
+  const session = await prisma.classSession.create({
     data: {
       venueId,
       productId: data.productId,
@@ -122,6 +123,16 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
     },
     include: SESSION_INCLUDE,
   })
+
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'CLASS_SESSION_CREATED',
+    entity: 'ClassSession',
+    entityId: session.id,
+  })
+
+  return session
 }
 
 // ---- Update ----
@@ -170,11 +181,20 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
   if ('assignedStaffId' in data) updateData.assignedStaffId = data.assignedStaffId ?? null
   if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
 
-  return prisma.classSession.update({
+  const updated = await prisma.classSession.update({
     where: { id: sessionId },
     data: updateData,
     include: SESSION_INCLUDE,
   })
+
+  logAction({
+    venueId,
+    action: 'CLASS_SESSION_UPDATED',
+    entity: 'ClassSession',
+    entityId: sessionId,
+  })
+
+  return updated
 }
 
 // ---- Cancel ----
@@ -184,7 +204,7 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
   if (!session) throw new NotFoundError('Sesión no encontrada')
   if (session.status === 'CANCELLED') throw new ConflictError('La sesión ya está cancelada')
 
-  return prisma.$transaction(async tx => {
+  const cancelled = await prisma.$transaction(async tx => {
     // Cancel all active reservations for this session
     await tx.reservation.updateMany({
       where: {
@@ -205,6 +225,15 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       include: SESSION_INCLUDE,
     })
   })
+
+  logAction({
+    venueId,
+    action: 'CLASS_SESSION_CANCELLED',
+    entity: 'ClassSession',
+    entityId: sessionId,
+  })
+
+  return cancelled
 }
 
 // ---- Add attendee ----

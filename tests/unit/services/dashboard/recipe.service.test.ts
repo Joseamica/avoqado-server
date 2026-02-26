@@ -12,6 +12,11 @@ import { createRecipe, updateRecipe, addRecipeLine } from '@/services/dashboard/
 import AppError from '@/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 
+// Mock activity log service
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+}))
+
 // Mock dependencies
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,

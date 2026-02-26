@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import { PaymentMethod, DepositMethod } from '@prisma/client'
 import logger from '../../config/logger'
+import { logAction } from './activity-log.service'
 
 /**
  * Cash Closeout Service (Cortes de Caja)
@@ -116,7 +117,7 @@ export async function createCashCloseout(
     variancePercent,
   })
 
-  return prisma.cashCloseout.create({
+  const closeout = await prisma.cashCloseout.create({
     data: {
       venueId,
       periodStart,
@@ -136,6 +137,16 @@ export async function createCashCloseout(
       },
     },
   })
+
+  logAction({
+    staffId: closedById,
+    venueId,
+    action: 'CASH_CLOSEOUT_CREATED',
+    entity: 'CashCloseout',
+    entityId: closeout.id,
+  })
+
+  return closeout
 }
 
 /**

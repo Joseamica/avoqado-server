@@ -3,6 +3,7 @@ import { Prisma, ReservationStatus, ReservationChannel } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // RESERVATION SERVICE — Core CRUD + State Machine
@@ -206,7 +207,7 @@ export async function createReservation(venueId: string, data: CreateReservation
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
   const requestedPartySize = data.partySize ?? 1
 
-  return withSerializableRetry(async tx => {
+  const reservation = await withSerializableRetry(async tx => {
     const { product } = await validateResourceOwnership(tx, venueId, {
       tableId: data.tableId,
       productId: data.productId,
@@ -330,6 +331,17 @@ export async function createReservation(venueId: string, data: CreateReservation
 
     return reservation
   })
+
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'RESERVATION_CREATED',
+    entity: 'Reservation',
+    entityId: reservation.id,
+    data: { status: reservation.status, confirmationCode: reservation.confirmationCode },
+  })
+
+  return reservation
 }
 
 // ---- List / Get ----
@@ -490,6 +502,25 @@ async function transitionReservation(
 
   logger.info(`✅ [RESERVATION] ${reservation.confirmationCode} transitioned ${reservation.status} → ${targetStatus} by=${by ?? 'system'}`)
 
+  const STATUS_TO_ACTION: Partial<Record<ReservationStatus, string>> = {
+    CONFIRMED: 'RESERVATION_CONFIRMED',
+    CHECKED_IN: 'RESERVATION_CHECKED_IN',
+    COMPLETED: 'RESERVATION_COMPLETED',
+    NO_SHOW: 'RESERVATION_NO_SHOW',
+    CANCELLED: 'RESERVATION_CANCELLED',
+  }
+  const logActionName = STATUS_TO_ACTION[targetStatus]
+  if (logActionName) {
+    logAction({
+      staffId: by ?? undefined,
+      venueId,
+      action: logActionName,
+      entity: 'Reservation',
+      entityId: updated.id,
+      data: { status: updated.status, confirmationCode: updated.confirmationCode },
+    })
+  }
+
   return updated
 }
 
@@ -546,7 +577,7 @@ export async function updateReservation(
   updatedById: string,
   moduleConfig?: any,
 ) {
-  return withSerializableRetry(async tx => {
+  const updated = await withSerializableRetry(async tx => {
     const reservation = await tx.reservation.findFirst({
       where: { id: reservationId, venueId },
     })
@@ -665,6 +696,17 @@ export async function updateReservation(
 
     return updated
   })
+
+  logAction({
+    staffId: updatedById,
+    venueId,
+    action: 'RESERVATION_UPDATED',
+    entity: 'Reservation',
+    entityId: updated.id,
+    data: { confirmationCode: updated.confirmationCode },
+  })
+
+  return updated
 }
 
 // ---- Reschedule ----
@@ -679,7 +721,24 @@ export async function rescheduleReservation(
 ) {
   const duration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60000)
 
-  return updateReservation(venueId, reservationId, { startsAt: newStartsAt, endsAt: newEndsAt, duration }, rescheduledBy, moduleConfig)
+  const rescheduled = await updateReservation(
+    venueId,
+    reservationId,
+    { startsAt: newStartsAt, endsAt: newEndsAt, duration },
+    rescheduledBy,
+    moduleConfig,
+  )
+
+  logAction({
+    staffId: rescheduledBy,
+    venueId,
+    action: 'RESERVATION_RESCHEDULED',
+    entity: 'Reservation',
+    entityId: rescheduled.id,
+    data: { startsAt: newStartsAt, endsAt: newEndsAt, confirmationCode: rescheduled.confirmationCode },
+  })
+
+  return rescheduled
 }
 
 // ---- Calendar View ----

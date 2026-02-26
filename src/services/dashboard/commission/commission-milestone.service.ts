@@ -16,6 +16,7 @@ import logger from '../../../config/logger'
 import { Prisma, MilestoneTargetType, BonusType, TierPeriod } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber, getPeriodDateRange } from './commission-utils'
+import { logAction } from '../activity-log.service'
 
 // ============================================
 // Type Definitions
@@ -190,6 +191,14 @@ export async function createMilestone(configId: string, venueId: string, data: C
     targetType: data.targetType,
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_MILESTONE_CREATED',
+    entity: 'CommissionMilestone',
+    entityId: milestone.id,
+    data: { name: data.name, targetType: data.targetType, targetValue: data.targetValue },
+  })
+
   return milestone
 }
 
@@ -240,6 +249,14 @@ export async function updateMilestone(milestoneId: string, venueId: string, data
     changes: Object.keys(data),
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_MILESTONE_UPDATED',
+    entity: 'CommissionMilestone',
+    entityId: milestoneId,
+    data: { changes: Object.keys(data) },
+  })
+
   return milestone
 }
 
@@ -271,6 +288,13 @@ export async function deactivateMilestone(milestoneId: string, venueId: string):
   })
 
   logger.info('Commission milestone deactivated', { milestoneId, venueId })
+
+  logAction({
+    venueId,
+    action: 'COMMISSION_MILESTONE_DEACTIVATED',
+    entity: 'CommissionMilestone',
+    entityId: milestoneId,
+  })
 }
 
 // ============================================

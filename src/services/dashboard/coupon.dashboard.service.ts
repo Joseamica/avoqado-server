@@ -12,6 +12,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType, Prisma } from '@prisma/client'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -339,6 +340,14 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
 
   logger.info(`🎫 Coupon code created: ${normalizedCode} for discount ${discount.name}`)
 
+  logAction({
+    venueId,
+    action: 'COUPON_CREATED',
+    entity: 'Coupon',
+    entityId: coupon.id,
+    data: { code: coupon.code },
+  })
+
   return {
     ...coupon,
     discount: {
@@ -416,6 +425,14 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
 
   logger.info(`🎫 Coupon code updated: ${coupon.code}`)
 
+  logAction({
+    venueId,
+    action: 'COUPON_UPDATED',
+    entity: 'Coupon',
+    entityId: coupon.id,
+    data: { code: coupon.code },
+  })
+
   return {
     ...coupon,
     discount: {
@@ -446,6 +463,14 @@ export async function deleteCouponCode(venueId: string, couponId: string): Promi
   })
 
   logger.info(`🗑️ Coupon code deleted: ${existing.code} (${couponId})`)
+
+  logAction({
+    venueId,
+    action: 'COUPON_DELETED',
+    entity: 'Coupon',
+    entityId: couponId,
+    data: { code: existing.code },
+  })
 }
 
 // ==========================================
@@ -525,6 +550,14 @@ export async function bulkGenerateCouponCodes(venueId: string, data: BulkGenerat
   })
 
   logger.info(`🎫 Bulk generated ${coupons.count} coupon codes for discount ${discount.name}`)
+
+  logAction({
+    venueId,
+    action: 'COUPONS_BULK_GENERATED',
+    entity: 'Coupon',
+    entityId: data.discountId,
+    data: { count: coupons.count },
+  })
 
   return {
     count: coupons.count,

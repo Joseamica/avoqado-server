@@ -3690,7 +3690,7 @@ model ActivityLog {
   id      String  @id @default(cuid())
   staffId String?
   staff   Staff?  @relation(fields: [staffId], references: [id])
-  venueId String
+  venueId String?
 
   action   String
   entity   String?

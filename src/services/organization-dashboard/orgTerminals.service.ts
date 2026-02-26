@@ -9,6 +9,7 @@ import {
   sendRemoteActivation as superadminSendRemoteActivation,
 } from '../dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
+import { logAction } from '../dashboard/activity-log.service'
 
 // Allowed commands at org level (excludes high-risk: FACTORY_RESET, SHUTDOWN, FORCE_UPDATE, INSTALL_VERSION)
 const ORG_ALLOWED_COMMANDS = ['LOCK', 'UNLOCK', 'MAINTENANCE_MODE', 'EXIT_MAINTENANCE', 'RESTART', 'CLEAR_CACHE', 'EXPORT_LOGS'] as const
@@ -115,6 +116,15 @@ export async function createTerminalForOrg(
     staffId,
   })
 
+  logAction({
+    staffId,
+    venueId: data.venueId,
+    action: 'TERMINAL_CREATED',
+    entity: 'Terminal',
+    entityId: result.terminal.id,
+    data: { name: data.name, serialNumber: data.serialNumber },
+  })
+
   return result
 }
 
@@ -131,8 +141,9 @@ export async function updateTerminalForOrg(
     model?: string
     assignedMerchantIds?: string[]
   },
+  staffId?: string,
 ) {
-  await validateTerminalInOrg(terminalId, orgId)
+  const terminal = await validateTerminalInOrg(terminalId, orgId)
 
   // Validate merchant accounts belong to org if being updated
   if (data.assignedMerchantIds && data.assignedMerchantIds.length > 0) {
@@ -141,29 +152,61 @@ export async function updateTerminalForOrg(
 
   logger.info('[OrgTerminals] Updating terminal', { orgId, terminalId })
 
-  return superadminUpdateTerminal(terminalId, data)
+  const result = await superadminUpdateTerminal(terminalId, data)
+
+  logAction({
+    staffId,
+    venueId: terminal.venue.id,
+    action: 'TERMINAL_UPDATED',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: { changes: Object.keys(data) },
+  })
+
+  return result
 }
 
 /**
  * Delete a terminal within the organization
  */
-export async function deleteTerminalForOrg(orgId: string, terminalId: string) {
-  await validateTerminalInOrg(terminalId, orgId)
+export async function deleteTerminalForOrg(orgId: string, terminalId: string, staffId?: string) {
+  const terminal = await validateTerminalInOrg(terminalId, orgId)
 
   logger.info('[OrgTerminals] Deleting terminal', { orgId, terminalId })
 
-  return superadminDeleteTerminal(terminalId)
+  const result = await superadminDeleteTerminal(terminalId)
+
+  logAction({
+    staffId,
+    venueId: terminal.venue.id,
+    action: 'TERMINAL_DELETED',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: { name: terminal.venue.name },
+  })
+
+  return result
 }
 
 /**
  * Generate activation code for a terminal within the organization
  */
 export async function generateActivationCodeForOrg(orgId: string, terminalId: string, staffId: string) {
-  await validateTerminalInOrg(terminalId, orgId)
+  const terminal = await validateTerminalInOrg(terminalId, orgId)
 
   logger.info('[OrgTerminals] Generating activation code', { orgId, terminalId, staffId })
 
-  return generateActivationCodeForTerminal(terminalId, staffId)
+  const result = await generateActivationCodeForTerminal(terminalId, staffId)
+
+  logAction({
+    staffId,
+    venueId: terminal.venue.id,
+    action: 'ACTIVATION_CODE_GENERATED',
+    entity: 'Terminal',
+    entityId: terminalId,
+  })
+
+  return result
 }
 
 /**
@@ -210,6 +253,15 @@ export async function sendCommandForOrg(
     source: 'DASHBOARD',
   })
 
+  logAction({
+    staffId,
+    venueId: terminal.venue.id,
+    action: 'COMMAND_SENT',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: { command },
+  })
+
   return result
 }
 
@@ -217,8 +269,8 @@ export async function sendCommandForOrg(
  * Assign merchant accounts to a terminal within the organization
  * Validates all merchants belong to the org's venues
  */
-export async function assignMerchantsForOrg(orgId: string, terminalId: string, merchantIds: string[]) {
-  await validateTerminalInOrg(terminalId, orgId)
+export async function assignMerchantsForOrg(orgId: string, terminalId: string, merchantIds: string[], staffId?: string) {
+  const terminal = await validateTerminalInOrg(terminalId, orgId)
 
   // Validate all merchants belong to the org
   if (merchantIds.length > 0) {
@@ -227,7 +279,18 @@ export async function assignMerchantsForOrg(orgId: string, terminalId: string, m
 
   logger.info('[OrgTerminals] Assigning merchants', { orgId, terminalId, merchantCount: merchantIds.length })
 
-  return superadminUpdateTerminal(terminalId, { assignedMerchantIds: merchantIds })
+  const result = await superadminUpdateTerminal(terminalId, { assignedMerchantIds: merchantIds })
+
+  logAction({
+    staffId,
+    venueId: terminal.venue.id,
+    action: 'MERCHANTS_ASSIGNED',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: { merchantCount: merchantIds.length },
+  })
+
+  return result
 }
 
 /**

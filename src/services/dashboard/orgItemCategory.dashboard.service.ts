@@ -12,6 +12,7 @@ import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '@/errors/AppError'
 import type { CategorySource, MergedCategory } from './category-resolution.service'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // TYPES
@@ -153,6 +154,13 @@ export async function createOrgCategory(venueId: string, data: CreateOrgCategory
     },
   })
 
+  logAction({
+    venueId,
+    action: 'ORG_CATEGORY_CREATED',
+    entity: 'ItemCategory',
+    entityId: category.id,
+  })
+
   return toMergedCategory(category)
 }
 
@@ -202,6 +210,13 @@ export async function updateOrgCategory(venueId: string, categoryId: string, dat
     },
   })
 
+  logAction({
+    venueId,
+    action: 'ORG_CATEGORY_UPDATED',
+    entity: 'ItemCategory',
+    entityId: categoryId,
+  })
+
   return toMergedCategory(category)
 }
 
@@ -232,6 +247,13 @@ export async function deleteOrgCategory(venueId: string, categoryId: string): Pr
       data: { active: false },
     })
 
+    logAction({
+      venueId,
+      action: 'ORG_CATEGORY_DELETED',
+      entity: 'ItemCategory',
+      entityId: categoryId,
+    })
+
     return {
       deleted: true,
       message: `Categoría desactivada. ${itemCount} items preservados.`,
@@ -241,6 +263,13 @@ export async function deleteOrgCategory(venueId: string, categoryId: string): Pr
   // Hard delete if no items
   await prisma.itemCategory.delete({
     where: { id: categoryId },
+  })
+
+  logAction({
+    venueId,
+    action: 'ORG_CATEGORY_DELETED',
+    entity: 'ItemCategory',
+    entityId: categoryId,
   })
 
   return {

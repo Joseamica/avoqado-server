@@ -17,6 +17,7 @@ import { Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { generateAPIKeys } from '@/middlewares/sdk-auth.middleware'
+import { logAction } from './activity-log.service'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -172,6 +173,13 @@ export async function createEcommerceMerchant(data: CreateEcommerceMerchantData)
     venueId: data.venueId,
     channelName: data.channelName,
     sandboxMode,
+  })
+
+  logAction({
+    venueId: data.venueId,
+    action: 'ECOMMERCE_MERCHANT_CREATED',
+    entity: 'EcommerceMerchant',
+    entityId: merchant.id,
   })
 
   // ⚠️ SECURITY: Return plaintext secret key ONLY on creation
@@ -408,6 +416,13 @@ export async function updateEcommerceMerchant(merchantId: string, data: UpdateEc
     venueId: existing.venueId,
   })
 
+  logAction({
+    venueId: existing.venueId,
+    action: 'ECOMMERCE_MERCHANT_UPDATED',
+    entity: 'EcommerceMerchant',
+    entityId: merchantId,
+  })
+
   return {
     ...updated,
     secretKeyHash: undefined,
@@ -553,6 +568,13 @@ export async function deleteEcommerceMerchant(merchantId: string, venueId?: stri
     merchantId,
     venueId: existing.venueId,
     channelName: existing.channelName,
+  })
+
+  logAction({
+    venueId: existing.venueId,
+    action: 'ECOMMERCE_MERCHANT_DELETED',
+    entity: 'EcommerceMerchant',
+    entityId: merchantId,
   })
 
   return { success: true, merchantId }

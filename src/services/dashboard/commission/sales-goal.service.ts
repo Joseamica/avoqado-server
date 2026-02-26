@@ -15,6 +15,7 @@ import prisma from '../../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import { MODULE_CODES } from '../../modules/module.service'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
+import { logAction } from '../activity-log.service'
 
 // ==========================================
 // TYPES
@@ -319,6 +320,14 @@ export async function createSalesGoal(venueId: string, input: CreateSalesGoalInp
     },
   })
 
+  logAction({
+    venueId,
+    action: 'SALES_GOAL_CREATED',
+    entity: 'SalesGoal',
+    entityId: newGoal.id,
+    data: { staffId: newGoal.staffId, goal: newGoal.goal, goalType: newGoal.goalType, period: newGoal.period },
+  })
+
   return enrichGoal(venueId, newGoal)
 }
 
@@ -360,6 +369,14 @@ export async function updateSalesGoal(venueId: string, goalId: string, input: Up
     },
   })
 
+  logAction({
+    venueId,
+    action: 'SALES_GOAL_UPDATED',
+    entity: 'SalesGoal',
+    entityId: goalId,
+    data: { changes: Object.keys(input) },
+  })
+
   return enrichGoal(venueId, updatedGoal)
 }
 
@@ -387,6 +404,13 @@ export async function deleteSalesGoal(venueId: string, goalId: string): Promise<
         salesGoals: updatedGoals,
       } as unknown as Prisma.InputJsonValue,
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'SALES_GOAL_DELETED',
+    entity: 'SalesGoal',
+    entityId: goalId,
   })
 }
 

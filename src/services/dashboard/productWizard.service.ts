@@ -5,6 +5,7 @@ import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
 import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
 import logger from '@/config/logger'
+import { logAction } from './activity-log.service'
 
 /**
  * Product Creation Wizard Service
@@ -360,6 +361,14 @@ export async function createProductWithInventory(
     } else if (step2Result.inventoryMethod === 'RECIPE' && data.recipe) {
       step3Result = await setupRecipeStep3(venueId, productId, data.recipe)
     }
+
+    logAction({
+      venueId,
+      action: 'PRODUCT_CREATED',
+      entity: 'Product',
+      entityId: productId,
+      data: { name: data.product.name, inventoryMethod: step2Result.inventoryMethod },
+    })
 
     return {
       success: true,

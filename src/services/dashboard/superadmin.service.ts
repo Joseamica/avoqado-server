@@ -2,6 +2,7 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { VenueStatus } from '@prisma/client'
 import { PRODUCTION_VENUE_STATUSES, OPERATIONAL_VENUE_STATUSES, DEMO_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+import { logAction } from './activity-log.service'
 
 // ===== PRODUCTION VENUE FILTER =====
 // Excludes demo/trial venues (LIVE_DEMO, TRIAL) from analytics to prevent skewed metrics
@@ -417,6 +418,14 @@ export async function approveVenue(venueId: string, approvedBy: string): Promise
     })
 
     logger.info(`Venue ${venue.name} (${venueId}) approved by ${approvedBy}`)
+
+    logAction({
+      staffId: approvedBy,
+      venueId,
+      action: 'VENUE_APPROVED',
+      entity: 'Venue',
+      entityId: venueId,
+    })
   } catch (error) {
     logger.error('Error approving venue:', error)
     throw error instanceof Error ? error : new Error('Failed to approve venue')
@@ -456,6 +465,14 @@ export async function suspendVenueByAdmin(venueId: string, reason: string, suspe
     })
 
     logger.info(`Venue ${venue.name} (${venueId}) suspended by admin ${suspendedBy}. Reason: ${reason}`)
+
+    logAction({
+      staffId: suspendedBy,
+      venueId,
+      action: 'VENUE_SUSPENDED',
+      entity: 'Venue',
+      entityId: venueId,
+    })
   } catch (error) {
     logger.error('Error suspending venue:', error)
     throw error instanceof Error ? error : new Error('Failed to suspend venue')
@@ -495,6 +512,14 @@ export async function reactivateVenueByAdmin(venueId: string, reactivatedBy: str
     })
 
     logger.info(`Venue ${venue.name} (${venueId}) reactivated by ${reactivatedBy}`)
+
+    logAction({
+      staffId: reactivatedBy,
+      venueId,
+      action: 'VENUE_REACTIVATED',
+      entity: 'Venue',
+      entityId: venueId,
+    })
   } catch (error) {
     logger.error('Error reactivating venue:', error)
     throw error instanceof Error ? error : new Error('Failed to reactivate venue')
@@ -633,6 +658,13 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
         monthlyPrice: feature.monthlyPrice,
       },
     })
+
+    logAction({
+      venueId,
+      action: 'FEATURE_ENABLED_BY_ADMIN',
+      entity: 'VenueFeature',
+      entityId: venueId,
+    })
   } catch (error) {
     logger.error('Error enabling feature for venue:', error)
     throw new Error('Failed to enable feature for venue')
@@ -663,6 +695,13 @@ export async function disableFeatureForVenue(venueId: string, featureCode: strin
         active: false,
         endDate: new Date(),
       },
+    })
+
+    logAction({
+      venueId,
+      action: 'FEATURE_DISABLED_BY_ADMIN',
+      entity: 'VenueFeature',
+      entityId: venueId,
     })
   } catch (error) {
     logger.error('Error disabling feature for venue:', error)

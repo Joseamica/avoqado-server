@@ -2,6 +2,7 @@ import { Prisma, BatchStatus, RawMaterialMovementType, Unit } from '@prisma/clie
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
+import { logAction } from './activity-log.service'
 
 /**
  * Generate unique batch number for a raw material
@@ -98,6 +99,14 @@ export async function createStockBatch(
         },
       },
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'STOCK_BATCH_CREATED',
+    entity: 'StockBatch',
+    entityId: batch.id,
+    data: { batchNumber, rawMaterialId, quantity: data.quantity, costPerUnit: data.costPerUnit },
   })
 
   return batch
@@ -537,6 +546,14 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
     include: {
       rawMaterial: true,
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'STOCK_BATCH_QUARANTINED',
+    entity: 'StockBatch',
+    entityId: batchId,
+    data: { reason, batchNumber: batch.batchNumber },
   })
 
   // Create a movement record for the quarantine

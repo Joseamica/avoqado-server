@@ -24,6 +24,7 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
+import { logAction } from '../activity-log.service'
 import {
   findActiveCommissionConfig,
   findActiveOverride,
@@ -463,6 +464,15 @@ export async function voidCommissionCalculation(calculationId: string, venueId: 
     voidedById,
     reason,
   })
+
+  logAction({
+    staffId: voidedById,
+    venueId,
+    action: 'COMMISSION_CALCULATION_VOIDED',
+    entity: 'CommissionCalculation',
+    entityId: calculationId,
+    data: { reason, staffId: calculation.staffId },
+  })
 }
 
 /**
@@ -517,6 +527,15 @@ export async function createManualCommission(
     amount,
     reason,
     createdById,
+  })
+
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'COMMISSION_MANUAL_CREATED',
+    entity: 'CommissionCalculation',
+    entityId: calculation.id,
+    data: { targetStaffId: staffId, amount, reason },
   })
 
   return {

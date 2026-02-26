@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { CreateRecipeDto, UpdateRecipeDto } from '../../schemas/dashboard/inventory.schema'
 import { Decimal } from '@prisma/client/runtime/library'
 import AppError from '@/errors/AppError'
+import { logAction } from './activity-log.service'
 
 /**
  * Get recipe for a product
@@ -136,6 +137,14 @@ export async function createRecipe(venueId: string, productId: string, data: Cre
     },
   })
 
+  logAction({
+    venueId,
+    action: 'RECIPE_CREATED',
+    entity: 'Recipe',
+    entityId: recipe.id,
+    data: { productId, productName: product.name },
+  })
+
   return recipe as any
 }
 
@@ -233,6 +242,14 @@ export async function updateRecipe(venueId: string, productId: string, data: Upd
       })
     })
 
+    logAction({
+      venueId,
+      action: 'RECIPE_UPDATED',
+      entity: 'Recipe',
+      entityId: recipe.id,
+      data: { productId },
+    })
+
     return recipe as any
   } else {
     // Just update recipe metadata
@@ -252,6 +269,14 @@ export async function updateRecipe(venueId: string, productId: string, data: Upd
         },
         product: true,
       },
+    })
+
+    logAction({
+      venueId,
+      action: 'RECIPE_UPDATED',
+      entity: 'Recipe',
+      entityId: recipe.id,
+      data: { productId },
     })
 
     return recipe as any
@@ -279,6 +304,14 @@ export async function deleteRecipe(venueId: string, productId: string): Promise<
 
   await prisma.recipe.delete({
     where: { id: recipe.id },
+  })
+
+  logAction({
+    venueId,
+    action: 'RECIPE_DELETED',
+    entity: 'Recipe',
+    entityId: recipe.id,
+    data: { productId },
   })
 }
 

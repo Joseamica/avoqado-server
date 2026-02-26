@@ -16,6 +16,7 @@ import logger from '../../../config/logger'
 import { Prisma, CommissionPayoutStatus, CommissionSummaryStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber } from './commission-utils'
+import { logAction } from '../activity-log.service'
 
 // ============================================
 // Type Definitions
@@ -292,6 +293,14 @@ export async function approvePayout(payoutId: string, venueId: string, approvedB
     approvedById,
   })
 
+  logAction({
+    staffId: approvedById,
+    venueId,
+    action: 'COMMISSION_PAYOUT_APPROVED',
+    entity: 'CommissionPayout',
+    entityId: payoutId,
+  })
+
   return updated
 }
 
@@ -404,6 +413,14 @@ export async function completePayout(payoutId: string, venueId: string, referenc
     amount: decimalToNumber(payout.amount),
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_PAYOUT_COMPLETED',
+    entity: 'CommissionPayout',
+    entityId: payoutId,
+    data: { amount: decimalToNumber(payout.amount), summaryId: payout.summaryId },
+  })
+
   return updated
 }
 
@@ -435,6 +452,14 @@ export async function cancelPayout(payoutId: string, venueId: string, reason?: s
     payoutId,
     venueId,
     reason,
+  })
+
+  logAction({
+    venueId,
+    action: 'COMMISSION_PAYOUT_CANCELLED',
+    entity: 'CommissionPayout',
+    entityId: payoutId,
+    data: { reason },
   })
 
   return updated

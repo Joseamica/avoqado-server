@@ -15,6 +15,7 @@ import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import { getMergedCategories, type CategorySource } from './category-resolution.service'
+import { logAction } from './activity-log.service'
 
 // ===========================================
 // TYPES
@@ -183,6 +184,13 @@ export async function createItemCategory(venueId: string, data: CreateItemCatego
     },
   })
 
+  logAction({
+    venueId,
+    action: 'ITEM_CATEGORY_CREATED',
+    entity: 'ItemCategory',
+    entityId: category.id,
+  })
+
   return {
     ...category,
     suggestedPrice: category.suggestedPrice ? Number(category.suggestedPrice) : null,
@@ -245,6 +253,13 @@ export async function updateItemCategory(venueId: string, categoryId: string, da
     prisma.serializedItem.count({ where: { categoryId, status: 'SOLD' } }),
   ])
 
+  logAction({
+    venueId,
+    action: 'ITEM_CATEGORY_UPDATED',
+    entity: 'ItemCategory',
+    entityId: categoryId,
+  })
+
   return {
     ...category,
     suggestedPrice: category.suggestedPrice ? Number(category.suggestedPrice) : null,
@@ -282,6 +297,13 @@ export async function deleteItemCategory(venueId: string, categoryId: string): P
       data: { active: false },
     })
 
+    logAction({
+      venueId,
+      action: 'ITEM_CATEGORY_DELETED',
+      entity: 'ItemCategory',
+      entityId: categoryId,
+    })
+
     return {
       deleted: true,
       message: `Category deactivated. ${itemCount} items preserved.`,
@@ -291,6 +313,13 @@ export async function deleteItemCategory(venueId: string, categoryId: string): P
   // Hard delete if no items
   await prisma.itemCategory.delete({
     where: { id: categoryId },
+  })
+
+  logAction({
+    venueId,
+    action: 'ITEM_CATEGORY_DELETED',
+    entity: 'ItemCategory',
+    entityId: categoryId,
   })
 
   return {

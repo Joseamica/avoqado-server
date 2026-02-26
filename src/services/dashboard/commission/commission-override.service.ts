@@ -15,6 +15,7 @@ import logger from '../../../config/logger'
 import { Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { validateRate } from './commission-utils'
+import { logAction } from '../activity-log.service'
 
 // ============================================
 // Type Definitions
@@ -248,6 +249,15 @@ export async function createCommissionOverride(
     createdById,
   })
 
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'COMMISSION_OVERRIDE_CREATED',
+    entity: 'CommissionOverride',
+    entityId: override.id,
+    data: { targetStaffId: data.staffId, customRate: data.customRate, excludeFromCommissions: data.excludeFromCommissions },
+  })
+
   return override
 }
 
@@ -328,6 +338,14 @@ export async function updateCommissionOverride(overrideId: string, venueId: stri
     changes: Object.keys(data),
   })
 
+  logAction({
+    venueId,
+    action: 'COMMISSION_OVERRIDE_UPDATED',
+    entity: 'CommissionOverride',
+    entityId: overrideId,
+    data: { changes: Object.keys(data) },
+  })
+
   return override
 }
 
@@ -363,6 +381,13 @@ export async function deactivateOverride(overrideId: string, venueId: string): P
     overrideId,
     venueId,
   })
+
+  logAction({
+    venueId,
+    action: 'COMMISSION_OVERRIDE_DEACTIVATED',
+    entity: 'CommissionOverride',
+    entityId: overrideId,
+  })
 }
 
 /**
@@ -391,6 +416,13 @@ export async function deleteOverride(overrideId: string, venueId: string): Promi
   logger.info('Commission override deleted', {
     overrideId,
     venueId,
+  })
+
+  logAction({
+    venueId,
+    action: 'COMMISSION_OVERRIDE_DELETED',
+    entity: 'CommissionOverride',
+    entityId: overrideId,
   })
 }
 
@@ -518,6 +550,14 @@ export async function bulkExcludeStaff(
     requested: staffIds.length,
     created,
     createdById,
+  })
+
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'COMMISSION_BULK_EXCLUSION',
+    entity: 'CommissionOverride',
+    data: { configId, requested: staffIds.length, created },
   })
 
   return created

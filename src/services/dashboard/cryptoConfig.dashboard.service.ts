@@ -15,6 +15,7 @@ import { CryptoConfigStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { logAction } from './activity-log.service'
 
 // B4Bit URLs by environment (automatic, no env vars needed)
 const isProduction = process.env.NODE_ENV === 'production'
@@ -95,6 +96,14 @@ export async function enableCryptoForVenue(venueId: string) {
         where: { venueId },
         data: { status: existing.b4bitSecretKey ? CryptoConfigStatus.ACTIVE : CryptoConfigStatus.PENDING_SETUP },
       })
+
+      logAction({
+        venueId,
+        action: 'CRYPTO_ENABLED',
+        entity: 'VenueCryptoConfig',
+        entityId: updated.id,
+      })
+
       return sanitizeConfig(updated)
     }
     throw new BadRequestError('Crypto ya está configurado para este venue')
@@ -120,6 +129,14 @@ export async function enableCryptoForVenue(venueId: string) {
   })
 
   logger.info('✅ Crypto config created (PENDING_SETUP)', { venueId, deviceName })
+
+  logAction({
+    venueId,
+    action: 'CRYPTO_ENABLED',
+    entity: 'VenueCryptoConfig',
+    entityId: cryptoConfig.id,
+  })
+
   return sanitizeConfig(cryptoConfig)
 }
 
@@ -170,6 +187,14 @@ export async function completeCryptoSetup(venueId: string, deviceId: string, sec
   })
 
   logger.info('✅ Crypto config activated for venue', { venueId })
+
+  logAction({
+    venueId,
+    action: 'CRYPTO_SETUP_COMPLETED',
+    entity: 'VenueCryptoConfig',
+    entityId: updated.id,
+  })
+
   return sanitizeConfig(updated)
 }
 
@@ -195,6 +220,14 @@ export async function disableCrypto(venueId: string) {
   })
 
   logger.info('🚫 Crypto disabled for venue', { venueId })
+
+  logAction({
+    venueId,
+    action: 'CRYPTO_DISABLED',
+    entity: 'VenueCryptoConfig',
+    entityId: updated.id,
+  })
+
   return sanitizeConfig(updated)
 }
 

@@ -150,6 +150,11 @@ jest.mock('@/config/logger', () => ({
   },
 }))
 
+// Mock activity log service globally (fire-and-forget, no need to assert in most tests)
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+}))
+
 console.log('Jest global setup file loaded.')
 
 // Clear all mocks before each test to ensure test isolation

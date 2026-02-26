@@ -19,6 +19,7 @@ import {
   venueStartOfMonth,
 } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
+import { logAction } from '../dashboard/activity-log.service'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -1743,6 +1744,13 @@ class OrganizationDashboardService {
       },
     })
 
+    logAction({
+      action: 'ORG_GOAL_UPDATED',
+      entity: 'OrganizationGoal',
+      entityId: goal.id,
+      data: { period, salesTarget, volumeTarget },
+    })
+
     return {
       id: goal.id,
       organizationId: goal.organizationId,
@@ -2497,7 +2505,7 @@ class OrganizationDashboardService {
       throw new Error('Time entry not found in this organization')
     }
 
-    return prisma.$transaction(async tx => {
+    const result = await prisma.$transaction(async tx => {
       const updated = await tx.timeEntry.update({
         where: { id: timeEntryId },
         data: {
@@ -2525,6 +2533,17 @@ class OrganizationDashboardService {
 
       return updated
     })
+
+    logAction({
+      staffId: validatedById,
+      venueId: timeEntry.venueId,
+      action: `TIME_ENTRY_${status}`,
+      entity: 'TimeEntry',
+      entityId: timeEntryId,
+      data: { note, depositAmount },
+    })
+
+    return result
   }
 
   /**
@@ -2543,7 +2562,7 @@ class OrganizationDashboardService {
       throw new Error('Time entry not found in this organization')
     }
 
-    return prisma.$transaction(async tx => {
+    const result = await prisma.$transaction(async tx => {
       // Delete any CashDeposit created around the same time as validation
       if (timeEntry.validatedAt) {
         const windowStart = new Date(timeEntry.validatedAt.getTime() - 5000)
@@ -2568,6 +2587,15 @@ class OrganizationDashboardService {
         },
       })
     })
+
+    logAction({
+      venueId: timeEntry.venueId,
+      action: 'TIME_ENTRY_VALIDATION_RESET',
+      entity: 'TimeEntry',
+      entityId: timeEntryId,
+    })
+
+    return result
   }
 
   // ==========================================
@@ -2585,16 +2613,34 @@ class OrganizationDashboardService {
   }
 
   async createZone(orgId: string, name: string, slug: string) {
-    return prisma.zone.create({
+    const zone = await prisma.zone.create({
       data: { organizationId: orgId, name, slug },
     })
+
+    logAction({
+      action: 'ZONE_CREATED',
+      entity: 'Zone',
+      entityId: zone.id,
+      data: { name, slug },
+    })
+
+    return zone
   }
 
   async updateZone(zoneId: string, data: { name?: string; slug?: string }) {
-    return prisma.zone.update({
+    const zone = await prisma.zone.update({
       where: { id: zoneId },
       data,
     })
+
+    logAction({
+      action: 'ZONE_UPDATED',
+      entity: 'Zone',
+      entityId: zoneId,
+      data: { changes: Object.keys(data) },
+    })
+
+    return zone
   }
 
   async deleteZone(zoneId: string) {
@@ -2603,7 +2649,15 @@ class OrganizationDashboardService {
       where: { zoneId },
       data: { zoneId: null },
     })
-    return prisma.zone.delete({ where: { id: zoneId } })
+    const zone = await prisma.zone.delete({ where: { id: zoneId } })
+
+    logAction({
+      action: 'ZONE_DELETED',
+      entity: 'Zone',
+      entityId: zoneId,
+    })
+
+    return zone
   }
 
   // ==========================================
@@ -2704,6 +2758,12 @@ class OrganizationDashboardService {
     await prisma.staff.update({
       where: { id: userId },
       data: { password: hashedPassword },
+    })
+
+    logAction({
+      action: 'USER_PASSWORD_RESET',
+      entity: 'Staff',
+      entityId: userId,
     })
 
     return { tempPassword, message: 'Password reset successfully. Share the temporary password securely.' }
@@ -3129,7 +3189,7 @@ class OrganizationDashboardService {
     if (data.enableCardPayments !== undefined) settingsSync.enableCardPayments = data.enableCardPayments
     if (data.enableBarcodeScanner !== undefined) settingsSync.enableBarcodeScanner = data.enableBarcodeScanner
 
-    return prisma.organizationAttendanceConfig.upsert({
+    const config = await prisma.organizationAttendanceConfig.upsert({
       where: { organizationId: orgId },
       create: {
         organizationId: orgId,
@@ -3141,11 +3201,25 @@ class OrganizationDashboardService {
         settings: settingsSync,
       },
     })
+
+    logAction({
+      action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
+      entity: 'OrganizationAttendanceConfig',
+      entityId: config.id,
+      data: { changes: Object.keys(data) },
+    })
+
+    return config
   }
 
   async deleteOrgAttendanceConfig(orgId: string) {
     await prisma.organizationAttendanceConfig.deleteMany({
       where: { organizationId: orgId },
+    })
+
+    logAction({
+      action: 'ORG_ATTENDANCE_CONFIG_DELETED',
+      entity: 'OrganizationAttendanceConfig',
     })
   }
 
@@ -3251,6 +3325,12 @@ class OrganizationDashboardService {
         )
       }
     }
+
+    logAction({
+      action: 'ORG_TPV_DEFAULTS_UPDATED',
+      entity: 'OrganizationAttendanceConfig',
+      data: { settingsKeys: Object.keys(settings), terminalsUpdated: terminals.length },
+    })
 
     return { config: mergedSettings, terminalsUpdated: terminals.length }
   }

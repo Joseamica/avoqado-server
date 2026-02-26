@@ -21,6 +21,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { LoyaltyTransactionType } from '@prisma/client'
 import logger from '@/config/logger'
+import { logAction } from './activity-log.service'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -97,6 +98,14 @@ export async function updateLoyaltyConfig(
   const config = await prisma.loyaltyConfig.update({
     where: { venueId },
     data,
+  })
+
+  logAction({
+    venueId,
+    action: 'LOYALTY_CONFIG_UPDATED',
+    entity: 'LoyaltyConfig',
+    entityId: venueId,
+    data: { active: config.active },
   })
 
   return {
@@ -391,6 +400,15 @@ export async function adjustPoints(
       },
     }),
   ])
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'LOYALTY_POINTS_ADJUSTED',
+    entity: 'Customer',
+    entityId: customerId,
+    data: { points, newBalance: updatedCustomer.loyaltyPoints },
+  })
 
   return {
     newBalance: updatedCustomer.loyaltyPoints,

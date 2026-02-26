@@ -15,6 +15,7 @@ import * as kycReviewService from '@/services/superadmin/kycReview.service'
 import emailService from '@/services/email.service'
 import logger from '@/config/logger'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+import { logAction } from '../dashboard/activity-log.service'
 
 // Types
 export interface CreateVenueInput {
@@ -293,6 +294,15 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       logger.warn(`⚠️  Organization ${organizationId} not found, skipping team invites`)
     }
   }
+
+  logAction({
+    staffId: userId,
+    venueId: venue.id,
+    action: 'VENUE_CREATED_FROM_ONBOARDING',
+    entity: 'Venue',
+    entityId: venue.id,
+    data: { venueSlug: venue.slug, venueName: venue.name, onboardingType, venueStatus },
+  })
 
   return result
 }

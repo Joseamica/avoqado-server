@@ -2,6 +2,7 @@ import { WaitlistStatus } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // WAITLIST SERVICE — Queue management + auto-promote
@@ -54,6 +55,14 @@ export async function addToWaitlist(venueId: string, data: AddToWaitlistInput, m
   })
 
   logger.info(`✅ [WAITLIST] Added entry ${entry.id} | venue=${venueId} position=${position} partySize=${data.partySize ?? 1}`)
+
+  logAction({
+    venueId,
+    action: 'WAITLIST_ADDED',
+    entity: 'ReservationWaitlistEntry',
+    entityId: entry.id,
+    data: { position, partySize: entry.partySize },
+  })
 
   return entry
 }
@@ -122,10 +131,20 @@ export async function removeFromWaitlist(venueId: string, entryId: string) {
     throw new BadRequestError(`No se puede eliminar una entrada con estado ${entry.status}`)
   }
 
-  return prisma.reservationWaitlistEntry.update({
+  const removed = await prisma.reservationWaitlistEntry.update({
     where: { id: entryId },
     data: { status: 'CANCELLED' },
   })
+
+  logAction({
+    venueId,
+    action: 'WAITLIST_REMOVED',
+    entity: 'ReservationWaitlistEntry',
+    entityId: removed.id,
+    data: { status: removed.status },
+  })
+
+  return removed
 }
 
 export async function promoteWaitlistEntry(venueId: string, entryId: string, reservationId: string) {
@@ -147,13 +166,23 @@ export async function promoteWaitlistEntry(venueId: string, entryId: string, res
     if (!reservation) throw new NotFoundError('Reservacion no encontrada en este negocio')
   }
 
-  return prisma.reservationWaitlistEntry.update({
+  const promoted = await prisma.reservationWaitlistEntry.update({
     where: { id: entryId },
     data: {
       status: 'PROMOTED',
       promotedReservationId: reservationId,
     },
   })
+
+  logAction({
+    venueId,
+    action: 'WAITLIST_PROMOTED',
+    entity: 'ReservationWaitlistEntry',
+    entityId: promoted.id,
+    data: { promotedReservationId: reservationId },
+  })
+
+  return promoted
 }
 
 /**

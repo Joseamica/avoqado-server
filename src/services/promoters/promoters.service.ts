@@ -5,6 +5,7 @@
  */
 import prisma from '../../utils/prismaClient'
 import { CashDepositStatus } from '@prisma/client'
+import { logAction } from '../dashboard/activity-log.service'
 
 // Types for the service responses
 export interface PromoterSummary {
@@ -416,6 +417,14 @@ class PromotersService {
       },
     })
 
+    logAction({
+      staffId: approvedById,
+      venueId,
+      action: 'CASH_DEPOSIT_APPROVED',
+      entity: 'CashDeposit',
+      entityId: depositId,
+    })
+
     return { success: true }
   }
 
@@ -441,6 +450,14 @@ class PromotersService {
         status: 'REJECTED',
         rejectionReason: reason,
       },
+    })
+
+    logAction({
+      venueId,
+      action: 'CASH_DEPOSIT_REJECTED',
+      entity: 'CashDeposit',
+      entityId: depositId,
+      data: { reason },
     })
 
     return { success: true }

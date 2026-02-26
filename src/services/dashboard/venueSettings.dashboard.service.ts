@@ -12,6 +12,7 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import { logAction } from './activity-log.service'
 import { VenueSettings, Prisma } from '@prisma/client'
 
 /**
@@ -163,6 +164,14 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
 
   logger.info(`Updated VenueSettings for venue: ${venueId}`, {
     updatedFields: Object.keys(updates),
+  })
+
+  logAction({
+    venueId,
+    action: 'SETTINGS_UPDATED',
+    entity: 'VenueSettings',
+    entityId: venueId,
+    data: { updatedFields: Object.keys(updates) },
   })
 
   return settings

@@ -13,6 +13,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import * as notificationService from '@/services/dashboard/notification.service'
 import { sendKycDocumentsToBlumon } from '@/services/resend.service'
 import { generateBlumonExcel } from '@/services/superadmin/blumonExcelGenerator.service'
+import { logAction } from '../dashboard/activity-log.service'
 
 /**
  * Get all venues pending KYC review
@@ -298,6 +299,14 @@ export async function approveKyc(venueId: string, superadminId: string) {
     },
   })
 
+  logAction({
+    staffId: superadminId,
+    venueId,
+    action: 'KYC_APPROVED',
+    entity: 'Venue',
+    entityId: venueId,
+  })
+
   logger.info(`✅ KYC approved successfully for venue ${venueId}`)
 
   // Send notification to venue owner
@@ -528,6 +537,15 @@ export async function rejectKyc(venueId: string, superadminId: string, rejection
     },
   })
 
+  logAction({
+    staffId: superadminId,
+    venueId,
+    action: 'KYC_REJECTED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { reason: rejectionReason },
+  })
+
   logger.info(`✅ Venue ${venueId} KYC rejected${rejectedDocuments ? ` (specific documents: ${rejectedDocuments.join(', ')})` : ''}`)
 
   // Notify venue owner about KYC rejection
@@ -567,6 +585,14 @@ export async function markKycInReview(venueId: string, superadminId: string) {
       statusChangedAt: new Date(),
       statusChangedBy: superadminId,
     },
+  })
+
+  logAction({
+    staffId: superadminId,
+    venueId,
+    action: 'KYC_IN_REVIEW',
+    entity: 'Venue',
+    entityId: venueId,
   })
 
   logger.info(`🔍 Venue ${venueId} KYC marked as IN_REVIEW by superadmin ${superadminId}`)

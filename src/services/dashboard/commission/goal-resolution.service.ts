@@ -12,6 +12,7 @@ import prisma from '../../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import { MODULE_CODES } from '../../modules/module.service'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
+import { logAction } from '../activity-log.service'
 import type { SalesGoal, SalesGoalPeriod, SalesGoalType } from './sales-goal.service'
 
 // ==========================================
@@ -272,6 +273,14 @@ export async function createOrgGoal(venueId: string, input: OrgGoalInput): Promi
     },
   })
 
+  logAction({
+    venueId,
+    action: 'ORG_SALES_GOAL_CREATED',
+    entity: 'OrganizationSalesGoalConfig',
+    entityId: created.id,
+    data: { goal: input.goal, goalType, period },
+  })
+
   const currentSales = await calculateCurrentSales(venueId, period as SalesGoalPeriod, goalType as SalesGoalType)
 
   return {
@@ -313,6 +322,14 @@ export async function updateOrgGoal(venueId: string, goalId: string, input: OrgG
     },
   })
 
+  logAction({
+    venueId,
+    action: 'ORG_SALES_GOAL_UPDATED',
+    entity: 'OrganizationSalesGoalConfig',
+    entityId: goalId,
+    data: { changes: Object.keys(input) },
+  })
+
   const currentSales = await calculateCurrentSales(venueId, updated.period as SalesGoalPeriod, updated.goalType as SalesGoalType)
 
   return {
@@ -345,5 +362,12 @@ export async function deleteOrgGoal(venueId: string, goalId: string): Promise<vo
 
   await prisma.organizationSalesGoalConfig.delete({
     where: { id: goalId },
+  })
+
+  logAction({
+    venueId,
+    action: 'ORG_SALES_GOAL_DELETED',
+    entity: 'OrganizationSalesGoalConfig',
+    entityId: goalId,
   })
 }

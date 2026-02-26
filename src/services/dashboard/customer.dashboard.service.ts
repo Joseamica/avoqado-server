@@ -11,6 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { PaymentStatus } from '@prisma/client'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -370,6 +371,14 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     customerId: customer.id,
   })
 
+  logAction({
+    venueId,
+    action: 'CUSTOMER_CREATED',
+    entity: 'Customer',
+    entityId: customer.id,
+    data: { email: customer.email, phone: customer.phone },
+  })
+
   return customer
 }
 
@@ -461,6 +470,14 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     customerId,
   })
 
+  logAction({
+    venueId,
+    action: 'CUSTOMER_UPDATED',
+    entity: 'Customer',
+    entityId: customerId,
+    data: { email: updatedCustomer.email, phone: updatedCustomer.phone },
+  })
+
   return updatedCustomer
 }
 
@@ -488,6 +505,14 @@ export async function deleteCustomer(venueId: string, customerId: string) {
   logger.info(`Customer soft-deleted: ${customerId}`, {
     venueId,
     customerId,
+  })
+
+  logAction({
+    venueId,
+    action: 'CUSTOMER_DELETED',
+    entity: 'Customer',
+    entityId: customerId,
+    data: { email: customer.email, phone: customer.phone },
   })
 
   return { success: true, message: 'Customer deactivated successfully' }
@@ -674,6 +699,14 @@ export async function settleCustomerBalance(
     settledOrderCount: pendingOrders.length,
     settledAmount: totalSettledAmount,
     notes,
+  })
+
+  logAction({
+    venueId,
+    action: 'CUSTOMER_BALANCE_SETTLED',
+    entity: 'Customer',
+    entityId: customerId,
+    data: { settledOrderCount: pendingOrders.length, settledAmount: totalSettledAmount },
   })
 
   return {

@@ -19,6 +19,7 @@ import { generateSlug } from '../../utils/slugify'
 import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
+import { logAction } from './activity-log.service'
 
 export async function getMenus(venueId: string): Promise<Menu[]> {
   return prisma.menu.findMany({
@@ -144,6 +145,8 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
       affectedItemCount,
     })
   }
+
+  logAction({ venueId, action: 'MENU_CATEGORY_CREATED', entity: 'MenuCategory', entityId: category.id, data: { name: category.name } })
 
   return category
 }
@@ -327,6 +330,14 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     })
   }
 
+  logAction({
+    venueId,
+    action: 'MENU_CATEGORY_UPDATED',
+    entity: 'MenuCategory',
+    entityId: updatedCategory.id,
+    data: { name: updatedCategory.name },
+  })
+
   return updatedCategory
 }
 
@@ -381,6 +392,14 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
     })
   }
 
+  logAction({
+    venueId,
+    action: 'MENU_CATEGORY_DELETED',
+    entity: 'MenuCategory',
+    entityId: deletedCategory.id,
+    data: { name: deletedCategory.name },
+  })
+
   return deletedCategory
 }
 
@@ -393,7 +412,11 @@ export async function reorderMenuCategories(venueId: string, reorderData: Reorde
   )
   // Note: updateMany doesn't throw if a record isn't found by default.
   // You might want to verify all IDs exist and belong to the venue before transaction for stricter validation.
-  return prisma.$transaction(transactions)
+  const result = await prisma.$transaction(transactions)
+
+  logAction({ venueId, action: 'MENU_CATEGORIES_REORDERED', entity: 'MenuCategory' })
+
+  return result
 }
 
 // ==========================================
@@ -426,7 +449,7 @@ export async function createMenu(venueId: string, data: CreateMenuDto): Promise<
     }
   }
 
-  return prisma.menu.create({
+  const menu = await prisma.menu.create({
     data: createData,
     include: {
       categories: {
@@ -441,6 +464,10 @@ export async function createMenu(venueId: string, data: CreateMenuDto): Promise<
       },
     },
   })
+
+  logAction({ venueId, action: 'MENU_CREATED', entity: 'Menu', entityId: menu.id, data: { name: menu.name } })
+
+  return menu
 }
 
 export async function getMenuById(venueId: string, menuId: string): Promise<Menu> {
@@ -509,7 +536,7 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
   if (data.categoryIds) {
     // We use a transaction to delete all existing assignments and create new ones
     // This is the simplest way to sync categories and handle reordering
-    return prisma.$transaction(async tx => {
+    const updatedMenu = await prisma.$transaction(async tx => {
       // 1. Update basic menu details
       if (Object.keys(updateData).length > 0) {
         await tx.menu.update({
@@ -551,9 +578,13 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
         },
       })
     })
+
+    logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name } })
+
+    return updatedMenu
   }
 
-  return prisma.menu.update({
+  const updatedMenu = await prisma.menu.update({
     where: { id: menuId, venueId },
     data: updateData,
     include: {
@@ -569,6 +600,10 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
       },
     },
   })
+
+  logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name } })
+
+  return updatedMenu
 }
 
 export async function deleteMenu(venueId: string, menuId: string): Promise<Menu> {
@@ -589,9 +624,13 @@ export async function deleteMenu(venueId: string, menuId: string): Promise<Menu>
   }
 
   // Delete menu (categories assignments will be deleted by cascade)
-  return prisma.menu.delete({
+  const deletedMenu = await prisma.menu.delete({
     where: { id: menuId },
   })
+
+  logAction({ venueId, action: 'MENU_DELETED', entity: 'Menu', entityId: deletedMenu.id, data: { name: deletedMenu.name } })
+
+  return deletedMenu
 }
 
 export async function cloneMenu(venueId: string, menuId: string, data: CloneMenuDto): Promise<Menu> {
@@ -651,7 +690,11 @@ export async function cloneMenu(venueId: string, menuId: string, data: CloneMenu
   }
 
   // Return the cloned menu with its categories
-  return getMenuById(venueId, clonedMenu.id)
+  const result = await getMenuById(venueId, clonedMenu.id)
+
+  logAction({ venueId, action: 'MENU_CLONED', entity: 'Menu', entityId: clonedMenu.id, data: { name: clonedMenu.name } })
+
+  return result
 }
 
 export async function reorderMenus(venueId: string, reorderData: ReorderMenusDto): Promise<Prisma.BatchPayload[]> {
@@ -662,7 +705,11 @@ export async function reorderMenus(venueId: string, reorderData: ReorderMenusDto
     }),
   )
 
-  return prisma.$transaction(transactions)
+  const result = await prisma.$transaction(transactions)
+
+  logAction({ venueId, action: 'MENUS_REORDERED', entity: 'Menu' })
+
+  return result
 }
 
 export async function assignCategoryToMenu(venueId: string, menuId: string, data: AssignCategoryToMenuDto): Promise<any> {
@@ -824,6 +871,8 @@ export async function createModifierGroup(venueId: string, data: CreateModifierG
     include: { modifiers: true },
   })
 
+  logAction({ venueId, action: 'MODIFIER_GROUP_CREATED', entity: 'ModifierGroup', entityId: created.id, data: { name: created.name } })
+
   return created
 }
 
@@ -875,6 +924,8 @@ export async function updateModifierGroup(
     include: { modifiers: true },
   })
 
+  logAction({ venueId, action: 'MODIFIER_GROUP_UPDATED', entity: 'ModifierGroup', entityId: updated.id, data: { name: updated.name } })
+
   return updated
 }
 
@@ -885,6 +936,8 @@ export async function deleteModifierGroup(venueId: string, modifierGroupId: stri
   }
 
   await prisma.modifierGroup.delete({ where: { id: modifierGroupId } })
+
+  logAction({ venueId, action: 'MODIFIER_GROUP_DELETED', entity: 'ModifierGroup', entityId: existing.id, data: { name: existing.name } })
 }
 
 export async function createModifier(venueId: string, modifierGroupId: string, data: CreateModifierDto): Promise<Modifier> {
@@ -893,7 +946,7 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
 
-  return prisma.modifier.create({
+  const modifier = await prisma.modifier.create({
     data: {
       group: { connect: { id: modifierGroupId } },
       name: data.name,
@@ -901,6 +954,10 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
       active: data.active ?? true,
     },
   })
+
+  logAction({ venueId, action: 'MODIFIER_CREATED', entity: 'Modifier', entityId: modifier.id, data: { name: modifier.name } })
+
+  return modifier
 }
 
 export async function getModifierById(venueId: string, modifierGroupId: string, modifierId: string): Promise<Modifier> {
@@ -990,7 +1047,7 @@ export async function updateModifier(
     }
   }
 
-  return prisma.modifier.update({
+  const updatedModifier = await prisma.modifier.update({
     where: { id: modifierId },
     data: updateData,
     include: {
@@ -999,6 +1056,10 @@ export async function updateModifier(
       },
     },
   })
+
+  logAction({ venueId, action: 'MODIFIER_UPDATED', entity: 'Modifier', entityId: updatedModifier.id, data: { name: updatedModifier.name } })
+
+  return updatedModifier
 }
 
 export async function deleteModifier(venueId: string, modifierGroupId: string, modifierId: string): Promise<void> {
@@ -1013,6 +1074,8 @@ export async function deleteModifier(venueId: string, modifierGroupId: string, m
   }
 
   await prisma.modifier.delete({ where: { id: modifierId } })
+
+  logAction({ venueId, action: 'MODIFIER_DELETED', entity: 'Modifier', entityId: existing.id, data: { name: existing.name } })
 }
 
 export async function assignModifierGroupToProduct(
@@ -1359,6 +1422,13 @@ export async function importMenu(venueId: string, data: ImportMenuData) {
       maxWait: 130000,
     },
   )
+
+  logAction({
+    venueId,
+    action: 'MENU_IMPORTED',
+    entity: 'Menu',
+    data: { mode: data.mode, categories: categoriesCreated, products: productsCreated + productsUpdated },
+  })
 
   return {
     success: true,

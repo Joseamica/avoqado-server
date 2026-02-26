@@ -3,6 +3,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { Unit, RawMaterialCategory } from '@prisma/client'
 import AppError from '../../errors/AppError'
 import { getSupplierRecommendations } from './supplier.service'
+import { logAction } from './activity-log.service'
 
 /**
  * Auto-Reorder Suggestion System
@@ -362,6 +363,14 @@ export async function createPurchaseOrdersFromSuggestions(
 
     createdOrders.push(order)
   }
+
+  logAction({
+    staffId: options?.staffId,
+    venueId,
+    action: 'AUTO_REORDER_PO_CREATED',
+    entity: 'PurchaseOrder',
+    data: { ordersCreated: createdOrders.length, materialCount: rawMaterialIds.length, autoApprove: options?.autoApprove },
+  })
 
   return {
     success: true,

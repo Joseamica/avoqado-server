@@ -9,6 +9,11 @@ jest.mock('../../../../src/services/stripe.service', () => ({
   cancelStripeSubscription: jest.fn(),
 }))
 
+// Mock activity log service (fire-and-forget, no need to assert)
+jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+}))
+
 // Mock Prisma Client
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,

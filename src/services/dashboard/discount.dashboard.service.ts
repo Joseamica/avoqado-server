@@ -12,6 +12,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType, DiscountScope, Prisma } from '@prisma/client'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -418,6 +419,15 @@ export async function createDiscount(venueId: string, data: CreateDiscountReques
 
   logger.info(`🎟️ Discount created: ${discount.name} (${discount.id}) for venue ${venueId}`)
 
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'DISCOUNT_CREATED',
+    entity: 'Discount',
+    entityId: discount.id,
+    data: { name: discount.name },
+  })
+
   return {
     ...discount,
     value: Number(discount.value),
@@ -516,6 +526,14 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
 
   logger.info(`🎟️ Discount updated: ${discount.name} (${discount.id})`)
 
+  logAction({
+    venueId,
+    action: 'DISCOUNT_UPDATED',
+    entity: 'Discount',
+    entityId: discount.id,
+    data: { name: discount.name },
+  })
+
   return {
     ...discount,
     value: Number(discount.value),
@@ -542,6 +560,14 @@ export async function deleteDiscount(venueId: string, discountId: string): Promi
   })
 
   logger.info(`🗑️ Discount deleted: ${existing.name} (${discountId})`)
+
+  logAction({
+    venueId,
+    action: 'DISCOUNT_DELETED',
+    entity: 'Discount',
+    entityId: discountId,
+    data: { name: existing.name },
+  })
 }
 
 /**
@@ -611,6 +637,15 @@ export async function cloneDiscount(venueId: string, discountId: string, created
   })
 
   logger.info(`🎟️ Discount cloned: ${original.name} -> ${clone.name} (${clone.id})`)
+
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'DISCOUNT_CLONED',
+    entity: 'Discount',
+    entityId: clone.id,
+    data: { name: clone.name, clonedFromId: original.id },
+  })
 
   return {
     ...clone,

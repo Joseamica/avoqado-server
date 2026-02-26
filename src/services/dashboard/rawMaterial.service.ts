@@ -5,6 +5,7 @@ import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateRawMaterialDto, UpdateRawMaterialDto, AdjustStockDto } from '../../schemas/dashboard/inventory.schema'
 import { createStockBatch, deductStockFIFO } from './fifoBatch.service'
 import { sendLowStockAlertNotification } from './notification.service'
+import { logAction } from './activity-log.service'
 
 /**
  * Helper function to get UnitType from Unit
@@ -166,6 +167,14 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
     },
   })
 
+  logAction({
+    venueId,
+    action: 'RAW_MATERIAL_CREATED',
+    entity: 'RawMaterial',
+    entityId: rawMaterial.id,
+    data: { name: rawMaterial.name },
+  })
+
   return rawMaterial
 }
 
@@ -195,6 +204,14 @@ export async function updateRawMaterial(venueId: string, rawMaterialId: string, 
   const rawMaterial = await prisma.rawMaterial.update({
     where: { id: rawMaterialId },
     data: updateData,
+  })
+
+  logAction({
+    venueId,
+    action: 'RAW_MATERIAL_UPDATED',
+    entity: 'RawMaterial',
+    entityId: rawMaterial.id,
+    data: { name: rawMaterial.name },
   })
 
   return rawMaterial
@@ -270,6 +287,15 @@ export async function deleteRawMaterial(venueId: string, rawMaterialId: string, 
       active: false, // Also mark as inactive
     },
   })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'RAW_MATERIAL_DELETED',
+    entity: 'RawMaterial',
+    entityId: rawMaterialId,
+    data: { name: existing.name },
+  })
 }
 
 /**
@@ -298,6 +324,14 @@ export async function deactivateRawMaterial(venueId: string, rawMaterialId: stri
     },
   })
 
+  logAction({
+    venueId,
+    action: 'RAW_MATERIAL_DEACTIVATED',
+    entity: 'RawMaterial',
+    entityId: deactivated.id,
+    data: { name: deactivated.name },
+  })
+
   return deactivated
 }
 
@@ -323,6 +357,14 @@ export async function reactivateRawMaterial(venueId: string, rawMaterialId: stri
     data: {
       active: true,
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'RAW_MATERIAL_REACTIVATED',
+    entity: 'RawMaterial',
+    entityId: reactivated.id,
+    data: { name: reactivated.name },
   })
 
   return reactivated
@@ -419,6 +461,15 @@ export async function adjustStock(venueId: string, rawMaterialId: string, data: 
       },
     })
   }
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'STOCK_ADJUSTED',
+    entity: 'RawMaterial',
+    entityId: rawMaterialId,
+    data: { name: rawMaterial.name, quantity: data.quantity, type: data.type },
+  })
 
   // Check if we need to create a low stock alert
   const finalStock = updatedRawMaterial.currentStock

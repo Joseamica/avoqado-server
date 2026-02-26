@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import { Prisma, MovementType } from '@prisma/client'
 import logger from '../../config/logger'
+import { logAction } from './activity-log.service'
 
 /**
  * Product Inventory Service
@@ -111,6 +112,15 @@ export async function adjustInventoryStock(
     newStock: newStock.toNumber(),
     quantity: data.quantity,
     type: data.type,
+  })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'PRODUCT_STOCK_ADJUSTED',
+    entity: 'Product',
+    entityId: productId,
+    data: { name: product.name, quantity: data.quantity, type: data.type },
   })
 
   return {

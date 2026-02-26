@@ -3,6 +3,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import AppError from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { deductStockForModifiers, deductStockForRecipe, OrderModifierForInventory } from './rawMaterial.service'
+import { logAction } from './activity-log.service'
 
 /**
  * Product Inventory Integration Service
@@ -480,6 +481,14 @@ export async function setProductInventoryMethod(productId: string, inventoryMeth
       trackInventory: true, // Enable tracking
       inventoryMethod, // Set method (QUANTITY | RECIPE)
     },
+  })
+
+  logAction({
+    venueId: product.venueId,
+    action: 'PRODUCT_INVENTORY_METHOD_SET',
+    entity: 'Product',
+    entityId: productId,
+    data: { inventoryMethod },
   })
 
   return {

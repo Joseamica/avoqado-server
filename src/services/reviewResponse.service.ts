@@ -4,6 +4,7 @@ import AppError from '@/errors/AppError'
 import * as googleBusinessProfileService from './googleBusinessProfile.service'
 import { ReviewSource } from '@prisma/client'
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * Generate AI-powered response draft for a review
@@ -92,6 +93,14 @@ export async function submitResponse(reviewId: string, responseText: string) {
       // The response is still saved in our database
     }
   }
+
+  logAction({
+    venueId: review.venueId,
+    action: 'REVIEW_RESPONSE_SUBMITTED',
+    entity: 'Review',
+    entityId: reviewId,
+    data: { source: review.source },
+  })
 
   return {
     success: true,

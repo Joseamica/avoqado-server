@@ -22,6 +22,7 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { RoleConfigItem, RoleConfigResponse } from '@/schemas/dashboard/venueRoleConfig.schema'
 import prisma from '@/utils/prismaClient'
+import { logAction } from './activity-log.service'
 
 /**
  * Default display names for each role (Spanish)
@@ -195,6 +196,13 @@ export async function updateVenueRoleConfigs(venueId: string, configs: RoleConfi
     ),
   )
 
+  logAction({
+    venueId,
+    action: 'ROLE_CONFIGS_UPDATED',
+    entity: 'VenueRoleConfig',
+    entityId: venueId,
+  })
+
   // Return updated configs
   return getVenueRoleConfigs(venueId)
 }
@@ -268,6 +276,14 @@ export async function resetRoleConfig(venueId: string, role: StaffRole): Promise
       role,
     },
   })
+
+  logAction({
+    venueId,
+    action: 'ROLE_CONFIG_RESET',
+    entity: 'VenueRoleConfig',
+    entityId: venueId,
+    data: { role },
+  })
 }
 
 /**
@@ -278,5 +294,12 @@ export async function resetRoleConfig(venueId: string, role: StaffRole): Promise
 export async function resetAllRoleConfigs(venueId: string): Promise<void> {
   await prisma.venueRoleConfig.deleteMany({
     where: { venueId },
+  })
+
+  logAction({
+    venueId,
+    action: 'ALL_ROLE_CONFIGS_RESET',
+    entity: 'VenueRoleConfig',
+    entityId: venueId,
   })
 }

@@ -8,6 +8,7 @@ import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken
 import { validateRequest } from '../../middlewares/validation'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as orgTerminalsService from '../../services/organization-dashboard/orgTerminals.service'
+import * as activityLogService from '../../services/dashboard/activity-log.service'
 import {
   GetOrgTerminalSchema,
   CreateOrgTerminalSchema,
@@ -688,8 +689,9 @@ router.patch(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
+      const { userId } = (req as any).authContext
 
-      const terminal = await orgTerminalsService.updateTerminalForOrg(orgId, terminalId, req.body)
+      const terminal = await orgTerminalsService.updateTerminalForOrg(orgId, terminalId, req.body, userId)
 
       res.json({
         success: true,
@@ -713,8 +715,9 @@ router.delete(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
+      const { userId } = (req as any).authContext
 
-      await orgTerminalsService.deleteTerminalForOrg(orgId, terminalId)
+      await orgTerminalsService.deleteTerminalForOrg(orgId, terminalId, userId)
 
       res.json({
         success: true,
@@ -826,9 +829,10 @@ router.put(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
+      const { userId } = (req as any).authContext
       const { merchantIds } = req.body
 
-      const terminal = await orgTerminalsService.assignMerchantsForOrg(orgId, terminalId, merchantIds)
+      const terminal = await orgTerminalsService.assignMerchantsForOrg(orgId, terminalId, merchantIds, userId)
 
       res.json({
         success: true,
@@ -950,6 +954,63 @@ router.post(
       res.json({
         success: true,
         data: result,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ─── Activity Log ───────────────────────────────────────────────────────────
+
+/**
+ * GET /dashboard/organizations/:orgId/activity-log
+ * Query activity logs with filters and pagination
+ */
+router.get('/:orgId/activity-log', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+    const { venueId, staffId, action, entity, search, startDate, endDate, page, pageSize } = req.query
+
+    const result = await activityLogService.queryActivityLogs({
+      organizationId: orgId,
+      venueId: venueId as string | undefined,
+      staffId: staffId as string | undefined,
+      action: action as string | undefined,
+      entity: entity as string | undefined,
+      search: search as string | undefined,
+      startDate: startDate as string | undefined,
+      endDate: endDate as string | undefined,
+      page: page ? parseInt(page as string, 10) : undefined,
+      pageSize: pageSize ? parseInt(pageSize as string, 10) : undefined,
+    })
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/organizations/:orgId/activity-log/actions
+ * Returns distinct action types for filter dropdowns
+ */
+router.get(
+  '/:orgId/activity-log/actions',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+
+      const actions = await activityLogService.getDistinctActions(orgId)
+
+      res.json({
+        success: true,
+        data: actions,
       })
     } catch (error) {
       next(error)

@@ -10,6 +10,7 @@ import emailService from '../email.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId, hasOrganizationAccess } from '../staffOrganization.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+import { logAction } from './activity-log.service'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
@@ -98,17 +99,15 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
   const refreshToken = jwtService.generateRefreshToken('MASTER_ADMIN', firstVenue.organizationId || firstVenue.id, rememberMe)
 
   // Audit log for successful master login
-  await prisma.activityLog.create({
+  logAction({
+    venueId: firstVenue.id,
+    action: 'MASTER_LOGIN_SUCCESS',
+    entity: 'Dashboard',
+    entityId: 'DASHBOARD_MASTER',
     data: {
-      action: 'MASTER_LOGIN_SUCCESS',
-      entity: 'Dashboard',
-      entityId: 'DASHBOARD_MASTER',
-      venueId: firstVenue.id,
-      data: {
-        venueName: firstVenue.name,
-        timestamp: new Date().toISOString(),
-        source: 'dashboard',
-      },
+      venueName: firstVenue.name,
+      timestamp: new Date().toISOString(),
+      source: 'dashboard',
     },
   })
 

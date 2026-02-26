@@ -11,6 +11,7 @@ import {
   expandWildcards,
 } from '../../lib/permissions'
 import logger from '@/config/logger'
+import { logAction } from './activity-log.service'
 
 /**
  * Get custom role permissions for a specific role in a venue
@@ -219,6 +220,14 @@ export async function updateRolePermissions(
       },
     })
 
+    logAction({
+      staffId: modifiedById,
+      venueId,
+      action: 'ROLE_PERMISSIONS_UPDATED',
+      entity: 'VenueRolePermission',
+      data: { role, permissionCount: permissions.length },
+    })
+
     logger.info(`Reverted ${role} permissions to defaults for venue ${venueId}`, {
       venueId,
       role,
@@ -262,6 +271,14 @@ export async function updateRolePermissions(
     },
   })
 
+  logAction({
+    staffId: modifiedById,
+    venueId,
+    action: 'ROLE_PERMISSIONS_UPDATED',
+    entity: 'VenueRolePermission',
+    data: { role, permissionCount: permissions.length },
+  })
+
   logger.info(`Updated ${role} permissions for venue ${venueId}`, {
     venueId,
     role,
@@ -293,6 +310,13 @@ export async function deleteRolePermissions(venueId: string, role: StaffRole, mo
       venueId,
       role,
     },
+  })
+
+  logAction({
+    venueId,
+    action: 'ROLE_PERMISSIONS_RESET',
+    entity: 'VenueRolePermission',
+    data: { role },
   })
 
   logger.info(`Deleted custom ${role} permissions for venue ${venueId} (reverted to defaults)`, {

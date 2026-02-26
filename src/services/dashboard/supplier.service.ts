@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import { CreateSupplierDto, UpdateSupplierDto } from '../../schemas/dashboard/inventory.schema'
 import { Decimal } from '@prisma/client/runtime/library'
+import { logAction } from './activity-log.service'
 
 /**
  * Get all suppliers for a venue
@@ -116,6 +117,14 @@ export async function createSupplier(venueId: string, data: CreateSupplierDto): 
     },
   })
 
+  logAction({
+    venueId,
+    action: 'SUPPLIER_CREATED',
+    entity: 'Supplier',
+    entityId: supplier.id,
+    data: { name: supplier.name },
+  })
+
   return supplier
 }
 
@@ -134,6 +143,14 @@ export async function updateSupplier(venueId: string, supplierId: string, data: 
   const supplier = await prisma.supplier.update({
     where: { id: supplierId },
     data,
+  })
+
+  logAction({
+    venueId,
+    action: 'SUPPLIER_UPDATED',
+    entity: 'Supplier',
+    entityId: supplier.id,
+    data: { name: supplier.name },
   })
 
   return supplier
@@ -169,6 +186,15 @@ export async function deleteSupplier(venueId: string, supplierId: string, staffI
       deletedBy: staffId,
       active: false, // Also mark as inactive
     },
+  })
+
+  logAction({
+    staffId,
+    venueId,
+    action: 'SUPPLIER_DELETED',
+    entity: 'Supplier',
+    entityId: supplierId,
+    data: { name: existing.name },
   })
 }
 
