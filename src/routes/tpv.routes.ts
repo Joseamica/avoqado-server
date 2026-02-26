@@ -2224,8 +2224,6 @@ router.post('/report-install-attempt', authenticateTokenMiddleware, appUpdateCon
  *       - Rollback to older stable version if new version has bugs
  *       - Upgrade specific terminals to a target version
  *       - SUPERADMIN-initiated version control
- *     security:
- *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: versionCode
@@ -2269,7 +2267,7 @@ router.post('/report-install-attempt', authenticateTokenMiddleware, appUpdateCon
  *       400:
  *         description: Invalid parameters
  */
-router.get('/get-version', authenticateTokenMiddleware, appUpdateController.getSpecificVersion)
+router.get('/get-version', appUpdateController.getSpecificVersion) // Public (no auth) — same as check-update. Allows INSTALL_VERSION command to work without active session.
 
 /**
  * @openapi
