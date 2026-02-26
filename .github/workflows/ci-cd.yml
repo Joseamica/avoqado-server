@@ -106,14 +106,14 @@ jobs:
         run: echo "build-time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
       - name: 📤 Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: build-files-${{ github.sha }}
           path: dist/
           retention-days: 7
 
       - name: 📤 Upload Prisma schema
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: prisma-schema-${{ github.sha }}
           path: prisma/
