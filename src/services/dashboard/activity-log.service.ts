@@ -201,3 +201,168 @@ export async function getDistinctActions(organizationId: string): Promise<string
 
   return results.map(r => r.action)
 }
+
+// ==========================================
+// SUPERADMIN — Global Activity Logs
+// ==========================================
+
+export interface SuperadminQueryActivityLogsParams {
+  organizationId?: string
+  venueId?: string
+  staffId?: string
+  action?: string
+  entity?: string
+  search?: string
+  startDate?: string
+  endDate?: string
+  page?: number
+  pageSize?: number
+}
+
+export interface SuperadminActivityLogEntry extends ActivityLogEntry {
+  venueId: string | null
+  organizationName: string | null
+}
+
+export interface PaginatedSuperadminActivityLogs {
+  logs: SuperadminActivityLogEntry[]
+  pagination: {
+    page: number
+    pageSize: number
+    total: number
+    totalPages: number
+  }
+}
+
+/**
+ * Query activity logs across ALL venues (superadmin only).
+ * Optionally filter by organization or venue.
+ */
+export async function querySuperadminActivityLogs(params: SuperadminQueryActivityLogsParams): Promise<PaginatedSuperadminActivityLogs> {
+  const { page = 1, pageSize = 50 } = params
+
+  // Build where clause (no org scoping — all logs visible)
+  const where: Record<string, unknown> = {}
+
+  // If filtering by org, get that org's venue IDs
+  if (params.organizationId) {
+    const orgVenues = await prisma.venue.findMany({
+      where: { organizationId: params.organizationId },
+      select: { id: true },
+    })
+    where.venueId = { in: orgVenues.map(v => v.id) }
+  }
+
+  if (params.venueId) {
+    where.venueId = params.venueId
+  }
+
+  if (params.staffId) {
+    where.staffId = params.staffId
+  }
+
+  if (params.action) {
+    where.action = params.action
+  }
+
+  if (params.entity) {
+    where.entity = params.entity
+  }
+
+  if (params.search) {
+    where.OR = [
+      { action: { contains: params.search, mode: 'insensitive' } },
+      { entity: { contains: params.search, mode: 'insensitive' } },
+      { entityId: { contains: params.search, mode: 'insensitive' } },
+    ]
+  }
+
+  if (params.startDate || params.endDate) {
+    const createdAt: Record<string, Date> = {}
+    if (params.startDate) createdAt.gte = new Date(params.startDate)
+    if (params.endDate) createdAt.lte = new Date(params.endDate)
+    where.createdAt = createdAt
+  }
+
+  // Count + fetch in parallel
+  const [total, logs] = await Promise.all([
+    prisma.activityLog.count({ where: where as any }),
+    prisma.activityLog.findMany({
+      where: where as any,
+      include: {
+        staff: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+  ])
+
+  // Collect unique venueIds to batch-fetch venue + org names
+  const venueIds = [...new Set(logs.map(l => l.venueId).filter(Boolean))] as string[]
+  const venues =
+    venueIds.length > 0
+      ? await prisma.venue.findMany({
+          where: { id: { in: venueIds } },
+          select: { id: true, name: true, organization: { select: { name: true } } },
+        })
+      : []
+
+  const venueMap = new Map(venues.map(v => [v.id, { name: v.name, orgName: v.organization?.name ?? null }]))
+
+  const enrichedLogs: SuperadminActivityLogEntry[] = logs.map(log => {
+    const venueInfo = log.venueId ? venueMap.get(log.venueId) : null
+    return {
+      id: log.id,
+      action: log.action,
+      entity: log.entity,
+      entityId: log.entityId,
+      data: log.data,
+      ipAddress: log.ipAddress,
+      createdAt: log.createdAt,
+      staff: log.staff,
+      venueId: log.venueId,
+      venueName: venueInfo?.name ?? (log.venueId ? 'Unknown' : 'Organization'),
+      organizationName: venueInfo?.orgName ?? null,
+    }
+  })
+
+  return {
+    logs: enrichedLogs,
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+    },
+  }
+}
+
+/**
+ * Get distinct action types across ALL venues (superadmin only).
+ */
+export async function getSuperadminDistinctActions(): Promise<string[]> {
+  const results = await prisma.activityLog.findMany({
+    select: { action: true },
+    distinct: ['action'],
+    orderBy: { action: 'asc' },
+  })
+
+  return results.map(r => r.action)
+}
+
+/**
+ * Get distinct entities across ALL venues (superadmin only).
+ */
+export async function getSuperadminDistinctEntities(): Promise<string[]> {
+  const results = await prisma.activityLog.findMany({
+    where: { entity: { not: null } },
+    select: { entity: true },
+    distinct: ['entity'],
+    orderBy: { entity: 'asc' },
+  })
+
+  return results.map(r => r.entity!).filter(Boolean)
+}

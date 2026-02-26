@@ -2164,6 +2164,53 @@ router.post('/report-update-installed', authenticateTokenMiddleware, appUpdateCo
 
 /**
  * @openapi
+ * /tpv/report-install-attempt:
+ *   post:
+ *     tags: [TPV - App Updates]
+ *     summary: Report APK install attempt (success or failure)
+ *     description: |
+ *       Called by TPV after every install attempt for diagnostics.
+ *       Logs strategy used, timing, error details, and device info.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [versionName, success, strategy, androidVersion, durationMs, updateSource, deviceModel, packageName]
+ *             properties:
+ *               versionName:
+ *                 type: string
+ *               serialNumber:
+ *                 type: string
+ *               success:
+ *                 type: boolean
+ *               strategy:
+ *                 type: string
+ *                 enum: [PACKAGE_INSTALLER, PAX_SDK, BOTH_FAILED, EXCEPTION]
+ *               errorMessage:
+ *                 type: string
+ *               androidVersion:
+ *                 type: integer
+ *               durationMs:
+ *                 type: integer
+ *               updateSource:
+ *                 type: string
+ *                 enum: [AVOQADO, BLUMON]
+ *               deviceModel:
+ *                 type: string
+ *               packageName:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Install attempt reported
+ */
+router.post('/report-install-attempt', authenticateTokenMiddleware, appUpdateController.reportInstallAttempt)
+
+/**
+ * @openapi
  * /tpv/get-version:
  *   get:
  *     tags: [TPV - App Updates]

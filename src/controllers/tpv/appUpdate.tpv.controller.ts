@@ -275,3 +275,59 @@ export async function reportUpdateInstalled(req: Request, res: Response) {
     })
   }
 }
+
+/**
+ * Report an APK install attempt (success or failure) for diagnostics.
+ *
+ * Called by TPV after every install attempt so we can monitor install
+ * success rates and alert on failures in production.
+ *
+ * Body:
+ * - versionName: string
+ * - serialNumber: string | null
+ * - success: boolean
+ * - strategy: "PACKAGE_INSTALLER" | "PAX_SDK" | "BOTH_FAILED" | "EXCEPTION"
+ * - errorMessage: string | null
+ * - androidVersion: number
+ * - durationMs: number
+ * - updateSource: "AVOQADO" | "BLUMON"
+ * - deviceModel: string
+ * - packageName: string
+ */
+export async function reportInstallAttempt(req: Request, res: Response) {
+  try {
+    const {
+      versionName,
+      serialNumber,
+      success,
+      strategy,
+      errorMessage,
+      androidVersion,
+      durationMs,
+      updateSource,
+      deviceModel,
+      packageName,
+    } = req.body
+
+    if (success) {
+      logger.info(
+        `[InstallAttempt] SUCCESS: ${serialNumber ?? 'unknown'} → ${versionName} via ${strategy} (${durationMs}ms, Android ${androidVersion}, ${deviceModel})`,
+      )
+    } else {
+      logger.error(
+        `[InstallAttempt] FAILED: ${serialNumber ?? 'unknown'} → ${versionName} via ${strategy} (${durationMs}ms, Android ${androidVersion}, ${deviceModel}) — ${errorMessage}`,
+      )
+    }
+
+    return res.json({
+      success: true,
+      message: 'Install attempt reported',
+    })
+  } catch (error) {
+    logger.error('Error reporting install attempt:', error)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to report install attempt',
+    })
+  }
+}
