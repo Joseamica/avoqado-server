@@ -44,6 +44,13 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     production: ['https://bills.avoqado.io', 'https://avoqado.io'],
   }
 
+  // SDK/Checkout origins (payment form iframe served from API domain needs to POST back to itself)
+  const sdkOrigins = {
+    development: ['http://localhost:3000'],
+    staging: [],
+    production: ['https://api.avoqado.io'],
+  }
+
   // Combine all allowed origins for this environment
   const allowedOrigins = [
     // SECURITY: 'null' origin only in development for Swagger UI
@@ -54,6 +61,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     ...(posOrigins[env] || []),
     ...(swaggerOrigins[env] || []),
     ...(publicSiteOrigins[env] || []),
+    ...(sdkOrigins[env] || []),
   ]
 
   return {
