@@ -135,18 +135,44 @@ export async function tokenizeCard(req: Request, res: Response) {
       throw new BadRequestError('Merchant OAuth credentials missing')
     }
 
-    // Check token expiration
-    const expiresAt = new Date(credentials.expiresAt)
+    // Check token expiration (handle both field names for backward compat)
+    const expiresAtStr = credentials.expiresAt || credentials.tokenExpiresAt
+    const expiresAt = expiresAtStr ? new Date(expiresAtStr) : new Date(0) // Force expired if missing
     const isExpired = blumonAuthService.isTokenExpired(expiresAt, 5)
 
     let accessToken = credentials.accessToken
 
-    if (isExpired && credentials.refreshToken) {
-      logger.info('🔄 [TOKENIZE] Refreshing expired OAuth token', {
+    if (isExpired) {
+      logger.info('🔄 [TOKENIZE] OAuth token expired, attempting refresh/re-auth', {
         merchantId: session.ecommerceMerchant.id,
+        expiresAt: expiresAtStr,
       })
 
-      const refreshResult = await blumonAuthService.refreshToken(credentials.refreshToken, session.ecommerceMerchant.sandboxMode)
+      let authResult: { accessToken: string; refreshToken?: string; expiresIn: number; expiresAt: Date }
+
+      try {
+        // Try refresh token first
+        if (credentials.refreshToken) {
+          authResult = await blumonAuthService.refreshToken(credentials.refreshToken, session.ecommerceMerchant.sandboxMode)
+        } else {
+          throw new Error('No refresh token available')
+        }
+      } catch (refreshError: any) {
+        // Refresh failed (token also expired) — re-authenticate with password
+        logger.warn('🔄 [TOKENIZE] Refresh failed, re-authenticating with credentials', {
+          merchantId: session.ecommerceMerchant.id,
+          refreshError: refreshError.message,
+        })
+
+        if (!credentials.username || !credentials.password) {
+          throw new BadRequestError('OAuth token expired and no credentials for re-authentication')
+        }
+
+        authResult = await blumonAuthService.authenticate(
+          { username: credentials.username, password: credentials.password },
+          session.ecommerceMerchant.sandboxMode,
+        )
+      }
 
       // Update merchant credentials
       await prisma.ecommerceMerchant.update({
@@ -154,16 +180,16 @@ export async function tokenizeCard(req: Request, res: Response) {
         data: {
           providerCredentials: {
             ...credentials,
-            accessToken: refreshResult.accessToken,
-            refreshToken: refreshResult.refreshToken,
-            expiresIn: refreshResult.expiresIn,
-            expiresAt: refreshResult.expiresAt.toISOString(),
+            accessToken: authResult.accessToken,
+            refreshToken: authResult.refreshToken,
+            expiresIn: authResult.expiresIn,
+            expiresAt: authResult.expiresAt.toISOString(),
             refreshedAt: new Date().toISOString(),
           },
         },
       })
 
-      accessToken = refreshResult.accessToken
+      accessToken = authResult.accessToken
     }
 
     // 5. Tokenize with Blumon (Edgardo: "amparo con mi PCI la última milla")
@@ -279,27 +305,51 @@ export async function chargeWithToken(req: Request, res: Response) {
     const credentials = session.ecommerceMerchant.providerCredentials as any
     let accessToken = credentials.accessToken
 
-    // Check/refresh token
-    const expiresAt = new Date(credentials.expiresAt)
+    // Check/refresh token (handle both field names for backward compat)
+    const expiresAtStr = credentials.expiresAt || credentials.tokenExpiresAt
+    const expiresAt = expiresAtStr ? new Date(expiresAtStr) : new Date(0)
     const isExpired = blumonAuthService.isTokenExpired(expiresAt, 5)
 
-    if (isExpired && credentials.refreshToken) {
-      const refreshResult = await blumonAuthService.refreshToken(credentials.refreshToken, session.ecommerceMerchant.sandboxMode)
+    if (isExpired) {
+      let authResult: { accessToken: string; refreshToken?: string; expiresIn: number; expiresAt: Date }
+
+      try {
+        if (credentials.refreshToken) {
+          authResult = await blumonAuthService.refreshToken(credentials.refreshToken, session.ecommerceMerchant.sandboxMode)
+        } else {
+          throw new Error('No refresh token available')
+        }
+      } catch (refreshError: any) {
+        logger.warn('🔄 [CHARGE] Refresh failed, re-authenticating', {
+          merchantId: session.ecommerceMerchant.id,
+          refreshError: refreshError.message,
+        })
+
+        if (!credentials.username || !credentials.password) {
+          throw new BadRequestError('OAuth token expired and no credentials for re-authentication')
+        }
+
+        authResult = await blumonAuthService.authenticate(
+          { username: credentials.username, password: credentials.password },
+          session.ecommerceMerchant.sandboxMode,
+        )
+      }
 
       await prisma.ecommerceMerchant.update({
         where: { id: session.ecommerceMerchant.id },
         data: {
           providerCredentials: {
             ...credentials,
-            accessToken: refreshResult.accessToken,
-            refreshToken: refreshResult.refreshToken,
-            expiresIn: refreshResult.expiresIn,
-            expiresAt: refreshResult.expiresAt.toISOString(),
+            accessToken: authResult.accessToken,
+            refreshToken: authResult.refreshToken,
+            expiresIn: authResult.expiresIn,
+            expiresAt: authResult.expiresAt.toISOString(),
+            refreshedAt: new Date().toISOString(),
           },
         },
       })
 
-      accessToken = refreshResult.accessToken
+      accessToken = authResult.accessToken
     }
 
     // 3. Authorize payment with Blumon
