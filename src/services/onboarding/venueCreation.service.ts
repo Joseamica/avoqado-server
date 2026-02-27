@@ -5,7 +5,17 @@
  * Supports both demo venues (pre-populated) and real business venues.
  */
 
-import { BusinessType, OnboardingType, VenueType, InvitationType, InvitationStatus, StaffRole, VenueStatus, OrgRole } from '@prisma/client'
+import {
+  BusinessType,
+  EntityType,
+  OnboardingType,
+  VenueType,
+  InvitationType,
+  InvitationStatus,
+  StaffRole,
+  VenueStatus,
+  OrgRole,
+} from '@prisma/client'
 import { addDays } from 'date-fns'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify, validateSlug } from '@/utils/slugify'
@@ -151,7 +161,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       organizationId,
       name: businessInfo.name,
       slug,
-      type: businessInfo.venueType || 'RESTAURANT',
+      type:
+        businessInfo.venueType && Object.values(VenueType).includes(businessInfo.venueType) ? businessInfo.venueType : VenueType.RESTAURANT,
       timezone: businessInfo.timezone || 'America/Mexico_City',
       currency: 'MXN',
       country: businessInfo.country || 'MX',
@@ -167,7 +178,11 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       email: businessInfo.email,
 
       // Legal Entity Type (from KYC documents step or business info)
-      entityType: (kycDocuments?.entityType || businessInfo.entityType) as any, // PERSONA_FISICA or PERSONA_MORAL
+      // Validate against Prisma EntityType enum to prevent PrismaClientValidationError
+      entityType: (() => {
+        const raw = kycDocuments?.entityType || businessInfo.entityType
+        return raw && Object.values(EntityType).includes(raw as EntityType) ? (raw as EntityType) : undefined
+      })(),
 
       // KYC Documents (from step 7)
       idDocumentUrl: kycDocuments?.documents?.ineUrl, // INE/IFE

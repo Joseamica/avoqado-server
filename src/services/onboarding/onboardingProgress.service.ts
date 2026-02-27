@@ -452,11 +452,17 @@ export async function getV2SetupDataForCompletion(organizationId: string) {
   // Build business info for venue creation (compatible with v1 format)
   // businessType.businessType = VenueType enum value (e.g. RESTAURANT, BAR)
   // businessType.businessCategory = category string (e.g. FOOD_SERVICE, RETAIL)
+  // entityInfo.entityType = sub-type (e.g. PERSONA_FISICA_ACTIVIDAD_EMPRESARIAL)
+  // entityInfo.entitySubType = parent Prisma EntityType enum (e.g. PERSONA_FISICA)
+  // We must use the parent type for the Prisma EntityType enum
+  const resolvedEntityType = entityInfo.entitySubType || entityInfo.entityType || undefined
+  // Validate it's a valid Prisma EntityType enum value, fallback to undefined
+  const validEntityTypes = ['PERSONA_FISICA', 'PERSONA_MORAL']
   const venueBusinessInfo = {
     name: businessInfo.businessName || 'Mi Negocio',
     type: businessType.businessType || '',
     venueType: businessType.businessType || '',
-    entityType: entityInfo.entityType || undefined,
+    entityType: validEntityTypes.includes(resolvedEntityType) ? resolvedEntityType : undefined,
     timezone: 'America/Mexico_City',
     address: businessInfo.address || '',
     city: businessInfo.city || '',

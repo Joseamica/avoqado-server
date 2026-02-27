@@ -6,6 +6,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { EntityType, VenueType } from '@prisma/client'
 import * as onboardingProgressService from '../services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '../services/onboarding/venueCreation.service'
 import * as signupService from '../services/onboarding/signup.service'
@@ -775,8 +776,59 @@ export async function saveV2Step(req: Request, res: Response, next: NextFunction
   try {
     const { organizationId, stepNumber } = req.params
     const stepData = req.body
+    const step = parseInt(stepNumber, 10)
 
-    const progress = await onboardingProgressService.saveV2StepData(organizationId, parseInt(stepNumber, 10), stepData)
+    // Per-step validation for critical fields
+    if (step === 2) {
+      if (!stepData.businessName || typeof stepData.businessName !== 'string' || stepData.businessName.trim().length === 0) {
+        throw new BadRequestError('El nombre del negocio es requerido')
+      }
+    }
+
+    if (step === 3) {
+      if (!stepData.businessType || typeof stepData.businessType !== 'string') {
+        throw new BadRequestError('El tipo de negocio es requerido')
+      }
+      if (!Object.values(VenueType).includes(stepData.businessType as VenueType)) {
+        throw new BadRequestError(`Tipo de negocio invalido: ${stepData.businessType}`)
+      }
+    }
+
+    if (step === 4) {
+      if (!stepData.entityType || typeof stepData.entityType !== 'string') {
+        throw new BadRequestError('El tipo de entidad es requerido')
+      }
+      // entitySubType should be the parent EntityType enum value
+      if (stepData.entitySubType && !Object.values(EntityType).includes(stepData.entitySubType as EntityType)) {
+        throw new BadRequestError(`Tipo de entidad padre invalido: ${stepData.entitySubType}`)
+      }
+    }
+
+    if (step === 5) {
+      if (!stepData.legalFirstName || typeof stepData.legalFirstName !== 'string' || stepData.legalFirstName.trim().length === 0) {
+        throw new BadRequestError('El nombre legal es requerido')
+      }
+      if (!stepData.legalLastName || typeof stepData.legalLastName !== 'string' || stepData.legalLastName.trim().length === 0) {
+        throw new BadRequestError('El apellido legal es requerido')
+      }
+    }
+
+    if (step === 7) {
+      if (!stepData.clabe || typeof stepData.clabe !== 'string') {
+        throw new BadRequestError('La CLABE es requerida')
+      }
+      if (!/^\d{18}$/.test(stepData.clabe)) {
+        throw new BadRequestError('La CLABE debe tener exactamente 18 digitos')
+      }
+      if (!validateCLABE(stepData.clabe)) {
+        throw new BadRequestError('La CLABE es invalida (checksum incorrecto)')
+      }
+      if (!stepData.accountHolder || typeof stepData.accountHolder !== 'string' || stepData.accountHolder.trim().length === 0) {
+        throw new BadRequestError('El nombre del titular es requerido')
+      }
+    }
+
+    const progress = await onboardingProgressService.saveV2StepData(organizationId, step, stepData)
 
     logger.info(`V2 Step ${stepNumber} saved for organization: ${organizationId}`)
 
@@ -833,7 +885,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     }
 
     // Extract and validate v2 setup data
-    const { businessInfo, bankInfo } = await onboardingProgressService.getV2SetupDataForCompletion(organizationId)
+    const { businessInfo, bankInfo, identityInfo, entityInfo } = await onboardingProgressService.getV2SetupDataForCompletion(organizationId)
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
@@ -905,6 +957,21 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         data: { completedAt: null },
       })
       throw venueError
+    }
+
+    // Persist identity info (RFC, legalName, commercialName) from onboarding steps
+    const venueUpdateData: Record<string, any> = {}
+    if (identityInfo?.rfc) venueUpdateData.rfc = identityInfo.rfc
+    if (entityInfo?.commercialName) venueUpdateData.legalName = entityInfo.commercialName
+    else if (identityInfo?.legalFirstName && identityInfo?.legalLastName) {
+      venueUpdateData.legalName = `${identityInfo.legalFirstName} ${identityInfo.legalLastName}`
+    }
+
+    if (Object.keys(venueUpdateData).length > 0) {
+      await prisma.venue.update({
+        where: { id: result.venue.id },
+        data: venueUpdateData,
+      })
     }
 
     // Mark organization as onboarding completed
