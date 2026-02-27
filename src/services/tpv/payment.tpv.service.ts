@@ -623,6 +623,40 @@ async function updateOrderTotalsForStandalonePayment(
         failedProducts: deductionErrors,
       })
 
+      // Rollback serialized items that were marked as SOLD before the failure
+      // Without this, serials stay SOLD while the order reverts to PENDING (ghost SOLD bug)
+      // Uses orderItemId as the safe anchor — unique per item, works for both venue-level and org-level
+      for (const item of updatedOrder.items) {
+        if (!item.productId && item.productSku) {
+          try {
+            const rolledBack = await prisma.serializedItem.updateMany({
+              where: {
+                orderItemId: item.id,
+                status: 'SOLD',
+              },
+              data: {
+                status: 'AVAILABLE',
+                orderItemId: null,
+                soldAt: null,
+                sellingVenueId: null,
+              },
+            })
+            if (rolledBack.count > 0) {
+              logger.info('🔄 Rolled back serialized item to AVAILABLE', {
+                orderId,
+                serialNumber: item.productSku,
+              })
+            }
+          } catch (rollbackError: any) {
+            logger.error('❌ Failed to rollback serialized item', {
+              orderId,
+              serialNumber: item.productSku,
+              error: rollbackError.message,
+            })
+          }
+        }
+      }
+
       // Rollback the order to PENDING state
       await prisma.order.update({
         where: { id: orderId },
