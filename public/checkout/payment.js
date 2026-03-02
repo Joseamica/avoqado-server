@@ -1,20 +1,22 @@
 /**
  * Avoqado Payment Form - Client-side Logic
  *
- * This file contains the payment form JavaScript, extracted to comply with CSP.
- * The inline script was moved here to satisfy: script-src 'self'
- *
- * Features:
- * - Card number formatting (4 digit groups)
- * - Card brand detection (Visa, Mastercard, Amex)
+ * Stripe-like checkout experience with:
+ * - Card number formatting (4 digit groups, AMEX 4-6-5)
+ * - Card brand detection (Visa, Mastercard, Amex) with SVG icons
  * - Luhn algorithm validation
  * - Paste event handling
  * - Expiry date auto-formatting (MM / YY)
- * - CVV numeric-only input
+ * - CVV numeric-only input (3 digits, AMEX 4)
  * - Cardholder name auto-uppercase
- * - Form validation
+ * - Form validation with inline errors
+ * - Loading spinner + success state on button
  * - PostMessage communication with parent window
  */
+
+// ═══════════════════════════════════════════════
+// INITIALIZATION
+// ═══════════════════════════════════════════════
 
 const params = new URLSearchParams(location.search)
 const sid = params.get('sessionId')
@@ -30,12 +32,30 @@ const expiry = document.getElementById('expiry')
 const cvv = document.getElementById('cvv')
 const name = document.getElementById('name')
 const form = document.getElementById('form')
-const error = document.getElementById('error')
+const errorEl = document.getElementById('error')
+const errorText = document.getElementById('error-text')
 const btn = document.getElementById('btn')
+const cardGroupBox = document.getElementById('card-group-box')
 
-// Card number formatting function
+// ═══════════════════════════════════════════════
+// ERROR HANDLING
+// ═══════════════════════════════════════════════
+
+function showError(msg) {
+  errorText.textContent = msg
+  errorEl.classList.add('show')
+}
+
+function hideError() {
+  errorEl.classList.remove('show')
+}
+
+// ═══════════════════════════════════════════════
+// CARD NUMBER FORMATTING & VALIDATION
+// ═══════════════════════════════════════════════
+
 const formatCardNumber = input => {
-  let v = input.value.replace(/\D/g, '').slice(0, 16) // Max 16 digits
+  let v = input.value.replace(/\D/g, '').slice(0, 16)
   let formatted = v.match(/.{1,4}/g)?.join(' ') || v
   input.value = formatted
 
@@ -45,7 +65,7 @@ const formatCardNumber = input => {
 
   if (/^4/.test(v)) {
     document.getElementById('visa').classList.add('active')
-  } else if (/^5[1-5]/.test(v)) {
+  } else if (/^5[1-5]/.test(v) || /^2[2-7]/.test(v)) {
     document.getElementById('mc').classList.add('active')
   } else if (/^3[47]/.test(v)) {
     document.getElementById('amex').classList.add('active')
@@ -58,7 +78,7 @@ const formatCardNumber = input => {
     cvv.setAttribute('placeholder', '1234')
   } else {
     cvv.setAttribute('maxlength', '3')
-    cvv.setAttribute('placeholder', '123')
+    cvv.setAttribute('placeholder', 'CVC')
   }
 
   // Luhn validation
@@ -74,16 +94,23 @@ const formatCardNumber = input => {
       sum += n
       alt = !alt
     }
-    input.className = sum % 10 === 0 ? 'valid' : 'invalid'
+    const isValid = sum % 10 === 0
+    input.className = isValid ? 'valid' : 'invalid'
+    if (isValid) {
+      cardGroupBox.classList.remove('has-error')
+    } else {
+      cardGroupBox.classList.add('has-error')
+    }
   } else {
     input.className = ''
+    cardGroupBox.classList.remove('has-error')
   }
 }
 
 // Card number input
 cardnum.addEventListener('input', e => formatCardNumber(e.target))
 
-// Card number paste (handle paste events)
+// Card number paste
 cardnum.addEventListener('paste', e => {
   e.preventDefault()
   const pastedText = (e.clipboardData || window.clipboardData).getData('text')
@@ -91,18 +118,25 @@ cardnum.addEventListener('paste', e => {
   formatCardNumber(cardnum)
 })
 
-// Expiry formatting (Stripe-like behavior)
-let expiryPrevValue = ''
+// Auto-advance from card number to expiry
+cardnum.addEventListener('input', () => {
+  const digits = cardnum.value.replace(/\D/g, '')
+  if (digits.length === 16 && cardnum.className === 'valid') {
+    expiry.focus()
+  }
+})
+
+// ═══════════════════════════════════════════════
+// EXPIRY FORMATTING
+// ═══════════════════════════════════════════════
+
 expiry.addEventListener('input', e => {
-  let v = e.target.value.replace(/\D/g, '') // Remove non-digits
+  let v = e.target.value.replace(/\D/g, '')
   let formatted = ''
 
-  // Format based on length
   if (v.length === 0) {
     formatted = ''
-  } else if (v.length === 1) {
-    formatted = v
-  } else if (v.length === 2) {
+  } else if (v.length <= 2) {
     formatted = v
   } else if (v.length === 3) {
     formatted = v.slice(0, 2) + ' / ' + v.slice(2)
@@ -111,55 +145,74 @@ expiry.addEventListener('input', e => {
   }
 
   e.target.value = formatted
-  expiryPrevValue = formatted
+
+  // Auto-advance to CVV
+  if (v.length === 4) {
+    cvv.focus()
+  }
 })
 
-// CVV - only numbers
+// ═══════════════════════════════════════════════
+// CVV
+// ═══════════════════════════════════════════════
+
 cvv.addEventListener('input', e => {
   e.target.value = e.target.value.replace(/\D/g, '')
+
+  // Auto-advance to name
+  const maxLen = parseInt(cvv.getAttribute('maxlength'))
+  if (e.target.value.length === maxLen) {
+    name.focus()
+  }
 })
 
-// Name - uppercase
+// ═══════════════════════════════════════════════
+// NAME
+// ═══════════════════════════════════════════════
+
 name.addEventListener('input', e => {
   e.target.value = e.target.value.toUpperCase()
 })
 
-// Submit
+// ═══════════════════════════════════════════════
+// FORM SUBMISSION
+// ═══════════════════════════════════════════════
+
 form.addEventListener('submit', async e => {
   e.preventDefault()
-  error.classList.remove('show')
+  hideError()
 
   const cn = cardnum.value.replace(/\s/g, '')
   const ex = expiry.value.replace(/\s/g, '')
   const cv = cvv.value
   const nm = name.value.trim()
 
+  // Validation
   const errs = []
-  if (!cn || cn.length < 13) errs.push('Tarjeta incompleta')
-  if (!ex.match(/^\d{2}\/\d{2}$/)) errs.push('Fecha inválida')
+  if (!cn || cn.length < 13) errs.push('Numero de tarjeta incompleto')
+  if (!ex.match(/^\d{2}\/\d{2}$/)) errs.push('Fecha de vencimiento invalida')
 
-  // CVV validation: AMEX requires 4 digits, others require 3
   const isAmexCard = /^3[47]/.test(cn)
   const requiredCvvLength = isAmexCard ? 4 : 3
   if (!cv || cv.length !== requiredCvvLength) {
-    errs.push(`CVV debe tener ${requiredCvvLength} dígitos`)
+    errs.push(`CVC debe tener ${requiredCvvLength} digitos`)
   }
 
-  if (!nm || nm.length < 3) errs.push('Nombre requerido')
+  if (!nm || nm.length < 3) errs.push('Nombre del titular requerido')
 
   if (errs.length) {
-    error.textContent = errs.join('. ')
-    error.classList.add('show')
+    showError(errs.join('. '))
     return
   }
 
+  // Set loading state
   btn.disabled = true
-  btn.textContent = 'Procesando...'
+  btn.classList.add('loading')
 
   const [m, y] = ex.split('/')
 
   try {
-    // Step 1: Tokenize card with Blumon
+    // Step 1: Tokenize card
     const tokenResponse = await fetch('/api/v1/sdk/tokenize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -197,50 +250,51 @@ form.addEventListener('submit', async e => {
       throw new Error(chargeData.error || chargeData.message || 'Error al procesar el pago')
     }
 
-    // Success!
-    btn.textContent = '✅ ¡Pago Exitoso!'
-    btn.style.background = '#0fda6a'
+    // Success state
+    btn.classList.remove('loading')
+    btn.classList.add('success')
 
-    // Auto-close after 2 seconds
+    // Notify parent after short delay
     setTimeout(() => {
       if (window.parent !== window) {
         window.parent.postMessage({ type: 'PAYMENT_COMPLETE' }, '*')
       }
     }, 2000)
   } catch (err) {
-    error.textContent = err.message || 'Error al procesar el pago'
-    error.classList.add('show')
+    showError(err.message || 'Error al procesar el pago')
     btn.disabled = false
-    btn.innerHTML = 'Pagar ' + fmtAmt
+    btn.classList.remove('loading')
   }
 })
 
+// ═══════════════════════════════════════════════
+// IFRAME READY
+// ═══════════════════════════════════════════════
+
 window.parent.postMessage({ type: 'IFRAME_READY' }, '*')
 
-// Pre-fill data from URL (for test forms)
-// This runs AFTER all event listeners and formatCardNumber are defined
+// ═══════════════════════════════════════════════
+// PRE-FILL (for test forms)
+// ═══════════════════════════════════════════════
+
 const prefillData = params.get('prefill')
 if (prefillData) {
   try {
     const data = JSON.parse(decodeURIComponent(prefillData))
 
-    // Pre-fill card number and trigger formatting
     if (data.cardNumber) {
       cardnum.value = data.cardNumber
       formatCardNumber(cardnum)
     }
 
-    // Pre-fill expiry
     if (data.expiry) {
       expiry.value = data.expiry
     }
 
-    // Pre-fill CVV
     if (data.cvv) {
       cvv.value = data.cvv
     }
 
-    // Pre-fill name (uppercase)
     if (data.name) {
       name.value = data.name.toUpperCase()
     }

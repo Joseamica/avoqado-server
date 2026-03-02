@@ -2,178 +2,656 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
-    <title>Pago Seguro v3.4 - Prefill Fixed</title>
+    <title>Pago Seguro - Avoqado</title>
     <style>
-      * {
+      /* ═══════════════════════════════════════════════
+         RESET & BASE
+         ═══════════════════════════════════════════════ */
+      *,
+      *::before,
+      *::after {
         margin: 0;
         padding: 0;
         box-sizing: border-box;
       }
+
+      :root {
+        /* 2026 Palette — Warm Cloud Dancer neutrals + Electric Indigo */
+        --color-primary: #675dff;
+        --color-primary-hover: #5a4fe6;
+        --color-bg: #faf9f7;
+        --color-surface: #ffffff;
+        --color-text: #0a2540;
+        --color-text-secondary: #596780;
+        --color-label: #0a2540;
+        --color-placeholder: #8c98a4;
+        --color-border: #d8dee4;
+        --color-border-focus: #675dff;
+        --color-error: #e5484d;
+        --color-error-bg: #fff0f0;
+        --color-error-border: #f9c6c6;
+        --color-success: #30a46c;
+        --color-success-bg: #ddf3e4;
+        --radius: 10px;
+        --radius-sm: 6px;
+        --shadow-sm: 0 1px 3px rgba(10, 37, 64, 0.04), 0 1px 2px rgba(10, 37, 64, 0.02);
+        --shadow-md: 0 2px 8px rgba(10, 37, 64, 0.06), 0 8px 24px rgba(10, 37, 64, 0.05);
+        --shadow-focus: 0 0 0 3px rgba(103, 93, 255, 0.2);
+        --shadow-focus-error: 0 0 0 3px rgba(229, 72, 77, 0.12);
+        --transition: 0.15s ease;
+        --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Ubuntu, sans-serif;
+      }
+
       body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        background: #f6f9fc;
-        padding: 20px;
-      }
-      .container {
-        max-width: 550px;
-        margin: 0 auto;
-        background: white;
-        padding: 50px 60px;
-        border-radius: 12px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-      }
-      .amount {
-        text-align: center;
-        font-size: 48px;
-        font-weight: 600;
-        color: #1a1f36;
-        margin-bottom: 40px;
-        padding-bottom: 40px;
-        border-bottom: 1px solid #e6ebf1;
-      }
-      .field {
-        margin-bottom: 24px;
-      }
-      label {
-        display: block;
-        margin-bottom: 10px;
-        font-size: 14px;
-        font-weight: 500;
-        color: #8898aa;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-      }
-      .input-wrap {
-        position: relative;
-      }
-      input {
-        width: 100%;
-        padding: 16px;
-        border: 1px solid #e6ebf1;
-        border-radius: 6px;
-        font-size: 18px;
-        color: #1a1f36;
-        transition: all 0.15s;
-      }
-      input:focus {
-        outline: none;
-        border-color: #635bff;
-        box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.1);
-      }
-      input.valid {
-        border-color: #0fda6a;
-      }
-      input.invalid {
-        border-color: #fa755a;
-      }
-      .row {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 16px;
-      }
-      .brands {
-        position: absolute;
-        right: 14px;
-        top: 50%;
-        transform: translateY(-50%);
+        font-family: var(--font);
+        background: var(--color-bg);
+        color: var(--color-text);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        min-height: 100vh;
         display: flex;
-        gap: 6px;
-        pointer-events: none;
+        align-items: flex-start;
+        justify-content: center;
+        padding: 16px;
       }
-      .brand {
-        width: 28px;
-        height: 18px;
-        background: #f6f9fc;
-        border: 1px solid #e6ebf1;
-        border-radius: 3px;
-        font-size: 8px;
-        font-weight: 700;
-        color: #aab7c4;
+
+      @media (min-width: 480px) {
+        body {
+          padding: 32px 16px;
+        }
+      }
+
+      /* ═══════════════════════════════════════════════
+         CONTAINER
+         ═══════════════════════════════════════════════ */
+      .checkout {
+        width: 100%;
+        max-width: 420px;
+        background: var(--color-surface);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow-md);
+        overflow: hidden;
+      }
+
+      .checkout-header {
+        padding: 24px 24px 20px;
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      @media (min-width: 480px) {
+        .checkout-header {
+          padding: 28px 32px 24px;
+        }
+      }
+
+      .checkout-header .merchant {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+
+      .checkout-header .merchant-logo {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #675dff, #9b8aff);
         display: flex;
         align-items: center;
         justify-content: center;
-        opacity: 0.5;
+        flex-shrink: 0;
       }
+
+      .checkout-header .merchant-logo svg {
+        width: 20px;
+        height: 20px;
+        fill: white;
+      }
+
+      .checkout-header .merchant-name {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--color-text-secondary);
+      }
+
+      .checkout-header .amount {
+        font-size: 36px;
+        font-weight: 700;
+        color: var(--color-text);
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+      }
+
+      @media (max-width: 360px) {
+        .checkout-header .amount {
+          font-size: 30px;
+        }
+      }
+
+      /* ═══════════════════════════════════════════════
+         FORM BODY
+         ═══════════════════════════════════════════════ */
+      .checkout-body {
+        padding: 24px;
+      }
+
+      @media (min-width: 480px) {
+        .checkout-body {
+          padding: 28px 32px 32px;
+        }
+      }
+
+      /* ═══════════════════════════════════════════════
+         ERROR MESSAGE
+         ═══════════════════════════════════════════════ */
+      .error {
+        display: none;
+        align-items: flex-start;
+        gap: 8px;
+        background: var(--color-error-bg);
+        border: 1px solid var(--color-error-border);
+        color: var(--color-error);
+        padding: 12px 14px;
+        border-radius: var(--radius-sm);
+        margin-bottom: 20px;
+        font-size: 13px;
+        line-height: 1.4;
+        animation: shake 0.3s ease;
+      }
+
+      .error.show {
+        display: flex;
+      }
+
+      .error-icon {
+        flex-shrink: 0;
+        width: 16px;
+        height: 16px;
+        margin-top: 1px;
+      }
+
+      @keyframes shake {
+        0%,
+        100% {
+          transform: translateX(0);
+        }
+        20% {
+          transform: translateX(-4px);
+        }
+        40% {
+          transform: translateX(4px);
+        }
+        60% {
+          transform: translateX(-3px);
+        }
+        80% {
+          transform: translateX(2px);
+        }
+      }
+
+      /* ═══════════════════════════════════════════════
+         LABELS
+         ═══════════════════════════════════════════════ */
+      .field-label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--color-label);
+        margin-bottom: 6px;
+        letter-spacing: 0.01em;
+      }
+
+      /* ═══════════════════════════════════════════════
+         GROUPED CARD INPUT (Stripe-style)
+         ═══════════════════════════════════════════════ */
+      .card-group {
+        margin-bottom: 20px;
+      }
+
+      .card-group-box {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-surface);
+        overflow: hidden;
+        transition:
+          border-color var(--transition),
+          box-shadow var(--transition);
+      }
+
+      .card-group-box:focus-within {
+        border-color: var(--color-border-focus);
+        box-shadow: var(--shadow-focus);
+      }
+
+      .card-group-box.has-error {
+        border-color: var(--color-error);
+      }
+
+      .card-group-box.has-error:focus-within {
+        box-shadow: var(--shadow-focus-error);
+      }
+
+      .card-number-row {
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+
+      .card-number-row input {
+        flex: 1;
+        min-width: 0;
+        border: none;
+        border-radius: 0;
+        padding: 12px 14px;
+        padding-right: 110px;
+        font-size: 16px;
+        color: var(--color-text);
+        background: transparent;
+        outline: none;
+        font-family: var(--font);
+        -webkit-appearance: none;
+      }
+
+      .card-number-row input::placeholder {
+        color: var(--color-placeholder);
+      }
+
+      .card-brands {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        gap: 4px;
+        pointer-events: none;
+      }
+
+      .brand {
+        opacity: 0.3;
+        transition: opacity var(--transition);
+        display: flex;
+        align-items: center;
+      }
+
       .brand.active {
         opacity: 1;
-        border-color: #635bff;
-        color: #635bff;
-        background: white;
       }
-      button {
+
+      .brand svg {
+        width: 32px;
+        height: 20px;
+      }
+
+      .card-details-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        border-top: 1px solid var(--color-border);
+      }
+
+      .card-details-row .detail-field {
+        position: relative;
+      }
+
+      .card-details-row .detail-field:first-child {
+        border-right: 1px solid var(--color-border);
+      }
+
+      .card-details-row input {
         width: 100%;
-        padding: 18px;
-        background: #635bff;
+        border: none;
+        border-radius: 0;
+        padding: 12px 14px;
+        font-size: 16px;
+        color: var(--color-text);
+        background: transparent;
+        outline: none;
+        font-family: var(--font);
+        -webkit-appearance: none;
+      }
+
+      .card-details-row input::placeholder {
+        color: var(--color-placeholder);
+      }
+
+      /* ═══════════════════════════════════════════════
+         STANDALONE INPUT (Name)
+         ═══════════════════════════════════════════════ */
+      .field {
+        margin-bottom: 20px;
+      }
+
+      .field input {
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        font-size: 16px;
+        color: var(--color-text);
+        background: var(--color-surface);
+        transition:
+          border-color var(--transition),
+          box-shadow var(--transition);
+        font-family: var(--font);
+        -webkit-appearance: none;
+      }
+
+      .field input::placeholder {
+        color: var(--color-placeholder);
+      }
+
+      .field input:focus {
+        outline: none;
+        border-color: var(--color-border-focus);
+        box-shadow: var(--shadow-focus);
+      }
+
+      /* Validation states on card number input */
+      input.valid + .card-brands {
+      }
+      input.invalid ~ .card-brands {
+      }
+
+      /* ═══════════════════════════════════════════════
+         PAY BUTTON
+         ═══════════════════════════════════════════════ */
+      .pay-btn {
+        width: 100%;
+        padding: 12px 24px;
+        background: linear-gradient(180deg, #7c6fff 0%, #675dff 100%);
         color: white;
         border: none;
-        border-radius: 6px;
-        font-size: 18px;
+        border-radius: var(--radius-sm);
+        font-size: 16px;
         font-weight: 600;
+        font-family: var(--font);
         cursor: pointer;
-        margin-top: 12px;
+        transition:
+          filter var(--transition),
+          transform 0.1s ease,
+          box-shadow var(--transition);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-height: 48px;
+        position: relative;
+        overflow: hidden;
+        box-shadow:
+          0 1px 2px rgba(103, 93, 255, 0.2),
+          0 4px 12px rgba(103, 93, 255, 0.15);
       }
-      button:hover {
-        background: #5548e0;
+
+      .pay-btn:hover:not(:disabled) {
+        filter: brightness(0.92);
+        box-shadow:
+          0 2px 4px rgba(103, 93, 255, 0.25),
+          0 8px 20px rgba(103, 93, 255, 0.2);
       }
-      button:disabled {
-        background: #aab7c4;
+
+      .pay-btn:active:not(:disabled) {
+        transform: scale(0.99);
+      }
+
+      .pay-btn:disabled {
+        opacity: 0.7;
         cursor: not-allowed;
       }
-      .error {
-        background: #fff6f6;
-        border: 1px solid #ffcfcf;
-        color: #fa755a;
-        padding: 12px;
-        border-radius: 6px;
-        margin-bottom: 20px;
-        font-size: 14px;
+
+      .pay-btn .lock-icon {
+        width: 14px;
+        height: 14px;
+        opacity: 0.85;
+      }
+
+      /* Loading spinner */
+      .pay-btn .spinner {
+        display: none;
+        width: 20px;
+        height: 20px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: spin 0.6s linear infinite;
+      }
+
+      .pay-btn.loading .spinner {
+        display: block;
+      }
+
+      .pay-btn.loading .btn-text {
         display: none;
       }
-      .error.show {
-        display: block;
+
+      .pay-btn.loading .lock-icon {
+        display: none;
+      }
+
+      /* Success state */
+      .pay-btn.success {
+        background: linear-gradient(180deg, #3cb87a 0%, #30a46c 100%);
+        box-shadow:
+          0 1px 2px rgba(48, 164, 108, 0.2),
+          0 4px 12px rgba(48, 164, 108, 0.15);
+      }
+
+      .pay-btn.success .btn-text-success {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .btn-text-success {
+        display: none;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* ═══════════════════════════════════════════════
+         FOOTER
+         ═══════════════════════════════════════════════ */
+      .checkout-footer {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 16px;
+        border-top: 1px solid var(--color-border);
+      }
+
+      .checkout-footer svg {
+        width: 10px;
+        height: 12px;
+        fill: var(--color-text-secondary);
+      }
+
+      .checkout-footer span {
+        font-size: 12px;
+        color: var(--color-text-secondary);
+      }
+
+      .checkout-footer a {
+        color: var(--color-text-secondary);
+        text-decoration: none;
+        font-weight: 600;
+        transition: color var(--transition);
+      }
+
+      .checkout-footer a:hover {
+        color: var(--color-text);
+      }
+
+      /* ═══════════════════════════════════════════════
+         ACCESSIBILITY
+         ═══════════════════════════════════════════════ */
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      /* iOS input zoom prevention */
+      @supports (-webkit-touch-callout: none) {
+        input {
+          font-size: 16px !important;
+        }
       }
     </style>
   </head>
   <body>
-    <div class="container">
-      <div class="amount" id="amount">$0.00 MXN</div>
-      <div class="error" id="error"></div>
+    <div class="checkout">
+      <!-- Header with amount -->
+      <div class="checkout-header">
+        <div class="merchant">
+          <div class="merchant-logo">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 2L2 7v10l10 5 10-5V7L12 2zm0 2.18L19.18 8 12 11.82 4.82 8 12 4.18z" />
+            </svg>
+          </div>
+          <span class="merchant-name">Avoqado</span>
+        </div>
+        <div class="amount" id="amount">$0.00</div>
+      </div>
 
-      <form id="form">
-        <div class="field">
-          <label>NÚMERO DE TARJETA</label>
-          <div class="input-wrap">
-            <input type="text" id="cardnum" placeholder="1234 5678 9012 3456" maxlength="19" autocomplete="off" inputmode="numeric" />
-            <div class="brands">
-              <div class="brand" id="visa">VISA</div>
-              <div class="brand" id="mc">MC</div>
-              <div class="brand" id="amex">AMEX</div>
+      <!-- Form body -->
+      <div class="checkout-body">
+        <!-- Error message -->
+        <div class="error" id="error" role="alert">
+          <svg class="error-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path
+              d="M8 1C4.13 1 1 4.13 1 8s3.13 7 7 7 7-3.13 7-7-3.13-7-7-7zm-.5 3h1v5h-1V4zm.5 8a.75.75 0 110-1.5.75.75 0 010 1.5z"
+              fill="currentColor"
+            />
+          </svg>
+          <span id="error-text"></span>
+        </div>
+
+        <form id="form" novalidate>
+          <!-- Card information group -->
+          <div class="card-group">
+            <label class="field-label" for="cardnum">Informacion de tarjeta</label>
+            <div class="card-group-box" id="card-group-box">
+              <div class="card-number-row">
+                <input
+                  type="text"
+                  id="cardnum"
+                  placeholder="1234 1234 1234 1234"
+                  maxlength="19"
+                  autocomplete="cc-number"
+                  inputmode="numeric"
+                  aria-label="Numero de tarjeta"
+                />
+                <div class="card-brands">
+                  <!-- Visa SVG -->
+                  <div class="brand" id="visa">
+                    <svg viewBox="0 0 32 20" xmlns="http://www.w3.org/2000/svg">
+                      <rect width="32" height="20" rx="3" fill="#f6f9fc" stroke="#e6e6e6" stroke-width="0.5" />
+                      <path
+                        d="M13.6 13.3h-1.7l1.1-6.5h1.7l-1.1 6.5zm7-6.3l-1.6 4.5-.5-2.3-.1-.4c-.3-.7-.9-1.3-1.6-1.7l1.4 5.2h1.8l2.7-6.5h-1.8l-.3 1.2zm-3.3 6.3l.8-1.1c.3.3.8.5 1.2.5.5 0 .7-.2.7-.4 0-.7-2-.5-2-2.1 0-1.1.9-1.9 2.3-1.9.7 0 1.3.2 1.7.5l-.8 1.1c-.3-.2-.6-.3-1-.3-.4 0-.6.2-.6.4 0 .6 2 .5 2 2 0 1.2-1 2-2.4 2-.8 0-1.5-.3-1.9-.7zm-8.5-3l-.6 3h-1.8l.1-.4c.5 0 .9-.1 1.2-.3.3-.2.5-.5.6-.9l.3-1.4h.2zm-.3-1.3H6.7L5.2 13.3h1.6l.3-1.3c0-.1.1-.3.2-.4h-.7l.3-1.3h2.1c.1 0 .2 0 .2.1l.1.3-.2 1.3z"
+                        fill="#1a1f71"
+                      />
+                    </svg>
+                  </div>
+                  <!-- Mastercard SVG -->
+                  <div class="brand" id="mc">
+                    <svg viewBox="0 0 32 20" xmlns="http://www.w3.org/2000/svg">
+                      <rect width="32" height="20" rx="3" fill="#f6f9fc" stroke="#e6e6e6" stroke-width="0.5" />
+                      <circle cx="12.5" cy="10" r="5" fill="#eb001b" />
+                      <circle cx="19.5" cy="10" r="5" fill="#f79e1b" />
+                      <path d="M16 6.3a5 5 0 010 7.4 5 5 0 000-7.4z" fill="#ff5f00" />
+                    </svg>
+                  </div>
+                  <!-- Amex SVG -->
+                  <div class="brand" id="amex">
+                    <svg viewBox="0 0 32 20" xmlns="http://www.w3.org/2000/svg">
+                      <rect width="32" height="20" rx="3" fill="#f6f9fc" stroke="#e6e6e6" stroke-width="0.5" />
+                      <text x="16" y="12" text-anchor="middle" font-family="Arial" font-weight="700" font-size="6" fill="#006fcf">
+                        AMEX
+                      </text>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card-details-row">
+                <div class="detail-field">
+                  <input
+                    type="text"
+                    id="expiry"
+                    placeholder="MM / AA"
+                    maxlength="7"
+                    autocomplete="cc-exp"
+                    inputmode="numeric"
+                    aria-label="Fecha de vencimiento"
+                  />
+                </div>
+                <div class="detail-field">
+                  <input
+                    type="text"
+                    id="cvv"
+                    placeholder="CVC"
+                    maxlength="4"
+                    autocomplete="cc-csc"
+                    inputmode="numeric"
+                    aria-label="Codigo de seguridad"
+                  />
+                </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="row">
+          <!-- Cardholder name -->
           <div class="field">
-            <label>VENCIMIENTO</label>
-            <input type="text" id="expiry" placeholder="MM / AA" maxlength="7" autocomplete="off" inputmode="numeric" />
+            <label class="field-label" for="name">Nombre del titular</label>
+            <input
+              type="text"
+              id="name"
+              placeholder="Nombre completo en la tarjeta"
+              autocomplete="cc-name"
+              aria-label="Nombre del titular de la tarjeta"
+            />
           </div>
-          <div class="field">
-            <label>CVV</label>
-            <input type="text" id="cvv" placeholder="123" maxlength="4" autocomplete="off" inputmode="numeric" />
-          </div>
-        </div>
 
-        <div class="field">
-          <label>NOMBRE DEL TITULAR</label>
-          <input type="text" id="name" placeholder="JOSÉ GARCÍA" autocomplete="off" />
-        </div>
+          <!-- Pay button -->
+          <button type="submit" id="btn" class="pay-btn">
+            <svg class="lock-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M11.5 7H11V5a3 3 0 00-6 0v2h-.5A1.5 1.5 0 003 8.5v5A1.5 1.5 0 004.5 15h7a1.5 1.5 0 001.5-1.5v-5A1.5 1.5 0 0011.5 7zM6 5a2 2 0 014 0v2H6V5z"
+                fill="currentColor"
+              />
+            </svg>
+            <span class="btn-text">Pagar <span id="btnamt">$0.00</span></span>
+            <div class="spinner"></div>
+            <span class="btn-text-success">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M13.3 4.3L6 11.6 2.7 8.3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              Pago exitoso
+            </span>
+          </button>
+        </form>
+      </div>
 
-        <button type="submit" id="btn">Pagar <span id="btnamt">$0.00</span></button>
-      </form>
+      <!-- Security footer -->
+      <div class="checkout-footer">
+        <svg viewBox="0 0 12 14" xmlns="http://www.w3.org/2000/svg">
+          <path
+            d="M10 5V4a4 4 0 00-8 0v1a2 2 0 00-2 2v5a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2zM3 4a3 3 0 016 0v1H3V4z"
+            fill="currentColor"
+          />
+        </svg>
+        <span>Pago seguro con <a href="https://avoqado.io" target="_blank" rel="noopener">Avoqado</a></span>
+      </div>
     </div>
 
     <!-- Payment form logic (extracted for CSP compliance) -->
