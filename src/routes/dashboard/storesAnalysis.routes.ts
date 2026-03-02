@@ -592,14 +592,16 @@ router.get('/zones', whiteLabelAccess, async (req: Request, res: Response, next:
 
 /**
  * GET /dashboard/venues/:venueId/stores-analysis/team
- * Returns: Team members scoped by role
- * - OWNER (org-level): sees all organization staff
- * - Others: sees only staff assigned to current venue
+ * Returns: Team members scoped by venue (default) or organization
+ * Query params:
+ *   - scope: 'venue' (default) | 'org' (only allowed for OWNER/SUPERADMIN)
+ * Response includes `canViewAllOrgStaff` so frontend knows whether to show toggle
  */
 router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const userId = (req as any).authContext?.userId
+    const scope = (req.query.scope as string) || 'venue'
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
@@ -618,17 +620,15 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
     const isOrgOwner = staffOrg?.role === 'OWNER'
 
     // Also check venue-level role (OWNER or SUPERADMIN see all)
-    const staffVenue = await prisma.staffVenue.findFirst({
-      where: { staffId: userId, venueId },
-      select: { role: true },
-    })
-    const isVenueOwner = staffVenue?.role === 'OWNER' || staffVenue?.role === 'SUPERADMIN'
+    const venueRole = (req as any).authContext?.role
+    const isVenueOwner = venueRole === 'OWNER' || venueRole === 'SUPERADMIN'
 
-    const showAllOrgStaff = isOrgOwner || isVenueOwner
+    const canViewAllOrgStaff = isOrgOwner || isVenueOwner
+    const showAllOrgStaff = canViewAllOrgStaff && scope === 'org'
 
     let staffOrgs
     if (showAllOrgStaff) {
-      // OWNER/SUPERADMIN: get all staff in the organization
+      // OWNER/SUPERADMIN requesting org scope: get all staff in the organization
       staffOrgs = await prisma.staffOrganization.findMany({
         where: { organizationId: orgId },
         include: {
@@ -649,7 +649,7 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
         },
       })
     } else {
-      // Non-owner: only get staff assigned to the current venue
+      // Default (venue scope): only get staff assigned to the current venue
       const venueStaff = await prisma.staffVenue.findMany({
         where: { venueId },
         select: { staffId: true },
@@ -699,6 +699,7 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
     res.json({
       success: true,
       data: team,
+      meta: { scope: showAllOrgStaff ? 'org' : 'venue', canViewAllOrgStaff },
     })
   } catch (error) {
     next(error)
