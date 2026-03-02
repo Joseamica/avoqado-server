@@ -592,11 +592,14 @@ router.get('/zones', whiteLabelAccess, async (req: Request, res: Response, next:
 
 /**
  * GET /dashboard/venues/:venueId/stores-analysis/team
- * Returns: Organization team members
+ * Returns: Team members scoped by role
+ * - OWNER (org-level): sees all organization staff
+ * - Others: sees only staff assigned to current venue
  */
 router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const userId = (req as any).authContext?.userId
     const orgId = await getOrgIdFromVenue(venueId)
 
     if (!orgId) {
@@ -607,26 +610,72 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
       })
     }
 
-    // Get all staff in the organization with their venue assignments
-    const staffOrgs = await prisma.staffOrganization.findMany({
-      where: { organizationId: orgId },
-      include: {
-        staff: {
-          include: {
-            venues: {
-              where: {
-                venue: { organizationId: orgId },
-              },
-              include: {
-                venue: {
-                  select: { id: true, name: true, slug: true },
+    // Check if the requesting user is an org-level OWNER
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { staffId: userId, organizationId: orgId },
+      select: { role: true },
+    })
+    const isOrgOwner = staffOrg?.role === 'OWNER'
+
+    // Also check venue-level role (OWNER or SUPERADMIN see all)
+    const staffVenue = await prisma.staffVenue.findFirst({
+      where: { staffId: userId, venueId },
+      select: { role: true },
+    })
+    const isVenueOwner = staffVenue?.role === 'OWNER' || staffVenue?.role === 'SUPERADMIN'
+
+    const showAllOrgStaff = isOrgOwner || isVenueOwner
+
+    let staffOrgs
+    if (showAllOrgStaff) {
+      // OWNER/SUPERADMIN: get all staff in the organization
+      staffOrgs = await prisma.staffOrganization.findMany({
+        where: { organizationId: orgId },
+        include: {
+          staff: {
+            include: {
+              venues: {
+                where: {
+                  venue: { organizationId: orgId },
+                },
+                include: {
+                  venue: {
+                    select: { id: true, name: true, slug: true },
+                  },
                 },
               },
             },
           },
         },
-      },
-    })
+      })
+    } else {
+      // Non-owner: only get staff assigned to the current venue
+      const venueStaff = await prisma.staffVenue.findMany({
+        where: { venueId },
+        select: { staffId: true },
+      })
+      const staffIds = venueStaff.map(sv => sv.staffId)
+
+      staffOrgs = await prisma.staffOrganization.findMany({
+        where: { organizationId: orgId, staffId: { in: staffIds } },
+        include: {
+          staff: {
+            include: {
+              venues: {
+                where: {
+                  venue: { organizationId: orgId },
+                },
+                include: {
+                  venue: {
+                    select: { id: true, name: true, slug: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      })
+    }
 
     const team = staffOrgs.map(so => ({
       id: so.staff.id,
