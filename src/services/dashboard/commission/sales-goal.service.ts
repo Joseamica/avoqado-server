@@ -16,6 +16,9 @@ import { Prisma } from '@prisma/client'
 import { MODULE_CODES } from '../../modules/module.service'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
+import { startOfWeek } from 'date-fns'
+import { fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { venueStartOfDay, venueStartOfMonth, DEFAULT_TIMEZONE } from '../../../utils/datetime'
 
 // ==========================================
 // TYPES
@@ -144,9 +147,23 @@ function getSalesGoalsFromConfig(config: Prisma.JsonValue): StoredSalesGoal[] {
 }
 
 /**
+ * Get timezone for a venue (cached per request via Prisma query cache)
+ */
+async function getVenueTimezone(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true },
+  })
+  return venue?.timezone || DEFAULT_TIMEZONE
+}
+
+/**
  * Calculate current sales for a goal based on period and goal type
  * - AMOUNT: sums Payment.amount (currency total)
  * - QUANTITY: counts order items (units/products sold)
+ *
+ * CRITICAL: Uses venue timezone for date boundaries (not UTC).
+ * "Today" means today in the venue's timezone, not UTC.
  */
 async function calculateCurrentSales(
   venueId: string,
@@ -154,20 +171,21 @@ async function calculateCurrentSales(
   period: SalesGoalPeriod,
   goalType: SalesGoalType = 'AMOUNT',
 ): Promise<number> {
-  const now = new Date()
+  const timezone = await getVenueTimezone(venueId)
   let startDate: Date
 
   switch (period) {
     case 'DAILY':
-      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0)
+      startDate = venueStartOfDay(timezone)
       break
-    case 'WEEKLY':
-      // Start of week (Sunday)
-      const dayOfWeek = now.getDay()
-      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek, 0, 0, 0)
+    case 'WEEKLY': {
+      // Start of week (Sunday) in venue timezone → converted to UTC for Prisma
+      const venueNow = toZonedTime(new Date(), timezone)
+      startDate = fromZonedTime(startOfWeek(venueNow, { weekStartsOn: 0 }), timezone)
       break
+    }
     case 'MONTHLY':
-      startDate = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0)
+      startDate = venueStartOfMonth(timezone)
       break
   }
 
