@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Command Center timezone bugs**: All date boundary calculations in `commandCenter.service.ts` now use venue timezone instead of UTC. Affected methods: `getSummary()`, `getInsights()`, `getTopSellers()`, `getCategoryBreakdown()`, `getStockVsSales()`. "Today", "this week", and "this month" now correctly correspond to the venue's local midnight rather than UTC midnight. Raw SQL date grouping in sales trend also uses venue timezone so late-night sales are attributed to the correct local day
+- **Commission system timezone bugs**: `getPeriodDateRange()` in `commission-utils.ts` now uses venue timezone instead of UTC for all period boundaries (DAILY, WEEKLY, BIWEEKLY, MONTHLY, QUARTERLY, YEARLY). The `_timezone` parameter was unused (defaulting to UTC) — now renamed to `timezone` with `DEFAULT_TIMEZONE` default. All callers updated: `commission-aggregation.service.ts`, `commission-tier.service.ts`, `commission-milestone.service.ts`. Staff commission stats in `commission-calculation.service.ts` also fixed (thisMonthStart/lastMonth boundaries)
+- **Sales goal timezone bugs**: `calculateCurrentSales()` in `sales-goal.service.ts` and `goal-resolution.service.ts` now uses venue timezone for date boundaries. Previously used `new Date()` (UTC midnight = 6pm Mexico), causing daily goals to reset mid-afternoon
+
 ### Added
 
 - **Order Guest Information & Actions System** (2025-01-19)

@@ -15,7 +15,7 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, TierType, TierPeriod, CommissionCalcType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { validateRate, getPeriodDateRange, decimalToNumber } from './commission-utils'
+import { validateRate, getPeriodDateRange, decimalToNumber, getVenueTimezone } from './commission-utils'
 import { logAction } from '../activity-log.service'
 
 // ============================================
@@ -446,7 +446,8 @@ export async function getStaffTierProgress(configId: string, staffId: string, ve
   }
 
   const firstTier = config.tiers[0]
-  const { start, end } = getPeriodDateRange(firstTier.tierPeriod)
+  const timezone = await getVenueTimezone(venueId)
+  const { start, end } = getPeriodDateRange(firstTier.tierPeriod, new Date(), timezone)
 
   // Calculate current period value
   let currentValue: number

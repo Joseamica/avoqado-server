@@ -15,7 +15,7 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, CommissionCalcStatus, CommissionSummaryStatus, TierPeriod } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { decimalToNumber, getPeriodDateRange } from './commission-utils'
+import { decimalToNumber, getPeriodDateRange, getVenueTimezone } from './commission-utils'
 import { logAction } from '../activity-log.service'
 
 // ============================================
@@ -48,7 +48,8 @@ export interface SummaryFilters {
 export async function aggregateVenueCommissions(venueId: string, period: TierPeriod = TierPeriod.WEEKLY): Promise<AggregationResult> {
   logger.info('Starting commission aggregation', { venueId, period })
 
-  const { start: periodStart, end: periodEnd } = getPeriodDateRange(period)
+  const timezone = await getVenueTimezone(venueId)
+  const { start: periodStart, end: periodEnd } = getPeriodDateRange(period, new Date(), timezone)
 
   // Get all pending calculations grouped by staff
   const pendingByStaff = await prisma.commissionCalculation.groupBy({

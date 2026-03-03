@@ -35,7 +35,10 @@ import {
   validateStaffForCommission,
   commissionExistsForPayment,
   decimalToNumber,
+  getVenueTimezone,
 } from './commission-utils'
+import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
+import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { getApplicableTierRate } from './commission-tier.service'
 
 // ============================================
@@ -599,11 +602,18 @@ export async function getStaffCommissions(
     if (filters.endDate) where.calculatedAt.lte = filters.endDate
   }
 
-  // Calculate date ranges for stats
+  // Calculate date ranges for stats in venue timezone
+  const timezone = await getVenueTimezone(venueId)
   const now = new Date()
-  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-  const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999)
+  const venueNow = toZonedTime(now, timezone)
+
+  // This month: start of current month in venue timezone → UTC
+  const thisMonthStart = fromZonedTime(startOfMonth(venueNow), timezone)
+
+  // Last month: start and end of previous month in venue timezone → UTC
+  const lastMonthVenue = subMonths(venueNow, 1)
+  const lastMonthStart = fromZonedTime(startOfMonth(lastMonthVenue), timezone)
+  const lastMonthEnd = fromZonedTime(endOfMonth(lastMonthVenue), timezone)
 
   const [calculations, total, summaries, thisMonthStats, lastMonthStats, totalStats] = await Promise.all([
     // Calculations

@@ -15,7 +15,7 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, MilestoneTargetType, BonusType, TierPeriod } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { decimalToNumber, getPeriodDateRange } from './commission-utils'
+import { decimalToNumber, getPeriodDateRange, getVenueTimezone } from './commission-utils'
 import { logAction } from '../activity-log.service'
 
 // ============================================
@@ -162,8 +162,9 @@ export async function createMilestone(configId: string, venueId: string, data: C
     throw new BadRequestError('Product or category ID required for product/category-based milestones')
   }
 
-  // Calculate period dates
-  const { start: periodStart, end: periodEnd } = getPeriodDateRange(data.period)
+  // Calculate period dates in venue timezone
+  const timezone = await getVenueTimezone(venueId)
+  const { start: periodStart, end: periodEnd } = getPeriodDateRange(data.period, new Date(), timezone)
 
   const milestone = await prisma.commissionMilestone.create({
     data: {
@@ -331,9 +332,10 @@ export async function getStaffMilestoneProgress(staffId: string, venueId: string
   })
 
   const progressList: MilestoneProgress[] = []
+  const timezone = await getVenueTimezone(venueId)
 
   for (const milestone of milestones) {
-    const { start, end } = getPeriodDateRange(milestone.period)
+    const { start, end } = getPeriodDateRange(milestone.period, new Date(), timezone)
 
     // Calculate current progress
     const currentValue = await calculateMilestoneProgress(
@@ -496,7 +498,8 @@ export async function checkAndAwardMilestones(staffId: string, venueId: string):
 
       if (!milestone) continue
 
-      const { start, end } = getPeriodDateRange(milestone.period)
+      const milestoneTimezone = await getVenueTimezone(venueId)
+      const { start, end } = getPeriodDateRange(milestone.period, new Date(), milestoneTimezone)
 
       // Calculate bonus amount based on bonus type
       let bonusAmount: number

@@ -14,6 +14,9 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Decimal } from '@prisma/client/runtime/library'
 import { CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPeriod } from '@prisma/client'
+import { startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from 'date-fns'
+import { toZonedTime, fromZonedTime } from 'date-fns-tz'
+import { DEFAULT_TIMEZONE } from '../../../utils/datetime'
 
 // ============================================
 // Type Definitions
@@ -400,75 +403,98 @@ export function calculateBaseAmount(
 // ============================================
 
 /**
- * Get the start and end dates for a tier period
+ * Get the start and end dates for a tier period in venue timezone
+ *
+ * Converts the reference date to venue timezone, computes period boundaries
+ * in venue-local time, then converts back to UTC for Prisma queries.
  *
  * @param period - TierPeriod enum
  * @param referenceDate - Reference date (defaults to now)
- * @param timezone - Venue timezone (defaults to UTC)
- * @returns { start: Date, end: Date }
+ * @param timezone - Venue timezone (defaults to DEFAULT_TIMEZONE)
+ * @returns { start: Date, end: Date } in UTC
  */
 export function getPeriodDateRange(
   period: TierPeriod,
   referenceDate: Date = new Date(),
-  _timezone: string = 'UTC',
+  timezone: string = DEFAULT_TIMEZONE,
 ): { start: Date; end: Date } {
-  // For simplicity, using UTC. In production, use venue timezone
-  const date = new Date(referenceDate)
+  // Convert reference date to venue-local time
+  const venueDate = toZonedTime(referenceDate, timezone)
 
-  let start: Date
-  let end: Date
+  let venueStart: Date
+  let venueEnd: Date
 
   switch (period) {
     case TierPeriod.DAILY:
-      start = new Date(date.setHours(0, 0, 0, 0))
-      end = new Date(date.setHours(23, 59, 59, 999))
+      venueStart = startOfDay(venueDate)
+      venueEnd = endOfDay(venueDate)
       break
 
     case TierPeriod.WEEKLY:
-      // Start from Monday
-      const dayOfWeek = date.getDay()
-      const diff = date.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1)
-      start = new Date(date.setDate(diff))
-      start.setHours(0, 0, 0, 0)
-      end = new Date(start)
-      end.setDate(end.getDate() + 6)
-      end.setHours(23, 59, 59, 999)
+      // Start from Monday (weekStartsOn: 1)
+      venueStart = startOfWeek(venueDate, { weekStartsOn: 1 })
+      venueEnd = endOfWeek(venueDate, { weekStartsOn: 1 })
       break
 
-    case TierPeriod.BIWEEKLY:
+    case TierPeriod.BIWEEKLY: {
       // Two weeks from start of year, week 1 starts Jan 1
-      const startOfYear = new Date(date.getFullYear(), 0, 1)
-      const weekNumber = Math.floor((date.getTime() - startOfYear.getTime()) / (7 * 24 * 60 * 60 * 1000))
+      const yearStart = new Date(venueDate.getFullYear(), 0, 1)
+      const weekNumber = Math.floor((venueDate.getTime() - yearStart.getTime()) / (7 * 24 * 60 * 60 * 1000))
       const biweekNumber = Math.floor(weekNumber / 2)
-      start = new Date(startOfYear.getTime() + biweekNumber * 2 * 7 * 24 * 60 * 60 * 1000)
-      start.setHours(0, 0, 0, 0)
-      end = new Date(start.getTime() + 13 * 24 * 60 * 60 * 1000)
-      end.setHours(23, 59, 59, 999)
+      const biweekStart = new Date(yearStart.getTime() + biweekNumber * 2 * 7 * 24 * 60 * 60 * 1000)
+      venueStart = startOfDay(biweekStart)
+      const biweekEnd = new Date(biweekStart.getTime() + 13 * 24 * 60 * 60 * 1000)
+      venueEnd = endOfDay(biweekEnd)
       break
+    }
 
     case TierPeriod.MONTHLY:
-      start = new Date(date.getFullYear(), date.getMonth(), 1, 0, 0, 0, 0)
-      end = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999)
+      venueStart = startOfMonth(venueDate)
+      venueEnd = endOfMonth(venueDate)
       break
 
-    case TierPeriod.QUARTERLY:
-      const quarter = Math.floor(date.getMonth() / 3)
-      start = new Date(date.getFullYear(), quarter * 3, 1, 0, 0, 0, 0)
-      end = new Date(date.getFullYear(), (quarter + 1) * 3, 0, 23, 59, 59, 999)
+    case TierPeriod.QUARTERLY: {
+      const quarter = Math.floor(venueDate.getMonth() / 3)
+      const quarterStart = new Date(venueDate.getFullYear(), quarter * 3, 1)
+      const quarterEnd = new Date(venueDate.getFullYear(), (quarter + 1) * 3, 0)
+      venueStart = startOfDay(quarterStart)
+      venueEnd = endOfDay(quarterEnd)
       break
+    }
 
-    case TierPeriod.YEARLY:
-      start = new Date(date.getFullYear(), 0, 1, 0, 0, 0, 0)
-      end = new Date(date.getFullYear(), 11, 31, 23, 59, 59, 999)
+    case TierPeriod.YEARLY: {
+      const yearStartDate = new Date(venueDate.getFullYear(), 0, 1)
+      const yearEndDate = new Date(venueDate.getFullYear(), 11, 31)
+      venueStart = startOfDay(yearStartDate)
+      venueEnd = endOfDay(yearEndDate)
       break
+    }
 
     default:
       // Default to monthly
-      start = new Date(date.getFullYear(), date.getMonth(), 1, 0, 0, 0, 0)
-      end = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999)
+      venueStart = startOfMonth(venueDate)
+      venueEnd = endOfMonth(venueDate)
   }
 
-  return { start, end }
+  // Convert venue-local boundaries back to UTC for Prisma queries
+  return {
+    start: fromZonedTime(venueStart, timezone),
+    end: fromZonedTime(venueEnd, timezone),
+  }
+}
+
+/**
+ * Get venue timezone from database
+ *
+ * @param venueId - Venue ID
+ * @returns IANA timezone string (defaults to DEFAULT_TIMEZONE if not found)
+ */
+export async function getVenueTimezone(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true },
+  })
+  return venue?.timezone || DEFAULT_TIMEZONE
 }
 
 // ============================================

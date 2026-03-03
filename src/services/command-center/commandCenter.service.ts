@@ -4,6 +4,19 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import prisma from '../../utils/prismaClient'
+import { venueStartOfDay, venueEndOfDay, venueStartOfMonth, venueStartOfDayOffset, DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { toZonedTime } from 'date-fns-tz'
+
+/**
+ * Get the timezone configured for a venue, falling back to Mexico City.
+ */
+async function getVenueTimezone(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true },
+  })
+  return venue?.timezone || DEFAULT_TIMEZONE
+}
 
 // Types for the service responses - aligned with frontend expectations
 export interface CommandCenterSummary {
@@ -77,11 +90,10 @@ class CommandCenterService {
    * Returns all data needed for the Command Center dashboard in one call
    */
   async getSummary(venueId: string): Promise<CommandCenterSummary> {
-    const now = new Date()
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const weekStart = new Date(todayStart)
-    weekStart.setDate(weekStart.getDate() - 7)
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+    const timezone = await getVenueTimezone(venueId)
+    const todayStart = venueStartOfDay(timezone)
+    const weekStart = venueStartOfDayOffset(timezone, -7)
+    const monthStart = venueStartOfMonth(timezone)
 
     // Get today's orders with lean item data (for category breakdown) and creator info
     const todayOrders = await prisma.order.findMany({
@@ -389,8 +401,8 @@ class CommandCenterService {
     }
 
     // Check for missing check-ins today
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    const timezone = await getVenueTimezone(venueId)
+    const todayStart = venueStartOfDay(timezone)
 
     const scheduledStaff = await prisma.staffVenue.count({
       where: {
@@ -408,9 +420,10 @@ class CommandCenterService {
       distinct: ['staffId'],
     })
 
+    const venueNow = toZonedTime(new Date(), timezone)
     const missingCheckIns = scheduledStaff - checkedInToday.length
-    if (missingCheckIns > 0 && new Date().getHours() >= 10) {
-      // After 10 AM
+    if (missingCheckIns > 0 && venueNow.getHours() >= 10) {
+      // After 10 AM in venue timezone
       insights.push({
         id: 'missing-checkins',
         type: 'WARNING',
@@ -427,8 +440,8 @@ class CommandCenterService {
    * Get top sellers for today
    */
   async getTopSellers(venueId: string, limit: number = 5): Promise<TopSeller[]> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    const timezone = await getVenueTimezone(venueId)
+    const todayStart = venueStartOfDay(timezone)
 
     // Get orders grouped by creator
     const orders = await prisma.order.findMany({
@@ -480,8 +493,8 @@ class CommandCenterService {
    * Get sales breakdown by category
    */
   async getCategoryBreakdown(venueId: string): Promise<CategoryBreakdown[]> {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    const timezone = await getVenueTimezone(venueId)
+    const todayStart = venueStartOfDay(timezone)
 
     // Get sold items grouped by category
     const soldItems = await prisma.serializedItem.findMany({
@@ -537,40 +550,35 @@ class CommandCenterService {
     options: { days?: number; startDate?: string; endDate?: string } = {},
   ): Promise<SalesTrendResponse> {
     const { days = 7, startDate, endDate } = options
-
-    const today = new Date()
-    today.setHours(23, 59, 59, 999)
+    const timezone = await getVenueTimezone(venueId)
 
     let currentPeriodStart: Date
     let currentPeriodEnd: Date
 
-    // Determine date range
+    // Determine date range using venue timezone
     if (startDate && endDate) {
-      currentPeriodStart = new Date(startDate)
-      currentPeriodStart.setHours(0, 0, 0, 0)
-      currentPeriodEnd = new Date(endDate)
-      currentPeriodEnd.setHours(23, 59, 59, 999)
+      currentPeriodStart = venueStartOfDay(timezone, new Date(startDate))
+      currentPeriodEnd = venueEndOfDay(timezone, new Date(endDate))
     } else {
-      currentPeriodEnd = today
-      currentPeriodStart = new Date(today)
-      currentPeriodStart.setDate(currentPeriodStart.getDate() - days + 1)
-      currentPeriodStart.setHours(0, 0, 0, 0)
+      currentPeriodEnd = venueEndOfDay(timezone)
+      currentPeriodStart = venueStartOfDayOffset(timezone, -(days - 1))
     }
 
     // Calculate previous period (same duration, immediately before)
     const periodDuration = Math.ceil((currentPeriodEnd.getTime() - currentPeriodStart.getTime()) / (1000 * 60 * 60 * 24))
-    const previousPeriodEnd = new Date(currentPeriodStart)
-    previousPeriodEnd.setDate(previousPeriodEnd.getDate() - 1)
-    previousPeriodEnd.setHours(23, 59, 59, 999)
-    const previousPeriodStart = new Date(previousPeriodEnd)
-    previousPeriodStart.setDate(previousPeriodStart.getDate() - periodDuration + 1)
-    previousPeriodStart.setHours(0, 0, 0, 0)
+    // Previous period ends the day before current period starts
+    const dayBeforeStart = new Date(currentPeriodStart.getTime() - 1) // 1ms before currentPeriodStart
+    const previousPeriodEnd = venueEndOfDay(timezone, dayBeforeStart)
+    // Previous period starts periodDuration days before previousPeriodEnd
+    const prevStartRef = new Date(previousPeriodEnd.getTime() - (periodDuration - 1) * 24 * 60 * 60 * 1000)
+    const previousPeriodStart = venueStartOfDay(timezone, prevStartRef)
 
     // Aggregate current period per day in SQL (avoids loading all orders+items into memory)
     const [dailyData, prevAgg, prevUnitsAgg] = await Promise.all([
       // Current period: sales + transactions + units per day via subquery
       // Inner query groups by order to get correct total + unit sum per order,
       // outer query aggregates per day
+      // Use venue timezone for DATE grouping so sales at 11PM Mexico don't land on next UTC day
       prisma.$queryRaw<Array<{ date_key: Date; sales: any; transactions: any; units: any }>>`
         SELECT
           sub.date_key,
@@ -579,7 +587,7 @@ class CommandCenterService {
           SUM(sub.units) as units
         FROM (
           SELECT
-            DATE(o."createdAt") as date_key,
+            DATE(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}) as date_key,
             o.total,
             COALESCE(SUM(oi.quantity), 0) as units
           FROM "Order" o
@@ -588,7 +596,7 @@ class CommandCenterService {
             AND o.status = 'COMPLETED'
             AND o."createdAt" >= ${currentPeriodStart}
             AND o."createdAt" <= ${currentPeriodEnd}
-          GROUP BY o.id, DATE(o."createdAt"), o.total
+          GROUP BY o.id, DATE(o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE ${timezone}), o.total
         ) sub
         GROUP BY sub.date_key
         ORDER BY sub.date_key
@@ -605,9 +613,10 @@ class CommandCenterService {
       }),
     ])
 
-    // Build daily data lookup
+    // Build daily data lookup (date_key from SQL is already a venue-local date)
     const dailyMap = new Map<string, { sales: number; units: number; transactions: number }>()
     for (const row of dailyData) {
+      // date_key is a DATE type from SQL — extract YYYY-MM-DD
       const key = row.date_key.toISOString().split('T')[0]
       dailyMap.set(key, {
         sales: Number(row.sales) || 0,
@@ -617,10 +626,13 @@ class CommandCenterService {
     }
 
     // Build trend data for all days in range (including days with zero)
+    // Convert UTC period boundaries to venue-local dates for iteration
     const trendMap = new Map<string, SalesTrendPoint>()
-    const iterDate = new Date(currentPeriodStart)
-    while (iterDate <= currentPeriodEnd) {
-      const dateKey = iterDate.toISOString().split('T')[0]
+    const venueStart = toZonedTime(currentPeriodStart, timezone)
+    const venueEnd = toZonedTime(currentPeriodEnd, timezone)
+    const iterDate = new Date(venueStart)
+    while (iterDate <= venueEnd) {
+      const dateKey = `${iterDate.getFullYear()}-${String(iterDate.getMonth() + 1).padStart(2, '0')}-${String(iterDate.getDate()).padStart(2, '0')}`
       const displayDate = iterDate.toLocaleDateString('es-MX', { day: '2-digit', month: 'short' })
       const dayData = dailyMap.get(dateKey) || { sales: 0, units: 0, transactions: 0 }
       trendMap.set(dateKey, {
