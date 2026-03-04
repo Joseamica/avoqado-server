@@ -402,6 +402,9 @@ model VenueSettings {
   // TPV Settings removed (2025-11-29) - now stored per-terminal in Terminal.config.settings
   // Migration script: scripts/migrate-tpv-settings-to-terminal.ts
 
+  // Sidebar visibility (superadmin toggle per venue)
+  hiddenSidebarItems String[] @default([]) // URL paths hidden from non-superadmin users
+
   updatedAt DateTime @updatedAt
 }
 
@@ -1147,6 +1150,9 @@ model RawMaterial {
   // Perishability
   perishable    Boolean @default(false)
   shelfLifeDays Int? // Expected shelf life in days (used to calculate batch expiration dates)
+
+  // Notifications
+  notifyOnLowStock Boolean @default(true) // When false, low stock alerts still created but notifications are not sent
 
   // Status
   active      Boolean   @default(true)

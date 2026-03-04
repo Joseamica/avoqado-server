@@ -32,6 +32,7 @@ export const CreateRawMaterialSchema = z.object({
       avgCostPerUnit: z.number().positive().nullish(), // Accept null, undefined, or number
       perishable: z.boolean().default(false),
       shelfLifeDays: z.number().int().positive().nullish(), // Accept null, undefined, or number
+      notifyOnLowStock: z.boolean().optional(),
     })
     .refine(data => data.minimumStock <= data.reorderPoint, {
       message: 'Minimum stock must be less than or equal to reorder point',
@@ -99,6 +100,7 @@ export const UpdateRawMaterialSchema = z.object({
       perishable: z.boolean().optional(),
       shelfLifeDays: z.number().int().positive().nullish(), // Accept null, undefined, or number
       active: z.boolean().optional(),
+      notifyOnLowStock: z.boolean().optional(),
     })
     .refine(
       data => {

@@ -393,110 +393,171 @@ export async function createProduct(venueId: string, productData: CreateProductD
 
   const { modifierGroupIds, ...productFields } = productData
 
-  // Get the next display order
-  const maxOrder = await prisma.product.findFirst({
-    where: { venueId },
-    orderBy: { displayOrder: 'desc' },
-    select: { displayOrder: true },
-  })
-
-  const displayOrder = (maxOrder?.displayOrder || 0) + 1
-
-  // ✅ Build product data with Square-aligned contextual fields
-  const product = await prisma.product.create({
-    data: {
-      // Basic fields
-      name: productFields.name,
-      description: productFields.description,
-      price: productFields.price,
-      type: productFields.type,
-      imageUrl: productFields.imageUrl,
-      sku: productFields.sku,
-      gtin: productFields.gtin,
-      categoryId: productFields.categoryId,
-      venueId,
-      displayOrder,
-      active: true,
-
-      // ═══════════════════════════════════════════════════════════════
-      // Square-aligned contextual fields
-      // ═══════════════════════════════════════════════════════════════
-      isAlcoholic: productFields.isAlcoholic ?? false,
-      kitchenName: productFields.kitchenName,
-      abbreviation: productFields.abbreviation,
-      duration: productFields.duration,
-
-      // Event fields
-      eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,
-      eventTime: productFields.eventTime,
-      eventEndTime: productFields.eventEndTime,
-      eventCapacity: productFields.eventCapacity,
-      eventLocation: productFields.eventLocation,
-
-      // Digital fields
-      downloadUrl: productFields.downloadUrl,
-      downloadLimit: productFields.downloadLimit,
-      fileSize: productFields.fileSize,
-
-      // Donation fields
-      suggestedAmounts: productFields.suggestedAmounts,
-      allowCustomAmount: productFields.allowCustomAmount ?? true,
-      donationCause: productFields.donationCause,
-
-      // Modifier groups
-      modifierGroups: modifierGroupIds?.length
-        ? {
-            create: modifierGroupIds.map((groupId, index) => ({
-              groupId,
-              displayOrder: index,
-            })),
-          }
-        : undefined,
-    },
+  type CreatedProductWithRelations = Prisma.ProductGetPayload<{
     include: {
-      category: true,
+      category: true
       modifierGroups: {
         include: {
-          group: true,
-        },
+          group: true
+        }
+      }
+    }
+  }>
+
+  const createProductInTransaction = async (): Promise<CreatedProductWithRelations> =>
+    prisma.$transaction(
+      async tx => {
+        const maxOrder = await tx.product.findFirst({
+          where: { venueId },
+          orderBy: { displayOrder: 'desc' },
+          select: { displayOrder: true },
+        })
+
+        const displayOrder = (maxOrder?.displayOrder || 0) + 1
+
+        return tx.product.create({
+          data: {
+            // Basic fields
+            name: productFields.name,
+            description: productFields.description,
+            price: productFields.price,
+            type: productFields.type,
+            imageUrl: productFields.imageUrl,
+            sku: productFields.sku,
+            gtin: productFields.gtin,
+            categoryId: productFields.categoryId,
+            venueId,
+            displayOrder,
+            active: true,
+
+            // ═══════════════════════════════════════════════════════════════
+            // Square-aligned contextual fields
+            // ═══════════════════════════════════════════════════════════════
+            isAlcoholic: productFields.isAlcoholic ?? false,
+            kitchenName: productFields.kitchenName,
+            abbreviation: productFields.abbreviation,
+            duration: productFields.duration,
+
+            // Event fields
+            eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,
+            eventTime: productFields.eventTime,
+            eventEndTime: productFields.eventEndTime,
+            eventCapacity: productFields.eventCapacity,
+            eventLocation: productFields.eventLocation,
+
+            // Digital fields
+            downloadUrl: productFields.downloadUrl,
+            downloadLimit: productFields.downloadLimit,
+            fileSize: productFields.fileSize,
+
+            // Donation fields
+            suggestedAmounts: productFields.suggestedAmounts,
+            allowCustomAmount: productFields.allowCustomAmount ?? true,
+            donationCause: productFields.donationCause,
+
+            // Modifier groups
+            modifierGroups: modifierGroupIds?.length
+              ? {
+                  create: modifierGroupIds.map((groupId, index) => ({
+                    groupId,
+                    displayOrder: index,
+                  })),
+                }
+              : undefined,
+          },
+          include: {
+            category: true,
+            modifierGroups: {
+              include: {
+                group: true,
+              },
+            },
+          },
+        })
       },
-    },
-  })
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      },
+    )
+
+  const maxRetries = 3
+  let product: CreatedProductWithRelations | null = null
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      product = await createProductInTransaction()
+      break
+    } catch (error) {
+      const isSerializationConflict = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034'
+
+      if (isSerializationConflict && attempt < maxRetries) {
+        logger.warn('Retrying product creation after serialization conflict', {
+          venueId,
+          sku: productFields.sku,
+          attempt,
+          maxRetries,
+        })
+        continue
+      }
+
+      throw error
+    }
+  }
+
+  if (!product) {
+    throw new AppError('No se pudo crear el producto después de reintentos de concurrencia.', 500)
+  }
 
   // 🔌 REAL-TIME: Broadcast product creation via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
-    // Broadcast menu item created event
-    broadcastingService.broadcastMenuItemCreated(venueId, {
-      itemId: product.id,
-      itemName: product.name,
-      sku: product.sku,
-      categoryId: product.categoryId,
-      categoryName: product.category.name,
-      price: Number(product.price),
-      available: product.active,
-      imageUrl: product.imageUrl,
-      description: product.description,
-      modifierGroupIds: product.modifierGroups.map(mg => mg.groupId),
-    })
+    try {
+      // Broadcast menu item created event
+      broadcastingService.broadcastMenuItemCreated(venueId, {
+        itemId: product.id,
+        itemName: product.name,
+        sku: product.sku,
+        categoryId: product.categoryId,
+        categoryName: product.category.name,
+        price: Number(product.price),
+        available: product.active,
+        imageUrl: product.imageUrl,
+        description: product.description,
+        modifierGroupIds: product.modifierGroups.map(mg => mg.groupId),
+      })
 
-    // Broadcast menu_updated event for full refresh
-    broadcastingService.broadcastMenuUpdated(venueId, {
-      updateType: 'PARTIAL_UPDATE',
-      productIds: [product.id],
-      categoryIds: [product.categoryId],
-      reason: 'ITEM_ADDED',
-    })
+      // Broadcast menu_updated event for full refresh
+      broadcastingService.broadcastMenuUpdated(venueId, {
+        updateType: 'PARTIAL_UPDATE',
+        productIds: [product.id],
+        categoryIds: [product.categoryId],
+        reason: 'ITEM_ADDED',
+      })
 
-    logger.info('🔌 Menu item created event broadcasted', {
-      venueId,
-      productId: product.id,
-      productName: product.name,
-      categoryId: product.categoryId,
-    })
+      logger.info('🔌 Menu item created event broadcasted', {
+        venueId,
+        productId: product.id,
+        productName: product.name,
+        categoryId: product.categoryId,
+      })
+    } catch (broadcastError) {
+      logger.error('Failed to broadcast product creation events', {
+        venueId,
+        productId: product.id,
+        error: broadcastError instanceof Error ? broadcastError.message : 'Unknown broadcast error',
+      })
+    }
   }
 
-  logAction({ venueId, action: 'PRODUCT_CREATED', entity: 'Product', entityId: product.id, data: { name: product.name } })
+  try {
+    logAction({ venueId, action: 'PRODUCT_CREATED', entity: 'Product', entityId: product.id, data: { name: product.name } })
+  } catch (logError) {
+    logger.warn('Failed to log PRODUCT_CREATED action', {
+      venueId,
+      productId: product.id,
+      error: logError instanceof Error ? logError.message : 'Unknown log error',
+    })
+  }
 
   return product
 }

@@ -175,6 +175,13 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                     },
                   },
                 },
+                // Sidebar visibility settings
+                settings: {
+                  select: {
+                    enableShifts: true,
+                    hiddenSidebarItems: true,
+                  },
+                },
               },
             },
           },
@@ -218,6 +225,12 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 module: { select: { code: true, name: true } },
               },
             },
+            settings: {
+              select: {
+                enableShifts: true,
+                hiddenSidebarItems: true,
+              },
+            },
           },
         })
 
@@ -240,6 +253,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           phone: venue.phone,
           organizationId: venue.organizationId,
           organization: venue.organization,
+          settings: venue.settings,
           permissions: DEFAULT_PERMISSIONS[StaffRole.SUPERADMIN] || [],
         }))
 
@@ -302,6 +316,8 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       // Organization info (needed for VenuesSwitcher grouping)
       organizationId?: string
       organization?: { id: string; name: string } | null
+      // Sidebar visibility settings
+      settings?: { enableShifts: boolean; hiddenSidebarItems: string[] } | null
     }
 
     // Check if user is a SUPERADMIN in any venue
@@ -330,6 +346,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       // Organization info (needed for PlayTelecom white-label and multi-venue orgs)
       organizationId: sv.venue.organizationId,
       organization: sv.venue.organization,
+      settings: sv.venue.settings,
     }))
 
     // Create a map of venue IDs that user already has a direct relationship with
@@ -400,6 +417,12 @@ export const getAuthStatus = async (req: Request, res: Response) => {
               },
             },
           },
+          settings: {
+            select: {
+              enableShifts: true,
+              hiddenSidebarItems: true,
+            },
+          },
         },
       })
 
@@ -424,6 +447,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         // Organization info (needed for VenuesSwitcher grouping)
         organizationId: venue.organizationId,
         organization: venue.organization,
+        settings: venue.settings,
       }))
 
       // Add all system venues to user's venues array (if not already there)
@@ -506,6 +530,12 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 },
               },
             },
+            settings: {
+              select: {
+                enableShifts: true,
+                hiddenSidebarItems: true,
+              },
+            },
           },
         })
 
@@ -530,6 +560,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           // Organization info (needed for VenuesSwitcher grouping)
           organizationId: venue.organizationId,
           organization: venue.organization,
+          settings: venue.settings,
         }))
 
         // Add all organization venues to user's venues array (if not already there)

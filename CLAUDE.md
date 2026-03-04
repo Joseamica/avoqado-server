@@ -37,7 +37,8 @@ Routes → Middleware → Controllers (thin) → Services (business logic) → P
 Multi-tenant: Organization → Venue → All data scoped by `venueId`.
 
 Services: `dashboard/` (admin), `tpv/` (POS terminals), `pos-sync/` (legacy SoftRestaurant), `sdk/` (e-commerce), `modules/` (feature
-flags), `pricing/` (MCC lookup), `serialized-inventory/` (unique barcodes), `access/` (permission resolution).
+flags), `pricing/` (MCC lookup), `serialized-inventory/` (unique barcodes), `access/` (permission resolution), `command-center/` (analytics
+dashboard), `dashboard/commission/` (sales goals, tiers, payouts, clawbacks).
 
 ## Blumon: TWO Separate Integrations
 
@@ -124,5 +125,6 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 | Industry config      | `docs/industry-config/README.md`                |
 | Business types/MCC   | `docs/BUSINESS_TYPES.md`                        |
 | Settlement incidents | `docs/features/SETTLEMENT_INCIDENTS.md`         |
+| Commissions/Goals    | `src/services/dashboard/commission/` (no doc yet)|
 | Datetime/timezone    | `docs/DATETIME_SYNC.md`                         |
 | Production checklist | `docs/PRODUCTION_READINESS_CHECKLIST.md`        |

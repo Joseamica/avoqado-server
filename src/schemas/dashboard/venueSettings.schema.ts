@@ -82,6 +82,9 @@ export const UpdateVenueSettingsSchema = z.object({
     tpvShowTipScreen: z.boolean().optional(),
     tpvShowReceiptScreen: z.boolean().optional(),
     tpvDefaultTipPercentage: z.number().int().min(0).max(100).nullable().optional(),
+
+    // Sidebar visibility (superadmin toggle per venue)
+    hiddenSidebarItems: z.array(z.string()).optional(),
   }),
 })
 

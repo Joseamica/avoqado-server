@@ -473,9 +473,7 @@ export async function sendLowStockAlertNotification(
           alertType,
         },
         priority: isOutOfStock ? NotificationPriority.URGENT : NotificationPriority.HIGH,
-        channels: isOutOfStock
-          ? [NotificationChannel.IN_APP, NotificationChannel.EMAIL] // Out of stock - use email too
-          : [NotificationChannel.IN_APP], // Low stock - just in-app
+        channels: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
       })
     }
 

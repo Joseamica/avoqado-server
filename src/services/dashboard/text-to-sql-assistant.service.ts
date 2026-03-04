@@ -2,7 +2,7 @@ import OpenAI from 'openai'
 import logger from '@/config/logger'
 import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { Prisma } from '@prisma/client'
+import { Prisma, ProductType, StaffRole } from '@prisma/client'
 import { AILearningService } from './ai-learning.service'
 import { SqlValidationService } from './sql-validation.service'
 import { SharedQueryService } from './shared-query.service'
@@ -20,6 +20,9 @@ import { QueryLimitsService } from './query-limits.service'
 import { SecurityAuditLoggerService } from './security-audit-logger.service'
 import { SecurityResponseService, SecurityViolationType } from './security-response.service'
 import { tokenBudgetService, TokenQueryType } from './token-budget.service'
+import { hasPermission } from '@/lib/permissions'
+import { CreateProductSchema } from '@/schemas/dashboard/menu.schema'
+import * as productService from './product.dashboard.service'
 
 interface TextToSqlQuery {
   message: string
@@ -113,6 +116,7 @@ interface TextToSqlResponse {
     violationType?: SecurityViolationType // Security: Type of violation detected
     warnings?: string[] // Semantic validation warnings
     userRole?: UserRole // User role for auditing
+    action?: CreateProductActionMetadata
   }
   suggestions?: string[]
   trainingDataId?: string
@@ -123,6 +127,56 @@ interface TextToSqlResponse {
     totalTokens: number
   }
 }
+
+interface CreateProductActionOption {
+  id: string
+  name: string
+}
+
+interface CreateProductActionDraft {
+  name?: string
+  price?: number
+  sku?: string
+  categoryId?: string
+  type?: ProductType
+  needsModifiers?: boolean
+  modifierGroupIds?: string[]
+}
+
+interface CreateProductActionPayload {
+  name?: string
+  price?: number | string
+  sku?: string
+  categoryId?: string
+  type?: ProductType
+  needsModifiers?: boolean
+  modifierGroupIds?: string[]
+}
+
+interface CreateProductActionMetadata {
+  type: 'create_product'
+  stage: 'collect' | 'created'
+  requiredFields: Array<'name' | 'price' | 'sku' | 'categoryId'>
+  missingFields: Array<'name' | 'price' | 'sku' | 'categoryId'>
+  draft: CreateProductActionDraft
+  categories: CreateProductActionOption[]
+  modifierGroups: CreateProductActionOption[]
+  createdProduct?: {
+    id: string
+    name: string
+    sku: string
+    categoryName: string
+    price: number
+  }
+}
+
+interface ParsedCreateProductActionCommand {
+  isCommand: boolean
+  payload?: CreateProductActionPayload
+  error?: string
+}
+
+const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
 
 interface SqlGenerationResult {
   sql: string
@@ -1030,6 +1084,39 @@ Ejemplos de respuestas CORRECTAS:
         sessionId,
       })
 
+      // Step 0.0: Handle structured chatbot action commands (MVP CRUD bridge)
+      const actionCommand = this.parseCreateProductActionCommand(query.message)
+      if (actionCommand.isCommand) {
+        if (actionCommand.error || !actionCommand.payload) {
+          const options = await this.getCreateProductActionOptions(query.venueId)
+          return {
+            response: actionCommand.error || 'No pude interpretar la solicitud de creación de producto.',
+            confidence: 0.95,
+            metadata: {
+              queryGenerated: false,
+              queryExecuted: false,
+              dataSourcesUsed: ['chatbot.create_product'],
+              action: {
+                type: 'create_product',
+                stage: 'collect',
+                requiredFields: ['name', 'price', 'sku', 'categoryId'],
+                missingFields: ['name', 'price', 'sku', 'categoryId'],
+                draft: {},
+                categories: options.categories,
+                modifierGroups: options.modifierGroups,
+              },
+            },
+            tokenUsage: {
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+            },
+          }
+        }
+
+        return await this.handleCreateProductExecutionAction(query, actionCommand.payload, startTime, sessionId)
+      }
+
       // ═══════════════════════════════════════════════════════════
       // SECURITY LEVEL 1: PRE-VALIDATION (Fast Fail - Block Before OpenAI)
       // ═══════════════════════════════════════════════════════════
@@ -1070,6 +1157,11 @@ Ejemplos de respuestas CORRECTAS:
             violationType: SecurityViolationType.PROMPT_INJECTION,
           },
         }
+      }
+
+      // Step 0.2: CRUD intent bridge (MVP) - create product with guided fields
+      if (this.detectCreateProductIntent(query.message)) {
+        return await this.handleCreateProductCollectAction(query, startTime, sessionId)
       }
 
       // Step 0: Check if this is a conversational message or a data query
@@ -1869,6 +1961,11 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         message: query.message,
       })
 
+      const userSafeMessage =
+        error instanceof AppError
+          ? error.message
+          : 'Hubo un problema procesando tu consulta. Por favor intenta nuevamente con una instrucción más específica.'
+
       // Record error interaction for learning (optional)
       let errorTrainingDataId: string | undefined
       try {
@@ -1876,9 +1973,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           venueId: query.venueId,
           userId: query.userId,
           userQuestion: query.message,
-          aiResponse:
-            'Hubo un problema procesando tu consulta. ' +
-            (error instanceof Error ? error.message : 'Por favor intenta con una pregunta más específica.'),
+          aiResponse: userSafeMessage,
           confidence: 0.1,
           executionTime: Date.now() - startTime,
           sessionId,
@@ -1888,9 +1983,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       return {
-        response:
-          'Hubo un problema procesando tu consulta. ' +
-          (error instanceof Error ? error.message : 'Por favor intenta con una pregunta más específica.'),
+        response: userSafeMessage,
         confidence: 0.1,
         metadata: {
           queryGenerated: false,
@@ -2812,6 +2905,765 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     } catch (error) {
       logger.warn('Cross-validation failed', { error })
       return null
+    }
+  }
+
+  private detectCreateProductIntent(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ')
+    if (!normalizedMessage) return false
+
+    const explicitCreatePatterns = [
+      /\b(crear|crea|agregar|agrega|anadir|registrar|dar de alta|create|add)\b.{0,30}\b(producto|product|item)s?\b/,
+      /\b(nuevo|nueva|new)\s+(producto|product|item)\b/,
+    ]
+
+    const hasCreateIntent = explicitCreatePatterns.some(pattern => pattern.test(normalizedMessage))
+    if (!hasCreateIntent) {
+      return false
+    }
+
+    // Avoid false positives from analytic/reporting questions that mention "producto".
+    const analyticsSignals = [
+      /\bcuant[oa]s?\b/,
+      /\bventas?\b/,
+      /\bvendi\w*\b/,
+      /\breporte\b/,
+      /\banalisis\b/,
+      /\bpromedio\b/,
+      /\btop\b/,
+      /\bmas vendido\b/,
+      /\bmas vendidos\b/,
+      /\bconsulta\b/,
+    ]
+
+    const hasAnalyticsSignal = analyticsSignals.some(pattern => pattern.test(normalizedMessage))
+    if (!hasAnalyticsSignal) {
+      return true
+    }
+
+    // If analytics words are present, require an explicit creation phrase.
+    return /\b(crear|crea|agregar|agrega|anadir|registrar|create|add)\b.{0,20}\b(producto|product|item)s?\b/.test(normalizedMessage)
+  }
+
+  private parseCreateProductActionCommand(message: string): ParsedCreateProductActionCommand {
+    if (!message.startsWith(CREATE_PRODUCT_ACTION_COMMAND_PREFIX)) {
+      return { isCommand: false }
+    }
+
+    const rawPayload = message.slice(CREATE_PRODUCT_ACTION_COMMAND_PREFIX.length).trim()
+    if (!rawPayload) {
+      return {
+        isCommand: true,
+        error: 'No recibí datos de producto para procesar.',
+      }
+    }
+
+    try {
+      const parsed = JSON.parse(rawPayload)
+      if (!parsed || typeof parsed !== 'object') {
+        return {
+          isCommand: true,
+          error: 'El formato de creación de producto es inválido.',
+        }
+      }
+
+      return {
+        isCommand: true,
+        payload: parsed as CreateProductActionPayload,
+      }
+    } catch (error) {
+      logger.warn('Failed to parse create product action command', { error })
+      return {
+        isCommand: true,
+        error: 'No pude interpretar los datos del producto. Intenta de nuevo.',
+      }
+    }
+  }
+
+  private normalizeTextForMatch(value: string): string {
+    return value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim()
+  }
+
+  private parsePriceCandidate(value: string): number | undefined {
+    if (!value) return undefined
+    const normalized = value.replace(/[^\d.,]/g, '').replace(',', '.')
+    if (!normalized) return undefined
+    const parsed = Number(normalized)
+    if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+    return Number(parsed.toFixed(2))
+  }
+
+  private extractProductNameFromMessage(message: string): string | undefined {
+    const quotedName = message.match(/["“](.+?)["”]/)
+    if (quotedName?.[1]) {
+      return quotedName[1].trim()
+    }
+
+    const namedPattern = /(?:llamad[oa]|nombre\s+de|named)\s+(.+?)(?=(?:,|\.|;|\bcon\b|\bprecio\b|\bsku\b|\bcategor[ií]a\b|$))/i
+    const namedMatch = message.match(namedPattern)
+    if (namedMatch?.[1]) {
+      return namedMatch[1].trim()
+    }
+
+    return undefined
+  }
+
+  private generateSuggestedSku(name: string): string {
+    const normalized = this.normalizeTextForMatch(name)
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[-_]+|[-_]+$/g, '')
+
+    const candidate = normalized.toUpperCase().slice(0, 24)
+    return candidate || `PROD-${Date.now().toString().slice(-6)}`
+  }
+
+  private extractCreateProductDraftFromMessage(message: string, categories: CreateProductActionOption[]): CreateProductActionDraft {
+    const draft: CreateProductActionDraft = {}
+    const lowerMessage = message.toLowerCase()
+
+    const extractedName = this.extractProductNameFromMessage(message)
+    if (extractedName) {
+      draft.name = extractedName
+      draft.sku = this.generateSuggestedSku(extractedName)
+    }
+
+    const skuMatch = message.match(/(?:sku)\s*(?:es|:)?\s*([a-z0-9_-]+)/i)
+    if (skuMatch?.[1]) {
+      draft.sku = skuMatch[1].toUpperCase()
+    }
+
+    const explicitPriceMatch = message.match(/(?:precio|price|cuesta|cost(?:ara|ará)?)\s*(?:de|es|:)?\s*\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)/i)
+    const currencyPriceMatch = message.match(/\$\s*([0-9]+(?:[.,][0-9]{1,2})?)/)
+    const parsedPrice = this.parsePriceCandidate(explicitPriceMatch?.[1] || currencyPriceMatch?.[1] || '')
+    if (parsedPrice !== undefined) {
+      draft.price = parsedPrice
+    }
+
+    const normalizedCategoryNames = categories.map(category => ({
+      ...category,
+      normalized: this.normalizeTextForMatch(category.name),
+    }))
+
+    const categoryByKeyword = message.match(/(?:categor[ií]a|category)\s*(?:de|es|:)?\s*["“]?([^"”,.;\n]+)["”]?/i)?.[1]
+    const categoryCandidate = categoryByKeyword?.trim()
+
+    if (categoryCandidate) {
+      const normalizedCandidate = this.normalizeTextForMatch(categoryCandidate)
+      const exactMatch = normalizedCategoryNames.find(category => category.normalized === normalizedCandidate)
+      const fuzzyMatch =
+        exactMatch ||
+        normalizedCategoryNames.find(
+          category => category.normalized.includes(normalizedCandidate) || normalizedCandidate.includes(category.normalized),
+        )
+
+      if (fuzzyMatch) {
+        draft.categoryId = fuzzyMatch.id
+      }
+    }
+
+    if (/\bsin\b[^.]{0,20}\b(modificadores?|extras?)\b/i.test(lowerMessage)) {
+      draft.needsModifiers = false
+    } else if (/\b(con|incluye|lleva)\b[^.]{0,20}\b(modificadores?|extras?)\b/i.test(lowerMessage)) {
+      draft.needsModifiers = true
+    }
+
+    draft.type = ProductType.FOOD
+    return draft
+  }
+
+  private getMissingCreateProductFields(draft: CreateProductActionDraft): Array<'name' | 'price' | 'sku' | 'categoryId'> {
+    const missing: Array<'name' | 'price' | 'sku' | 'categoryId'> = []
+
+    if (!draft.name?.trim()) {
+      missing.push('name')
+    }
+
+    if (typeof draft.price !== 'number' || !Number.isFinite(draft.price) || draft.price <= 0) {
+      missing.push('price')
+    }
+
+    if (!draft.sku || !/^[A-Za-z0-9_-]+$/.test(draft.sku)) {
+      missing.push('sku')
+    }
+
+    if (!draft.categoryId) {
+      missing.push('categoryId')
+    }
+
+    return missing
+  }
+
+  private async getCreateProductActionOptions(
+    venueId: string,
+  ): Promise<{ categories: CreateProductActionOption[]; modifierGroups: CreateProductActionOption[] }> {
+    const [categories, modifierGroups] = await Promise.all([
+      prisma.menuCategory.findMany({
+        where: {
+          venueId,
+          active: true,
+        },
+        select: {
+          id: true,
+          name: true,
+        },
+        orderBy: {
+          displayOrder: 'asc',
+        },
+      }),
+      prisma.modifierGroup.findMany({
+        where: {
+          venueId,
+          active: true,
+        },
+        select: {
+          id: true,
+          name: true,
+        },
+        orderBy: {
+          displayOrder: 'asc',
+        },
+      }),
+    ])
+
+    return {
+      categories,
+      modifierGroups,
+    }
+  }
+
+  private async resolveCustomPermissionsForRole(venueId: string, role: StaffRole): Promise<string[] | null> {
+    const customPermissionRecord = await prisma.venueRolePermission.findUnique({
+      where: {
+        venueId_role: {
+          venueId,
+          role,
+        },
+      },
+      select: {
+        permissions: true,
+      },
+    })
+
+    return (customPermissionRecord?.permissions as string[]) || null
+  }
+
+  private async handleCreateProductCollectAction(query: TextToSqlQuery, startTime: number, sessionId: string): Promise<TextToSqlResponse> {
+    const options = await this.getCreateProductActionOptions(query.venueId)
+    const draft = this.extractCreateProductDraftFromMessage(query.message, options.categories)
+    const missingFields = this.getMissingCreateProductFields(draft)
+    const requiredFields: Array<'name' | 'price' | 'sku' | 'categoryId'> = ['name', 'price', 'sku', 'categoryId']
+
+    let response: string
+    if (options.categories.length === 0) {
+      response = 'Puedo ayudarte a crear el producto, pero primero necesitas al menos una categoría de menú activa en este venue.'
+    } else if (missingFields.length === 0) {
+      response = 'Perfecto. Ya tengo todo para crear el producto. Revisa los valores en el formulario y confirma cuando estés listo.'
+    } else {
+      const fieldLabels: Record<'name' | 'price' | 'sku' | 'categoryId', string> = {
+        name: 'nombre',
+        price: 'precio',
+        sku: 'SKU',
+        categoryId: 'categoría',
+      }
+      const missingText = missingFields.map(field => fieldLabels[field]).join(', ')
+      response = `Perfecto. Para crear el producto me faltan estos campos obligatorios: ${missingText}. Completa el formulario y lo creo en cuanto confirmes.`
+    }
+
+    let trainingDataId: string | undefined
+    try {
+      trainingDataId = await this.learningService.recordChatInteraction({
+        venueId: query.venueId,
+        userId: query.userId,
+        userQuestion: query.message,
+        aiResponse: response,
+        confidence: 0.98,
+        executionTime: Date.now() - startTime,
+        rowsReturned: 0,
+        sessionId,
+      })
+    } catch (learningError) {
+      logger.warn('🧠 Failed to record create-product collect interaction:', learningError)
+    }
+
+    return {
+      response,
+      confidence: 0.98,
+      metadata: {
+        queryGenerated: false,
+        queryExecuted: false,
+        dataSourcesUsed: ['chatbot.create_product'],
+        action: {
+          type: 'create_product',
+          stage: 'collect',
+          requiredFields,
+          missingFields,
+          draft,
+          categories: options.categories,
+          modifierGroups: options.modifierGroups,
+        },
+      },
+      suggestions: ['Asigna un SKU corto y único', 'Selecciona la categoría correcta', 'Si aplica, agrega modificadores'],
+      trainingDataId,
+      tokenUsage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      },
+    }
+  }
+
+  private async handleCreateProductExecutionAction(
+    query: TextToSqlQuery,
+    payload: CreateProductActionPayload,
+    startTime: number,
+    sessionId: string,
+  ): Promise<TextToSqlResponse> {
+    const options = await this.getCreateProductActionOptions(query.venueId)
+    const role = (query.userRole as unknown as StaffRole) || StaffRole.VIEWER
+    const customPermissions = await this.resolveCustomPermissionsForRole(query.venueId, role)
+    const canCreateProducts = hasPermission(role, customPermissions, 'menu:create')
+
+    if (!canCreateProducts) {
+      return {
+        response: 'No tienes permisos para crear productos en este venue. Necesitas el permiso menu:create.',
+        confidence: 1,
+        metadata: {
+          queryGenerated: false,
+          queryExecuted: false,
+          dataSourcesUsed: ['chatbot.create_product'],
+          action: {
+            type: 'create_product',
+            stage: 'collect',
+            requiredFields: ['name', 'price', 'sku', 'categoryId'],
+            missingFields: ['name', 'price', 'sku', 'categoryId'],
+            draft: {},
+            categories: options.categories,
+            modifierGroups: options.modifierGroups,
+          },
+        },
+        tokenUsage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        },
+      }
+    }
+
+    const normalizedDraft: CreateProductActionDraft = {
+      name: typeof payload.name === 'string' ? payload.name.trim() : undefined,
+      price:
+        typeof payload.price === 'number'
+          ? payload.price
+          : typeof payload.price === 'string'
+            ? this.parsePriceCandidate(payload.price)
+            : undefined,
+      sku: typeof payload.sku === 'string' ? payload.sku.toUpperCase().trim() : undefined,
+      categoryId: typeof payload.categoryId === 'string' ? payload.categoryId.trim() : undefined,
+      type: payload.type || ProductType.FOOD,
+      needsModifiers: payload.needsModifiers ?? false,
+      modifierGroupIds: Array.isArray(payload.modifierGroupIds) ? payload.modifierGroupIds : [],
+    }
+
+    const missingFields = this.getMissingCreateProductFields(normalizedDraft)
+    if (missingFields.length > 0) {
+      const fieldLabels: Record<'name' | 'price' | 'sku' | 'categoryId', string> = {
+        name: 'nombre',
+        price: 'precio',
+        sku: 'SKU',
+        categoryId: 'categoría',
+      }
+
+      return {
+        response: `No pude crear el producto porque faltan campos obligatorios: ${missingFields.map(field => fieldLabels[field]).join(', ')}.`,
+        confidence: 0.95,
+        metadata: {
+          queryGenerated: false,
+          queryExecuted: false,
+          dataSourcesUsed: ['chatbot.create_product'],
+          action: {
+            type: 'create_product',
+            stage: 'collect',
+            requiredFields: ['name', 'price', 'sku', 'categoryId'],
+            missingFields,
+            draft: normalizedDraft,
+            categories: options.categories,
+            modifierGroups: options.modifierGroups,
+          },
+        },
+        tokenUsage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        },
+      }
+    }
+
+    const requestedModifierGroupIds = normalizedDraft.needsModifiers ? normalizedDraft.modifierGroupIds || [] : []
+    const uniqueModifierGroupIds = Array.from(new Set(requestedModifierGroupIds))
+
+    const validation = CreateProductSchema.safeParse({
+      params: { venueId: query.venueId },
+      body: {
+        name: normalizedDraft.name,
+        price: normalizedDraft.price,
+        sku: normalizedDraft.sku,
+        categoryId: normalizedDraft.categoryId,
+        type: normalizedDraft.type,
+        ...(uniqueModifierGroupIds.length > 0 ? { modifierGroupIds: uniqueModifierGroupIds } : {}),
+      },
+    })
+
+    if (!validation.success) {
+      const firstError = validation.error.issues[0]?.message || 'La información del producto no es válida.'
+
+      return {
+        response: `No pude crear el producto: ${firstError}`,
+        confidence: 0.9,
+        metadata: {
+          queryGenerated: false,
+          queryExecuted: false,
+          dataSourcesUsed: ['chatbot.create_product'],
+          action: {
+            type: 'create_product',
+            stage: 'collect',
+            requiredFields: ['name', 'price', 'sku', 'categoryId'],
+            missingFields,
+            draft: normalizedDraft,
+            categories: options.categories,
+            modifierGroups: options.modifierGroups,
+          },
+        },
+        tokenUsage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        },
+      }
+    }
+
+    const category = await prisma.menuCategory.findFirst({
+      where: {
+        id: validation.data.body.categoryId,
+        venueId: query.venueId,
+        active: true,
+      },
+      select: {
+        id: true,
+        name: true,
+      },
+    })
+
+    if (!category) {
+      return {
+        response: 'La categoría seleccionada no existe o no está activa para este venue.',
+        confidence: 0.95,
+        metadata: {
+          queryGenerated: false,
+          queryExecuted: false,
+          dataSourcesUsed: ['chatbot.create_product'],
+          action: {
+            type: 'create_product',
+            stage: 'collect',
+            requiredFields: ['name', 'price', 'sku', 'categoryId'],
+            missingFields: ['categoryId'],
+            draft: normalizedDraft,
+            categories: options.categories,
+            modifierGroups: options.modifierGroups,
+          },
+        },
+        tokenUsage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        },
+      }
+    }
+
+    if (uniqueModifierGroupIds.length > 0) {
+      const existingGroups = await prisma.modifierGroup.findMany({
+        where: {
+          id: { in: uniqueModifierGroupIds },
+          venueId: query.venueId,
+          active: true,
+        },
+        select: {
+          id: true,
+        },
+      })
+
+      if (existingGroups.length !== uniqueModifierGroupIds.length) {
+        return {
+          response: 'Uno o más grupos de modificadores no son válidos para este venue.',
+          confidence: 0.95,
+          metadata: {
+            queryGenerated: false,
+            queryExecuted: false,
+            dataSourcesUsed: ['chatbot.create_product'],
+            action: {
+              type: 'create_product',
+              stage: 'collect',
+              requiredFields: ['name', 'price', 'sku', 'categoryId'],
+              missingFields: [],
+              draft: normalizedDraft,
+              categories: options.categories,
+              modifierGroups: options.modifierGroups,
+            },
+          },
+          tokenUsage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+          },
+        }
+      }
+    }
+
+    const toCreateProductCollectResponse = (
+      responseMessage: string,
+      draft: CreateProductActionDraft,
+      collectMissingFields: Array<'name' | 'price' | 'sku' | 'categoryId'>,
+    ): TextToSqlResponse => ({
+      response: responseMessage,
+      confidence: 0.95,
+      metadata: {
+        queryGenerated: false,
+        queryExecuted: false,
+        dataSourcesUsed: ['chatbot.create_product'],
+        action: {
+          type: 'create_product',
+          stage: 'collect',
+          requiredFields: ['name', 'price', 'sku', 'categoryId'],
+          missingFields: collectMissingFields,
+          draft,
+          categories: options.categories,
+          modifierGroups: options.modifierGroups,
+        },
+      },
+      tokenUsage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      },
+    })
+
+    const requestedSku = validation.data.body.sku
+    const requestedPrice = Number(validation.data.body.price)
+    const requestedNameNormalized = this.normalizeTextForMatch(validation.data.body.name)
+    const requestedModifierGroupIdsSorted = [...uniqueModifierGroupIds].sort()
+
+    type ExistingProductBySku = Prisma.ProductGetPayload<{
+      select: {
+        id: true
+        name: true
+        sku: true
+        price: true
+        categoryId: true
+        type: true
+        modifierGroups: {
+          select: {
+            groupId: true
+          }
+        }
+      }
+    }>
+
+    const findExistingProductBySku = async (): Promise<ExistingProductBySku | null> =>
+      prisma.product.findFirst({
+        where: {
+          venueId: query.venueId,
+          sku: requestedSku,
+        },
+        select: {
+          id: true,
+          name: true,
+          sku: true,
+          price: true,
+          categoryId: true,
+          type: true,
+          modifierGroups: {
+            select: {
+              groupId: true,
+            },
+          },
+        },
+      })
+
+    const isEquivalentExistingProduct = (existingProduct: ExistingProductBySku): boolean => {
+      const existingModifierGroupIds = existingProduct.modifierGroups.map(group => group.groupId).sort()
+      const sameModifierGroups =
+        existingModifierGroupIds.length === requestedModifierGroupIdsSorted.length &&
+        existingModifierGroupIds.every((groupId, index) => groupId === requestedModifierGroupIdsSorted[index])
+
+      return (
+        this.normalizeTextForMatch(existingProduct.name) === requestedNameNormalized &&
+        Number(existingProduct.price).toFixed(2) === requestedPrice.toFixed(2) &&
+        existingProduct.categoryId === validation.data.body.categoryId &&
+        existingProduct.type === validation.data.body.type &&
+        sameModifierGroups
+      )
+    }
+
+    let productSummary: {
+      id: string
+      name: string
+      sku: string
+      categoryId: string
+      type: ProductType
+      price: number
+    } | null = null
+    let response = ''
+
+    const existingProductBySku = await findExistingProductBySku()
+
+    if (existingProductBySku) {
+      if (!isEquivalentExistingProduct(existingProductBySku)) {
+        return toCreateProductCollectResponse(
+          `Ya existe un producto con el SKU ${requestedSku} en este venue. Usa un SKU distinto para crearlo desde el chat.`,
+          normalizedDraft,
+          ['sku'],
+        )
+      }
+
+      productSummary = {
+        id: existingProductBySku.id,
+        name: existingProductBySku.name,
+        sku: existingProductBySku.sku,
+        categoryId: existingProductBySku.categoryId,
+        type: existingProductBySku.type,
+        price: Number(existingProductBySku.price),
+      }
+
+      response = `El producto "${productSummary.name}" ya existía con el SKU ${productSummary.sku}. Tomé la solicitud como confirmada.`
+    } else {
+      try {
+        const product = await productService.createProduct(query.venueId, {
+          name: validation.data.body.name,
+          price: validation.data.body.price,
+          sku: validation.data.body.sku,
+          categoryId: validation.data.body.categoryId,
+          type: validation.data.body.type,
+          modifierGroupIds: uniqueModifierGroupIds,
+        })
+
+        productSummary = {
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          categoryId: product.categoryId,
+          type: product.type,
+          price: Number(product.price),
+        }
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          const concurrentProduct = await findExistingProductBySku()
+          if (concurrentProduct && isEquivalentExistingProduct(concurrentProduct)) {
+            productSummary = {
+              id: concurrentProduct.id,
+              name: concurrentProduct.name,
+              sku: concurrentProduct.sku,
+              categoryId: concurrentProduct.categoryId,
+              type: concurrentProduct.type,
+              price: Number(concurrentProduct.price),
+            }
+
+            response = `El producto "${productSummary.name}" ya se había creado con el SKU ${productSummary.sku}. Tomé la solicitud como confirmada.`
+          } else {
+            return toCreateProductCollectResponse(
+              `Ya existe un producto con el SKU ${requestedSku} en este venue. Usa un SKU distinto para crearlo desde el chat.`,
+              normalizedDraft,
+              ['sku'],
+            )
+          }
+        } else {
+          throw error
+        }
+      }
+
+      if (!response) {
+        if (!productSummary) {
+          throw new AppError('No se pudo resolver el producto creado.', 500)
+        }
+
+        response = `Listo, creé el producto "${productSummary.name}" con SKU ${productSummary.sku} en la categoría "${category.name}" por ${new Intl.NumberFormat(
+          'es-MX',
+          {
+            style: 'currency',
+            currency: 'MXN',
+          },
+        ).format(productSummary.price)}.`
+      }
+    }
+
+    let trainingDataId: string | undefined
+    try {
+      if (!productSummary) {
+        throw new AppError('No se pudo preparar la respuesta de creación de producto.', 500)
+      }
+
+      trainingDataId = await this.learningService.recordChatInteraction({
+        venueId: query.venueId,
+        userId: query.userId,
+        userQuestion: query.message,
+        aiResponse: response,
+        confidence: 0.99,
+        executionTime: Date.now() - startTime,
+        rowsReturned: 1,
+        sessionId,
+      })
+    } catch (learningError) {
+      logger.warn('🧠 Failed to record create-product execution interaction:', learningError)
+    }
+
+    if (!productSummary) {
+      throw new AppError('No se pudo preparar la respuesta final del producto.', 500)
+    }
+
+    return {
+      response,
+      confidence: 0.99,
+      metadata: {
+        queryGenerated: false,
+        queryExecuted: true,
+        rowsReturned: 1,
+        executionTime: Date.now() - startTime,
+        dataSourcesUsed: ['chatbot.create_product', 'ProductService'],
+        action: {
+          type: 'create_product',
+          stage: 'created',
+          requiredFields: ['name', 'price', 'sku', 'categoryId'],
+          missingFields: [],
+          draft: {
+            name: productSummary.name,
+            price: productSummary.price,
+            sku: productSummary.sku,
+            categoryId: productSummary.categoryId,
+            type: productSummary.type,
+            needsModifiers: uniqueModifierGroupIds.length > 0,
+            modifierGroupIds: uniqueModifierGroupIds,
+          },
+          categories: options.categories,
+          modifierGroups: options.modifierGroups,
+          createdProduct: {
+            id: productSummary.id,
+            name: productSummary.name,
+            sku: productSummary.sku,
+            categoryName: category.name,
+            price: productSummary.price,
+          },
+        },
+      },
+      suggestions: ['Crear otro producto', 'Agregar inventario inicial', 'Asignar modificadores a otro producto'],
+      trainingDataId,
+      tokenUsage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      },
     }
   }
 

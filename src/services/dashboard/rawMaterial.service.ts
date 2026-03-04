@@ -697,14 +697,17 @@ async function checkAndCreateLowStockAlert(venueId: string, rawMaterialId: strin
         },
       })
 
-      await sendLowStockAlertNotification(
-        venueId,
-        rawMaterialId,
-        alertType,
-        rawMaterial.currentStock.toNumber(),
-        rawMaterial.unit,
-        rawMaterial.reorderPoint.toNumber(),
-      )
+      // Send notification only if the raw material has notifications enabled
+      if (rawMaterial.notifyOnLowStock) {
+        await sendLowStockAlertNotification(
+          venueId,
+          rawMaterialId,
+          alertType,
+          rawMaterial.currentStock.toNumber(),
+          rawMaterial.unit,
+          rawMaterial.reorderPoint.toNumber(),
+        )
+      }
     }
   }
 }

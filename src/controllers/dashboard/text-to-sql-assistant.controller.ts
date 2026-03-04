@@ -6,98 +6,50 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { UserRole } from '../../services/dashboard/table-access-control.service'
 
+const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
+
+const normalizeForSecurityCheck = (message: string): string => {
+  return message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
+const isCrudBridgeMessage = (message: string): boolean => {
+  if (message.startsWith(CREATE_PRODUCT_ACTION_COMMAND_PREFIX)) {
+    return true
+  }
+
+  const normalized = normalizeForSecurityCheck(message)
+  return /\b(crear|crea|agregar|agrega|anadir|registrar|dar de alta|create|add|nuevo|nueva|new)\b.{0,30}\b(producto|product|item)s?\b/.test(
+    normalized,
+  )
+}
+
 /**
  * Detecta si una consulta contiene información sensible que requiere rol SUPERADMIN
  */
 const isSensitiveQuery = (message: string): boolean => {
-  const sensitiveIndicators = [
-    // User/Role management queries
-    'roles',
-    'role',
-    'usuario',
-    'usuarios',
-    'user',
-    'users',
-    'staff',
-    'empleado',
-    'empleados',
-    'admin',
-    'administrador',
-    'superadmin',
-    'owner',
-    'propietario',
-    'manager',
-    'gerente',
+  const normalized = normalizeForSecurityCheck(message)
+  const sensitivePatterns = [
+    // Account/permission model
+    /\b(superadmin|owner|propietario|admin|administrador(?:es)?)\b/,
+    /\b(rol|roles|role|permissions?|permisos?)\b/,
+    /\b(usuarios?|users?|staff|empleados?)\b/,
 
-    // System/Organization queries
-    'organización',
-    'organizacion',
-    'organization',
-    'sistema',
-    'system',
-    'configuración',
-    'configuration',
-    'permisos',
-    'permissions',
-    'acceso',
-    'access',
-    'seguridad',
-    'security',
+    // System internals
+    /\b(base de datos|database|schema|esquema|tablas?|tables?|columnas?|columns?)\b/,
+    /\b(configuracion|configuration|acceso|access|seguridad|security)\b/,
 
-    // Database/Technical queries
-    'tabla',
-    'tablas',
-    'table',
-    'tables',
-    'esquema',
-    'schema',
-    'base de datos',
-    'database',
-    'estructura',
-    'structure',
-    'columna',
-    'columnas',
-    'column',
-    'columns',
+    // Credentials/secrets
+    /\b(password|contrasena|api[\s_-]*key|apikey|secret|secreto|credenciales?|credentials|access[\s_-]*token|jwt)\b/,
 
-    // Sensitive business data
-    'contraseña',
-    'password',
-    'token',
-    'api',
-    'clave',
-    'key',
-    'secret',
-    'secreto',
-    'credenciales',
-    'credentials',
-    'login',
-    'sesión',
-    'session',
-
-    // Financial/Audit queries
-    'audit',
-    'auditoria',
-    'log',
-    'logs',
-    'historial completo',
-    'todos los registros',
-    'información confidencial',
-    'datos sensibles',
-    'privado',
-    'private',
-
-    // System queries that could reveal architecture
-    'cuántos',
-    'cuantos',
-    'todos los',
-    'all',
-    'lista completa',
-    'complete list',
+    // Audit/compliance exports
+    /\b(auditoria|audit|logs?|historial completo|informacion confidencial|datos sensibles)\b/,
   ]
 
-  const lowerMessage = message.toLowerCase().trim()
-  return sensitiveIndicators.some(indicator => lowerMessage.includes(indicator))
+  return sensitivePatterns.some(pattern => pattern.test(normalized))
 }
 
 /**
@@ -113,6 +65,8 @@ const hasPermissionForSensitiveQuery = (userRole: string): boolean => {
 export const processTextToSqlQuery = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { message, conversationHistory, venueSlug, userId, includeVisualization, referencesContext }: AssistantQueryDto = req.body
+    const sensitiveQuery = isSensitiveQuery(message)
+    const crudBridgeMessage = isCrudBridgeMessage(message)
 
     // Verificar que el usuario esté autenticado
     if (!req.authContext?.userId || !req.authContext?.venueId || !req.authContext?.role) {
@@ -154,11 +108,12 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
     }
 
     // Verificar permisos para consultas sensibles
-    if (isSensitiveQuery(message) && !hasPermissionForSensitiveQuery(req.authContext.role)) {
+    if (sensitiveQuery && !crudBridgeMessage && !hasPermissionForSensitiveQuery(req.authContext.role)) {
       logger.warn('🚨 Intento de acceso a datos sensibles bloqueado', {
         userId: req.authContext.userId,
         venueId: req.authContext.venueId,
         role: req.authContext.role,
+        crudBridgeMessage,
         query: message.substring(0, 100), // Solo los primeros 100 caracteres por seguridad
       })
 
@@ -173,7 +128,8 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       userId: req.authContext.userId,
       role: req.authContext.role,
       messageLength: message.length,
-      isSensitive: isSensitiveQuery(message),
+      isSensitive: sensitiveQuery,
+      isCrudBridgeMessage: crudBridgeMessage,
       timestamp: new Date().toISOString(),
     })
 
@@ -200,7 +156,8 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       queryExecuted: response.metadata.queryExecuted,
       rowsReturned: response.metadata.rowsReturned,
       executionTime: response.metadata.executionTime,
-      isSensitive: isSensitiveQuery(message),
+      isSensitive: sensitiveQuery,
+      isCrudBridgeMessage: crudBridgeMessage,
     })
 
     // Respuesta exitosa con metadatos de consulta SQL
@@ -216,6 +173,10 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
 
     if (metadata && 'bulletproofValidation' in metadata) {
       sanitizedMetadata.bulletproofValidation = (metadata as any).bulletproofValidation
+    }
+
+    if (metadata && 'action' in metadata) {
+      sanitizedMetadata.action = (metadata as any).action
     }
 
     const includeDebugInfo = process.env.NODE_ENV !== 'production' && req.authContext.role === 'SUPERADMIN'
