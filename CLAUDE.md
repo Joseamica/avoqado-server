@@ -105,26 +105,26 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 
 ### Full reference (`docs/`)
 
-| Topic                | File                                            |
-| -------------------- | ----------------------------------------------- |
-| All docs index       | `docs/README.md`                                |
-| Architecture         | `docs/ARCHITECTURE_OVERVIEW.md`                 |
-| Database schema      | `docs/DATABASE_SCHEMA.md`                       |
-| Permissions system   | `docs/PERMISSIONS_SYSTEM.md`                    |
-| Blumon TPV           | `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`     |
-| Blumon E-commerce    | `docs/blumon-ecommerce/REFACTORING_COMPLETE.md` |
-| Payment architecture | `docs/PAYMENT_ARCHITECTURE.md`                  |
-| Stripe               | `docs/STRIPE_INTEGRATION.md`                    |
-| Inventory (FIFO)     | `docs/INVENTORY_REFERENCE.md`                   |
-| Serialized inventory | `docs/features/SERIALIZED_INVENTORY.md`         |
-| Chatbot/Text-to-SQL  | `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md`         |
-| Terminal IDs         | `docs/TERMINAL_IDENTIFICATION.md`               |
-| TPV commands         | `docs/TPV_COMMAND_SYSTEM.md`                    |
-| Team invitations     | `docs/features/TEAM_INVITATIONS.md`             |
-| Login scenarios      | `docs/features/LOGIN_SCENARIOS.md`              |
-| Industry config      | `docs/industry-config/README.md`                |
-| Business types/MCC   | `docs/BUSINESS_TYPES.md`                        |
-| Settlement incidents | `docs/features/SETTLEMENT_INCIDENTS.md`         |
-| Commissions/Goals    | `src/services/dashboard/commission/` (no doc yet)|
-| Datetime/timezone    | `docs/DATETIME_SYNC.md`                         |
-| Production checklist | `docs/PRODUCTION_READINESS_CHECKLIST.md`        |
+| Topic                | File                                              |
+| -------------------- | ------------------------------------------------- |
+| All docs index       | `docs/README.md`                                  |
+| Architecture         | `docs/ARCHITECTURE_OVERVIEW.md`                   |
+| Database schema      | `docs/DATABASE_SCHEMA.md`                         |
+| Permissions system   | `docs/PERMISSIONS_SYSTEM.md`                      |
+| Blumon TPV           | `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`       |
+| Blumon E-commerce    | `docs/blumon-ecommerce/REFACTORING_COMPLETE.md`   |
+| Payment architecture | `docs/PAYMENT_ARCHITECTURE.md`                    |
+| Stripe               | `docs/STRIPE_INTEGRATION.md`                      |
+| Inventory (FIFO)     | `docs/INVENTORY_REFERENCE.md`                     |
+| Serialized inventory | `docs/features/SERIALIZED_INVENTORY.md`           |
+| Chatbot/Text-to-SQL  | `docs/CHATBOT_TEXT_TO_SQL_REFERENCE.md`           |
+| Terminal IDs         | `docs/TERMINAL_IDENTIFICATION.md`                 |
+| TPV commands         | `docs/TPV_COMMAND_SYSTEM.md`                      |
+| Team invitations     | `docs/features/TEAM_INVITATIONS.md`               |
+| Login scenarios      | `docs/features/LOGIN_SCENARIOS.md`                |
+| Industry config      | `docs/industry-config/README.md`                  |
+| Business types/MCC   | `docs/BUSINESS_TYPES.md`                          |
+| Settlement incidents | `docs/features/SETTLEMENT_INCIDENTS.md`           |
+| Commissions/Goals    | `src/services/dashboard/commission/` (no doc yet) |
+| Datetime/timezone    | `docs/DATETIME_SYNC.md`                           |
+| Production checklist | `docs/PRODUCTION_READINESS_CHECKLIST.md`          |

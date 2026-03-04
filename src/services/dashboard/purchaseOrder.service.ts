@@ -15,8 +15,7 @@ import { createStockBatch } from './fifoBatch.service'
 import { sendPurchaseOrderEmail } from '../resend.service'
 import logger from '@/config/logger'
 import PDFDocument from 'pdfkit'
-import { getLabelTemplate, calculateLabelPosition } from '../labels/labelTemplates'
-import { generateBarcode, getRecommendedBarcodeFormat } from '../labels/barcodeGenerator'
+import { renderLabelsPdf, getUnitAbbreviation, type LabelItem } from '../labels/labelPdfRenderer'
 import { logAction } from './activity-log.service'
 
 async function getStaffSummary(staffId?: string | null) {
@@ -1172,180 +1171,27 @@ export async function generateLabels(
     throw new AppError('Purchase order not found', 404)
   }
 
-  // 2. Filter and map items according to config
-  const selectedItems = purchaseOrder.items
+  // 2. Filter and map items to LabelItem shape
+  const labelItems: LabelItem[] = purchaseOrder.items
     .filter(item => config.items.some(i => i.itemId === item.id))
     .map(item => {
       const configItem = config.items.find(i => i.itemId === item.id)!
       return {
-        ...item,
+        name: item.rawMaterial.name,
+        sku: item.rawMaterial.sku,
+        gtin: item.rawMaterial.gtin ?? null,
+        price: item.unitPrice?.toString() ?? null,
+        unit: item.rawMaterial.unit,
         labelQuantity: configItem.quantity,
       }
     })
 
-  if (selectedItems.length === 0) {
+  if (labelItems.length === 0) {
     throw new AppError('No items selected for label generation', 400)
   }
 
-  // 3. Get label template
-  const labelTemplate = getLabelTemplate(config.labelType)
-
-  // 4. Create PDF document
-  const doc = new PDFDocument({
-    size: labelTemplate.pageSize,
-    margin: 0,
-  })
-
-  const chunks: Buffer[] = []
-  doc.on('data', (chunk: Buffer) => chunks.push(chunk))
-
-  let labelIndex = 0
-  let totalLabelsGenerated = 0
-
-  // 5. Generate labels for each item
-  for (const item of selectedItems) {
-    for (let i = 0; i < item.labelQuantity; i++) {
-      // Calculate position on page
-      const position = calculateLabelPosition(labelIndex, labelTemplate)
-
-      let yOffset = position.y + 5
-
-      // Generate barcode if SKU is available
-      const barcodeData = item.rawMaterial.sku
-
-      if (barcodeData && barcodeData.trim() !== '') {
-        try {
-          const barcodeFormat = getRecommendedBarcodeFormat(barcodeData)
-          const barcodePNG = await generateBarcode({
-            code: barcodeData,
-            format: barcodeFormat,
-            width: Math.floor(labelTemplate.width / 2.83465), // Convert points to mm
-            height: 10,
-            includeText: true,
-          })
-
-          // Add barcode image to label
-          doc.image(barcodePNG, position.x + 5, yOffset, {
-            fit: [labelTemplate.width - 10, 30],
-          })
-
-          yOffset += 35
-        } catch (error) {
-          logger.error('Error generating barcode:', error)
-          // Continue without barcode
-        }
-      }
-
-      // Add details based on config
-      if (config.details.itemName) {
-        doc
-          .fontSize(8)
-          .font('Helvetica-Bold')
-          .text(item.rawMaterial.name, position.x + 5, yOffset, {
-            width: labelTemplate.width - 10,
-            ellipsis: true,
-          })
-        yOffset += 10
-      }
-
-      if (config.details.sku && item.rawMaterial.sku) {
-        doc
-          .fontSize(7)
-          .font('Helvetica')
-          .text(`SKU: ${item.rawMaterial.sku}`, position.x + 5, yOffset)
-        yOffset += 9
-      }
-
-      if (config.details.price) {
-        doc
-          .fontSize(9)
-          .font('Helvetica-Bold')
-          .text(`$${item.unitPrice}`, position.x + 5, yOffset)
-        yOffset += 10
-      }
-
-      if (config.details.unitAbbr && item.rawMaterial.unit) {
-        const unitText = getUnitAbbreviation(item.rawMaterial.unit)
-        doc
-          .fontSize(7)
-          .font('Helvetica')
-          .text(unitText, position.x + 5, yOffset)
-      }
-
-      labelIndex++
-      totalLabelsGenerated++
-
-      // Add new page if needed
-      if (labelIndex % labelTemplate.labelsPerPage === 0 && i < item.labelQuantity - 1) {
-        doc.addPage()
-        labelIndex = 0
-      }
-    }
-  }
-
-  // 6. Finalize PDF
-  doc.end()
-
-  // 7. Wait for PDF to finish and return buffer
-  const pdfBuffer = await new Promise<Buffer>(resolve => {
-    doc.on('end', () => {
-      resolve(Buffer.concat(chunks))
-    })
-  })
-
-  return {
-    pdfBuffer,
-    totalLabels: totalLabelsGenerated,
-  }
-}
-
-/**
- * Get unit abbreviation for labels
- */
-function getUnitAbbreviation(unit: Unit): string {
-  const abbreviations: Record<Unit, string> = {
-    // Weight units
-    GRAM: 'g',
-    KILOGRAM: 'kg',
-    MILLIGRAM: 'mg',
-    POUND: 'lb',
-    OUNCE: 'oz',
-    TON: 't',
-    // Volume units - Liquid
-    MILLILITER: 'ml',
-    LITER: 'L',
-    GALLON: 'gal',
-    QUART: 'qt',
-    PINT: 'pt',
-    CUP: 'cup',
-    FLUID_OUNCE: 'fl oz',
-    TABLESPOON: 'tbsp',
-    TEASPOON: 'tsp',
-    // Count units
-    UNIT: 'ud',
-    PIECE: 'pz',
-    DOZEN: 'dz',
-    CASE: 'caja',
-    BOX: 'caja',
-    BAG: 'bolsa',
-    BOTTLE: 'bot',
-    CAN: 'lata',
-    JAR: 'frasco',
-    // Length units
-    METER: 'm',
-    CENTIMETER: 'cm',
-    MILLIMETER: 'mm',
-    INCH: 'in',
-    FOOT: 'ft',
-    // Temperature units
-    CELSIUS: '°C',
-    FAHRENHEIT: '°F',
-    // Time units
-    MINUTE: 'min',
-    HOUR: 'h',
-    DAY: 'd',
-  }
-  return abbreviations[unit] || unit
+  // 3. Use shared renderer
+  return renderLabelsPdf(labelItems, config)
 }
 
 /**

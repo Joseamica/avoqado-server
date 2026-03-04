@@ -944,6 +944,34 @@ export const GenerateLabelsSchema = z.object({
   }),
 })
 
+export const GenerateProductLabelsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+  }),
+  body: z.object({
+    labelType: z.string().min(1, 'El tipo de etiqueta es requerido'),
+    barcodeFormat: z.enum(['SKU', 'GTIN', 'NONE'], {
+      errorMap: () => ({ message: 'El formato del código de barras debe ser SKU, GTIN o Ninguno' }),
+    }),
+    details: z.object({
+      sku: z.boolean(),
+      gtin: z.boolean(),
+      variantName: z.boolean(),
+      price: z.boolean(),
+      itemName: z.boolean(),
+      unitAbbr: z.boolean(),
+    }),
+    items: z
+      .array(
+        z.object({
+          productId: z.string().cuid({ message: 'El ID del producto no es válido' }),
+          quantity: z.number().int().min(1, 'La cantidad debe ser al menos 1'),
+        }),
+      )
+      .min(1, 'Se requiere al menos un artículo'),
+  }),
+})
+
 // Type exports for TypeScript
 export type CreateRawMaterialDto = z.infer<typeof CreateRawMaterialSchema>['body']
 export type UpdateRawMaterialDto = z.infer<typeof UpdateRawMaterialSchema>['body']

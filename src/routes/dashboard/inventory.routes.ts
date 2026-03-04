@@ -12,6 +12,7 @@ import * as alertController from '../../controllers/dashboard/inventory/alert.co
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
 import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
+import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
 
 // Import schemas
 import {
@@ -42,6 +43,7 @@ import {
   ReceiveAllItemsSchema,
   ReceiveNoItemsSchema,
   GenerateLabelsSchema,
+  GenerateProductLabelsSchema,
   GetAlertsQuerySchema,
   AcknowledgeAlertSchema,
   ResolveAlertSchema,
@@ -736,6 +738,24 @@ router.post(
  *     summary: Generate PDF for purchase order
  */
 router.get('/purchase-orders/:purchaseOrderId/pdf', checkPermission('inventory:read'), purchaseOrderController.generatePDF)
+
+// ===========================================
+// PRODUCT LABELS ROUTES
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/product-labels:
+ *   post:
+ *     tags: [Inventory - Product Labels]
+ *     summary: Generate barcode labels for products
+ */
+router.post(
+  '/product-labels',
+  checkPermission('inventory:read'),
+  validateRequest(GenerateProductLabelsSchema),
+  productLabelController.generateProductLabels,
+)
 
 // ===========================================
 // ALERTS ROUTES
