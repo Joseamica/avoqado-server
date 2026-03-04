@@ -76,62 +76,35 @@ interface StoredSalesGoal {
 // ==========================================
 
 /**
- * Get or create VenueModule for SERIALIZED_INVENTORY
+ * Get or create VenueModule for COMMISSIONS.
+ * No org-level enablement required — commissions/goals are available to all venues.
+ * Access is controlled by permissions (commissions:read, etc.), not module gating.
  */
 async function getOrCreateVenueModule(venueId: string) {
-  // Find the SERIALIZED_INVENTORY module
   const module = await prisma.module.findUnique({
-    where: { code: MODULE_CODES.SERIALIZED_INVENTORY },
+    where: { code: MODULE_CODES.COMMISSIONS },
   })
 
   if (!module) {
-    throw new BadRequestError('SERIALIZED_INVENTORY module not found')
+    throw new BadRequestError('COMMISSIONS module not found in database')
   }
 
-  // Find or create VenueModule
-  let venueModule = await prisma.venueModule.findUnique({
+  const venueModule = await prisma.venueModule.upsert({
     where: {
       venueId_moduleId: {
         venueId,
         moduleId: module.id,
       },
     },
+    update: {},
+    create: {
+      venueId,
+      moduleId: module.id,
+      enabled: true,
+      config: { salesGoals: [] },
+      enabledBy: 'system',
+    },
   })
-
-  if (!venueModule) {
-    // Check if module is enabled at org level
-    const venue = await prisma.venue.findUnique({
-      where: { id: venueId },
-      select: { organizationId: true },
-    })
-
-    if (!venue) {
-      throw new NotFoundError('Venue not found')
-    }
-
-    const orgModule = await prisma.organizationModule.findFirst({
-      where: {
-        organizationId: venue.organizationId,
-        moduleId: module.id,
-        enabled: true,
-      },
-    })
-
-    if (!orgModule) {
-      throw new BadRequestError('SERIALIZED_INVENTORY module is not enabled for this venue')
-    }
-
-    // Create VenueModule to store venue-specific config (like goals)
-    venueModule = await prisma.venueModule.create({
-      data: {
-        venueId,
-        moduleId: module.id,
-        enabled: true,
-        config: { salesGoals: [] },
-        enabledBy: 'system',
-      },
-    })
-  }
 
   return venueModule
 }

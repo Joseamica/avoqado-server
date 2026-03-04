@@ -148,7 +148,7 @@ async function getOrgIdFromVenue(venueId: string): Promise<string> {
 export async function getEffectiveGoals(venueId: string): Promise<ResolvedGoal[]> {
   // 1. Check venue-level goals
   const module = await prisma.module.findUnique({
-    where: { code: MODULE_CODES.SERIALIZED_INVENTORY },
+    where: { code: MODULE_CODES.COMMISSIONS },
   })
 
   if (module) {
