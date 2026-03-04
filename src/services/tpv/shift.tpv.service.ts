@@ -52,6 +52,13 @@ interface ShiftSummaryResponse {
     label: string
     value: number
   }>
+  staffSales: Array<{
+    staffId: string
+    name: string
+    totalSales: number
+    totalOrders: number
+    totalTips: number
+  }>
 }
 
 /**
@@ -618,6 +625,9 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
   // Create a map to track tips per staff member
   const staffTipsMap: Map<string, { name: string; amount: number; count: number }> = new Map()
 
+  // Create a map to track sales per staff member
+  const staffSalesMap: Map<string, { name: string; totalSales: number; totalOrders: number; totalTips: number }> = new Map()
+
   // Create maps for payment methods and time-series data
   const paymentMethodMap: Map<string, number> = new Map()
   const allPayments: Array<{ createdAt: Date; amount: number }> = []
@@ -645,6 +655,20 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
           createdAt: payment.createdAt,
           amount: paymentAmount,
         })
+
+        // Track per-staff sales
+        const pStaffId = payment.processedById
+        if (pStaffId) {
+          const sName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Unknown'
+          if (staffSalesMap.has(pStaffId)) {
+            const d = staffSalesMap.get(pStaffId)!
+            d.totalSales += paymentAmount
+            d.totalTips += tipAmount
+            d.totalOrders += 1
+          } else {
+            staffSalesMap.set(pStaffId, { name: sName, totalSales: paymentAmount, totalTips: tipAmount, totalOrders: 1 })
+          }
+        }
       }
 
       if (!isNaN(tipAmount)) {
@@ -687,6 +711,20 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
         createdAt: payment.createdAt,
         amount: paymentAmount,
       })
+
+      // Track per-staff sales (orphan payments)
+      const oStaffId = payment.processedById
+      if (oStaffId) {
+        const sName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Unknown'
+        if (staffSalesMap.has(oStaffId)) {
+          const d = staffSalesMap.get(oStaffId)!
+          d.totalSales += paymentAmount
+          d.totalTips += tipAmount
+          d.totalOrders += 1
+        } else {
+          staffSalesMap.set(oStaffId, { name: sName, totalSales: paymentAmount, totalTips: tipAmount, totalOrders: 1 })
+        }
+      }
     }
 
     if (!isNaN(tipAmount)) {
@@ -773,6 +811,15 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
     waiterTips: waiterTips,
     paymentMethods: paymentMethodBreakdown,
     salesTrend: salesTrend,
+    staffSales: Array.from(staffSalesMap.entries())
+      .map(([id, d]) => ({
+        staffId: id,
+        name: d.name,
+        totalSales: +d.totalSales.toFixed(2),
+        totalOrders: d.totalOrders,
+        totalTips: +d.totalTips.toFixed(2),
+      }))
+      .sort((a, b) => b.totalSales - a.totalSales),
   }
 }
 
