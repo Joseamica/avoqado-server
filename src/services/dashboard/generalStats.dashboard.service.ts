@@ -3,7 +3,8 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
 import { SharedQueryService } from './shared-query.service'
-import { parseDateRange } from '../../utils/datetime'
+import { parseDateRange, DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { DateTime } from 'luxon'
 
 export async function getGeneralStatsData(venueId: string, filters: GeneralStatsQuery = {}): Promise<GeneralStatsResponse> {
   // Validate venue exists
@@ -99,7 +100,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   const products = Array.from(productsMap.values())
 
   // Generate extra metrics
-  const extraMetrics = await generateExtraMetrics(venueId, fromDate, toDate)
+  const extraMetrics = await generateExtraMetrics(venueId, fromDate, toDate, venue.timezone)
 
   // Transform data to match legacy format
   const transformedPayments = validPayments.map(payment => ({
@@ -136,7 +137,7 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
   }
 }
 
-async function generateExtraMetrics(venueId: string, fromDate: Date, toDate: Date) {
+async function generateExtraMetrics(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
   // Fetch table performance data
   const tablePerformance = await generateTablePerformance(venueId, fromDate, toDate)
 
@@ -147,7 +148,7 @@ async function generateExtraMetrics(venueId: string, fromDate: Date, toDate: Dat
   const productProfitability = await generateProductProfitability(venueId, fromDate, toDate)
 
   // Generate peak hours data
-  const peakHoursData = await generatePeakHoursData(venueId, fromDate, toDate)
+  const peakHoursData = await generatePeakHoursData(venueId, fromDate, toDate, timezone)
 
   // Generate weekly trends data
   const weeklyTrendsData = await generateWeeklyTrendsData(venueId, fromDate, toDate)
@@ -306,7 +307,8 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
   })
 }
 
-async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Date) {
+async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
   const orders = await prisma.order.findMany({
     where: {
       venueId,
@@ -321,7 +323,7 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   const hourlyData = new Map<number, { sales: number; transactions: number }>()
 
   orders.forEach(order => {
-    const hour = order.createdAt.getHours()
+    const hour = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).hour
     const existing = hourlyData.get(hour)
 
     if (existing) {
@@ -492,23 +494,23 @@ export async function getChartData(venueId: string, chartType: string, filters: 
       return await getSalesByPaymentMethodData(venueId, dateFilter)
 
     case 'peak-hours':
-      return await generatePeakHoursData(venueId, fromDate, toDate)
+      return await generatePeakHoursData(venueId, fromDate, toDate, venue.timezone)
 
     case 'weekly-trends':
       return await generateWeeklyTrendsData(venueId, fromDate, toDate)
 
     // Strategic Analytics Chart Types
     case 'revenue-trends':
-      return await getRevenueTrendsData(venueId, fromDate, toDate)
+      return await getRevenueTrendsData(venueId, fromDate, toDate, venue.timezone)
 
     case 'aov-trends':
-      return await getAOVTrendsData(venueId, fromDate, toDate)
+      return await getAOVTrendsData(venueId, fromDate, toDate, venue.timezone)
 
     case 'order-frequency':
-      return await getOrderFrequencyData(venueId, fromDate, toDate)
+      return await getOrderFrequencyData(venueId, fromDate, toDate, venue.timezone)
 
     case 'customer-satisfaction':
-      return await getCustomerSatisfactionData(venueId, fromDate, toDate)
+      return await getCustomerSatisfactionData(venueId, fromDate, toDate, venue.timezone)
 
     case 'kitchen-performance':
       return await getKitchenPerformanceData(venueId, fromDate, toDate)
@@ -669,7 +671,8 @@ function generatePaymentMethodsData(payments: any[]) {
 }
 
 // Strategic Analytics Chart Data Functions
-async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Date) {
+async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
   const orders = await prisma.order.findMany({
     where: {
       venueId,
@@ -690,7 +693,7 @@ async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Dat
   const revenueByDate = new Map<string, number>()
 
   orders.forEach(order => {
-    const dateStr = order.createdAt.toISOString().split('T')[0]
+    const dateStr = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
     const revenue = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
     revenueByDate.set(dateStr, (revenueByDate.get(dateStr) || 0) + revenue)
   })
@@ -699,17 +702,15 @@ async function getRevenueTrendsData(venueId: string, fromDate: Date, toDate: Dat
     .map(([date, amount]) => ({
       date,
       revenue: amount,
-      formattedDate: new Date(date).toLocaleDateString('es-ES', {
-        month: 'short',
-        day: 'numeric',
-      }),
+      formattedDate: DateTime.fromISO(date, { zone: tz }).toLocaleString({ month: 'short', day: 'numeric' }, { locale: 'es' }),
     }))
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+    .sort((a, b) => a.date.localeCompare(b.date))
 
   return { revenue }
 }
 
-async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
+async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
   const orders = await prisma.order.findMany({
     where: {
       venueId,
@@ -730,7 +731,7 @@ async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
   const aovByDate = new Map<string, { total: number; count: number }>()
 
   orders.forEach(order => {
-    const dateStr = order.createdAt.toISOString().split('T')[0]
+    const dateStr = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
     const revenue = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
 
     if (revenue > 0) {
@@ -746,17 +747,15 @@ async function getAOVTrendsData(venueId: string, fromDate: Date, toDate: Date) {
       date,
       aov: data.count > 0 ? data.total / data.count : 0,
       orderCount: data.count,
-      formattedDate: new Date(date).toLocaleDateString('es-ES', {
-        month: 'short',
-        day: 'numeric',
-      }),
+      formattedDate: DateTime.fromISO(date, { zone: tz }).toLocaleString({ month: 'short', day: 'numeric' }, { locale: 'es' }),
     }))
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+    .sort((a, b) => a.date.localeCompare(b.date))
 
   return { aov }
 }
 
-async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Date) {
+async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
   const orders = await prisma.order.findMany({
     where: {
       venueId,
@@ -771,7 +770,7 @@ async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Da
   const frequencyByHour = new Map<number, number>()
 
   orders.forEach(order => {
-    const hour = order.createdAt.getHours()
+    const hour = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).hour
     frequencyByHour.set(hour, (frequencyByHour.get(hour) || 0) + 1)
   })
 
@@ -786,7 +785,8 @@ async function getOrderFrequencyData(venueId: string, fromDate: Date, toDate: Da
   return { frequency }
 }
 
-async function getCustomerSatisfactionData(venueId: string, fromDate: Date, toDate: Date) {
+async function getCustomerSatisfactionData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
   const reviews = await prisma.review.findMany({
     where: {
       venueId,
@@ -800,7 +800,7 @@ async function getCustomerSatisfactionData(venueId: string, fromDate: Date, toDa
   const satisfactionByDate = new Map<string, { totalRating: number; count: number }>()
 
   reviews.forEach(review => {
-    const dateStr = review.createdAt.toISOString().split('T')[0]
+    const dateStr = DateTime.fromJSDate(review.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
     const existing = satisfactionByDate.get(dateStr) || { totalRating: 0, count: 0 }
     existing.totalRating += review.overallRating
     existing.count += 1
@@ -812,10 +812,7 @@ async function getCustomerSatisfactionData(venueId: string, fromDate: Date, toDa
       date,
       rating: data.count > 0 ? (data.totalRating / data.count).toFixed(1) : 0,
       reviewCount: data.count,
-      formattedDate: new Date(date).toLocaleDateString('es-ES', {
-        month: 'short',
-        day: 'numeric',
-      }),
+      formattedDate: DateTime.fromISO(date, { zone: tz }).toLocaleString({ month: 'short', day: 'numeric' }, { locale: 'es' }),
     }))
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
 
