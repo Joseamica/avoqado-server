@@ -119,6 +119,53 @@ export class TableAccessControlService {
       forbiddenColumns: ['internalCost', 'profitMargin'], // Sensitive cost data
     },
     {
+      table: 'ModifierGroup',
+      accessLevel: AccessLevel.PUBLIC,
+      allowedRoles: [
+        UserRole.SUPERADMIN,
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+        UserRole.STAFF,
+        UserRole.CASHIER,
+        UserRole.WAITER,
+        UserRole.KITCHEN,
+        UserRole.VIEWER,
+      ],
+    },
+    {
+      table: 'Modifier',
+      accessLevel: AccessLevel.PUBLIC,
+      allowedRoles: [
+        UserRole.SUPERADMIN,
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+        UserRole.STAFF,
+        UserRole.CASHIER,
+        UserRole.WAITER,
+        UserRole.KITCHEN,
+        UserRole.VIEWER,
+      ],
+    },
+    {
+      table: 'ProductModifierGroup',
+      accessLevel: AccessLevel.PUBLIC,
+      allowedRoles: [
+        UserRole.SUPERADMIN,
+        UserRole.ADMIN,
+        UserRole.MANAGER,
+        UserRole.STAFF,
+        UserRole.CASHIER,
+        UserRole.WAITER,
+        UserRole.KITCHEN,
+        UserRole.VIEWER,
+      ],
+    },
+    {
+      table: 'Inventory',
+      accessLevel: AccessLevel.PUBLIC,
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF, UserRole.KITCHEN, UserRole.VIEWER],
+    },
+    {
       table: 'RawMaterial',
       accessLevel: AccessLevel.PUBLIC,
       allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF, UserRole.KITCHEN, UserRole.VIEWER],
@@ -148,6 +195,12 @@ export class TableAccessControlService {
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
       reason: 'Order data contains financial information',
+    },
+    {
+      table: 'OrderItem',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      reason: 'Order item data is part of transactional financial information',
     },
     {
       table: 'Payment',
@@ -182,22 +235,28 @@ export class TableAccessControlService {
       allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
       reason: 'Inventory movements reveal business operations',
     },
+    {
+      table: 'Shift',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      reason: 'Shift performance data contains staff and operational information',
+    },
 
     // ========================================
-    // FORBIDDEN TABLES - Only SUPERADMIN
+    // HIGH-SENSITIVITY TABLES
     // ========================================
     {
       table: 'Staff',
-      accessLevel: AccessLevel.FORBIDDEN,
-      allowedRoles: [UserRole.SUPERADMIN],
-      forbiddenColumns: ['password', 'hashedPassword', 'refreshToken', 'resetToken'],
-      reason: 'Staff table contains authentication credentials and sensitive employee data',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      forbiddenColumns: ['password', 'hashedPassword', 'refreshToken', 'resetToken', 'email', 'phone'],
+      reason: 'Staff table contains employee and authentication-sensitive data',
     },
     {
       table: 'StaffVenue',
-      accessLevel: AccessLevel.FORBIDDEN,
-      allowedRoles: [UserRole.SUPERADMIN],
-      reason: 'Staff-venue relationships reveal organizational structure',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      reason: 'Staff-venue relationships are restricted organizational data',
     },
     {
       table: 'Organization',
@@ -270,8 +329,15 @@ export class TableAccessControlService {
       const policy = this.getTablePolicy(table)
 
       if (!policy) {
-        // Table not in policy list - default to PUBLIC (but log warning)
-        logger.warn('⚠️ Table not in access control policy', { table, userRole })
+        // DENY BY DEFAULT: unknown tables are blocked until explicitly allowlisted
+        logger.error('🚫 Table not in access control allowlist', { table, userRole })
+        deniedTables.push(table)
+        violations.push({
+          table,
+          reason: `Table '${table}' is not allowlisted for chatbot access`,
+          requiredRole: 'EXPLICIT_ALLOWLIST_REQUIRED',
+          userRole,
+        })
         return
       }
 

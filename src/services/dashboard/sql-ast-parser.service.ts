@@ -152,7 +152,8 @@ export class SqlAstParserService {
       }
 
       // Step 10: SECURITY - Validate column-level access control
-      if (options.userRole && options.userRole !== UserRole.SUPERADMIN && options.userRole !== UserRole.ADMIN) {
+      // ADMIN must still respect forbidden columns (API keys, credentials, PII).
+      if (options.userRole && options.userRole !== UserRole.SUPERADMIN) {
         const columnViolations = this.validateForbiddenColumns(ast, tables, options.userRole)
         if (columnViolations.length > 0) {
           columnViolations.forEach(violation => {
@@ -823,5 +824,17 @@ export class SqlAstParserService {
         error: error instanceof Error ? error.message : 'Unknown parsing error',
       }
     }
+  }
+
+  /**
+   * Public helper to extract table names from a SQL query using AST parsing.
+   * Returns an empty list if parsing fails.
+   */
+  public extractTablesFromQuery(sql: string): string[] {
+    const ast = this.parseSQL(sql)
+    if (!ast) {
+      return []
+    }
+    return this.extractTables(ast)
   }
 }

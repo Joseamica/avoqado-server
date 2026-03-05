@@ -15,8 +15,10 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, TierType, TierPeriod, CommissionCalcType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { validateRate, getPeriodDateRange, decimalToNumber, getVenueTimezone } from './commission-utils'
+import { validateRate, getPeriodDateRange, decimalToNumber, getVenueTimezone, CommissionConfigWithRelations } from './commission-utils'
 import { logAction } from '../activity-log.service'
+import { getStaffSalesGoal } from './sales-goal.service'
+import { getEffectiveGoals } from './goal-resolution.service'
 
 // ============================================
 // Type Definitions
@@ -156,14 +158,14 @@ export async function createCommissionTier(configId: string, venueId: string, da
   })
 
   if (existingTier) {
-    throw new BadRequestError(`Tier level ${data.tierLevel} already exists for this config`)
+    throw new BadRequestError(`El nivel ${data.tierLevel} ya existe para esta configuración`)
   }
 
   // Check for overlapping thresholds
   const overlapping = await checkTierOverlap(configId, data.minThreshold, data.maxThreshold ?? null)
   if (overlapping) {
     throw new BadRequestError(
-      `Threshold range overlaps with tier "${overlapping.tierName}" (${overlapping.minThreshold}-${overlapping.maxThreshold ?? '∞'})`,
+      `El rango se sobrepone con el nivel "${overlapping.tierName}" ($${overlapping.minThreshold} - $${overlapping.maxThreshold ?? '∞'})`,
     )
   }
 
@@ -237,7 +239,7 @@ export async function createTiersBatch(configId: string, venueId: string, tiers:
     const currentMax = current.maxThreshold ?? Infinity
     if (currentMax > next.minThreshold) {
       throw new BadRequestError(
-        `Tier ${current.tierLevel} max threshold (${currentMax}) overlaps with tier ${next.tierLevel} min threshold (${next.minThreshold})`,
+        `El límite máximo del nivel ${current.tierLevel} ($${currentMax}) se sobrepone con el mínimo del nivel ${next.tierLevel} ($${next.minThreshold})`,
       )
     }
   }
@@ -309,7 +311,7 @@ export async function updateCommissionTier(tierId: string, venueId: string, data
     data.maxThreshold === undefined ? (existing.maxThreshold ? decimalToNumber(existing.maxThreshold) : null) : data.maxThreshold
 
   if (maxThreshold !== null && minThreshold >= maxThreshold) {
-    throw new BadRequestError('minThreshold must be less than maxThreshold')
+    throw new BadRequestError('El mínimo debe ser menor que el máximo')
   }
 
   // Check for overlapping thresholds (excluding self)
@@ -317,7 +319,7 @@ export async function updateCommissionTier(tierId: string, venueId: string, data
     const overlapping = await checkTierOverlap(existing.configId, minThreshold, maxThreshold, tierId)
     if (overlapping) {
       throw new BadRequestError(
-        `Threshold range overlaps with tier "${overlapping.tierName}" (${overlapping.minThreshold}-${overlapping.maxThreshold ?? '∞'})`,
+        `El rango se sobrepone con el nivel "${overlapping.tierName}" ($${overlapping.minThreshold} - $${overlapping.maxThreshold ?? '∞'})`,
       )
     }
   }
@@ -551,6 +553,92 @@ export async function getApplicableTierRate(
     tierName: tier.name,
     rate: tier.rate,
   }
+}
+
+// ============================================
+// Goal-Based Tier Resolution
+// ============================================
+
+/**
+ * Resolve commission rate using staff's monthly sales goal as tier threshold.
+ *
+ * When config.useGoalAsTier=true, the staff's active monthly goal becomes
+ * the tier boundary:
+ * - Below goal → config.defaultRate
+ * - Above goal → config.goalBonusRate
+ * - No goal assigned → config.defaultRate only
+ *
+ * @param staffId - Staff member ID
+ * @param venueId - Venue ID
+ * @param config - Commission config with goal tier settings
+ * @param currentPeriodSales - Staff's current period sales amount
+ * @returns Tier info with rate, or null if no goal-based tier applies
+ */
+export async function resolveGoalBasedTier(
+  staffId: string,
+  venueId: string,
+  config: CommissionConfigWithRelations,
+  currentPeriodSales: number,
+): Promise<{ tierLevel: number; tierName: string; rate: number } | null> {
+  if (!config.useGoalAsTier || !config.goalBonusRate) {
+    return null
+  }
+
+  const bonusRate = decimalToNumber(config.goalBonusRate)
+  const defaultRate = decimalToNumber(config.defaultRate)
+
+  // Try staff-specific goal first
+  const staffGoal = await getStaffSalesGoal(venueId, staffId)
+
+  if (staffGoal) {
+    if (currentPeriodSales >= staffGoal.goal) {
+      logger.debug('Staff exceeded goal, applying bonus rate', {
+        staffId,
+        goal: staffGoal.goal,
+        currentSales: currentPeriodSales,
+        bonusRate,
+      })
+      return {
+        tierLevel: 2,
+        tierName: 'Meta superada',
+        rate: bonusRate,
+      }
+    }
+    return {
+      tierLevel: 1,
+      tierName: 'Base (bajo meta)',
+      rate: defaultRate,
+    }
+  }
+
+  // Try venue-wide goal
+  const effectiveGoals = await getEffectiveGoals(venueId)
+  const venueGoal = effectiveGoals.find(g => g.staffId === null && g.period === 'MONTHLY')
+
+  if (venueGoal) {
+    if (currentPeriodSales >= venueGoal.goal) {
+      logger.debug('Staff exceeded venue goal, applying bonus rate', {
+        staffId,
+        goal: venueGoal.goal,
+        currentSales: currentPeriodSales,
+        bonusRate,
+      })
+      return {
+        tierLevel: 2,
+        tierName: 'Meta superada',
+        rate: bonusRate,
+      }
+    }
+    return {
+      tierLevel: 1,
+      tierName: 'Base (bajo meta)',
+      rate: defaultRate,
+    }
+  }
+
+  // No goal assigned → return null (defaultRate will be used by cascade)
+  logger.debug('No goal found for staff, goal-based tier not applicable', { staffId, venueId })
+  return null
 }
 
 // ============================================

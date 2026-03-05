@@ -32,6 +32,7 @@ import {
   calculateFinalRate,
   applyCommissionBounds,
   calculateBaseAmount,
+  calculateCategoryFilteredAmount,
   validateStaffForCommission,
   commissionExistsForPayment,
   decimalToNumber,
@@ -39,7 +40,7 @@ import {
 } from './commission-utils'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
-import { getApplicableTierRate } from './commission-tier.service'
+import { getApplicableTierRate, resolveGoalBasedTier } from './commission-tier.service'
 
 // ============================================
 // Type Definitions
@@ -192,15 +193,48 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
   // Step 6: Calculate Base Amount
   // ========================================
 
-  const { baseAmount, tipAmount, discountAmount, taxAmount } = calculateBaseAmount(
-    {
-      amount: payment.amount,
-      tipAmount: payment.tipAmount,
-      taxAmount: payment.order?.taxAmount,
-      discountAmount: payment.order?.discountAmount,
-    },
-    config,
-  )
+  let baseAmount: number
+  let tipAmount: number
+  let discountAmount: number
+  let taxAmount: number
+
+  // If category filtering is enabled, calculate amount from matching order items only
+  if (config.filterByCategories && config.categoryIds.length > 0 && payment.orderId) {
+    baseAmount = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
+      includeTax: config.includeTax,
+      includeDiscount: config.includeDiscount,
+    })
+    tipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
+    discountAmount = 0 // Already handled in category filter
+    taxAmount = 0 // Already handled in category filter
+
+    // Add tips to base if configured
+    if (config.includeTips) {
+      baseAmount += tipAmount
+    }
+
+    if (baseAmount <= 0) {
+      logger.info('Skipping commission: No matching category items in order', {
+        paymentId,
+        categoryIds: config.categoryIds,
+      })
+      return null
+    }
+  } else {
+    const result = calculateBaseAmount(
+      {
+        amount: payment.amount,
+        tipAmount: payment.tipAmount,
+        taxAmount: payment.order?.taxAmount,
+        discountAmount: payment.order?.discountAmount,
+      },
+      config,
+    )
+    baseAmount = result.baseAmount
+    tipAmount = result.tipAmount
+    discountAmount = result.discountAmount
+    taxAmount = result.taxAmount
+  }
 
   if (baseAmount <= 0) {
     logger.info('Skipping commission: Base amount is zero or negative', {
@@ -218,8 +252,33 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
   let tierName: string | undefined
   let tierRate: number | null = null
 
-  // Check for tier rate if config is TIERED
-  if (config.calcType === CommissionCalcType.TIERED) {
+  // Check for goal-based tier first (takes priority over manual tiers)
+  if (config.useGoalAsTier && config.goalBonusRate) {
+    // Get current month's sales for this staff
+    const timezone = await getVenueTimezone(payment.venueId)
+    const now = new Date()
+    const venueNow = toZonedTime(now, timezone)
+    const monthStart = fromZonedTime(startOfMonth(venueNow), timezone)
+
+    const monthlyStats = await prisma.commissionCalculation.aggregate({
+      where: {
+        staffId: recipientStaffId,
+        venueId: payment.venueId,
+        status: { not: 'VOIDED' },
+        calculatedAt: { gte: monthStart },
+      },
+      _sum: { baseAmount: true },
+    })
+    const currentPeriodSales = decimalToNumber(monthlyStats._sum.baseAmount)
+
+    const goalTierInfo = await resolveGoalBasedTier(recipientStaffId, payment.venueId, config, currentPeriodSales)
+    if (goalTierInfo) {
+      tierLevel = goalTierInfo.tierLevel
+      tierName = goalTierInfo.tierName
+      tierRate = goalTierInfo.rate
+    }
+  } else if (config.calcType === CommissionCalcType.TIERED) {
+    // Standard tier-based rate
     const tierInfo = await getApplicableTierRate(config.id, recipientStaffId, payment.venueId)
     if (tierInfo) {
       tierLevel = tierInfo.tierLevel

@@ -41,7 +41,7 @@ async function main() {
         `
         return Number(result[0].count)
       },
-      maxAllowed: 1000, // Alert if too many test customers
+      maxAllowed: 50000, // Production databases have real imported customers
     },
     // Add more checks as needed for future migrations
   ]

@@ -9,7 +9,8 @@ export const conversationEntrySchema = z.object({
     .string({
       required_error: 'El contenido es requerido.',
     })
-    .min(1, 'El contenido no puede estar vacío.'),
+    .min(1, 'El contenido no puede estar vacío.')
+    .max(3000, 'El contenido no puede exceder 3000 caracteres.'),
   timestamp: z
     .string({
       required_error: 'La fecha es requerida.',
@@ -30,7 +31,7 @@ export const assistantQuerySchema = z.object({
     venueSlug: z.string().trim().min(1, 'El identificador del venue no puede estar vacío.').optional(),
     userId: z.string().trim().min(1, 'El identificador del usuario no puede estar vacío.').optional(),
     includeVisualization: z.boolean().optional().default(false),
-    referencesContext: z.string().max(10000, 'El contexto de referencias no puede exceder 10000 caracteres.').optional(),
+    referencesContext: z.string().max(4000, 'El contexto de referencias no puede exceder 4000 caracteres.').optional(),
   }),
 })
 
@@ -88,9 +89,9 @@ export const feedbackSubmissionSchema = z.object({
       required_error: 'El tipo de feedback es requerido.',
       invalid_type_error: 'El tipo de feedback debe ser CORRECT, INCORRECT o PARTIALLY_CORRECT.',
     }),
-    correctedResponse: z.string().optional(),
-    correctedSql: z.string().optional(),
-    userNotes: z.string().optional(),
+    correctedResponse: z.string().max(3000, 'La corrección de respuesta no puede exceder 3000 caracteres.').optional(),
+    correctedSql: z.string().max(5000, 'La corrección SQL no puede exceder 5000 caracteres.').optional(),
+    userNotes: z.string().max(2000, 'Las notas no pueden exceder 2000 caracteres.').optional(),
   }),
 })
 

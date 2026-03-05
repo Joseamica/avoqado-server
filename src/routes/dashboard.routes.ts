@@ -4,10 +4,12 @@ import multer from 'multer'
 import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware' // Verifica esta ruta
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { authorizeRole } from '../middlewares/authorizeRole.middleware'
 import { chatbotRateLimitMiddleware } from '../middlewares/chatbot-rate-limit.middleware'
 import { tokenBudgetMiddleware } from '../middlewares/token-budget.middleware'
 import { passwordResetRateLimiter } from '../middlewares/password-reset-rate-limit.middleware'
+import { requireJsonBodyMiddleware } from '../middlewares/requireJsonBody.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
 import { StaffRole } from '../security'
 
@@ -7220,6 +7222,8 @@ router.post(
 router.post(
   '/assistant/query',
   authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  requireJsonBodyMiddleware,
   validateRequest(assistantQuerySchema),
   assistantController.processAssistantQuery,
 )
@@ -7265,7 +7269,13 @@ router.post(
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  *       500: { $ref: '#/components/responses/InternalServerError' }
  */
-router.post('/assistant/generate-title', authenticateTokenMiddleware, assistantController.generateConversationTitle)
+router.post(
+  '/assistant/generate-title',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  requireJsonBodyMiddleware,
+  assistantController.generateConversationTitle,
+)
 
 /**
  * @openapi
@@ -7347,8 +7357,10 @@ router.post('/assistant/generate-title', authenticateTokenMiddleware, assistantC
 router.post(
   '/assistant/text-to-sql',
   authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
   chatbotRateLimitMiddleware, // Rate limit: 10 queries/min per user, 100/hour per venue
   tokenBudgetMiddleware, // Track token budget and add headers
+  requireJsonBodyMiddleware,
   validateRequest(assistantQuerySchema),
   textToSqlAssistantController.processTextToSqlQuery,
 )
@@ -7377,7 +7389,12 @@ router.post(
  *                       items: { type: string }
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  */
-router.get('/assistant/suggestions', authenticateTokenMiddleware, assistantController.getAssistantSuggestions)
+router.get(
+  '/assistant/suggestions',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  assistantController.getAssistantSuggestions,
+)
 
 /**
  * @openapi
@@ -7432,6 +7449,8 @@ router.get('/assistant/suggestions', authenticateTokenMiddleware, assistantContr
 router.post(
   '/assistant/feedback',
   authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  requireJsonBodyMiddleware,
   validateRequest(feedbackSubmissionSchema),
   assistantController.submitFeedback,
 )

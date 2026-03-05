@@ -121,6 +121,12 @@ const prismaMock: any = {
   classSession: createMockModel(),
   reservationWaitlistEntry: createMockModel(),
   table: createMockModel(),
+  // Commission models
+  commissionConfig: createMockModel(),
+  commissionTier: createMockModel(),
+  commissionOverride: createMockModel(),
+  commissionCalculation: createMockModel(),
+  commissionSummary: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

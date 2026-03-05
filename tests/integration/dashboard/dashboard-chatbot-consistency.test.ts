@@ -21,6 +21,7 @@ import textToSqlService from '@/services/dashboard/text-to-sql-assistant.service
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import { SqlValidationService } from '@/services/dashboard/sql-validation.service'
 import { Prisma } from '@prisma/client'
+import { UserRole } from '@/services/dashboard/table-access-control.service'
 
 // Increase timeout for integration tests (Neon cold start can be slow)
 jest.setTimeout(60000)
@@ -51,6 +52,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
         venueId: testData.venue.id,
         userId: testData.staff[0].id,
         venueSlug: testData.venue.slug,
+        userRole: UserRole.MANAGER,
       })
 
       // Both should use SharedQueryService → 100% identical
@@ -72,6 +74,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
         venueId: testData.venue.id,
         userId: testData.staff[0].id,
         venueSlug: testData.venue.slug,
+        userRole: UserRole.MANAGER,
       })
 
       expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
@@ -89,6 +92,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
         venueId: testData.venue.id,
         userId: testData.staff[0].id,
         venueSlug: testData.venue.slug,
+        userRole: UserRole.MANAGER,
       })
 
       expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')

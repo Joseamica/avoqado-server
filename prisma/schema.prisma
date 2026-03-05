@@ -6247,6 +6247,14 @@ model CommissionConfig {
   // Role-based rates (JSON object: { "WAITER": 0.03, "CASHIER": 0.02 })
   roleRates Json?
 
+  // Category filtering — only calculate commissions for items in specific categories
+  filterByCategories Boolean  @default(false)
+  categoryIds        String[] // Array of MenuCategory IDs
+
+  // Goal-based tiers — use staff's monthly sales goal as tier threshold
+  useGoalAsTier Boolean  @default(false)
+  goalBonusRate Decimal? @db.Decimal(5, 4) // Rate when goal is exceeded (e.g., 0.0600 = 6%)
+
   // Time bounds
   effectiveFrom DateTime  @default(now())
   effectiveTo   DateTime?

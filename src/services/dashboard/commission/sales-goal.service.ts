@@ -81,13 +81,17 @@ interface StoredSalesGoal {
  * Access is controlled by permissions (commissions:read, etc.), not module gating.
  */
 async function getOrCreateVenueModule(venueId: string) {
-  const module = await prisma.module.findUnique({
+  // Auto-create the COMMISSIONS module if it doesn't exist (no manual seeding required)
+  const module = await prisma.module.upsert({
     where: { code: MODULE_CODES.COMMISSIONS },
+    update: {},
+    create: {
+      code: MODULE_CODES.COMMISSIONS,
+      name: 'Commissions',
+      description: 'Staff commission and sales goal tracking',
+      defaultConfig: {},
+    },
   })
-
-  if (!module) {
-    throw new BadRequestError('COMMISSIONS module not found in database')
-  }
 
   const venueModule = await prisma.venueModule.upsert({
     where: {

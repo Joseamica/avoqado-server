@@ -2,9 +2,10 @@ import { NextFunction, Request, Response } from 'express'
 import assistantService from '../../services/dashboard/assistant.dashboard.service'
 import { AILearningService } from '../../services/dashboard/ai-learning.service'
 import { AssistantQueryDto, FeedbackSubmissionDto } from '../../schemas/dashboard/assistant.schema'
-import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
+import { UnauthorizedError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { SqlValidationService } from '../../services/dashboard/sql-validation.service'
 
 const aiLearningService = new AILearningService()
 
@@ -152,12 +153,53 @@ export const submitFeedback = async (req: AuthenticatedRequest, res: Response, n
       throw new UnauthorizedError('Usuario no autenticado')
     }
 
+    const trainingData = await prisma.chatTrainingData.findUnique({
+      where: { id: trainingDataId },
+      select: {
+        id: true,
+        venueId: true,
+      },
+    })
+
+    if (!trainingData) {
+      throw new NotFoundError('No se encontró el registro de entrenamiento para este feedback.')
+    }
+
+    if (trainingData.venueId !== req.authContext.venueId) {
+      logger.warn('🚨 Cross-venue feedback attempt blocked', {
+        trainingDataId,
+        requestedVenueId: req.authContext.venueId,
+        ownerVenueId: trainingData.venueId,
+        userId: req.authContext.userId,
+      })
+      throw new ForbiddenError('No tienes permisos para enviar feedback sobre conversaciones de otro venue.')
+    }
+
+    const isPrivilegedForSqlCorrection = ['SUPERADMIN', 'ADMIN', 'MANAGER'].includes(req.authContext.role)
+    const safeCorrectedSql = isPrivilegedForSqlCorrection ? correctedSql : undefined
+
+    if (correctedSql && !isPrivilegedForSqlCorrection) {
+      logger.warn('🚫 correctedSql stripped from non-privileged feedback submission', {
+        userId: req.authContext.userId,
+        venueId: req.authContext.venueId,
+        role: req.authContext.role,
+        trainingDataId,
+      })
+    }
+
+    if (safeCorrectedSql) {
+      const sqlValidation = SqlValidationService.validateSchema(safeCorrectedSql)
+      if (!sqlValidation.isValid) {
+        throw new ForbiddenError('El SQL corregido no cumple con las reglas de seguridad del asistente.')
+      }
+    }
+
     // Procesar el feedback usando el servicio de aprendizaje
     await aiLearningService.processFeedback({
       trainingDataId,
       feedbackType: feedbackType as any, // El enum ya está validado por Zod
       correctedResponse,
-      correctedSql,
+      correctedSql: safeCorrectedSql,
       adminNotes: userNotes,
     })
 

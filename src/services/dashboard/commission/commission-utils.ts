@@ -40,6 +40,10 @@ export interface CommissionConfigWithRelations {
   includeDiscount: boolean
   includeTax: boolean
   roleRates: RoleRates | null
+  filterByCategories: boolean
+  categoryIds: string[]
+  useGoalAsTier: boolean
+  goalBonusRate: Decimal | null
   effectiveFrom: Date
   effectiveTo: Date | null
   tiers?: CommissionTierData[]
@@ -576,4 +580,60 @@ export async function commissionExistsForOrder(orderId: string): Promise<boolean
   })
 
   return existing !== null
+}
+
+// ============================================
+// Category-Filtered Amount Calculation
+// ============================================
+
+/**
+ * Calculate the commission base amount filtering only order items in allowed categories.
+ *
+ * When a config has filterByCategories=true, only items whose menuItem.categoryId
+ * is in config.categoryIds contribute to the base amount.
+ *
+ * @param orderId - Order ID to get items from
+ * @param categoryIds - Allowed category IDs
+ * @param config - Tax/tip/discount inclusion settings
+ * @returns Filtered base amount, or 0 if no matching items
+ */
+export async function calculateCategoryFilteredAmount(
+  orderId: string,
+  categoryIds: string[],
+  config: { includeTax: boolean; includeDiscount: boolean },
+): Promise<number> {
+  const orderItems = await prisma.orderItem.findMany({
+    where: {
+      orderId,
+      product: {
+        categoryId: { in: categoryIds },
+      },
+    },
+    select: {
+      quantity: true,
+      unitPrice: true,
+      taxAmount: true,
+      discountAmount: true,
+    },
+  })
+
+  if (orderItems.length === 0) return 0
+
+  let total = 0
+  for (const item of orderItems) {
+    const itemSubtotal = decimalToNumber(item.unitPrice) * item.quantity
+    let itemAmount = itemSubtotal
+
+    if (config.includeTax) {
+      itemAmount += decimalToNumber(item.taxAmount)
+    }
+
+    if (config.includeDiscount) {
+      itemAmount += decimalToNumber(item.discountAmount)
+    }
+
+    total += itemAmount
+  }
+
+  return total
 }

@@ -142,18 +142,19 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
       prisma.staff.count(),
     ])
 
-    // Aggregate revenue at database level (avoids loading all payments into memory)
+    // Aggregate revenue — exclude CASH (we earn nothing from cash transactions)
     const paymentAgg = await prisma.payment.aggregate({
       where: {
         createdAt: {
           gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
         },
         status: 'COMPLETED',
+        method: { not: 'CASH' },
         order: {
           venue: PRODUCTION_VENUE_FILTER,
         },
       },
-      _sum: { amount: true },
+      _sum: { amount: true, feeAmount: true },
       _count: true,
     })
 
@@ -162,8 +163,8 @@ export async function getSuperadminDashboardData(): Promise<SuperadminDashboardD
     const transactionCount = paymentAgg._count
     const _averageRevenuePerUser = totalUsers > 0 ? totalRevenue / totalUsers : 0
 
-    // Calculate commission (assuming 15% average commission rate)
-    const _totalCommissionRevenue = totalRevenue * 0.15
+    // Use actual fee amounts collected
+    const _totalCommissionRevenue = paymentAgg._sum.feeAmount?.toNumber() || 0
 
     // Calculate actual subscription revenue from venue monthly fees
     const _subscriptionRevenue = await calculateSubscriptionRevenue(
@@ -910,14 +911,15 @@ export async function getRevenueMetrics(startDate?: Date, endDate?: Date): Promi
     const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1)
     const end = endDate || new Date()
 
-    // Aggregate at database level (avoids loading all payments into memory)
+    // Aggregate at database level — exclude CASH (we earn nothing from cash transactions)
     const paymentAgg = await prisma.payment.aggregate({
       where: {
         createdAt: { gte: start, lte: end },
         status: 'COMPLETED',
+        method: { not: 'CASH' },
         order: { venue: PRODUCTION_VENUE_FILTER },
       },
-      _sum: { amount: true },
+      _sum: { amount: true, feeAmount: true },
       _count: true,
     })
 
@@ -925,8 +927,8 @@ export async function getRevenueMetrics(startDate?: Date, endDate?: Date): Promi
     const transactionCount = paymentAgg._count
     const averageOrderValue = transactionCount > 0 ? totalRevenue / transactionCount : 0
 
-    // Calculate commission (varies by venue plan, defaulting to 15%)
-    const commissionRevenue = totalRevenue * 0.15
+    // Use actual fee amounts collected (not hardcoded percentage)
+    const commissionRevenue = paymentAgg._sum.feeAmount?.toNumber() || 0
 
     // Calculate subscription revenue (from venue fees)
     const subscriptionRevenue = await calculateSubscriptionRevenue(start, end)
@@ -1028,6 +1030,7 @@ async function calculateSubscriptionRevenue(startDate: Date, endDate: Date): Pro
  */
 async function calculateFeatureRevenue(startDate: Date, endDate: Date): Promise<number> {
   try {
+    const now = new Date()
     const venueFeatures = await prisma.venueFeature.findMany({
       where: {
         active: true,
@@ -1035,6 +1038,8 @@ async function calculateFeatureRevenue(startDate: Date, endDate: Date): Promise<
           lte: endDate,
         },
         OR: [{ endDate: null }, { endDate: { gte: startDate } }],
+        // Exclude free features and superadmin-assigned gratis
+        monthlyPrice: { gt: 0 },
       },
       include: {
         feature: true,
@@ -1042,7 +1047,9 @@ async function calculateFeatureRevenue(startDate: Date, endDate: Date): Promise<
     })
 
     return venueFeatures.reduce((sum, vf) => {
-      const monthlyPrice = Number(vf.monthlyPrice || vf.feature.monthlyPrice || 0)
+      // Skip features still in active trial period
+      if (vf.trialEndDate && vf.trialEndDate > now) return sum
+      const monthlyPrice = Number(vf.monthlyPrice)
       const monthsInPeriod = Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30)))
       return sum + monthlyPrice * monthsInPeriod
     }, 0)
@@ -1082,6 +1089,7 @@ async function getRevenueForPeriod(startDate: Date, endDate: Date): Promise<numb
     where: {
       createdAt: { gte: startDate, lte: endDate },
       status: 'COMPLETED',
+      method: { not: 'CASH' },
       order: { venue: PRODUCTION_VENUE_FILTER },
     },
     _sum: { amount: true },
@@ -1095,15 +1103,16 @@ async function getRevenueForPeriod(startDate: Date, endDate: Date): Promise<numb
  */
 async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueRevenue[]> {
   try {
-    // Use groupBy to aggregate at the database level instead of loading all payments into memory
+    // Use groupBy to aggregate — exclude CASH (we earn nothing from cash)
     const revenueByVenue = await prisma.payment.groupBy({
       by: ['venueId'],
       where: {
         createdAt: { gte: startDate, lte: endDate },
         status: 'COMPLETED',
+        method: { not: 'CASH' },
         venue: PRODUCTION_VENUE_FILTER,
       },
-      _sum: { amount: true },
+      _sum: { amount: true, feeAmount: true },
       _count: true,
     })
 
@@ -1120,12 +1129,13 @@ async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueR
     return revenueByVenue
       .map(group => {
         const revenue = group._sum.amount?.toNumber() || 0
+        const commission = group._sum.feeAmount?.toNumber() || 0
         const transactionCount = group._count
         return {
           venueId: group.venueId,
           venueName: venueNameMap.get(group.venueId) || 'Unknown',
           revenue,
-          commission: revenue * 0.15,
+          commission,
           transactionCount,
           averageOrderValue: transactionCount > 0 ? revenue / transactionCount : 0,
           growth: 0,
@@ -1143,17 +1153,19 @@ async function getRevenueByVenue(startDate: Date, endDate: Date): Promise<VenueR
  */
 async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<PeriodRevenue[]> {
   try {
-    // Use raw SQL to group by date at the database level
+    // Use raw SQL to group by date — exclude CASH (we earn nothing from cash)
     const results = await prisma.$queryRaw<
       Array<{
         period_date: string
         total_revenue: number
+        total_fees: number
         transaction_count: bigint
       }>
     >`
       SELECT
         TO_CHAR(p."createdAt", 'YYYY-MM-DD') as period_date,
         COALESCE(SUM(p.amount), 0) as total_revenue,
+        COALESCE(SUM(p."feeAmount"), 0) as total_fees,
         COUNT(p.id) as transaction_count
       FROM "Payment" p
       INNER JOIN "Order" o ON o.id = p."orderId"
@@ -1161,6 +1173,7 @@ async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<Perio
       WHERE p."createdAt" >= ${startDate}
         AND p."createdAt" <= ${endDate}
         AND p.status = 'COMPLETED'
+        AND p.method != 'CASH'
         AND v.status NOT IN ('LIVE_DEMO', 'TRIAL')
       GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
       ORDER BY period_date ASC
@@ -1168,10 +1181,11 @@ async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<Perio
 
     return results.map(row => {
       const revenue = Number(row.total_revenue)
+      const commission = Number(row.total_fees)
       return {
         period: row.period_date,
         revenue,
-        commission: revenue * 0.15,
+        commission,
         transactionCount: Number(row.transaction_count),
         date: row.period_date,
       }
@@ -1187,6 +1201,7 @@ async function getRevenueByPeriod(startDate: Date, endDate: Date): Promise<Perio
  */
 async function getRevenueByFeature(startDate: Date, endDate: Date): Promise<FeatureRevenue[]> {
   try {
+    const now = new Date()
     const venueFeatures = await prisma.venueFeature.findMany({
       where: {
         active: true,
@@ -1194,6 +1209,8 @@ async function getRevenueByFeature(startDate: Date, endDate: Date): Promise<Feat
           lte: endDate,
         },
         OR: [{ endDate: null }, { endDate: { gte: startDate } }],
+        // Exclude free features (price = 0) and superadmin-assigned gratis
+        monthlyPrice: { gt: 0 },
       },
       include: {
         feature: true,
@@ -1203,8 +1220,11 @@ async function getRevenueByFeature(startDate: Date, endDate: Date): Promise<Feat
     const featureRevenueMap = new Map<string, FeatureRevenue>()
 
     venueFeatures.forEach(vf => {
+      // Skip features still in active trial period (not yet paying)
+      if (vf.trialEndDate && vf.trialEndDate > now) return
+
       const feature = vf.feature
-      const monthlyPrice = Number(vf.monthlyPrice || feature.monthlyPrice || 0)
+      const monthlyPrice = Number(vf.monthlyPrice)
       const monthsInPeriod = Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30)))
       const revenue = monthlyPrice * monthsInPeriod
 
@@ -1282,7 +1302,7 @@ async function calculatePlatformRevenue(
   settledRevenue: number
 }> {
   try {
-    // 1. Calculate actual commission revenue from fees collected (exclude demo venues)
+    // 1. Calculate actual commission revenue from fees collected (exclude CASH and demo venues)
     const commissionRevenue = await prisma.payment.aggregate({
       where: {
         createdAt: {
@@ -1290,6 +1310,7 @@ async function calculatePlatformRevenue(
           lte: endDate,
         },
         status: 'COMPLETED',
+        method: { not: 'CASH' },
         order: {
           venue: PRODUCTION_VENUE_FILTER,
         },

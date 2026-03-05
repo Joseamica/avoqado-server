@@ -36,6 +36,10 @@ export interface CreateCommissionConfigInput {
   includeDiscount?: boolean
   includeTax?: boolean
   roleRates?: RoleRates
+  filterByCategories?: boolean
+  categoryIds?: string[]
+  useGoalAsTier?: boolean
+  goalBonusRate?: number | null
   effectiveFrom?: Date
   effectiveTo?: Date | null
   orgId?: string
@@ -55,6 +59,10 @@ export interface UpdateCommissionConfigInput {
   includeDiscount?: boolean
   includeTax?: boolean
   roleRates?: RoleRates | null
+  filterByCategories?: boolean
+  categoryIds?: string[]
+  useGoalAsTier?: boolean
+  goalBonusRate?: number | null
   effectiveFrom?: Date
   effectiveTo?: Date | null
   active?: boolean
@@ -235,6 +243,10 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
       includeDiscount: data.includeDiscount ?? false,
       includeTax: data.includeTax ?? false,
       roleRates: data.roleRates ?? Prisma.JsonNull,
+      filterByCategories: data.filterByCategories ?? false,
+      categoryIds: data.categoryIds ?? [],
+      useGoalAsTier: data.useGoalAsTier ?? false,
+      goalBonusRate: data.goalBonusRate ?? null,
       effectiveFrom: data.effectiveFrom ?? new Date(),
       effectiveTo: data.effectiveTo,
       createdById,
@@ -351,6 +363,10 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
   if (data.includeDiscount !== undefined) updateData.includeDiscount = data.includeDiscount
   if (data.includeTax !== undefined) updateData.includeTax = data.includeTax
   if (data.roleRates !== undefined) updateData.roleRates = data.roleRates ?? Prisma.JsonNull
+  if (data.filterByCategories !== undefined) updateData.filterByCategories = data.filterByCategories
+  if (data.categoryIds !== undefined) updateData.categoryIds = data.categoryIds
+  if (data.useGoalAsTier !== undefined) updateData.useGoalAsTier = data.useGoalAsTier
+  if (data.goalBonusRate !== undefined) updateData.goalBonusRate = data.goalBonusRate
   if (data.effectiveFrom !== undefined) updateData.effectiveFrom = data.effectiveFrom
   if (data.effectiveTo !== undefined) updateData.effectiveTo = data.effectiveTo
   if (data.active !== undefined) updateData.active = data.active
@@ -495,6 +511,10 @@ export async function copyCommissionConfig(
         includeDiscount: overrides?.includeDiscount ?? source.includeDiscount,
         includeTax: overrides?.includeTax ?? source.includeTax,
         roleRates: source.roleRates ?? Prisma.JsonNull,
+        filterByCategories: source.filterByCategories,
+        categoryIds: source.categoryIds,
+        useGoalAsTier: source.useGoalAsTier,
+        goalBonusRate: source.goalBonusRate,
         effectiveFrom: overrides?.effectiveFrom ?? new Date(),
         effectiveTo: overrides?.effectiveTo ?? null,
         createdById,

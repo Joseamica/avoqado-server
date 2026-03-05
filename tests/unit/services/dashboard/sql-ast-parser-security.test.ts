@@ -17,6 +17,7 @@
  */
 
 import { SqlAstParserService } from '@/services/dashboard/sql-ast-parser.service'
+import { UserRole } from '@/services/dashboard/table-access-control.service'
 
 describe('SqlAstParserService - Security Features', () => {
   let service: SqlAstParserService
@@ -297,6 +298,20 @@ describe('SqlAstParserService - Security Features', () => {
       })
 
       expect(result.valid).toBe(true)
+    })
+  })
+
+  describe('🔐 Forbidden Columns By Role', () => {
+    it('should REJECT forbidden columns even for ADMIN role', () => {
+      const sql = `SELECT "metadata" FROM "Payment" WHERE "venueId" = '${testVenueId}'`
+
+      const result = service.validateQuery(sql, {
+        requiredVenueId: testVenueId,
+        userRole: UserRole.ADMIN,
+      })
+
+      expect(result.valid).toBe(false)
+      expect(result.errors.join(' ')).toContain('Access denied: Column')
     })
   })
 
