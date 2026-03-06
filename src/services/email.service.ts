@@ -1904,7 +1904,7 @@ Avoqado Dashboard
         Este informe solo considera los pedidos cerrados y las ventas realizadas durante el horario comercial.
       </p>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Consulta el <a href="${data.dashboardUrl}/reports" style="color: #1a73e8; text-decoration: none;">informe de conciliacion</a> para obtener mas informacion sobre los pagos y las transferencias anteriores.
+        Consulta el <a href="${data.dashboardUrl}/reports/sales-summary" style="color: #1a73e8; text-decoration: none;">informe de conciliacion</a> para obtener mas informacion sobre los pagos y las transferencias anteriores.
       </p>
       <p style="margin: 16px 0 0 0;">
         <a href="${data.dashboardUrl}" style="color: #1a73e8; text-decoration: none; font-size: 14px;">Abrir Dashboard</a>
@@ -1937,7 +1937,7 @@ Avoqado Dashboard
         <tr>
           <td><h2 style="margin: 0; font-size: 24px; font-weight: 400; color: #000;">Ventas<sup style="font-size: 12px;">1</sup></h2></td>
           <td style="text-align: right;">
-            <a href="${data.dashboardUrl}/reports/sales" style="color: #1a73e8; text-decoration: none; font-size: 14px;">Mostrar mas &rarr;</a>
+            <a href="${data.dashboardUrl}/reports/sales-summary" style="color: #1a73e8; text-decoration: none; font-size: 14px;">Mostrar mas &rarr;</a>
           </td>
         </tr>
       </table>
@@ -2086,7 +2086,7 @@ Avoqado Dashboard
         <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
       </p>
       <p style="margin: 8px 0 0 0; font-size: 14px;">
-        <a href="${data.dashboardUrl}/settings/notifications" style="color: #000; text-decoration: none; font-weight: 600;">Cancelar la suscripcion o administrar tus preferencias</a>
+        <a href="${data.dashboardUrl}/notifications/preferences" style="color: #000; text-decoration: none; font-weight: 600;">Administrar preferencias de notificaciones</a>
       </p>
     </div>
 

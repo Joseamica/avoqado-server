@@ -692,10 +692,10 @@ export async function sendPurchaseOrderEmail(data: PurchaseOrderEmailData): Prom
     const itemRowsHtml = data.items
       .map(
         item => `
-        <tr>
-          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; font-size: 14px;">${item.quantity} × ${item.name}</td>
-          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; font-size: 13px; color: #666;">@ ${item.unitPrice}</td>
-          <td style="padding: 12px 15px; border-bottom: 1px solid #e0e0e0; text-align: right; font-size: 14px; font-weight: 600;">$${item.total}</td>
+        <tr style="border-bottom: 1px solid #f0f0f0;">
+          <td style="padding: 14px 0; font-size: 15px; color: #000;">${item.quantity} × ${item.name}</td>
+          <td style="padding: 14px 0; font-size: 14px; color: #666; text-align: center;">$${item.unitPrice}</td>
+          <td style="padding: 14px 0; font-size: 15px; color: #000; text-align: right; font-weight: 600;">$${item.total}</td>
         </tr>
       `,
       )
@@ -705,104 +705,118 @@ export async function sendPurchaseOrderEmail(data: PurchaseOrderEmailData): Prom
       .map(item => `${item.quantity} × ${item.name} (${item.unit}) @ $${item.unitPrice} = $${item.total}`)
       .join('\n')
 
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+
     const html = `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Orden de compra ${data.orderNumber} de ${data.venueName}</title>
-        </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background: white; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.1); overflow: hidden;">
-            <!-- Header -->
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
-              <h1 style="color: white; margin: 0; font-size: 28px; font-weight: bold;">Orden de compra ${data.orderNumber} de ${data.venueName}</h1>
-              <p style="color: #e8f4f8; margin: 10px 0 0 0; font-size: 16px;">${orderDateFormatted}</p>
-            </div>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orden de compra ${data.orderNumber} de ${data.venueName}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
 
-            <!-- Content -->
-            <div style="padding: 40px 30px;">
-              <!-- Supplier Info -->
-              <div style="margin-bottom: 30px;">
-                <p style="font-size: 14px; margin: 0 0 5px 0; color: #666;">A:</p>
-                <p style="font-size: 16px; margin: 0 0 5px 0; font-weight: 600; color: #333;">${data.supplierName}</p>
-                ${data.supplierContactName ? `<p style="font-size: 14px; margin: 0 0 5px 0; color: #666;">Contacto: ${data.supplierContactName}</p>` : ''}
-              </div>
+    <!-- Header with Logo -->
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
 
-              <!-- Venue Info -->
-              <div style="background: #f8f9ff; border-radius: 10px; padding: 20px; margin-bottom: 30px;">
-                <p style="font-size: 14px; margin: 0 0 5px 0; color: #666;">Enviar a:</p>
-                <p style="font-size: 16px; margin: 0 0 5px 0; font-weight: 600; color: #333;">${data.venueName}</p>
-                <p style="font-size: 14px; margin: 0; color: #666;">${data.venueAddress}, ${data.venueCity}, ${data.venueState}, ${data.venueZipCode}</p>
-              </div>
+    <!-- Title Section -->
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">Orden de compra</h1>
+      <p style="margin: 0 0 4px 0; font-size: 15px; color: #000; font-weight: 600;">${data.orderNumber}</p>
+      <p style="margin: 0; font-size: 14px; color: #666;">${orderDateFormatted}</p>
+    </div>
 
-              <!-- Order Info -->
-              <div style="margin-bottom: 30px;">
-                <table style="width: 100%; border-collapse: collapse;">
-                  <tr>
-                    <td style="padding: 8px 0; color: #666; width: 50%;">Pedido por:</td>
-                    <td style="padding: 8px 0; color: #333;">${data.staffName}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 8px 0; color: #666;">Número de cuenta:</td>
-                    <td style="padding: 8px 0; color: #333; font-family: monospace;">${data.orderNumber}</td>
-                  </tr>
-                  ${expectedDeliveryFormatted ? `<tr><td style="padding: 8px 0; color: #666;">Fecha esperada de entrega:</td><td style="padding: 8px 0; color: #333;">${expectedDeliveryFormatted}</td></tr>` : ''}
-                </table>
-              </div>
+    <!-- Supplier & Venue Info Box -->
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; margin-bottom: 24px; overflow: hidden;">
+      <table cellpadding="0" cellspacing="0" style="width: 100%;">
+        <tr>
+          <td style="padding: 20px; border-right: 1px solid #e0e0e0; width: 50%; vertical-align: top;">
+            <div style="font-size: 12px; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">Proveedor</div>
+            <div style="font-size: 15px; font-weight: 600; color: #000; margin-bottom: 4px;">${data.supplierName}</div>
+            ${data.supplierContactName ? `<div style="font-size: 14px; color: #666;">${data.supplierContactName}</div>` : ''}
+          </td>
+          <td style="padding: 20px; width: 50%; vertical-align: top;">
+            <div style="font-size: 12px; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">Enviar a</div>
+            <div style="font-size: 15px; font-weight: 600; color: #000; margin-bottom: 4px;">${data.venueName}</div>
+            <div style="font-size: 14px; color: #666;">${data.venueAddress}, ${data.venueCity}, ${data.venueState}, ${data.venueZipCode}</div>
+          </td>
+        </tr>
+      </table>
+    </div>
 
-              <!-- Items Table -->
-              <div style="margin-bottom: 30px;">
-                <h2 style="color: #333; font-size: 18px; margin: 0 0 15px 0;">Productos ordenados</h2>
-                <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
-                  <tbody>
-                    ${itemRowsHtml}
-                  </tbody>
-                </table>
-              </div>
+    <!-- Order Details -->
+    <div style="margin-bottom: 24px;">
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <tr style="border-bottom: 1px solid #f0f0f0;">
+          <td style="padding: 10px 0; font-size: 14px; color: #666;">Pedido por</td>
+          <td style="padding: 10px 0; font-size: 14px; color: #000; text-align: right;">${data.staffName}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f0f0f0;">
+          <td style="padding: 10px 0; font-size: 14px; color: #666;">Número de orden</td>
+          <td style="padding: 10px 0; font-size: 14px; color: #000; text-align: right; font-family: monospace;">${data.orderNumber}</td>
+        </tr>
+        ${expectedDeliveryFormatted ? `<tr style="border-bottom: 1px solid #f0f0f0;"><td style="padding: 10px 0; font-size: 14px; color: #666;">Fecha esperada de entrega</td><td style="padding: 10px 0; font-size: 14px; color: #000; text-align: right;">${expectedDeliveryFormatted}</td></tr>` : ''}
+      </table>
+    </div>
 
-              <!-- Totals -->
-              <div style="margin-bottom: 30px;">
-                <table style="width: 100%; border-collapse: collapse;">
-                  <tr>
-                    <td style="padding: 8px 0; color: #666; text-align: right;">Subtotal:</td>
-                    <td style="padding: 8px 0; color: #333; text-align: right; width: 120px; font-weight: 600;">$${data.subtotal}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 8px 0; color: #666; text-align: right;">Impuesto estimado (${(data.taxRate * 100).toFixed(0)}%):</td>
-                    <td style="padding: 8px 0; color: #333; text-align: right; font-weight: 600;">$${data.taxAmount}</td>
-                  </tr>
-                  <tr style="border-top: 2px solid #333;">
-                    <td style="padding: 15px 0 0 0; color: #333; text-align: right; font-size: 18px; font-weight: bold;">Total:</td>
-                    <td style="padding: 15px 0 0 0; color: #333; text-align: right; font-size: 18px; font-weight: bold;">$${data.total}</td>
-                  </tr>
-                </table>
-              </div>
+    <!-- Items Section -->
+    <div style="margin-bottom: 24px;">
+      <h2 style="margin: 0 0 16px 0; font-size: 24px; font-weight: 400; color: #000;">Productos ordenados</h2>
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <tr style="border-bottom: 1px solid #e0e0e0;">
+          <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000;">Producto</td>
+          <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: center;">Precio unit.</td>
+          <td style="padding: 12px 0; font-size: 14px; font-weight: 600; color: #000; text-align: right;">Total</td>
+        </tr>
+        ${itemRowsHtml}
+      </table>
+    </div>
 
-              ${
-                data.notes
-                  ? `
-              <!-- Notes -->
-              <div style="background: #fff8e1; border-radius: 10px; padding: 20px; margin-bottom: 30px;">
-                <p style="font-size: 14px; margin: 0 0 10px 0; color: #666; font-weight: 600;">Notas:</p>
-                <p style="font-size: 14px; margin: 0; color: #666; white-space: pre-line;">${data.notes}</p>
-              </div>
-              `
-                  : ''
-              }
+    <!-- Totals -->
+    <div style="margin-bottom: 32px;">
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <tr style="border-bottom: 1px solid #f0f0f0;">
+          <td style="padding: 10px 0; font-size: 14px; color: #666; text-align: right;">Subtotal</td>
+          <td style="padding: 10px 0; font-size: 14px; color: #000; text-align: right; width: 120px;">$${data.subtotal}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #f0f0f0;">
+          <td style="padding: 10px 0; font-size: 14px; color: #666; text-align: right;">Impuesto estimado (${(data.taxRate * 100).toFixed(0)}%)</td>
+          <td style="padding: 10px 0; font-size: 14px; color: #000; text-align: right;">$${data.taxAmount}</td>
+        </tr>
+        <tr style="border-top: 2px solid #000;">
+          <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000; text-align: right;">Total</td>
+          <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000; text-align: right;">$${data.total}</td>
+        </tr>
+      </table>
+    </div>
 
-              <!-- Footer -->
-              <div style="text-align: center; padding-top: 30px; border-top: 1px solid #e0e0e0;">
-                <p style="font-size: 14px; color: #666; margin: 0 0 5px 0;">${data.venueName}</p>
-                <p style="font-size: 13px; color: #999; margin: 0;">
-                  Comunícate con ${data.venueName} para obtener más información sobre sus prácticas de privacidad.
-                </p>
-              </div>
-            </div>
-          </div>
-        </body>
-      </html>
+    ${
+      data.notes
+        ? `
+    <!-- Notes -->
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin-bottom: 32px;">
+      <div style="font-size: 12px; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">Notas</div>
+      <p style="font-size: 14px; margin: 0; color: #000; white-space: pre-line;">${data.notes}</p>
+    </div>
+    `
+        : ''
+    }
+
+    <!-- Footer -->
+    <div style="border-top: 1px solid #e0e0e0; padding-top: 24px;">
+      <p style="font-size: 14px; color: #666; margin: 0 0 4px 0;">${data.venueName}</p>
+      <p style="font-size: 13px; color: #999; margin: 0;">
+        Comunícate con ${data.venueName} para obtener más información sobre sus prácticas de privacidad.
+      </p>
+    </div>
+  </div>
+</body>
+</html>
     `
 
     const text = `

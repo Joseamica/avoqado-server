@@ -3,6 +3,8 @@ import socketManager from '../../communication/sockets'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '@/config/logger'
+import * as pushService from '../mobile/push.mobile.service'
+import emailService from '../email.service'
 
 // ===== TYPES =====
 
@@ -93,6 +95,8 @@ export async function createNotification(data: CreateNotificationDto): Promise<N
     throw new Error('Notification skipped due to quiet hours')
   }
 
+  const channels = data.channels || preferences.channels || [NotificationChannel.IN_APP]
+
   const notification = await prisma.notification.create({
     data: {
       recipientId: data.recipientId,
@@ -106,12 +110,12 @@ export async function createNotification(data: CreateNotificationDto): Promise<N
       entityId: data.entityId,
       metadata: data.metadata,
       priority: data.priority || preferences.priority || NotificationPriority.NORMAL,
-      channels: data.channels || preferences.channels || [NotificationChannel.IN_APP],
+      channels,
       sentAt: new Date(),
     },
   })
 
-  // Broadcast the new notification via Socket.IO
+  // Broadcast via Socket.IO (real-time in-app)
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
     broadcastingService.broadcastNewNotification({
@@ -130,7 +134,60 @@ export async function createNotification(data: CreateNotificationDto): Promise<N
     })
   }
 
+  // Dispatch to other channels (non-blocking)
+  dispatchToChannels(notification, channels, recipient).catch(err => {
+    logger.error(`Failed to dispatch notification ${notification.id} to channels`, { error: err })
+  })
+
   return notification
+}
+
+/**
+ * Dispatch notification to email and push channels (non-blocking)
+ */
+async function dispatchToChannels(
+  notification: Notification,
+  channels: NotificationChannel[],
+  recipient: { id: string; email: string; firstName: string; lastName: string },
+) {
+  for (const channel of channels) {
+    try {
+      switch (channel) {
+        case NotificationChannel.IN_APP:
+          // Already handled by DB insert + Socket.IO broadcast
+          break
+
+        case NotificationChannel.EMAIL:
+          if (recipient.email) {
+            await emailService.sendEmail({
+              to: recipient.email,
+              subject: notification.title,
+              html: `<p>${notification.message}</p>`,
+              text: notification.message,
+            })
+            logger.info(`Email sent for notification ${notification.id} to ${recipient.email}`)
+          }
+          break
+
+        case NotificationChannel.PUSH:
+          const result = await pushService.sendPushToStaff(recipient.id, {
+            title: notification.title,
+            body: notification.message,
+            data: {
+              type: notification.type,
+              notificationId: notification.id,
+              actionUrl: notification.actionUrl || '',
+            },
+          })
+          if (result.success) {
+            logger.info(`Push sent for notification ${notification.id}`)
+          }
+          break
+      }
+    } catch (error) {
+      logger.error(`Failed to dispatch notification ${notification.id} via ${channel}`, { error })
+    }
+  }
 }
 
 /**

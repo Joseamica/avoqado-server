@@ -18,7 +18,8 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard/sales-summary.dashboard.service'
 import emailService from '../services/email.service'
-import { StaffRole, VenueStatus } from '@prisma/client'
+import { NotificationType, StaffRole, VenueStatus } from '@prisma/client'
+import { FRONTEND_URL } from '../config/env'
 
 // ============================================================
 // Types
@@ -178,8 +179,20 @@ export class NightlySalesSummaryJob {
       // Process each venue
       for (const venue of venues) {
         try {
-          // Get recipients (owners and admins)
+          // Check which staff have opted out of daily sales summary
+          const optedOutStaff = await prisma.notificationPreference.findMany({
+            where: {
+              venueId: venue.id,
+              type: NotificationType.DAILY_SALES_SUMMARY,
+              enabled: false,
+            },
+            select: { staffId: true },
+          })
+          const optedOutIds = new Set(optedOutStaff.map(p => p.staffId))
+
+          // Get recipients (owners and admins who haven't opted out)
           const recipients = venue.staff
+            .filter(sv => !optedOutIds.has(sv.staff.id))
             .map(sv => sv.staff)
             .filter(s => s.email) // Only staff with emails
             .map(s => ({
@@ -257,7 +270,7 @@ export class NightlySalesSummaryJob {
             reportDate: now,
             businessHoursStart: '08:00 AM',
             businessHoursEnd: '10:00 PM',
-            dashboardUrl: `https://dashboard.avoqado.io/${venue.slug}`,
+            dashboardUrl: `${FRONTEND_URL}/venues/${venue.slug}`,
             metrics: todaySummary.summary,
             previousPeriod: {
               netSales: yesterdaySummary.summary.netSales,

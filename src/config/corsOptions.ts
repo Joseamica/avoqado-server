@@ -89,6 +89,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'x-api-key',
       'x-client-type',
       'x-client-id',
+      'x-venue-id',
       'Origin',
       'X-Requested-With',
       'Accept',

@@ -4904,6 +4904,9 @@ enum NotificationType {
   SUBSCRIPTION_CANCELLED
   SUBSCRIPTION_PAYMENT_FAILED
 
+  // Report notifications
+  DAILY_SALES_SUMMARY // Nightly sales summary email
+
   // KYC notifications (Superadmin)
   NEW_KYC_SUBMISSION // New venue submitted KYC documents
   KYC_APPROVED // KYC was approved by superadmin
