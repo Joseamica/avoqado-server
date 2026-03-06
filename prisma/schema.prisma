@@ -1524,6 +1524,7 @@ model LowStockAlert {
   acknowledgedAt DateTime?
   resolvedBy     String? // Staff ID
   resolvedAt     DateTime?
+  lastNotifiedAt DateTime? // Last time a digest email was sent for this alert
 
   createdAt DateTime @default(now())
 

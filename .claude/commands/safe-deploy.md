@@ -1,6 +1,6 @@
-# Deploy: Merge develop → main
+# Safe Deploy: Verificar + Merge develop → main
 
-Merge directo de `develop` hacia `main` en AMBOS repositorios, luego push a remote. Sin verificaciones pre-deploy (usa `/safe-deploy` si quieres correr pre-deploy primero).
+Igual que `/deploy` pero corre `pre-deploy` en ambos repos antes de mergear. Usa esto cuando quieras verificación completa antes de producción.
 
 ## Repositorios
 
@@ -9,15 +9,33 @@ Merge directo de `develop` hacia `main` en AMBOS repositorios, luego push a remo
 
 ## Instrucciones
 
-### Fase 1: Verificar estado de git
+### Fase 1: Pre-vuelo (ambos repos en develop)
 
-Para CADA repo, asegurar que estamos en develop y al día:
+Antes de tocar main, verificar que develop está sano.
+
+**Server (avoqado-server) — correr PRIMERO (más crítico: DB migrations, API):**
 ```bash
+cd /Users/amieva/Documents/Programming/Avoqado/avoqado-server
 git checkout develop
 git pull origin develop
+npm run pre-deploy
 ```
+El pre-deploy corre: ESLint, TypeScript check, Prisma generate, pre-migration check, build, unit tests, integration tests, cross-repo check.
 
-Luego verificar divergencia:
+**Dashboard (avoqado-web-dashboard):**
+```bash
+cd /Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard
+git checkout develop
+git pull origin develop
+npm run pre-deploy -- --skip-e2e
+```
+El pre-deploy corre: ESLint, endpoint check, build, cross-repo check. Se usa `--skip-e2e` por defecto (Playwright es lento). Si el usuario pide E2E completo, quitar el flag.
+
+**Si CUALQUIER pre-deploy falla → DETENERSE. No continuar al merge.** Informar al usuario qué falló y cómo arreglarlo. Si un repo falla pero el otro pasa, preguntar si mergear solo el que pasó.
+
+### Fase 2: Verificar estado de git
+
+Para CADA repo:
 ```bash
 git fetch origin
 git log --oneline origin/main..origin/develop  # commits nuevos en develop
@@ -31,12 +49,12 @@ Mostrar al usuario un resumen claro:
   Dashboard: develop tiene 5 commits nuevos, main al día ✅
 ```
 
-### Fase 2: Analizar escenarios
+### Fase 3: Analizar escenarios
 
 **Escenario A - Normal (main detrás de develop):**
 - `origin/main..origin/develop` muestra commits → hay cambios que mergear
 - `origin/develop..origin/main` vacío → main no tiene nada extra
-- Acción: fast-forward merge directo → continuar a Fase 3
+- Acción: fast-forward merge directo → continuar a Fase 4
 
 **Escenario B - Main está adelante (divergencia):**
 - `origin/develop..origin/main` muestra commits → main tiene cambios que develop no
@@ -51,7 +69,7 @@ Mostrar al usuario un resumen claro:
 - Ambos logs vacíos → informar que ya están al día
 - No hacer nada
 
-### Fase 3: Ejecutar merge (por cada repo)
+### Fase 4: Ejecutar merge (por cada repo)
 
 ```bash
 git checkout main
@@ -61,33 +79,36 @@ git merge develop --ff-only
 
 Si `--ff-only` falla → DETENERSE, informar al usuario.
 
-### Fase 4: Push a remote
+### Fase 5: Push a remote
 
 ```bash
 git push origin main
 ```
 
-### Fase 5: Volver a develop
+### Fase 6: Volver a develop
 
 ```bash
 git checkout develop
 ```
 
-### Fase 6: Reporte final
+### Fase 7: Reporte final
 
 ```
-✅ Deploy completado:
-  Server:    3 commits mergeados y pusheados a main
-  Dashboard: 5 commits mergeados y pusheados a main
+✅ Safe Deploy completado:
+  Server:    pre-deploy ✅ → 3 commits mergeados y pusheados a main
+  Dashboard: pre-deploy ✅ → 5 commits mergeados y pusheados a main
 
 Ambos repos en rama develop.
 ```
 
 ## Reglas estrictas
 
+- NUNCA mergear si pre-deploy falla
 - NUNCA crear Pull Requests - merge directo
 - NUNCA hacer force push sin permiso explícito
 - Siempre intentar fast-forward primero
 - Si hay conflictos, mostrarlos y esperar instrucciones
 - Siempre hacer fetch antes de cualquier operación
 - Siempre volver a develop al terminar
+- Correr el server pre-deploy PRIMERO (es más crítico - DB migrations, API)
+- Si un repo falla pre-deploy pero el otro pasa, preguntar si mergear solo el que pasó

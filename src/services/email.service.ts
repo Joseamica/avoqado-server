@@ -2131,6 +2131,162 @@ Servicios Tecnologicos Avo S.A. de C.V.
     })
   }
 
+  /**
+   * Send low stock digest email (similar to Square's "Alertas de bajas existencias")
+   */
+  async sendLowStockDigestEmail(
+    email: string,
+    data: {
+      venueName: string
+      items: Array<{
+        name: string
+        category: string | null
+        currentStock: number
+        reorderPoint: number
+        unit: string
+        isOutOfStock: boolean
+      }>
+      dashboardUrl: string
+      preferencesUrl: string
+    },
+  ): Promise<boolean> {
+    const now = new Date()
+    const dateFormatted = now.toLocaleDateString('es-MX', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'America/Mexico_City',
+    })
+    const dateCapitalized = dateFormatted.charAt(0).toUpperCase() + dateFormatted.slice(1)
+
+    const outOfStockCount = data.items.filter(i => i.isOutOfStock).length
+    const lowStockCount = data.items.length - outOfStockCount
+
+    const subject = `Alertas de bajas existencias en ${data.venueName}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+
+    // Build table rows
+    const tableRows = data.items
+      .map(item => {
+        const statusLabel = item.isOutOfStock ? 'Sin stock' : 'Stock bajo'
+        const statusColor = item.isOutOfStock ? '#dc2626' : '#f59e0b'
+        const stockColor = item.isOutOfStock ? '#dc2626' : '#000'
+
+        return `
+          <tr>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">
+              <div style="font-size: 14px; font-weight: 500; color: #000;">${item.name}</div>
+              <div style="font-size: 12px; color: #666;">${item.category || 'Sin categorizar'}</div>
+            </td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: right;">
+              <span style="font-size: 14px; font-weight: 600; color: ${stockColor};">${item.currentStock}</span>
+              <span style="font-size: 12px; color: #666;"> ${item.unit}</span>
+            </td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: right;">
+              <span style="font-size: 14px; color: #666;">${item.reorderPoint}</span>
+              <span style="font-size: 12px; color: #666;"> ${item.unit}</span>
+            </td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: center;">
+              <span style="display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; color: #fff; background-color: ${statusColor};">${statusLabel}</span>
+            </td>
+          </tr>`
+      })
+      .join('')
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <!-- Header with Logo -->
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <!-- Title Section -->
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      Alertas de bajas existencias en ${data.venueName}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">
+      ${dateCapitalized}
+    </p>
+
+    <!-- Summary -->
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #000;">
+      ${data.items.length} ${data.items.length === 1 ? 'ingrediente requiere' : 'ingredientes requieren'} tu atenci&oacute;n${outOfStockCount > 0 ? ` (${outOfStockCount} sin stock)` : ''}.
+    </p>
+
+    <!-- Items Table -->
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+      <thead>
+        <tr style="background-color: #f9fafb;">
+          <th style="padding: 10px 16px; text-align: left; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Art&iacute;culo</th>
+          <th style="padding: 10px 16px; text-align: right; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Disponible</th>
+          <th style="padding: 10px 16px; text-align: right; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">M&iacute;nimo</th>
+          <th style="padding: 10px 16px; text-align: center; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Estado</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${tableRows}
+      </tbody>
+    </table>
+
+    <!-- CTA Button -->
+    <div style="margin: 32px 0; text-align: left;">
+      <a href="${data.dashboardUrl}" style="display: inline-block; background-color: #2563eb; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Administrar inventario
+      </a>
+    </div>
+
+    <!-- Divider -->
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+
+    <!-- Footer -->
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        <a href="${data.preferencesUrl}" style="color: #666; text-decoration: underline;">Administra tus preferencias de notificaciones</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `Alertas de bajas existencias en ${data.venueName}
+${dateCapitalized}
+
+${data.items.length} ingrediente(s) requieren tu atencion.
+
+${data.items.map(i => `- ${i.name}: ${i.currentStock} ${i.unit} (minimo: ${i.reorderPoint} ${i.unit}) - ${i.isOutOfStock ? 'SIN STOCK' : 'STOCK BAJO'}`).join('\n')}
+
+Administrar inventario: ${data.dashboardUrl}
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.`
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
   async verifyConnection(): Promise<boolean> {
     if (!resend || !this.isAvailable) {
       return false

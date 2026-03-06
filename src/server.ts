@@ -22,6 +22,7 @@ import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
+import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
@@ -86,6 +87,10 @@ const gracefulShutdown = async (signal: string) => {
         // Stop nightly sales summary job
         logger.info('Stopping nightly sales summary job...')
         nightlySalesSummaryJob.stop()
+
+        // Stop nightly low stock digest job
+        logger.info('Stopping nightly low stock digest job...')
+        nightlyLowStockJob.stop()
 
         // Stop live demo cleanup job
         if (liveDemoCleanupJob) {
@@ -244,6 +249,9 @@ const startApplication = async (retries = 3) => {
 
       // Start nightly sales summary job (daily at 10 PM Mexico City - sends email to admins/owners)
       nightlySalesSummaryJob.start()
+
+      // Start nightly low stock digest job (daily at 10:30 PM Mexico City - sends inventory alerts)
+      nightlyLowStockJob.start()
 
       // Start marketing campaign job (every 5 minutes - processes email queue)
       marketingCampaignJob.start()
