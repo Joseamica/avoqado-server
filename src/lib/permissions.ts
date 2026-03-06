@@ -515,6 +515,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'home:read',
     'analytics:read',
     'analytics:export',
+    'reports:read', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:read',
     'settlements:simulate',
     'menu:read',
@@ -598,6 +599,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.ADMIN]: [
     'home:*',
     'analytics:*',
+    'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
     'menu:*',
     'orders:*',
@@ -664,6 +666,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.OWNER]: [
     'home:*',
     'analytics:*',
+    'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
     'commissions:*', // Commission system (full control including payout)
     'menu:*',
@@ -1010,7 +1013,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
   analytics: ['analytics:read', 'analytics:export'],
   settlements: ['settlements:read', 'settlements:simulate'],
-  menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete'],
+  reports: ['reports:read', 'reports:export'],
+  menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel'],
   payments: ['payments:read', 'payments:create', 'payments:refund'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
@@ -1046,6 +1050,17 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   notifications: ['notifications:send'],
   products: ['products:read', 'products:create', 'products:update', 'products:delete'],
   'role-config': ['role-config:read', 'role-config:update'], // Custom role display names
+  'tpv-settings': ['tpv-settings:read', 'tpv-settings:update'],
+  billing: [
+    'billing:read',
+    'billing:subscriptions:read',
+    'billing:subscriptions:manage',
+    'billing:history:read',
+    'billing:payment-methods:read',
+    'billing:payment-methods:manage',
+    'billing:tokens:read',
+    'billing:tokens:purchase',
+  ],
   // TPV-specific permissions (granular features)
   'tpv-terminal': ['tpv-terminal:settings'],
   'tpv-devices': ['tpv-devices:manage'], // External devices (iPad, tablets) for BLE payments
