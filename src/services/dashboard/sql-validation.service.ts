@@ -28,6 +28,7 @@
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { SharedQueryService } from './shared-query.service'
+import { QueryLimitsService } from './query-limits.service'
 import type { RelativeDateRange } from '@/utils/datetime'
 // Configuration-driven schema registry for valid table names
 import { getSchemaRegistry } from '@/config/chatbot'
@@ -184,15 +185,32 @@ export class SqlValidationService {
    * // result.isValid = false
    * // result.errors = ['Syntax error near "invalid"']
    */
-  static async validateDryRun(sql: string): Promise<ValidationResult> {
+  static async validateDryRun(sql: string, options?: { timeoutMs?: number }): Promise<ValidationResult> {
     const errors: string[] = []
     const warnings: string[] = []
     const suggestions: string[] = []
 
     try {
+      const requestedTimeoutMs = options?.timeoutMs ?? Number(process.env.CHATBOT_DRY_RUN_TIMEOUT_MS || 2500)
+      const timeoutMs = Number.isFinite(requestedTimeoutMs) ? Math.min(Math.max(Math.floor(requestedTimeoutMs), 500), 10000) : 2500
+      const statementTimeoutMs = Math.max(250, timeoutMs - 250)
+
       // Use EXPLAIN to validate query without executing
       // This catches syntax errors and type mismatches
-      await prisma.$queryRawUnsafe(`EXPLAIN ${sql}`)
+      await QueryLimitsService.withTimeout(
+        prisma.$transaction(
+          async tx => {
+            await tx.$executeRawUnsafe('SET LOCAL transaction_read_only = on')
+            await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${statementTimeoutMs}`)
+            await tx.$queryRawUnsafe(`EXPLAIN ${sql}`)
+          },
+          {
+            maxWait: 1000,
+            timeout: timeoutMs + 500,
+          },
+        ),
+        timeoutMs + 750,
+      )
 
       return {
         isValid: true,
@@ -217,6 +235,9 @@ export class SqlValidationService {
       } else if (errorMessage.includes('type')) {
         errors.push(`Type mismatch: ${errorMessage}`)
         suggestions.push('Check data types in WHERE clause and comparisons')
+      } else if (errorMessage.toLowerCase().includes('timeout') || errorMessage.toLowerCase().includes('statement timeout')) {
+        errors.push(`Dry-run timeout: ${errorMessage}`)
+        suggestions.push('Intenta una consulta más acotada con menos joins o un rango de fechas más corto')
       } else {
         errors.push(`Query execution error: ${errorMessage}`)
       }

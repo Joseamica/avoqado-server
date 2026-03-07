@@ -34,6 +34,7 @@ interface TextToSqlQuery {
   ipAddress?: string // For audit logging
   includeVisualization?: boolean // Include chart visualization in response
   referencesContext?: string // AI references context (selected payments, orders, etc.)
+  internalActionExecution?: boolean // Internal-only: allows action command execution after preview/confirm
 }
 
 interface ConversationEntry {
@@ -113,11 +114,19 @@ interface TextToSqlResponse {
     rowsReturned?: number
     executionTime?: number
     dataSourcesUsed: string[]
+    routedTo?: 'SharedQueryService' | 'TextToSqlPipeline' | 'Blocked' | 'ActionPreview' | 'ActionConfirm'
+    intent?: IntentClassificationResult['intent']
+    riskLevel?: 'low' | 'medium' | 'high' | 'critical'
+    reasonCode?: string
     blocked?: boolean // Security: Query was blocked
     violationType?: SecurityViolationType // Security: Type of violation detected
     warnings?: string[] // Semantic validation warnings
     userRole?: UserRole // User role for auditing
     action?: CreateProductActionMetadata
+    idempotency?: {
+      key: string
+      replayed: boolean
+    }
   }
   suggestions?: string[]
   trainingDataId?: string
@@ -149,7 +158,7 @@ interface CreateProductActionPayload {
   price?: number | string
   sku?: string
   categoryId?: string
-  type?: ProductType
+  type?: ProductType | string
   needsModifiers?: boolean
   modifierGroupIds?: string[]
 }
@@ -171,6 +180,48 @@ interface CreateProductActionMetadata {
   }
 }
 
+interface AssistantActionPreviewRequest {
+  actionType: 'create_product'
+  draft?: CreateProductActionPayload
+  conversationId?: string
+  venueId: string
+  userId: string
+  userRole: UserRole
+  ipAddress?: string
+}
+
+interface AssistantActionPreviewResponse {
+  actionId: string
+  actionType: 'create_product'
+  normalizedDraft: CreateProductActionDraft
+  requiredFields: Array<'name' | 'price' | 'sku' | 'categoryId'>
+  missingFields: Array<'name' | 'price' | 'sku' | 'categoryId'>
+  categories: CreateProductActionOption[]
+  modifierGroups: CreateProductActionOption[]
+  canConfirm: boolean
+  confirmationSummary: string
+  expiresAt: string
+}
+
+interface AssistantActionConfirmRequest {
+  actionId: string
+  idempotencyKey: string
+  confirmed: true
+  venueId: string
+  userId: string
+  userRole: UserRole
+  ipAddress?: string
+}
+
+interface AssistantActionConfirmResponse {
+  actionId: string
+  status: 'confirmed' | 'requires_input' | 'expired' | 'noop'
+  response: string
+  entityId?: string
+  auditId?: string
+  metadata?: Record<string, any>
+}
+
 interface ParsedCreateProductActionCommand {
   isCommand: boolean
   payload?: CreateProductActionPayload
@@ -181,6 +232,22 @@ const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
 const CHATBOT_MUTATIONS_ENABLED = process.env.CHATBOT_ENABLE_MUTATIONS === 'true'
 const MAX_PROMPT_CONTEXT_CHARS = 600
 const MAX_REFERENCES_CONTEXT_CHARS = 3000
+const ACTION_SESSION_TTL_MS = 15 * 60 * 1000
+
+interface PendingAssistantActionSession {
+  actionId: string
+  actionType: 'create_product'
+  venueId: string
+  userId: string
+  userRole: UserRole
+  normalizedDraft: CreateProductActionDraft
+  requiredFields: Array<'name' | 'price' | 'sku' | 'categoryId'>
+  missingFields: Array<'name' | 'price' | 'sku' | 'categoryId'>
+  categories: CreateProductActionOption[]
+  modifierGroups: CreateProductActionOption[]
+  createdAt: number
+  expiresAt: number
+}
 
 interface SqlGenerationResult {
   sql: string
@@ -264,6 +331,16 @@ class TextToSqlAssistantService {
   private openai: OpenAI
   private schemaContext: string
   private learningService: AILearningService
+  private static readonly pendingActionSessions: Map<string, PendingAssistantActionSession> = new Map()
+  private static readonly idempotencyResults: Map<
+    string,
+    {
+      response: AssistantActionConfirmResponse
+      createdAt: number
+      expiresAt: number
+    }
+  > = new Map()
+  private static actionSessionCleanupInitialized = false
   private static readonly SHARED_INTENT_TABLES: Record<SharedIntent, string[]> = {
     sales: ['Payment', 'Order'],
     averageTicket: ['Payment', 'Order'],
@@ -287,6 +364,29 @@ class TextToSqlAssistantService {
     this.openai = new OpenAI({ apiKey })
     this.schemaContext = this.buildSchemaContext()
     this.learningService = new AILearningService()
+    this.initializeActionSessionCleanup()
+  }
+
+  private initializeActionSessionCleanup(): void {
+    if (TextToSqlAssistantService.actionSessionCleanupInitialized) {
+      return
+    }
+    TextToSqlAssistantService.actionSessionCleanupInitialized = true
+
+    const cleanupInterval = setInterval(() => {
+      const now = Date.now()
+      for (const [actionId, session] of TextToSqlAssistantService.pendingActionSessions.entries()) {
+        if (now >= session.expiresAt) {
+          TextToSqlAssistantService.pendingActionSessions.delete(actionId)
+        }
+      }
+      for (const [key, record] of TextToSqlAssistantService.idempotencyResults.entries()) {
+        if (now >= record.expiresAt) {
+          TextToSqlAssistantService.idempotencyResults.delete(key)
+        }
+      }
+    }, 60 * 1000)
+    cleanupInterval.unref?.()
   }
 
   private validateSharedIntentAccess(
@@ -906,18 +1006,8 @@ The user wants to see a chart visualization. To generate meaningful charts:
         }
       }
 
-      // Layer 2: Dry Run Validation (0.1s - validates syntax without fetching data)
-      const dryRunValidation = await SqlValidationService.validateDryRun(sqlQuery)
-      if (!dryRunValidation.isValid) {
-        logger.error('❌ SQL dry run validation failed', {
-          sql: sqlQuery,
-          errors: dryRunValidation.errors,
-        })
-        throw new Error(`SQL syntax error: ${dryRunValidation.errors.join(', ')}`)
-      }
-
       // ═══════════════════════════════════════════════════════════
-      // SECURITY LEVEL 3: SQL VALIDATION (Selective - Role-Based)
+      // SECURITY LEVEL 3: SQL VALIDATION (AST + ACL, fail-closed)
       // ═══════════════════════════════════════════════════════════
 
       const effectiveUserRole = userRole || UserRole.VIEWER
@@ -971,6 +1061,19 @@ The user wants to see a chart visualization. To generate meaningful charts:
 
         const errorMessage = TableAccessControlService.formatAccessDeniedMessage(accessValidation, 'es')
         throw new Error(errorMessage)
+      }
+
+      // Layer 2: Dry Run Validation AFTER AST/ACL (safer ordering)
+      // Validates SQL syntax using EXPLAIN in read-only mode with explicit timeout.
+      const dryRunTimeoutMs = effectiveUserRole === UserRole.SUPERADMIN ? 5000 : 2500
+      const dryRunValidation = await SqlValidationService.validateDryRun(sqlQuery, { timeoutMs: dryRunTimeoutMs })
+      if (!dryRunValidation.isValid) {
+        logger.error('❌ SQL dry run validation failed', {
+          sql: sqlQuery,
+          errors: dryRunValidation.errors,
+          userRole: effectiveUserRole,
+        })
+        throw new Error(`SQL syntax error: ${dryRunValidation.errors.join(', ')}`)
       }
 
       // Execute SQL inside a READ ONLY transaction (defense-in-depth against write attempts).
@@ -1260,6 +1363,9 @@ Ejemplos de respuestas CORRECTAS:
             queryGenerated: false,
             queryExecuted: false,
             dataSourcesUsed: [],
+            routedTo: 'Blocked',
+            riskLevel: 'high',
+            reasonCode: 'mutation_disabled',
             blocked: true,
             violationType: SecurityViolationType.DANGEROUS_OPERATION,
           },
@@ -1277,6 +1383,39 @@ Ejemplos de respuestas CORRECTAS:
         ? this.parseCreateProductActionCommand(query.message)
         : { isCommand: false }
       if (actionCommand.isCommand) {
+        if (!query.internalActionExecution) {
+          const options = await this.getCreateProductActionOptions(query.venueId)
+          return {
+            response:
+              'Para crear productos desde el chatbot se requiere flujo seguro: vista previa y confirmación explícita. Completa el formulario y confirma la operación.',
+            confidence: 1,
+            metadata: {
+              queryGenerated: false,
+              queryExecuted: false,
+              dataSourcesUsed: ['chatbot.create_product'],
+              routedTo: 'ActionPreview',
+              riskLevel: 'medium',
+              reasonCode: 'direct_action_command_blocked',
+              blocked: true,
+              action: {
+                type: 'create_product',
+                stage: 'collect',
+                requiredFields: ['name', 'price', 'sku', 'categoryId'],
+                missingFields: ['name', 'price', 'sku', 'categoryId'],
+                draft: {},
+                categories: options.categories,
+                modifierGroups: options.modifierGroups,
+              },
+            },
+            suggestions: ['Completa la vista previa del producto', 'Confirma explícitamente antes de ejecutar'],
+            tokenUsage: {
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+            },
+          }
+        }
+
         if (actionCommand.error || !actionCommand.payload) {
           const options = await this.getCreateProductActionOptions(query.venueId)
           return {
@@ -1286,6 +1425,9 @@ Ejemplos de respuestas CORRECTAS:
               queryGenerated: false,
               queryExecuted: false,
               dataSourcesUsed: ['chatbot.create_product'],
+              routedTo: 'ActionPreview',
+              riskLevel: 'medium',
+              reasonCode: 'invalid_action_payload',
               action: {
                 type: 'create_product',
                 stage: 'collect',
@@ -1343,6 +1485,9 @@ Ejemplos de respuestas CORRECTAS:
             queryGenerated: false,
             queryExecuted: false,
             dataSourcesUsed: [],
+            routedTo: 'Blocked',
+            riskLevel: 'critical',
+            reasonCode: 'prompt_injection_blocked',
             blocked: true,
             violationType: SecurityViolationType.PROMPT_INJECTION,
           },
@@ -1403,6 +1548,9 @@ Ejemplos de respuestas CORRECTAS:
             queryGenerated: false,
             queryExecuted: false,
             dataSourcesUsed: [],
+            routedTo: 'TextToSqlPipeline',
+            riskLevel: 'low',
+            reasonCode: 'conversational_message',
           },
           suggestions: [
             '¿Cuántas reseñas de 5 estrellas tengo?',
@@ -1489,6 +1637,9 @@ Ejemplos de respuestas CORRECTAS:
               queryGenerated: false,
               queryExecuted: false,
               dataSourcesUsed: [],
+              routedTo: 'Blocked',
+              riskLevel: 'high',
+              reasonCode: 'shared_intent_access_denied',
               blocked: true,
               violationType,
             },
@@ -1933,6 +2084,8 @@ Ejemplos de respuestas CORRECTAS:
               dataSourcesUsed: ['SharedQueryService'],
               routedTo: 'SharedQueryService',
               intent: intentClassification.intent,
+              riskLevel: 'low',
+              reasonCode: 'shared_intent_routed',
               bypassedLLM: !usedLlmPlanner && !usedLlmIntentClassifier,
               costSaving: !usedLlmPlanner && !usedLlmIntentClassifier,
               usedLlmPlanner,
@@ -2097,6 +2250,9 @@ Ejemplos de respuestas CORRECTAS:
             queryGenerated: !!sqlGeneration,
             queryExecuted: false,
             dataSourcesUsed: [],
+            routedTo: 'TextToSqlPipeline',
+            riskLevel: 'medium',
+            reasonCode: 'generation_failed_after_retries',
           },
           suggestions: ['¿Cuántas ventas tuve hoy?', '¿Cuál es mi promedio de reseñas?', '¿Qué mesero tiene más propinas este mes?'],
           trainingDataId,
@@ -2179,6 +2335,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
             rowsReturned: execution.metadata.rowsReturned,
             executionTime: totalTime,
             dataSourcesUsed: sqlGeneration.tables,
+            routedTo: 'TextToSqlPipeline',
+            riskLevel: 'medium',
+            reasonCode: 'low_confidence_fallback',
             fallbackMode: true,
           } as any,
           suggestions: [
@@ -2208,6 +2367,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
             rowsReturned: execution.metadata.rowsReturned,
             executionTime: totalTime,
             dataSourcesUsed: sqlGeneration.tables,
+            routedTo: 'TextToSqlPipeline',
+            riskLevel: 'medium',
+            reasonCode: 'result_validation_failed',
             resultValidationFailed: true,
             validationErrors: resultValidation.errors,
             bulletproofValidation: {
@@ -2319,6 +2481,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           rowsReturned: execution.metadata.rowsReturned,
           executionTime: totalTime,
           dataSourcesUsed: sqlGeneration.tables,
+          routedTo: 'TextToSqlPipeline',
+          riskLevel: validationWarnings.length > 0 || sanityChecks.length > 0 ? 'medium' : 'low',
+          reasonCode: selfCorrectionHappened ? 'sql_execution_success_self_corrected' : 'sql_execution_success',
           selfCorrection: {
             attemptCount,
             selfCorrected: selfCorrectionHappened,
@@ -2410,6 +2575,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           queryGenerated: false,
           queryExecuted: false,
           dataSourcesUsed: [],
+          routedTo: 'TextToSqlPipeline',
+          riskLevel: 'high',
+          reasonCode: 'processing_error',
         },
         suggestions: [
           '¿Cuántas reseñas de 5 estrellas tengo?',
@@ -2858,29 +3026,47 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
   }
 
   private containsFutureDates(result: any): boolean {
-    const today = new Date()
-    const resultStr = JSON.stringify(result).toLowerCase()
+    const now = new Date()
+    const maxAllowedDate = new Date(now)
+    maxAllowedDate.setDate(maxAllowedDate.getDate() + 1) // tolerate minor TZ drift
+    const visitedObjects = new WeakSet<object>()
 
-    // Check for obvious future years
-    if (resultStr.includes('2026') || resultStr.includes('2027')) {
-      return true
-    }
-
-    // Check for future months in 2025
-    const currentMonth = today.getMonth() + 1
-    const currentYear = today.getFullYear()
-
-    if (currentYear === 2025) {
-      // Check if result contains months beyond current month
-      const monthsRegex = /(202[5-9]-(?:0[9-9]|1[0-2]))/
-      const matches = resultStr.match(monthsRegex)
-      if (matches) {
-        const resultMonth = parseInt(matches[1].split('-')[1])
-        return resultMonth > currentMonth
+    const inspectValue = (value: any): boolean => {
+      if (value == null) {
+        return false
       }
+
+      if (value instanceof Date) {
+        return value.getTime() > maxAllowedDate.getTime()
+      }
+
+      if (typeof value === 'string') {
+        const normalized = value.trim()
+        if (/^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$/.test(normalized)) {
+          const parsed = new Date(normalized)
+          if (!Number.isNaN(parsed.getTime()) && parsed.getTime() > maxAllowedDate.getTime()) {
+            return true
+          }
+        }
+        return false
+      }
+
+      if (Array.isArray(value)) {
+        return value.some(item => inspectValue(item))
+      }
+
+      if (typeof value === 'object') {
+        if (visitedObjects.has(value)) {
+          return false
+        }
+        visitedObjects.add(value)
+        return Object.values(value).some(item => inspectValue(item))
+      }
+
+      return false
     }
 
-    return false
+    return inspectValue(result)
   }
 
   private detectUnrealisticValues(question: string, result: any): { isValid: boolean; errors: string[] } {
@@ -3358,6 +3544,201 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
   }
 
+  public async previewAction(request: AssistantActionPreviewRequest): Promise<AssistantActionPreviewResponse> {
+    if (request.actionType !== 'create_product') {
+      throw new AppError('Tipo de acción no soportado.', 400)
+    }
+
+    if (!CHATBOT_MUTATIONS_ENABLED) {
+      throw new AppError('El chatbot está en modo solo lectura. Habilita CHATBOT_ENABLE_MUTATIONS para usar acciones.', 403)
+    }
+
+    const role = (request.userRole as unknown as StaffRole) || StaffRole.VIEWER
+    const customPermissions = await this.resolveCustomPermissionsForRole(request.venueId, role)
+    const canCreateProducts = hasPermission(role, customPermissions, 'menu:create')
+
+    if (!canCreateProducts) {
+      throw new AppError('No tienes permisos para crear productos en este venue (menu:create).', 403)
+    }
+
+    const options = await this.getCreateProductActionOptions(request.venueId)
+
+    const normalizedDraft: CreateProductActionDraft = {
+      name: typeof request.draft?.name === 'string' ? request.draft.name.trim() : undefined,
+      price:
+        typeof request.draft?.price === 'number'
+          ? request.draft.price
+          : typeof request.draft?.price === 'string'
+            ? this.parsePriceCandidate(request.draft.price)
+            : undefined,
+      sku: typeof request.draft?.sku === 'string' ? request.draft.sku.toUpperCase().trim() : undefined,
+      categoryId: typeof request.draft?.categoryId === 'string' ? request.draft.categoryId.trim() : undefined,
+      type: this.normalizeProductType(request.draft?.type),
+      needsModifiers: request.draft?.needsModifiers ?? false,
+      modifierGroupIds: Array.isArray(request.draft?.modifierGroupIds) ? request.draft?.modifierGroupIds : [],
+    }
+
+    const missingFields = this.getMissingCreateProductFields(normalizedDraft)
+    const actionId = randomUUID()
+    const now = Date.now()
+    const expiresAt = now + ACTION_SESSION_TTL_MS
+
+    const formatCurrency = (value: number | undefined): string => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return 'pendiente'
+      return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(value)
+    }
+
+    const selectedCategory = normalizedDraft.categoryId
+      ? options.categories.find(category => category.id === normalizedDraft.categoryId)?.name || 'categoría seleccionada'
+      : 'pendiente'
+
+    const confirmationSummary = `Crear producto "${normalizedDraft.name || 'pendiente'}" con SKU ${
+      normalizedDraft.sku || 'pendiente'
+    }, precio ${formatCurrency(normalizedDraft.price)} y categoría ${selectedCategory}.`
+
+    TextToSqlAssistantService.pendingActionSessions.set(actionId, {
+      actionId,
+      actionType: 'create_product',
+      venueId: request.venueId,
+      userId: request.userId,
+      userRole: request.userRole,
+      normalizedDraft,
+      requiredFields: ['name', 'price', 'sku', 'categoryId'],
+      missingFields,
+      categories: options.categories,
+      modifierGroups: options.modifierGroups,
+      createdAt: now,
+      expiresAt,
+    })
+
+    return {
+      actionId,
+      actionType: 'create_product',
+      normalizedDraft,
+      requiredFields: ['name', 'price', 'sku', 'categoryId'],
+      missingFields,
+      categories: options.categories,
+      modifierGroups: options.modifierGroups,
+      canConfirm: missingFields.length === 0 && options.categories.length > 0,
+      confirmationSummary,
+      expiresAt: new Date(expiresAt).toISOString(),
+    }
+  }
+
+  public async confirmAction(request: AssistantActionConfirmRequest): Promise<AssistantActionConfirmResponse> {
+    if (!request.confirmed) {
+      throw new AppError('Debes confirmar explícitamente la acción.', 400)
+    }
+
+    if (!CHATBOT_MUTATIONS_ENABLED) {
+      throw new AppError('El chatbot está en modo solo lectura. Habilita CHATBOT_ENABLE_MUTATIONS para usar acciones.', 403)
+    }
+
+    const idempotencyStorageKey = `${request.venueId}:${request.userId}:${request.idempotencyKey}`
+    const replayed = TextToSqlAssistantService.idempotencyResults.get(idempotencyStorageKey)
+    if (replayed) {
+      return {
+        ...replayed.response,
+        metadata: {
+          ...(replayed.response.metadata || {}),
+          routedTo: 'ActionConfirm',
+          riskLevel: 'medium',
+          reasonCode: 'idempotency_replay',
+          idempotency: {
+            key: request.idempotencyKey,
+            replayed: true,
+          },
+        },
+      }
+    }
+
+    const pendingSession = TextToSqlAssistantService.pendingActionSessions.get(request.actionId)
+    if (!pendingSession) {
+      return {
+        actionId: request.actionId,
+        status: 'expired',
+        response: 'La vista previa expiró o no existe. Vuelve a solicitar preview antes de confirmar.',
+        metadata: {
+          routedTo: 'ActionConfirm',
+          riskLevel: 'medium',
+          reasonCode: 'preview_not_found',
+        },
+      }
+    }
+
+    if (Date.now() >= pendingSession.expiresAt) {
+      TextToSqlAssistantService.pendingActionSessions.delete(request.actionId)
+      return {
+        actionId: request.actionId,
+        status: 'expired',
+        response: 'La vista previa expiró. Genera una nueva vista previa antes de confirmar.',
+        metadata: {
+          routedTo: 'ActionConfirm',
+          riskLevel: 'medium',
+          reasonCode: 'preview_expired',
+        },
+      }
+    }
+
+    if (pendingSession.venueId !== request.venueId || pendingSession.userId !== request.userId) {
+      throw new AppError('La acción no pertenece a tu sesión actual.', 403)
+    }
+
+    if (pendingSession.missingFields.length > 0) {
+      return {
+        actionId: request.actionId,
+        status: 'requires_input',
+        response: `Aún faltan campos obligatorios: ${pendingSession.missingFields.join(', ')}.`,
+        metadata: {
+          routedTo: 'ActionConfirm',
+          riskLevel: 'medium',
+          reasonCode: 'missing_required_fields',
+          missingFields: pendingSession.missingFields,
+        },
+      }
+    }
+
+    const mutationResponse = await this.processQuery({
+      message: `${CREATE_PRODUCT_ACTION_COMMAND_PREFIX}${JSON.stringify(pendingSession.normalizedDraft)}`,
+      venueId: request.venueId,
+      userId: request.userId,
+      userRole: request.userRole,
+      ipAddress: request.ipAddress,
+      internalActionExecution: true,
+    })
+
+    const createdProductId = (mutationResponse.metadata?.action as any)?.createdProduct?.id
+    const auditId = mutationResponse.trainingDataId
+
+    const status: AssistantActionConfirmResponse['status'] = mutationResponse.metadata?.queryExecuted ? 'confirmed' : 'noop'
+    const responsePayload: AssistantActionConfirmResponse = {
+      actionId: request.actionId,
+      status,
+      response: mutationResponse.response,
+      entityId: createdProductId,
+      auditId,
+      metadata: {
+        ...mutationResponse.metadata,
+        routedTo: 'ActionConfirm',
+        riskLevel: mutationResponse.metadata?.queryExecuted ? 'medium' : 'high',
+        reasonCode: mutationResponse.metadata?.queryExecuted ? 'action_confirmed' : 'action_noop',
+        idempotency: {
+          key: request.idempotencyKey,
+          replayed: false,
+        },
+      },
+    }
+
+    TextToSqlAssistantService.idempotencyResults.set(idempotencyStorageKey, {
+      response: responsePayload,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + ACTION_SESSION_TTL_MS,
+    })
+    TextToSqlAssistantService.pendingActionSessions.delete(request.actionId)
+
+    return responsePayload
+  }
+
   private detectCreateProductIntent(message: string): boolean {
     const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ')
     if (!normalizedMessage) return false
@@ -3445,6 +3826,13 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     const parsed = Number(normalized)
     if (!Number.isFinite(parsed) || parsed <= 0) return undefined
     return Number(parsed.toFixed(2))
+  }
+
+  private normalizeProductType(value?: ProductType | string): ProductType {
+    if (!value) return ProductType.FOOD
+
+    const normalizedValue = String(value).trim().toUpperCase()
+    return Object.values(ProductType).includes(normalizedValue as ProductType) ? (normalizedValue as ProductType) : ProductType.FOOD
   }
 
   private extractProductNameFromMessage(message: string): string | undefined {
@@ -3647,6 +4035,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         queryGenerated: false,
         queryExecuted: false,
         dataSourcesUsed: ['chatbot.create_product'],
+        routedTo: 'ActionPreview',
+        riskLevel: 'medium',
+        reasonCode: 'create_product_collect',
         action: {
           type: 'create_product',
           stage: 'collect',
@@ -3686,6 +4077,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           queryGenerated: false,
           queryExecuted: false,
           dataSourcesUsed: ['chatbot.create_product'],
+          routedTo: 'Blocked',
+          riskLevel: 'high',
+          reasonCode: 'create_product_permission_denied',
           action: {
             type: 'create_product',
             stage: 'collect',
@@ -3714,7 +4108,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
             : undefined,
       sku: typeof payload.sku === 'string' ? payload.sku.toUpperCase().trim() : undefined,
       categoryId: typeof payload.categoryId === 'string' ? payload.categoryId.trim() : undefined,
-      type: payload.type || ProductType.FOOD,
+      type: this.normalizeProductType(payload.type),
       needsModifiers: payload.needsModifiers ?? false,
       modifierGroupIds: Array.isArray(payload.modifierGroupIds) ? payload.modifierGroupIds : [],
     }
@@ -3735,6 +4129,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           queryGenerated: false,
           queryExecuted: false,
           dataSourcesUsed: ['chatbot.create_product'],
+          routedTo: 'ActionPreview',
+          riskLevel: 'medium',
+          reasonCode: 'create_product_missing_required_fields',
           action: {
             type: 'create_product',
             stage: 'collect',
@@ -3778,6 +4175,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           queryGenerated: false,
           queryExecuted: false,
           dataSourcesUsed: ['chatbot.create_product'],
+          routedTo: 'ActionPreview',
+          riskLevel: 'medium',
+          reasonCode: 'create_product_schema_validation_failed',
           action: {
             type: 'create_product',
             stage: 'collect',
@@ -3816,6 +4216,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           queryGenerated: false,
           queryExecuted: false,
           dataSourcesUsed: ['chatbot.create_product'],
+          routedTo: 'ActionPreview',
+          riskLevel: 'medium',
+          reasonCode: 'create_product_category_invalid',
           action: {
             type: 'create_product',
             stage: 'collect',
@@ -3854,6 +4257,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
             queryGenerated: false,
             queryExecuted: false,
             dataSourcesUsed: ['chatbot.create_product'],
+            routedTo: 'ActionPreview',
+            riskLevel: 'medium',
+            reasonCode: 'create_product_modifier_group_invalid',
             action: {
               type: 'create_product',
               stage: 'collect',
@@ -3884,6 +4290,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         queryGenerated: false,
         queryExecuted: false,
         dataSourcesUsed: ['chatbot.create_product'],
+        routedTo: 'ActionPreview',
+        riskLevel: 'medium',
+        reasonCode: 'create_product_requires_additional_input',
         action: {
           type: 'create_product',
           stage: 'collect',
@@ -4082,6 +4491,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         rowsReturned: 1,
         executionTime: Date.now() - startTime,
         dataSourcesUsed: ['chatbot.create_product', 'ProductService'],
+        routedTo: 'ActionConfirm',
+        riskLevel: 'medium',
+        reasonCode: 'create_product_confirmed',
         action: {
           type: 'create_product',
           stage: 'created',
@@ -5740,6 +6152,9 @@ ${JSON.stringify(input, null, 2)}
           queryExecuted: true,
           rowsReturned: Array.isArray(consensus.result) ? consensus.result.length : 1,
           executionTime: totalTime,
+          routedTo: 'TextToSqlPipeline',
+          riskLevel: consensus.confidence === 'high' ? 'low' : 'medium',
+          reasonCode: 'consensus_voting_success',
           consensusVoting: {
             totalGenerations: 3,
             successfulExecutions: results.length,

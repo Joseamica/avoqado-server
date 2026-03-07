@@ -1,12 +1,13 @@
 import { NextFunction, Request, Response } from 'express'
 import textToSqlAssistantService from '../../services/dashboard/text-to-sql-assistant.service'
-import { AssistantQueryDto } from '../../schemas/dashboard/assistant.schema'
+import { AssistantActionConfirmDto, AssistantActionPreviewDto, AssistantQueryDto } from '../../schemas/dashboard/assistant.schema'
 import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { UserRole } from '../../services/dashboard/table-access-control.service'
 
 const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
+type SensitiveRiskLevel = 'none' | 'medium' | 'high' | 'critical'
 
 const normalizeForSecurityCheck = (message: string): string => {
   return message
@@ -28,35 +29,120 @@ const isCrudBridgeMessage = (message: string): boolean => {
 }
 
 /**
- * Detecta si una consulta contiene información sensible que requiere rol SUPERADMIN
+ * Clasifica el riesgo de seguridad de una consulta.
  */
-const isSensitiveQuery = (message: string): boolean => {
+const classifySensitiveRisk = (message: string): SensitiveRiskLevel => {
   const normalized = normalizeForSecurityCheck(message)
-  const sensitivePatterns = [
-    // Account/permission model
-    /\b(superadmin|owner|propietario|admin|administrador(?:es)?)\b/,
-    /\b(rol|roles|role|permissions?|permisos?)\b/,
-    /\b(usuarios?|users?|staff|empleados?)\b/,
-
-    // System internals
+  const criticalPatterns = [
+    /\b(password|contrasena|api[\s_-]*key|apikey|secret|secreto|credentials?|access[\s_-]*token|jwt)\b/,
+    /\b(stripe.*secret|refresh[\s_-]*token|webhook[\s_-]*secret)\b/,
+  ]
+  const highPatterns = [
     /\b(base de datos|database|schema|esquema|tablas?|tables?|columnas?|columns?)\b/,
-    /\b(configuracion|configuration|acceso|access|seguridad|security)\b/,
-
-    // Credentials/secrets
-    /\b(password|contrasena|api[\s_-]*key|apikey|secret|secreto|credenciales?|credentials|access[\s_-]*token|jwt)\b/,
-
-    // Audit/compliance exports
+    /\b(information_schema|pg_catalog|pg_tables)\b/,
     /\b(auditoria|audit|logs?|historial completo|informacion confidencial|datos sensibles)\b/,
   ]
+  const mediumPatterns = [/\b(superadmin|owner|propietario|admin|administrador(?:es)?)\b/, /\b(rol|roles|role|permissions?|permisos?)\b/]
 
-  return sensitivePatterns.some(pattern => pattern.test(normalized))
+  if (criticalPatterns.some(pattern => pattern.test(normalized))) return 'critical'
+  if (highPatterns.some(pattern => pattern.test(normalized))) return 'high'
+  if (mediumPatterns.some(pattern => pattern.test(normalized))) return 'medium'
+  return 'none'
 }
 
 /**
- * Verifica si el usuario tiene permisos para ejecutar consultas sensibles
+ * Política de acceso por riesgo:
+ * - critical/high: SUPERADMIN
+ * - medium/none: permitido (el servicio aplicará ACL de tablas/columnas por rol)
  */
-const hasPermissionForSensitiveQuery = (userRole: string): boolean => {
-  return userRole === 'SUPERADMIN'
+const hasPermissionForSensitiveRisk = (userRole: string, riskLevel: SensitiveRiskLevel): boolean => {
+  if (riskLevel === 'critical' || riskLevel === 'high') {
+    return userRole === 'SUPERADMIN'
+  }
+  return true
+}
+
+const resolveAuthenticatedVenueContext = async (
+  req: Request,
+  options?: {
+    expectedVenueSlug?: string
+    expectedUserId?: string
+  },
+): Promise<{ venueId: string; userId: string; role: string; venueSlug: string }> => {
+  if (!req.authContext?.userId || !req.authContext?.venueId || !req.authContext?.role) {
+    throw new UnauthorizedError('Usuario no autenticado')
+  }
+
+  if (options?.expectedUserId && options.expectedUserId !== req.authContext.userId) {
+    logger.warn('🚨 userId mismatch detected in Text-to-SQL request', {
+      expectedUserId: req.authContext.userId,
+      receivedUserId: options.expectedUserId,
+    })
+    throw new ForbiddenError('Los identificadores enviados no coinciden con tu sesión activa.')
+  }
+
+  const currentVenueRecord = await prisma.venue.findUnique({
+    where: { id: req.authContext.venueId },
+    select: { slug: true },
+  })
+
+  if (!currentVenueRecord) {
+    logger.error('Authenticated venue not found in database', {
+      venueId: req.authContext.venueId,
+      userId: req.authContext.userId,
+    })
+    throw new ForbiddenError('No se encontró información del venue activo')
+  }
+
+  if (options?.expectedVenueSlug && currentVenueRecord.slug !== options.expectedVenueSlug) {
+    logger.warn('🚨 venueSlug mismatch detected in Text-to-SQL request', {
+      expectedVenueId: req.authContext.venueId,
+      expectedSlug: currentVenueRecord?.slug,
+      receivedSlug: options.expectedVenueSlug,
+    })
+    throw new ForbiddenError('El venue seleccionado no coincide con tu sesión activa.')
+  }
+
+  return {
+    venueId: req.authContext.venueId,
+    userId: req.authContext.userId,
+    role: req.authContext.role,
+    venueSlug: currentVenueRecord.slug,
+  }
+}
+
+const buildSanitizedMetadata = (metadata: Record<string, any> | undefined, confidence: number): Record<string, unknown> => {
+  const sanitizedMetadata: Record<string, unknown> = {
+    confidence,
+    queryGenerated: metadata?.queryGenerated,
+    queryExecuted: metadata?.queryExecuted,
+    rowsReturned: metadata?.rowsReturned,
+    executionTime: metadata?.executionTime,
+    blocked: metadata?.blocked,
+    violationType: metadata?.violationType,
+    riskLevel: metadata?.riskLevel,
+    reasonCode: metadata?.reasonCode,
+    routedTo: metadata?.routedTo,
+    intent: metadata?.intent,
+  }
+
+  if (metadata && 'warnings' in metadata) {
+    sanitizedMetadata.warnings = metadata.warnings
+  }
+
+  if (metadata && 'bulletproofValidation' in metadata) {
+    sanitizedMetadata.bulletproofValidation = metadata.bulletproofValidation
+  }
+
+  if (metadata && 'action' in metadata) {
+    sanitizedMetadata.action = metadata.action
+  }
+
+  if (metadata && 'idempotency' in metadata) {
+    sanitizedMetadata.idempotency = metadata.idempotency
+  }
+
+  return sanitizedMetadata
 }
 
 /**
@@ -65,57 +151,48 @@ const hasPermissionForSensitiveQuery = (userRole: string): boolean => {
 export const processTextToSqlQuery = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { message, conversationHistory, venueSlug, userId, includeVisualization, referencesContext }: AssistantQueryDto = req.body
-    const sensitiveQuery = isSensitiveQuery(message)
+    const sensitiveRiskLevel = classifySensitiveRisk(message)
     const crudBridgeMessage = isCrudBridgeMessage(message)
-
-    // Verificar que el usuario esté autenticado
-    if (!req.authContext?.userId || !req.authContext?.venueId || !req.authContext?.role) {
-      throw new UnauthorizedError('Usuario no autenticado')
-    }
-
-    // Validar coherencia del userId enviado por el cliente
-    if (userId && userId !== req.authContext.userId) {
-      logger.warn('🚨 userId mismatch detected in Text-to-SQL request', {
-        expectedUserId: req.authContext.userId,
-        receivedUserId: userId,
-      })
-      throw new ForbiddenError('Los identificadores enviados no coinciden con tu sesión activa.')
-    }
-
-    // Validar coherencia del venueSlug si fue enviado por el cliente
-    const currentVenueRecord = await prisma.venue.findUnique({
-      where: { id: req.authContext.venueId },
-      select: { slug: true },
+    const authContext = await resolveAuthenticatedVenueContext(req, {
+      expectedVenueSlug: venueSlug,
+      expectedUserId: userId,
     })
 
-    if (!currentVenueRecord) {
-      logger.error('Authenticated venue not found in database', {
-        venueId: req.authContext.venueId,
-        userId: req.authContext.userId,
-      })
-      throw new ForbiddenError('No se encontró información del venue activo')
-    }
-
-    if (venueSlug) {
-      if (currentVenueRecord.slug !== venueSlug) {
-        logger.warn('🚨 venueSlug mismatch detected in Text-to-SQL request', {
-          expectedVenueId: req.authContext.venueId,
-          expectedSlug: currentVenueRecord?.slug,
-          receivedSlug: venueSlug,
-        })
-        throw new ForbiddenError('El venue seleccionado no coincide con tu sesión activa.')
-      }
-    }
-
     // Verificar permisos para consultas sensibles
-    if (sensitiveQuery && !crudBridgeMessage && !hasPermissionForSensitiveQuery(req.authContext.role)) {
+    if (sensitiveRiskLevel !== 'none' && !crudBridgeMessage && !hasPermissionForSensitiveRisk(authContext.role, sensitiveRiskLevel)) {
       logger.warn('🚨 Intento de acceso a datos sensibles bloqueado', {
-        userId: req.authContext.userId,
-        venueId: req.authContext.venueId,
-        role: req.authContext.role,
+        userId: authContext.userId,
+        venueId: authContext.venueId,
+        role: authContext.role,
+        riskLevel: sensitiveRiskLevel,
         crudBridgeMessage,
         query: message.substring(0, 100), // Solo los primeros 100 caracteres por seguridad
       })
+
+      if (sensitiveRiskLevel === 'high') {
+        res.json({
+          success: true,
+          data: {
+            response:
+              'Esa solicitud parece orientada a estructura interna del sistema. Puedo ayudarte con métricas operativas del negocio; por ejemplo ventas, ticket promedio, reseñas, productos top o turnos activos.',
+            suggestions: [
+              'Dame un resumen de mi negocio esta semana',
+              '¿Cuánto vendí hoy y cómo voy vs ayer?',
+              '¿Qué productos se vendieron más este mes?',
+            ],
+            metadata: {
+              confidence: 1,
+              queryGenerated: false,
+              queryExecuted: false,
+              blocked: true,
+              riskLevel: 'high',
+              reasonCode: 'sensitive_high_requires_superadmin',
+              routedTo: 'Blocked',
+            },
+          },
+        })
+        return
+      }
 
       throw new ForbiddenError(
         'Acceso denegado: Esta consulta requiere permisos de SUPERADMIN para acceder a información sensible del sistema.',
@@ -124,11 +201,11 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
 
     // Log de auditoría de seguridad
     logger.info('🔍 Text-to-SQL query initiated', {
-      venueId: req.authContext.venueId,
-      userId: req.authContext.userId,
-      role: req.authContext.role,
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      role: authContext.role,
       messageLength: message.length,
-      isSensitive: sensitiveQuery,
+      sensitiveRiskLevel,
       isCrudBridgeMessage: crudBridgeMessage,
       timestamp: new Date().toISOString(),
     })
@@ -137,10 +214,10 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
     const response = await textToSqlAssistantService.processQuery({
       message,
       conversationHistory,
-      venueId: req.authContext.venueId,
-      userId: req.authContext.userId,
-      venueSlug: currentVenueRecord?.slug,
-      userRole: req.authContext.role as UserRole, // Pass for security validation
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      venueSlug: authContext.venueSlug,
+      userRole: authContext.role as UserRole, // Pass for security validation
       ipAddress: req.ip || req.socket.remoteAddress || 'unknown', // Pass for audit logging
       includeVisualization, // Pass flag for chart generation
       referencesContext, // Pass AI references context for contextual queries
@@ -148,38 +225,24 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
 
     // Log del resultado
     logger.info('🔍 Text-to-SQL query completed', {
-      venueId: req.authContext.venueId,
-      userId: req.authContext.userId,
-      role: req.authContext.role,
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      role: authContext.role,
       confidence: response.confidence,
       queryGenerated: response.metadata.queryGenerated,
       queryExecuted: response.metadata.queryExecuted,
       rowsReturned: response.metadata.rowsReturned,
       executionTime: response.metadata.executionTime,
-      isSensitive: sensitiveQuery,
+      sensitiveRiskLevel,
       isCrudBridgeMessage: crudBridgeMessage,
     })
 
     // Respuesta exitosa con metadatos de consulta SQL
     const { sqlQuery, queryResult, metadata, ...assistantPayload } = response
 
-    const sanitizedMetadata: Record<string, unknown> = {
-      confidence: assistantPayload.confidence,
-      queryGenerated: metadata?.queryGenerated,
-      queryExecuted: metadata?.queryExecuted,
-      rowsReturned: metadata?.rowsReturned,
-      executionTime: metadata?.executionTime,
-    }
+    const sanitizedMetadata = buildSanitizedMetadata(metadata as Record<string, any> | undefined, assistantPayload.confidence)
 
-    if (metadata && 'bulletproofValidation' in metadata) {
-      sanitizedMetadata.bulletproofValidation = (metadata as any).bulletproofValidation
-    }
-
-    if (metadata && 'action' in metadata) {
-      sanitizedMetadata.action = (metadata as any).action
-    }
-
-    const includeDebugInfo = process.env.NODE_ENV !== 'production' && req.authContext.role === 'SUPERADMIN'
+    const includeDebugInfo = process.env.NODE_ENV !== 'production' && authContext.role === 'SUPERADMIN'
 
     if (includeDebugInfo) {
       if (metadata?.dataSourcesUsed) {
@@ -215,6 +278,66 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       role: req.authContext?.role,
     })
 
+    next(error)
+  }
+}
+
+export const previewAssistantAction = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { actionType, draft, conversationId }: AssistantActionPreviewDto = req.body
+    const authContext = await resolveAuthenticatedVenueContext(req)
+
+    const preview = await textToSqlAssistantService.previewAction({
+      actionType,
+      draft,
+      conversationId,
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      userRole: authContext.role as UserRole,
+      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
+    })
+
+    res.json({
+      success: true,
+      data: preview,
+    })
+  } catch (error) {
+    logger.error('🔍 Assistant action preview failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.authContext?.venueId,
+      userId: req.authContext?.userId,
+      role: req.authContext?.role,
+    })
+    next(error)
+  }
+}
+
+export const confirmAssistantAction = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { actionId, idempotencyKey, confirmed }: AssistantActionConfirmDto = req.body
+    const authContext = await resolveAuthenticatedVenueContext(req)
+
+    const result = await textToSqlAssistantService.confirmAction({
+      actionId,
+      idempotencyKey,
+      confirmed,
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      userRole: authContext.role as UserRole,
+      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
+    })
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    logger.error('🔍 Assistant action confirmation failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.authContext?.venueId,
+      userId: req.authContext?.userId,
+      role: req.authContext?.role,
+    })
     next(error)
   }
 }

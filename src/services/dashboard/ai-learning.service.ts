@@ -42,20 +42,150 @@ interface UserFeedback {
 }
 
 export class AILearningService {
+  private static retentionCleanupInitialized = false
+  private static readonly MIN_RETENTION_DAYS = 7
+  private static readonly MAX_RETENTION_DAYS = 365
+  private static readonly DEFAULT_RETENTION_DAYS = 90
+  private static readonly DEFAULT_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+  constructor() {
+    this.initializeRetentionCleanup()
+  }
+
+  private parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+    if (!value) return defaultValue
+    const normalized = value.trim().toLowerCase()
+    if (['true', '1', 'yes'].includes(normalized)) return true
+    if (['false', '0', 'no'].includes(normalized)) return false
+    return defaultValue
+  }
+
+  private getRetentionDays(): number {
+    const rawValue = Number(process.env.CHATBOT_TRAINING_RETENTION_DAYS || AILearningService.DEFAULT_RETENTION_DAYS)
+    if (!Number.isFinite(rawValue)) {
+      return AILearningService.DEFAULT_RETENTION_DAYS
+    }
+    const integerDays = Math.floor(rawValue)
+    return Math.min(Math.max(integerDays, AILearningService.MIN_RETENTION_DAYS), AILearningService.MAX_RETENTION_DAYS)
+  }
+
+  private getPurgeIntervalMs(): number {
+    const rawValue = Number(process.env.CHATBOT_TRAINING_PURGE_INTERVAL_MS || AILearningService.DEFAULT_PURGE_INTERVAL_MS)
+    if (!Number.isFinite(rawValue)) {
+      return AILearningService.DEFAULT_PURGE_INTERVAL_MS
+    }
+    return Math.min(Math.max(Math.floor(rawValue), 60_000), 24 * 60 * 60 * 1000)
+  }
+
+  private shouldStoreSqlQuery(): boolean {
+    return this.parseBooleanEnv(process.env.CHATBOT_STORE_SQL_DETAILS, true)
+  }
+
+  private shouldStoreSqlResult(): boolean {
+    if (process.env.CHATBOT_STORE_SQL_RESULT !== undefined) {
+      return this.parseBooleanEnv(process.env.CHATBOT_STORE_SQL_RESULT, true)
+    }
+    return this.parseBooleanEnv(process.env.CHATBOT_STORE_SQL_DETAILS, true)
+  }
+
+  private trimText(value: string, maxChars: number): string {
+    if (value.length <= maxChars) {
+      return value
+    }
+    return value.slice(0, Math.max(0, maxChars - 3)) + '...'
+  }
+
+  private compactSqlResultForStorage(sqlResult: any): any {
+    if (sqlResult == null) {
+      return null
+    }
+
+    const MAX_ROWS = 20
+    const MAX_STRING_CHARS = 300
+
+    if (Array.isArray(sqlResult)) {
+      return sqlResult.slice(0, MAX_ROWS).map(row => this.compactSqlResultForStorage(row))
+    }
+
+    if (typeof sqlResult === 'object') {
+      const compacted: Record<string, unknown> = {}
+      let inserted = 0
+      for (const [key, value] of Object.entries(sqlResult as Record<string, unknown>)) {
+        if (inserted >= 30) break
+        compacted[key] = this.compactSqlResultForStorage(value)
+        inserted++
+      }
+      return compacted
+    }
+
+    if (typeof sqlResult === 'string') {
+      return this.trimText(sqlResult, MAX_STRING_CHARS)
+    }
+
+    return sqlResult
+  }
+
+  private initializeRetentionCleanup(): void {
+    if (AILearningService.retentionCleanupInitialized) {
+      return
+    }
+    AILearningService.retentionCleanupInitialized = true
+
+    const purgeIntervalMs = this.getPurgeIntervalMs()
+
+    // Run once on startup and then periodically.
+    this.purgeExpiredTrainingData().catch(error => {
+      logger.warn('🧹 Initial chat-training purge failed', { error: error instanceof Error ? error.message : error })
+    })
+
+    const cleanupInterval = setInterval(() => {
+      this.purgeExpiredTrainingData().catch(error => {
+        logger.warn('🧹 Periodic chat-training purge failed', { error: error instanceof Error ? error.message : error })
+      })
+    }, purgeIntervalMs)
+    cleanupInterval.unref?.()
+  }
+
+  public async purgeExpiredTrainingData(): Promise<number> {
+    const retentionDays = this.getRetentionDays()
+    const cutoffDate = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
+
+    const deleteResult = await prisma.chatTrainingData.deleteMany({
+      where: {
+        createdAt: {
+          lt: cutoffDate,
+        },
+      },
+    })
+
+    if (deleteResult.count > 0) {
+      logger.info('🧹 Purged expired chat-training records', {
+        deleted: deleteResult.count,
+        retentionDays,
+        cutoffDate: cutoffDate.toISOString(),
+      })
+    }
+
+    return deleteResult.count
+  }
+
   /**
    * 📊 STEP 1: Store every chat interaction for learning
    */
   async recordChatInteraction(interaction: ChatInteraction): Promise<string> {
     try {
+      const storeSqlQuery = this.shouldStoreSqlQuery()
+      const storeSqlResult = this.shouldStoreSqlResult()
+
       const trainingData = await prisma.chatTrainingData.create({
         data: {
           id: randomUUID(),
           venueId: interaction.venueId,
           userId: interaction.userId,
-          userQuestion: interaction.userQuestion,
-          aiResponse: interaction.aiResponse,
-          sqlQuery: interaction.sqlQuery,
-          sqlResult: interaction.sqlResult || null,
+          userQuestion: this.trimText(interaction.userQuestion, 3000),
+          aiResponse: this.trimText(interaction.aiResponse, 4000),
+          sqlQuery: storeSqlQuery && interaction.sqlQuery ? this.trimText(interaction.sqlQuery, 6000) : null,
+          sqlResult: storeSqlResult ? this.compactSqlResultForStorage(interaction.sqlResult) : null,
           confidence: interaction.confidence,
           executionTime: interaction.executionTime,
           rowsReturned: interaction.rowsReturned,
@@ -71,6 +201,8 @@ export class AILearningService {
         trainingDataId: trainingData.id,
         category: trainingData.responseCategory,
         confidence: interaction.confidence,
+        storeSqlQuery,
+        storeSqlResult,
       })
 
       return trainingData.id

@@ -17,3 +17,4 @@ firebase-service-account.json
 logs/
 dist/
 .claude/settings.local.json
+.worktrees/

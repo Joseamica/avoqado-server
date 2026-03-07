@@ -55,7 +55,12 @@ import * as venueFeatureController from '../controllers/dashboard/venueFeature.d
 import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.dashboard.controller'
 import * as tpvMessageController from '../controllers/dashboard/tpv-message.dashboard.controller'
-import { assistantQuerySchema, feedbackSubmissionSchema } from '../schemas/dashboard/assistant.schema'
+import {
+  assistantActionConfirmSchema,
+  assistantActionPreviewSchema,
+  assistantQuerySchema,
+  feedbackSubmissionSchema,
+} from '../schemas/dashboard/assistant.schema'
 import {
   dateRangeQuerySchema,
   timelineQuerySchema,
@@ -7363,6 +7368,28 @@ router.post(
   requireJsonBodyMiddleware,
   validateRequest(assistantQuerySchema),
   textToSqlAssistantController.processTextToSqlQuery,
+)
+
+router.post(
+  '/assistant/actions/preview',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  chatbotRateLimitMiddleware,
+  tokenBudgetMiddleware,
+  requireJsonBodyMiddleware,
+  validateRequest(assistantActionPreviewSchema),
+  textToSqlAssistantController.previewAssistantAction,
+)
+
+router.post(
+  '/assistant/actions/confirm',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  chatbotRateLimitMiddleware,
+  tokenBudgetMiddleware,
+  requireJsonBodyMiddleware,
+  validateRequest(assistantActionConfirmSchema),
+  textToSqlAssistantController.confirmAssistantAction,
 )
 
 /**

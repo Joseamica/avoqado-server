@@ -72,21 +72,33 @@ export class PIIDetectionService {
    */
   private static readonly PATTERNS = {
     // Email: name@domain.com
-    EMAIL: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
+    EMAIL: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/i,
 
     // Phone numbers (various formats)
-    PHONE_US: /\b(\+?1[-.]?)?\(?([0-9]{3})\)?[-.]?([0-9]{3})[-.]?([0-9]{4})\b/g,
-    PHONE_MX: /\b(\+?52[-.]?)?([0-9]{2,3})[-.]?([0-9]{3,4})[-.]?([0-9]{4})\b/g,
-    PHONE_INTERNATIONAL: /\+[0-9]{1,3}[-.\s]?(\([0-9]{1,4}\)|[0-9]{1,4})[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,9}/g,
+    PHONE_US: /\b(\+?1[-.]?)?\(?([0-9]{3})\)?[-.]?([0-9]{3})[-.]?([0-9]{4})\b/,
+    PHONE_MX: /\b(\+?52[-.]?)?([0-9]{2,3})[-.]?([0-9]{3,4})[-.]?([0-9]{4})\b/,
+    PHONE_INTERNATIONAL: /\+[0-9]{1,3}[-.\s]?(\([0-9]{1,4}\)|[0-9]{1,4})[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,9}/,
 
     // Credit cards (Visa, MC, Amex, Discover)
-    CREDIT_CARD: /\b(?:\d{4}[-\s]?){3}\d{4}\b/g,
+    CREDIT_CARD: /\b(?:\d{4}[-\s]?){3}\d{4}\b/,
 
     // SSN (US format: XXX-XX-XXXX)
-    SSN: /\b\d{3}-\d{2}-\d{4}\b/g,
+    SSN: /\b\d{3}-\d{2}-\d{4}\b/,
 
     // IP addresses (IPv4)
-    IP_ADDRESS: /\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/g,
+    IP_ADDRESS: /\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/,
+  }
+
+  private static matchesPattern(value: string, pattern: RegExp): boolean {
+    const safeFlags = pattern.flags.replace(/g/g, '')
+    const safePattern = new RegExp(pattern.source, safeFlags)
+    return safePattern.test(value)
+  }
+
+  private static redactPattern(value: string, pattern: RegExp, replacement: string): string {
+    const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`
+    const globalPattern = new RegExp(pattern.source, flags)
+    return value.replace(globalPattern, replacement)
   }
 
   /**
@@ -212,7 +224,7 @@ export class PIIDetectionService {
     let detected = false
 
     // Email detection
-    if (options.redactEmails !== false && this.PATTERNS.EMAIL.test(value)) {
+    if (options.redactEmails !== false && this.matchesPattern(value, this.PATTERNS.EMAIL)) {
       detected = true
       detectedFields.push({
         fieldName,
@@ -220,11 +232,11 @@ export class PIIDetectionService {
         rowIndex,
         originalValue: value,
       })
-      redactedValue = redactedValue.replace(this.PATTERNS.EMAIL, '[EMAIL_REDACTED]')
+      redactedValue = this.redactPattern(redactedValue, this.PATTERNS.EMAIL, '[EMAIL_REDACTED]')
     }
 
     // Phone detection (US)
-    if (options.redactPhones !== false && this.PATTERNS.PHONE_US.test(value)) {
+    if (options.redactPhones !== false && this.matchesPattern(value, this.PATTERNS.PHONE_US)) {
       detected = true
       detectedFields.push({
         fieldName,
@@ -232,11 +244,11 @@ export class PIIDetectionService {
         rowIndex,
         originalValue: value,
       })
-      redactedValue = redactedValue.replace(this.PATTERNS.PHONE_US, '[PHONE_REDACTED]')
+      redactedValue = this.redactPattern(redactedValue, this.PATTERNS.PHONE_US, '[PHONE_REDACTED]')
     }
 
     // Phone detection (MX)
-    if (options.redactPhones !== false && this.PATTERNS.PHONE_MX.test(value)) {
+    if (options.redactPhones !== false && this.matchesPattern(value, this.PATTERNS.PHONE_MX)) {
       detected = true
       detectedFields.push({
         fieldName,
@@ -244,11 +256,11 @@ export class PIIDetectionService {
         rowIndex,
         originalValue: value,
       })
-      redactedValue = redactedValue.replace(this.PATTERNS.PHONE_MX, '[PHONE_REDACTED]')
+      redactedValue = this.redactPattern(redactedValue, this.PATTERNS.PHONE_MX, '[PHONE_REDACTED]')
     }
 
     // Credit card detection
-    if (options.redactCreditCards !== false && this.PATTERNS.CREDIT_CARD.test(value)) {
+    if (options.redactCreditCards !== false && this.matchesPattern(value, this.PATTERNS.CREDIT_CARD)) {
       detected = true
       detectedFields.push({
         fieldName,
@@ -256,11 +268,11 @@ export class PIIDetectionService {
         rowIndex,
         originalValue: value,
       })
-      redactedValue = redactedValue.replace(this.PATTERNS.CREDIT_CARD, '[CARD_REDACTED]')
+      redactedValue = this.redactPattern(redactedValue, this.PATTERNS.CREDIT_CARD, '[CARD_REDACTED]')
     }
 
     // SSN detection
-    if (options.redactSSNs !== false && this.PATTERNS.SSN.test(value)) {
+    if (options.redactSSNs !== false && this.matchesPattern(value, this.PATTERNS.SSN)) {
       detected = true
       detectedFields.push({
         fieldName,
@@ -268,11 +280,11 @@ export class PIIDetectionService {
         rowIndex,
         originalValue: value,
       })
-      redactedValue = redactedValue.replace(this.PATTERNS.SSN, '[SSN_REDACTED]')
+      redactedValue = this.redactPattern(redactedValue, this.PATTERNS.SSN, '[SSN_REDACTED]')
     }
 
     // IP address detection (optional)
-    if (options.redactIPAddresses && this.PATTERNS.IP_ADDRESS.test(value)) {
+    if (options.redactIPAddresses && this.matchesPattern(value, this.PATTERNS.IP_ADDRESS)) {
       detected = true
       detectedFields.push({
         fieldName,
@@ -280,7 +292,7 @@ export class PIIDetectionService {
         rowIndex,
         originalValue: value,
       })
-      redactedValue = redactedValue.replace(this.PATTERNS.IP_ADDRESS, '[IP_REDACTED]')
+      redactedValue = this.redactPattern(redactedValue, this.PATTERNS.IP_ADDRESS, '[IP_REDACTED]')
     }
 
     return { detected, detectedFields, redactedValue }
@@ -333,10 +345,10 @@ export class PIIDetectionService {
           const stringValue = String(fieldValue)
 
           if (
-            this.PATTERNS.EMAIL.test(stringValue) ||
-            this.PATTERNS.PHONE_US.test(stringValue) ||
-            this.PATTERNS.CREDIT_CARD.test(stringValue) ||
-            this.PATTERNS.SSN.test(stringValue)
+            this.matchesPattern(stringValue, this.PATTERNS.EMAIL) ||
+            this.matchesPattern(stringValue, this.PATTERNS.PHONE_US) ||
+            this.matchesPattern(stringValue, this.PATTERNS.CREDIT_CARD) ||
+            this.matchesPattern(stringValue, this.PATTERNS.SSN)
           ) {
             return true
           }
@@ -365,10 +377,10 @@ export class PIIDetectionService {
           const stringValue = String(fieldValue)
 
           if (
-            this.PATTERNS.EMAIL.test(stringValue) ||
-            this.PATTERNS.PHONE_US.test(stringValue) ||
-            this.PATTERNS.CREDIT_CARD.test(stringValue) ||
-            this.PATTERNS.SSN.test(stringValue)
+            this.matchesPattern(stringValue, this.PATTERNS.EMAIL) ||
+            this.matchesPattern(stringValue, this.PATTERNS.PHONE_US) ||
+            this.matchesPattern(stringValue, this.PATTERNS.CREDIT_CARD) ||
+            this.matchesPattern(stringValue, this.PATTERNS.SSN)
           ) {
             piiFields.add(fieldName)
           }

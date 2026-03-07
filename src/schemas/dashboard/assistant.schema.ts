@@ -35,6 +35,37 @@ export const assistantQuerySchema = z.object({
   }),
 })
 
+export const assistantActionPreviewSchema = z.object({
+  body: z.object({
+    actionType: z.enum(['create_product'], {
+      required_error: 'El tipo de acción es requerido.',
+      invalid_type_error: 'El tipo de acción no es válido.',
+    }),
+    draft: z
+      .object({
+        name: z.string().min(1, 'El nombre no puede estar vacío.').max(120, 'El nombre no puede exceder 120 caracteres.').optional(),
+        price: z.union([z.number(), z.string()]).optional(),
+        sku: z.string().max(64, 'El SKU no puede exceder 64 caracteres.').optional(),
+        categoryId: z.string().trim().min(1, 'La categoría no puede estar vacía.').optional(),
+        type: z.string().max(40).optional(),
+        needsModifiers: z.boolean().optional(),
+        modifierGroupIds: z.array(z.string().trim().min(1)).max(50, 'No puedes enviar más de 50 modificadores.').optional(),
+      })
+      .default({}),
+    conversationId: z.string().trim().min(1).max(120).optional(),
+  }),
+})
+
+export const assistantActionConfirmSchema = z.object({
+  body: z.object({
+    actionId: z.string().uuid('El actionId debe ser un UUID válido.'),
+    idempotencyKey: z.string().uuid('El idempotencyKey debe ser un UUID válido.'),
+    confirmed: z.literal(true, {
+      errorMap: () => ({ message: 'Debes confirmar explícitamente la acción.' }),
+    }),
+  }),
+})
+
 // Schema for chart visualization data
 export const chartVisualizationSchema = z.object({
   type: z.enum(['bar', 'line', 'pie', 'area']),
@@ -98,6 +129,8 @@ export const feedbackSubmissionSchema = z.object({
 // Inferimos los tipos para usarlos en el controlador y servicio
 export type ConversationEntryDto = z.infer<typeof conversationEntrySchema>
 export type AssistantQueryDto = z.infer<typeof assistantQuerySchema.shape.body>
+export type AssistantActionPreviewDto = z.infer<typeof assistantActionPreviewSchema.shape.body>
+export type AssistantActionConfirmDto = z.infer<typeof assistantActionConfirmSchema.shape.body>
 export type AssistantResponseDto = z.infer<typeof assistantResponseSchema>
 export type FeedbackSubmissionDto = z.infer<typeof feedbackSubmissionSchema.shape.body>
 export type ChartVisualization = z.infer<typeof chartVisualizationSchema>

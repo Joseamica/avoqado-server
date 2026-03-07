@@ -136,13 +136,14 @@ class InMemoryRateLimitStore {
 const rateLimitStore = new InMemoryRateLimitStore()
 
 // Cleanup expired entries every 5 minutes
-setInterval(
+const cleanupInterval = setInterval(
   () => {
     rateLimitStore.cleanup()
     logger.debug('🧹 Rate limit store cleanup completed')
   },
   5 * 60 * 1000,
 )
+cleanupInterval.unref?.()
 
 /**
  * Custom rate limit middleware for chatbot queries
