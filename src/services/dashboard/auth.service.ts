@@ -198,6 +198,7 @@ export async function loginStaff(loginData: LoginDto) {
               organizationId: true, // For deriving orgId in token generation
             },
           },
+          permissionSet: true,
         },
       },
     },
@@ -423,11 +424,16 @@ export async function loginStaff(loginData: LoginDto) {
     createdAt: staff.createdAt,
     lastLogin: staff.lastLoginAt,
     venues: staff.venues.map(sv => {
-      // Get custom permissions for this venue + role combination
-      const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
+      let permissions: string[]
 
-      // If custom permissions exist, use them; otherwise use defaults
-      const permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[sv.role] || []
+      if (sv.permissionSet) {
+        // Permission set assigned: use its permissions directly
+        permissions = sv.permissionSet.permissions
+      } else {
+        // No permission set: use role-based resolution
+        const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
+        permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[sv.role] || []
+      }
 
       return {
         id: sv.venue.id,
@@ -438,6 +444,8 @@ export async function loginStaff(loginData: LoginDto) {
         status: sv.venue.status, // Single source of truth for venue state
         kycStatus: sv.venue.kycStatus, // KYC compliance status
         permissions, // Include permissions in response
+        permissionSetId: sv.permissionSet?.id ?? null,
+        permissionSetName: sv.permissionSet?.name ?? null,
       }
     }),
   }

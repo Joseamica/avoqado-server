@@ -200,7 +200,7 @@ describe('checkPermission Middleware', () => {
             venueId: 'different_venue_456',
           },
         },
-        select: { role: true, active: true },
+        select: { role: true, active: true, permissionSetId: true, permissionSet: true },
       })
       expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.ADMIN, null, 'menu:read')
     })

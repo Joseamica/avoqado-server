@@ -1,6 +1,7 @@
 # Deploy: Merge develop → main
 
-Merge directo de `develop` hacia `main` en AMBOS repositorios, luego push a remote. Sin verificaciones pre-deploy (usa `/safe-deploy` si quieres correr pre-deploy primero).
+Merge directo de `develop` hacia `main` en AMBOS repositorios, luego push a remote. Sin verificaciones pre-deploy (usa `/safe-deploy` si
+quieres correr pre-deploy primero).
 
 ## Repositorios
 
@@ -12,12 +13,14 @@ Merge directo de `develop` hacia `main` en AMBOS repositorios, luego push a remo
 ### Fase 1: Verificar estado de git
 
 Para CADA repo, asegurar que estamos en develop y al día:
+
 ```bash
 git checkout develop
 git pull origin develop
 ```
 
 Luego verificar divergencia:
+
 ```bash
 git fetch origin
 git log --oneline origin/main..origin/develop  # commits nuevos en develop
@@ -25,6 +28,7 @@ git log --oneline origin/develop..origin/main  # commits que main tiene y develo
 ```
 
 Mostrar al usuario un resumen claro:
+
 ```
 📊 Estado:
   Server:    develop tiene 3 commits nuevos, main al día ✅
@@ -34,11 +38,13 @@ Mostrar al usuario un resumen claro:
 ### Fase 2: Analizar escenarios
 
 **Escenario A - Normal (main detrás de develop):**
+
 - `origin/main..origin/develop` muestra commits → hay cambios que mergear
 - `origin/develop..origin/main` vacío → main no tiene nada extra
 - Acción: fast-forward merge directo → continuar a Fase 3
 
 **Escenario B - Main está adelante (divergencia):**
+
 - `origin/develop..origin/main` muestra commits → main tiene cambios que develop no
 - DETENERSE y ADVERTIR al usuario
 - Mostrar exactamente qué commits tiene main que develop no
@@ -48,6 +54,7 @@ Mostrar al usuario un resumen claro:
 - NUNCA hacer force push sin confirmación explícita
 
 **Escenario C - Ya sincronizados:**
+
 - Ambos logs vacíos → informar que ya están al día
 - No hacer nada
 

@@ -121,6 +121,8 @@ const prismaMock: any = {
   classSession: createMockModel(),
   reservationWaitlistEntry: createMockModel(),
   table: createMockModel(),
+  // Permission Set models
+  permissionSet: createMockModel(),
   // Commission models
   commissionConfig: createMockModel(),
   commissionTier: createMockModel(),

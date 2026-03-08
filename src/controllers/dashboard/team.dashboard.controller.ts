@@ -234,3 +234,19 @@ export async function hardDeleteTeamMember(req: Request, res: Response, next: Ne
     next(error)
   }
 }
+
+export async function assignPermissionSet(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, teamMemberId } = req.params
+    const { permissionSetId } = req.body
+
+    const result = await teamService.assignPermissionSet(venueId, teamMemberId, permissionSetId ?? null)
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

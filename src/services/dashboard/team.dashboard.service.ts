@@ -22,6 +22,8 @@ interface TeamMember {
   totalTips: number
   totalOrders: number
   averageRating: number
+  permissionSetId: string | null
+  permissionSetName: string | null
 }
 
 interface PaginatedTeamResponse {
@@ -123,6 +125,12 @@ export async function getTeamMembers(
             name: true,
           },
         },
+        permissionSet: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
       },
       orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }],
       skip,
@@ -195,6 +203,8 @@ export async function getTeamMembers(
       totalTips: totalTips,
       totalOrders: orderData.totalOrders,
       averageRating: 0, // Rating requires more complex query, keeping as 0 for list view
+      permissionSetId: sv.permissionSet?.id ?? null,
+      permissionSetName: sv.permissionSet?.name ?? null,
     }
   })
 
@@ -814,6 +824,7 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     },
     include: {
       staff: true,
+      permissionSet: { select: { id: true, name: true } },
     },
   })
 
@@ -860,6 +871,8 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     totalTips: Number(updatedStaffVenue.totalTips),
     totalOrders: updatedStaffVenue.totalOrders,
     averageRating: Number(updatedStaffVenue.averageRating),
+    permissionSetId: updatedStaffVenue.permissionSet?.id ?? null,
+    permissionSetName: updatedStaffVenue.permissionSet?.name ?? null,
   }
 }
 
@@ -1153,4 +1166,51 @@ export async function cancelInvitation(venueId: string, invitationId: string): P
     invitationId,
     venueId,
   })
+}
+
+/**
+ * Assign or remove a permission set from a staff member
+ * @param permissionSetId - null to remove (falls back to role-based permissions)
+ */
+export async function assignPermissionSet(venueId: string, staffVenueId: string, permissionSetId: string | null) {
+  const staffVenue = await prisma.staffVenue.findFirst({
+    where: { id: staffVenueId, venueId },
+  })
+
+  if (!staffVenue) {
+    throw new NotFoundError('Miembro del equipo no encontrado en este venue')
+  }
+
+  // If assigning, verify the permission set exists and belongs to the venue
+  if (permissionSetId) {
+    const permissionSet = await prisma.permissionSet.findFirst({
+      where: { id: permissionSetId, venueId },
+    })
+
+    if (!permissionSet) {
+      throw new NotFoundError('Conjunto de permisos no encontrado en este venue')
+    }
+  }
+
+  const updated = await prisma.staffVenue.update({
+    where: { id: staffVenueId },
+    data: { permissionSetId },
+    include: {
+      permissionSet: {
+        select: { id: true, name: true },
+      },
+    },
+  })
+
+  logger.info('Permission set assignment updated', {
+    venueId,
+    staffVenueId,
+    permissionSetId,
+    action: permissionSetId ? 'assigned' : 'removed',
+  })
+
+  return {
+    permissionSetId: updated.permissionSet?.id ?? null,
+    permissionSetName: updated.permissionSet?.name ?? null,
+  }
 }

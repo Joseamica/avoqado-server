@@ -35,6 +35,7 @@ import * as paymentController from '../controllers/dashboard/payment.dashboard.c
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
+import * as permissionSetController from '../controllers/dashboard/permissionSet.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
 import * as venueRoleConfigController from '../controllers/dashboard/venueRoleConfig.dashboard.controller'
@@ -134,6 +135,11 @@ import {
   RemoveCustomersSchema,
 } from '../schemas/dashboard/customerGroup.schema'
 import { UpdateRoleConfigsSchema, RoleConfigParamsSchema } from '../schemas/dashboard/venueRoleConfig.schema'
+import {
+  CreatePermissionSetSchema,
+  UpdatePermissionSetSchema,
+  DuplicatePermissionSetSchema,
+} from '../schemas/dashboard/permissionSet.schema'
 import { UpdateVenueSettingsSchema, UpdateTpvSettingsSchema } from '../schemas/dashboard/venueSettings.schema'
 import {
   GetModifierUsageStatsSchema,
@@ -6682,6 +6688,13 @@ router.delete(
   teamController.removeTeamMember,
 )
 
+router.put(
+  '/venues/:venueId/team/:teamMemberId/permission-set',
+  authenticateTokenMiddleware,
+  checkPermission('settings:manage'),
+  teamController.assignPermissionSet,
+)
+
 /**
  * @openapi
  * /api/v2/dashboard/{venueId}/team/{teamMemberId}/hard-delete:
@@ -7823,6 +7836,55 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('settings:manage'),
   rolePermissionController.getRoleHierarchyInfo,
+)
+
+// ============================================================================
+// PERMISSION SET ROUTES
+// ============================================================================
+
+router.get(
+  '/venues/:venueId/permission-sets',
+  authenticateTokenMiddleware,
+  checkPermission('settings:manage'),
+  permissionSetController.getAll,
+)
+
+router.get(
+  '/venues/:venueId/permission-sets/:id',
+  authenticateTokenMiddleware,
+  checkPermission('settings:manage'),
+  permissionSetController.getById,
+)
+
+router.post(
+  '/venues/:venueId/permission-sets',
+  authenticateTokenMiddleware,
+  checkPermission('role-permissions:update'),
+  validateRequest(CreatePermissionSetSchema),
+  permissionSetController.create,
+)
+
+router.put(
+  '/venues/:venueId/permission-sets/:id',
+  authenticateTokenMiddleware,
+  checkPermission('role-permissions:update'),
+  validateRequest(UpdatePermissionSetSchema),
+  permissionSetController.update,
+)
+
+router.delete(
+  '/venues/:venueId/permission-sets/:id',
+  authenticateTokenMiddleware,
+  checkPermission('settings:manage'),
+  permissionSetController.remove,
+)
+
+router.post(
+  '/venues/:venueId/permission-sets/:id/duplicate',
+  authenticateTokenMiddleware,
+  checkPermission('role-permissions:update'),
+  validateRequest(DuplicatePermissionSetSchema),
+  permissionSetController.duplicate,
 )
 
 // ============================================================================

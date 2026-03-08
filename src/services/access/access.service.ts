@@ -14,6 +14,7 @@
 import { StaffRole, OrgRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { DEFAULT_PERMISSIONS, resolvePermissions } from '@/lib/permissions'
+import { getEffectivePermissions } from '@/lib/resolveEffectivePermissions'
 import logger from '@/config/logger'
 
 /**
@@ -210,6 +211,8 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
       select: {
         role: true,
         active: true,
+        permissionSetId: true,
+        permissionSet: true,
         venue: {
           select: {
             organizationId: true,
@@ -294,23 +297,28 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
     throw new Error(`User ${userId} has no access to venue ${venueId}`)
   }
 
-  // Find custom permissions for this role
-  const customPerms = rolePermissions.find(rp => rp.role === role)
-  const customPermissions = customPerms?.permissions || null
-
-  // Resolve core permissions (using existing hasPermission logic for consistency)
-  // Get base permissions first
-  const defaultPerms = DEFAULT_PERMISSIONS[role] || []
+  // Check if staff has a permission set assigned (overrides role-based permissions)
   let basePermissions: string[]
 
-  // OVERRIDE MODE for wildcard roles (OWNER, ADMIN)
-  const hasWildcardDefaults = defaultPerms.includes('*:*')
-  const hasCustomPermissions = customPermissions && customPermissions.length > 0
-
-  if (hasWildcardDefaults && hasCustomPermissions) {
-    basePermissions = customPermissions
+  if (staffVenueData?.permissionSetId && staffVenueData?.permissionSet) {
+    // Permission set assigned: use its permissions directly (bypass role-based resolution)
+    basePermissions = getEffectivePermissions(staffVenueData, [])
   } else {
-    basePermissions = [...defaultPerms, ...(customPermissions || [])]
+    // No permission set: use existing role-based resolution
+    const customPerms = rolePermissions.find(rp => rp.role === role)
+    const customPermissions = customPerms?.permissions || null
+
+    const defaultPerms = DEFAULT_PERMISSIONS[role] || []
+
+    // OVERRIDE MODE for wildcard roles (OWNER, ADMIN)
+    const hasWildcardDefaults = defaultPerms.includes('*:*')
+    const hasCustomPermissions = customPermissions && customPermissions.length > 0
+
+    if (hasWildcardDefaults && hasCustomPermissions) {
+      basePermissions = customPermissions
+    } else {
+      basePermissions = [...defaultPerms, ...(customPermissions || [])]
+    }
   }
 
   // Resolve dependencies

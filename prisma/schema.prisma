@@ -209,6 +209,7 @@ model Venue {
   invitations           Invitation[]
   staff                 StaffVenue[]
   rolePermissions       VenueRolePermission[]
+  permissionSets        PermissionSet[]
   roleConfigs           VenueRoleConfig[]
   menuCategories        MenuCategory[]
   menus                 Menu[]
@@ -480,6 +481,7 @@ model Staff {
 
   // Role permission management
   modifiedRolePermissions VenueRolePermission[] @relation("ModifiedRolePermissions")
+  createdPermissionSets   PermissionSet[]       @relation("PermissionSetCreatedBy")
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -574,6 +576,10 @@ model StaffVenue {
   role        StaffRole
   permissions Json? // Custom permissions override
 
+  // Optional: Custom permission set (overrides role-based permissions when assigned)
+  permissionSetId String?
+  permissionSet   PermissionSet? @relation(fields: [permissionSetId], references: [id], onDelete: SetNull)
+
   // Performance tracking (for waiters)
   totalSales    Decimal @default(0) @db.Decimal(12, 2)
   totalTips     Decimal @default(0) @db.Decimal(10, 2)
@@ -600,6 +606,7 @@ model StaffVenue {
   @@index([venueId])
   @@index([role])
   @@index([pin]) // ✅ Índice para búsquedas de PIN
+  @@index([permissionSetId])
 }
 
 // ==========================================
@@ -684,6 +691,36 @@ model VenueRolePermission {
   @@index([modifiedBy])
   @@index([venueId, updatedAt]) // Audit trail: recent changes per venue
   @@index([modifiedBy, updatedAt]) // Audit trail: who changed what when
+}
+
+// ==========================================
+// PermissionSet: Custom Named Permission Bundles
+// ==========================================
+// Allows venues to create named sets of permissions (e.g., "Bar Lead", "Shift Manager")
+// and assign them to staff members, decoupled from the fixed role hierarchy.
+// When assigned, the set's permissions are used INSTEAD of role-based permissions.
+// When removed/deleted (SetNull), staff falls back to role-based permissions.
+model PermissionSet {
+  id          String   @id @default(cuid())
+  venueId     String
+  venue       Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  permissions String[] // e.g., ["products:read", "products:create", "shifts:create"]
+  color       String? // Optional UI color for badge (e.g., "#7C3AED")
+
+  // Audit trail
+  createdBy String?
+  creator   Staff?  @relation("PermissionSetCreatedBy", fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Staff members using this permission set
+  staffVenues StaffVenue[]
+
+  @@unique([venueId, name]) // One set name per venue
+  @@index([venueId])
 }
 
 // ==========================================

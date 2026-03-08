@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express'
-import { OrgRole, StaffRole } from '@prisma/client'
+import { OrgRole, StaffRole, PermissionSet } from '@prisma/client'
 import { hasPermission } from '@/lib/permissions'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -9,6 +9,7 @@ type RoleResolutionSource = 'token' | 'staffVenue' | 'orgOwner' | 'none'
 interface ResolvedUserRole {
   role: StaffRole | null
   source: RoleResolutionSource
+  permissionSet?: PermissionSet | null
 }
 
 /**
@@ -44,6 +45,8 @@ async function resolveUserRoleForVenue(params: {
     select: {
       role: true,
       active: true,
+      permissionSetId: true,
+      permissionSet: true,
     },
   })
 
@@ -51,6 +54,7 @@ async function resolveUserRoleForVenue(params: {
     return {
       role: staffVenue.role,
       source: 'staffVenue',
+      permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null,
     }
   }
 
@@ -162,7 +166,11 @@ export const checkPermission = (requiredPermission: string) => {
         return next()
       }
 
-      const { role: userRole, source: roleSource } = await resolveUserRoleForVenue({
+      const {
+        role: userRole,
+        source: roleSource,
+        permissionSet,
+      } = await resolveUserRoleForVenue({
         userId: authContext.userId,
         targetVenueId: venueId,
         tokenVenueId: authContext.venueId,
@@ -177,27 +185,33 @@ export const checkPermission = (requiredPermission: string) => {
         })
       }
 
-      // Load custom permissions from VenueRolePermission table
-      let customPermissions: string[] | null = null
+      // If permission set is assigned, use its permissions directly
+      let authorized: boolean
+      if (permissionSet) {
+        authorized = permissionSet.permissions.includes(requiredPermission)
+      } else {
+        // Load custom permissions from VenueRolePermission table
+        let customPermissions: string[] | null = null
 
-      const venueRolePermission = await prisma.venueRolePermission.findUnique({
-        where: {
-          venueId_role: {
-            venueId,
-            role: userRole,
+        const venueRolePermission = await prisma.venueRolePermission.findUnique({
+          where: {
+            venueId_role: {
+              venueId,
+              role: userRole,
+            },
           },
-        },
-        select: {
-          permissions: true,
-        },
-      })
+          select: {
+            permissions: true,
+          },
+        })
 
-      if (venueRolePermission) {
-        customPermissions = venueRolePermission.permissions as string[]
+        if (venueRolePermission) {
+          customPermissions = venueRolePermission.permissions as string[]
+        }
+
+        // Check if user has permission (uses override mode for wildcard roles)
+        authorized = hasPermission(userRole, customPermissions, requiredPermission)
       }
-
-      // Check if user has permission (uses override mode for wildcard roles)
-      const authorized = hasPermission(userRole, customPermissions, requiredPermission)
 
       if (!authorized) {
         logger.warn(
@@ -256,7 +270,7 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
         })
       }
 
-      const { role: userRole } = await resolveUserRoleForVenue({
+      const { role: userRole, permissionSet } = await resolveUserRoleForVenue({
         userId: authContext.userId,
         targetVenueId: venueId,
         tokenVenueId: authContext.venueId,
@@ -270,27 +284,31 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
         })
       }
 
-      // Load custom permissions
-      let customPermissions: string[] | null = null
+      // Check permission set first, then fall back to role-based
+      let authorized: boolean
+      if (permissionSet) {
+        authorized = requiredPermissions.some(perm => permissionSet.permissions.includes(perm))
+      } else {
+        let customPermissions: string[] | null = null
 
-      const venueRolePermission = await prisma.venueRolePermission.findUnique({
-        where: {
-          venueId_role: {
-            venueId,
-            role: userRole,
+        const venueRolePermission = await prisma.venueRolePermission.findUnique({
+          where: {
+            venueId_role: {
+              venueId,
+              role: userRole,
+            },
           },
-        },
-        select: {
-          permissions: true,
-        },
-      })
+          select: {
+            permissions: true,
+          },
+        })
 
-      if (venueRolePermission) {
-        customPermissions = venueRolePermission.permissions as string[]
+        if (venueRolePermission) {
+          customPermissions = venueRolePermission.permissions as string[]
+        }
+
+        authorized = requiredPermissions.some(perm => hasPermission(userRole, customPermissions, perm))
       }
-
-      // Check if user has ANY of the permissions
-      const authorized = requiredPermissions.some(perm => hasPermission(userRole, customPermissions, perm))
 
       if (!authorized) {
         logger.warn(
@@ -346,7 +364,7 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
         })
       }
 
-      const { role: userRole } = await resolveUserRoleForVenue({
+      const { role: userRole, permissionSet } = await resolveUserRoleForVenue({
         userId: authContext.userId,
         targetVenueId: venueId,
         tokenVenueId: authContext.venueId,
@@ -360,27 +378,31 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
         })
       }
 
-      // Load custom permissions
-      let customPermissions: string[] | null = null
+      // Check permission set first, then fall back to role-based
+      let authorized: boolean
+      if (permissionSet) {
+        authorized = requiredPermissions.every(perm => permissionSet.permissions.includes(perm))
+      } else {
+        let customPermissions: string[] | null = null
 
-      const venueRolePermission = await prisma.venueRolePermission.findUnique({
-        where: {
-          venueId_role: {
-            venueId,
-            role: userRole,
+        const venueRolePermission = await prisma.venueRolePermission.findUnique({
+          where: {
+            venueId_role: {
+              venueId,
+              role: userRole,
+            },
           },
-        },
-        select: {
-          permissions: true,
-        },
-      })
+          select: {
+            permissions: true,
+          },
+        })
 
-      if (venueRolePermission) {
-        customPermissions = venueRolePermission.permissions as string[]
+        if (venueRolePermission) {
+          customPermissions = venueRolePermission.permissions as string[]
+        }
+
+        authorized = requiredPermissions.every(perm => hasPermission(userRole, customPermissions, perm))
       }
-
-      // Check if user has ALL of the permissions
-      const authorized = requiredPermissions.every(perm => hasPermission(userRole, customPermissions, perm))
 
       if (!authorized) {
         logger.warn(

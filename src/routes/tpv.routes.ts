@@ -2592,22 +2592,41 @@ router.get('/auth/permissions', authenticateTokenMiddleware, async (req: Request
     const { venueId, role } = authContext
     const staffId = authContext.userId
 
-    // 1. Get base permissions for this role
-    const basePermissions = DEFAULT_PERMISSIONS[role as keyof typeof DEFAULT_PERMISSIONS] || []
+    // Check if staff has a permission set assigned
+    const staffVenue = await prisma.staffVenue.findUnique({
+      where: {
+        staffId_venueId: { staffId, venueId },
+      },
+      select: {
+        permissionSetId: true,
+        permissionSet: true,
+      },
+    })
 
-    // 2. Get custom permissions (if any) from VenueRolePermission table
-    const customPerms = await rolePermissionService.getRolePermissions(venueId, role)
+    let expandedPermissions: string[]
 
-    // 3. Merge base + custom permissions
-    const allPermissions = customPerms ? [...basePermissions, ...customPerms.permissions] : basePermissions
+    if (staffVenue?.permissionSetId && staffVenue?.permissionSet) {
+      // Permission set assigned: use its permissions directly
+      const resolvedPermissionsSet = resolvePermissions(staffVenue.permissionSet.permissions)
+      expandedPermissions = expandWildcards(Array.from(resolvedPermissionsSet))
+    } else {
+      // No permission set: use role-based resolution
+      // 1. Get base permissions for this role
+      const basePermissions = DEFAULT_PERMISSIONS[role as keyof typeof DEFAULT_PERMISSIONS] || []
 
-    // 4. Resolve implicit dependencies
-    const resolvedPermissionsSet = resolvePermissions(allPermissions)
-    const resolvedPermissions = Array.from(resolvedPermissionsSet)
+      // 2. Get custom permissions (if any) from VenueRolePermission table
+      const customPerms = await rolePermissionService.getRolePermissions(venueId, role)
 
-    // 5. Expand wildcards to individual permissions (for TPV client)
-    // This ensures SUPERADMIN/OWNER/ADMIN get full permission list instead of ['*:*']
-    const expandedPermissions = expandWildcards(resolvedPermissions)
+      // 3. Merge base + custom permissions
+      const allPermissions = customPerms ? [...basePermissions, ...customPerms.permissions] : basePermissions
+
+      // 4. Resolve implicit dependencies
+      const resolvedPermissionsSet = resolvePermissions(allPermissions)
+      const resolvedPermissions = Array.from(resolvedPermissionsSet)
+
+      // 5. Expand wildcards to individual permissions (for TPV client)
+      expandedPermissions = expandWildcards(resolvedPermissions)
+    }
 
     logger.info(`[TPV] Permissions fetched for staff ${staffId} (${role}): ${expandedPermissions.length} permissions`)
 

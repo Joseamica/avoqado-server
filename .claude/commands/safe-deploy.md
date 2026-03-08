@@ -1,6 +1,7 @@
 # Safe Deploy: Verificar + Merge develop → main
 
-Igual que `/deploy` pero corre `pre-deploy` en ambos repos antes de mergear. Usa esto cuando quieras verificación completa antes de producción.
+Igual que `/deploy` pero corre `pre-deploy` en ambos repos antes de mergear. Usa esto cuando quieras verificación completa antes de
+producción.
 
 ## Repositorios
 
@@ -14,28 +15,35 @@ Igual que `/deploy` pero corre `pre-deploy` en ambos repos antes de mergear. Usa
 Antes de tocar main, verificar que develop está sano.
 
 **Server (avoqado-server) — correr PRIMERO (más crítico: DB migrations, API):**
+
 ```bash
 cd /Users/amieva/Documents/Programming/Avoqado/avoqado-server
 git checkout develop
 git pull origin develop
 npm run pre-deploy
 ```
+
 El pre-deploy corre: ESLint, TypeScript check, Prisma generate, pre-migration check, build, unit tests, integration tests, cross-repo check.
 
 **Dashboard (avoqado-web-dashboard):**
+
 ```bash
 cd /Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard
 git checkout develop
 git pull origin develop
 npm run pre-deploy -- --skip-e2e
 ```
-El pre-deploy corre: ESLint, endpoint check, build, cross-repo check. Se usa `--skip-e2e` por defecto (Playwright es lento). Si el usuario pide E2E completo, quitar el flag.
 
-**Si CUALQUIER pre-deploy falla → DETENERSE. No continuar al merge.** Informar al usuario qué falló y cómo arreglarlo. Si un repo falla pero el otro pasa, preguntar si mergear solo el que pasó.
+El pre-deploy corre: ESLint, endpoint check, build, cross-repo check. Se usa `--skip-e2e` por defecto (Playwright es lento). Si el usuario
+pide E2E completo, quitar el flag.
+
+**Si CUALQUIER pre-deploy falla → DETENERSE. No continuar al merge.** Informar al usuario qué falló y cómo arreglarlo. Si un repo falla pero
+el otro pasa, preguntar si mergear solo el que pasó.
 
 ### Fase 2: Verificar estado de git
 
 Para CADA repo:
+
 ```bash
 git fetch origin
 git log --oneline origin/main..origin/develop  # commits nuevos en develop
@@ -43,6 +51,7 @@ git log --oneline origin/develop..origin/main  # commits que main tiene y develo
 ```
 
 Mostrar al usuario un resumen claro:
+
 ```
 📊 Estado:
   Server:    develop tiene 3 commits nuevos, main al día ✅
@@ -52,11 +61,13 @@ Mostrar al usuario un resumen claro:
 ### Fase 3: Analizar escenarios
 
 **Escenario A - Normal (main detrás de develop):**
+
 - `origin/main..origin/develop` muestra commits → hay cambios que mergear
 - `origin/develop..origin/main` vacío → main no tiene nada extra
 - Acción: fast-forward merge directo → continuar a Fase 4
 
 **Escenario B - Main está adelante (divergencia):**
+
 - `origin/develop..origin/main` muestra commits → main tiene cambios que develop no
 - DETENERSE y ADVERTIR al usuario
 - Mostrar exactamente qué commits tiene main que develop no
@@ -66,6 +77,7 @@ Mostrar al usuario un resumen claro:
 - NUNCA hacer force push sin confirmación explícita
 
 **Escenario C - Ya sincronizados:**
+
 - Ambos logs vacíos → informar que ya están al día
 - No hacer nada
 
