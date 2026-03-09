@@ -939,6 +939,11 @@ export function getAllValidPermissions(): string[] {
     })
   })
 
+  // Add all individual permissions by resource
+  Object.values(INDIVIDUAL_PERMISSIONS_BY_RESOURCE).forEach(perms => {
+    perms.forEach(p => permissions.add(p))
+  })
+
   return Array.from(permissions).sort()
 }
 

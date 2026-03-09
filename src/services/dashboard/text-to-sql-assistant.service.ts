@@ -7,7 +7,7 @@ import { AILearningService } from './ai-learning.service'
 import { SqlValidationService } from './sql-validation.service'
 import { SharedQueryService } from './shared-query.service'
 import { randomUUID } from 'crypto'
-import type { RelativeDateRange } from '@/utils/datetime'
+import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
 // Note: Date filter examples are defined in buildSchemaContext() below.
 // The getSqlDateFilter utility from @/utils/datetime can be used for manual SQL generation if needed.
 
@@ -325,6 +325,12 @@ interface BusinessOverviewPlannerOutput {
   focusArea: 'traffic' | 'pricing' | 'service' | 'product_mix' | 'retention'
   opportunities: string[]
   risks: string[]
+}
+
+interface OperationalHelpResponse {
+  response: string
+  suggestions: string[]
+  topic: 'permissions' | 'menu' | 'inventory' | 'commissions' | 'general'
 }
 
 class TextToSqlAssistantService {
@@ -1499,6 +1505,47 @@ Ejemplos de respuestas CORRECTAS:
         return await this.handleCreateProductCollectAction(query, startTime, sessionId)
       }
 
+      // Step 0.3: Operational help intent (how-to questions about dashboard configuration, not analytics).
+      const operationalHelp = this.getOperationalHelpResponse(query.message)
+      if (operationalHelp) {
+        logger.info('🧭 Processing operational help message (non-analytics)', {
+          message: query.message,
+          venueId: query.venueId,
+          topic: operationalHelp.topic,
+        })
+
+        let trainingDataId: string | undefined
+        try {
+          trainingDataId = await this.learningService.recordChatInteraction({
+            venueId: query.venueId,
+            userId: query.userId,
+            userQuestion: query.message,
+            aiResponse: operationalHelp.response,
+            confidence: 0.93,
+            executionTime: Date.now() - startTime,
+            rowsReturned: 0,
+            sessionId,
+          })
+        } catch (learningError) {
+          logger.warn('🧠 Failed to record operational help interaction:', learningError)
+        }
+
+        return {
+          response: operationalHelp.response,
+          confidence: 0.93,
+          metadata: {
+            queryGenerated: false,
+            queryExecuted: false,
+            dataSourcesUsed: ['dashboard.help'],
+            routedTo: 'SharedQueryService',
+            riskLevel: 'low',
+            reasonCode: 'operational_help_routed',
+          },
+          suggestions: operationalHelp.suggestions,
+          trainingDataId,
+        }
+      }
+
       // Step 0: Check if this is a conversational message or a data query
       if (!this.isDataQuery(query.message)) {
         // Handle conversational messages
@@ -2225,6 +2272,11 @@ Ejemplos de respuestas CORRECTAS:
 
       // Check if we got valid results
       if (!sqlGeneration || !execution) {
+        const deterministicComparisonFallback = await this.tryDeterministicProductComparisonFallback(query, userRole, sessionId, startTime)
+        if (deterministicComparisonFallback) {
+          return deterministicComparisonFallback
+        }
+
         // Still record the interaction for learning
         let trainingDataId: string | undefined
         try {
@@ -2547,6 +2599,13 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         message: query.message,
       })
 
+      if (!(error instanceof AppError)) {
+        const deterministicComparisonFallback = await this.tryDeterministicProductComparisonFallback(query, userRole, sessionId, startTime)
+        if (deterministicComparisonFallback) {
+          return deterministicComparisonFallback
+        }
+      }
+
       const userSafeMessage =
         error instanceof AppError
           ? error.message
@@ -2586,6 +2645,246 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         ],
         trainingDataId: errorTrainingDataId,
       }
+    }
+  }
+
+  private extractProductComparisonTerms(message: string): { leftTerm: string; rightTerm: string } | null {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ')
+
+    const patterns = [
+      /(?:\bde\b\s+)?([a-z0-9ñ\s]{2,40}?)\s+(?:vs|versus|contra)\s+([a-z0-9ñ\s]{2,40}?)(?=(?:\s+en\s+horario|\s+durante|\s+los?\s+fines|\s+el\s+fin|\s+hoy|\s+ayer|\s+esta\s+semana|\s+este\s+mes|\s+last\s+\d+\s+days|$))/i,
+      /([a-z0-9ñ]{2,30})\s+(?:vs|versus|contra)\s+([a-z0-9ñ]{2,30})/i,
+    ]
+
+    const cleanupTerm = (rawTerm: string): string => {
+      return rawTerm
+        .replace(/\b(cuanto|cuanta|cuantos|cuantas|how much|how many|vendi|vendimos|ventas?|ingresos?)\b/g, ' ')
+        .replace(/\b(de|la|el|los|las|del|al|en|por|para|con|y)\b/g, ' ')
+        .replace(/[^a-z0-9ñ\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    }
+
+    for (const pattern of patterns) {
+      const match = normalizedMessage.match(pattern)
+      if (!match) continue
+
+      const leftTerm = cleanupTerm(match[1] || '')
+      const rightTerm = cleanupTerm(match[2] || '')
+
+      if (leftTerm.length < 2 || rightTerm.length < 2) {
+        continue
+      }
+
+      return {
+        leftTerm,
+        rightTerm,
+      }
+    }
+
+    return null
+  }
+
+  private hasWeekendConstraint(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message)
+    return /\b(fines? de semana|weekend|sabado|domingo)\b/i.test(normalizedMessage)
+  }
+
+  private hasNightConstraint(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message)
+    return /\b(horario nocturno|nocturn[oa]s?|noche|night)\b/i.test(normalizedMessage)
+  }
+
+  private async tryDeterministicProductComparisonFallback(
+    query: TextToSqlQuery,
+    userRole: UserRole,
+    sessionId: string,
+    startTime: number,
+  ): Promise<TextToSqlResponse | null> {
+    const comparisonTerms = this.extractProductComparisonTerms(query.message)
+    if (!comparisonTerms) {
+      return null
+    }
+
+    const intentAccess = this.validateSharedIntentAccess('topProducts', userRole)
+    if (!intentAccess.allowed) {
+      return null
+    }
+
+    try {
+      const { dateRange } = this.extractDateRangeWithExplicit(query.message)
+      const effectiveDateRange = dateRange || 'thisMonth'
+      const weekendOnly = this.hasWeekendConstraint(query.message)
+      const nightOnly = this.hasNightConstraint(query.message)
+
+      const venue = await prisma.venue.findUnique({
+        where: { id: query.venueId },
+        select: { timezone: true, currency: true },
+      })
+
+      const venueTimezone = venue?.timezone || 'America/Mexico_City'
+      const currency = venue?.currency || 'MXN'
+      const { from, to } = getVenueDateRange(effectiveDateRange, venueTimezone)
+
+      const leftLike = `%${comparisonTerms.leftTerm}%`
+      const rightLike = `%${comparisonTerms.rightTerm}%`
+
+      const weekendFilter = weekendOnly
+        ? Prisma.sql`AND EXTRACT(DOW FROM (o."createdAt" AT TIME ZONE ${venueTimezone})) IN (0, 6)`
+        : Prisma.empty
+
+      const nightFilter = nightOnly
+        ? Prisma.sql`AND EXTRACT(HOUR FROM (o."createdAt" AT TIME ZONE ${venueTimezone})) BETWEEN 18 AND 23`
+        : Prisma.empty
+
+      const rows = await prisma.$queryRaw<
+        Array<{
+          productName: string
+          quantitySold: bigint
+          revenue: Prisma.Decimal
+          orderCount: bigint
+        }>
+      >`
+        SELECT
+          p."name" as "productName",
+          SUM(oi."quantity")::bigint as "quantitySold",
+          SUM(oi."quantity" * oi."unitPrice") as "revenue",
+          COUNT(DISTINCT o."id")::bigint as "orderCount"
+        FROM "OrderItem" oi
+        INNER JOIN "Product" p ON oi."productId" = p."id"
+        INNER JOIN "Order" o ON oi."orderId" = o."id"
+        WHERE o."venueId"::text = ${query.venueId}
+          AND o."createdAt" >= ${from}::timestamp
+          AND o."createdAt" <= ${to}::timestamp
+          AND (LOWER(p."name") LIKE LOWER(${leftLike}) OR LOWER(p."name") LIKE LOWER(${rightLike}))
+          ${weekendFilter}
+          ${nightFilter}
+        GROUP BY p."id", p."name"
+      `
+
+      const aggregate = {
+        left: { quantitySold: 0, revenue: 0, orderCount: 0, products: new Set<string>() },
+        right: { quantitySold: 0, revenue: 0, orderCount: 0, products: new Set<string>() },
+      }
+
+      for (const row of rows) {
+        const normalizedProductName = this.normalizeTextForMatch(row.productName)
+        const matchesLeft = normalizedProductName.includes(comparisonTerms.leftTerm)
+        const matchesRight = normalizedProductName.includes(comparisonTerms.rightTerm)
+
+        let bucket: 'left' | 'right' | null = null
+        if (matchesLeft && !matchesRight) {
+          bucket = 'left'
+        } else if (!matchesLeft && matchesRight) {
+          bucket = 'right'
+        } else if (matchesLeft && matchesRight) {
+          bucket = comparisonTerms.leftTerm.length >= comparisonTerms.rightTerm.length ? 'left' : 'right'
+        }
+
+        if (!bucket) continue
+
+        aggregate[bucket].quantitySold += Number(row.quantitySold || 0)
+        aggregate[bucket].revenue += row.revenue?.toNumber?.() || Number(row.revenue || 0)
+        aggregate[bucket].orderCount += Number(row.orderCount || 0)
+        aggregate[bucket].products.add(row.productName)
+      }
+
+      const formatCurrency = (value: number): string =>
+        new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(Number.isFinite(value) ? value : 0)
+
+      const leftRevenue = aggregate.left.revenue
+      const rightRevenue = aggregate.right.revenue
+      const totalRevenue = leftRevenue + rightRevenue
+      const leftShare = totalRevenue > 0 ? (leftRevenue / totalRevenue) * 100 : 0
+      const rightShare = totalRevenue > 0 ? (rightRevenue / totalRevenue) * 100 : 0
+
+      const filtersUsed = [
+        this.formatDateRangeName(effectiveDateRange),
+        weekendOnly ? 'fines de semana' : null,
+        nightOnly ? 'horario nocturno (18:00-23:59)' : null,
+      ]
+        .filter(Boolean)
+        .join(', ')
+
+      const leftLabel = comparisonTerms.leftTerm
+      const rightLabel = comparisonTerms.rightTerm
+      const leftWinner = leftRevenue >= rightRevenue
+      const winnerLabel = leftWinner ? leftLabel : rightLabel
+      const deltaRevenue = Math.abs(leftRevenue - rightRevenue)
+
+      const noData = leftRevenue === 0 && rightRevenue === 0
+      const response = noData
+        ? `No encontré ventas para comparar "${leftLabel}" vs "${rightLabel}" en ${filtersUsed}. Revisa si los nombres de producto en menú usan otra variante (ej. singular/plural o marca).`
+        : [
+            `Comparativo ${leftLabel} vs ${rightLabel} en ${filtersUsed}:`,
+            `• ${leftLabel}: ${formatCurrency(leftRevenue)} (${aggregate.left.quantitySold} unidades, ${leftShare.toFixed(1)}%)`,
+            `• ${rightLabel}: ${formatCurrency(rightRevenue)} (${aggregate.right.quantitySold} unidades, ${rightShare.toFixed(1)}%)`,
+            `• Ganador: ${winnerLabel} por ${formatCurrency(deltaRevenue)}.`,
+          ].join('\n')
+
+      let trainingDataId: string | undefined
+      try {
+        trainingDataId = await this.learningService.recordChatInteraction({
+          venueId: query.venueId,
+          userId: query.userId,
+          userQuestion: query.message,
+          aiResponse: response,
+          confidence: noData ? 0.72 : 0.86,
+          executionTime: Date.now() - startTime,
+          rowsReturned: rows.length,
+          sessionId,
+        })
+      } catch (learningError) {
+        logger.warn('🧠 Failed to record deterministic comparison fallback interaction:', learningError)
+      }
+
+      return {
+        response,
+        confidence: noData ? 0.72 : 0.86,
+        queryResult: {
+          comparison: {
+            leftTerm: leftLabel,
+            rightTerm: rightLabel,
+            filtersUsed,
+            left: {
+              revenue: leftRevenue,
+              quantitySold: aggregate.left.quantitySold,
+              orderCount: aggregate.left.orderCount,
+              products: Array.from(aggregate.left.products),
+            },
+            right: {
+              revenue: rightRevenue,
+              quantitySold: aggregate.right.quantitySold,
+              orderCount: aggregate.right.orderCount,
+              products: Array.from(aggregate.right.products),
+            },
+          },
+        },
+        metadata: {
+          queryGenerated: false,
+          queryExecuted: true,
+          rowsReturned: rows.length,
+          executionTime: Date.now() - startTime,
+          dataSourcesUsed: ['SharedQueryService', 'OrderItem', 'Order', 'Product'],
+          routedTo: 'SharedQueryService',
+          intent: 'topProducts',
+          riskLevel: 'low',
+          reasonCode: 'deterministic_product_comparison_fallback',
+        },
+        suggestions: [
+          'Prueba con rango explícito: "últimos 30 días"',
+          'Indica productos exactos: "hamburguesa clásica vs pizza pepperoni"',
+          'Quita filtros de horario para ver tendencia general',
+        ],
+        trainingDataId,
+      }
+    } catch (error) {
+      logger.warn('Deterministic product comparison fallback failed', {
+        error: error instanceof Error ? error.message : String(error),
+        message: query.message,
+        venueId: query.venueId,
+      })
+      return null
     }
   }
 
@@ -4683,6 +4982,79 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     const hasDataIndicators = dataQueryIndicators.some(indicator => lowerMessage.includes(indicator))
 
     return hasDataIndicators
+  }
+
+  private getOperationalHelpResponse(message: string): OperationalHelpResponse | null {
+    const normalizedMessage = this.normalizeTextForMatch(message)
+
+    const hasHowToSignal =
+      /\b(como|how|donde|pasos|guia|ayuda|help|puedo|quiero|configuro|configurar|creo|crear|editar)\b/.test(normalizedMessage) ||
+      /\?$/.test(normalizedMessage)
+
+    if (!hasHowToSignal) {
+      return null
+    }
+
+    const hasAnalyticsSignal = /\b(ventas?|ingresos?|ticket|promedio|resenas?|reseñas?|top|propinas?|ordenes?|pedidos?)\b/.test(
+      normalizedMessage,
+    )
+    if (hasAnalyticsSignal) {
+      return null
+    }
+
+    const permissionsSignal = /\b(permisos?|roles?|permission|role)\b/.test(normalizedMessage)
+    if (permissionsSignal) {
+      return {
+        topic: 'permissions',
+        response: [
+          'Para crear o ajustar permisos ve a `Configuración -> Roles y permisos` en el dashboard.',
+          '1. Elige el rol que quieres editar (o crea uno nuevo si aplica).',
+          '2. Activa/desactiva los permisos por módulo.',
+          '3. Guarda cambios y asigna ese rol al miembro del equipo.',
+          'Si quieres, te puedo guiar paso a paso según el rol (mesero, gerente, admin).',
+        ].join('\n'),
+        suggestions: [
+          '¿Qué permiso necesita un mesero para cobrar en TPV?',
+          '¿Cómo asigno un rol a un staff específico?',
+          '¿Qué diferencia hay entre ADMIN y VIEWER?',
+        ],
+      }
+    }
+
+    const menuSignal = /\b(menu|menú|productos?|categorias?|modificadores?)\b/.test(normalizedMessage)
+    if (menuSignal) {
+      return {
+        topic: 'menu',
+        response:
+          'Para gestionar menú entra a `Menú` en el dashboard. Ahí puedes crear categorías y productos, y luego asignar modificadores cuando aplique.',
+        suggestions: [
+          '¿Cómo creo una categoría?',
+          '¿Cómo creo un producto con modificadores?',
+          '¿Qué campos son obligatorios para un producto?',
+        ],
+      }
+    }
+
+    const inventorySignal = /\b(inventario|stock|insumos?|materia prima|raw material)\b/.test(normalizedMessage)
+    if (inventorySignal) {
+      return {
+        topic: 'inventory',
+        response:
+          'Para inventario usa el módulo `Inventario`: crea insumos, define stock mínimo, registra entradas/salidas y revisa alertas de bajo inventario.',
+        suggestions: ['¿Cómo configuro stock mínimo?', '¿Cómo registro una compra?', '¿Qué insumos están por agotarse?'],
+      }
+    }
+
+    const commissionsSignal = /\b(comision(?:es)?|commission|payout|meta)\b/.test(normalizedMessage)
+    if (commissionsSignal) {
+      return {
+        topic: 'commissions',
+        response: 'Para comisiones entra a `Comisiones`: define reglas, asigna staff, configura periodos y revisa payouts antes de cerrar.',
+        suggestions: ['¿Cómo creo una regla de comisión?', '¿Cómo se calcula un payout?', 'Muéstrame el ranking de comisiones del mes'],
+      }
+    }
+
+    return null
   }
 
   /**

@@ -54,20 +54,30 @@ export async function getAllRolePermissions(venueId: string) {
     throw new NotFoundError('Venue not found')
   }
 
-  // Get custom permissions
-  const customPermissions = await prisma.venueRolePermission.findMany({
-    where: { venueId },
-    include: {
-      modifier: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
+  // Get custom permissions and staff counts per role in parallel
+  const [customPermissions, staffCounts] = await Promise.all([
+    prisma.venueRolePermission.findMany({
+      where: { venueId },
+      include: {
+        modifier: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
         },
       },
-    },
-  })
+    }),
+    prisma.staffVenue.groupBy({
+      by: ['role'],
+      where: { venueId, active: true },
+      _count: { role: true },
+    }),
+  ])
+
+  // Build a map of role -> count
+  const staffCountMap = new Map(staffCounts.map(sc => [sc.role, sc._count.role]))
 
   // Build response with all roles
   const roles = Object.values(StaffRole)
@@ -84,6 +94,7 @@ export async function getAllRolePermissions(venueId: string) {
       isCustom: !!custom,
       modifiedBy: custom?.modifier || null,
       modifiedAt: custom?.updatedAt || null,
+      staffCount: staffCountMap.get(role) || 0,
     }
   })
 }

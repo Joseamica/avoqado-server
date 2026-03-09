@@ -63,6 +63,63 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
     })
   })
 
+  describe('Deterministic Comparison Fallback Helpers', () => {
+    it('should extract comparison terms from "X vs Y" queries', () => {
+      const query = '¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?'
+      // @ts-expect-error - accessing private method for testing
+      const terms = service.extractProductComparisonTerms(query)
+
+      expect(terms).toEqual({
+        leftTerm: 'hamburguesas',
+        rightTerm: 'pizzas',
+      })
+    })
+
+    it('should return null when query has no comparison connector', () => {
+      const query = '¿Cuánto vendí de hamburguesas en horario nocturno?'
+      // @ts-expect-error - accessing private method for testing
+      const terms = service.extractProductComparisonTerms(query)
+
+      expect(terms).toBeNull()
+    })
+
+    it('should detect weekend constraint in natural language', () => {
+      const query = 'ventas de hamburguesas vs pizzas los fines de semana'
+      // @ts-expect-error - accessing private method for testing
+      const hasWeekendConstraint = service.hasWeekendConstraint(query)
+
+      expect(hasWeekendConstraint).toBe(true)
+    })
+
+    it('should detect night constraint in natural language', () => {
+      const query = 'ventas de hamburguesas vs pizzas en horario nocturno'
+      // @ts-expect-error - accessing private method for testing
+      const hasNightConstraint = service.hasNightConstraint(query)
+
+      expect(hasNightConstraint).toBe(true)
+    })
+  })
+
+  describe('Operational Help Routing', () => {
+    it('should route permission how-to questions to operational help', () => {
+      const query = 'como creo nuevos permisos?'
+      // @ts-expect-error - accessing private method for testing
+      const help = service.getOperationalHelpResponse(query)
+
+      expect(help).not.toBeNull()
+      expect(help?.topic).toBe('permissions')
+      expect(help?.response.toLowerCase()).toContain('roles y permisos')
+    })
+
+    it('should NOT route analytics questions to operational help', () => {
+      const query = '¿cómo van mis ventas esta semana?'
+      // @ts-expect-error - accessing private method for testing
+      const help = service.getOperationalHelpResponse(query)
+
+      expect(help).toBeNull()
+    })
+  })
+
   describe('Importance Detection', () => {
     it('should detect important queries with rankings', () => {
       const rankingQuery = '¿Quién es el mejor mesero?'
