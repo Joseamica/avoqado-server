@@ -5,6 +5,7 @@ import { generateAccessToken, generateRefreshToken, verifyToken, StaffRole } fro
 import { v4 as uuidv4 } from 'uuid'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
+import { getRoleDisplayName, DEFAULT_ROLE_DISPLAY_NAMES } from '../dashboard/venueRoleConfig.dashboard.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
 /**
@@ -174,6 +175,9 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
   })
   const loyaltyActive = loyaltyConfig?.active ?? false
 
+  // Fetch custom role display name for this venue+role
+  const roleDisplayName = await getRoleDisplayName(staffVenue.venueId, staffVenue.role)
+
   // Return staff information with venue-specific data and JWT tokens
   return {
     // Existing staff data
@@ -181,6 +185,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     staffId: staffVenue.staffId,
     venueId: staffVenue.venueId,
     role: staffVenue.role,
+    roleDisplayName,
     permissions: staffVenue.permissions,
     totalSales: staffVenue.totalSales,
     totalTips: staffVenue.totalTips,
@@ -532,6 +537,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
     staffId: 'MASTER_ADMIN',
     venueId: venue.id,
     role: 'SUPERADMIN',
+    roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
     permissions: ['*'],
     totalSales: 0,
     totalTips: 0,

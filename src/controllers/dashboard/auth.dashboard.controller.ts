@@ -8,6 +8,7 @@ import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
+import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 
 /**
  * Simple deep merge for module config objects.
@@ -240,6 +241,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: venue.slug,
           logo: venue.logo,
           role: StaffRole.SUPERADMIN,
+          roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
           status: venue.status,
           kycStatus: venue.kycStatus,
           features: venue.features,
@@ -301,6 +303,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       logo: string | null
       type?: string // Business type for sector-aware UI terminology
       role?: any
+      roleDisplayName?: string // Custom display name for the role (per-venue)
       status?: VenueStatus // Single source of truth for venue state
       kycStatus?: string | null // Include KYC verification status
       features?: any[]
@@ -324,6 +327,19 @@ export const getAuthStatus = async (req: Request, res: Response) => {
     const isSuperAdmin = staff.venues.some(sv => sv.role === StaffRole.SUPERADMIN)
     const isOwner = staff.venues.some(sv => sv.role === StaffRole.OWNER)
     let allVenues: VenueWithFeatures[] = []
+
+    // Batch-fetch role display names for all direct venues (one query per venue)
+    const uniqueDirectRoles = [...new Set(staff.venues.map(sv => sv.role))] as StaffRole[]
+    const roleDisplayNamesByVenue = new Map<string, Map<StaffRole, string>>()
+    await Promise.all(
+      staff.venues.map(async sv => {
+        if (!roleDisplayNamesByVenue.has(sv.venue.id)) {
+          const displayNames = await getRoleDisplayNames(sv.venue.id, uniqueDirectRoles)
+          roleDisplayNamesByVenue.set(sv.venue.id, displayNames)
+        }
+      }),
+    )
+
     const directVenues: VenueWithFeatures[] = staff.venues.map(sv => ({
       id: sv.venue.id,
       name: sv.venue.name,
@@ -331,6 +347,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       logo: sv.venue.logo,
       type: sv.venue.type, // Business type for sector-aware UI
       role: sv.role,
+      roleDisplayName: roleDisplayNamesByVenue.get(sv.venue.id)?.get(sv.role) ?? DEFAULT_ROLE_DISPLAY_NAMES[sv.role as StaffRole],
       status: sv.venue.status, // Single source of truth
       kycStatus: sv.venue.kycStatus, // Include KYC status
       features: sv.venue.features, // Incluir las features
@@ -457,6 +474,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           directVenues.push({
             ...venue,
             role: StaffRole.SUPERADMIN,
+            roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
           })
         }
       }
@@ -570,6 +588,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             directVenues.push({
               ...venue,
               role: StaffRole.OWNER,
+              roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.OWNER],
             })
           }
         }

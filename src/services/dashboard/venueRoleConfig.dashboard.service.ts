@@ -58,9 +58,9 @@ const DEFAULT_ROLE_SORT_ORDER: Record<StaffRole, number> = {
 
 /**
  * Roles that cannot be renamed (system roles)
- * SUPERADMIN should always show as SUPERADMIN for consistency
+ * Currently empty — all roles including SUPERADMIN are renameable per venue.
  */
-const NON_RENAMEABLE_ROLES: StaffRole[] = [StaffRole.SUPERADMIN]
+const NON_RENAMEABLE_ROLES: StaffRole[] = []
 
 /**
  * Get all role configs for a venue (with defaults for unconfigured roles)

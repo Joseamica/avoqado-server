@@ -11,6 +11,7 @@ import logger from '@/config/logger'
 import { getPrimaryOrganizationId, hasOrganizationAccess } from '../staffOrganization.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
+import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from './venueRoleConfig.dashboard.service'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
@@ -136,6 +137,7 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
           slug: firstVenue.slug,
           logo: firstVenue.logo,
           role: StaffRole.SUPERADMIN,
+          roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
           status: firstVenue.status,
           permissions: ['*'], // Full permissions
         },
@@ -412,7 +414,18 @@ export async function loginStaff(loginData: LoginDto) {
     },
   })
 
-  // 7. Formatear respuesta with merged permissions
+  // 7. Fetch role display names for all venues (batch for efficiency)
+  const uniqueRoles = [...new Set(staff.venues.map(sv => sv.role))]
+  // Use first venue's ID for batch lookup (all venues may have different configs, so fetch per-venue)
+  const roleDisplayNamesByVenue = new Map<string, Map<StaffRole, string>>()
+  await Promise.all(
+    venueIds.map(async vid => {
+      const displayNames = await getRoleDisplayNames(vid, uniqueRoles)
+      roleDisplayNamesByVenue.set(vid, displayNames)
+    }),
+  )
+
+  // 8. Formatear respuesta with merged permissions
   const sanitizedStaff = {
     id: staff.id,
     email: staff.email,
@@ -435,12 +448,16 @@ export async function loginStaff(loginData: LoginDto) {
         permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[sv.role] || []
       }
 
+      const venueDisplayNames = roleDisplayNamesByVenue.get(sv.venueId)
+      const roleDisplayName = venueDisplayNames?.get(sv.role) ?? DEFAULT_ROLE_DISPLAY_NAMES[sv.role]
+
       return {
         id: sv.venue.id,
         name: sv.venue.name,
         slug: sv.venue.slug,
         logo: sv.venue.logo,
         role: sv.role,
+        roleDisplayName,
         status: sv.venue.status, // Single source of truth for venue state
         kycStatus: sv.venue.kycStatus, // KYC compliance status
         permissions, // Include permissions in response
