@@ -132,10 +132,10 @@ describe('VenueRoleConfig Dashboard Service', () => {
       ).rejects.toThrow(NotFoundError)
     })
 
-    it('should skip SUPERADMIN role and warn', async () => {
+    it('should allow renaming SUPERADMIN role', async () => {
       const mockVenue = { id: 'venue-123' }
       const inputConfigs = [
-        { role: 'SUPERADMIN' as StaffRole, displayName: 'Jefe Supremo' }, // Should be skipped
+        { role: 'SUPERADMIN' as StaffRole, displayName: 'Jefe Supremo' },
         { role: 'CASHIER' as StaffRole, displayName: 'Promotor' },
       ]
 
@@ -145,18 +145,8 @@ describe('VenueRoleConfig Dashboard Service', () => {
 
       await updateVenueRoleConfigs('venue-123', inputConfigs)
 
-      // SUPERADMIN is silently skipped, only ADMIN should be processed
-      // The $transaction should be called with only the ADMIN update
+      // Both SUPERADMIN and CASHIER should be processed
       expect(prismaMock.$transaction).toHaveBeenCalled()
-    })
-
-    it('should throw BadRequestError if only non-renameable roles are provided', async () => {
-      const mockVenue = { id: 'venue-123' }
-      const inputConfigs = [{ role: 'SUPERADMIN' as StaffRole, displayName: 'Jefe Supremo' }]
-
-      prismaMock.venue.findUnique.mockResolvedValue(mockVenue as any)
-
-      await expect(updateVenueRoleConfigs('venue-123', inputConfigs)).rejects.toThrow(BadRequestError)
     })
   })
 

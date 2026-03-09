@@ -83,6 +83,12 @@ describe('Login Scenarios', () => {
     ;(mockPrisma as any).invitation = {
       findMany: jest.fn().mockResolvedValue([]),
     }
+
+    // Initialize venueRoleConfig mock (for roleDisplayName in auth responses)
+    ;(mockPrisma as any).venueRoleConfig = {
+      findMany: jest.fn().mockResolvedValue([]),
+      findUnique: jest.fn().mockResolvedValue(null),
+    }
   })
 
   // Helper to create a staff object with venues

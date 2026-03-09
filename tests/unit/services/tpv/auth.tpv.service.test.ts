@@ -19,6 +19,9 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     loyaltyConfig: {
       findUnique: jest.fn(),
     },
+    venueRoleConfig: {
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
   },
 }))
 
@@ -115,6 +118,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         staffId: 'staff-1',
         venueId: 'venue-1',
         role: StaffRole.WAITER,
+        roleDisplayName: 'Mesero',
         permissions: null,
         totalSales: new Decimal('1000.00'),
         totalTips: new Decimal('100.00'),
