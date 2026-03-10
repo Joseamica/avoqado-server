@@ -49,6 +49,7 @@ interface InviteTeamMemberRequest {
   type?: InviteType // 'email' (default) or 'tpv-only'
   pin?: string // For TPV-only invitations, set PIN directly
   inviteToAllVenues?: boolean // When true (OWNER role only), creates StaffVenue for all org venues
+  requirePin?: boolean // When true, PIN is required when accepting the invitation
 }
 
 interface UpdateTeamMemberRequest {
@@ -479,6 +480,7 @@ export async function inviteTeamMember(
       message: request.message,
       // Store inviteToAllVenues flag in permissions JSON for email invitations
       permissions: shouldInviteToAllVenues ? { inviteToAllVenues: true } : undefined,
+      requirePin: request.requirePin === true,
     },
   })
 

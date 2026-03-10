@@ -118,6 +118,8 @@ export async function getInvitationByToken(token: string) {
     // Multi-venue support: inform frontend about user's existing account status
     userAlreadyHasPassword: userAlreadyHasPassword || false, // If true, skip password form
     existsInDifferentOrg: existsInDifferentOrg || false, // If true, show "contact support" message
+    // PIN requirement: when true, the accepting user MUST provide a PIN
+    requirePin: invitation.requirePin || false,
   }
 }
 
@@ -148,6 +150,11 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
     // Check if invitation is expired
     if (new Date() > invitation.expiresAt) {
       throw new AppError('La invitación ha expirado', 410)
+    }
+
+    // Enforce PIN requirement if set by inviter
+    if (invitation.requirePin && !userData.pin) {
+      throw new AppError('El PIN es requerido para esta invitación', 400)
     }
 
     // Check if user with this email already exists GLOBALLY

@@ -38,7 +38,7 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
       return
     }
 
-    const { email, firstName, lastName, role, message, type, pin, inviteToAllVenues } = req.body
+    const { email, firstName, lastName, role, message, type, pin, inviteToAllVenues, requirePin } = req.body
 
     const isTPVOnly = type === 'tpv-only'
 
@@ -96,6 +96,7 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
       type,
       pin,
       inviteToAllVenues,
+      requirePin,
     })
 
     res.status(201).json({

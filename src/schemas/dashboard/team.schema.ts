@@ -60,6 +60,8 @@ export const InviteTeamMemberSchema = z.object({
         .optional(),
       // When true and role is OWNER, creates StaffVenue for all organization venues
       inviteToAllVenues: z.boolean().optional(),
+      // When true, PIN is required when accepting the invitation
+      requirePin: z.boolean().optional(),
     })
     .refine(
       data => {
