@@ -10,6 +10,12 @@
 import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
 
+// Mock credit pack public service BEFORE importing webhook service to prevent Stripe SDK initialization error
+jest.mock('@/services/dashboard/creditPack.public.service', () => ({
+  __esModule: true,
+  fulfillPurchase: jest.fn(),
+}))
+
 // Mock Stripe service BEFORE importing webhook service to prevent Stripe SDK initialization error
 jest.mock('@/services/stripe.service', () => ({
   __esModule: true,
