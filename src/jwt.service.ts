@@ -190,3 +190,40 @@ export function verifyRefreshToken(token: string): RefreshTokenPayload {
  *
  * // exampleUsage();
  */
+
+// --- Customer Token Functions ---
+
+export interface CustomerTokenPayload extends jwt.JwtPayload {
+  sub: string // Customer.id
+  venueId: string
+  type: 'customer' // Distinguishes from staff tokens
+}
+
+/**
+ * Genera un token de acceso para clientes (portal público).
+ * Expiración: 30 días.
+ */
+export function generateCustomerToken(customerId: string, venueId: string): string {
+  const payload: Omit<CustomerTokenPayload, 'iat' | 'exp'> = {
+    sub: customerId,
+    venueId,
+    type: 'customer',
+  }
+  return jwt.sign(payload, ACCESS_TOKEN_SECRET!, {
+    expiresIn: 2592000, // 30 days
+    algorithm: 'HS256',
+  })
+}
+
+/**
+ * Verifica un token de cliente.
+ */
+export function verifyCustomerToken(token: string): CustomerTokenPayload {
+  const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!, {
+    algorithms: ['HS256'],
+  }) as CustomerTokenPayload
+  if (!decoded.sub || !decoded.venueId || decoded.type !== 'customer') {
+    throw new jwt.JsonWebTokenError('Token de cliente inválido.')
+  }
+  return decoded
+}

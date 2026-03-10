@@ -323,6 +323,13 @@ model Venue {
   waitlistEntries     ReservationWaitlistEntry[]
   reservationSettings ReservationSettings?
 
+  // ==========================================
+  // CREDIT PACKS / BUNDLES
+  // ==========================================
+  creditPacks         CreditPack[]
+  creditPackPurchases CreditPackPurchase[]
+  creditTransactions  CreditTransaction[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -359,7 +366,8 @@ model VenueSettings {
   autoCloseShifts Boolean @default(false)
   shiftDuration   Int     @default(8) // hours
   enableShifts    Boolean @default(true) // Enable/disable shift system for venue
-  requirePinLogin Boolean @default(true)
+  requirePinLogin      Boolean @default(true)
+  terminalPermissions  Json?   // Permissions for terminal session when requirePinLogin=false
 
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
@@ -599,6 +607,9 @@ model StaffVenue {
   orderDiscountsApplied     OrderDiscount[]    @relation("OrderDiscountAppliedBy")
   orderDiscountsAuthorized  OrderDiscount[]    @relation("OrderDiscountAuthorizedBy")
 
+  // Credit Packs
+  creditTransactionsCreated CreditTransaction[] @relation("CreditTransactionCreatedBy")
+
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
   @@unique([venueId, pin]) // ✅ PIN único por venue
@@ -777,6 +788,7 @@ model Invitation {
   // Metadata
   message     String? // ✅ Mensaje personalizado del invitador
   permissions Json? // ✅ Permisos específicos si aplica
+  requirePin  Boolean @default(false) // When true, PIN is required when accepting the invitation
 
   // Tracking
   invitedById  String
@@ -1050,6 +1062,10 @@ model Product {
   allowCustomAmount Boolean   @default(true) // Allow custom donation amount
   donationCause     String? // "Tips for staff", "Red Cross", etc.
 
+  // Credit Packs
+  allowCreditRedemption  Boolean @default(true)  // Whether this product accepts credit pack redemptions
+  requireCreditForBooking Boolean @default(false) // Whether booking requires spending a credit (blocks free bookings)
+
   // Inventory tracking configuration
   trackInventory  Boolean          @default(false)
   inventoryMethod InventoryMethod? // ✅ WORLD-CLASS: How to track (QUANTITY | RECIPE)
@@ -1088,6 +1104,10 @@ model Product {
   // Reservations (product-based appointments/classes)
   reservations  Reservation[]
   classSessions ClassSession[]
+
+  // Credit Packs
+  creditPackItems    CreditPackItem[]
+  creditItemBalances CreditItemBalance[]
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -2024,6 +2044,9 @@ model Order {
 
   // Commission System
   commissionCalculations CommissionCalculation[]
+
+  // Credit Packs (for future TPV integration)
+  creditTransactions CreditTransaction[]
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -3814,6 +3837,10 @@ model Customer {
   // Reservations
   reservations    Reservation[]
   waitlistEntries ReservationWaitlistEntry[]
+
+  // Credit Packs
+  creditPackPurchases CreditPackPurchase[]
+  creditTransactions  CreditTransaction[]
 
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
@@ -7423,6 +7450,9 @@ model Reservation {
   // Relations (Phase 2)
   waitlistPromotion ReservationWaitlistEntry?
 
+  // Credit Packs
+  creditTransaction CreditTransaction?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -7566,4 +7596,155 @@ model ReservationSettings {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// NOTE: CREDIT PACKS / BUNDLES SYSTEM
+// ==========================================
+
+model CreditPack {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String? @db.Text
+  price       Decimal @db.Decimal(10, 2)
+  currency    String  @default("MXN")
+
+  validityDays   Int? // Days from purchase until expiration (null = no expiration)
+  maxPerCustomer Int? // Max purchases per customer (null = unlimited)
+  active         Boolean @default(true)
+  displayOrder   Int     @default(0)
+
+  // Stripe (one-time product/price)
+  stripeProductId String?
+  stripePriceId   String?
+
+  // Relations
+  items     CreditPackItem[]
+  purchases CreditPackPurchase[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, active])
+}
+
+model CreditPackItem {
+  id           String     @id @default(cuid())
+  creditPackId String
+  creditPack   CreditPack @relation(fields: [creditPackId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity Int // Number of credits for this product (e.g., 10 classes)
+
+  // Relations
+  balances CreditItemBalance[]
+
+  @@index([creditPackId])
+  @@unique([creditPackId, productId])
+}
+
+model CreditPackPurchase {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  customerId   String
+  customer     Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  creditPackId String
+  creditPack   CreditPack @relation(fields: [creditPackId], references: [id])
+
+  purchasedAt DateTime             @default(now())
+  expiresAt   DateTime?
+  status      CreditPurchaseStatus @default(ACTIVE)
+
+  // Stripe
+  stripeCheckoutSessionId String? @unique
+  stripePaymentIntentId   String?
+  amountPaid              Decimal @db.Decimal(10, 2)
+
+  // Relations
+  itemBalances CreditItemBalance[]
+  transactions CreditTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, customerId, status])
+  @@index([customerId])
+  @@index([expiresAt])
+}
+
+enum CreditPurchaseStatus {
+  ACTIVE
+  EXHAUSTED
+  EXPIRED
+  REFUNDED
+}
+
+model CreditItemBalance {
+  id                   String             @id @default(cuid())
+  creditPackPurchaseId String
+  creditPackPurchase   CreditPackPurchase @relation(fields: [creditPackPurchaseId], references: [id], onDelete: Cascade)
+
+  creditPackItemId String
+  creditPackItem   CreditPackItem @relation(fields: [creditPackItemId], references: [id])
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  originalQuantity  Int // Quantity at purchase time
+  remainingQuantity Int // Current balance
+
+  // Relations
+  transactions CreditTransaction[]
+
+  @@index([creditPackPurchaseId])
+  @@index([productId])
+  @@unique([creditPackPurchaseId, creditPackItemId])
+}
+
+model CreditTransaction {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  customerId           String
+  customer             Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  creditPackPurchaseId String
+  creditPackPurchase   CreditPackPurchase @relation(fields: [creditPackPurchaseId], references: [id])
+  creditItemBalanceId  String
+  creditItemBalance    CreditItemBalance  @relation(fields: [creditItemBalanceId], references: [id])
+
+  type     CreditTransactionType
+  quantity Int // +N for PURCHASE, -1 for REDEEM, etc.
+
+  // Context: what triggered this transaction
+  reservationId String?      @unique
+  reservation   Reservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  orderId       String?
+  order         Order?       @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  reason      String?     @db.Text
+  createdById String?
+  createdBy   StaffVenue? @relation("CreditTransactionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([creditItemBalanceId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([reservationId])
+  @@index([orderId])
+}
+
+enum CreditTransactionType {
+  PURCHASE
+  REDEEM
+  EXPIRE
+  REFUND
+  ADJUST
 }

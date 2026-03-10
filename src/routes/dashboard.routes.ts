@@ -234,6 +234,7 @@ import orgItemCategoryRoutes from './dashboard/orgItemCategory.routes'
 import organizationDashboardRoutes from './dashboard/organizationDashboard.routes'
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
+import creditPackRoutes from './dashboard/creditPack.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3476,6 +3477,9 @@ router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, reserva
 
 // Class Sessions (group classes / workshops)
 router.use('/venues/:venueId/class-sessions', authenticateTokenMiddleware, classSessionRoutes)
+
+// Credit Packs / Bundles (multi-product packages with credits)
+router.use('/venues/:venueId/credit-packs', authenticateTokenMiddleware, creditPackRoutes)
 
 // @temporary - Serialized Inventory Demo routes (delete after final implementation)
 // For PlayTelecom SIM sales visualization demo

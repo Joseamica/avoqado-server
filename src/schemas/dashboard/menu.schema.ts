@@ -202,6 +202,10 @@ const ProductBodyBase = z.object({
   suggestedAmounts: z.array(z.number().positive('El monto de donación debe ser positivo')).optional(),
   allowCustomAmount: z.boolean().optional(),
   donationCause: z.string().max(500).optional().nullable(),
+
+  // Credit Packs
+  allowCreditRedemption: z.boolean().optional(),
+  requireCreditForBooking: z.boolean().optional(),
 })
 
 const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) => {

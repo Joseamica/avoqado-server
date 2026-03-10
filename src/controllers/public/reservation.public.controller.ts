@@ -5,7 +5,7 @@ import { getReservationSettings } from '../../services/dashboard/reservationSett
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { ReservationStatus } from '@prisma/client'
+import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -57,6 +57,7 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
             type: true,
             maxParticipants: true,
             layoutConfig: true,
+            requireCreditForBooking: true,
           },
           orderBy: { name: 'asc' },
         },
@@ -183,6 +184,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
         status: reservation.status,
         depositRequired: false,
         depositAmount: null,
+        creditRedeemed: reservation.creditRedeemed || false,
       })
     }
 
@@ -295,6 +297,7 @@ async function createClassReservation(
     partySize?: number
     spotIds?: string[]
     specialRequests?: string
+    creditItemBalanceId?: string
   },
   moduleConfig: any,
 ) {
@@ -328,13 +331,18 @@ async function createClassReservation(
     // Verify the product is CLASS and active
     const product = await tx.product.findFirst({
       where: { id: session.productId, venueId },
-      select: { type: true, active: true, layoutConfig: true },
+      select: { type: true, active: true, layoutConfig: true, requireCreditForBooking: true },
     })
     if (!product || product.type !== 'CLASS') {
       throw new BadRequestError('El producto asociado no es una clase valida')
     }
     if (!product.active) {
       throw new BadRequestError('Este servicio ya no esta disponible')
+    }
+
+    // Block booking if product requires credit and none provided
+    if (product.requireCreditForBooking && !body.creditItemBalanceId) {
+      throw new BadRequestError('Este servicio requiere un credito para reservar. Compra un paquete de creditos primero.')
     }
 
     // Sum enrolled from active reservations
@@ -412,10 +420,105 @@ async function createClassReservation(
       },
     })
 
+    // ---- Credit redemption (if creditItemBalanceId provided) ----
+    let creditRedeemed = false
+    if (body.creditItemBalanceId) {
+      // Find customer by email/phone
+      const customer = await tx.customer.findFirst({
+        where: {
+          venueId,
+          OR: [...(body.guestEmail ? [{ email: body.guestEmail }] : []), ...(body.guestPhone ? [{ phone: body.guestPhone }] : [])],
+        },
+      })
+
+      if (!customer) {
+        throw new BadRequestError('No se encontro el cliente para canjear creditos')
+      }
+
+      // Lock and verify balance
+      const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
+        SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
+        FROM "CreditItemBalance"
+        WHERE id = ${body.creditItemBalanceId}
+        FOR UPDATE
+      `
+
+      if (balances.length === 0) {
+        throw new BadRequestError('Balance de credito no encontrado')
+      }
+
+      const balance = balances[0]
+
+      if (balance.remainingQuantity <= 0) {
+        throw new BadRequestError('No hay creditos disponibles')
+      }
+
+      if (balance.productId !== session.productId) {
+        throw new BadRequestError('El credito no corresponde al producto de esta clase')
+      }
+
+      // Verify purchase is active and not expired
+      const purchase = await tx.creditPackPurchase.findUnique({
+        where: { id: balance.creditPackPurchaseId },
+        select: { status: true, expiresAt: true, customerId: true },
+      })
+
+      if (!purchase || purchase.customerId !== customer.id) {
+        throw new BadRequestError('Credito no valido para este cliente')
+      }
+
+      if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
+        throw new BadRequestError('Los creditos ya no estan activos')
+      }
+
+      if (purchase.expiresAt && purchase.expiresAt < new Date()) {
+        throw new BadRequestError('Los creditos han expirado')
+      }
+
+      // Decrement balance
+      await tx.creditItemBalance.update({
+        where: { id: body.creditItemBalanceId },
+        data: { remainingQuantity: { decrement: 1 } },
+      })
+
+      // Create credit transaction
+      await tx.creditTransaction.create({
+        data: {
+          venueId,
+          customerId: customer.id,
+          creditPackPurchaseId: balance.creditPackPurchaseId,
+          creditItemBalanceId: body.creditItemBalanceId,
+          type: 'REDEEM',
+          quantity: -1,
+          reservationId: reservation.id,
+        },
+      })
+
+      // Check if purchase is exhausted
+      const remainingBalances = await tx.creditItemBalance.findMany({
+        where: {
+          creditPackPurchaseId: balance.creditPackPurchaseId,
+          remainingQuantity: { gt: 0 },
+        },
+      })
+
+      if (remainingBalances.length === 0) {
+        await tx.creditPackPurchase.update({
+          where: { id: balance.creditPackPurchaseId },
+          data: { status: CreditPurchaseStatus.EXHAUSTED },
+        })
+      }
+
+      creditRedeemed = true
+      logger.info(
+        `✅ [CREDIT REDEEM] Credit redeemed for reservation ${reservation.confirmationCode} | balance=${body.creditItemBalanceId}`,
+      )
+    }
+
     logger.info(
-      `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}`,
+      `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}${creditRedeemed ? ' (credit)' : ''}`,
     )
 
-    return reservation
+    return { ...reservation, creditRedeemed }
   })
 }

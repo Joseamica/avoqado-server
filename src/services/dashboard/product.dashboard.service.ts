@@ -41,6 +41,10 @@ export interface CreateProductDto {
   suggestedAmounts?: number[]
   allowCustomAmount?: boolean
   donationCause?: string
+
+  // Credit Packs
+  allowCreditRedemption?: boolean
+  requireCreditForBooking?: boolean
 }
 
 export interface UpdateProductDto {
@@ -82,6 +86,10 @@ export interface UpdateProductDto {
   suggestedAmounts?: number[]
   allowCustomAmount?: boolean
   donationCause?: string | null
+
+  // Credit Packs
+  allowCreditRedemption?: boolean
+  requireCreditForBooking?: boolean
 }
 
 export interface ReorderProductsDto {
@@ -454,6 +462,10 @@ export async function createProduct(venueId: string, productData: CreateProductD
             suggestedAmounts: productFields.suggestedAmounts,
             allowCustomAmount: productFields.allowCustomAmount ?? true,
             donationCause: productFields.donationCause,
+
+            // Credit Packs
+            allowCreditRedemption: productFields.allowCreditRedemption ?? true,
+            requireCreditForBooking: productFields.requireCreditForBooking ?? false,
 
             // Modifier groups
             modifierGroups: modifierGroupIds?.length

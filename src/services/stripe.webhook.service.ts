@@ -15,6 +15,7 @@ import { handlePaymentFailure, generateBillingPortalUrl } from './stripe.service
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
+import { fulfillPurchase as fulfillCreditPackPurchase } from './dashboard/creditPack.public.service'
 
 /**
  * Handle subscription updated event
@@ -1125,6 +1126,19 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       case 'payment_intent.payment_failed':
         await handlePaymentIntentFailed(event.data.object as Stripe.PaymentIntent)
         break
+
+      case 'checkout.session.completed': {
+        const session = event.data.object as Stripe.Checkout.Session
+        if (session.metadata?.type === 'credit_pack_purchase') {
+          logger.info('📥 Webhook: Credit pack checkout completed', {
+            sessionId: session.id,
+            venueId: session.metadata.venueId,
+            packId: session.metadata.packId,
+          })
+          await fulfillCreditPackPurchase(session.id)
+        }
+        break
+      }
 
       default:
         logger.info('ℹ️ Webhook: Unhandled event type', { type: event.type })

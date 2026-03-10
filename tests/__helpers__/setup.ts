@@ -129,6 +129,12 @@ const prismaMock: any = {
   commissionOverride: createMockModel(),
   commissionCalculation: createMockModel(),
   commissionSummary: createMockModel(),
+  // Credit Pack models
+  creditPack: createMockModel(),
+  creditPackItem: createMockModel(),
+  creditPackPurchase: createMockModel(),
+  creditItemBalance: createMockModel(),
+  creditTransaction: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

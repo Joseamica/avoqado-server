@@ -5,7 +5,10 @@ import rateLimit from 'express-rate-limit'
 import { getPublicReceipt } from '../controllers/public/receipt.public.controller'
 import { submitReviewFromReceipt, checkReviewStatus, getReviewForReceipt } from '../controllers/public/receiptReview.public.controller'
 import * as reservationPublicController from '../controllers/public/reservation.public.controller'
+import * as creditPackPublicController from '../controllers/public/creditPack.public.controller'
+import * as customerPortalController from '../controllers/public/customerPortal.public.controller'
 import { validateRequest } from '../middlewares/validation'
+import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
 import {
   publicVenueParamsSchema,
   publicReservationParamsSchema,
@@ -13,16 +16,25 @@ import {
   getAvailabilityQuerySchema,
   cancelBodySchema,
 } from '../schemas/dashboard/reservation.schema'
+import {
+  publicPacksParamsSchema,
+  publicBalanceQuerySchema,
+  publicCheckoutSchema,
+  customerRegisterSchema,
+  customerLoginSchema,
+  customerUpdateProfileSchema,
+} from '../schemas/dashboard/creditPack.schema'
 
 const router = Router()
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
-router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'OPTIONS'] }))
+router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'OPTIONS'] }))
 
 // Rate limiting: read endpoints (60 req/min), write (5 req/min), cancel (10 req/min)
 const readLimit = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false })
 const writeLimit = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false })
 const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
+const authLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
 
 // Digital Receipt routes
 router.get('/receipt/:accessKey', getPublicReceipt)
@@ -67,6 +79,45 @@ router.post(
   cancelLimit,
   validateRequest(z.object({ params: publicReservationParamsSchema, body: cancelBodySchema })),
   reservationPublicController.cancelReservation,
+)
+
+// ---- Public Credit Pack / Bundle Routes (unauthenticated) ----
+
+router.get(
+  '/venues/:venueSlug/credit-packs',
+  readLimit,
+  validateRequest(publicPacksParamsSchema),
+  creditPackPublicController.getAvailablePacks,
+)
+
+router.get(
+  '/venues/:venueSlug/credit-packs/balance',
+  readLimit,
+  validateRequest(publicBalanceQuerySchema),
+  creditPackPublicController.getCustomerBalance,
+)
+
+router.post(
+  '/venues/:venueSlug/credit-packs/:packId/checkout',
+  writeLimit,
+  validateRequest(publicCheckoutSchema),
+  creditPackPublicController.createCheckout,
+)
+
+// ---- Customer Portal (authenticated) ----
+
+router.post('/venues/:venueSlug/customer/register', authLimit, validateRequest(customerRegisterSchema), customerPortalController.register)
+
+router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(customerLoginSchema), customerPortalController.login)
+
+router.get('/venues/:venueSlug/customer/portal', readLimit, authenticateCustomer, customerPortalController.getPortal)
+
+router.patch(
+  '/venues/:venueSlug/customer/profile',
+  writeLimit,
+  authenticateCustomer,
+  validateRequest(customerUpdateProfileSchema),
+  customerPortalController.updateProfile,
 )
 
 export default router

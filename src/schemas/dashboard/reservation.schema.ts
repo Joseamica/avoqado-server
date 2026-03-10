@@ -298,6 +298,7 @@ export const publicCreateReservationBodySchema = z
     classSessionId: z.string().optional(),
     spotIds: z.array(z.string().min(1)).max(100).optional(),
     specialRequests: z.string().max(2000).optional(),
+    creditItemBalanceId: z.string().optional(), // Credit pack: redeem 1 credit on booking
   })
   .refine(
     data => {

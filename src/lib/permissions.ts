@@ -560,6 +560,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
+    'creditPacks:*', // Credit pack/bundle management
     'commissions:read', // Can view commission configs and staff earnings
     'commissions:view_own', // Can view own commission earnings
     'features:read',
@@ -612,6 +613,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
+    'creditPacks:*', // Credit pack/bundle management
     'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
     'inventory:org-manage', // Manage org-level item categories & serialized items
     // Commission System (can manage but NOT payout - OWNER only)
@@ -680,6 +682,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
+    'creditPacks:*', // Credit pack/bundle management
     'features:*',
     'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
