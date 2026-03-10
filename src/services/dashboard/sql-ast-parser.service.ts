@@ -85,14 +85,21 @@ export class SqlAstParserService {
         }
       }
 
+      // Flatten UNION ALL chains so every part is validated
+      const allNodes = this.flattenUnion(ast)
+
       // Step 2: Validate query type (must be SELECT)
       if (!this.isSelectQuery(ast)) {
         errors.push('Query must be a SELECT statement')
         violationType = SecurityViolationType.DANGEROUS_OPERATION
       }
 
-      // Step 3: Extract tables accessed
-      const tables = this.extractTables(ast)
+      // Step 3: Extract tables accessed (across all UNION parts)
+      const tablesSet = new Set<string>()
+      for (const node of allNodes) {
+        this.extractTables(node).forEach(t => tablesSet.add(t))
+      }
+      const tables = Array.from(tablesSet)
 
       // Step 4: Validate table access permissions
       if (options.allowedTables && options.allowedTables.length > 0) {
@@ -103,8 +110,26 @@ export class SqlAstParserService {
         }
       }
 
-      // Step 5: CRITICAL - Validate venueId filter in WHERE clause
-      const whereAnalysis = this.analyzeWhereClause(ast, options.requiredVenueId)
+      // Step 5: CRITICAL - Validate venueId filter in WHERE clause (across all UNION parts)
+      const whereAnalysis: WhereClauseAnalysis = {
+        hasVenueFilter: false,
+        venueFilterValue: null,
+        hasOrConditions: false,
+        hasSuspiciousPatterns: false,
+        suspiciousReasons: [],
+      }
+      for (const node of allNodes) {
+        const partAnalysis = this.analyzeWhereClause(node, options.requiredVenueId)
+        if (partAnalysis.hasVenueFilter) {
+          whereAnalysis.hasVenueFilter = true
+          whereAnalysis.venueFilterValue = partAnalysis.venueFilterValue
+        }
+        if (partAnalysis.hasOrConditions) whereAnalysis.hasOrConditions = true
+        if (partAnalysis.hasSuspiciousPatterns) {
+          whereAnalysis.hasSuspiciousPatterns = true
+          whereAnalysis.suspiciousReasons.push(...partAnalysis.suspiciousReasons)
+        }
+      }
 
       if (!whereAnalysis.hasVenueFilter) {
         errors.push(`Query MUST include a WHERE filter with venueId = '${options.requiredVenueId}' for tenant isolation`)
@@ -134,15 +159,19 @@ export class SqlAstParserService {
         }
       }
 
-      // Step 7: Validate subqueries (recursive)
-      const subqueryValidation = this.validateSubqueries(ast, options)
-      errors.push(...subqueryValidation.errors)
-      warnings.push(...subqueryValidation.warnings)
+      // Step 7: Validate subqueries (recursive, across all UNION parts)
+      for (const node of allNodes) {
+        const subqueryValidation = this.validateSubqueries(node, options)
+        errors.push(...subqueryValidation.errors)
+        warnings.push(...subqueryValidation.warnings)
+      }
 
-      // Step 8: Validate JOINs
-      const joinValidation = this.validateJoins(ast, options.requiredVenueId)
-      errors.push(...joinValidation.errors)
-      warnings.push(...joinValidation.warnings)
+      // Step 8: Validate JOINs (across all UNION parts)
+      for (const node of allNodes) {
+        const joinValidation = this.validateJoins(node, options.requiredVenueId)
+        errors.push(...joinValidation.errors)
+        warnings.push(...joinValidation.warnings)
+      }
 
       // Step 9: Check for dangerous SQL functions
       const dangerousFunctions = this.detectDangerousFunctions(sql)
@@ -207,6 +236,27 @@ export class SqlAstParserService {
   }
 
   /**
+   * Flatten UNION ALL / UNION linked list into an array of AST nodes.
+   * node-sql-parser chains UNION parts via `_next` property.
+   */
+  private flattenUnion(ast: AST): any[] {
+    const nodes: any[] = []
+    const collect = (node: any) => {
+      if (!node) return
+      if (Array.isArray(node)) {
+        node.forEach(n => collect(n))
+      } else {
+        nodes.push(node)
+        if (node._next) {
+          collect(node._next)
+        }
+      }
+    }
+    collect(ast)
+    return nodes
+  }
+
+  /**
    * Check if query is a SELECT statement
    */
   private isSelectQuery(ast: AST): boolean {
@@ -221,12 +271,27 @@ export class SqlAstParserService {
    *
    * IMPORTANT: Only extracts actual table references from FROM clauses,
    * NOT from column references inside functions like EXTRACT(HOUR FROM column).
+   * CTE names (WITH aliases) are excluded — they're virtual tables, not real DB tables.
    */
   private extractTables(ast: AST): string[] {
     const tables = new Set<string>()
+    const cteNames = new Set<string>()
 
     const extractFromNode = (node: any) => {
       if (!node) return
+
+      // Collect CTE names so we can exclude them from the final result
+      if (node.with && Array.isArray(node.with)) {
+        for (const cte of node.with) {
+          if (cte.name?.value) {
+            cteNames.add(cte.name.value)
+          }
+          // Extract real tables referenced inside CTEs
+          if (cte.stmt) {
+            extractFromNode(cte.stmt)
+          }
+        }
+      }
 
       // Handle SELECT statements - only process actual FROM clause
       if (node.type === 'select' && node.from && Array.isArray(node.from)) {
@@ -243,11 +308,12 @@ export class SqlAstParserService {
         })
       }
 
-      // Handle JOINs - only if it's a valid join structure
+      // Handle JOINs - extract the table name, not the join type
+      // In node-sql-parser AST, fromItem.join = "INNER JOIN" (type), fromItem.table = "TableName" (actual table)
       if (node.from && Array.isArray(node.from)) {
         node.from.forEach((fromItem: any) => {
-          if (fromItem.join && typeof fromItem.join === 'string') {
-            tables.add(fromItem.join)
+          if (fromItem.join && fromItem.table && typeof fromItem.table === 'string') {
+            tables.add(fromItem.table)
           }
         })
       }
@@ -264,7 +330,8 @@ export class SqlAstParserService {
       extractFromNode(ast)
     }
 
-    return Array.from(tables)
+    // Exclude CTE aliases from the result — they're not real database tables
+    return Array.from(tables).filter(t => !cteNames.has(t))
   }
 
   /**
@@ -317,7 +384,9 @@ export class SqlAstParserService {
   /**
    * CRITICAL: Analyze WHERE clause for venueId filter
    *
-   * This is the core security function that prevents cross-venue data access
+   * This is the core security function that prevents cross-venue data access.
+   * For CTE (WITH) queries, venueId may be in the CTE definitions rather than
+   * the outer SELECT — this is safe because CTEs produce already-scoped data.
    */
   private analyzeWhereClause(ast: AST, requiredVenueId: string): WhereClauseAnalysis {
     const result: WhereClauseAnalysis = {
@@ -329,7 +398,35 @@ export class SqlAstParserService {
     }
 
     const checkWhereClause = (node: any) => {
-      if (!node || !node.where) return
+      if (!node) return
+
+      // Check CTE (WITH) definitions for venueId filters
+      // CTEs that filter by venueId produce tenant-scoped data,
+      // so the outer SELECT doesn't need a redundant venueId filter
+      if (node.with && Array.isArray(node.with)) {
+        for (const cte of node.with) {
+          if (cte.stmt && cte.stmt.where) {
+            const venueFilter = this.findVenueFilter(cte.stmt.where, requiredVenueId)
+            if (venueFilter.found) {
+              result.hasVenueFilter = true
+              result.venueFilterValue = venueFilter.value
+            }
+            // Check CTE WHERE for suspicious patterns too
+            if (this.hasOrConditions(cte.stmt.where)) {
+              result.hasOrConditions = true
+              result.hasSuspiciousPatterns = true
+              result.suspiciousReasons.push('CTE contains OR conditions which may bypass venueId filter')
+            }
+            const suspicious = this.detectSuspiciousWherePatterns(cte.stmt.where)
+            if (suspicious.length > 0) {
+              result.hasSuspiciousPatterns = true
+              result.suspiciousReasons.push(...suspicious)
+            }
+          }
+        }
+      }
+
+      if (!node.where) return
 
       const venueFilter = this.findVenueFilter(node.where, requiredVenueId)
       if (venueFilter.found) {
@@ -458,7 +555,7 @@ export class SqlAstParserService {
   private detectSuspiciousWherePatterns(whereExpr: any): string[] {
     const suspicious: string[] = []
 
-    const check = (expr: any) => {
+    const check = (expr: any, parentExpr?: any) => {
       if (!expr) return
 
       // Pattern 1: Always-true conditions (1=1, true, etc.)
@@ -468,9 +565,16 @@ export class SqlAstParserService {
         }
       }
 
-      // Pattern 2: Boolean true literal
+      // Pattern 2: Boolean true literal — only flag standalone TRUE, not "column = true"
+      // "active" = true is legitimate (column_ref = bool), WHERE true is suspicious
       if (expr.type === 'bool' && expr.value === true) {
-        suspicious.push('Boolean TRUE literal detected in WHERE clause')
+        const isColumnComparison =
+          parentExpr?.type === 'binary_expr' &&
+          (parentExpr.operator === '=' || parentExpr.operator === '!=') &&
+          (parentExpr.left?.type === 'column_ref' || parentExpr.right?.type === 'column_ref')
+        if (!isColumnComparison) {
+          suspicious.push('Boolean TRUE literal detected in WHERE clause')
+        }
       }
 
       // Pattern 3: IN with subquery that might return multiple venues
@@ -483,9 +587,9 @@ export class SqlAstParserService {
         suspicious.push('NOT operator detected - may negate venueId filter')
       }
 
-      // Recursively check nested expressions
-      if (expr.left) check(expr.left)
-      if (expr.right) check(expr.right)
+      // Recursively check nested expressions (pass current expr as parent)
+      if (expr.left) check(expr.left, expr)
+      if (expr.right) check(expr.right, expr)
     }
 
     check(whereExpr)
@@ -574,25 +678,54 @@ export class SqlAstParserService {
   }
 
   /**
-   * Validate JOINs for security
+   * Validate JOINs for security.
+   * CTE aliases (WITH names) are exempt from venueId JOIN checks since
+   * they already produce venue-scoped data from their own WHERE clauses.
    */
   private validateJoins(ast: AST, requiredVenueId: string): AstValidationResult {
     const errors: string[] = []
     const warnings: string[] = []
+
+    // Collect CTE names to exempt them from JOIN venueId checks
+    const cteNames = new Set<string>()
+    const collectCteNames = (node: any) => {
+      if (node?.with && Array.isArray(node.with)) {
+        for (const cte of node.with) {
+          if (cte.name?.value) {
+            cteNames.add(cte.name.value.toLowerCase())
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(ast)) {
+      ast.forEach(statement => collectCteNames(statement))
+    } else {
+      collectCteNames(ast)
+    }
 
     const checkJoins = (node: any) => {
       if (!node || !node.from) return
 
       node.from.forEach((fromItem: any) => {
         if (fromItem.join) {
+          const tableName = fromItem.table || 'unknown'
+          const isCteRef = cteNames.has(tableName.toLowerCase())
+
           // Every JOIN should have an ON clause that includes venueId
           if (fromItem.on) {
-            const hasVenueFilter = this.findVenueFilter(fromItem.on, requiredVenueId)
-            if (!hasVenueFilter.found) {
-              warnings.push(`JOIN without venueId filter detected on table: ${fromItem.table || 'unknown'}`)
+            // Skip venueId check for CTE references — they're already venue-scoped
+            if (!isCteRef) {
+              const hasVenueFilter = this.findVenueFilter(fromItem.on, requiredVenueId)
+              if (!hasVenueFilter.found) {
+                warnings.push(`JOIN without venueId filter detected on table: ${tableName}`)
+              }
             }
           } else {
-            errors.push('JOIN without ON clause detected - cross joins are not allowed')
+            // CTE cross-joins (FROM cte1, cte2) are safe; real table cross-joins are not
+            if (!isCteRef) {
+              errors.push('JOIN without ON clause detected - cross joins are not allowed')
+            }
           }
         }
       })

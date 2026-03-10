@@ -206,6 +206,7 @@ export type RelativeDateRange =
   | 'thisMonth' // Últimos 30 días (NOT calendar month)
   | 'lastWeek' // Previous 7 days
   | 'lastMonth' // Previous 30 days
+  | 'allTime' // All historical data (from 2020-01-01)
 
 /**
  * Parse ISO 8601 date strings from frontend to Date objects
@@ -331,6 +332,12 @@ export function getVenueDateRange(period: RelativeDateRange, timezone: string = 
       // Previous 30-day period
       from = subDays(nowUtc, 60)
       to = subDays(nowUtc, 30)
+      break
+
+    case 'allTime':
+      // All historical data — start from 2020-01-01 UTC
+      from = new Date('2020-01-01T00:00:00.000Z')
+      to = nowUtc
       break
 
     default:
@@ -519,6 +526,9 @@ export function getSqlDateFilter(period: RelativeDateRange, columnName: string =
 
     case 'lastMonth':
       return `${columnName} >= NOW() - INTERVAL '60 days' AND ${columnName} < NOW() - INTERVAL '30 days'`
+
+    case 'allTime':
+      return `${columnName} >= '2020-01-01'::timestamp`
 
     default:
       throw new Error(`Unsupported period: ${period}`)

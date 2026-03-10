@@ -30,8 +30,9 @@ import logger from '@/config/logger'
 import { SharedQueryService } from './shared-query.service'
 import { QueryLimitsService } from './query-limits.service'
 import type { RelativeDateRange } from '@/utils/datetime'
-// Configuration-driven schema registry for valid table names
+// Configuration-driven schema registry for valid table names (fallback)
 import { getSchemaRegistry } from '@/config/chatbot'
+import { TableAccessControlService } from './table-access-control.service'
 
 /**
  * Validation result with detailed error information
@@ -63,13 +64,27 @@ export class SqlValidationService {
   /**
    * Valid tables in Avoqado schema
    *
-   * Now dynamically loaded from the configuration-driven schema registry.
-   * This allows industry-specific table filtering and centralized schema management.
+   * Dynamically built from Prisma DMMF (runtime schema introspection)
+   * filtered by the ACL allowlist. New tables added to Prisma + ACL
+   * automatically become valid without manual registration.
    *
-   * @see src/config/chatbot/ for table definitions
+   * Falls back to schema registry if DMMF is unavailable.
    */
+  private static _validTablesCache: string[] | null = null
   private static get VALID_TABLES(): string[] {
-    return getSchemaRegistry().getValidTableNames()
+    if (this._validTablesCache) return this._validTablesCache
+
+    try {
+      const { Prisma } = require('@prisma/client')
+      const allModelNames: string[] = Prisma.dmmf.datamodel.models.map((m: any) => m.name)
+      const allowlisted = new Set(TableAccessControlService.getChatbotAllowlistedTables())
+      // Include all allowlisted tables + any model from DMMF (for JOIN targets like Table, etc.)
+      this._validTablesCache = allModelNames.filter((name: string) => allowlisted.has(name))
+      return this._validTablesCache
+    } catch {
+      // Fallback to schema registry
+      return getSchemaRegistry().getValidTableNames()
+    }
   }
 
   /**
@@ -146,8 +161,9 @@ export class SqlValidationService {
       suggestions.push(`Valid tables: ${this.VALID_TABLES.join(', ')}`)
     }
 
-    // Check for SELECT only
-    if (!sql.trim().toLowerCase().startsWith('select')) {
+    // Check for SELECT only (also allow WITH...SELECT for CTEs)
+    const sqlLower = sql.trim().toLowerCase().replace(/;+$/, '') // strip trailing semicolons
+    if (!sqlLower.startsWith('select') && !sqlLower.startsWith('with')) {
       errors.push('Query must be a SELECT statement')
     }
 

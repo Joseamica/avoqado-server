@@ -108,6 +108,16 @@ export class AILearningService {
     }
 
     if (typeof sqlResult === 'object') {
+      // Prisma Decimal → number (must check BEFORE generic object iteration)
+      if (typeof sqlResult.toNumber === 'function' && 'd' in sqlResult && 's' in sqlResult && 'e' in sqlResult) {
+        return Number(sqlResult.toString())
+      }
+
+      // Date → ISO string
+      if (sqlResult instanceof Date) {
+        return sqlResult.toISOString()
+      }
+
       const compacted: Record<string, unknown> = {}
       let inserted = 0
       for (const [key, value] of Object.entries(sqlResult as Record<string, unknown>)) {

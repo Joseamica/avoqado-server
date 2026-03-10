@@ -20,12 +20,13 @@ import { SecurityViolationType } from './security-response.service'
  */
 export enum UserRole {
   SUPERADMIN = 'SUPERADMIN',
+  OWNER = 'OWNER',
   ADMIN = 'ADMIN',
   MANAGER = 'MANAGER',
-  STAFF = 'STAFF',
   CASHIER = 'CASHIER',
   WAITER = 'WAITER',
   KITCHEN = 'KITCHEN',
+  HOST = 'HOST',
   VIEWER = 'VIEWER',
 }
 
@@ -71,121 +72,66 @@ export class TableAccessControlService {
   /**
    * Define access policies for all tables
    */
+  /** All roles for PUBLIC tables */
+  private static readonly ALL_ROLES = [
+    UserRole.SUPERADMIN,
+    UserRole.OWNER,
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.CASHIER,
+    UserRole.WAITER,
+    UserRole.KITCHEN,
+    UserRole.HOST,
+    UserRole.VIEWER,
+  ]
+
+  /** Roles for RESTRICTED tables (MANAGER or higher) */
+  private static readonly MANAGER_AND_ABOVE = [UserRole.SUPERADMIN, UserRole.OWNER, UserRole.ADMIN, UserRole.MANAGER]
+
   private static readonly TABLE_POLICIES: TablePolicy[] = [
     // ========================================
     // PUBLIC TABLES - All authenticated users
     // ========================================
-    {
-      table: 'Menu',
-      accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [
-        UserRole.SUPERADMIN,
-        UserRole.ADMIN,
-        UserRole.MANAGER,
-        UserRole.STAFF,
-        UserRole.CASHIER,
-        UserRole.WAITER,
-        UserRole.KITCHEN,
-        UserRole.VIEWER,
-      ],
-    },
-    {
-      table: 'MenuCategory',
-      accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [
-        UserRole.SUPERADMIN,
-        UserRole.ADMIN,
-        UserRole.MANAGER,
-        UserRole.STAFF,
-        UserRole.CASHIER,
-        UserRole.WAITER,
-        UserRole.KITCHEN,
-        UserRole.VIEWER,
-      ],
-    },
+    { table: 'Menu', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
+    { table: 'MenuCategory', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
     {
       table: 'Product',
       accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [
-        UserRole.SUPERADMIN,
-        UserRole.ADMIN,
-        UserRole.MANAGER,
-        UserRole.STAFF,
-        UserRole.CASHIER,
-        UserRole.WAITER,
-        UserRole.KITCHEN,
-        UserRole.VIEWER,
-      ],
-      forbiddenColumns: ['internalCost', 'profitMargin'], // Sensitive cost data
+      allowedRoles: TableAccessControlService.ALL_ROLES,
+      forbiddenColumns: ['internalCost', 'profitMargin'],
     },
-    {
-      table: 'ModifierGroup',
-      accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [
-        UserRole.SUPERADMIN,
-        UserRole.ADMIN,
-        UserRole.MANAGER,
-        UserRole.STAFF,
-        UserRole.CASHIER,
-        UserRole.WAITER,
-        UserRole.KITCHEN,
-        UserRole.VIEWER,
-      ],
-    },
-    {
-      table: 'Modifier',
-      accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [
-        UserRole.SUPERADMIN,
-        UserRole.ADMIN,
-        UserRole.MANAGER,
-        UserRole.STAFF,
-        UserRole.CASHIER,
-        UserRole.WAITER,
-        UserRole.KITCHEN,
-        UserRole.VIEWER,
-      ],
-    },
-    {
-      table: 'ProductModifierGroup',
-      accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [
-        UserRole.SUPERADMIN,
-        UserRole.ADMIN,
-        UserRole.MANAGER,
-        UserRole.STAFF,
-        UserRole.CASHIER,
-        UserRole.WAITER,
-        UserRole.KITCHEN,
-        UserRole.VIEWER,
-      ],
-    },
+    { table: 'ModifierGroup', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
+    { table: 'Modifier', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
+    { table: 'ProductModifierGroup', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
     {
       table: 'Inventory',
       accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF, UserRole.KITCHEN, UserRole.VIEWER],
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.OWNER, UserRole.ADMIN, UserRole.MANAGER, UserRole.KITCHEN, UserRole.VIEWER],
     },
     {
       table: 'RawMaterial',
       accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER, UserRole.STAFF, UserRole.KITCHEN, UserRole.VIEWER],
-      forbiddenColumns: ['cost', 'supplierCost'], // Sensitive cost data
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.OWNER, UserRole.ADMIN, UserRole.MANAGER, UserRole.KITCHEN, UserRole.VIEWER],
+      forbiddenColumns: ['cost', 'supplierCost'],
     },
     {
       table: 'Recipe',
       accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER, UserRole.KITCHEN, UserRole.VIEWER],
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.OWNER, UserRole.ADMIN, UserRole.MANAGER, UserRole.KITCHEN, UserRole.VIEWER],
     },
     {
       table: 'RecipeLine',
       accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER, UserRole.KITCHEN, UserRole.VIEWER],
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.OWNER, UserRole.ADMIN, UserRole.MANAGER, UserRole.KITCHEN, UserRole.VIEWER],
     },
     {
       table: 'StockBatch',
       accessLevel: AccessLevel.PUBLIC,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER, UserRole.VIEWER],
+      allowedRoles: [UserRole.SUPERADMIN, UserRole.OWNER, UserRole.ADMIN, UserRole.MANAGER, UserRole.VIEWER],
     },
+
+    // Restaurant dining tables (for "en qué mesa se pide más" queries)
+    { table: 'Table', accessLevel: AccessLevel.PUBLIC, allowedRoles: TableAccessControlService.ALL_ROLES },
 
     // ========================================
     // RESTRICTED TABLES - MANAGER or higher
@@ -193,53 +139,66 @@ export class TableAccessControlService {
     {
       table: 'Order',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       reason: 'Order data contains financial information',
     },
     {
       table: 'OrderItem',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       reason: 'Order item data is part of transactional financial information',
     },
     {
       table: 'Payment',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
-      forbiddenColumns: ['stripePaymentIntentId', 'metadata'], // Payment gateway secrets
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      forbiddenColumns: ['stripePaymentIntentId', 'metadata'],
       reason: 'Payment data is highly sensitive financial information',
     },
     {
       table: 'Customer',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
-      forbiddenColumns: ['email', 'phone', 'address'], // PII
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      forbiddenColumns: ['email', 'phone', 'address'],
       reason: 'Customer data contains personally identifiable information (PII)',
     },
     {
       table: 'Venue',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       forbiddenColumns: ['stripeLiveSecretKey', 'stripeTestSecretKey', 'internalSettings'],
       reason: 'Venue configuration contains sensitive API keys',
     },
     {
       table: 'Review',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       reason: 'Reviews may contain customer PII',
     },
     {
       table: 'RawMaterialMovement',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       reason: 'Inventory movements reveal business operations',
     },
     {
       table: 'Shift',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       reason: 'Shift performance data contains staff and operational information',
+    },
+    {
+      table: 'Reservation',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      forbiddenColumns: ['cancelSecret', 'depositProcessorRef'],
+      reason: 'Reservation data contains guest PII and deposit details',
+    },
+    {
+      table: 'ClassSession',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Class session data contains scheduling and capacity information',
     },
 
     // ========================================
@@ -248,14 +207,14 @@ export class TableAccessControlService {
     {
       table: 'Staff',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       forbiddenColumns: ['password', 'hashedPassword', 'refreshToken', 'resetToken', 'email', 'phone'],
       reason: 'Staff table contains employee and authentication-sensitive data',
     },
     {
       table: 'StaffVenue',
       accessLevel: AccessLevel.RESTRICTED,
-      allowedRoles: [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER],
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       reason: 'Staff-venue relationships are restricted organizational data',
     },
     {
@@ -385,12 +344,13 @@ export class TableAccessControlService {
    */
   private static getMinimumRequiredRole(policy: TablePolicy): string {
     if (policy.allowedRoles.includes(UserRole.VIEWER)) return 'VIEWER'
+    if (policy.allowedRoles.includes(UserRole.HOST)) return 'HOST'
     if (policy.allowedRoles.includes(UserRole.KITCHEN)) return 'KITCHEN'
     if (policy.allowedRoles.includes(UserRole.WAITER)) return 'WAITER'
     if (policy.allowedRoles.includes(UserRole.CASHIER)) return 'CASHIER'
-    if (policy.allowedRoles.includes(UserRole.STAFF)) return 'STAFF'
     if (policy.allowedRoles.includes(UserRole.MANAGER)) return 'MANAGER'
     if (policy.allowedRoles.includes(UserRole.ADMIN)) return 'ADMIN'
+    if (policy.allowedRoles.includes(UserRole.OWNER)) return 'OWNER'
     return 'SUPERADMIN'
   }
 
@@ -441,13 +401,22 @@ export class TableAccessControlService {
   }
 
   /**
+   * Get all allowlisted table names for the chatbot schema context.
+   * Returns PUBLIC + RESTRICTED tables (not FORBIDDEN or system tables).
+   * The role-based ACL check happens at query execution time, not at schema generation.
+   */
+  public static getChatbotAllowlistedTables(): string[] {
+    return this.TABLE_POLICIES.filter(p => p.accessLevel !== AccessLevel.FORBIDDEN).map(p => p.table)
+  }
+
+  /**
    * Check if role can access ANY restricted or forbidden tables
    *
    * @param userRole - User's role
    * @returns true if user can access sensitive tables
    */
   public static canAccessSensitiveTables(userRole: UserRole): boolean {
-    return [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MANAGER].includes(userRole)
+    return [UserRole.SUPERADMIN, UserRole.OWNER, UserRole.ADMIN, UserRole.MANAGER].includes(userRole)
   }
 
   /**
