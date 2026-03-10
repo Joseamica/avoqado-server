@@ -18,3 +18,8 @@ logs/
 dist/
 .claude/settings.local.json
 .worktrees/
+
+# Screenshots and temp files
+*.png
+.playwright-mcp/
+scripts/temp-*
