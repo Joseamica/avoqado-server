@@ -39,6 +39,7 @@ export const updateAccountSchema = z.object({
       lastName: z.string().min(1, { message: 'El apellido es requerido.' }).optional(),
       email: z.string().email({ message: 'Email inválido.' }).optional(),
       phone: z.string().optional(), // Phone is completely optional
+      pin: z.union([z.string().regex(/^\d{4,10}$/, 'El PIN debe tener entre 4 y 10 dígitos'), z.literal(''), z.null()]).optional(), // PIN for TPV access (on StaffVenue)
       old_password: z.string().optional(),
       password: strongPasswordSchema.optional(),
     })

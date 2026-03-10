@@ -126,6 +126,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           where: { active: true },
           select: {
             role: true,
+            pin: true,
             venue: {
               select: {
                 id: true,
@@ -321,6 +322,8 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       organization?: { id: string; name: string } | null
       // Sidebar visibility settings
       settings?: { enableShifts: boolean; hiddenSidebarItems: string[] } | null
+      // PIN for TPV access (user's own PIN, venue-specific)
+      pin?: string | null
     }
 
     // Check if user is a SUPERADMIN in any venue
@@ -364,6 +367,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       organizationId: sv.venue.organizationId,
       organization: sv.venue.organization,
       settings: sv.venue.settings,
+      pin: sv.pin,
     }))
 
     // Create a map of venue IDs that user already has a direct relationship with
@@ -909,6 +913,36 @@ export async function updateAccountController(req: Request, res: Response, next:
         updatedAt: true,
       },
     })
+
+    // Handle PIN update (stored on StaffVenue, not Staff)
+    const venueId = req.authContext?.venueId
+    if (venueId && updateData.pin !== undefined) {
+      const pinValue = updateData.pin === '' || updateData.pin === null ? null : updateData.pin
+
+      // Check PIN uniqueness in this venue (if setting a new PIN)
+      if (pinValue) {
+        const existingPinUser = await prisma.staffVenue.findFirst({
+          where: {
+            venueId,
+            pin: pinValue,
+            active: true,
+            staffId: { not: staffId },
+          },
+        })
+        if (existingPinUser) {
+          res.status(400).json({
+            success: false,
+            message: 'Este PIN ya está en uso por otro miembro del equipo.',
+          })
+          return
+        }
+      }
+
+      await prisma.staffVenue.updateMany({
+        where: { staffId, venueId },
+        data: { pin: pinValue },
+      })
+    }
 
     logger.info(`Staff profile updated successfully`, {
       staffId,
