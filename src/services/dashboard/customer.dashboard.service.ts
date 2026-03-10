@@ -117,7 +117,7 @@ export async function getCustomers(
   customerGroupId?: string,
   noGroup?: boolean,
   tags?: string,
-  sortBy: 'createdAt' | 'totalSpent' | 'visitCount' | 'lastVisit' = 'createdAt',
+  sortBy: 'createdAt' | 'totalSpent' | 'visitCount' | 'lastVisit' | 'name' = 'createdAt',
   sortOrder: 'asc' | 'desc' = 'desc',
   hasPendingBalance?: boolean,
 ): Promise<PaginatedCustomersResponse> {
@@ -129,6 +129,7 @@ export async function getCustomers(
     totalSpent: 'totalSpent',
     visitCount: 'totalVisits',
     lastVisit: 'lastVisitAt',
+    name: 'firstName',
   }
   const effectiveSortBy = sortBy || 'createdAt'
   const effectiveSortOrder = sortOrder || 'desc'

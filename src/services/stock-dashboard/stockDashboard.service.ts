@@ -406,15 +406,34 @@ class StockDashboardService {
       categoryName: string
       type: 'REGISTERED' | 'SOLD' | 'RETURNED' | 'DAMAGED'
       timestamp: Date
+      venueName: string | null
+      userName: string | null
     }>
   > {
     // Get recent items by createdAt and soldAt
     const recentItems = await prisma.serializedItem.findMany({
       where: { venueId },
-      include: { category: true },
+      include: {
+        category: true,
+        venue: { select: { name: true } },
+        sellingVenue: { select: { name: true } },
+      },
       orderBy: { createdAt: 'desc' },
       take: limit * 2, // Get more to allow for filtering
     })
+
+    // Collect unique createdBy staff IDs to resolve names
+    const staffIds = [...new Set(recentItems.map(i => i.createdBy).filter(Boolean))]
+    const staffMap = new Map<string, string>()
+    if (staffIds.length > 0) {
+      const staffRecords = await prisma.staff.findMany({
+        where: { id: { in: staffIds } },
+        select: { id: true, firstName: true, lastName: true },
+      })
+      for (const s of staffRecords) {
+        staffMap.set(s.id, `${s.firstName} ${s.lastName}`.trim())
+      }
+    }
 
     const movements: Array<{
       id: string
@@ -422,9 +441,14 @@ class StockDashboardService {
       categoryName: string
       type: 'REGISTERED' | 'SOLD' | 'RETURNED' | 'DAMAGED'
       timestamp: Date
+      venueName: string | null
+      userName: string | null
     }> = []
 
     for (const item of recentItems) {
+      const registeredByName = staffMap.get(item.createdBy) || null
+      const itemVenueName = item.venue?.name || null
+
       // Add registration event
       movements.push({
         id: `reg-${item.id}`,
@@ -432,6 +456,8 @@ class StockDashboardService {
         categoryName: item.category.name,
         type: 'REGISTERED',
         timestamp: item.createdAt,
+        venueName: itemVenueName,
+        userName: registeredByName,
       })
 
       // Add sale event if sold
@@ -442,6 +468,8 @@ class StockDashboardService {
           categoryName: item.category.name,
           type: 'SOLD',
           timestamp: item.soldAt,
+          venueName: item.sellingVenue?.name || itemVenueName,
+          userName: registeredByName,
         })
       }
 
@@ -453,6 +481,8 @@ class StockDashboardService {
           categoryName: item.category.name,
           type: item.status as 'RETURNED' | 'DAMAGED',
           timestamp: item.soldAt || item.createdAt,
+          venueName: item.sellingVenue?.name || itemVenueName,
+          userName: registeredByName,
         })
       }
     }

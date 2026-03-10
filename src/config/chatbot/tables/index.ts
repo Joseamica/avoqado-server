@@ -24,6 +24,9 @@ import { CUSTOMER_TABLE, REVIEW_TABLE } from './customer.table'
 // Inventory
 import { RAW_MATERIAL_TABLE, STOCK_BATCH_TABLE, RECIPE_TABLE } from './inventory.table'
 
+// Reservation & ClassSession
+import { RESERVATION_TABLE, CLASS_SESSION_TABLE } from './reservation.table'
+
 /**
  * All table definitions for chatbot schema registry
  * Order matters for schema context generation (most important first)
@@ -51,6 +54,10 @@ const ALL_TABLES: TableDefinition[] = [
   RAW_MATERIAL_TABLE,
   STOCK_BATCH_TABLE,
   RECIPE_TABLE,
+
+  // Reservations & Classes
+  RESERVATION_TABLE,
+  CLASS_SESSION_TABLE,
 ]
 
 export default ALL_TABLES
@@ -70,4 +77,6 @@ export {
   RAW_MATERIAL_TABLE,
   STOCK_BATCH_TABLE,
   RECIPE_TABLE,
+  RESERVATION_TABLE,
+  CLASS_SESSION_TABLE,
 }

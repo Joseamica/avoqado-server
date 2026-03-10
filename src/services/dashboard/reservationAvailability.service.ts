@@ -58,8 +58,8 @@ export async function getAvailableSlots(
   // For each time range, generate slot start times (converted to UTC)
   const slotStarts: Date[] = []
   for (const range of daySchedule.ranges) {
-    const rangeStart = fromZonedTime(new Date(`${dateStr}T${range.open}:00`), venueTimezone)
-    const rangeEnd = fromZonedTime(new Date(`${dateStr}T${range.close}:00`), venueTimezone)
+    const rangeStart = fromZonedTime(`${dateStr}T${range.open}:00`, venueTimezone)
+    const rangeEnd = fromZonedTime(`${dateStr}T${range.close}:00`, venueTimezone)
 
     const cursor = new Date(rangeStart)
     while (cursor.getTime() + defaultDuration * 60000 <= rangeEnd.getTime()) {
@@ -254,8 +254,8 @@ export async function getClassSessionSlots(
   const { dateStr } = resolveVenueCalendarDate(date, venueTimezone)
 
   // Date range for the requested day in venue timezone
-  const dayStart = fromZonedTime(new Date(`${dateStr}T00:00:00`), venueTimezone)
-  const dayEnd = fromZonedTime(new Date(`${dateStr}T23:59:59.999`), venueTimezone)
+  const dayStart = fromZonedTime(`${dateStr}T00:00:00`, venueTimezone)
+  const dayEnd = fromZonedTime(`${dateStr}T23:59:59.999`, venueTimezone)
 
   const sessions = await prisma.classSession.findMany({
     where: {

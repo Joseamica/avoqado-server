@@ -32,7 +32,7 @@ export const CustomersQuerySchema = z.object({
       .optional()
       .transform(val => val === 'true'), // Query params are strings, convert properly
     tags: z.string().optional(), // Comma-separated tags
-    sortBy: z.enum(['createdAt', 'totalSpent', 'visitCount', 'lastVisit']).optional(),
+    sortBy: z.enum(['createdAt', 'totalSpent', 'visitCount', 'lastVisit', 'name']).optional(),
     sortOrder: z.enum(['asc', 'desc']).optional(),
     hasPendingBalance: z
       .string()
