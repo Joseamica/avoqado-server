@@ -2,6 +2,7 @@ import logger from '@/config/logger'
 import { Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
+import { venueStartOfDay } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import emailService from '../email.service'
 import { logAction } from './activity-log.service'
@@ -52,9 +53,45 @@ export async function getTerminalsData(
     }),
   ])
 
-  // 5. Estructurar y devolver la respuesta final
+  // 5. Fetch today's payment stats per terminal (grouped aggregate)
+  const terminalIds = terminals.map(t => t.id)
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const todayStart = venueStartOfDay(venue?.timezone || 'America/Mexico_City')
+
+  const paymentStats =
+    terminalIds.length > 0
+      ? await prisma.payment.groupBy({
+          by: ['terminalId'],
+          where: {
+            terminalId: { in: terminalIds },
+            status: 'COMPLETED',
+            createdAt: { gte: todayStart },
+          },
+          _sum: { amount: true, tipAmount: true },
+          _count: true,
+        })
+      : []
+
+  const statsMap = new Map(
+    paymentStats.map(s => [
+      s.terminalId,
+      {
+        todayPaymentCount: s._count,
+        todayPaymentTotal: Number(s._sum.amount || 0) + Number(s._sum.tipAmount || 0),
+        todayPaymentSubtotal: Number(s._sum.amount || 0),
+        todayTipTotal: Number(s._sum.tipAmount || 0),
+      },
+    ]),
+  )
+
+  const terminalsWithStats = terminals.map(t => ({
+    ...t,
+    ...(statsMap.get(t.id) || { todayPaymentCount: 0, todayPaymentTotal: 0, todayPaymentSubtotal: 0, todayTipTotal: 0 }),
+  }))
+
+  // 6. Estructurar y devolver la respuesta final
   return {
-    data: terminals,
+    data: terminalsWithStats,
     meta: {
       total,
       page,
