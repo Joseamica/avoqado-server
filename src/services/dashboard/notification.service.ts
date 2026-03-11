@@ -2,6 +2,7 @@ import { NotificationType, NotificationChannel, NotificationPriority, AlertType,
 
 import * as resendService from '../resend.service'
 import * as pushService from '../mobile/push.mobile.service'
+import * as whatsappService from '../whatsapp.service'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
@@ -170,6 +171,7 @@ export async function sendNotification(payload: NotificationPayload): Promise<an
       email: false,
       sms: false,
       push: false,
+      whatsapp: false,
     }
 
     for (const channel of channels) {
@@ -192,8 +194,11 @@ export async function sendNotification(payload: NotificationPayload): Promise<an
             break
 
           case NotificationChannel.PUSH:
-            // TODO: Integrate with push notification service (FCM, APNs, etc.)
             results.push = await sendPushNotification(notification)
+            break
+
+          case NotificationChannel.WHATSAPP:
+            results.whatsapp = await sendWhatsAppNotification(notification)
             break
 
           default:
@@ -343,6 +348,33 @@ async function sendPushNotification(notification: any): Promise<boolean> {
     return result.success
   } catch (error) {
     logger.error(`❌ [Push] Error sending push notification:`, error)
+    return false
+  }
+}
+
+/**
+ * Send WhatsApp notification using the generic order_status_update template
+ */
+async function sendWhatsAppNotification(notification: any): Promise<boolean> {
+  try {
+    if (!notification.recipient?.phone) {
+      logger.warn(`No phone number for WhatsApp notification ${notification.recipientId}`)
+      return false
+    }
+
+    const customerName = `${notification.recipient.firstName || ''} ${notification.recipient.lastName || ''}`.trim() || 'Cliente'
+    const venueName = (notification.metadata as any)?.venueName || 'Tu negocio'
+
+    await whatsappService.sendOrderStatusUpdateWhatsApp(notification.recipient.phone, {
+      customerName,
+      venueName,
+      status: notification.message,
+    })
+
+    logger.info(`WhatsApp notification sent to ${notification.recipient.phone}`)
+    return true
+  } catch (error) {
+    logger.error('Failed to send WhatsApp notification:', error)
     return false
   }
 }

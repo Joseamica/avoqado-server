@@ -214,6 +214,7 @@ import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
+import paymentLinkRoutes from './dashboard/paymentLink.routes'
 import reportsRoutes from './dashboard/reports.routes'
 import commissionRoutes from './dashboard/commission.routes'
 import reservationRoutes from './dashboard/reservation.routes'
@@ -3441,6 +3442,9 @@ router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, check
 
 // E-commerce Merchant Management routes (OWNER, ADMIN)
 router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, ecommerceMerchantRoutes)
+
+// Payment Link Management routes (ADMIN+)
+router.use('/venues/:venueId/payment-links', authenticateTokenMiddleware, checkPermission('payment-link:read'), paymentLinkRoutes)
 
 // Venue Crypto Config routes (ADMIN+) - Per-venue B4Bit device management
 router.post(

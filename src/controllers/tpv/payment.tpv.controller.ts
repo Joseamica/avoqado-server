@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
+import * as saleVerificationService from '../../services/tpv/sale-verification.service'
 import * as receiptDashboardService from '../../services/dashboard/receipt.dashboard.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -66,6 +67,41 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
     // Call service to record the payment
     const result = await paymentTpvService.recordOrderPayment(venueId, orderId, paymentData, userId, orgId)
 
+    // 📸 NON-BLOCKING VERIFICATION: Create PENDING SaleVerification for SERIALIZED_INVENTORY payments
+    // Same logic as recordFastPayment — serialized sales can come through order payment route too
+    if (paymentData.serialNumbers?.length > 0 && userId) {
+      try {
+        const existingVerification = await prisma.saleVerification.findUnique({
+          where: { paymentId: result.id },
+        })
+
+        if (!existingVerification) {
+          await saleVerificationService.createPendingSaleVerification({
+            venueId,
+            paymentId: result.id,
+            staffId: userId,
+            isPortabilidad: paymentData.isPortabilidad ?? false,
+            serialNumbers: paymentData.serialNumbers,
+            scannedProducts: paymentData.verificationBarcodes
+              ? paymentData.verificationBarcodes.map((barcode: string) => ({
+                  barcode,
+                  format: 'UNKNOWN',
+                  hasInventory: false,
+                  quantity: 1,
+                }))
+              : [],
+            deviceId: paymentData.deviceSerialNumber,
+          })
+        }
+      } catch (verificationError: any) {
+        // Non-blocking: don't fail the payment if verification creation fails
+        logger.error(`⚠️ [ORDER PAYMENT] Failed to create PENDING verification (non-blocking)`, {
+          paymentId: result.id,
+          error: verificationError.message,
+        })
+      }
+    }
+
     // Send success response
     res.status(201).json({
       success: true,
@@ -99,6 +135,44 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
 
     // Call service to record the fast payment
     const result = await paymentTpvService.recordFastPayment(venueId, paymentData, userId, orgId)
+
+    // 📸 NON-BLOCKING VERIFICATION: Create PENDING SaleVerification for SERIALIZED_INVENTORY payments
+    // When the TPV sends isPortabilidad/serialNumbers, it means this is a serialized sale
+    // that needs proof-of-sale photos. Staff can upload them later from "Pendientes Verificacion"
+    if (paymentData.serialNumbers?.length > 0 && userId) {
+      try {
+        // Only create if no verification was already created in the transaction
+        // (the existing flow creates one when verificationPhotos are provided)
+        const existingVerification = await prisma.saleVerification.findUnique({
+          where: { paymentId: result.id },
+        })
+
+        if (!existingVerification) {
+          await saleVerificationService.createPendingSaleVerification({
+            venueId,
+            paymentId: result.id,
+            staffId: userId,
+            isPortabilidad: paymentData.isPortabilidad ?? false,
+            serialNumbers: paymentData.serialNumbers,
+            scannedProducts: paymentData.verificationBarcodes
+              ? paymentData.verificationBarcodes.map((barcode: string) => ({
+                  barcode,
+                  format: 'UNKNOWN',
+                  hasInventory: false,
+                  quantity: 1,
+                }))
+              : [],
+            deviceId: paymentData.deviceSerialNumber,
+          })
+        }
+      } catch (verificationError: any) {
+        // Non-blocking: don't fail the payment if verification creation fails
+        logger.error(`⚠️ [FAST PAYMENT] Failed to create PENDING verification (non-blocking)`, {
+          paymentId: result.id,
+          error: verificationError.message,
+        })
+      }
+    }
 
     // Send success response
     res.status(201).json({

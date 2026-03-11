@@ -702,6 +702,27 @@ async function main() {
   console.log(`   Name: ${whiteLabelModule.name}`)
   console.log(`   Presets: telecom, jewelry, retail, custom\n`)
 
+  // Create PAYMENT_LINKS module
+  const paymentLinksModule = await prisma.module.upsert({
+    where: { code: 'PAYMENT_LINKS' },
+    create: {
+      code: 'PAYMENT_LINKS',
+      name: 'Ligas de Pago',
+      description: 'Genera ligas de pago compartibles para cobrar en línea vía WhatsApp, QR o link directo.',
+      defaultConfig: {},
+      presets: {},
+      configSchema: { type: 'object', properties: {} },
+    },
+    update: {
+      name: 'Ligas de Pago',
+      description: 'Genera ligas de pago compartibles para cobrar en línea vía WhatsApp, QR o link directo.',
+    },
+  })
+
+  console.log(`✅ Module: ${paymentLinksModule.code}`)
+  console.log(`   ID: ${paymentLinksModule.id}`)
+  console.log(`   Name: ${paymentLinksModule.name}\n`)
+
   // Summary
   const moduleCount = await prisma.module.count({ where: { active: true } })
   console.log(`\n📊 Summary: ${moduleCount} active modules in system`)

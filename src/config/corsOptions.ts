@@ -39,9 +39,9 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
 
   // Public customer-facing sites (bills, payments, etc.)
   const publicSiteOrigins = {
-    development: ['http://localhost:3001'], // Local bills dev
-    staging: [],
-    production: ['https://bills.avoqado.io', 'https://avoqado.io'],
+    development: ['http://localhost:3001', 'http://localhost:5174'], // Local bills dev + checkout dev
+    staging: ['https://pay.staging.avoqado.io'],
+    production: ['https://bills.avoqado.io', 'https://avoqado.io', 'https://pay.avoqado.io'],
   }
 
   // SDK/Checkout origins (payment form iframe served from API domain needs to POST back to itself)

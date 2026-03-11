@@ -330,6 +330,11 @@ model Venue {
   creditPackPurchases CreditPackPurchase[]
   creditTransactions  CreditTransaction[]
 
+  // ==========================================
+  // PAYMENT LINKS
+  // ==========================================
+  paymentLinks PaymentLink[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -565,6 +570,9 @@ model Staff {
   // Marketing Campaigns (superadmin)
   emailTemplatesCreated     EmailTemplate[]     @relation("EmailTemplateCreator")
   marketingCampaignsCreated MarketingCampaign[] @relation("MarketingCampaignCreator")
+
+  // Payment Links
+  paymentLinksCreated PaymentLink[]
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -2435,6 +2443,10 @@ model SaleVerification {
   status            SaleVerificationStatus @default(PENDING)
   inventoryDeducted Boolean                @default(false) // Whether stock was deducted
 
+  // Non-blocking verification metadata
+  isPortabilidad Boolean  @default(false) // true = requires 2 photos, false = requires 1
+  serialNumbers  String[] // ICCID(s) from scanned SIMs (for display in "Pendientes" screen)
+
   // Metadata
   deviceId String? // TPV device that captured the verification
   notes    String? // Optional notes from staff
@@ -3063,6 +3075,7 @@ model EcommerceMerchant {
 
   // Relations
   checkoutSessions CheckoutSession[]
+  paymentLinks     PaymentLink[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3128,6 +3141,10 @@ model CheckoutSession {
   userAgent String? // Browser info
   referrer  String? // Where customer came from
 
+  // Payment Link (optional - session created from a payment link)
+  paymentLinkId String?
+  paymentLink   PaymentLink? @relation(fields: [paymentLinkId], references: [id])
+
   // Status
   status       CheckoutStatus @default(PENDING)
   expiresAt    DateTime // 24 hours by default
@@ -3146,6 +3163,7 @@ model CheckoutSession {
   @@index([createdAt])
   @@index([expiresAt]) // For cleanup of expired sessions
   @@index([paymentId])
+  @@index([paymentLinkId])
 }
 
 /// Mapping between a venue and the merchant accounts it should use.
@@ -4997,6 +5015,7 @@ enum NotificationChannel {
   SMS // SMS notifications (future)
   PUSH // Push notifications (future)
   WEBHOOK // Webhook notifications (future)
+  WHATSAPP // WhatsApp Business API notifications
 }
 
 enum DevicePlatform {
@@ -7747,4 +7766,58 @@ enum CreditTransactionType {
   EXPIRE
   REFUND
   ADJUST
+}
+
+// ==========================================
+// PAYMENT LINKS
+// ==========================================
+
+model PaymentLink {
+  id        String @id @default(cuid())
+  shortCode String @unique // 8-char alphanumeric (nanoid)
+
+  venueId              String
+  venue                Venue             @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  ecommerceMerchantId  String
+  ecommerceMerchant    EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Restrict)
+  createdById          String
+  createdBy            Staff             @relation(fields: [createdById], references: [id])
+
+  title       String
+  description String?
+  imageUrl    String?
+
+  amountType PaymentLinkAmountType // FIXED | OPEN
+  amount     Decimal?              @db.Decimal(12, 2)
+  currency   String                @default("MXN")
+
+  isReusable  Boolean   @default(false)
+  expiresAt   DateTime?
+  redirectUrl String?
+
+  status         PaymentLinkStatus @default(ACTIVE)
+  totalCollected Decimal           @default(0) @db.Decimal(12, 2)
+  paymentCount   Int               @default(0)
+
+  checkoutSessions CheckoutSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([shortCode])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum PaymentLinkAmountType {
+  FIXED
+  OPEN
+}
+
+enum PaymentLinkStatus {
+  ACTIVE
+  PAUSED
+  EXPIRED
+  ARCHIVED
 }

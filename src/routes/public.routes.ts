@@ -7,6 +7,7 @@ import { submitReviewFromReceipt, checkReviewStatus, getReviewForReceipt } from 
 import * as reservationPublicController from '../controllers/public/reservation.public.controller'
 import * as creditPackPublicController from '../controllers/public/creditPack.public.controller'
 import * as customerPortalController from '../controllers/public/customerPortal.public.controller'
+import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
 import {
@@ -24,6 +25,12 @@ import {
   customerLoginSchema,
   customerUpdateProfileSchema,
 } from '../schemas/dashboard/creditPack.schema'
+import {
+  publicShortCodeSchema,
+  publicCheckoutSchema as plCheckoutSchema,
+  publicChargeSchema,
+  publicSessionSchema,
+} from '../schemas/dashboard/paymentLink.schema'
 
 const router = Router()
 
@@ -118,6 +125,21 @@ router.patch(
   authenticateCustomer,
   validateRequest(customerUpdateProfileSchema),
   customerPortalController.updateProfile,
+)
+
+// ---- Public Payment Link Routes (unauthenticated) ----
+
+router.get('/payment-links/:shortCode', readLimit, validateRequest(publicShortCodeSchema), paymentLinkPublicController.resolvePaymentLink)
+
+router.post('/payment-links/:shortCode/checkout', writeLimit, validateRequest(plCheckoutSchema), paymentLinkPublicController.createCheckout)
+
+router.post('/payment-links/:shortCode/charge', writeLimit, validateRequest(publicChargeSchema), paymentLinkPublicController.completeCharge)
+
+router.get(
+  '/payment-links/:shortCode/session/:sessionId',
+  readLimit,
+  validateRequest(publicSessionSchema),
+  paymentLinkPublicController.getSessionStatus,
 )
 
 export default router

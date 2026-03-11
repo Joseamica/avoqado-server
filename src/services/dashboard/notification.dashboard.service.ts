@@ -5,6 +5,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '@/config/logger'
 import * as pushService from '../mobile/push.mobile.service'
 import emailService from '../email.service'
+import * as whatsappService from '../whatsapp.service'
 
 // ===== TYPES =====
 
@@ -148,7 +149,7 @@ export async function createNotification(data: CreateNotificationDto): Promise<N
 async function dispatchToChannels(
   notification: Notification,
   channels: NotificationChannel[],
-  recipient: { id: string; email: string; firstName: string; lastName: string },
+  recipient: { id: string; email: string; phone?: string | null; firstName: string; lastName: string },
 ) {
   for (const channel of channels) {
     try {
@@ -181,6 +182,19 @@ async function dispatchToChannels(
           })
           if (result.success) {
             logger.info(`Push sent for notification ${notification.id}`)
+          }
+          break
+
+        case NotificationChannel.WHATSAPP:
+          if (recipient.phone) {
+            await whatsappService.sendOrderStatusUpdateWhatsApp(recipient.phone, {
+              customerName: `${recipient.firstName} ${recipient.lastName}`.trim(),
+              venueName: (notification.metadata as any)?.venueName || 'Tu negocio',
+              status: notification.message,
+            })
+            logger.info(`WhatsApp sent for notification ${notification.id} to ${recipient.phone}`)
+          } else {
+            logger.warn(`No phone number for WhatsApp notification ${notification.id}`)
           }
           break
       }

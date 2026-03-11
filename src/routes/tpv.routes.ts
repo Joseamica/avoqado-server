@@ -4909,6 +4909,25 @@ router.post(
   saleVerificationController.createProofOfSale,
 )
 
+/**
+ * @openapi
+ * /tpv/verification/pending:
+ *   get:
+ *     summary: Get pending verifications for the authenticated staff
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of pending verifications
+ */
+router.get(
+  '/verification/pending',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getPendingVerifications,
+)
+
 // ══════════════════════════════════════════════════════════════════════════════
 // BARCODE QUICK ADD (Square POS "Scan & Go" Pattern)
 // ══════════════════════════════════════════════════════════════════════════════

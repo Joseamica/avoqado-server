@@ -168,13 +168,12 @@ export async function updateVerificationStatus(req: Request, res: Response): Pro
 }
 
 /**
- * POST /tpv/verification/proof-of-sale
- * Create or update proof-of-sale photo for a payment
- * Simpler endpoint than full verification - just adds photos after successful payment
+ * GET /tpv/verification/pending
+ * Get pending verifications for the authenticated staff member
+ * Used by the "Pendientes Verificacion" screen on WelcomeScreen
  */
-export async function createProofOfSale(req: Request, res: Response): Promise<void> {
+export async function getPendingVerifications(req: Request, res: Response): Promise<void> {
   try {
-    const { paymentId, photoUrls } = req.body
     const venueId = req.authContext?.venueId
     const staffId = req.authContext?.userId
 
@@ -186,13 +185,54 @@ export async function createProofOfSale(req: Request, res: Response): Promise<vo
       return
     }
 
-    logger.info(`[SALE VERIFICATION CONTROLLER] POST /tpv/verification/proof-of-sale - PaymentId: ${paymentId}`)
+    logger.info(`[SALE VERIFICATION CONTROLLER] GET /tpv/verification/pending - Staff: ${staffId}`)
 
-    const verification = await saleVerificationService.createOrUpdateProofOfSale(venueId, paymentId, photoUrls, staffId)
+    const pending = await saleVerificationService.getPendingVerifications(venueId, staffId)
+
+    res.status(200).json({
+      success: true,
+      data: pending,
+    })
+  } catch (error: any) {
+    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting pending verifications: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}
+
+/**
+ * POST /tpv/verification/proof-of-sale
+ * Create or update proof-of-sale photo for a payment
+ * Supports:
+ * - Legacy flow (old TPV): paymentId + photoUrls → creates COMPLETED record
+ * - Non-blocking flow (new TPV): verificationId + paymentId + photoUrls → updates PENDING record
+ */
+export async function createProofOfSale(req: Request, res: Response): Promise<void> {
+  try {
+    const { paymentId, photoUrls, verificationId } = req.body
+    const venueId = req.authContext?.venueId
+    const staffId = req.authContext?.userId
+
+    if (!venueId || !staffId) {
+      res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Missing authentication context',
+      })
+      return
+    }
+
+    logger.info(`[SALE VERIFICATION CONTROLLER] POST /tpv/verification/proof-of-sale - PaymentId: ${paymentId}`, {
+      verificationId: verificationId ?? 'none (legacy flow)',
+    })
+
+    const verification = await saleVerificationService.createOrUpdateProofOfSale(venueId, paymentId, photoUrls, staffId, verificationId)
 
     res.status(200).json({
       success: true,
       verificationId: verification.id,
+      status: verification.status,
       message: 'Proof-of-sale photo uploaded successfully',
     })
   } catch (error: any) {

@@ -43,6 +43,18 @@ interface SaleVerificationResponse {
   updatedAt: Date
 }
 
+interface PendingVerificationResponse {
+  id: string
+  paymentId: string
+  amount: number
+  orderNumber: string | null
+  date: string
+  serialNumbers: string[]
+  isPortabilidad: boolean
+  photos: string[]
+  requiredPhotos: number
+}
+
 interface ListSaleVerificationsParams {
   pageSize: number
   pageNumber: number
@@ -232,17 +244,108 @@ export async function updateVerificationStatus(
 }
 
 /**
+ * Create a PENDING sale verification record immediately after payment
+ * Called from the fast payment flow for SERIALIZED_INVENTORY orders
+ * The staff can upload photos later via the "Pendientes Verificacion" screen
+ */
+export async function createPendingSaleVerification(data: {
+  venueId: string
+  paymentId: string
+  staffId: string
+  isPortabilidad: boolean
+  serialNumbers: string[]
+  scannedProducts: ScannedProduct[]
+  deviceId?: string
+}): Promise<SaleVerificationResponse> {
+  logger.info(`📸 [SALE VERIFICATION SERVICE] Creating PENDING verification for payment ${data.paymentId}`, {
+    isPortabilidad: data.isPortabilidad,
+    serialNumbers: data.serialNumbers,
+    requiredPhotos: data.isPortabilidad ? 2 : 1,
+  })
+
+  const verification = await prisma.saleVerification.create({
+    data: {
+      venueId: data.venueId,
+      paymentId: data.paymentId,
+      staffId: data.staffId,
+      photos: [],
+      scannedProducts: data.scannedProducts as unknown as Prisma.InputJsonValue,
+      status: 'PENDING',
+      inventoryDeducted: false,
+      isPortabilidad: data.isPortabilidad,
+      serialNumbers: data.serialNumbers,
+      deviceId: data.deviceId ?? null,
+    },
+  })
+
+  logger.info(`✅ [SALE VERIFICATION SERVICE] Created PENDING verification ${verification.id}`)
+  return mapToResponse(verification)
+}
+
+/**
+ * Get pending verifications for a specific staff member
+ * Used by the TPV "Pendientes Verificacion" screen
+ */
+export async function getPendingVerifications(venueId: string, staffId: string): Promise<PendingVerificationResponse[]> {
+  logger.info(`📸 [SALE VERIFICATION SERVICE] Getting pending verifications for staff ${staffId} in venue ${venueId}`)
+
+  const verifications = await prisma.saleVerification.findMany({
+    where: {
+      venueId,
+      staffId,
+      status: 'PENDING',
+    },
+    include: {
+      payment: {
+        select: {
+          id: true,
+          amount: true,
+          createdAt: true,
+          order: {
+            select: {
+              orderNumber: true,
+            },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  logger.info(`✅ [SALE VERIFICATION SERVICE] Found ${verifications.length} pending verifications`)
+
+  return verifications.map(v => ({
+    id: v.id,
+    paymentId: v.paymentId,
+    amount: v.payment.amount.toNumber(),
+    orderNumber: v.payment.order?.orderNumber ?? null,
+    date: v.createdAt.toISOString(),
+    serialNumbers: v.serialNumbers,
+    isPortabilidad: v.isPortabilidad,
+    photos: v.photos,
+    requiredPhotos: v.isPortabilidad ? 2 : 1,
+  }))
+}
+
+/**
  * Create or update proof-of-sale photo for a payment
- * Simpler than full verification - just adds photos to existing or creates minimal record
- * Used by Android TPV after successful payment when SERIALIZED_INVENTORY module is active
+ * Supports both:
+ * - Legacy flow: create new record with COMPLETED status (old TPV versions)
+ * - Non-blocking flow: find existing PENDING record, append photos, check completion
+ *
+ * @param verificationId Optional - if provided, update existing PENDING record directly
  */
 export async function createOrUpdateProofOfSale(
   venueId: string,
   paymentId: string,
   photoUrls: string[],
   staffId: string,
+  verificationId?: string,
 ): Promise<SaleVerificationResponse> {
-  logger.info(`📸 [SALE VERIFICATION SERVICE] Creating/updating proof-of-sale for payment ${paymentId}`)
+  logger.info(`📸 [SALE VERIFICATION SERVICE] Creating/updating proof-of-sale for payment ${paymentId}`, {
+    verificationId: verificationId ?? 'none (legacy flow)',
+    photosCount: photoUrls.length,
+  })
 
   // Validate payment exists and belongs to venue
   const payment = await prisma.payment.findFirst({
@@ -265,21 +368,33 @@ export async function createOrUpdateProofOfSale(
 
   let verification
 
-  if (payment.saleVerification) {
-    // Verification exists → Append photos
-    logger.info(`📸 [SALE VERIFICATION SERVICE] Appending photos to existing verification ${payment.saleVerification.id}`)
+  // Try to find existing verification (by verificationId or paymentId)
+  const existing = verificationId
+    ? await prisma.saleVerification.findFirst({ where: { id: verificationId, venueId } })
+    : payment.saleVerification
+
+  if (existing) {
+    // Append photos to existing record
+    const updatedPhotos = [...existing.photos, ...photoUrls]
+    const requiredPhotos = existing.isPortabilidad ? 2 : 1
+    const isComplete = updatedPhotos.length >= requiredPhotos
+
+    logger.info(`📸 [SALE VERIFICATION SERVICE] Appending ${photoUrls.length} photos to verification ${existing.id}`, {
+      totalPhotos: updatedPhotos.length,
+      requiredPhotos,
+      willComplete: isComplete,
+    })
 
     verification = await prisma.saleVerification.update({
-      where: { id: payment.saleVerification.id },
+      where: { id: existing.id },
       data: {
-        photos: {
-          push: photoUrls,
-        },
+        photos: updatedPhotos,
+        status: isComplete ? 'COMPLETED' : 'PENDING',
       },
     })
   } else {
-    // No verification → Create new with COMPLETED status (no scanned products needed)
-    logger.info(`📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification`)
+    // No existing verification → Create new with COMPLETED status (legacy flow)
+    logger.info(`📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification (legacy flow)`)
 
     verification = await prisma.saleVerification.create({
       data: {
@@ -287,14 +402,14 @@ export async function createOrUpdateProofOfSale(
         paymentId,
         staffId,
         photos: photoUrls,
-        scannedProducts: [], // Empty array for proof-of-sale only
+        scannedProducts: [],
         status: 'COMPLETED',
         inventoryDeducted: false,
       },
     })
   }
 
-  logger.info(`✅ [SALE VERIFICATION SERVICE] Proof-of-sale saved: ${verification.id}`)
+  logger.info(`✅ [SALE VERIFICATION SERVICE] Proof-of-sale saved: ${verification.id} (status: ${verification.status})`)
 
   return mapToResponse(verification)
 }
@@ -311,6 +426,8 @@ function mapToResponse(verification: {
   scannedProducts: Prisma.JsonValue
   status: SaleVerificationStatus
   inventoryDeducted: boolean
+  isPortabilidad: boolean
+  serialNumbers: string[]
   deviceId: string | null
   notes: string | null
   createdAt: Date

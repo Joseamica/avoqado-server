@@ -216,6 +216,11 @@ export const recordPaymentBodySchema = z.object({
       // Small integer from SDK response (response.operation) needed for CancelIcc refunds
       // Example: 12945658 (fits in Int, unlike the 12-digit referenceNumber)
       blumonOperationNumber: z.number().int().positive().optional(),
+
+      // 📸 NON-BLOCKING PROOF-OF-SALE (2026-03-10)
+      // For SERIALIZED_INVENTORY mode: backend creates PENDING SaleVerification record
+      isPortabilidad: z.boolean().optional(),
+      serialNumbers: z.array(z.string()).optional(),
     })
     .refine(
       data => {
@@ -607,6 +612,7 @@ export const createProofOfSaleSchema = z.object({
     photoUrls: z
       .array(z.string().url({ message: 'Cada foto debe ser una URL válida.' }))
       .min(1, { message: 'Debe proporcionar al menos una foto.' }),
+    verificationId: z.string().cuid({ message: 'El ID de verificación debe ser un CUID válido.' }).optional(),
   }),
 })
 
