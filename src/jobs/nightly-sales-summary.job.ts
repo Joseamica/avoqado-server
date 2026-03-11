@@ -77,10 +77,10 @@ export class NightlySalesSummaryJob {
   private isRunning: boolean = false
 
   constructor() {
-    // Run daily at 10:00 PM Mexico City time
+    // Run daily at 10:02 PM Mexico City time (offset from */5 cron jobs to avoid Resend rate limits)
     // This gives time for most venues to close their business day
     this.job = new CronJob(
-      '0 22 * * *', // At 22:00 (10 PM) every day
+      '2 22 * * *', // At 22:02 every day
       async () => {
         await this.sendSalesSummaries()
       },
@@ -290,7 +290,7 @@ export class NightlySalesSummaryJob {
               ? ((todaySummary.summary.netSales - lastWeekSummary.summary.netSales) / lastWeekSummary.summary.netSales) * 100
               : 0
 
-          // Send email to each recipient
+          // Send email to each recipient (with 500ms delay to respect Resend's 2/sec rate limit)
           for (const recipient of recipients) {
             try {
               const sent = await emailService.sendSalesSummaryEmail(recipient.email, summaryData, weeklyNetSalesChange)
@@ -298,6 +298,9 @@ export class NightlySalesSummaryJob {
                 emailsSent++
                 logger.debug(`Sales summary sent to ${recipient.email} for ${venue.name}`)
               }
+
+              // Rate limit: 500ms between emails (same as marketing job)
+              await new Promise(resolve => setTimeout(resolve, 500))
             } catch (emailError) {
               errors++
               logger.error(`Failed to send sales summary to ${recipient.email}`, { error: emailError, venueId: venue.id })

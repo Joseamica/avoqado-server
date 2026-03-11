@@ -135,6 +135,10 @@ const prismaMock: any = {
   creditPackPurchase: createMockModel(),
   creditItemBalance: createMockModel(),
   creditTransaction: createMockModel(),
+  // Payment Link models
+  paymentLink: createMockModel(),
+  checkoutSession: createMockModel(),
+  ecommerceMerchant: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

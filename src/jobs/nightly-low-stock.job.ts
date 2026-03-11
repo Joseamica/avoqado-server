@@ -5,7 +5,7 @@
  * and sends ONE consolidated email per venue to managers/admins/owners.
  * Similar to Square's "Alertas de bajas existencias" digest.
  *
- * Runs at 10:30 PM Mexico City time (30 min after sales summary).
+ * Runs at 10:33 PM Mexico City time (offset from other cron jobs to avoid Resend rate limits).
  */
 
 import { CronJob } from 'cron'
@@ -45,9 +45,9 @@ export class NightlyLowStockJob {
   private isRunning: boolean = false
 
   constructor() {
-    // Run daily at 10:30 PM Mexico City time (30 min after sales summary)
+    // Run daily at 10:33 PM Mexico City time (offset from */5 cron jobs to avoid Resend rate limits)
     this.job = new CronJob(
-      '30 22 * * *',
+      '33 22 * * *',
       async () => {
         await this.sendLowStockDigests()
       },
@@ -60,7 +60,7 @@ export class NightlyLowStockJob {
   start(): void {
     if (this.job) {
       this.job.start()
-      logger.info('Nightly Low Stock Digest Job started - daily at 10:30 PM Mexico City')
+      logger.info('Nightly Low Stock Digest Job started - daily at 10:33 PM Mexico City')
     }
   }
 
@@ -233,7 +233,7 @@ export class NightlyLowStockJob {
 
           const dashboardUrl = `${FRONTEND_URL}/venues/${venue.slug}/inventory/raw-materials`
 
-          // Send email to each recipient
+          // Send email to each recipient (with 500ms delay to respect Resend's 2/sec rate limit)
           for (const recipient of recipients) {
             try {
               const sent = await emailService.sendLowStockDigestEmail(recipient.email, {
@@ -247,6 +247,9 @@ export class NightlyLowStockJob {
                 emailsSent++
                 logger.debug(`Low stock digest sent to ${recipient.email} for ${venue.name}`)
               }
+
+              // Rate limit: 500ms between emails (same as marketing job)
+              await new Promise(resolve => setTimeout(resolve, 500))
             } catch (emailError) {
               errors++
               logger.error(`Failed to send low stock digest to ${recipient.email}`, {
