@@ -236,7 +236,7 @@ describe('Reservation Waitlist Service', () => {
       prismaMock.reservationWaitlistEntry.findFirst.mockResolvedValue(createMockEntry({ status: 'WAITING' }))
       prismaMock.reservationWaitlistEntry.update.mockResolvedValue(createMockEntry({ status: 'CANCELLED' }))
 
-      const result = await removeFromWaitlist(VENUE_ID, 'entry-1')
+      await removeFromWaitlist(VENUE_ID, 'entry-1')
 
       expect(prismaMock.reservationWaitlistEntry.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -285,7 +285,7 @@ describe('Reservation Waitlist Service', () => {
         createMockEntry({ status: 'PROMOTED', promotedReservationId: 'res-new' }),
       )
 
-      const result = await promoteWaitlistEntry(VENUE_ID, 'entry-1', 'res-new')
+      await promoteWaitlistEntry(VENUE_ID, 'entry-1', 'res-new')
 
       expect(prismaMock.reservationWaitlistEntry.update).toHaveBeenCalledWith(
         expect.objectContaining({
