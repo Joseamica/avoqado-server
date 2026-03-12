@@ -33,7 +33,6 @@ import {
   updatePaymentLink,
   archivePaymentLink,
   getPaymentLinkByShortCode,
-  createCheckoutSession,
   completeCharge,
   getSessionStatus,
 } from '../../../../src/services/dashboard/paymentLink.service'
@@ -142,13 +141,17 @@ describe('PaymentLink Service', () => {
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
       prismaMock.paymentLink.create.mockResolvedValueOnce(createMockPaymentLink())
 
-      const result = await createPaymentLink(VENUE_ID, {
-        title: 'Test Payment',
-        description: 'Test description',
-        amountType: 'FIXED',
-        amount: 100,
-        purpose: 'PAYMENT',
-      }, STAFF_ID)
+      const result = await createPaymentLink(
+        VENUE_ID,
+        {
+          title: 'Test Payment',
+          description: 'Test description',
+          amountType: 'FIXED',
+          amount: 100,
+          purpose: 'PAYMENT',
+        },
+        STAFF_ID,
+      )
 
       expect(result).toBeDefined()
       expect(result.shortCode).toBe('abc12345')
@@ -169,13 +172,17 @@ describe('PaymentLink Service', () => {
       prismaMock.product.findFirst.mockResolvedValueOnce({ id: PRODUCT_ID })
       prismaMock.paymentLink.create.mockResolvedValueOnce(createMockItemPaymentLink())
 
-      const result = await createPaymentLink(VENUE_ID, {
-        title: 'Test Product',
-        amountType: 'FIXED',
-        amount: 250,
-        purpose: 'ITEM',
-        productId: PRODUCT_ID,
-      }, STAFF_ID)
+      const result = await createPaymentLink(
+        VENUE_ID,
+        {
+          title: 'Test Product',
+          amountType: 'FIXED',
+          amount: 250,
+          purpose: 'ITEM',
+          productId: PRODUCT_ID,
+        },
+        STAFF_ID,
+      )
 
       expect(result).toBeDefined()
       expect(prismaMock.product.findFirst).toHaveBeenCalledWith({
@@ -196,13 +203,17 @@ describe('PaymentLink Service', () => {
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
 
       await expect(
-        createPaymentLink(VENUE_ID, {
-          title: 'No Product',
-          amountType: 'FIXED',
-          amount: 100,
-          purpose: 'ITEM',
-          // No productId
-        }, STAFF_ID),
+        createPaymentLink(
+          VENUE_ID,
+          {
+            title: 'No Product',
+            amountType: 'FIXED',
+            amount: 100,
+            purpose: 'ITEM',
+            // No productId
+          },
+          STAFF_ID,
+        ),
       ).rejects.toThrow(BadRequestError)
     })
 
@@ -211,13 +222,17 @@ describe('PaymentLink Service', () => {
       prismaMock.product.findFirst.mockResolvedValueOnce(null) // Product not found in venue
 
       await expect(
-        createPaymentLink(VENUE_ID, {
-          title: 'Wrong Product',
-          amountType: 'FIXED',
-          amount: 100,
-          purpose: 'ITEM',
-          productId: 'product-from-other-venue',
-        }, STAFF_ID),
+        createPaymentLink(
+          VENUE_ID,
+          {
+            title: 'Wrong Product',
+            amountType: 'FIXED',
+            amount: 100,
+            purpose: 'ITEM',
+            productId: 'product-from-other-venue',
+          },
+          STAFF_ID,
+        ),
       ).rejects.toThrow(BadRequestError)
     })
 
@@ -225,11 +240,15 @@ describe('PaymentLink Service', () => {
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
 
       await expect(
-        createPaymentLink(VENUE_ID, {
-          title: 'Test',
-          amountType: 'FIXED',
-          amount: 100,
-        }, STAFF_ID),
+        createPaymentLink(
+          VENUE_ID,
+          {
+            title: 'Test',
+            amountType: 'FIXED',
+            amount: 100,
+          },
+          STAFF_ID,
+        ),
       ).rejects.toThrow(BadRequestError)
     })
   })
@@ -285,9 +304,7 @@ describe('PaymentLink Service', () => {
   // ─── GET BY ID ──────────────────────────────────────
   describe('getPaymentLinkById', () => {
     it('should return link with checkout sessions', async () => {
-      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(
-        createMockPaymentLink({ checkoutSessions: [] }),
-      )
+      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(createMockPaymentLink({ checkoutSessions: [] }))
 
       const result = await getPaymentLinkById(VENUE_ID, 'pl-123')
       expect(result).toBeDefined()
@@ -301,9 +318,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should reject if link belongs to another venue', async () => {
-      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(
-        createMockPaymentLink({ venueId: 'other-venue' }),
-      )
+      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(createMockPaymentLink({ venueId: 'other-venue' }))
 
       await expect(getPaymentLinkById(VENUE_ID, 'pl-123')).rejects.toThrow()
     })
@@ -317,9 +332,7 @@ describe('PaymentLink Service', () => {
         venueId: VENUE_ID,
         status: 'ACTIVE',
       })
-      prismaMock.paymentLink.update.mockResolvedValueOnce(
-        createMockPaymentLink({ title: 'Updated', amount: new Decimal(200) }),
-      )
+      prismaMock.paymentLink.update.mockResolvedValueOnce(createMockPaymentLink({ title: 'Updated', amount: new Decimal(200) }))
 
       const result = await updatePaymentLink(VENUE_ID, 'pl-123', {
         title: 'Updated',
@@ -336,9 +349,7 @@ describe('PaymentLink Service', () => {
         status: 'ARCHIVED',
       })
 
-      await expect(
-        updatePaymentLink(VENUE_ID, 'pl-123', { title: 'Nope' }),
-      ).rejects.toThrow(BadRequestError)
+      await expect(updatePaymentLink(VENUE_ID, 'pl-123', { title: 'Nope' })).rejects.toThrow(BadRequestError)
     })
   })
 
@@ -420,9 +431,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should reject paused/archived links', async () => {
-      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(
-        createMockPaymentLink({ status: 'PAUSED', venue: {}, product: null }),
-      )
+      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(createMockPaymentLink({ status: 'PAUSED', venue: {}, product: null }))
 
       await expect(getPaymentLinkByShortCode('abc12345')).rejects.toThrow(BadRequestError)
     })
@@ -495,12 +504,7 @@ describe('PaymentLink Service', () => {
       )
 
       // Verify inventory was deducted
-      expect(mockDeductInventory).toHaveBeenCalledWith(
-        VENUE_ID,
-        PRODUCT_ID,
-        2,
-        'cs_pl_test123',
-      )
+      expect(mockDeductInventory).toHaveBeenCalledWith(VENUE_ID, PRODUCT_ID, 2, 'cs_pl_test123')
     })
 
     it('should charge WITHOUT creating Order for PAYMENT link', async () => {
@@ -520,9 +524,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should reject already completed session', async () => {
-      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(
-        createMockCheckoutSession({ status: 'COMPLETED' }),
-      )
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession({ status: 'COMPLETED' }))
 
       await expect(completeCharge('abc12345', 'cs_pl_test123')).rejects.toThrow(BadRequestError)
     })
@@ -613,12 +615,16 @@ describe('PaymentLink Service', () => {
         }),
       )
 
-      const result = await createPaymentLink(VENUE_ID, {
-        title: 'Donación',
-        amountType: 'OPEN',
-        isReusable: true,
-        purpose: 'DONATION',
-      }, STAFF_ID)
+      const result = await createPaymentLink(
+        VENUE_ID,
+        {
+          title: 'Donación',
+          amountType: 'OPEN',
+          isReusable: true,
+          purpose: 'DONATION',
+        },
+        STAFF_ID,
+      )
 
       expect(result).toBeDefined()
       expect(prismaMock.paymentLink.create).toHaveBeenCalledWith(
@@ -636,12 +642,16 @@ describe('PaymentLink Service', () => {
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
       prismaMock.paymentLink.create.mockResolvedValueOnce(createMockPaymentLink())
 
-      await createPaymentLink(VENUE_ID, {
-        title: 'No purpose specified',
-        amountType: 'FIXED',
-        amount: 50,
-        // No purpose field
-      }, STAFF_ID)
+      await createPaymentLink(
+        VENUE_ID,
+        {
+          title: 'No purpose specified',
+          amountType: 'FIXED',
+          amount: 50,
+          // No purpose field
+        },
+        STAFF_ID,
+      )
 
       expect(prismaMock.paymentLink.create).toHaveBeenCalledWith(
         expect.objectContaining({

@@ -211,7 +211,7 @@ export async function getPendingVerifications(req: Request, res: Response): Prom
  */
 export async function createProofOfSale(req: Request, res: Response): Promise<void> {
   try {
-    const { paymentId, photoUrls, verificationId } = req.body
+    const { paymentId, photoUrls, verificationId, replaceIndex, photoLabel } = req.body
     const venueId = req.authContext?.venueId
     const staffId = req.authContext?.userId
 
@@ -225,9 +225,19 @@ export async function createProofOfSale(req: Request, res: Response): Promise<vo
 
     logger.info(`[SALE VERIFICATION CONTROLLER] POST /tpv/verification/proof-of-sale - PaymentId: ${paymentId}`, {
       verificationId: verificationId ?? 'none (legacy flow)',
+      replaceIndex: replaceIndex ?? 'none (append)',
+      photoLabel: photoLabel ?? 'none',
     })
 
-    const verification = await saleVerificationService.createOrUpdateProofOfSale(venueId, paymentId, photoUrls, staffId, verificationId)
+    const verification = await saleVerificationService.createOrUpdateProofOfSale(
+      venueId,
+      paymentId,
+      photoUrls,
+      staffId,
+      verificationId,
+      replaceIndex,
+      photoLabel,
+    )
 
     res.status(200).json({
       success: true,

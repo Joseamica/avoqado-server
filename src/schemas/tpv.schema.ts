@@ -613,6 +613,8 @@ export const createProofOfSaleSchema = z.object({
       .array(z.string().url({ message: 'Cada foto debe ser una URL válida.' }))
       .min(1, { message: 'Debe proporcionar al menos una foto.' }),
     verificationId: z.string().cuid({ message: 'El ID de verificación debe ser un CUID válido.' }).optional(),
+    replaceIndex: z.number().int().min(0).max(1).optional(), // Replace photo at this index instead of appending
+    photoLabel: z.enum(['Vinculacion', 'Portabilidad']).optional(), // Fixed slot: Vinculacion=0, Portabilidad=1
   }),
 })
 

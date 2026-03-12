@@ -1099,6 +1099,7 @@ model Product {
   // Relations
   inventory      Inventory?
   orderItems     OrderItem[]
+  paymentLinks   PaymentLink[]
   modifierGroups ProductModifierGroup[]
   recipe         Recipe? // ✅ NEW: Recipe composition
   pricingPolicy  PricingPolicy? // ✅ NEW: Pricing strategy
@@ -4591,6 +4592,7 @@ enum OrderSource {
   AVOQADO_ANDROID // Avoqado Android app
   PHONE // Phone order
   POS // Direct from POS
+  PAYMENT_LINK // Payment link checkout
 }
 
 enum TableShape {
@@ -7783,6 +7785,12 @@ model PaymentLink {
   createdById          String
   createdBy            Staff             @relation(fields: [createdById], references: [id])
 
+  purpose PaymentLinkPurpose @default(PAYMENT)
+
+  // Optional product reference (for ITEM purpose — enables inventory deduction)
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
   title       String
   description String?
   imageUrl    String?
@@ -7794,6 +7802,11 @@ model PaymentLink {
   isReusable  Boolean   @default(false)
   expiresAt   DateTime?
   redirectUrl String?
+
+  // Custom fields config: [{ id, type: "TEXT"|"SELECT", label, required, options? }]
+  customFields Json?
+  // Tipping config: { presets: [10, 15, 20], allowCustom: true } — null = disabled
+  tippingConfig Json?
 
   status         PaymentLinkStatus @default(ACTIVE)
   totalCollected Decimal           @default(0) @db.Decimal(12, 2)
@@ -7808,6 +7821,12 @@ model PaymentLink {
   @@index([shortCode])
   @@index([status])
   @@index([createdAt])
+}
+
+enum PaymentLinkPurpose {
+  PAYMENT  // Accept a payment (generic)
+  ITEM     // Sell an item (linked to Product, creates Order + deducts inventory)
+  DONATION // Accept a donation (open amount)
 }
 
 enum PaymentLinkAmountType {

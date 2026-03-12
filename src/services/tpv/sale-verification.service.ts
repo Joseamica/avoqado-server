@@ -322,7 +322,7 @@ export async function getPendingVerifications(venueId: string, staffId: string):
     date: v.createdAt.toISOString(),
     serialNumbers: v.serialNumbers,
     isPortabilidad: v.isPortabilidad,
-    photos: v.photos,
+    photos: v.photos, // Preserves index positions (may contain empty strings for unfilled slots)
     requiredPhotos: v.isPortabilidad ? 2 : 1,
   }))
 }
@@ -341,10 +341,14 @@ export async function createOrUpdateProofOfSale(
   photoUrls: string[],
   staffId: string,
   verificationId?: string,
+  replaceIndex?: number,
+  photoLabel?: 'Vinculacion' | 'Portabilidad',
 ): Promise<SaleVerificationResponse> {
   logger.info(`📸 [SALE VERIFICATION SERVICE] Creating/updating proof-of-sale for payment ${paymentId}`, {
     verificationId: verificationId ?? 'none (legacy flow)',
     photosCount: photoUrls.length,
+    replaceIndex: replaceIndex ?? 'none (append)',
+    photoLabel: photoLabel ?? 'none',
   })
 
   // Validate payment exists and belongs to venue
@@ -374,13 +378,38 @@ export async function createOrUpdateProofOfSale(
     : payment.saleVerification
 
   if (existing) {
-    // Append photos to existing record
-    const updatedPhotos = [...existing.photos, ...photoUrls]
-    const requiredPhotos = existing.isPortabilidad ? 2 : 1
-    const isComplete = updatedPhotos.length >= requiredPhotos
+    let updatedPhotos: string[]
 
-    logger.info(`📸 [SALE VERIFICATION SERVICE] Appending ${photoUrls.length} photos to verification ${existing.id}`, {
-      totalPhotos: updatedPhotos.length,
+    // Determine the target index from photoLabel (fixed slots: Vinculacion=0, Portabilidad=1)
+    const labelIndex = photoLabel === 'Vinculacion' ? 0 : photoLabel === 'Portabilidad' ? 1 : undefined
+
+    if (replaceIndex !== undefined && replaceIndex < existing.photos.length) {
+      // Replace mode: swap photo at the given index
+      updatedPhotos = [...existing.photos]
+      updatedPhotos[replaceIndex] = photoUrls[0]
+      logger.info(`📸 [SALE VERIFICATION SERVICE] Replacing photo at index ${replaceIndex} in verification ${existing.id}`)
+    } else if (labelIndex !== undefined) {
+      // Label-based fixed slot: place photo at the correct index regardless of upload order
+      // Pad array with empty strings if needed (e.g., portabilidad uploaded first → pad index 0)
+      updatedPhotos = [...existing.photos]
+      while (updatedPhotos.length <= labelIndex) {
+        updatedPhotos.push('')
+      }
+      updatedPhotos[labelIndex] = photoUrls[0]
+      logger.info(`📸 [SALE VERIFICATION SERVICE] Placing photo at fixed slot ${labelIndex} (${photoLabel}) in verification ${existing.id}`)
+    } else {
+      // Append mode (default / legacy): add new photos
+      updatedPhotos = [...existing.photos, ...photoUrls]
+    }
+
+    // Count non-empty photos for completion check
+    const nonEmptyPhotos = updatedPhotos.filter(p => p !== '')
+
+    const requiredPhotos = existing.isPortabilidad ? 2 : 1
+    const isComplete = nonEmptyPhotos.length >= requiredPhotos
+
+    logger.info(`📸 [SALE VERIFICATION SERVICE] Updated photos for verification ${existing.id}`, {
+      totalPhotos: nonEmptyPhotos.length,
       requiredPhotos,
       willComplete: isComplete,
     })

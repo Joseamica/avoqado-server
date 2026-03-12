@@ -12,11 +12,11 @@ export const listEcommerceMerchantsQuerySchema = z.object({
     active: z
       .string()
       .optional()
-      .transform(val => val === 'true'),
+      .transform(val => (val !== undefined ? val === 'true' : undefined)),
     sandboxMode: z
       .string()
       .optional()
-      .transform(val => val === 'true'),
+      .transform(val => (val !== undefined ? val === 'true' : undefined)),
     providerId: z.string().optional(),
     limit: z.string().transform(Number).optional(),
     offset: z.string().transform(Number).optional(),

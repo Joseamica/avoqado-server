@@ -239,6 +239,15 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
           type: true,
         },
       },
+      venueConfigsPrimary: {
+        select: { venue: { select: { id: true, name: true, slug: true } } },
+      },
+      venueConfigsSecondary: {
+        select: { venue: { select: { id: true, name: true, slug: true } } },
+      },
+      venueConfigsTertiary: {
+        select: { venue: { select: { id: true, name: true, slug: true } } },
+      },
       _count: {
         select: {
           costStructures: true,
@@ -251,9 +260,8 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
     orderBy: [{ displayOrder: 'asc' }, { createdAt: 'desc' }],
   })
 
-  // Get terminal counts for each merchant account
+  // Get terminals for each merchant account (with serial numbers)
   // Since assignedMerchantIds is a String[] array, we can't use Prisma _count
-  // We need to count terminals where the account ID is in the array
   const accountIds = accounts.map(a => a.id)
   const terminalsWithMerchants = await prisma.terminal.findMany({
     where: {
@@ -263,32 +271,49 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
     },
     select: {
       id: true,
+      serialNumber: true,
       assignedMerchantIds: true,
     },
   })
 
-  // Build a map of merchantAccountId -> terminal count
-  const terminalCountByMerchant: Record<string, number> = {}
+  // Build a map of merchantAccountId -> terminal details
+  const terminalsByMerchant: Record<string, Array<{ id: string; serialNumber: string }>> = {}
   for (const terminal of terminalsWithMerchants) {
     for (const merchantId of terminal.assignedMerchantIds) {
       if (accountIds.includes(merchantId)) {
-        terminalCountByMerchant[merchantId] = (terminalCountByMerchant[merchantId] || 0) + 1
+        if (!terminalsByMerchant[merchantId]) terminalsByMerchant[merchantId] = []
+        terminalsByMerchant[merchantId].push({ id: terminal.id, serialNumber: terminal.serialNumber || '' })
       }
     }
   }
 
   // Remove encrypted credentials from response for security
-  // Also compute total venue configs count and terminals count
-  const sanitizedAccounts = accounts.map(account => ({
-    ...account,
-    credentialsEncrypted: undefined, // Don't expose encrypted data
-    hasCredentials: !!(account.credentialsEncrypted as any)?.encrypted,
-    _count: {
-      costStructures: account._count.costStructures,
-      venueConfigs: account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary,
-      terminals: terminalCountByMerchant[account.id] || 0,
-    },
-  }))
+  // Include venue names and terminal serials for the table UI
+  const sanitizedAccounts = accounts.map(account => {
+    // Deduplicate venues across primary/secondary/tertiary configs
+    const venueMap = new Map<string, { id: string; name: string; slug: string }>()
+    for (const vc of [...account.venueConfigsPrimary, ...account.venueConfigsSecondary, ...account.venueConfigsTertiary]) {
+      venueMap.set(vc.venue.id, vc.venue)
+    }
+
+    const terminals = terminalsByMerchant[account.id] || []
+
+    return {
+      ...account,
+      credentialsEncrypted: undefined, // Don't expose encrypted data
+      venueConfigsPrimary: undefined,
+      venueConfigsSecondary: undefined,
+      venueConfigsTertiary: undefined,
+      hasCredentials: !!(account.credentialsEncrypted as any)?.encrypted,
+      venues: Array.from(venueMap.values()),
+      terminals: terminals.map(t => ({ id: t.id, serialNumber: t.serialNumber })),
+      _count: {
+        costStructures: account._count.costStructures,
+        venueConfigs: account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary,
+        terminals: terminals.length,
+      },
+    }
+  })
 
   logger.info('Retrieved merchant accounts', {
     count: accounts.length,

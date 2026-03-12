@@ -32,8 +32,10 @@ export async function listEcommerceMerchants(req: Request, res: Response) {
 
     const result = await ecommerceMerchantService.listEcommerceMerchants({
       venueId,
-      active: active ? active === 'true' : undefined,
-      sandboxMode: sandboxMode ? sandboxMode === 'true' : undefined,
+      // Zod already transforms query strings to booleans; pass directly
+      // (undefined when not provided, true/false when provided)
+      active: active as boolean | undefined,
+      sandboxMode: sandboxMode as boolean | undefined,
       providerId: providerId as string | undefined,
       limit: limit ? Number(limit) : undefined,
       offset: offset ? Number(offset) : undefined,

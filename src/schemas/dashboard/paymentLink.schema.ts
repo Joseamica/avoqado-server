@@ -1,6 +1,31 @@
 import { z } from 'zod'
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CUSTOM FIELD & TIPPING SCHEMAS
+// ═══════════════════════════════════════════════════════════════════════════
+
+const customFieldSchema = z.object({
+  id: z.string().min(1, 'ID del campo es requerido'),
+  type: z.enum(['TEXT', 'SELECT'], { invalid_type_error: 'El tipo de campo debe ser TEXT o SELECT' }),
+  label: z.string().min(1, 'La etiqueta del campo es requerida').max(100, 'La etiqueta no puede exceder 100 caracteres'),
+  required: z.boolean().default(false),
+  options: z.array(z.string().min(1, 'Cada opción debe tener al menos un carácter')).optional(),
+})
+
+const customFieldsSchema = z.array(customFieldSchema).max(5, 'Máximo 5 campos personalizados').optional().nullable()
+
+const tippingConfigSchema = z
+  .object({
+    presets: z
+      .array(z.number().min(1, 'El porcentaje debe ser mayor a 0').max(100, 'El porcentaje no puede exceder 100'))
+      .min(1, 'Se requiere al menos un porcentaje')
+      .max(4, 'Máximo 4 opciones de porcentaje'),
+    allowCustom: z.boolean().default(true),
+  })
+  .optional()
+  .nullable()
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BODY SCHEMAS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -18,6 +43,10 @@ export const createPaymentLinkBodySchema = z
     isReusable: z.boolean().default(false),
     expiresAt: z.string().datetime('Fecha de expiración inválida').optional(),
     redirectUrl: z.string().url('URL de redirección inválida').optional(),
+    purpose: z.enum(['PAYMENT', 'ITEM', 'DONATION']).default('PAYMENT'),
+    productId: z.string().min(1, 'ID de producto inválido').optional(),
+    customFields: customFieldsSchema,
+    tippingConfig: tippingConfigSchema,
   })
   .refine(
     data => {
@@ -29,6 +58,18 @@ export const createPaymentLinkBodySchema = z
     {
       message: 'El monto es requerido para ligas de pago con monto fijo',
       path: ['amount'],
+    },
+  )
+  .refine(
+    data => {
+      if (data.purpose === 'ITEM' && !data.productId) {
+        return false
+      }
+      return true
+    },
+    {
+      message: 'El producto es requerido para ligas de pago de artículo',
+      path: ['productId'],
     },
   )
 
@@ -43,6 +84,9 @@ export const updatePaymentLinkBodySchema = z.object({
   expiresAt: z.string().datetime('Fecha de expiración inválida').optional().nullable(),
   redirectUrl: z.string().url('URL de redirección inválida').optional().nullable(),
   status: z.enum(['ACTIVE', 'PAUSED']).optional(),
+  productId: z.string().min(1, 'ID de producto inválido').optional().nullable(),
+  customFields: customFieldsSchema,
+  tippingConfig: tippingConfigSchema,
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -58,6 +102,9 @@ export const checkoutBodySchema = z.object({
   customerEmail: z.string().email('Email inválido').optional(),
   customerPhone: z.string().optional(),
   amount: z.number().positive('El monto debe ser mayor a 0').optional(), // Required for OPEN amount links
+  quantity: z.number().int().min(1).default(1), // For ITEM payment links
+  tipAmount: z.number().min(0, 'La propina no puede ser negativa').optional(),
+  customFieldResponses: z.record(z.string(), z.string()).optional(), // { fieldId: value }
 })
 
 export const chargeBodySchema = z.object({

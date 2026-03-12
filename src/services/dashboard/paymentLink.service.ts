@@ -14,10 +14,24 @@ import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
 import { getBlumonEcommerceService } from '@/services/sdk/blumon-ecommerce.service'
+import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════════════════════════
+
+export interface CustomFieldDefinition {
+  id: string
+  type: 'TEXT' | 'SELECT'
+  label: string
+  required: boolean
+  options?: string[]
+}
+
+export interface TippingConfig {
+  presets: number[]
+  allowCustom: boolean
+}
 
 export interface CreatePaymentLinkData {
   title: string
@@ -29,6 +43,10 @@ export interface CreatePaymentLinkData {
   isReusable?: boolean
   expiresAt?: string
   redirectUrl?: string
+  purpose?: 'PAYMENT' | 'ITEM' | 'DONATION'
+  productId?: string
+  customFields?: CustomFieldDefinition[] | null
+  tippingConfig?: TippingConfig | null
 }
 
 export interface UpdatePaymentLinkData {
@@ -42,6 +60,9 @@ export interface UpdatePaymentLinkData {
   expiresAt?: string | null
   redirectUrl?: string | null
   status?: 'ACTIVE' | 'PAUSED'
+  productId?: string | null
+  customFields?: CustomFieldDefinition[] | null
+  tippingConfig?: TippingConfig | null
 }
 
 export interface ListPaymentLinksFilters {
@@ -78,16 +99,32 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
     throw new BadRequestError('Este venue no tiene una afiliación de e-commerce activa. Contacta a soporte para activarla.')
   }
 
-  // 2. Generate unique short code
+  // 2. If purpose is ITEM, validate productId belongs to venue
+  if (data.purpose === 'ITEM') {
+    if (!data.productId) {
+      throw new BadRequestError('El producto es requerido para ligas de pago de artículo')
+    }
+    const product = await prisma.product.findFirst({
+      where: { id: data.productId, venueId },
+      select: { id: true },
+    })
+    if (!product) {
+      throw new BadRequestError('El producto no existe o no pertenece a este venue')
+    }
+  }
+
+  // 3. Generate unique short code
   const shortCode = nanoid(8)
 
-  // 3. Create payment link
+  // 4. Create payment link
   const paymentLink = await prisma.paymentLink.create({
     data: {
       shortCode,
       venueId,
       ecommerceMerchantId: ecommerceMerchant.id,
       createdById: staffId,
+      purpose: data.purpose || 'PAYMENT',
+      productId: data.purpose === 'ITEM' ? data.productId : undefined,
       title: data.title,
       description: data.description,
       imageUrl: data.imageUrl,
@@ -97,6 +134,8 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
       isReusable: data.isReusable ?? false,
       expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
       redirectUrl: data.redirectUrl,
+      customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
+      tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
     },
     include: {
       createdBy: {
@@ -179,6 +218,15 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
       createdBy: {
         select: { id: true, firstName: true, lastName: true },
       },
+      product: {
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          price: true,
+          imageUrl: true,
+        },
+      },
       checkoutSessions: {
         orderBy: { createdAt: 'desc' },
         take: 10,
@@ -246,6 +294,27 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
   }
   if (data.redirectUrl !== undefined) updateData.redirectUrl = data.redirectUrl
   if (data.status !== undefined) updateData.status = data.status
+  if (data.productId !== undefined) {
+    if (data.productId) {
+      // Validate the product belongs to this venue
+      const product = await prisma.product.findFirst({
+        where: { id: data.productId, venueId, deletedAt: null },
+        select: { id: true },
+      })
+      if (!product) {
+        throw new BadRequestError('Producto no encontrado en este venue')
+      }
+      updateData.product = { connect: { id: data.productId } }
+    } else {
+      updateData.product = { disconnect: true }
+    }
+  }
+  if (data.customFields !== undefined) {
+    updateData.customFields = data.customFields === null ? Prisma.JsonNull : (data.customFields as unknown as Prisma.InputJsonValue)
+  }
+  if (data.tippingConfig !== undefined) {
+    updateData.tippingConfig = data.tippingConfig === null ? Prisma.JsonNull : (data.tippingConfig as unknown as Prisma.InputJsonValue)
+  }
 
   const updated = await prisma.paymentLink.update({
     where: { id: linkId },
@@ -328,6 +397,15 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
           secondaryColor: true,
         },
       },
+      product: {
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          price: true,
+          imageUrl: true,
+        },
+      },
     },
   })
 
@@ -358,6 +436,7 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
   return {
     id: paymentLink.id,
     shortCode: paymentLink.shortCode,
+    purpose: paymentLink.purpose,
     title: paymentLink.title,
     description: paymentLink.description,
     imageUrl: paymentLink.imageUrl,
@@ -365,6 +444,10 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     amount: paymentLink.amount,
     currency: paymentLink.currency,
     venue: paymentLink.venue,
+    product: paymentLink.product,
+    customFields: paymentLink.customFields,
+    tippingConfig: paymentLink.tippingConfig,
+    redirectUrl: paymentLink.redirectUrl,
   }
 }
 
@@ -382,6 +465,9 @@ export async function createCheckoutSession(
     customerEmail?: string
     customerPhone?: string
     amount?: number
+    quantity?: number
+    tipAmount?: number
+    customFieldResponses?: Record<string, string>
   },
 ) {
   // 1. Resolve payment link
@@ -393,6 +479,14 @@ export async function createCheckoutSession(
           id: true,
           sandboxMode: true,
           providerCredentials: true,
+        },
+      },
+      product: {
+        select: {
+          id: true,
+          name: true,
+          price: true,
+          taxRate: true,
         },
       },
     },
@@ -421,8 +515,13 @@ export async function createCheckoutSession(
   }
 
   // 2. Determine amount
+  const quantity = cardData.quantity || 1
   let chargeAmount: number
-  if (paymentLink.amountType === 'FIXED') {
+
+  if (paymentLink.purpose === 'ITEM' && paymentLink.product) {
+    // For ITEM links, calculate amount from product price * quantity
+    chargeAmount = Number(paymentLink.product.price) * quantity
+  } else if (paymentLink.amountType === 'FIXED') {
     chargeAmount = Number(paymentLink.amount)
   } else {
     if (!cardData.amount || cardData.amount <= 0) {
@@ -430,6 +529,35 @@ export async function createCheckoutSession(
     }
     chargeAmount = cardData.amount
   }
+
+  // 2b. Validate custom field responses if link has custom fields
+  const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
+  if (customFields && customFields.length > 0) {
+    for (const field of customFields) {
+      if (field.required) {
+        const response = cardData.customFieldResponses?.[field.id]
+        if (!response || response.trim() === '') {
+          throw new BadRequestError(`El campo "${field.label}" es requerido`)
+        }
+      }
+      // Validate SELECT field options
+      if (field.type === 'SELECT' && field.options && cardData.customFieldResponses?.[field.id]) {
+        if (!field.options.includes(cardData.customFieldResponses[field.id])) {
+          throw new BadRequestError(`Opción inválida para el campo "${field.label}"`)
+        }
+      }
+    }
+  }
+
+  // 2c. Calculate tip amount
+  const tipAmount = cardData.tipAmount && cardData.tipAmount > 0 ? cardData.tipAmount : 0
+  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
+  if (tipAmount > 0 && !tippingConfig) {
+    throw new BadRequestError('Esta liga de pago no acepta propinas')
+  }
+
+  // Add tip to total charge amount
+  chargeAmount = chargeAmount + tipAmount
 
   // 3. Get Blumon service
   const credentials = paymentLink.ecommerceMerchant.providerCredentials as Record<string, any>
@@ -470,6 +598,19 @@ export async function createCheckoutSession(
         maskedPan: tokenResult.maskedPan,
         cardBrand: tokenResult.cardBrand,
         cvv: cardData.cvv, // Needed for charge step
+        // Tip tracking
+        ...(tipAmount > 0 && { tipAmount }),
+        // Custom field responses
+        ...(cardData.customFieldResponses && { customFieldResponses: cardData.customFieldResponses }),
+        // ITEM link metadata for order creation
+        ...(paymentLink.purpose === 'ITEM' &&
+          paymentLink.product && {
+            purpose: 'ITEM',
+            productId: paymentLink.product.id,
+            productName: paymentLink.product.name,
+            productPrice: Number(paymentLink.product.price),
+            quantity,
+          }),
       } as Prisma.InputJsonValue,
       status: 'PROCESSING',
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
@@ -504,7 +645,7 @@ export async function completeCharge(shortCode: string, sessionId: string, three
     where: { sessionId },
     include: {
       paymentLink: {
-        select: { id: true, shortCode: true, venueId: true },
+        select: { id: true, shortCode: true, venueId: true, purpose: true, productId: true, createdById: true },
       },
       ecommerceMerchant: {
         select: {
@@ -553,37 +694,132 @@ export async function completeCharge(shortCode: string, sessionId: string, three
     orderId: session.sessionId,
   })
 
-  // 4. Update session and payment link in transaction
-  await prisma.$transaction([
-    prisma.checkoutSession.update({
+  // 4. Update session and payment link + create Order for ITEM links
+  const isItemLink = session.paymentLink!.purpose === 'ITEM' && metadata.productId
+  const venueId = session.paymentLink!.venueId
+
+  await prisma.$transaction(async tx => {
+    // Update checkout session
+    await tx.checkoutSession.update({
       where: { id: session.id },
       data: {
         status: 'COMPLETED',
         completedAt: new Date(),
         blumonCheckoutId: chargeResult.transactionId,
-        // Clear sensitive data from metadata
         metadata: {
           maskedPan: metadata.maskedPan,
           cardBrand: metadata.cardBrand,
           authorizationCode: chargeResult.authorizationCode,
           transactionId: chargeResult.transactionId,
+          // Preserve tip and custom field data
+          ...(metadata.tipAmount && { tipAmount: metadata.tipAmount }),
+          ...(metadata.customFieldResponses && { customFieldResponses: metadata.customFieldResponses }),
+          // Preserve product info for reference
+          ...(isItemLink && {
+            productId: metadata.productId,
+            productName: metadata.productName,
+            quantity: metadata.quantity,
+          }),
         } as Prisma.InputJsonValue,
       },
-    }),
-    prisma.paymentLink.update({
+    })
+
+    // Update payment link counters
+    await tx.paymentLink.update({
       where: { id: session.paymentLink!.id },
       data: {
         totalCollected: { increment: session.amount },
         paymentCount: { increment: 1 },
       },
-    }),
-  ])
+    })
+
+    // For ITEM links: create Order + OrderItems (like TPV flow)
+    if (isItemLink) {
+      const quantity = metadata.quantity || 1
+      const unitPrice = new Prisma.Decimal(metadata.productPrice)
+      const subtotal = unitPrice.mul(quantity)
+      const taxAmount = new Prisma.Decimal(0) // Tax included in price for payment links
+      const orderTipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
+      const total = subtotal.add(orderTipAmount)
+
+      const orderNumber = `PL-${Date.now()}`
+
+      const order = await tx.order.create({
+        data: {
+          venueId,
+          orderNumber,
+          type: 'TAKEOUT',
+          source: 'PAYMENT_LINK',
+          createdById: session.paymentLink!.createdById,
+          customerName: session.customerName,
+          customerEmail: session.customerEmail,
+          subtotal,
+          discountAmount: 0,
+          taxAmount,
+          tipAmount: orderTipAmount,
+          total,
+          paidAmount: total,
+          remainingBalance: 0,
+          status: 'COMPLETED',
+          paymentStatus: 'PAID',
+          completedAt: new Date(),
+          items: {
+            create: {
+              productId: metadata.productId,
+              productName: metadata.productName,
+              quantity,
+              unitPrice,
+              discountAmount: 0,
+              taxAmount,
+              total,
+            },
+          },
+        },
+      })
+
+      logger.info('Order created for ITEM payment link', {
+        orderId: order.id,
+        orderNumber,
+        paymentLinkId: session.paymentLink!.id,
+        productId: metadata.productId,
+        quantity,
+      })
+    }
+  })
+
+  // 5. Deduct inventory AFTER transaction (non-blocking, same pattern as TPV)
+  if (isItemLink) {
+    const quantity = metadata.quantity || 1
+    try {
+      await deductInventoryForProduct(
+        venueId,
+        metadata.productId,
+        quantity,
+        session.sessionId, // Use sessionId as orderId reference for tracking
+      )
+      logger.info('Inventory deducted for payment link item', {
+        paymentLinkId: session.paymentLink!.id,
+        productId: metadata.productId,
+        quantity,
+      })
+    } catch (deductionError: any) {
+      // Log but don't fail the payment — inventory deduction is best-effort
+      // (consistent with TPV behavior for NO_RECIPE products)
+      logger.error('Failed to deduct inventory for payment link item', {
+        paymentLinkId: session.paymentLink!.id,
+        productId: metadata.productId,
+        quantity,
+        error: deductionError.message,
+      })
+    }
+  }
 
   logger.info('Payment link charge completed', {
     sessionId,
     paymentLinkId: session.paymentLink!.id,
     amount: Number(session.amount),
     transactionId: chargeResult.transactionId,
+    isItemLink,
   })
 
   return {
