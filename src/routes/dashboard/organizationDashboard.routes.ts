@@ -8,6 +8,7 @@ import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken
 import { validateRequest } from '../../middlewares/validation'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as orgTerminalsService from '../../services/organization-dashboard/orgTerminals.service'
+import * as orgMessagesService from '../../services/organization-dashboard/orgMessages.service'
 import * as activityLogService from '../../services/dashboard/activity-log.service'
 import {
   GetOrgTerminalSchema,
@@ -1011,6 +1012,79 @@ router.get(
       res.json({
         success: true,
         data: actions,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ==========================================
+// ORG-LEVEL MESSAGE BROADCAST
+// ==========================================
+
+/**
+ * POST /dashboard/organizations/:orgId/messages/broadcast
+ * Broadcasts a message to ALL terminals across ALL venues in the organization
+ */
+router.post(
+  '/:orgId/messages/broadcast',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const {
+        type,
+        title,
+        body,
+        priority,
+        requiresAck,
+        surveyOptions,
+        surveyMultiSelect,
+        actionLabel,
+        actionType,
+        actionPayload,
+        targetType,
+        targetTerminalIds,
+        expiresAt,
+      } = req.body
+
+      if (!type || !title || !body || !targetType) {
+        return res.status(400).json({
+          success: false,
+          error: 'missing_fields',
+          message: 'type, title, body, and targetType are required',
+        })
+      }
+
+      // Get creator info from auth context (same pattern as tpv-message controller)
+      const createdBy = (req as any).user?.staffId || (req as any).user?.id || (req as any).authContext?.userId || 'unknown'
+      const createdByName = (req as any).user?.firstName
+        ? `${(req as any).user.firstName} ${(req as any).user.lastName || ''}`.trim()
+        : 'Admin'
+
+      const result = await orgMessagesService.broadcastOrgMessage(orgId, {
+        type,
+        title,
+        body,
+        priority,
+        requiresAck,
+        surveyOptions,
+        surveyMultiSelect,
+        actionLabel,
+        actionType,
+        actionPayload,
+        targetType,
+        targetTerminalIds,
+        expiresAt,
+        createdBy,
+        createdByName,
+      })
+
+      res.status(201).json({
+        success: true,
+        data: result,
       })
     } catch (error) {
       next(error)
