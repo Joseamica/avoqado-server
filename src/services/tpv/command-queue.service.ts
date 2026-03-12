@@ -97,7 +97,7 @@ const COMMAND_CONFIG: Record<
     riskLevel: 'MEDIUM',
     defaultPriority: 'NORMAL',
     maxRetries: 2,
-    expirationMinutes: 30,
+    expirationMinutes: 1440, // 24 hours - terminal may be offline, restart when it reconnects
     doubleConfirm: false,
   },
   SHUTDOWN: {
