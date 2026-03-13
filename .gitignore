@@ -23,3 +23,6 @@ dist/
 *.png
 .playwright-mcp/
 scripts/temp-*
+.eslintcache
+.cache/eslint/
+.cache/pre-deploy-logs/

@@ -14,7 +14,17 @@ export async function getPaymentsData(
     { venueId: string },
     {},
     {},
-    { page?: string; pageSize?: string; merchantAccountId?: string; method?: string; source?: string; staffId?: string; search?: string }
+    {
+      page?: string
+      pageSize?: string
+      merchantAccountId?: string
+      method?: string
+      source?: string
+      staffId?: string
+      search?: string
+      startDate?: string
+      endDate?: string
+    }
   >,
   res: Response,
   next: NextFunction,
@@ -32,6 +42,8 @@ export async function getPaymentsData(
       source: req.query.source,
       staffId: req.query.staffId,
       search: req.query.search,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
     }
 
     // Llamada al servicio con los parámetros ya parseados
