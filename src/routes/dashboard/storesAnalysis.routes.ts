@@ -1303,10 +1303,18 @@ router.delete('/org-goals/:goalId', orgGoalAccess, async (req: Request, res: Res
 // =============================================================================
 // ORG-LEVEL ATTENDANCE CONFIG ENDPOINTS
 // Organization-level attendance defaults (check-in time, lateness, geofence).
-// Requires attendance:org-manage permission (OWNER-only by default).
+// Requires OWNER+ role (permission-based check was being filtered by white-label feature gate).
 // =============================================================================
 
-const orgAttendanceAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true, permission: 'attendance:org-manage' })]
+const requireOwnerPlus = (req: Request, res: Response, next: NextFunction) => {
+  const access = req.access
+  if (!access || !['OWNER', 'SUPERADMIN'].includes(access.role)) {
+    return res.status(403).json({ message: 'Owner access required' })
+  }
+  next()
+}
+
+const orgAttendanceAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true }), requireOwnerPlus]
 
 /**
  * GET /dashboard/venues/:venueId/stores-analysis/org-attendance-config

@@ -12,6 +12,8 @@ export interface PaymentFilters {
   source?: string
   staffId?: string
   search?: string
+  startDate?: string
+  endDate?: string
 }
 
 export async function getPaymentsData(
@@ -52,6 +54,16 @@ export async function getPaymentsData(
 
     if (filters.staffId) {
       whereClause.processedById = filters.staffId
+    }
+
+    if (filters.startDate || filters.endDate) {
+      whereClause.createdAt = {}
+      if (filters.startDate) {
+        whereClause.createdAt.gte = new Date(filters.startDate)
+      }
+      if (filters.endDate) {
+        whereClause.createdAt.lte = new Date(filters.endDate)
+      }
     }
 
     // Búsqueda por texto (amount, reference, last4, waiter name)
