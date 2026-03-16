@@ -54,6 +54,20 @@ interface VenueSalesSummaryData {
     netSales: number
     avgOrder: number
   }>
+  // Last week's metrics for weekly comparison
+  lastWeekMetrics?: {
+    grossSales: number
+    items: number
+    serviceCosts: number
+    discounts: number
+    refunds: number
+    netSales: number
+    taxes: number
+    tips: number
+    totalCollected: number
+    platformFees: number
+    transactionCount: number
+  }
   // Customer metrics (if available)
   customers?: {
     total: number
@@ -262,14 +276,15 @@ export class NightlySalesSummaryJob {
           const orderSources = await getOrderSourcesBreakdown(venue.id, todayStart, todayEnd)
 
           // Prepare email data
+          const lwSummary = lastWeekSummary.summary
           const summaryData: VenueSalesSummaryData = {
             venueId: venue.id,
             venueName: venue.name,
             venueTimezone: timezone,
             venueCurrency: venue.currency || 'MXN',
             reportDate: now,
-            businessHoursStart: '08:00 AM',
-            businessHoursEnd: '10:00 PM',
+            businessHoursStart: '', // Not tracked per venue yet
+            businessHoursEnd: '',
             dashboardUrl: `${FRONTEND_URL}/venues/${venue.slug}`,
             metrics: todaySummary.summary,
             previousPeriod: {
@@ -279,6 +294,19 @@ export class NightlySalesSummaryJob {
                   ? yesterdaySummary.summary.netSales / yesterdaySummary.summary.transactionCount
                   : 0,
               transactionCount: yesterdaySummary.summary.transactionCount,
+            },
+            lastWeekMetrics: {
+              grossSales: lwSummary.grossSales,
+              items: lwSummary.items,
+              serviceCosts: lwSummary.serviceCosts,
+              discounts: lwSummary.discounts,
+              refunds: lwSummary.refunds,
+              netSales: lwSummary.netSales,
+              taxes: lwSummary.taxes,
+              tips: lwSummary.tips,
+              totalCollected: lwSummary.totalCollected,
+              platformFees: lwSummary.platformFees,
+              transactionCount: lwSummary.transactionCount,
             },
             categoryBreakdown,
             orderSources,

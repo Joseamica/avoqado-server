@@ -1,76 +1,52 @@
 /**
- * Test script to send a sales summary email
+ * Test script to send a sales summary email with REAL data from the database
  * Run with: npx ts-node scripts/test-sales-summary-email.ts
+ *
+ * Uses the same logic as the nightly job but for a single venue.
  */
 
 import '../src/config/env'
-import emailService from '../src/services/email.service'
+import { NightlySalesSummaryJob } from '../src/jobs/nightly-sales-summary.job'
 
 async function sendTestEmail() {
-  const testEmail = 'joseamica@gmail.com'
+  // Use the actual nightly job with a specific venue
+  // Pass a venueId to only process that one venue
+  const job = new NightlySalesSummaryJob()
 
-  // Mock data similar to what the job would generate
-  const mockData = {
-    venueId: 'test-venue-id',
-    venueName: 'Test Restaurante',
-    venueTimezone: 'America/Mexico_City',
-    venueCurrency: 'MXN',
-    reportDate: new Date(),
-    businessHoursStart: '8:00 AM',
-    businessHoursEnd: '10:00 PM',
-    dashboardUrl: 'https://dashboard.avoqado.io/test-restaurante',
-    metrics: {
-      grossSales: 15420.5,
-      items: 15420.5,
-      serviceCosts: 0,
-      discounts: 850.0,
-      refunds: 0,
-      netSales: 14570.5,
-      deferredSales: 0,
-      taxes: 2331.28,
-      tips: 2185.58,
-      platformFees: 364.26,
-      staffCommissions: 728.53,
-      commissions: 364.26,
-      totalCollected: 16391.82,
-      netProfit: 13477.71,
-      transactionCount: 47,
-    },
-    previousPeriod: {
-      netSales: 12500.0,
-      avgOrder: 280.0,
-      transactionCount: 42,
-    },
-    categoryBreakdown: [
-      { name: 'Platos Fuertes', itemsSold: 28, netSales: 8400.0 },
-      { name: 'Bebidas', itemsSold: 52, netSales: 3120.0 },
-      { name: 'Entradas', itemsSold: 18, netSales: 1800.0 },
-      { name: 'Postres', itemsSold: 12, netSales: 1250.5 },
-    ],
-    orderSources: [
-      { source: 'Punto de venta', orders: 35, netSales: 10850.0, avgOrder: 310.0 },
-      { source: 'Avoqado QR', orders: 12, netSales: 3720.5, avgOrder: 310.04 },
-    ],
-  }
-
-  // Weekly change: 16.56% increase
-  const weeklyChange = 16.56
-
-  console.log(`Sending test sales summary email to ${testEmail}...`)
+  // Find an active venue to test with
+  const { PrismaClient } = await import('@prisma/client')
+  const prisma = new PrismaClient()
 
   try {
-    const result = await emailService.sendSalesSummaryEmail(testEmail, mockData, weeklyChange)
+    // Get the first active venue with recent orders
+    const venue = await prisma.venue.findFirst({
+      where: {
+        status: { in: ['ACTIVE', 'TRIAL', 'LIVE_DEMO'] },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, name: true, slug: true },
+    })
 
-    if (result) {
-      console.log('Email sent successfully!')
-    } else {
-      console.log('Email service returned false - check if SMTP is configured')
+    if (!venue) {
+      console.error('No active venues found')
+      process.exit(1)
     }
-  } catch (error) {
-    console.error('Failed to send email:', error)
-  }
 
-  process.exit(0)
+    console.log(`Testing with venue: ${venue.name} (${venue.id})`)
+    console.log('Running nightly sales summary job for this venue...\n')
+
+    const result = await job.runNow(venue.id)
+
+    console.log('\nJob completed:')
+    console.log(`  Venues processed: ${result.venuesProcessed}`)
+    console.log(`  Emails sent: ${result.emailsSent}`)
+    console.log(`  Errors: ${result.errors}`)
+  } catch (error) {
+    console.error('Failed:', error)
+  } finally {
+    await prisma.$disconnect()
+    process.exit(0)
+  }
 }
 
 sendTestEmail()

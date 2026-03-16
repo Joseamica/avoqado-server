@@ -233,7 +233,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   const platformFees = Number(platformFeesResult._sum.feeAmount || 0)
   const staffCommissions = Number(staffCommissionsResult._sum.netCommission || 0)
   const deferredSales = Number(deferredResult._sum.remainingBalance || 0)
-  const serviceCosts = 0 // Not tracked separately in current schema
+  // Service costs = any revenue beyond item sales (delivery fees, service charges, etc.)
+  // Currently no separate serviceCharge field in Order schema, so this is derived
+  const serviceCosts = grossSales - items
 
   // Net Sales = Gross Sales - Discounts - Refunds
   const netSales = grossSales - discounts - refunds
@@ -548,7 +550,7 @@ async function calculateTimePeriodMetrics(
       metrics: {
         grossSales,
         items: grossSales, // Simplified - using grossSales as items proxy
-        serviceCosts: 0,
+        serviceCosts: grossSales - grossSales, // Derived: grossSales - items (no service charges in current schema)
         discounts,
         refunds,
         netSales,

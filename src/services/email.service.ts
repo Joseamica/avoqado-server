@@ -1833,22 +1833,43 @@ Avoqado Dashboard
         new: number
         returning: number
       }
+      // Last week's metrics for weekly comparison column
+      lastWeekMetrics?: {
+        grossSales: number
+        items: number
+        serviceCosts: number
+        discounts: number
+        refunds: number
+        netSales: number
+        taxes: number
+        tips: number
+        totalCollected: number
+        platformFees: number
+        transactionCount: number
+      }
     },
     weeklyChange: number = 0,
   ): Promise<boolean> {
     const currency = data.venueCurrency || 'MXN'
 
+    // Format weekly change for a specific metric
+    const weeklyChangeFor = (current: number, lastWeek: number | undefined): string => {
+      if (lastWeek === undefined || lastWeek === 0) return 'n/a'
+      const change = ((current - lastWeek) / lastWeek) * 100
+      const sign = change >= 0 ? '+' : ''
+      return `${sign}${change.toFixed(1)}%`
+    }
+
+    const weeklyColorFor = (current: number, lastWeek: number | undefined): string => {
+      if (lastWeek === undefined || lastWeek === 0) return '#666'
+      return current >= lastWeek ? '#22c55e' : '#ef4444'
+    }
+
+    const lw = data.lastWeekMetrics
+
     // Format currency
     const formatCurrency = (amount: number) => {
       return new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(amount)
-    }
-
-    // Format percentage change
-    const formatChange = (current: number, previous: number) => {
-      if (previous === 0) return 'n/a'
-      const change = ((current - previous) / previous) * 100
-      const sign = change >= 0 ? '+' : ''
-      return `${sign}${change.toFixed(1)}%`
     }
 
     // Format date in Spanish
@@ -1864,13 +1885,8 @@ Avoqado Dashboard
     // Calculate average order
     const avgOrder = data.metrics.transactionCount > 0 ? data.metrics.netSales / data.metrics.transactionCount : 0
 
-    // Previous period values
-    const _prevNetSales = data.previousPeriod?.netSales || 0
-    const prevAvgOrder = data.previousPeriod?.avgOrder || 0
-
-    // Format weekly change
-    const weeklyChangeFormatted = weeklyChange !== 0 ? `${weeklyChange >= 0 ? '+' : ''}${weeklyChange.toFixed(1)}%` : 'n/a'
-    const _weeklyChangeColor = weeklyChange >= 0 ? '#22c55e' : '#ef4444'
+    // Weekly average order for comparison
+    const lastWeekAvgOrder = lw && lw.transactionCount > 0 ? lw.netSales / lw.transactionCount : 0
 
     const subject = `${reportDateCapitalized} - Resumen de ventas - ${data.venueName}`
 
@@ -1897,9 +1913,9 @@ Avoqado Dashboard
     <!-- Title Section -->
     <div style="padding-bottom: 16px;">
       <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">${reportDateCapitalized}, ${data.venueName}</h1>
-      <p style="margin: 0 0 8px 0; font-size: 14px; color: #000;">
-        ${reportDateFormatted} ${data.businessHoursStart} - ${reportDateFormatted} ${data.businessHoursEnd} CST
-      </p>
+      ${data.businessHoursStart && data.businessHoursEnd ? `<p style="margin: 0 0 8px 0; font-size: 14px; color: #000;">
+        ${reportDateFormatted} ${data.businessHoursStart} - ${reportDateFormatted} ${data.businessHoursEnd} (${data.venueTimezone})
+      </p>` : ''}
       <p style="margin: 0 0 8px 0; font-size: 14px; color: #666;">
         Este informe solo considera los pedidos cerrados y las ventas realizadas durante el horario comercial.
       </p>
@@ -1918,14 +1934,12 @@ Avoqado Dashboard
           <td style="padding: 24px; border-right: 1px solid #e0e0e0; width: 50%; vertical-align: top;">
             <div style="font-size: 14px; color: #666; margin-bottom: 8px;">Ventas netas</div>
             <div style="font-size: 36px; font-weight: 400; color: #000; margin-bottom: 4px;">${formatCurrency(data.metrics.netSales)}</div>
-            <div style="font-size: 14px; color: #666;">${weeklyChangeFormatted} semanal</div>
-            <div style="font-size: 14px; color: #666;">n/a anual</div>
+            <div style="font-size: 14px; color: ${weeklyColorFor(data.metrics.netSales, lw?.netSales)};">${weeklyChangeFor(data.metrics.netSales, lw?.netSales)} semanal</div>
           </td>
           <td style="padding: 24px; width: 50%; vertical-align: top;">
             <div style="font-size: 14px; color: #666; margin-bottom: 8px;">Pedido promedio</div>
             <div style="font-size: 36px; font-weight: 400; color: #000; margin-bottom: 4px;">${formatCurrency(avgOrder)}</div>
-            <div style="font-size: 14px; color: #666;">${formatChange(avgOrder, prevAvgOrder)} semanal</div>
-            <div style="font-size: 14px; color: #666;">n/a anual</div>
+            <div style="font-size: 14px; color: ${weeklyColorFor(avgOrder, lastWeekAvgOrder)};">${weeklyChangeFor(avgOrder, lastWeekAvgOrder)} semanal</div>
           </td>
         </tr>
       </table>
@@ -1951,47 +1965,47 @@ Avoqado Dashboard
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; font-weight: 600; color: #000;">Ventas brutas</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.grossSales)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #666; text-align: right;">n/a</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.grossSales, lw?.grossSales)}; text-align: right;">${weeklyChangeFor(data.metrics.grossSales, lw?.grossSales)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0 16px 24px; font-size: 15px; color: #000;">Ventas de articulos</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.items)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #666; text-align: right;">n/a</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.items, lw?.items)}; text-align: right;">${weeklyChangeFor(data.metrics.items, lw?.items)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0 16px 24px; font-size: 15px; color: #000;">Cobro por servicio</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.serviceCosts)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #22c55e; text-align: right;">+0.0%</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.serviceCosts, lw?.serviceCosts)}; text-align: right;">${weeklyChangeFor(data.metrics.serviceCosts, lw?.serviceCosts)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">Devoluciones</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.refunds)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #22c55e; text-align: right;">+0.0%</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.refunds, lw?.refunds)}; text-align: right;">${weeklyChangeFor(data.metrics.refunds, lw?.refunds)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">Descuentos y cortesias</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.discounts)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #22c55e; text-align: right;">+0.0%</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.discounts, lw?.discounts)}; text-align: right;">${weeklyChangeFor(data.metrics.discounts, lw?.discounts)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #e0e0e0;">
           <td style="padding: 16px 0; font-size: 15px; font-weight: 600; color: #000;">Ventas netas</td>
           <td style="padding: 16px 0; font-size: 15px; font-weight: 600; color: #000; text-align: right;">${formatCurrency(data.metrics.netSales)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #666; text-align: right;">n/a</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.netSales, lw?.netSales)}; text-align: right;">${weeklyChangeFor(data.metrics.netSales, lw?.netSales)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">Impuestos</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.taxes)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #22c55e; text-align: right;">+0.0%</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.taxes, lw?.taxes)}; text-align: right;">${weeklyChangeFor(data.metrics.taxes, lw?.taxes)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">Propinas</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.tips)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #22c55e; text-align: right;">+0.0%</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.tips, lw?.tips)}; text-align: right;">${weeklyChangeFor(data.metrics.tips, lw?.tips)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #e0e0e0;">
           <td style="padding: 16px 0; font-size: 15px; font-weight: 600; color: #000;">Total en ventas</td>
           <td style="padding: 16px 0; font-size: 15px; font-weight: 600; color: #000; text-align: right;">${formatCurrency(data.metrics.totalCollected)}</td>
-          <td style="padding: 16px 0; font-size: 14px; color: #666; text-align: right;">n/a</td>
+          <td style="padding: 16px 0; font-size: 14px; color: ${weeklyColorFor(data.metrics.totalCollected, lw?.totalCollected)}; text-align: right;">${weeklyChangeFor(data.metrics.totalCollected, lw?.totalCollected)}</td>
         </tr>
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">
@@ -2022,7 +2036,7 @@ Avoqado Dashboard
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 16px 0; font-size: 15px; color: #000;">${cat.name}</td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${cat.itemsSold}</td>
-          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(cat.netSales)}<br><span style="font-size: 13px; color: #666;">n/a</span></td>
+          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(cat.netSales)}</td>
         </tr>
         `,
           )
