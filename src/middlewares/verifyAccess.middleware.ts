@@ -117,6 +117,8 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
       // SUPERADMIN always passes through - they have access to ALL venues
       if (superAdminVenue) {
         logger.debug(`verifyAccess: SUPERADMIN bypass for user ${userId}`)
+        // Set req.access so downstream middleware (e.g. requireOwnerPlus) can read the role
+        req.access = { role: StaffRole.SUPERADMIN } as any
         return next()
       }
 
