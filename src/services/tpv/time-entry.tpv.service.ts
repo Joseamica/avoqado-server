@@ -263,7 +263,13 @@ export async function clockOut(params: ClockOutParams) {
 
   const totalBreakMinutes = calculateTotalBreakMinutes(updatedBreaks)
   const clockOutTime = new Date()
-  const totalHours = calculateHours(timeEntry.clockInTime, clockOutTime, totalBreakMinutes)
+  const rawHours = calculateHours(timeEntry.clockInTime, clockOutTime, totalBreakMinutes)
+
+  // Decimal(5,2) in DB → max 999.99 hours (~41 days).
+  // If exceeded, the clock-in is corrupted/stale — cap it so the employee
+  // can still clock out and the entry is marked for admin review.
+  const MAX_HOURS = 999.99
+  const totalHours = Math.min(rawHours, MAX_HOURS)
 
   // Update time entry with photo and GPS data
   const updatedTimeEntry = await prisma.timeEntry.update({

@@ -15,6 +15,7 @@ import * as paymentMobileController from '../controllers/mobile/payment.mobile.c
 import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
 import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
+import * as reportsMobileController from '../controllers/mobile/reports.mobile.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
 import * as productMobileController from '../controllers/mobile/product.mobile.controller'
@@ -490,6 +491,49 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  *         description: Not authenticated
  */
 router.post('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermission('orders:create'), orderMobileController.createOrder)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/orders:
+ *   get:
+ *     tags: [Mobile - Orders]
+ *     summary: List orders for a venue (paginated)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: page
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - name: pageSize
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *       - name: search
+ *         in: query
+ *         schema:
+ *           type: string
+ *       - name: status
+ *         in: query
+ *         schema:
+ *           type: string
+ *           description: Comma-separated statuses (e.g. COMPLETED,PENDING)
+ *       - name: paymentStatus
+ *         in: query
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Paginated list of orders
+ */
+router.get('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermission('orders:read'), orderMobileController.listOrders)
 
 /**
  * @openapi
@@ -1346,6 +1390,35 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   receiptMobileController.sendReceiptWhatsapp,
+)
+
+// ============================================================================
+// REPORTS (Sales Reports)
+// Authenticated endpoints - requires MANAGER+ role
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/reports/sales-summary
+ * Get sales summary report with payment method breakdown and hourly data.
+ * Query: { startDate: string, endDate: string, groupBy?: string, reportType?: string }
+ */
+router.get(
+  '/venues/:venueId/reports/sales-summary',
+  authenticateTokenMiddleware,
+  checkPermission('reports:read'),
+  reportsMobileController.salesSummary,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/reports/sales-by-item
+ * Get sales by item report (top products).
+ * Query: { startDate: string, endDate: string }
+ */
+router.get(
+  '/venues/:venueId/reports/sales-by-item',
+  authenticateTokenMiddleware,
+  checkPermission('reports:read'),
+  reportsMobileController.salesByItem,
 )
 
 export default router

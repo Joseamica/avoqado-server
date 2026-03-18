@@ -82,7 +82,159 @@ function flattenOrderModifiers(order: any): any {
   }
 }
 
+// MARK: - List Orders Types
+
+export interface ListOrdersInput {
+  page: number
+  pageSize: number
+  search?: string
+  status?: string // comma-separated: "COMPLETED,CONFIRMED"
+  paymentStatus?: string
+}
+
+export interface OrderSummaryResponse {
+  id: string
+  orderNumber: string
+  status: string
+  paymentStatus: string
+  type: string
+  source: string
+  subtotal: number
+  taxAmount: number
+  discountAmount: number
+  total: number
+  itemCount: number
+  staffName: string | null
+  customerName: string | null
+  createdAt: Date
+}
+
+export interface OrderDetailResponse {
+  id: string
+  orderNumber: string
+  status: string
+  paymentStatus: string
+  type: string
+  source: string
+  subtotal: number
+  taxAmount: number
+  discountAmount: number
+  tipAmount: number
+  total: number
+  staffName: string | null
+  customerName: string | null
+  specialRequests: string | null
+  createdAt: Date
+  items: Array<{
+    id: string
+    productId: string | null
+    productName: string | null
+    quantity: number
+    unitPrice: number
+    total: number
+    notes: string | null
+    modifiers: Array<{
+      id: string
+      name: string
+      price: number
+    }>
+  }>
+  payments: Array<{
+    id: string
+    amount: number
+    tipAmount: number
+    method: string
+    status: string
+    createdAt: Date
+    processedBy: string | null
+  }>
+}
+
 // MARK: - Service Functions
+
+/**
+ * List orders for a venue with pagination, search, and filters
+ *
+ * @param venueId Venue ID (tenant isolation)
+ * @param input Pagination and filter parameters
+ * @returns Paginated list of order summaries
+ */
+export async function listOrders(venueId: string, input: ListOrdersInput) {
+  logger.info(`📱 [ORDER.MOBILE] Listing orders | venue=${venueId} | page=${input.page} | search=${input.search || 'none'}`)
+
+  const skip = (input.page - 1) * input.pageSize
+  const take = input.pageSize
+
+  // Build where clause
+  const where: any = {
+    venueId,
+    status: { not: 'DELETED' },
+  }
+
+  // Filter by status if provided
+  if (input.status) {
+    const statuses = input.status.split(',').map(s => s.trim())
+    where.status = { in: statuses }
+  }
+
+  // Filter by payment status if provided
+  if (input.paymentStatus) {
+    const paymentStatuses = input.paymentStatus.split(',').map(s => s.trim())
+    where.paymentStatus = { in: paymentStatuses }
+  }
+
+  // Search by order number
+  if (input.search) {
+    where.orderNumber = { contains: input.search, mode: 'insensitive' }
+  }
+
+  const [orders, total] = await prisma.$transaction([
+    prisma.order.findMany({
+      where,
+      include: {
+        servedBy: {
+          select: { firstName: true, lastName: true },
+        },
+        _count: {
+          select: { items: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take,
+    }),
+    prisma.order.count({ where }),
+  ])
+
+  const data: OrderSummaryResponse[] = orders.map((order: any) => ({
+    id: order.id,
+    orderNumber: order.orderNumber,
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+    type: order.type,
+    source: order.source,
+    subtotal: Number(order.subtotal),
+    taxAmount: Number(order.taxAmount),
+    discountAmount: Number(order.discountAmount),
+    total: Number(order.total),
+    itemCount: order._count.items,
+    staffName: order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}`.trim() : null,
+    customerName: order.customerName,
+    createdAt: order.createdAt,
+  }))
+
+  logger.info(`✅ [ORDER.MOBILE] Listed ${data.length} orders (total: ${total})`)
+
+  return {
+    data,
+    meta: {
+      total,
+      page: input.page,
+      pageSize: input.pageSize,
+      pageCount: Math.ceil(total / input.pageSize),
+    },
+  }
+}
 
 /**
  * Create a new order with items (for mobile order-based payment flow)
@@ -155,6 +307,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
 
   // Calculate totals and prepare items data
   let subtotal = 0
+  let totalTax = 0
   const itemsData = input.items.map(item => {
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
@@ -170,6 +323,11 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     const itemTotal = unitPrice * item.quantity
     subtotal += itemTotal
 
+    // Calculate tax using product's taxRate (default 0.16 = IVA 16%)
+    const taxRate = Number(product.taxRate ?? 0.16)
+    const itemTaxAmount = itemTotal * taxRate
+    totalTax += itemTaxAmount
+
     return {
       productId: item.productId,
       productName: product.name,
@@ -178,7 +336,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       quantity: item.quantity,
       unitPrice: new Prisma.Decimal(Number(product.price)),
       discountAmount: new Prisma.Decimal(0),
-      taxAmount: new Prisma.Decimal(0),
+      taxAmount: new Prisma.Decimal(itemTaxAmount),
       total: new Prisma.Decimal(itemTotal),
       notes: item.notes || null,
       modifiers: {
@@ -210,9 +368,9 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       source: input.source || 'AVOQADO_IOS',
       subtotal: new Prisma.Decimal(subtotal),
       discountAmount: new Prisma.Decimal(0),
-      taxAmount: new Prisma.Decimal(0),
-      total: new Prisma.Decimal(subtotal),
-      remainingBalance: new Prisma.Decimal(subtotal),
+      taxAmount: new Prisma.Decimal(totalTax),
+      total: new Prisma.Decimal(subtotal + totalTax),
+      remainingBalance: new Prisma.Decimal(subtotal + totalTax),
       customerName: input.customerName || null,
       customerPhone: input.customerPhone || null,
       specialRequests: input.specialRequests || null,
@@ -287,7 +445,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
  * @param orderId Order ID
  * @returns Order with items and payment status
  */
-export async function getOrder(venueId: string, orderId: string): Promise<CreatedOrderResponse> {
+export async function getOrder(venueId: string, orderId: string): Promise<OrderDetailResponse> {
   logger.info(`📱 [ORDER.MOBILE] Getting order ${orderId} | venue=${venueId}`)
 
   const order = await prisma.order.findUnique({
@@ -296,6 +454,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<Create
       venueId,
     },
     include: {
+      servedBy: {
+        select: { firstName: true, lastName: true },
+      },
       items: {
         include: {
           product: {
@@ -319,7 +480,13 @@ export async function getOrder(venueId: string, orderId: string): Promise<Create
         select: {
           id: true,
           amount: true,
+          tipAmount: true,
+          method: true,
           status: true,
+          createdAt: true,
+          processedBy: {
+            select: { firstName: true, lastName: true },
+          },
         },
       },
     },
@@ -337,10 +504,17 @@ export async function getOrder(venueId: string, orderId: string): Promise<Create
     orderNumber: flattenedOrder.orderNumber,
     status: flattenedOrder.status,
     paymentStatus: flattenedOrder.paymentStatus,
+    type: flattenedOrder.type,
+    source: flattenedOrder.source,
     subtotal: Number(flattenedOrder.subtotal),
     taxAmount: Number(flattenedOrder.taxAmount),
     discountAmount: Number(flattenedOrder.discountAmount),
+    tipAmount: Number(flattenedOrder.tipAmount),
     total: Number(flattenedOrder.total),
+    staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
+    customerName: flattenedOrder.customerName,
+    specialRequests: flattenedOrder.specialRequests,
+    createdAt: flattenedOrder.createdAt,
     items: flattenedOrder.items.map((item: any) => ({
       id: item.id,
       productId: item.productId,
@@ -348,9 +522,18 @@ export async function getOrder(venueId: string, orderId: string): Promise<Create
       quantity: item.quantity,
       unitPrice: Number(item.unitPrice),
       total: Number(item.total),
+      notes: item.notes || null,
       modifiers: item.modifiers || [],
     })),
-    createdAt: flattenedOrder.createdAt,
+    payments: (flattenedOrder.payments || []).map((p: any) => ({
+      id: p.id,
+      amount: Number(p.amount),
+      tipAmount: Number(p.tipAmount),
+      method: p.method,
+      status: p.status,
+      createdAt: p.createdAt,
+      processedBy: p.processedBy ? `${p.processedBy.firstName} ${p.processedBy.lastName}`.trim() : null,
+    })),
   }
 }
 

@@ -1913,9 +1913,13 @@ Avoqado Dashboard
     <!-- Title Section -->
     <div style="padding-bottom: 16px;">
       <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">${reportDateCapitalized}, ${data.venueName}</h1>
-      ${data.businessHoursStart && data.businessHoursEnd ? `<p style="margin: 0 0 8px 0; font-size: 14px; color: #000;">
+      ${
+        data.businessHoursStart && data.businessHoursEnd
+          ? `<p style="margin: 0 0 8px 0; font-size: 14px; color: #000;">
         ${reportDateFormatted} ${data.businessHoursStart} - ${reportDateFormatted} ${data.businessHoursEnd} (${data.venueTimezone})
-      </p>` : ''}
+      </p>`
+          : ''
+      }
       <p style="margin: 0 0 8px 0; font-size: 14px; color: #666;">
         Este informe solo considera los pedidos cerrados y las ventas realizadas durante el horario comercial.
       </p>

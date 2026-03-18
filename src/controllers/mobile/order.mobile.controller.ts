@@ -11,6 +11,36 @@ import logger from '../../config/logger'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 
 /**
+ * List orders for a venue (paginated)
+ * AUTHENTICATED endpoint - requires valid JWT
+ *
+ * @route GET /api/v1/mobile/venues/:venueId/orders
+ */
+export const listOrders = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const { page = '1', pageSize = '20', search, status, paymentStatus } = req.query
+
+    const result = await orderMobileService.listOrders(venueId, {
+      page: Number(page),
+      pageSize: Number(pageSize),
+      search: search as string | undefined,
+      status: status as string | undefined,
+      paymentStatus: paymentStatus as string | undefined,
+    })
+
+    res.status(200).json({
+      success: true,
+      data: result.data,
+      meta: result.meta,
+    })
+  } catch (error) {
+    logger.error('Error in listOrders controller:', error)
+    next(error)
+  }
+}
+
+/**
  * Create order with items
  * AUTHENTICATED endpoint - requires valid JWT
  *
