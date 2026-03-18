@@ -475,7 +475,7 @@ class StockDashboardService {
     regGroups.forEach(group => {
       const first = group[0]
       const registeredByName = staffMap.get(first.createdBy) || null
-      const itemVenueName = first.venue?.name || null
+      const itemVenueName = first.venueId ? first.venue?.name || null : 'Todas las tiendas'
 
       if (group.length > 1) {
         // Bulk upload — single row
@@ -485,7 +485,7 @@ class StockDashboardService {
           categoryName: first.category.name,
           type: 'BULK_UPLOAD',
           timestamp: first.createdAt,
-          venueName: first.venueId ? itemVenueName : 'Organización',
+          venueName: itemVenueName,
           userName: registeredByName,
           itemCount: group.length,
         })
@@ -506,7 +506,7 @@ class StockDashboardService {
     // ── Individual sale / return / damage events ──
     for (const item of recentItems) {
       const registeredByName = staffMap.get(item.createdBy) || null
-      const itemVenueName = item.venue?.name || null
+      const itemVenueName = item.venueId ? item.venue?.name || null : 'Todas las tiendas'
 
       if (item.status === 'SOLD' && item.soldAt) {
         movements.push({
