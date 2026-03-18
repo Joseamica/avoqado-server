@@ -496,6 +496,7 @@ export class SerializedInventoryService {
     categoryId: string
     serialNumbers: string[]
     createdBy: string
+    registeredFromVenueId?: string
   }): Promise<RegisterBatchResult> {
     const duplicates: string[] = []
     let created = 0
@@ -532,6 +533,7 @@ export class SerializedInventoryService {
             categoryId: data.categoryId,
             serialNumber,
             createdBy: data.createdBy,
+            registeredFromVenueId: data.registeredFromVenueId || null,
             status: 'AVAILABLE',
           },
         })

@@ -5682,6 +5682,9 @@ router.post('/serialized-inventory/scan', authenticateTokenMiddleware, async (re
 /**
  * POST /tpv/v1/serialized-inventory/register-batch
  * Register multiple items in batch (bulk registration by manager).
+ * Items are registered at org-level (shared across all venues) when
+ * the venue belongs to an organization. Falls back to venue-level
+ * registration if the venue has no organization.
  * Requires serialized-inventory:create permission.
  */
 router.post(
@@ -5702,20 +5705,37 @@ router.post(
         throw new AppError('serialNumbers array is required and cannot be empty', 400)
       }
 
-      logger.info(`📦 [SERIALIZED INV] Batch registration`, {
+      // Check if venue belongs to an org → register at org-level for all venues
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        select: { organizationId: true },
+      })
+
+      const isOrgLevel = !!venue?.organizationId
+
+      logger.info(`📦 [SERIALIZED INV] Batch registration (${isOrgLevel ? 'org-level' : 'venue-level'})`, {
         venueId,
         staffId,
         categoryId,
         count: serialNumbers.length,
+        organizationId: venue?.organizationId || null,
         correlationId: req.correlationId,
       })
 
-      const result = await serializedInventoryService.registerBatch({
-        venueId,
-        categoryId,
-        serialNumbers,
-        createdBy: staffId,
-      })
+      const result = isOrgLevel
+        ? await serializedInventoryService.registerBatchOrg({
+            organizationId: venue!.organizationId!,
+            categoryId,
+            serialNumbers,
+            createdBy: staffId,
+            registeredFromVenueId: venueId,
+          })
+        : await serializedInventoryService.registerBatch({
+            venueId,
+            categoryId,
+            serialNumbers,
+            createdBy: staffId,
+          })
 
       logger.info(`✅ [SERIALIZED INV] Batch complete: ${result.created} created, ${result.duplicates.length} duplicates`, {
         venueId,
