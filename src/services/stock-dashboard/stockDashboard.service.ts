@@ -52,39 +52,44 @@ export interface BulkUploadResult {
 
 class StockDashboardService {
   /**
+   * Build Prisma where clauses that cover both venue-specific items AND
+   * org-level items (uploaded with venueId: null, organizationId: set).
+   * This ensures "Registrar a nivel organización" uploads are visible in
+   * every venue of the organization.
+   */
+  private async getItemScope(venueId: string) {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { organizationId: true },
+    })
+    const orgId = venue?.organizationId ?? null
+    const scopeFilter: Record<string, any> = orgId ? { OR: [{ venueId }, { organizationId: orgId, venueId: null }] } : { venueId }
+    return { orgId, itemWhere: scopeFilter, categoryWhere: scopeFilter }
+  }
+
+  /**
    * Get stock metrics summary for a venue
    */
   async getStockMetrics(venueId: string): Promise<StockMetrics> {
     const todayStart = venueStartOfDay()
     const weekStart = venueStartOfDayOffset(undefined, -7)
+    const { itemWhere, categoryWhere } = await this.getItemScope(venueId)
 
-    // Count totals
+    // Count totals — includes org-level items (venueId: null) via itemWhere OR clause
     const [totalPieces, availablePieces, soldToday, soldThisWeek] = await Promise.all([
+      prisma.serializedItem.count({ where: { ...itemWhere } }),
+      prisma.serializedItem.count({ where: { ...itemWhere, status: 'AVAILABLE' } }),
       prisma.serializedItem.count({
-        where: { venueId },
+        where: { ...itemWhere, status: 'SOLD', soldAt: { gte: todayStart } },
       }),
       prisma.serializedItem.count({
-        where: { venueId, status: 'AVAILABLE' },
-      }),
-      prisma.serializedItem.count({
-        where: {
-          venueId,
-          status: 'SOLD',
-          soldAt: { gte: todayStart },
-        },
-      }),
-      prisma.serializedItem.count({
-        where: {
-          venueId,
-          status: 'SOLD',
-          soldAt: { gte: weekStart },
-        },
+        where: { ...itemWhere, status: 'SOLD', soldAt: { gte: weekStart } },
       }),
     ])
 
     // Calculate total value (sum of suggested prices for available items)
     const categories = await prisma.itemCategory.findMany({
-      where: { venueId, active: true },
+      where: { ...categoryWhere, active: true },
       select: { id: true, suggestedPrice: true },
     })
 
@@ -92,7 +97,7 @@ class StockDashboardService {
     for (const cat of categories) {
       if (cat.suggestedPrice) {
         const count = await prisma.serializedItem.count({
-          where: { venueId, categoryId: cat.id, status: 'AVAILABLE' },
+          where: { ...itemWhere, categoryId: cat.id, status: 'AVAILABLE' },
         })
         totalValue += count * Number(cat.suggestedPrice)
       }
@@ -112,10 +117,11 @@ class StockDashboardService {
    */
   async getCategoryStock(venueId: string): Promise<CategoryStockInfo[]> {
     const weekStart = venueStartOfDayOffset(undefined, -7)
+    const { itemWhere, categoryWhere } = await this.getItemScope(venueId)
 
-    // Get categories with their alert configs
+    // Get categories with their alert configs — includes org-level categories
     const categories = await prisma.itemCategory.findMany({
-      where: { venueId, active: true },
+      where: { ...categoryWhere, active: true },
       orderBy: { sortOrder: 'asc' },
     })
 
@@ -128,14 +134,14 @@ class StockDashboardService {
     const results: CategoryStockInfo[] = []
 
     for (const category of categories) {
-      // Count available and sold in last 7 days
+      // Count available and sold in last 7 days — includes org-level items
       const [available, sold7d] = await Promise.all([
         prisma.serializedItem.count({
-          where: { venueId, categoryId: category.id, status: 'AVAILABLE' },
+          where: { ...itemWhere, categoryId: category.id, status: 'AVAILABLE' },
         }),
         prisma.serializedItem.count({
           where: {
-            venueId,
+            ...itemWhere,
             categoryId: category.id,
             status: 'SOLD',
             soldAt: { gte: weekStart },
@@ -184,6 +190,7 @@ class StockDashboardService {
   async getStockVsSales(venueId: string, days: number = 14): Promise<StockVsSalesPoint[]> {
     const data: StockVsSalesPoint[] = []
     const today = venueStartOfDay()
+    const { itemWhere } = await this.getItemScope(venueId)
 
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date(today)
@@ -191,10 +198,10 @@ class StockDashboardService {
       const nextDate = new Date(date)
       nextDate.setDate(nextDate.getDate() + 1)
 
-      // Count sales for this day
+      // Count sales for this day — includes org-level items
       const salesCount = await prisma.serializedItem.count({
         where: {
-          venueId,
+          ...itemWhere,
           status: 'SOLD',
           soldAt: {
             gte: date,
@@ -203,11 +210,10 @@ class StockDashboardService {
         },
       })
 
-      // Get stock level at end of day
-      // For past days, we calculate based on when items were created/sold
+      // Get stock level at end of day — includes org-level items
       const stockLevel = await prisma.serializedItem.count({
         where: {
-          venueId,
+          ...itemWhere,
           status: 'AVAILABLE',
           createdAt: { lt: nextDate },
         },
@@ -228,10 +234,11 @@ class StockDashboardService {
    */
   async getLowStockAlerts(venueId: string): Promise<StockAlert[]> {
     const alerts: StockAlert[] = []
+    const { itemWhere, categoryWhere } = await this.getItemScope(venueId)
 
-    // Get categories with alert configs
+    // Get categories with alert configs — includes org-level categories
     const categories = await prisma.itemCategory.findMany({
-      where: { venueId, active: true },
+      where: { ...categoryWhere, active: true },
     })
 
     const alertConfigs = await prisma.stockAlertConfig.findMany({
@@ -241,7 +248,7 @@ class StockDashboardService {
 
     for (const category of categories) {
       const available = await prisma.serializedItem.count({
-        where: { venueId, categoryId: category.id, status: 'AVAILABLE' },
+        where: { ...itemWhere, categoryId: category.id, status: 'AVAILABLE' },
       })
 
       const config = alertMap.get(category.id)
@@ -404,26 +411,28 @@ class StockDashboardService {
       id: string
       serialNumber: string
       categoryName: string
-      type: 'REGISTERED' | 'SOLD' | 'RETURNED' | 'DAMAGED'
+      type: 'REGISTERED' | 'SOLD' | 'RETURNED' | 'DAMAGED' | 'BULK_UPLOAD'
       timestamp: Date
       venueName: string | null
       userName: string | null
+      itemCount?: number
     }>
   > {
-    // Get recent items by createdAt and soldAt
+    const { itemWhere } = await this.getItemScope(venueId)
+    // Get recent items — includes org-level items
     const recentItems = await prisma.serializedItem.findMany({
-      where: { venueId },
+      where: { ...itemWhere },
       include: {
         category: true,
         venue: { select: { name: true } },
         sellingVenue: { select: { name: true } },
       },
       orderBy: { createdAt: 'desc' },
-      take: limit * 2, // Get more to allow for filtering
+      take: limit * 4, // Get enough to group bulk uploads and still have events
     })
 
-    // Collect unique createdBy staff IDs to resolve names
-    const staffIds = [...new Set(recentItems.map(i => i.createdBy).filter(Boolean))]
+    // Resolve staff names
+    const staffIds = Array.from(new Set(recentItems.map(i => i.createdBy).filter(Boolean)))
     const staffMap = new Map<string, string>()
     if (staffIds.length > 0) {
       const staffRecords = await prisma.staff.findMany({
@@ -435,32 +444,70 @@ class StockDashboardService {
       }
     }
 
-    const movements: Array<{
+    type Movement = {
       id: string
       serialNumber: string
       categoryName: string
-      type: 'REGISTERED' | 'SOLD' | 'RETURNED' | 'DAMAGED'
+      type: 'REGISTERED' | 'SOLD' | 'RETURNED' | 'DAMAGED' | 'BULK_UPLOAD'
       timestamp: Date
       venueName: string | null
       userName: string | null
-    }> = []
+      itemCount?: number
+    }
 
+    const movements: Movement[] = []
+
+    // ── Group registrations to detect bulk uploads ──
+    // Items created within a 2-minute window by the same person in the same
+    // category are collapsed into a single BULK_UPLOAD event.
+    const BULK_WINDOW_MS = 2 * 60 * 1000
+    const regGroups = new Map<string, typeof recentItems>()
+
+    for (const item of recentItems) {
+      const bucket = Math.floor(item.createdAt.getTime() / BULK_WINDOW_MS)
+      const key = `${item.createdBy}|${item.categoryId}|${bucket}`
+      const group = regGroups.get(key) || []
+      group.push(item)
+      regGroups.set(key, group)
+    }
+
+    // Emit grouped registration events
+    regGroups.forEach(group => {
+      const first = group[0]
+      const registeredByName = staffMap.get(first.createdBy) || null
+      const itemVenueName = first.venue?.name || null
+
+      if (group.length > 1) {
+        // Bulk upload — single row
+        movements.push({
+          id: `bulk-${first.id}`,
+          serialNumber: `${group.length} seriales`,
+          categoryName: first.category.name,
+          type: 'BULK_UPLOAD',
+          timestamp: first.createdAt,
+          venueName: first.venueId ? itemVenueName : 'Organización',
+          userName: registeredByName,
+          itemCount: group.length,
+        })
+      } else {
+        // Single registration
+        movements.push({
+          id: `reg-${first.id}`,
+          serialNumber: first.serialNumber,
+          categoryName: first.category.name,
+          type: 'REGISTERED',
+          timestamp: first.createdAt,
+          venueName: itemVenueName,
+          userName: registeredByName,
+        })
+      }
+    })
+
+    // ── Individual sale / return / damage events ──
     for (const item of recentItems) {
       const registeredByName = staffMap.get(item.createdBy) || null
       const itemVenueName = item.venue?.name || null
 
-      // Add registration event
-      movements.push({
-        id: `reg-${item.id}`,
-        serialNumber: item.serialNumber,
-        categoryName: item.category.name,
-        type: 'REGISTERED',
-        timestamp: item.createdAt,
-        venueName: itemVenueName,
-        userName: registeredByName,
-      })
-
-      // Add sale event if sold
       if (item.status === 'SOLD' && item.soldAt) {
         movements.push({
           id: `sold-${item.id}`,
@@ -473,7 +520,6 @@ class StockDashboardService {
         })
       }
 
-      // Add return/damage events (use soldAt if available, otherwise createdAt)
       if (item.status === 'RETURNED' || item.status === 'DAMAGED') {
         movements.push({
           id: `${item.status.toLowerCase()}-${item.id}`,
