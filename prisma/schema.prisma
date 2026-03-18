@@ -290,8 +290,9 @@ model Venue {
   // ==========================================
   venueModules    VenueModule[] // Modules enabled for this venue
   itemCategories      ItemCategory[] // Categories for serialized items
-  serializedItems     SerializedItem[] // Items with unique barcodes (SIMs, etc.)
-  soldSerializedItems SerializedItem[] @relation("SoldItems") // Items sold at this venue (org-level items)
+  serializedItems           SerializedItem[] // Items with unique barcodes (SIMs, etc.)
+  soldSerializedItems       SerializedItem[] @relation("SoldItems") // Items sold at this venue (org-level items)
+  registeredSerializedItems SerializedItem[] @relation("RegisteredItems") // Audit: org-level items registered from this venue
 
   // ==========================================
   // COMMISSION SYSTEM
@@ -6135,6 +6136,15 @@ model SerializedItem {
   // Venue that sold this item (for org-level items sold at a specific venue)
   sellingVenueId String?
   sellingVenue   Venue? @relation("SoldItems", fields: [sellingVenueId], references: [id])
+
+  // Traceability: which venue initiated the registration of this item.
+  // For org-level items (venueId=null), we can't derive this from venueId since it's null,
+  // and createdBy (staffId) can belong to multiple venues. This field records the exact
+  // venue the user was logged into when they registered the item, enabling audit trails
+  // like "PlayTelecom Centro registered 100 SIMs at org level on March 18".
+  // Nullable: null for items registered before this field existed.
+  registeredFromVenueId String?
+  registeredFromVenue   Venue? @relation("RegisteredItems", fields: [registeredFromVenueId], references: [id])
 
   // Category
   categoryId String

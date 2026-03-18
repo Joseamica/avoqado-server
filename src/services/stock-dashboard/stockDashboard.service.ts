@@ -416,6 +416,7 @@ class StockDashboardService {
       venueName: string | null
       userName: string | null
       itemCount?: number
+      registeredFromVenueName?: string | null
     }>
   > {
     const { itemWhere } = await this.getItemScope(venueId)
@@ -426,6 +427,7 @@ class StockDashboardService {
         category: true,
         venue: { select: { name: true } },
         sellingVenue: { select: { name: true } },
+        registeredFromVenue: { select: { name: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: limit * 4, // Get enough to group bulk uploads and still have events
@@ -453,6 +455,7 @@ class StockDashboardService {
       venueName: string | null
       userName: string | null
       itemCount?: number
+      registeredFromVenueName?: string | null
     }
 
     const movements: Movement[] = []
@@ -476,6 +479,7 @@ class StockDashboardService {
       const first = group[0]
       const registeredByName = staffMap.get(first.createdBy) || null
       const itemVenueName = first.venueId ? first.venue?.name || null : 'Todas las tiendas'
+      const regFromVenue = first.registeredFromVenue?.name || null
 
       if (group.length > 1) {
         // Bulk upload — single row
@@ -488,6 +492,7 @@ class StockDashboardService {
           venueName: itemVenueName,
           userName: registeredByName,
           itemCount: group.length,
+          registeredFromVenueName: regFromVenue,
         })
       } else {
         // Single registration
@@ -499,6 +504,7 @@ class StockDashboardService {
           timestamp: first.createdAt,
           venueName: itemVenueName,
           userName: registeredByName,
+          registeredFromVenueName: regFromVenue,
         })
       }
     })
@@ -614,6 +620,7 @@ class StockDashboardService {
               categoryId,
               serialNumber,
               createdBy,
+              registeredFromVenueId: venueId,
               status: 'AVAILABLE',
             },
           })
