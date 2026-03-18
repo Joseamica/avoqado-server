@@ -417,6 +417,7 @@ class StockDashboardService {
       userName: string | null
       itemCount?: number
       registeredFromVenueName?: string | null
+      serialNumbers?: string[]
     }>
   > {
     const { itemWhere } = await this.getItemScope(venueId)
@@ -456,6 +457,7 @@ class StockDashboardService {
       userName: string | null
       itemCount?: number
       registeredFromVenueName?: string | null
+      serialNumbers?: string[]
     }
 
     const movements: Movement[] = []
@@ -482,7 +484,7 @@ class StockDashboardService {
       const regFromVenue = first.registeredFromVenue?.name || null
 
       if (group.length > 1) {
-        // Bulk upload — single row
+        // Bulk upload — single row with serial numbers for drill-down
         movements.push({
           id: `bulk-${first.id}`,
           serialNumber: `${group.length} seriales`,
@@ -493,6 +495,7 @@ class StockDashboardService {
           userName: registeredByName,
           itemCount: group.length,
           registeredFromVenueName: regFromVenue,
+          serialNumbers: group.map(i => i.serialNumber),
         })
       } else {
         // Single registration
