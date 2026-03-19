@@ -247,11 +247,14 @@ const startApplication = async (retries = 3) => {
       // Start auto clock-out job (every 15 minutes for HR automation)
       autoClockOutJob.start()
 
-      // Start nightly sales summary job (daily at 10 PM Mexico City - sends email to admins/owners)
-      nightlySalesSummaryJob.start()
-
-      // Start nightly low stock digest job (daily at 10:30 PM Mexico City - sends inventory alerts)
-      nightlyLowStockJob.start()
+      // Start nightly email jobs only in production (avoid sending emails from dev/staging)
+      if (NODE_ENV === 'production') {
+        nightlySalesSummaryJob.start()
+        nightlyLowStockJob.start()
+        logger.info('📧 Nightly email jobs started (production)')
+      } else {
+        logger.info('⏭️  Nightly email jobs disabled (non-production environment)')
+      }
 
       // Start marketing campaign job (every 5 minutes - processes email queue)
       marketingCampaignJob.start()
