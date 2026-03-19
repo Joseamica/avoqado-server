@@ -474,8 +474,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-time-entries:write', // Can clock in/out, take breaks
     'tpv-payments:pay-later', // Can create pay-later orders
     // Serialized Inventory (SIMs, jewelry, etc.)
-    'serialized-inventory:sell', // Can sell serialized items
-    'serialized-inventory:create', // Can register (Alta de Productos)
+    'serialized-inventory:sell', // Can sell serialized items (scan & sell at TPV)
   ],
 
   /**
@@ -505,8 +504,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:read', // Can search products by barcode
     'tpv-payments:pay-later', // Can create pay-later orders
     // Serialized Inventory (SIMs, jewelry, etc.)
-    'serialized-inventory:sell', // Can sell serialized items
-    'serialized-inventory:create', // Can register (Alta de Productos) and create categories
+    'serialized-inventory:sell', // Can sell serialized items (scan & sell at TPV)
   ],
 
   /**

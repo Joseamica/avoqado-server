@@ -14,6 +14,7 @@
 import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { verifyAccess } from '../../middlewares/verifyAccess.middleware'
+import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { stockDashboardService } from '../../services/stock-dashboard/stockDashboard.service'
 import * as itemCategoryService from '../../services/dashboard/itemCategory.dashboard.service'
 
@@ -22,6 +23,7 @@ const router = Router({ mergeParams: true })
 
 // Unified middleware for white-label stock routes
 const whiteLabelStockAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true })]
+const whiteLabelStockWrite = [...whiteLabelStockAccess, checkPermission('serialized-inventory:create')]
 
 /**
  * GET /dashboard/stock/metrics
@@ -112,7 +114,7 @@ router.get('/alerts', whiteLabelStockAccess, async (req: Request, res: Response,
  * Configure stock alert for a category
  * Body: { categoryId, minimumStock, alertEnabled }
  */
-router.post('/alerts/configure', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.post('/alerts/configure', whiteLabelStockWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { categoryId, minimumStock, alertEnabled } = req.body
@@ -141,7 +143,7 @@ router.post('/alerts/configure', whiteLabelStockAccess, async (req: Request, res
  * Process CSV bulk upload for item registration
  * Body: { categoryId, csvContent }
  */
-router.post('/bulk-upload', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.post('/bulk-upload', whiteLabelStockWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { userId } = (req as any).authContext
     const venueId = req.params.venueId || (req as any).authContext?.venueId
@@ -172,7 +174,7 @@ router.post('/bulk-upload', whiteLabelStockAccess, async (req: Request, res: Res
  * Body: { categoryId, csvContent }
  * Requires: inventory:org-manage permission
  */
-router.post('/org-bulk-upload', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.post('/org-bulk-upload', whiteLabelStockWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { userId } = (req as any).authContext
     const venueId = req.params.venueId || (req as any).authContext?.venueId
