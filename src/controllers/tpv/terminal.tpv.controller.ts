@@ -213,6 +213,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       blumonMerchantId: true,
       credentialsEncrypted: true,
       providerConfig: true,
+      provider: { select: { code: true } },  // Include provider code for multi-processor routing
     }
 
     let merchantAccounts: any[]
@@ -269,6 +270,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     const transformedMerchants = merchantAccounts.map((ma: any) => ({
       id: ma.id,
       displayName: ma.displayName,
+      providerCode: ma.provider?.code || 'BLUMON',  // BLUMON, ANGELPAY, MENTA, etc.
       serialNumber: ma.blumonSerialNumber,
       posId: ma.blumonPosId,
       environment: ma.blumonEnvironment,
