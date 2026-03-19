@@ -13,6 +13,7 @@ import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
 
 // Security services
 import { PromptInjectionDetectorService } from './prompt-injection-detector.service'
+import { SemanticInjectionDetectorService } from './semantic-injection-detector.service'
 import { SqlAstParserService, ValidationOptions as AstValidationOptions } from './sql-ast-parser.service'
 import { TableAccessControlService, UserRole } from './table-access-control.service'
 import { PIIDetectionService } from './pii-detection.service'
@@ -1760,6 +1761,112 @@ Ejemplos de respuestas CORRECTAS:
             blocked: true,
             violationType: SecurityViolationType.PROMPT_INJECTION,
           },
+        }
+      }
+
+      // Step 0.1b: Semantic Injection Detection (language-agnostic, runs only when regex didn't block)
+      // Uses gpt-4o-mini to classify intent in ANY language. ~$0.0001/call, 3s timeout, fails open.
+      // Checks BOTH the message AND conversation history entries for injection attempts.
+      if (!promptInjectionCheck.shouldBlock) {
+        const semanticCheck = await SemanticInjectionDetectorService.detect(query.message, this.openai)
+
+        // Log when classifier was bypassed (fail-open, circuit breaker, or kill switch)
+        if (semanticCheck.error) {
+          logger.warn('⚠️ Semantic classifier bypassed — message unchecked', {
+            reason: semanticCheck.reason,
+            circuitBreakerOpen: semanticCheck.circuitBreakerOpen || false,
+            userId: query.userId,
+            venueId: query.venueId,
+          })
+        }
+
+        if (semanticCheck.isInjection && semanticCheck.confidence >= 70) {
+          logger.warn('🛡️ Semantic prompt injection blocked', {
+            userId: query.userId,
+            venueId: query.venueId,
+            confidence: semanticCheck.confidence,
+            reason: semanticCheck.reason,
+            language: semanticCheck.detectedLanguage,
+            latencyMs: semanticCheck.latencyMs,
+          })
+
+          SecurityAuditLoggerService.logQueryBlocked({
+            userId: query.userId,
+            venueId: query.venueId,
+            userRole: userRole,
+            naturalLanguageQuery: query.message,
+            violationType: SecurityViolationType.PROMPT_INJECTION,
+            errorMessage: `Semantic injection detected (${semanticCheck.detectedLanguage}): ${semanticCheck.reason}`,
+            ipAddress: query.ipAddress,
+          })
+
+          const securityResponse = SecurityResponseService.generateSecurityResponse(SecurityViolationType.PROMPT_INJECTION, 'es')
+
+          return {
+            response: securityResponse.message,
+            confidence: 0,
+            metadata: {
+              queryGenerated: false,
+              queryExecuted: false,
+              dataSourcesUsed: [],
+              routedTo: 'Blocked',
+              riskLevel: 'critical',
+              reasonCode: 'semantic_injection_blocked',
+              blocked: true,
+              violationType: SecurityViolationType.PROMPT_INJECTION,
+            },
+          }
+        }
+
+        // Step 0.1c: Scan conversation history for injection attempts.
+        // An attacker could embed injection in prior conversation entries that go directly to LLM.
+        // Only scan the last 5 entries to keep cost bounded.
+        if (query.conversationHistory && query.conversationHistory.length > 0) {
+          const historyToScan = query.conversationHistory.slice(-5)
+          for (const entry of historyToScan) {
+            const content = typeof entry.content === 'string' ? entry.content : String(entry.content)
+            // Skip short entries (greetings, confirmations) — not worth an API call
+            if (content.length < 20) continue
+
+            const historyCheck = await SemanticInjectionDetectorService.detect(content, this.openai)
+            if (historyCheck.isInjection && historyCheck.confidence >= 70) {
+              logger.warn('🛡️ Injection detected in conversation history', {
+                userId: query.userId,
+                venueId: query.venueId,
+                entryRole: entry.role,
+                confidence: historyCheck.confidence,
+                reason: historyCheck.reason,
+                language: historyCheck.detectedLanguage,
+              })
+
+              SecurityAuditLoggerService.logQueryBlocked({
+                userId: query.userId,
+                venueId: query.venueId,
+                userRole: userRole,
+                naturalLanguageQuery: `[history:${entry.role}] ${content.substring(0, 200)}`,
+                violationType: SecurityViolationType.PROMPT_INJECTION,
+                errorMessage: `Injection in conversation history (${entry.role}): ${historyCheck.reason}`,
+                ipAddress: query.ipAddress,
+              })
+
+              const securityResponse = SecurityResponseService.generateSecurityResponse(SecurityViolationType.PROMPT_INJECTION, 'es')
+
+              return {
+                response: securityResponse.message,
+                confidence: 0,
+                metadata: {
+                  queryGenerated: false,
+                  queryExecuted: false,
+                  dataSourcesUsed: [],
+                  routedTo: 'Blocked',
+                  riskLevel: 'critical',
+                  reasonCode: 'conversation_history_injection_blocked',
+                  blocked: true,
+                  violationType: SecurityViolationType.PROMPT_INJECTION,
+                },
+              }
+            }
+          }
         }
       }
 
