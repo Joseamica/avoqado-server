@@ -7,6 +7,16 @@
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { MovementType } from '@prisma/client'
+import { logAction } from '../dashboard/activity-log.service'
+
+// NOTE: When full inventory management is implemented in mobile (iOS/Android),
+// all CRUD operations (products, raw materials, recipes, suppliers, POs) must
+// include logAction calls matching the dashboard pattern. See:
+// - product.dashboard.service.ts (PRODUCT_CREATED/UPDATED/DELETED)
+// - rawMaterial.service.ts (RAW_MATERIAL_CREATED/UPDATED/DELETED, STOCK_ADJUSTED)
+// - recipe.service.ts (RECIPE_CREATED/UPDATED/DELETED)
+// - supplier.service.ts (SUPPLIER_CREATED/UPDATED/DELETED)
+// - purchaseOrder.service.ts (PURCHASE_ORDER_* actions)
 
 export interface StockOverviewFilters {
   search?: string
@@ -185,6 +195,15 @@ export async function createStockCount(venueId: string, userId: string, type: 'C
     },
   })
 
+  logAction({
+    staffId: userId,
+    venueId,
+    action: 'STOCK_COUNT_CREATED',
+    entity: 'StockCount',
+    entityId: count.id,
+    data: { type, itemCount: count.items.length, source: 'MOBILE' },
+  })
+
   return {
     id: count.id,
     type: count.type,
@@ -296,6 +315,26 @@ export async function confirmStockCount(countId: string, venueId: string, userId
   await prisma.stockCount.update({
     where: { id: countId },
     data: { status: 'COMPLETED', completedAt: new Date() },
+  })
+
+  // Log adjustments applied
+  const adjustments = count.items
+    .filter(item => Number(item.counted) - Number(item.expected) !== 0)
+    .map(item => ({
+      productId: item.productId,
+      productName: (item.product as any).name || item.productId,
+      expected: Number(item.expected),
+      counted: Number(item.counted),
+      difference: Number(item.counted) - Number(item.expected),
+    }))
+
+  logAction({
+    staffId: userId,
+    venueId,
+    action: 'STOCK_COUNT_CONFIRMED',
+    entity: 'StockCount',
+    entityId: countId,
+    data: { adjustmentsCount: adjustments.length, adjustments, source: 'MOBILE' },
   })
 
   return { success: true }

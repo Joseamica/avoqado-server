@@ -811,6 +811,30 @@ export async function completeCharge(shortCode: string, sessionId: string, three
         quantity,
         error: deductionError.message,
       })
+
+      const errorReason = deductionError.message.includes('Insufficient stock')
+        ? 'INSUFFICIENT_STOCK'
+        : deductionError.message.includes('does not have a recipe')
+          ? 'NO_RECIPE'
+          : 'UNKNOWN'
+
+      if (errorReason !== 'NO_RECIPE') {
+        logAction({
+          venueId,
+          action: 'INVENTORY_DEDUCTION_FAILED',
+          entity: 'Order',
+          entityId: session.sessionId,
+          data: {
+            source: 'PAYMENT_LINK',
+            productId: metadata.productId,
+            productName: metadata.productName,
+            quantity: metadata.quantity || 1,
+            reason: errorReason,
+            error: deductionError.message,
+            paymentLinkId: session.paymentLink!.id,
+          },
+        })
+      }
     }
   }
 

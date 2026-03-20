@@ -16,6 +16,7 @@ import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
+import { logAction } from '../dashboard/activity-log.service'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -612,6 +613,22 @@ async function updateOrderTotalsForStandalonePayment(
             productName: item.product?.name || item.productName || 'Unknown',
             error: deductionError.message,
           })
+
+          logAction({
+            staffId,
+            venueId: updatedOrder.venueId,
+            action: 'INVENTORY_DEDUCTION_FAILED',
+            entity: 'Order',
+            entityId: orderId,
+            data: {
+              source: 'TPV',
+              productId: item.productId,
+              productName: item.product?.name || item.productName || 'Unknown',
+              quantity: item.quantity,
+              reason: errorReason,
+              error: deductionError.message,
+            },
+          })
         }
       }
     }
@@ -621,6 +638,20 @@ async function updateOrderTotalsForStandalonePayment(
       logger.error('❌ CRITICAL: Inventory deduction failed, rolling back order completion', {
         orderId,
         failedProducts: deductionErrors,
+      })
+
+      logAction({
+        staffId,
+        venueId: updatedOrder.venueId,
+        action: 'INVENTORY_DEDUCTION_ROLLBACK',
+        entity: 'Order',
+        entityId: orderId,
+        data: {
+          source: 'TPV',
+          failedProducts: deductionErrors,
+          previousStatus: 'COMPLETED',
+          rolledBackTo: 'PENDING',
+        },
       })
 
       // Rollback serialized items that were marked as SOLD before the failure
