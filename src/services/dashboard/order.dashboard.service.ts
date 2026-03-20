@@ -243,6 +243,12 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
             modifiersCount: orderModifiers.length,
           })
         } catch (deductionError: any) {
+          const errorReason = deductionError.message.includes('does not have a recipe')
+            ? 'NO_RECIPE'
+            : deductionError.message.includes('Insufficient stock')
+              ? 'INSUFFICIENT_STOCK'
+              : 'UNKNOWN'
+
           // Log individual product deduction errors but continue with other products
           logger.warn('⚠️ Failed to deduct stock for product - continuing with order (dashboard)', {
             orderId,
@@ -250,12 +256,26 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
             productName: item.product?.name || item.productName,
             quantity: item.quantity,
             error: deductionError.message,
-            reason: deductionError.message.includes('does not have a recipe')
-              ? 'NO_RECIPE'
-              : deductionError.message.includes('Insufficient stock')
-                ? 'INSUFFICIENT_STOCK'
-                : 'UNKNOWN',
+            reason: errorReason,
           })
+
+          if (errorReason !== 'NO_RECIPE') {
+            logAction({
+              staffId: updatedOrder.servedById || undefined,
+              venueId: updatedOrder.venueId,
+              action: 'INVENTORY_DEDUCTION_FAILED',
+              entity: 'Order',
+              entityId: orderId,
+              data: {
+                source: 'DASHBOARD',
+                productId: item.productId,
+                productName: item.product?.name || item.productName || 'Unknown',
+                quantity: item.quantity,
+                reason: errorReason,
+                error: deductionError.message,
+              },
+            })
+          }
         }
       }
       logger.info('🎯 Inventory deduction completed for order (dashboard)', {
