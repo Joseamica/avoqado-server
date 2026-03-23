@@ -19,6 +19,7 @@ import {
   recordPaymentBodySchema,
   sendReceiptParamsSchema,
   sendReceiptBodySchema,
+  sendWhatsAppReceiptBodySchema,
   paymentRouteSchema,
   tableParamsSchema,
   assignTableSchema,
@@ -3187,6 +3188,75 @@ router.post(
   validateRequest(sendReceiptParamsSchema),
   validateRequest(sendReceiptBodySchema),
   paymentController.sendPaymentReceipt,
+)
+
+// ==========================================
+// SEND RECEIPT BY WHATSAPP
+// ==========================================
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/payments/{paymentId}/send-whatsapp:
+ *   post:
+ *     summary: Send a payment receipt via WhatsApp
+ *     description: |
+ *       Sends the payment receipt to the specified phone number via WhatsApp Business API.
+ *       Uses the receipt_link template with venue name, total amount, and receipt URL.
+ *     tags:
+ *       - TPV - Payments
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The venue ID (CUID)
+ *       - in: path
+ *         name: paymentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The payment ID (CUID)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - recipientPhone
+ *             properties:
+ *               recipientPhone:
+ *                 type: string
+ *                 description: Phone number with country code (e.g., "5215512345678")
+ *                 example: "5215512345678"
+ *     responses:
+ *       200:
+ *         description: WhatsApp receipt sent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 receiptId:
+ *                   type: string
+ *                 message:
+ *                   type: string
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Payment not found
+ */
+router.post(
+  '/venues/:venueId/payments/:paymentId/send-whatsapp',
+  authenticateTokenMiddleware,
+  validateRequest(sendReceiptParamsSchema),
+  validateRequest(sendWhatsAppReceiptBodySchema),
+  paymentController.sendPaymentReceiptWhatsApp,
 )
 
 // ==========================================

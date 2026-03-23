@@ -19,6 +19,13 @@ import * as reportsMobileController from '../controllers/mobile/reports.mobile.c
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
 import * as productMobileController from '../controllers/mobile/product.mobile.controller'
+import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
+import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
+import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
+import * as refundMobileController from '../controllers/mobile/refund.mobile.controller'
+import * as estimateMobileController from '../controllers/mobile/estimate.mobile.controller'
+import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
+import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation'
@@ -1419,6 +1426,380 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('reports:read'),
   reportsMobileController.salesByItem,
+)
+
+// ============================================================================
+// CASH DRAWER (Caja de Efectivo)
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/cash-drawer/current
+ * Get current open cash drawer session with events.
+ */
+router.get(
+  '/venues/:venueId/cash-drawer/current',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  cashDrawerMobileController.getCurrent,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-drawer/open
+ * Open a new cash drawer session.
+ * Body: { startingAmount: number (cents), deviceName?: string, staffName: string }
+ */
+router.post(
+  '/venues/:venueId/cash-drawer/open',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  cashDrawerMobileController.openSession,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-in
+ * Add pay-in event to open session.
+ * Body: { amount: number (cents), note?: string, staffName: string }
+ */
+router.post(
+  '/venues/:venueId/cash-drawer/pay-in',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  cashDrawerMobileController.payIn,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-drawer/pay-out
+ * Add pay-out event to open session.
+ * Body: { amount: number (cents), note?: string, staffName: string }
+ */
+router.post(
+  '/venues/:venueId/cash-drawer/pay-out',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  cashDrawerMobileController.payOut,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-drawer/close
+ * Close current cash drawer session.
+ * Body: { actualAmount: number (cents), note?: string, staffName: string }
+ */
+router.post(
+  '/venues/:venueId/cash-drawer/close',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  cashDrawerMobileController.closeSession,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/cash-drawer/history
+ * List closed cash drawer sessions (paginated).
+ * Query: { page?: number, pageSize?: number }
+ */
+router.get(
+  '/venues/:venueId/cash-drawer/history',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  cashDrawerMobileController.getHistory,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-drawer/sync
+ * Bulk sync events from mobile (offline-first support).
+ * Body: { events: Array<{ type, amount, note?, staffId, staffName, orderId?, createdAt? }> }
+ */
+router.post(
+  '/venues/:venueId/cash-drawer/sync',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  cashDrawerMobileController.syncEvents,
+)
+
+// ============================================================================
+// PURCHASE ORDERS
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/purchase-orders
+ * List purchase orders (paginated, with filters).
+ * Query: { page?, pageSize?, status?, dateFrom?, dateTo?, search? }
+ */
+router.get(
+  '/venues/:venueId/purchase-orders',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  purchaseOrderMobileController.listPurchaseOrders,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/purchase-orders
+ * Create a new purchase order.
+ * Body: { supplierName, items: [{ rawMaterialId, quantity, unitPrice, unit?, notes? }], notes?, expectedDate? }
+ */
+router.post(
+  '/venues/:venueId/purchase-orders',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:create'),
+  purchaseOrderMobileController.createPurchaseOrder,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/purchase-orders/:poId
+ * Get purchase order detail with items.
+ */
+router.get(
+  '/venues/:venueId/purchase-orders/:poId',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  purchaseOrderMobileController.getPurchaseOrder,
+)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/purchase-orders/:poId/status
+ * Update purchase order status (send, cancel, approve, etc.).
+ * Body: { status: string }
+ */
+router.put(
+  '/venues/:venueId/purchase-orders/:poId/status',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:create'),
+  purchaseOrderMobileController.updateStatus,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/purchase-orders/:poId/receive
+ * Receive stock from a purchase order. Creates inventory movements.
+ * Body: { items: [{ itemId: string, receivedQuantity: number }] }
+ */
+router.post(
+  '/venues/:venueId/purchase-orders/:poId/receive',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:create'),
+  purchaseOrderMobileController.receiveStock,
+)
+
+// ============================================================================
+// INVENTORY TRANSFERS
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/transfers
+ * List inventory transfers (paginated).
+ * Query: { page?, pageSize? }
+ */
+router.get(
+  '/venues/:venueId/transfers',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  transferMobileController.listTransfers,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/transfers
+ * Create a new inventory transfer.
+ * Body: { fromLocationName, toLocationName, items: [{ productId, productName, quantity }], notes?, staffName }
+ */
+router.post(
+  '/venues/:venueId/transfers',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:create'),
+  transferMobileController.createTransfer,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/transfers/:id
+ * Get transfer detail.
+ */
+router.get(
+  '/venues/:venueId/transfers/:id',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:read'),
+  transferMobileController.getTransfer,
+)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/transfers/:id/status
+ * Update transfer status (send, complete, cancel).
+ * Body: { status: string }
+ */
+router.put(
+  '/venues/:venueId/transfers/:id/status',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:create'),
+  transferMobileController.updateStatus,
+)
+
+// ============================================================================
+// REFUNDS (Unassociated)
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/refunds
+ * Create an unassociated refund (not tied to a specific order).
+ * Body: { amount: number (cents), reason: string, method: "CASH", staffName?: string }
+ */
+router.post(
+  '/venues/:venueId/refunds',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  refundMobileController.createRefund,
+)
+
+// ============================================================================
+// ESTIMATES / PRESUPUESTOS
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/estimates
+ * List estimates (paginated, with filters).
+ * Query: { page?, pageSize?, status?, dateFrom?, dateTo?, search? }
+ */
+router.get(
+  '/venues/:venueId/estimates',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  estimateMobileController.listEstimates,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/estimates
+ * Create a new estimate.
+ * Body: { items: [{ productId?, productName, quantity, unitPrice }], staffName, customerName?, customerEmail?, customerPhone?, notes?, validUntil? }
+ */
+router.post(
+  '/venues/:venueId/estimates',
+  authenticateTokenMiddleware,
+  checkPermission('orders:create'),
+  estimateMobileController.createEstimate,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/estimates/:estimateId
+ * Get estimate detail with items.
+ */
+router.get(
+  '/venues/:venueId/estimates/:estimateId',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  estimateMobileController.getEstimate,
+)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/estimates/:estimateId/status
+ * Update estimate status (send, accept, reject, cancel).
+ * Body: { status: string }
+ */
+router.put(
+  '/venues/:venueId/estimates/:estimateId/status',
+  authenticateTokenMiddleware,
+  checkPermission('orders:create'),
+  estimateMobileController.updateStatus,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/estimates/:estimateId/convert
+ * Convert an accepted estimate to an order.
+ */
+router.post(
+  '/venues/:venueId/estimates/:estimateId/convert',
+  authenticateTokenMiddleware,
+  checkPermission('orders:create'),
+  estimateMobileController.convertToOrder,
+)
+
+// ============================================================================
+// PRODUCT OPTIONS (Variants)
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/product-options
+ * List all product options with values.
+ */
+router.get(
+  '/venues/:venueId/product-options',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  productOptionMobileController.listProductOptions,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/product-options
+ * Create a product option with values.
+ * Body: { name: string, values: [{ value: string, sortOrder?: number }] }
+ */
+router.post(
+  '/venues/:venueId/product-options',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  productOptionMobileController.createProductOption,
+)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/product-options/:optionId
+ * Update a product option and/or its values.
+ * Body: { name?: string, values?: [{ value: string, sortOrder?: number }] }
+ */
+router.put(
+  '/venues/:venueId/product-options/:optionId',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  productOptionMobileController.updateProductOption,
+)
+
+/**
+ * DELETE /api/v1/mobile/venues/:venueId/product-options/:optionId
+ * Delete a product option and all its values.
+ */
+router.delete(
+  '/venues/:venueId/product-options/:optionId',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  productOptionMobileController.deleteProductOption,
+)
+
+// ============================================================================
+// MEASUREMENT UNITS
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/measurement-units
+ * List custom measurement units for a venue.
+ */
+router.get(
+  '/venues/:venueId/measurement-units',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  measurementUnitMobileController.listMeasurementUnits,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/measurement-units
+ * Create a custom measurement unit.
+ * Body: { name: string, abbreviation: string }
+ */
+router.post(
+  '/venues/:venueId/measurement-units',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  measurementUnitMobileController.createMeasurementUnit,
+)
+
+/**
+ * DELETE /api/v1/mobile/venues/:venueId/measurement-units/:id
+ * Delete a custom measurement unit.
+ */
+router.delete(
+  '/venues/:venueId/measurement-units/:id',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  measurementUnitMobileController.deleteMeasurementUnit,
 )
 
 export default router

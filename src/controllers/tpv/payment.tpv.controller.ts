@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
 import * as saleVerificationService from '../../services/tpv/sale-verification.service'
 import * as receiptDashboardService from '../../services/dashboard/receipt.dashboard.service'
+import { sendReceiptWhatsApp } from '../../services/whatsapp.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 
@@ -277,6 +278,68 @@ export async function sendPaymentReceipt(req: Request, res: Response, next: Next
       success: true,
       receiptId: receipt.id,
       message: 'Recibo enviado exitosamente',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Send a payment receipt via WhatsApp
+ * @param req Request with venueId, paymentId and recipientPhone
+ * @param res Response
+ * @param next Next function for error handling
+ */
+export async function sendPaymentReceiptWhatsApp(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const venueId: string = req.params.venueId
+    const paymentId: string = req.params.paymentId
+    const { recipientPhone } = req.body
+
+    // Verify that the payment exists and belongs to the venue
+    const payment = await prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        venueId: venueId,
+      },
+    })
+
+    if (!payment) {
+      throw new NotFoundError('Payment not found or does not belong to this venue')
+    }
+
+    // Generate (or retrieve) the receipt
+    const receipt = await receiptDashboardService.generateAndStoreReceipt(paymentId)
+
+    // Extract data from dataSnapshot for WhatsApp template
+    const dataSnapshot = receipt.dataSnapshot as any
+    const venueName = dataSnapshot?.venue?.name || 'Establecimiento'
+    const baseAmount = parseFloat(dataSnapshot?.payment?.amount?.toString() || '0')
+    const tipAmountVal = parseFloat(dataSnapshot?.payment?.tipAmount?.toString() || '0')
+    const totalAmount = (baseAmount + tipAmountVal).toFixed(2)
+    const receiptUrl = `${process.env.FRONTEND_URL}/receipts/public/${receipt.accessKey}`
+
+    // Send WhatsApp message asynchronously (don't block response)
+    sendReceiptWhatsApp(recipientPhone, {
+      venueName,
+      totalAmount: `$${totalAmount}`,
+      receiptUrl,
+    }).catch(error => {
+      logger.error(`Failed to send WhatsApp receipt for payment ${paymentId}:`, error)
+    })
+
+    // Update receipt with phone
+    await prisma.digitalReceipt.update({
+      where: { id: receipt.id },
+      data: { recipientPhone },
+    })
+
+    logger.info(`WhatsApp receipt queued for payment ${paymentId} to ${recipientPhone}`)
+
+    res.status(200).json({
+      success: true,
+      receiptId: receipt.id,
+      message: 'Recibo enviado por WhatsApp exitosamente',
     })
   } catch (error) {
     next(error)

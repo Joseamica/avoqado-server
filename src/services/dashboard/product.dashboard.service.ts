@@ -45,6 +45,9 @@ export interface CreateProductDto {
   // Credit Packs
   allowCreditRedemption?: boolean
   requireCreditForBooking?: boolean
+
+  // General-purpose duration
+  durationMinutes?: number
 }
 
 export interface UpdateProductDto {
@@ -90,6 +93,9 @@ export interface UpdateProductDto {
   // Credit Packs
   allowCreditRedemption?: boolean
   requireCreditForBooking?: boolean
+
+  // General-purpose duration
+  durationMinutes?: number | null
 }
 
 export interface ReorderProductsDto {
@@ -466,6 +472,9 @@ export async function createProduct(venueId: string, productData: CreateProductD
             // Credit Packs
             allowCreditRedemption: productFields.allowCreditRedemption ?? true,
             requireCreditForBooking: productFields.requireCreditForBooking ?? false,
+
+            // General-purpose duration
+            durationMinutes: productFields.durationMinutes,
 
             // Modifier groups
             modifierGroups: modifierGroupIds?.length

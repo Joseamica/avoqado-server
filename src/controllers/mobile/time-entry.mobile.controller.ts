@@ -44,7 +44,7 @@ export const identifyByPin = async (req: Request, res: Response, next: NextFunct
 export const clockIn = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const { pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy } = req.body
+    const { pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, note } = req.body
 
     if (!pin) {
       return res.status(400).json({
@@ -61,6 +61,7 @@ export const clockIn = async (req: Request, res: Response, next: NextFunction) =
       latitude,
       longitude,
       accuracy,
+      note,
     })
 
     res.status(201).json({
@@ -80,7 +81,7 @@ export const clockIn = async (req: Request, res: Response, next: NextFunction) =
 export const clockOut = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const { pin, checkOutPhotoUrl, latitude, longitude, accuracy } = req.body
+    const { pin, checkOutPhotoUrl, latitude, longitude, accuracy, note } = req.body
 
     if (!pin) {
       return res.status(400).json({
@@ -96,6 +97,7 @@ export const clockOut = async (req: Request, res: Response, next: NextFunction) 
       latitude,
       longitude,
       accuracy,
+      note,
     })
 
     res.status(200).json({

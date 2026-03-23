@@ -23,6 +23,7 @@ interface ClockInParams {
   latitude?: number
   longitude?: number
   accuracy?: number
+  note?: string
 }
 
 interface ClockOutParams {
@@ -32,6 +33,7 @@ interface ClockOutParams {
   latitude?: number
   longitude?: number
   accuracy?: number
+  note?: string
 }
 
 // MARK: - Identify by PIN
@@ -161,7 +163,7 @@ export async function identifyByPin(venueId: string, pin: string) {
  * Clock in a staff member (identified by PIN)
  */
 export async function clockIn(params: ClockInParams) {
-  const { venueId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy } = params
+  const { venueId, pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, note } = params
 
   logger.info(`📱 [TIME-ENTRY.MOBILE] Clock-in request | venue=${venueId}`)
 
@@ -216,6 +218,7 @@ export async function clockIn(params: ClockInParams) {
       clockInLatitude: latitude,
       clockInLongitude: longitude,
       clockInAccuracy: accuracy,
+      notes: note,
       status: TimeEntryStatus.CLOCKED_IN,
     },
     include: {
@@ -241,7 +244,7 @@ export async function clockIn(params: ClockInParams) {
  * Clock out a staff member (identified by PIN)
  */
 export async function clockOut(params: ClockOutParams) {
-  const { venueId, pin, checkOutPhotoUrl, latitude, longitude, accuracy } = params
+  const { venueId, pin, checkOutPhotoUrl, latitude, longitude, accuracy, note } = params
 
   logger.info(`📱 [TIME-ENTRY.MOBILE] Clock-out request | venue=${venueId}`)
 
@@ -320,7 +323,9 @@ export async function clockOut(params: ClockOutParams) {
   const workMinutes = totalMinutes - breakMinutes
   const totalHours = Number((workMinutes / 60).toFixed(2))
 
-  // Update time entry
+  // Update time entry (append note if provided, preserving any existing notes)
+  const updatedNotes = note ? (activeEntry.notes ? `${activeEntry.notes}\n[Clock-out] ${note}` : note) : undefined
+
   const updatedEntry = await prisma.timeEntry.update({
     where: { id: activeEntry.id },
     data: {
@@ -332,6 +337,7 @@ export async function clockOut(params: ClockOutParams) {
       clockOutLatitude: latitude,
       clockOutLongitude: longitude,
       clockOutAccuracy: accuracy,
+      ...(updatedNotes !== undefined && { notes: updatedNotes }),
     },
     include: {
       staff: {

@@ -336,6 +336,31 @@ model Venue {
   // ==========================================
   paymentLinks PaymentLink[]
 
+  // ==========================================
+  // CASH DRAWER
+  // ==========================================
+  cashDrawerSessions CashDrawerSession[]
+
+  // ==========================================
+  // INVENTORY TRANSFERS
+  // ==========================================
+  inventoryTransfers InventoryTransfer[]
+
+  // ==========================================
+  // ESTIMATES / PRESUPUESTOS
+  // ==========================================
+  estimates Estimate[]
+
+  // ==========================================
+  // PRODUCT OPTIONS (Variants)
+  // ==========================================
+  productOptions ProductOption[]
+
+  // ==========================================
+  // MEASUREMENT UNITS
+  // ==========================================
+  measurementUnits MeasurementUnit[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1074,6 +1099,9 @@ model Product {
   // Credit Packs
   allowCreditRedemption  Boolean @default(true)  // Whether this product accepts credit pack redemptions
   requireCreditForBooking Boolean @default(false) // Whether booking requires spending a credit (blocks free bookings)
+
+  // General-purpose duration (any product type, e.g., haircut = 45 min)
+  durationMinutes Int? // Duration in minutes (optional, for scheduling/display)
 
   // Inventory tracking configuration
   trackInventory  Boolean          @default(false)
@@ -7849,4 +7877,182 @@ enum PaymentLinkStatus {
   PAUSED
   EXPIRED
   ARCHIVED
+}
+
+// ==========================================
+// CASH DRAWER
+// ==========================================
+
+model CashDrawerSession {
+  id              String   @id @default(cuid())
+  venueId         String
+  venue           Venue    @relation(fields: [venueId], references: [id])
+  deviceName      String?
+  openedByStaffId String
+  openedByName    String
+  openedAt        DateTime @default(now())
+  startingAmount  Decimal  @db.Decimal(12, 2)
+  closedByStaffId String?
+  closedByName    String?
+  closedAt        DateTime?
+  actualAmount    Decimal? @db.Decimal(12, 2)
+  overShort       Decimal? @db.Decimal(12, 2)
+  closingNote     String?
+  status          CashDrawerStatus @default(OPEN)
+  events          CashDrawerEvent[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([status])
+}
+
+model CashDrawerEvent {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   CashDrawerSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  venueId   String
+  type      CashDrawerEventType
+  amount    Decimal  @db.Decimal(12, 2)
+  note      String?
+  staffId   String
+  staffName String
+  orderId   String?
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+}
+
+enum CashDrawerStatus {
+  OPEN
+  CLOSED
+}
+
+enum CashDrawerEventType {
+  OPEN
+  PAY_IN
+  PAY_OUT
+  CASH_SALE
+  CLOSE
+}
+
+// ==========================================
+// INVENTORY TRANSFERS
+// ==========================================
+
+model InventoryTransfer {
+  id               String   @id @default(cuid())
+  venueId          String
+  venue            Venue    @relation(fields: [venueId], references: [id])
+  fromLocationName String
+  toLocationName   String
+  status           TransferStatus @default(DRAFT)
+  notes            String?
+  itemsJson        String?  @db.Text
+  createdById      String?
+  createdByName    String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([venueId])
+}
+
+enum TransferStatus {
+  DRAFT
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+// ==========================================
+// ESTIMATES / PRESUPUESTOS
+// ==========================================
+
+model Estimate {
+  id             String         @id @default(cuid())
+  venueId        String
+  venue          Venue          @relation(fields: [venueId], references: [id])
+  estimateNumber String         @unique
+  customerId     String?
+  customerName   String?
+  customerEmail  String?
+  customerPhone  String?
+  status         EstimateStatus @default(DRAFT)
+  items          EstimateItem[]
+  subtotal       Decimal        @db.Decimal(12, 2)
+  taxAmount      Decimal        @default(0) @db.Decimal(10, 2)
+  total          Decimal        @db.Decimal(12, 2)
+  notes          String?
+  validUntil     DateTime?
+  sentAt         DateTime?
+  acceptedAt     DateTime?
+  convertedOrderId String?
+  createdById    String?
+  createdByName  String
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([venueId])
+  @@index([venueId, status])
+}
+
+model EstimateItem {
+  id          String   @id @default(cuid())
+  estimateId  String
+  estimate    Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  productId   String?
+  productName String
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  totalPrice  Decimal  @db.Decimal(12, 2)
+
+  @@index([estimateId])
+}
+
+enum EstimateStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  CONVERTED
+  EXPIRED
+  CANCELLED
+}
+
+// ==========================================
+// PRODUCT OPTIONS (Variants)
+// ==========================================
+
+model ProductOption {
+  id        String               @id @default(cuid())
+  venueId   String
+  venue     Venue                @relation(fields: [venueId], references: [id])
+  name      String               // e.g., "Tamaño", "Color"
+  values    ProductOptionValue[]
+  createdAt DateTime             @default(now())
+
+  @@index([venueId])
+}
+
+model ProductOptionValue {
+  id        String        @id @default(cuid())
+  optionId  String
+  option    ProductOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  value     String        // e.g., "Grande", "Rojo"
+  sortOrder Int           @default(0)
+}
+
+// ==========================================
+// MEASUREMENT UNITS (Custom units per venue)
+// ==========================================
+
+model MeasurementUnit {
+  id           String   @id @default(cuid())
+  venueId      String
+  venue        Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  name         String   // e.g., "Kilogramo", "Litro", "Pieza"
+  abbreviation String   // e.g., "kg", "L", "pz"
+  createdAt    DateTime @default(now())
+
+  @@index([venueId])
 }

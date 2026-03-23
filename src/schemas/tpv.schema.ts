@@ -133,6 +133,12 @@ export const sendReceiptBodySchema = z.object({
   }),
 })
 
+export const sendWhatsAppReceiptBodySchema = z.object({
+  body: z.object({
+    recipientPhone: z.string().min(10, { message: 'El teléfono debe tener al menos 10 dígitos.' }),
+  }),
+})
+
 export const recordPaymentBodySchema = z.object({
   body: z
     .object({
