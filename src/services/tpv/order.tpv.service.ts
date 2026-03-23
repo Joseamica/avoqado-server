@@ -2573,10 +2573,20 @@ export async function sellSerializedItem(
       },
     })
 
-    // ⚠️ DO NOT mark as SOLD here - only mark as SOLD when payment completes
-    // Item will be marked as SOLD in processPayment() when payment succeeds
-    // This prevents marking items as sold when payment is cancelled/fails
-    // Note: order.items[0].id available for future use when marking as sold
+    // ⚠️ DO NOT mark as SOLD here for paid orders - only when payment completes
+    // EXCEPTION: $0 orders (gifts/free SIMs) are auto-completed immediately
+    if (input.price === 0) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: 'COMPLETED',
+          paymentStatus: 'PAID',
+          remainingBalance: 0,
+        },
+      })
+      await serializedInventoryService.markAsSold(venueId, input.serialNumber, order.items[0].id, tx)
+      logger.info(`🎁 [ORDER SERVICE] $0 order auto-completed (gift): ${orderNumber}`)
+    }
 
     // Fetch full order with all includes
     const fullOrder = await tx.order.findUniqueOrThrow({

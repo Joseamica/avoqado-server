@@ -1,4 +1,5 @@
 import { StaffRole } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
 
 /**
  * Default permissions matrix by role
@@ -1142,4 +1143,26 @@ export function expandWildcards(permissions: string[]): string[] {
   }
 
   return Array.from(expanded).sort()
+}
+
+/**
+ * Resolve custom permissions for a specific role in a venue.
+ *
+ * Looks up VenueRolePermission overrides. Returns the custom permissions array
+ * if one exists, or null if the venue uses the defaults for this role.
+ */
+export async function resolveCustomPermissionsForRole(venueId: string, role: StaffRole): Promise<string[] | null> {
+  const customPermissionRecord = await prisma.venueRolePermission.findUnique({
+    where: {
+      venueId_role: {
+        venueId,
+        role,
+      },
+    },
+    select: {
+      permissions: true,
+    },
+  })
+
+  return (customPermissionRecord?.permissions as string[]) || null
 }

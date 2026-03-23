@@ -640,12 +640,13 @@ export async function receivePurchaseOrder(
 
     batchCreations.push({ itemId: orderItem.id, batchPromise })
 
-    // Update order item quantity received
+    // Update order item quantity received and set receiveStatus
     operations.push(
       prisma.purchaseOrderItem.update({
         where: { id: orderItem.id },
         data: {
           quantityReceived: totalReceived,
+          receiveStatus: PurchaseOrderItemStatus.RECEIVED,
         },
       }),
     )

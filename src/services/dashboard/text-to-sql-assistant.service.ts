@@ -21,9 +21,14 @@ import { QueryLimitsService } from './query-limits.service'
 import { SecurityAuditLoggerService } from './security-audit-logger.service'
 import { SecurityResponseService, SecurityViolationType } from './security-response.service'
 import { tokenBudgetService, TokenQueryType } from './token-budget.service'
-import { hasPermission } from '@/lib/permissions'
+import { hasPermission, resolveCustomPermissionsForRole } from '@/lib/permissions'
 import { CreateProductSchema } from '@/schemas/dashboard/menu.schema'
 import * as productService from './product.dashboard.service'
+
+// Action Engine
+import { ActionEngine } from './chatbot-actions/action-engine.service'
+import { ActionContext } from './chatbot-actions/types'
+import { registerAllActions } from './chatbot-actions/definitions'
 
 interface TextToSqlQuery {
   message: string
@@ -182,7 +187,7 @@ interface CreateProductActionMetadata {
 }
 
 interface AssistantActionPreviewRequest {
-  actionType: 'create_product'
+  actionType: string
   draft?: CreateProductActionPayload
   conversationId?: string
   venueId: string
@@ -203,6 +208,9 @@ interface AssistantActionPreviewResponse {
   confirmationSummary: string
   expiresAt: string
 }
+
+// Generic response returned by the Action Engine for non-create_product actions.
+type AssistantActionEngineResponse = Record<string, unknown>
 
 interface AssistantActionConfirmRequest {
   actionId: string
@@ -347,6 +355,7 @@ class TextToSqlAssistantService {
   private openai: OpenAI
   private schemaContext: string
   private learningService: AILearningService
+  private actionEngine: ActionEngine
   private currentQueryMetadata: Record<string, string> = {}
   private static readonly pendingActionSessions: Map<string, PendingAssistantActionSession> = new Map()
   private static readonly idempotencyResults: Map<
@@ -381,6 +390,8 @@ class TextToSqlAssistantService {
     this.openai = new OpenAI({ apiKey })
     this.schemaContext = this.buildSchemaContext()
     this.learningService = new AILearningService()
+    this.actionEngine = new ActionEngine()
+    registerAllActions()
     this.initializeActionSessionCleanup()
   }
 
@@ -1780,7 +1791,16 @@ Ejemplos de respuestas CORRECTAS:
           })
         }
 
-        if (semanticCheck.isInjection && semanticCheck.confidence >= 70) {
+        // When mutations are enabled, CRUD messages (crear, eliminar, actualizar, etc.)
+        // are legitimate commands, not injection attempts. Skip the block if the message
+        // looks like a CRUD operation and mutations are enabled.
+        const isCrudMessage =
+          CHATBOT_MUTATIONS_ENABLED &&
+          /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|cambia|cambiar|ajusta|ajustar|registra|registrar|recib[eio]|recibir|aprob[ao]|aprobar|cancel[ao]|cancelar|desactiva|desactivar|modifica|modificar|dar de alta|quita|quitar|pon[me]*|add|create|delete|remove|update|adjust)\b/i.test(
+            query.message,
+          )
+
+        if (semanticCheck.isInjection && semanticCheck.confidence >= 70 && !isCrudMessage) {
           logger.warn('🛡️ Semantic prompt injection blocked', {
             userId: query.userId,
             venueId: query.venueId,
@@ -1867,6 +1887,54 @@ Ejemplos de respuestas CORRECTAS:
               }
             }
           }
+        }
+      }
+
+      // ── Action Engine Hook ──
+      if (CHATBOT_MUTATIONS_ENABLED) {
+        try {
+          const actionContext: ActionContext = {
+            venueId: query.venueId,
+            userId: query.userId,
+            role: (query.userRole as unknown as StaffRole) || StaffRole.VIEWER,
+            permissions: await resolveCustomPermissionsForRole(query.venueId, (query.userRole as unknown as StaffRole) || StaffRole.VIEWER),
+            ipAddress: query.ipAddress,
+          }
+
+          const detection = await this.actionEngine.detectAction(query.message, actionContext)
+
+          if (detection.isAction && detection.classification) {
+            const result = await this.actionEngine.processAction(detection.classification, actionContext)
+            // Convert ActionResponse to TextToSqlResponse format
+            return {
+              response: result.message,
+              confidence: detection.classification.confidence,
+              metadata: {
+                queryGenerated: false,
+                queryExecuted: result.type === 'confirmed',
+                dataSourcesUsed: ['chatbot.action_engine'],
+                routedTo: 'ActionEngine' as any,
+                riskLevel: 'low' as any,
+                reasonCode: `action_${result.type}`,
+                // Action Engine specific fields
+                action: {
+                  type: result.type,
+                  actionId: result.actionId,
+                  preview: result.preview,
+                  missingFields: result.missingFields,
+                  candidates: result.candidates,
+                  entityId: result.entityId,
+                } as any,
+              },
+            }
+          }
+        } catch (error) {
+          // Action Engine errors should not break the text-to-SQL pipeline
+          logger.error('[ActionEngine] Error in action detection/processing', {
+            error: error instanceof Error ? { message: error.message, stack: error.stack } : error,
+            message: query.message,
+          })
+          // Fall through to existing text-to-SQL flow
         }
       }
 
@@ -4465,13 +4533,31 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
   }
 
-  public async previewAction(request: AssistantActionPreviewRequest): Promise<AssistantActionPreviewResponse> {
-    if (request.actionType !== 'create_product') {
-      throw new AppError('Tipo de acción no soportado.', 400)
-    }
-
+  public async previewAction(
+    request: AssistantActionPreviewRequest,
+  ): Promise<AssistantActionPreviewResponse | AssistantActionEngineResponse> {
     if (!CHATBOT_MUTATIONS_ENABLED) {
       throw new AppError('El chatbot está en modo solo lectura. Habilita CHATBOT_ENABLE_MUTATIONS para usar acciones.', 403)
+    }
+
+    // Delegate non-create_product actions to the Action Engine
+    if (request.actionType !== 'create_product') {
+      const role = (request.userRole as unknown as StaffRole) || StaffRole.VIEWER
+      const customPermissions = await this.resolveCustomPermissionsForRole(request.venueId, role)
+      const actionContext: ActionContext = {
+        venueId: request.venueId,
+        userId: request.userId,
+        role,
+        permissions: customPermissions,
+        ipAddress: request.ipAddress,
+      }
+      const classification = {
+        actionType: request.actionType,
+        params: (request.draft as Record<string, unknown>) ?? {},
+        confidence: 1,
+      }
+      const result = await this.actionEngine.processAction(classification, actionContext)
+      return result as unknown as AssistantActionEngineResponse
     }
 
     const role = (request.userRole as unknown as StaffRole) || StaffRole.VIEWER
@@ -4546,13 +4632,29 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
   }
 
-  public async confirmAction(request: AssistantActionConfirmRequest): Promise<AssistantActionConfirmResponse> {
+  public async confirmAction(request: AssistantActionConfirmRequest): Promise<AssistantActionConfirmResponse | Record<string, unknown>> {
     if (!request.confirmed) {
       throw new AppError('Debes confirmar explícitamente la acción.', 400)
     }
 
     if (!CHATBOT_MUTATIONS_ENABLED) {
       throw new AppError('El chatbot está en modo solo lectura. Habilita CHATBOT_ENABLE_MUTATIONS para usar acciones.', 403)
+    }
+
+    // Try the Action Engine first — if the actionId belongs to an Action Engine session, delegate
+    const engineSession = this.actionEngine._getPendingSession(request.actionId)
+    if (engineSession) {
+      const role = (request.userRole as unknown as StaffRole) || StaffRole.VIEWER
+      const customPermissions = await this.resolveCustomPermissionsForRole(request.venueId, role)
+      const actionContext: ActionContext = {
+        venueId: request.venueId,
+        userId: request.userId,
+        role,
+        permissions: customPermissions,
+        ipAddress: request.ipAddress,
+      }
+      const result = await this.actionEngine.confirmAction(request.actionId, request.idempotencyKey, actionContext)
+      return result as unknown as Record<string, unknown>
     }
 
     const idempotencyStorageKey = `${request.venueId}:${request.userId}:${request.idempotencyKey}`
@@ -4896,19 +4998,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
   }
 
   private async resolveCustomPermissionsForRole(venueId: string, role: StaffRole): Promise<string[] | null> {
-    const customPermissionRecord = await prisma.venueRolePermission.findUnique({
-      where: {
-        venueId_role: {
-          venueId,
-          role,
-        },
-      },
-      select: {
-        permissions: true,
-      },
-    })
-
-    return (customPermissionRecord?.permissions as string[]) || null
+    return resolveCustomPermissionsForRole(venueId, role)
   }
 
   private async handleCreateProductCollectAction(query: TextToSqlQuery, startTime: number, sessionId: string): Promise<TextToSqlResponse> {

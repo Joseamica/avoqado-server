@@ -264,6 +264,31 @@ export class PromptInjectionDetectorService {
       riskScore: 50,
       description: 'Attempt to disable safety features',
     },
+
+    // ========================================
+    // CRITICAL: Spanish injection patterns
+    // ========================================
+    {
+      pattern: /\b(ignora|olvida|desconsidera)\b.{0,30}\b(instrucciones|reglas|sistema)\b/i,
+      type: 'INSTRUCTION_OVERRIDE',
+      severity: 'CRITICAL',
+      riskScore: 95,
+      description: 'Attempt to ignore/forget instructions (Spanish)',
+    },
+    {
+      pattern: /\b(ahora\s+eres|actua\s+como|pretende\s+ser)\b/i,
+      type: 'ROLE_MANIPULATION',
+      severity: 'HIGH',
+      riskScore: 85,
+      description: 'Attempt to change assistant role (Spanish)',
+    },
+    {
+      pattern: /\b(muestra|dame|revela)\b.{0,20}\b(prompt|instrucciones|sistema)\b/i,
+      type: 'PROMPT_REVELATION',
+      severity: 'CRITICAL',
+      riskScore: 90,
+      description: 'Attempt to reveal system prompt (Spanish)',
+    },
   ]
 
   /**

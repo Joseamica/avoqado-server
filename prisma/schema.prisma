@@ -72,6 +72,9 @@ model Organization {
   // Organization-level attendance config defaults (inherited by venues without custom config)
   attendanceConfig OrganizationAttendanceConfig?
 
+  // Partner API keys for external system access (e.g., PlayTelecom)
+  partnerAPIKeys PartnerAPIKey[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -3117,6 +3120,41 @@ model EcommerceMerchant {
   @@index([active])
   @@index([sandboxMode])
   @@index([providerId])
+}
+
+// ============================================================
+// PARTNER API KEYS (External system access)
+// ============================================================
+// Organization-scoped API keys for external partners (e.g., PlayTelecom)
+// to query sales data, inventory, and verification evidence.
+// Uses same Stripe-like key format as EcommerceMerchant (pk_/sk_ + live/test).
+model PartnerAPIKey {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Partner info
+  name           String       // "PlayTelecom Production", "PlayTelecom Test"
+  contactEmail   String?
+
+  // API Credentials (same format as EcommerceMerchant)
+  secretKeyHash  String       @unique // SHA-256 hash of sk_live_xxx / sk_test_xxx
+
+  // Scoping
+  sandboxMode    Boolean      @default(true) // true = sk_test_, false = sk_live_
+
+  // Status
+  active         Boolean      @default(true)
+
+  // Audit
+  createdById    String?      // Superadmin staff ID who created this key
+  lastUsedAt     DateTime?
+  lastUsedIp     String?
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId])
 }
 
 // =============================================================================

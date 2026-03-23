@@ -37,10 +37,7 @@ export const assistantQuerySchema = z.object({
 
 export const assistantActionPreviewSchema = z.object({
   body: z.object({
-    actionType: z.enum(['create_product'], {
-      required_error: 'El tipo de acción es requerido.',
-      invalid_type_error: 'El tipo de acción no es válido.',
-    }),
+    actionType: z.string().min(1, { message: 'El tipo de acción es requerido' }),
     draft: z
       .object({
         name: z.string().min(1, 'El nombre no puede estar vacío.').max(120, 'El nombre no puede exceder 120 caracteres.').optional(),

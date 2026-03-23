@@ -325,3 +325,18 @@ export async function getGlobalMovements(
     },
   }
 }
+
+/**
+ * Set minimum stock threshold for a product with QUANTITY tracking
+ */
+export async function setMinimumStock(venueId: string, productId: string, minimum: number) {
+  return prisma.inventory.update({
+    where: {
+      productId,
+      product: { venueId },
+    },
+    data: {
+      minimumStock: minimum,
+    },
+  })
+}

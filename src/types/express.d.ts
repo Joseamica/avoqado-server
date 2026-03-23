@@ -9,6 +9,12 @@ declare global {
       correlationId?: string
       authenticated?: boolean
       sdkContext?: SDKContext
+      partnerContext?: {
+        partnerId: string
+        partnerName: string
+        organizationId: string
+        sandboxMode: boolean
+      }
     }
   }
 }
