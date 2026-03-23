@@ -60,10 +60,7 @@ class PartnerService {
         lte: to,
       },
       // Org-scoped: items that belong to the org OR items in org's venues
-      OR: [
-        { organizationId },
-        { venue: { organizationId } },
-      ],
+      OR: [{ organizationId }, { venue: { organizationId } }],
     }
 
     if (venueId) {
@@ -139,7 +136,7 @@ class PartnerService {
     })
 
     // Map to PlayTelecom response format
-    const data: PartnerSaleRecord[] = items.map((item) => {
+    const data: PartnerSaleRecord[] = items.map(item => {
       const order = item.orderItem?.order
       const payment = order?.payments?.[0]
       const verification = payment?.saleVerification
@@ -158,9 +155,7 @@ class PartnerService {
         tienda_id: venue?.id || '',
         tienda: venue?.name || '',
         vendedor_id: order?.createdBy?.id || null,
-        vendedor: order?.createdBy
-          ? `${order.createdBy.firstName} ${order.createdBy.lastName}`
-          : null,
+        vendedor: order?.createdBy ? `${order.createdBy.firstName} ${order.createdBy.lastName}` : null,
         ciudad: venue?.city || null,
         producto: item.category?.name || null,
         precio: item.orderItem?.unitPrice ? Number(item.orderItem.unitPrice) : 0,
@@ -171,10 +166,7 @@ class PartnerService {
         registro_url: verification?.photos?.[0] || null,
         latitud: terminal?.lastLatitude ? String(terminal.lastLatitude) : null,
         longitud: terminal?.lastLongitude ? String(terminal.lastLongitude) : null,
-        evidencia_portabilidad_url:
-          verification?.isPortabilidad && verification?.photos?.[1]
-            ? verification.photos[1]
-            : null,
+        evidencia_portabilidad_url: verification?.isPortabilidad && verification?.photos?.[1] ? verification.photos[1] : null,
       }
     })
 

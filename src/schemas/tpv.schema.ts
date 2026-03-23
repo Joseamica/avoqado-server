@@ -143,7 +143,7 @@ export const recordPaymentBodySchema = z.object({
   body: z
     .object({
       venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
-      amount: z.number().int().positive({ message: 'El monto debe ser un número entero positivo (en centavos).' }),
+      amount: z.number().int().nonnegative({ message: 'El monto debe ser un número entero no negativo (en centavos).' }),
       tip: z.number().int().min(0, { message: 'La propina debe ser un número entero no negativo (en centavos).' }),
       status: z.enum(['COMPLETED', 'PENDING', 'FAILED', 'PROCESSING', 'REFUNDED'], { message: 'Estado de pago inválido.' }),
       method: z.enum(['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'], { message: 'Método de pago inválido.' }),
