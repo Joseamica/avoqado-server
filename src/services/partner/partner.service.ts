@@ -11,7 +11,7 @@ interface PartnerSalesQuery {
   organizationId: string
   from: Date
   to: Date
-  venueId?: string
+  venueSlug?: string
   status?: string // exitosa | fallida | cancelada
   page: number
   limit: number
@@ -49,7 +49,7 @@ interface PartnerSalesResponse {
 
 class PartnerService {
   async getSales(query: PartnerSalesQuery): Promise<PartnerSalesResponse> {
-    const { organizationId, from, to, venueId, status, page, limit } = query
+    const { organizationId, from, to, venueSlug, status, page, limit } = query
     const skip = (page - 1) * limit
 
     // Build where clause: all sold SerializedItems in this org's venues
@@ -63,9 +63,18 @@ class PartnerService {
       OR: [{ organizationId }, { venue: { organizationId } }],
     }
 
-    if (venueId) {
-      // Filter by specific selling venue
-      where.sellingVenueId = venueId
+    // Resolve venue slug to ID if provided
+    if (venueSlug) {
+      const venue = await prisma.venue.findUnique({
+        where: { slug: venueSlug },
+        select: { id: true, organizationId: true },
+      })
+      if (venue) {
+        where.sellingVenueId = venue.id
+      } else {
+        // Slug not found — return empty results
+        return { data: [], pagination: { page, limit, total: 0 } }
+      }
     }
 
     // Filter by payment status at DB level (not post-query)
@@ -92,8 +101,8 @@ class PartnerService {
       orderBy: { soldAt: 'desc' },
       include: {
         category: { select: { name: true } },
-        sellingVenue: { select: { id: true, name: true, city: true } },
-        venue: { select: { id: true, name: true, city: true } },
+        sellingVenue: { select: { id: true, slug: true, name: true, city: true } },
+        venue: { select: { id: true, slug: true, name: true, city: true } },
         orderItem: {
           select: {
             unitPrice: true,
@@ -152,7 +161,7 @@ class PartnerService {
         transaction_id: order?.orderNumber || item.id,
         fecha_venta: item.soldAt?.toISOString() || '',
         tpv_id: terminal?.serialNumber || null,
-        tienda_id: venue?.id || '',
+        tienda_id: venue?.slug || venue?.id || '',
         tienda: venue?.name || '',
         vendedor_id: order?.createdBy?.id || null,
         vendedor: order?.createdBy ? `${order.createdBy.firstName} ${order.createdBy.lastName}` : null,

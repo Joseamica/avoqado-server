@@ -11,14 +11,14 @@ const router = Router()
  * Query params:
  *   from (required) - ISO date string, start of range
  *   to   (required) - ISO date string, end of range
- *   venue_id        - Filter by specific venue
+ *   venue_slug      - Filter by venue slug (e.g., "dona-simona")
  *   status          - exitosa | cancelada | fallida
  *   page            - Page number (default: 1)
  *   limit           - Items per page (default: 50, max: 100)
  */
 router.get('/sales', requirePartnerKey, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { from, to, venue_id, status, page: pageStr, limit: limitStr } = req.query
+    const { from, to, venue_slug, status, page: pageStr, limit: limitStr } = req.query
 
     // Validate required params
     if (!from || !to) {
@@ -55,7 +55,7 @@ router.get('/sales', requirePartnerKey, async (req: Request, res: Response, next
       organizationId: req.partnerContext!.organizationId,
       from: fromDate,
       to: toDate,
-      venueId: venue_id as string | undefined,
+      venueSlug: venue_slug as string | undefined,
       status: status as string | undefined,
       page,
       limit,
