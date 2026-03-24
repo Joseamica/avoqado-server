@@ -81,6 +81,10 @@ Reglas para ACTION (intent = action):
 - El usuario da una INSTRUCCIÓN DIRECTA con un objeto específico: "crea materia prima sal", "elimina el producto X", "ajusta stock de Y"
 - Contiene un verbo imperativo + un sustantivo concreto que se va a crear/modificar/eliminar
 - Merma o pérdida con cantidad específica: "se perdieron 3 kilos de tomate" → action
+- Alertas: reconocer, resolver, descartar una alerta → action
+- Proveedores: crear, actualizar, eliminar proveedor, registrar precio → action
+- PO workflow: enviar para aprobación, rechazar, recibir todo → action
+- Reactivar materia prima, recalcular costo de receta, aplicar precio sugerido → action
 
 Reglas para QUERY (intent = query):
 - El usuario PREGUNTA sobre datos: cuántos, cuánto, muéstrame, dame, lista, reporte, estadísticas

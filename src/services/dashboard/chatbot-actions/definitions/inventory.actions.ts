@@ -295,6 +295,50 @@ export const inventoryActions: ActionDefinition[] = [
   },
 
   // ---------------------------------------------------------------------------
+  // inventory.rawMaterial.reactivate
+  // ---------------------------------------------------------------------------
+  {
+    actionType: 'inventory.rawMaterial.reactivate',
+    entity: 'RawMaterial',
+    operation: 'delete', // 'delete' so entity resolver includes inactive materials (active=false, deletedAt IS NULL)
+    permission: 'inventory:update',
+    dangerLevel: 'low',
+    service: 'rawMaterialService',
+    method: 'reactivateRawMaterial',
+    description: 'Reactiva un insumo previamente desactivado para que vuelva a estar disponible en el inventario',
+    examples: [
+      'Reactiva el insumo de tomate bola que desactivé antes',
+      'vuelve a activar la materia prima harina de maíz',
+      'reactivar insumo aceite de ajonjolí',
+      'activa de nuevo el insumo queso panela',
+      'habilitar de nuevo la sal de grano en inventario',
+    ],
+    fields: {
+      name: {
+        type: 'string',
+        required: true,
+        prompt: '¿Cuál insumo desactivado quieres reactivar?',
+      },
+    },
+    entityResolution: {
+      searchField: 'name',
+      scope: 'venueId',
+      fuzzyMatch: true,
+      multipleMatchBehavior: 'ask',
+    },
+    serviceAdapter: async (params, context) => {
+      const { entityId } = params as any
+      return rawMaterialService.reactivateRawMaterial(context.venueId, entityId as string)
+    },
+    previewTemplate: {
+      title: 'Reactivar insumo: {{name}}',
+      summary: 'Se reactivará el insumo "{{name}}". Volverá a aparecer en el inventario y podrá usarse en recetas y órdenes de compra.',
+      showDiff: false,
+      showImpact: false,
+    },
+  },
+
+  // ---------------------------------------------------------------------------
   // inventory.rawMaterial.adjustStock
   // ---------------------------------------------------------------------------
   {

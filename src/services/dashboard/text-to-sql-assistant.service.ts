@@ -1796,7 +1796,7 @@ Ejemplos de respuestas CORRECTAS:
         // looks like a CRUD operation and mutations are enabled.
         const isCrudMessage =
           CHATBOT_MUTATIONS_ENABLED &&
-          /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|cambia|cambiar|ajusta|ajustar|registra|registrar|recib[eio]|recibir|aprob[ao]|aprobar|cancel[ao]|cancelar|desactiva|desactivar|modifica|modificar|dar de alta|quita|quitar|pon[me]*|add|create|delete|remove|update|adjust)\b/i.test(
+          /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|cambia|cambiar|ajusta|ajustar|registra|registrar|recib[eio]|recibir|aprob[ao]|aprobar|cancel[ao]|cancelar|desactiva|desactivar|modifica|modificar|dar de alta|quita|quitar|pon[me]*|reconoc[eo]|reconocer|resuelv[eo]|resolver|reactiva|reactivar|rechaz[ao]|rechazar|envi[ao]|enviar|manda|mandar|aplica|aplicar|recalcula|recalcular|dismiss|add|create|delete|remove|update|adjust|resolve|acknowledge)\b/i.test(
             query.message,
           )
 

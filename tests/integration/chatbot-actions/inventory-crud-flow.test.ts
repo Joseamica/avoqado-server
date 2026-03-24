@@ -452,11 +452,11 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
   // -------------------------------------------------------------------------
 
   describe('Registry integration', () => {
-    it('should register exactly 18 actions when registerAllActions() is called', () => {
+    it('should register all actions when registerAllActions() is called', () => {
       actionRegistry.clear()
       const count = registerAllActions()
-      expect(count).toBe(18)
-      expect(actionRegistry.getAll()).toHaveLength(18)
+      expect(count).toBe(33)
+      expect(actionRegistry.getAll()).toHaveLength(33)
     })
 
     it('should have inventory domain actions registered', () => {
@@ -506,6 +506,9 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
       const domains = actionRegistry.getDomains()
       expect(domains).toContain('inventory')
       expect(domains).toContain('menu')
+      expect(domains).toContain('supplier')
+      expect(domains).toContain('alert')
+      expect(domains).toContain('pricing')
     })
 
     it('should be idempotent: calling registerAllActions() twice does not duplicate actions', () => {
@@ -513,7 +516,7 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
       registerAllActions()
       registerAllActions() // Second call should overwrite, not append
 
-      expect(actionRegistry.getAll()).toHaveLength(18)
+      expect(actionRegistry.getAll()).toHaveLength(33)
     })
   })
 

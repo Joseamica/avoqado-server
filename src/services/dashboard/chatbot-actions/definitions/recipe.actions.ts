@@ -412,6 +412,67 @@ export const recipeActions: ActionDefinition[] = [
   },
 
   // ---------------------------------------------------------------------------
+  // inventory.recipe.recalculateCost
+  // ---------------------------------------------------------------------------
+  {
+    actionType: 'inventory.recipe.recalculateCost',
+    entity: 'Recipe',
+    operation: 'custom',
+    permission: 'menu:update',
+    dangerLevel: 'low',
+    service: 'recipeService',
+    method: 'recalculateRecipeCost',
+    description: 'Recalcula el costo total de la receta basándose en los precios actuales de los ingredientes',
+    examples: [
+      'recalcula el costo de la receta de hamburguesa',
+      'actualiza el costo de preparar la pizza',
+      'recalcular costo de la receta del café americano',
+      'actualiza el costo de ingredientes del smoothie de mango',
+      'recalcula el precio de costo de los tacos de pollo',
+    ],
+    fields: {
+      name: {
+        type: 'string',
+        required: true,
+        prompt: '¿De qué producto quieres recalcular el costo de la receta?',
+      },
+    },
+    entityResolution: {
+      searchField: 'name',
+      scope: 'venueId',
+      fuzzyMatch: true,
+      multipleMatchBehavior: 'ask',
+      resolveVia: {
+        intermediateEntity: 'Product',
+        intermediateField: 'name',
+        linkField: 'productId',
+      },
+    },
+    serviceAdapter: async (params, context) => {
+      const { entityId } = params as any
+
+      // entityId is productId (from two-hop resolution via Product)
+      // Look up the recipe by productId to get the recipeId
+      const recipe = await prisma.recipe.findFirst({
+        where: { productId: entityId as string },
+        select: { id: true },
+      })
+
+      if (!recipe) {
+        throw new Error('No se encontró una receta para este producto.')
+      }
+
+      return recipeService.recalculateRecipeCost(recipe.id)
+    },
+    previewTemplate: {
+      title: 'Recalcular costo de receta: {{name}}',
+      summary: 'Se recalculará el costo total de la receta de "{{name}}" usando los precios actuales de los ingredientes.',
+      showDiff: true,
+      showImpact: false,
+    },
+  },
+
+  // ---------------------------------------------------------------------------
   // inventory.recipe.removeLine
   // ---------------------------------------------------------------------------
   {
