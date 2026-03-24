@@ -74,11 +74,22 @@ export class ObservabilityController {
         throw new Error(`Invalid log level: ${payload.level}`)
       }
 
+      // Resolve terminalId: TPV may send serialNumber instead of CUID
+      let resolvedTerminalId = payload.terminalId
+      if (!payload.terminalId.startsWith('c')) {
+        // Looks like a serialNumber (e.g., "AVQD-2841548625"), resolve to CUID
+        const terminal = await prisma.terminal.findFirst({
+          where: { serialNumber: { equals: payload.terminalId, mode: 'insensitive' } },
+          select: { id: true },
+        })
+        if (terminal) resolvedTerminalId = terminal.id
+      }
+
       // Store log in database
       const terminalLog = await prisma.terminalLog.create({
         data: {
           venueId: payload.venueId,
-          terminalId: payload.terminalId,
+          terminalId: resolvedTerminalId,
           level,
           tag: payload.tag,
           message: payload.message,

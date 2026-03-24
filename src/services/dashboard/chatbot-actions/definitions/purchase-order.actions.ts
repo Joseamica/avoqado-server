@@ -101,9 +101,10 @@ export const purchaseOrderActions: ActionDefinition[] = [
         },
         unitPrice: {
           type: 'decimal',
-          required: true,
+          required: false,
           prompt: '¿Cuál es el precio unitario?',
           min: 0.01,
+          default: 0,
         },
       },
     },
@@ -152,27 +153,33 @@ export const purchaseOrderActions: ActionDefinition[] = [
             deletedAt: null,
             name: { contains: searchName, mode: 'insensitive' },
           },
-          select: { id: true },
+          select: { id: true, costPerUnit: true },
         })
         if (rm) {
           rawMaterialId = rm.id
         } else {
-          const fuzzy = await prisma.$queryRaw<Array<{ id: string }>>`
-            SELECT id FROM "RawMaterial"
+          const fuzzy = await prisma.$queryRaw<Array<{ id: string; costPerUnit?: any }>>`
+            SELECT id, "costPerUnit" FROM "RawMaterial"
             WHERE "venueId" = ${context.venueId} AND "active" = true AND "deletedAt" IS NULL
               AND similarity(name, ${searchName}) > 0.2
             ORDER BY similarity(name, ${searchName}) DESC
             LIMIT 1
           `
-          if (fuzzy.length > 0) rawMaterialId = fuzzy[0].id
+          if (fuzzy.length > 0) {
+            rawMaterialId = fuzzy[0].id
+            if (!rm) (rm as any) = fuzzy[0]
+          }
         }
         if (!rawMaterialId) throw new Error(`No se encontró el insumo "${searchName}" en el inventario.`)
+
+        // Use unitPrice from user, or fall back to raw material's costPerUnit
+        const price = item.unitPrice ? Number(item.unitPrice) : (rm as any)?.costPerUnit ? Number((rm as any).costPerUnit) : 0
 
         resolvedItems.push({
           rawMaterialId,
           quantityOrdered: Number(item.quantity),
           unit: item.unit as string,
-          unitPrice: Number(item.unitPrice),
+          unitPrice: price,
         })
       }
 

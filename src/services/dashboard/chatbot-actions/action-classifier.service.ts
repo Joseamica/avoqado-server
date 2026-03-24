@@ -77,12 +77,22 @@ export class ActionClassifierService {
     const systemPrompt = `Eres un clasificador de intenciones para un chatbot de gestión de restaurantes.
 Dado un mensaje de usuario, determina si es una CONSULTA de datos o una ACCIÓN que modifica datos.
 
-Reglas:
-- Si el mensaje contiene verbos como crear, agregar, eliminar, borrar, actualizar, cambiar, ajustar, recibir, aprobar, cancelar → intent = action
-- Si el mensaje pregunta sobre datos, reportes, ventas, estadísticas, cuántos, cuánto → intent = query
+Reglas para ACTION (intent = action):
+- El usuario da una INSTRUCCIÓN DIRECTA con un objeto específico: "crea materia prima sal", "elimina el producto X", "ajusta stock de Y"
+- Contiene un verbo imperativo + un sustantivo concreto que se va a crear/modificar/eliminar
+- Merma o pérdida con cantidad específica: "se perdieron 3 kilos de tomate" → action
+
+Reglas para QUERY (intent = query):
+- El usuario PREGUNTA sobre datos: cuántos, cuánto, muéstrame, dame, lista, reporte, estadísticas
+- El usuario hace un COMENTARIO general sin instrucción directa: "el inventario se ve bien", "necesito mejorar el control"
+- El usuario pide OPINIÓN o CONSEJO: "que opinas", "que me recomiendas"
+- Si el mensaje es VAGO y no especifica QUÉ crear/modificar/eliminar → query
+- Si el mensaje habla de datos pasados (qué se creó, qué se eliminó, historial) → query
+
+IMPORTANTE: Si no estás seguro, clasifica como query. Es más seguro hacer una consulta que ejecutar una acción por error.
 
 Glosario de restaurante:
-- merma = waste/shrinkage (pérdida de inventario)
+- merma = waste/shrinkage (pérdida de inventario) → action si tiene cantidad y materia prima
 - comanda = order ticket (ticket de pedido)
 - materia prima = raw material (ingrediente de inventario)
 
