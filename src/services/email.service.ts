@@ -5,11 +5,18 @@ import logger from '../config/logger'
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
 const FROM_EMAIL = process.env.EMAIL_FROM || 'Avoqado <noreply@avoqado.io>'
 
+interface EmailAttachment {
+  filename: string
+  content: Buffer | string
+  contentType?: string
+}
+
 interface EmailOptions {
   to: string
   subject: string
   html?: string
   text?: string
+  attachments?: EmailAttachment[]
 }
 
 interface InvitationEmailData {
@@ -166,6 +173,13 @@ class EmailService {
         subject: options.subject,
         html: options.html || undefined,
         text: options.text || 'Please view this email in an HTML-compatible email client.',
+        ...(options.attachments?.length && {
+          attachments: options.attachments.map(a => ({
+            filename: a.filename,
+            content: a.content instanceof Buffer ? a.content : Buffer.from(a.content as string, 'utf-8'),
+            ...(a.contentType && { content_type: a.contentType }),
+          })),
+        }),
       }
 
       const result = await resend.emails.send(emailPayload)

@@ -24,6 +24,7 @@ import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
+import { moneygiverSettlementJob } from './jobs/moneygiver-settlement.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -243,6 +244,9 @@ const startApplication = async (retries = 3) => {
 
       // Start commission aggregation job (daily at 3:00 AM Mexico City)
       commissionAggregationJob.start()
+
+      // Start Moneygiver daily settlement report (daily at 7:00 AM Mexico City)
+      moneygiverSettlementJob.start()
 
       // Start auto clock-out job (every 15 minutes for HR automation)
       autoClockOutJob.start()
