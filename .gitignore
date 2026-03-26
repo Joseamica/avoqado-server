@@ -26,3 +26,6 @@ scripts/temp-*
 .eslintcache
 .cache/eslint/
 .cache/pre-deploy-logs/
+.serena/project.yml
+.claude-flow/tasks/store.json
+.serena/project.yml
