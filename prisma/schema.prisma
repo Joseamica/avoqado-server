@@ -306,6 +306,7 @@ model Venue {
   commissionSummaries    CommissionSummary[]
   commissionPayouts      CommissionPayout[]
   milestoneAchievements  MilestoneAchievement[]
+  venueCommission        VenueCommission?
 
   // ==========================================
   // PLAYTELECOM / WHITE-LABEL DASHBOARD
@@ -3001,6 +3002,10 @@ model MerchantAccount {
   blumonPosId        String? // Momentum API posId (e.g., "376")
   blumonEnvironment  String? // "SANDBOX" or "PRODUCTION"
   blumonMerchantId   String? // Blumon's merchant identifier
+
+  // Aggregator relationship (e.g., Moneygiver)
+  aggregatorId String?
+  aggregator   Aggregator? @relation(fields: [aggregatorId], references: [id])
 
   // Relations
   venueConfigsPrimary   VenuePaymentConfig[]        @relation("PrimaryAccount")
@@ -8093,4 +8098,43 @@ model MeasurementUnit {
   createdAt    DateTime @default(now())
 
   @@index([venueId])
+}
+
+// ==========================================
+// AGGREGATOR / PAYMENT INTERMEDIARY SYSTEM
+// ==========================================
+
+model Aggregator {
+  id       String  @id @default(cuid())
+  name     String  @unique
+  venueId  String?
+  baseFees Json    // {DEBIT: 0.025, CREDIT: 0.025, AMEX: 0.033, INTERNATIONAL: 0.033}
+  ivaRate  Decimal @default(0.16) @db.Decimal(5, 4) // 0.16 = 16% IVA Mexico
+  active   Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchants        MerchantAccount[]
+  venueCommissions VenueCommission[]
+
+  @@index([active])
+}
+
+model VenueCommission {
+  id           String  @id @default(cuid())
+  venueId      String  @unique
+  aggregatorId String
+  rate         Decimal @db.Decimal(5, 4) // 0.0462 = 4.62%
+  referredBy   String  // "EXTERNAL" or "AGGREGATOR"
+  active       Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  venue      Venue      @relation(fields: [venueId], references: [id])
+  aggregator Aggregator @relation(fields: [aggregatorId], references: [id])
+
+  @@index([aggregatorId])
+  @@index([active])
 }

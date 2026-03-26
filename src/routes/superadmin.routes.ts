@@ -19,6 +19,8 @@ import onboardingRoutes from './superadmin/onboarding.routes'
 import trainingRoutes from './superadmin/training.routes'
 import activityLogRoutes from './superadmin/activityLog.routes'
 import partnerKeyRoutes from './superadmin/partnerKey.routes'
+import aggregatorRoutes from './superadmin/aggregator.routes'
+import venueCommissionRoutes from './superadmin/venueCommission.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -43,6 +45,8 @@ router.use('/onboarding', onboardingRoutes)
 router.use('/trainings', trainingRoutes)
 router.use('/activity-log', activityLogRoutes)
 router.use('/partner-keys', partnerKeyRoutes)
+router.use('/aggregators', aggregatorRoutes)
+router.use('/venue-commissions', venueCommissionRoutes)
 // app-updates route is mounted in app.ts with 100MB body limit (not here)
 
 export default router

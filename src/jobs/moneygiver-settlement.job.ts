@@ -22,8 +22,6 @@ import emailService from '../services/email.service'
 
 const TIMEZONE = 'America/Mexico_City'
 const RECIPIENT = 'jose@avoqado.io'
-const MONEYGIVER_FILTER = '%moneygiver%'
-
 const RATES: Record<string, number> = {
   DEBIT: 0.025,
   CREDIT: 0.025,
@@ -50,6 +48,7 @@ interface SettlementRow {
   tips: number
   rate: number
   fee: number
+  ivaFee: number
   netAmount: number
 }
 
@@ -59,6 +58,7 @@ interface VenueSummary {
   grossAmount: number
   tips: number
   totalFees: number
+  totalIva: number
   netAmount: number
 }
 
@@ -121,7 +121,7 @@ export class MoneygiverSettlementJob {
       })
 
       // Query payments grouped by venue + card type
-      const rows = await this.queryPayments(startUTC, endUTC)
+      const { rows, ivaRate } = await this.queryPayments(startUTC, endUTC)
 
       if (rows.length === 0) {
         logger.info('💰 No Moneygiver transactions for ' + dateStr)
@@ -129,7 +129,7 @@ export class MoneygiverSettlementJob {
       }
 
       // Calculate fees and net amounts
-      const settlementRows = this.calculateSettlement(rows)
+      const settlementRows = this.calculateSettlement(rows, ivaRate)
       const venueSummaries = this.buildVenueSummaries(settlementRows)
       const grandTotal = this.buildGrandTotal(settlementRows)
 
@@ -193,8 +193,27 @@ export class MoneygiverSettlementJob {
 
   // ─── Query ───
 
-  private async queryPayments(startUTC: Date, endUTC: Date) {
-    return prisma.$queryRaw<
+  private async queryPayments(
+    startUTC: Date,
+    endUTC: Date,
+  ): Promise<{
+    rows: Array<{ venue_name: string; card_type: string; tx_count: bigint; gross_amount: Decimal; tips: Decimal }>
+    ivaRate: number
+  }> {
+    // Find the active aggregator by FK instead of ILIKE on displayName
+    const aggregator = await prisma.aggregator.findFirst({
+      where: { active: true },
+      select: { id: true, ivaRate: true },
+    })
+
+    if (!aggregator) {
+      logger.info('💰 No active aggregator found, returning empty results')
+      return { rows: [], ivaRate: 0 }
+    }
+
+    const ivaRate = Number(aggregator.ivaRate ?? 0)
+
+    const rows = await prisma.$queryRaw<
       Array<{
         venue_name: string
         card_type: string
@@ -213,26 +232,30 @@ export class MoneygiverSettlementJob {
       JOIN "TransactionCost" tc ON tc."paymentId" = p.id
       JOIN "MerchantAccount" ma ON p."merchantAccountId" = ma.id
       JOIN "Venue" v ON p."venueId" = v.id
-      WHERE ma."displayName" ILIKE ${MONEYGIVER_FILTER}
+      WHERE ma."aggregatorId" = ${aggregator.id}
         AND p.status = 'COMPLETED'
         AND p."createdAt" >= ${startUTC}
         AND p."createdAt" <= ${endUTC}
       GROUP BY v.name, tc."transactionType"
       ORDER BY v.name, tc."transactionType"
     `
+
+    return { rows, ivaRate }
   }
 
   // ─── Settlement calculation ───
 
   private calculateSettlement(
     rows: Array<{ venue_name: string; card_type: string; tx_count: bigint; gross_amount: Decimal; tips: Decimal }>,
+    ivaRate: number,
   ): SettlementRow[] {
     return rows.map(row => {
       const grossAmount = Number(row.gross_amount)
       const tips = Number(row.tips)
       const rate = RATES[row.card_type] ?? RATES.OTHER
       const fee = Math.round(grossAmount * rate * 100) / 100
-      const netAmount = Math.round((grossAmount - fee) * 100) / 100
+      const ivaFee = Math.round(fee * ivaRate * 100) / 100
+      const netAmount = Math.round((grossAmount - fee - ivaFee) * 100) / 100
 
       return {
         venueName: row.venue_name,
@@ -242,6 +265,7 @@ export class MoneygiverSettlementJob {
         tips,
         rate,
         fee,
+        ivaFee,
         netAmount,
       }
     })
@@ -257,6 +281,7 @@ export class MoneygiverSettlementJob {
         grossAmount: 0,
         tips: 0,
         totalFees: 0,
+        totalIva: 0,
         netAmount: 0,
       }
 
@@ -264,6 +289,7 @@ export class MoneygiverSettlementJob {
       existing.grossAmount += row.grossAmount
       existing.tips += row.tips
       existing.totalFees += row.fee
+      existing.totalIva += row.ivaFee
       existing.netAmount += row.netAmount
       map.set(row.venueName, existing)
     }
@@ -279,9 +305,10 @@ export class MoneygiverSettlementJob {
         grossAmount: acc.grossAmount + row.grossAmount,
         tips: acc.tips + row.tips,
         totalFees: acc.totalFees + row.fee,
+        totalIva: acc.totalIva + row.ivaFee,
         netAmount: acc.netAmount + row.netAmount,
       }),
-      { venueName: 'TOTAL', txCount: 0, grossAmount: 0, tips: 0, totalFees: 0, netAmount: 0 },
+      { venueName: 'TOTAL', txCount: 0, grossAmount: 0, tips: 0, totalFees: 0, totalIva: 0, netAmount: 0 },
     )
   }
 
@@ -302,6 +329,7 @@ export class MoneygiverSettlementJob {
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${fmt(r.tips)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${pct(r.rate)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(r.fee)}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(r.ivaFee)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;font-weight:600;color:#38a169">${fmt(r.netAmount)}</td>
       </tr>`,
       )
@@ -316,6 +344,7 @@ export class MoneygiverSettlementJob {
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${fmt(v.grossAmount)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${fmt(v.tips)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(v.totalFees)}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(v.totalIva)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;font-weight:600;color:#38a169">${fmt(v.netAmount)}</td>
       </tr>`,
       )
@@ -343,6 +372,7 @@ export class MoneygiverSettlementJob {
       <div style="text-align:right">
         <p style="margin:0;font-size:13px;color:#718096">Monto Bruto: ${fmt(grandTotal.grossAmount)}</p>
         <p style="margin:4px 0 0;font-size:13px;color:#e53e3e">Comisiones: -${fmt(grandTotal.totalFees)}</p>
+        <p style="margin:4px 0 0;font-size:13px;color:#e53e3e">IVA: -${fmt(grandTotal.totalIva)}</p>
         <p style="margin:4px 0 0;font-size:13px;color:#718096">${grandTotal.txCount} transacciones</p>
       </div>
     </div>
@@ -359,6 +389,7 @@ export class MoneygiverSettlementJob {
           <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Propinas</th>
           <th style="padding:10px 12px;text-align:center;border-bottom:2px solid #e2e8f0">Tasa</th>
           <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Comisión</th>
+          <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">IVA</th>
           <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Neto</th>
         </tr>
       </thead>
@@ -371,6 +402,7 @@ export class MoneygiverSettlementJob {
           <td style="padding:10px 12px;border-top:2px solid #e2e8f0;text-align:right">${fmt(grandTotal.tips)}</td>
           <td style="padding:10px 12px;border-top:2px solid #e2e8f0;text-align:center">—</td>
           <td style="padding:10px 12px;border-top:2px solid #e2e8f0;text-align:right;color:#e53e3e">${fmt(grandTotal.totalFees)}</td>
+          <td style="padding:10px 12px;border-top:2px solid #e2e8f0;text-align:right;color:#e53e3e">${fmt(grandTotal.totalIva)}</td>
           <td style="padding:10px 12px;border-top:2px solid #e2e8f0;text-align:right;color:#38a169">${fmt(grandTotal.netAmount)}</td>
         </tr>
       </tfoot>
@@ -386,6 +418,7 @@ export class MoneygiverSettlementJob {
           <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Bruto</th>
           <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Propinas</th>
           <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Comisiones</th>
+          <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">IVA</th>
           <th style="padding:10px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Neto a Dispersar</th>
         </tr>
       </thead>
@@ -393,7 +426,7 @@ export class MoneygiverSettlementJob {
     </table>
 
     <p style="margin:24px 0 0;font-size:11px;color:#a0aec0;text-align:center">
-      Generado automáticamente por Avoqado • Tasas: Débito 2.5% | Crédito 2.5% | AMEX 3.3% | Internacional 3.3%
+      Generado automáticamente por Avoqado • Tasas: Débito 2.5% | Crédito 2.5% | AMEX 3.3% | Internacional 3.3% + IVA 16%
     </p>
   </div>
 </div>
@@ -412,18 +445,18 @@ export class MoneygiverSettlementJob {
     const detailRows = rows
       .map(
         r =>
-          `<Row>${strCell(r.venueName)}${strCell(CARD_TYPE_LABELS[r.cardType] || r.cardType)}${numCell(r.txCount)}${numCell(r.grossAmount)}${numCell(r.tips)}${strCell((r.rate * 100).toFixed(1) + '%')}${numCell(r.fee)}${numCell(r.netAmount)}</Row>`,
+          `<Row>${strCell(r.venueName)}${strCell(CARD_TYPE_LABELS[r.cardType] || r.cardType)}${numCell(r.txCount)}${numCell(r.grossAmount)}${numCell(r.tips)}${strCell((r.rate * 100).toFixed(1) + '%')}${numCell(r.fee)}${numCell(r.ivaFee)}${numCell(r.netAmount)}</Row>`,
       )
       .join('\n')
 
     // Grand total
-    const totalRow = `<Row>${strCell('TOTAL')}${strCell('')}${numCell(grandTotal.txCount)}${numCell(grandTotal.grossAmount)}${numCell(grandTotal.tips)}${strCell('—')}${numCell(grandTotal.totalFees)}${numCell(grandTotal.netAmount)}</Row>`
+    const totalRow = `<Row>${strCell('TOTAL')}${strCell('')}${numCell(grandTotal.txCount)}${numCell(grandTotal.grossAmount)}${numCell(grandTotal.tips)}${strCell('—')}${numCell(grandTotal.totalFees)}${numCell(grandTotal.totalIva)}${numCell(grandTotal.netAmount)}</Row>`
 
     // Venue summary rows
     const venueSummaryRows = venueSummaries
       .map(
         v =>
-          `<Row>${strCell(v.venueName)}${numCell(v.txCount)}${numCell(v.grossAmount)}${numCell(v.tips)}${numCell(v.totalFees)}${numCell(v.netAmount)}</Row>`,
+          `<Row>${strCell(v.venueName)}${numCell(v.txCount)}${numCell(v.grossAmount)}${numCell(v.tips)}${numCell(v.totalFees)}${numCell(v.totalIva)}${numCell(v.netAmount)}</Row>`,
       )
       .join('\n')
 
@@ -437,9 +470,9 @@ export class MoneygiverSettlementJob {
 </Styles>
 <Worksheet ss:Name="Desglose">
   <Table>
-    <Column ss:Width="150"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="100"/><Column ss:Width="80"/><Column ss:Width="60"/><Column ss:Width="90"/><Column ss:Width="110"/>
+    <Column ss:Width="150"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="100"/><Column ss:Width="80"/><Column ss:Width="60"/><Column ss:Width="90"/><Column ss:Width="90"/><Column ss:Width="110"/>
     <Row ss:StyleID="Header">
-      ${strCell('Venue')}${strCell('Tipo')}${strCell('# Txns')}${strCell('Monto Bruto')}${strCell('Propinas')}${strCell('Tasa')}${strCell('Comisión')}${strCell('Neto a Dispersar')}
+      ${strCell('Venue')}${strCell('Tipo')}${strCell('# Txns')}${strCell('Monto Bruto')}${strCell('Propinas')}${strCell('Tasa')}${strCell('Comisión')}${strCell('IVA')}${strCell('Neto a Dispersar')}
     </Row>
     ${detailRows}
     <Row ss:StyleID="Total">
@@ -449,9 +482,9 @@ export class MoneygiverSettlementJob {
 </Worksheet>
 <Worksheet ss:Name="Resumen por Venue">
   <Table>
-    <Column ss:Width="150"/><Column ss:Width="60"/><Column ss:Width="100"/><Column ss:Width="80"/><Column ss:Width="90"/><Column ss:Width="110"/>
+    <Column ss:Width="150"/><Column ss:Width="60"/><Column ss:Width="100"/><Column ss:Width="80"/><Column ss:Width="90"/><Column ss:Width="90"/><Column ss:Width="110"/>
     <Row ss:StyleID="Header">
-      ${strCell('Venue')}${strCell('# Txns')}${strCell('Monto Bruto')}${strCell('Propinas')}${strCell('Comisiones')}${strCell('Neto a Dispersar')}
+      ${strCell('Venue')}${strCell('# Txns')}${strCell('Monto Bruto')}${strCell('Propinas')}${strCell('Comisiones')}${strCell('IVA')}${strCell('Neto a Dispersar')}
     </Row>
     ${venueSummaryRows}
   </Table>
@@ -459,17 +492,6 @@ export class MoneygiverSettlementJob {
 </Workbook>`
 
     return Buffer.from('\uFEFF' + xml, 'utf-8')
-  }
-
-  // ─── CSV ───
-
-  private generateCSV(dateStr: string, rows: SettlementRow[], _venueSummaries: VenueSummary[], _grandTotal: VenueSummary): string {
-    const header = 'Venue,Tipo,# Txns,Monto Bruto,Propinas,Tasa,Comision,Neto a Dispersar'
-    const lines = rows.map(
-      r =>
-        `"${r.venueName}","${CARD_TYPE_LABELS[r.cardType] || r.cardType}",${r.txCount},${r.grossAmount.toFixed(2)},${r.tips.toFixed(2)},${(r.rate * 100).toFixed(1)}%,${r.fee.toFixed(2)},${r.netAmount.toFixed(2)}`,
-    )
-    return [header, ...lines].join('\n')
   }
 }
 
