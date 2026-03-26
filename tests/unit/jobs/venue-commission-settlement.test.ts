@@ -10,7 +10,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
   const round2 = (n: number) => Math.round(n * 100) / 100
 
   describe('calculateVenueCommissions', () => {
-    it('should calculate Layer 2 commission and EXTERNAL split (70/30) with IVA', () => {
+    it('should calculate Layer 2 commission and EXTERNAL split (70/30) without IVA on L2', () => {
       const rows: RawPaymentRow[] = [
         {
           venue_name: 'Dona Simona',
@@ -29,8 +29,8 @@ describe('VenueCommissionSettlement — Calculations', () => {
 
       // L1: fee = 100 * 0.025 = 2.5, iva = 2.5 * 0.16 = 0.4
       // netAfterL1 = 100 - 2.5 - 0.4 = 97.1
-      // L2: fee = 97.1 * 0.0462 = 4.49 (round2), iva = 4.49 * 0.16 = 0.72 (round2)
-      // netToVenue = 97.1 - 4.49 - 0.72 = 91.89
+      // L2: fee = 97.1 * 0.0462 = 4.49 (round2), no IVA on L2
+      // netToVenue = 97.1 - 4.49 = 92.61
 
       expect(result).toHaveLength(1)
       const r = result[0]
@@ -40,13 +40,12 @@ describe('VenueCommissionSettlement — Calculations', () => {
       expect(r.layer1Iva).toBe(0.4)
       expect(r.netAfterLayer1).toBe(97.1)
       expect(r.layer2Fee).toBe(round2(97.1 * 0.0462))
-      expect(r.layer2Iva).toBe(round2(r.layer2Fee * 0.16))
-      expect(r.netToVenue).toBe(round2(97.1 - r.layer2Fee - r.layer2Iva))
+      expect(r.netToVenue).toBe(round2(97.1 - r.layer2Fee))
       expect(r.externalShare).toBe(round2(r.layer2Fee * 0.7))
       expect(r.aggregatorShare).toBe(round2(r.layer2Fee * 0.3))
     })
 
-    it('should calculate AGGREGATOR split (30/70) with IVA', () => {
+    it('should calculate AGGREGATOR split (30/70) without IVA on L2', () => {
       const rows: RawPaymentRow[] = [
         {
           venue_name: 'Alberto Dominguez',
@@ -66,13 +65,13 @@ describe('VenueCommissionSettlement — Calculations', () => {
 
       // L1: fee = 500 * 0.025 = 12.5, iva = 12.5 * 0.16 = 2.0
       // netAfterL1 = 500 - 12.5 - 2.0 = 485.5
-      // L2: fee = 485.5 * 0.07 = 33.99 (round2), iva = 33.99 * 0.16 = 5.44 (round2)
+      // L2: fee = 485.5 * 0.07 = 33.99 (round2), no IVA on L2
 
       expect(r.layer1Fee).toBe(12.5)
       expect(r.layer1Iva).toBe(2.0)
       expect(r.netAfterLayer1).toBe(485.5)
       expect(r.layer2Fee).toBe(round2(485.5 * 0.07))
-      expect(r.layer2Iva).toBe(round2(r.layer2Fee * 0.16))
+      expect(r.netToVenue).toBe(round2(485.5 - r.layer2Fee))
       expect(r.externalShare).toBe(round2(r.layer2Fee * 0.3))
       expect(r.aggregatorShare).toBe(round2(r.layer2Fee * 0.7))
     })
@@ -102,7 +101,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
       expect(result[0].netAfterLayer1).toBe(round2(200 - 6.6 - round2(6.6 * 0.16)))
     })
 
-    it('should split only layer2Fee (not layer2Iva) for external/aggregator share', () => {
+    it('should split only layer2Fee for external/aggregator share', () => {
       const rows: RawPaymentRow[] = [
         {
           venue_name: 'Split Test Venue',
@@ -128,7 +127,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
   })
 
   describe('buildVenueBreakdown', () => {
-    it('should aggregate rows by venue with IVA and split totals', () => {
+    it('should aggregate rows by venue with split totals', () => {
       const rows: CommissionRow[] = [
         {
           venueName: 'Dona Simona',
@@ -142,8 +141,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           netAfterLayer1: 291.3,
           layer2Rate: 0.0462,
           layer2Fee: 13.46,
-          layer2Iva: 2.15,
-          netToVenue: 275.69,
+          netToVenue: 277.84,
           referredBy: 'EXTERNAL',
           externalShare: 9.42,
           aggregatorShare: 4.04,
@@ -160,8 +158,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           netAfterLayer1: 194.2,
           layer2Rate: 0.0462,
           layer2Fee: 8.97,
-          layer2Iva: 1.44,
-          netToVenue: 183.79,
+          netToVenue: 185.23,
           referredBy: 'EXTERNAL',
           externalShare: 6.28,
           aggregatorShare: 2.69,
@@ -176,14 +173,13 @@ describe('VenueCommissionSettlement — Calculations', () => {
       expect(breakdown[0].grossAmount).toBe(500)
       expect(breakdown[0].layer1Iva).toBeCloseTo(2.0, 1)
       expect(breakdown[0].layer2Fee).toBeCloseTo(22.43, 1)
-      expect(breakdown[0].layer2Iva).toBeCloseTo(3.59, 1)
       expect(breakdown[0].externalShare).toBeCloseTo(15.7, 1)
       expect(breakdown[0].aggregatorShare).toBeCloseTo(6.73, 1)
     })
   })
 
   describe('buildGrandTotals', () => {
-    it('should sum all rows including IVA into grand totals', () => {
+    it('should sum all rows into grand totals without L2 IVA', () => {
       const rows: CommissionRow[] = [
         {
           venueName: 'A',
@@ -197,8 +193,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           netAfterLayer1: 97.1,
           layer2Rate: 0.05,
           layer2Fee: 4.86,
-          layer2Iva: 0.78,
-          netToVenue: 91.46,
+          netToVenue: 92.24,
           referredBy: 'EXTERNAL',
           externalShare: 3.4,
           aggregatorShare: 1.46,
@@ -215,8 +210,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           netAfterLayer1: 194.2,
           layer2Rate: 0.07,
           layer2Fee: 13.59,
-          layer2Iva: 2.17,
-          netToVenue: 178.44,
+          netToVenue: 180.61,
           referredBy: 'AGGREGATOR',
           externalShare: 4.08,
           aggregatorShare: 9.51,
@@ -229,7 +223,6 @@ describe('VenueCommissionSettlement — Calculations', () => {
       expect(totals.grossAmount).toBe(300)
       expect(totals.layer1Iva).toBeCloseTo(1.2, 1)
       expect(totals.layer2Fee).toBeCloseTo(18.45, 1)
-      expect(totals.layer2Iva).toBeCloseTo(2.95, 1)
       expect(totals.externalShare).toBeCloseTo(7.48, 1)
       expect(totals.aggregatorShare).toBeCloseTo(10.97, 1)
     })

@@ -38,7 +38,6 @@ export interface CommissionRow {
   netAfterLayer1: number
   layer2Rate: number
   layer2Fee: number
-  layer2Iva: number
   netToVenue: number
   referredBy: string
   externalShare: number
@@ -55,7 +54,6 @@ export interface VenueBreakdown {
   layer1Iva: number
   netAfterLayer1: number
   layer2Fee: number
-  layer2Iva: number
   netToVenue: number
   externalShare: number
   aggregatorShare: number
@@ -68,7 +66,6 @@ export interface GrandTotals {
   layer1Fee: number
   layer1Iva: number
   layer2Fee: number
-  layer2Iva: number
   netToVenue: number
   externalShare: number
   aggregatorShare: number
@@ -97,8 +94,7 @@ export function calculateVenueCommissions(rows: RawPaymentRow[]): CommissionRow[
     const layer1Iva = round2(layer1Fee * ivaRate)
     const netAfterLayer1 = round2(grossAmount - layer1Fee - layer1Iva)
     const layer2Fee = round2(netAfterLayer1 * layer2Rate)
-    const layer2Iva = round2(layer2Fee * ivaRate)
-    const netToVenue = round2(netAfterLayer1 - layer2Fee - layer2Iva)
+    const netToVenue = round2(netAfterLayer1 - layer2Fee)
 
     const split = SPLIT_RATIOS[referredBy] ?? SPLIT_RATIOS.EXTERNAL
     const externalShare = round2(layer2Fee * split.external)
@@ -116,7 +112,6 @@ export function calculateVenueCommissions(rows: RawPaymentRow[]): CommissionRow[
       netAfterLayer1,
       layer2Rate,
       layer2Fee,
-      layer2Iva,
       netToVenue,
       referredBy,
       externalShare,
@@ -139,7 +134,6 @@ export function buildVenueBreakdown(rows: CommissionRow[]): VenueBreakdown[] {
       layer1Iva: 0,
       netAfterLayer1: 0,
       layer2Fee: 0,
-      layer2Iva: 0,
       netToVenue: 0,
       externalShare: 0,
       aggregatorShare: 0,
@@ -152,7 +146,6 @@ export function buildVenueBreakdown(rows: CommissionRow[]): VenueBreakdown[] {
     existing.layer1Iva += row.layer1Iva
     existing.netAfterLayer1 += row.netAfterLayer1
     existing.layer2Fee += row.layer2Fee
-    existing.layer2Iva += row.layer2Iva
     existing.netToVenue += row.netToVenue
     existing.externalShare += row.externalShare
     existing.aggregatorShare += row.aggregatorShare
@@ -171,7 +164,6 @@ export function buildGrandTotals(rows: CommissionRow[]): GrandTotals {
       layer1Fee: acc.layer1Fee + row.layer1Fee,
       layer1Iva: acc.layer1Iva + row.layer1Iva,
       layer2Fee: acc.layer2Fee + row.layer2Fee,
-      layer2Iva: acc.layer2Iva + row.layer2Iva,
       netToVenue: acc.netToVenue + row.netToVenue,
       externalShare: acc.externalShare + row.externalShare,
       aggregatorShare: acc.aggregatorShare + row.aggregatorShare,
@@ -183,7 +175,6 @@ export function buildGrandTotals(rows: CommissionRow[]): GrandTotals {
       layer1Fee: 0,
       layer1Iva: 0,
       layer2Fee: 0,
-      layer2Iva: 0,
       netToVenue: 0,
       externalShare: 0,
       aggregatorShare: 0,
@@ -404,7 +395,6 @@ export class VenueCommissionSettlementJob {
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${fmt(r.netAfterLayer1)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${pct(r.layer2Rate)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(r.layer2Fee)}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(r.layer2Iva)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;font-weight:600;color:#38a169">${fmt(r.netToVenue)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center;font-size:11px">${r.referredBy === 'EXTERNAL' ? '70/30' : '30/70'}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#3182ce">${fmt(r.externalShare)}</td>
@@ -424,7 +414,6 @@ export class VenueCommissionSettlementJob {
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(v.layer1Fee)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(v.layer1Iva)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(v.layer2Fee)}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(v.layer2Iva)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;font-weight:600;color:#38a169">${fmt(v.netToVenue)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#3182ce">${fmt(v.externalShare)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#805ad5">${fmt(v.aggregatorShare)}</td>
@@ -467,10 +456,6 @@ export class VenueCommissionSettlementJob {
         <p style="margin:0;font-size:12px;color:#718096">IVA L1 Total</p>
         <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#d97706">${fmt(grandTotals.layer1Iva)}</p>
       </div>
-      <div style="flex:1;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:16px">
-        <p style="margin:0;font-size:12px;color:#718096">IVA L2 Total</p>
-        <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#d97706">${fmt(grandTotals.layer2Iva)}</p>
-      </div>
     </div>
 
     <h3 style="margin:0 0 12px;font-size:15px;color:#2d3748">Desglose por Venue y Tipo de Tarjeta</h3>
@@ -488,7 +473,6 @@ export class VenueCommissionSettlementJob {
           <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Neto L1</th>
           <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Tasa L2</th>
           <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Fee L2</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">IVA L2</th>
           <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Neto Venue</th>
           <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Split</th>
           <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Externo</th>
@@ -510,7 +494,6 @@ export class VenueCommissionSettlementJob {
           <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Fee L1</th>
           <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">IVA L1</th>
           <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Fee L2</th>
-          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">IVA L2</th>
           <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Neto Venue</th>
           <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Externo</th>
           <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Agregador</th>
@@ -542,16 +525,16 @@ export class VenueCommissionSettlementJob {
     const detailRows = rows
       .map(
         r =>
-          `<Row>${strCell(r.venueName)}${strCell(CARD_TYPE_LABELS[r.cardType] || r.cardType)}${numCell(r.txCount)}${numCell(r.grossAmount)}${strCell((r.layer1Rate * 100).toFixed(1) + '%')}${numCell(r.layer1Fee)}${numCell(r.layer1Iva)}${numCell(r.netAfterLayer1)}${strCell((r.layer2Rate * 100).toFixed(2) + '%')}${numCell(r.layer2Fee)}${numCell(r.layer2Iva)}${numCell(r.netToVenue)}${strCell(r.referredBy === 'EXTERNAL' ? '70/30' : '30/70')}${numCell(r.externalShare)}${numCell(r.aggregatorShare)}</Row>`,
+          `<Row>${strCell(r.venueName)}${strCell(CARD_TYPE_LABELS[r.cardType] || r.cardType)}${numCell(r.txCount)}${numCell(r.grossAmount)}${strCell((r.layer1Rate * 100).toFixed(1) + '%')}${numCell(r.layer1Fee)}${numCell(r.layer1Iva)}${numCell(r.netAfterLayer1)}${strCell((r.layer2Rate * 100).toFixed(2) + '%')}${numCell(r.layer2Fee)}${numCell(r.netToVenue)}${strCell(r.referredBy === 'EXTERNAL' ? '70/30' : '30/70')}${numCell(r.externalShare)}${numCell(r.aggregatorShare)}</Row>`,
       )
       .join('\n')
 
-    const totalRow = `<Row ss:StyleID="Total">${strCell('TOTAL')}${strCell('')}${numCell(grandTotals.txCount)}${numCell(grandTotals.grossAmount)}${strCell('')}${numCell(grandTotals.layer1Fee)}${numCell(grandTotals.layer1Iva)}${strCell('')}${strCell('')}${numCell(grandTotals.layer2Fee)}${numCell(grandTotals.layer2Iva)}${numCell(grandTotals.netToVenue)}${strCell('')}${numCell(grandTotals.externalShare)}${numCell(grandTotals.aggregatorShare)}</Row>`
+    const totalRow = `<Row ss:StyleID="Total">${strCell('TOTAL')}${strCell('')}${numCell(grandTotals.txCount)}${numCell(grandTotals.grossAmount)}${strCell('')}${numCell(grandTotals.layer1Fee)}${numCell(grandTotals.layer1Iva)}${strCell('')}${strCell('')}${numCell(grandTotals.layer2Fee)}${numCell(grandTotals.netToVenue)}${strCell('')}${numCell(grandTotals.externalShare)}${numCell(grandTotals.aggregatorShare)}</Row>`
 
     const venueRows = venueBreakdown
       .map(
         v =>
-          `<Row>${strCell(v.venueName)}${strCell(v.referredBy === 'EXTERNAL' ? 'Externo' : 'Agregador')}${numCell(v.txCount)}${numCell(v.grossAmount)}${numCell(v.layer1Fee)}${numCell(v.layer1Iva)}${numCell(v.layer2Fee)}${numCell(v.layer2Iva)}${numCell(v.netToVenue)}${numCell(v.externalShare)}${numCell(v.aggregatorShare)}</Row>`,
+          `<Row>${strCell(v.venueName)}${strCell(v.referredBy === 'EXTERNAL' ? 'Externo' : 'Agregador')}${numCell(v.txCount)}${numCell(v.grossAmount)}${numCell(v.layer1Fee)}${numCell(v.layer1Iva)}${numCell(v.layer2Fee)}${numCell(v.netToVenue)}${numCell(v.externalShare)}${numCell(v.aggregatorShare)}</Row>`,
       )
       .join('\n')
 
@@ -564,9 +547,9 @@ export class VenueCommissionSettlementJob {
 </Styles>
 <Worksheet ss:Name="Desglose">
   <Table>
-    <Column ss:Width="140"/><Column ss:Width="80"/><Column ss:Width="40"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="90"/><Column ss:Width="50"/><Column ss:Width="80"/><Column ss:Width="80"/>
+    <Column ss:Width="140"/><Column ss:Width="80"/><Column ss:Width="40"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="80"/><Column ss:Width="90"/><Column ss:Width="50"/><Column ss:Width="80"/><Column ss:Width="80"/>
     <Row ss:StyleID="Header">
-      ${strCell('Venue')}${strCell('Tipo')}${strCell('#')}${strCell('Bruto')}${strCell('Tasa L1')}${strCell('Fee L1')}${strCell('IVA L1')}${strCell('Neto L1')}${strCell('Tasa L2')}${strCell('Fee L2')}${strCell('IVA L2')}${strCell('Neto Venue')}${strCell('Split')}${strCell('Externo')}${strCell('Agregador')}
+      ${strCell('Venue')}${strCell('Tipo')}${strCell('#')}${strCell('Bruto')}${strCell('Tasa L1')}${strCell('Fee L1')}${strCell('IVA L1')}${strCell('Neto L1')}${strCell('Tasa L2')}${strCell('Fee L2')}${strCell('Neto Venue')}${strCell('Split')}${strCell('Externo')}${strCell('Agregador')}
     </Row>
     ${detailRows}
     ${totalRow}
@@ -574,9 +557,9 @@ export class VenueCommissionSettlementJob {
 </Worksheet>
 <Worksheet ss:Name="Resumen por Venue">
   <Table>
-    <Column ss:Width="140"/><Column ss:Width="80"/><Column ss:Width="40"/><Column ss:Width="90"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="90"/><Column ss:Width="80"/><Column ss:Width="80"/>
+    <Column ss:Width="140"/><Column ss:Width="80"/><Column ss:Width="40"/><Column ss:Width="90"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="80"/><Column ss:Width="90"/><Column ss:Width="80"/><Column ss:Width="80"/>
     <Row ss:StyleID="Header">
-      ${strCell('Venue')}${strCell('Referido')}${strCell('# Txns')}${strCell('Bruto')}${strCell('Fee L1')}${strCell('IVA L1')}${strCell('Fee L2')}${strCell('IVA L2')}${strCell('Neto Venue')}${strCell('Externo')}${strCell('Agregador')}
+      ${strCell('Venue')}${strCell('Referido')}${strCell('# Txns')}${strCell('Bruto')}${strCell('Fee L1')}${strCell('IVA L1')}${strCell('Fee L2')}${strCell('Neto Venue')}${strCell('Externo')}${strCell('Agregador')}
     </Row>
     ${venueRows}
   </Table>
