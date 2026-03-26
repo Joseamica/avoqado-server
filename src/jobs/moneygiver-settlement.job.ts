@@ -4,11 +4,8 @@
  * Sends a daily email at 7:00 AM Mexico City time with the previous day's
  * transaction breakdown for all Moneygiver merchant accounts.
  *
- * Applies Avoqado's rates (not Blumon's) to calculate dispersal amounts:
- * - Debit: 2.5%
- * - Credit: 2.5%
- * - AMEX: 3.3%
- * - International: 3.3%
+ * Rates come from Aggregator.baseFees in DB (configurable via superadmin UI).
+ * IVA rate comes from Aggregator.ivaRate.
  */
 
 import { CronJob } from 'cron'
@@ -22,13 +19,7 @@ import emailService from '../services/email.service'
 
 const TIMEZONE = 'America/Mexico_City'
 const RECIPIENT = 'jose@avoqado.io'
-const RATES: Record<string, number> = {
-  DEBIT: 0.025,
-  CREDIT: 0.025,
-  AMEX: 0.033,
-  INTERNATIONAL: 0.033,
-  OTHER: 0.025,
-}
+const DEFAULT_RATE = 0.025
 
 const CARD_TYPE_LABELS: Record<string, string> = {
   DEBIT: 'Débito',
@@ -121,7 +112,7 @@ export class MoneygiverSettlementJob {
       })
 
       // Query payments grouped by venue + card type
-      const { rows, ivaRate } = await this.queryPayments(startUTC, endUTC)
+      const { rows, ivaRate, baseFees } = await this.queryPayments(startUTC, endUTC)
 
       if (rows.length === 0) {
         logger.info('💰 No Moneygiver transactions for ' + dateStr)
@@ -129,7 +120,7 @@ export class MoneygiverSettlementJob {
       }
 
       // Calculate fees and net amounts
-      const settlementRows = this.calculateSettlement(rows, ivaRate)
+      const settlementRows = this.calculateSettlement(rows, ivaRate, baseFees)
       const venueSummaries = this.buildVenueSummaries(settlementRows)
       const grandTotal = this.buildGrandTotal(settlementRows)
 
@@ -199,19 +190,21 @@ export class MoneygiverSettlementJob {
   ): Promise<{
     rows: Array<{ venue_name: string; card_type: string; tx_count: bigint; gross_amount: Decimal; tips: Decimal }>
     ivaRate: number
+    baseFees: Record<string, number>
   }> {
     // Find the active aggregator by FK instead of ILIKE on displayName
     const aggregator = await prisma.aggregator.findFirst({
       where: { active: true },
-      select: { id: true, ivaRate: true },
+      select: { id: true, ivaRate: true, baseFees: true },
     })
 
     if (!aggregator) {
       logger.info('💰 No active aggregator found, returning empty results')
-      return { rows: [], ivaRate: 0 }
+      return { rows: [], ivaRate: 0, baseFees: {} }
     }
 
     const ivaRate = Number(aggregator.ivaRate ?? 0)
+    const baseFees = (aggregator.baseFees ?? {}) as Record<string, number>
 
     const rows = await prisma.$queryRaw<
       Array<{
@@ -240,7 +233,7 @@ export class MoneygiverSettlementJob {
       ORDER BY v.name, tc."transactionType"
     `
 
-    return { rows, ivaRate }
+    return { rows, ivaRate, baseFees }
   }
 
   // ─── Settlement calculation ───
@@ -248,11 +241,12 @@ export class MoneygiverSettlementJob {
   private calculateSettlement(
     rows: Array<{ venue_name: string; card_type: string; tx_count: bigint; gross_amount: Decimal; tips: Decimal }>,
     ivaRate: number,
+    baseFees: Record<string, number>,
   ): SettlementRow[] {
     return rows.map(row => {
       const grossAmount = Number(row.gross_amount)
       const tips = Number(row.tips)
-      const rate = RATES[row.card_type] ?? RATES.OTHER
+      const rate = baseFees[row.card_type] ?? baseFees['OTHER'] ?? DEFAULT_RATE
       const fee = Math.round(grossAmount * rate * 100) / 100
       const ivaFee = Math.round(fee * ivaRate * 100) / 100
       const netAmount = Math.round((grossAmount - fee - ivaFee) * 100) / 100
@@ -426,7 +420,7 @@ export class MoneygiverSettlementJob {
     </table>
 
     <p style="margin:24px 0 0;font-size:11px;color:#a0aec0;text-align:center">
-      Generado automáticamente por Avoqado • Tasas: Débito 2.5% | Crédito 2.5% | AMEX 3.3% | Internacional 3.3% + IVA 16%
+      Generado automaticamente por Avoqado • Tasas configuradas en Aggregator + IVA
     </p>
   </div>
 </div>

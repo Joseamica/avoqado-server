@@ -44,6 +44,18 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
     const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
 
     if (!shouldSkipLogging) {
+      // Enrich logs with auth context (available after auth middleware runs)
+      const authContext = (req as any).authContext
+      const authFields: Record<string, any> = {}
+      if (authContext) {
+        authFields.userId = authContext.userId
+        authFields.venueId = authContext.venueId
+        authFields.role = authContext.role
+        if (authContext.terminalSerialNumber) {
+          authFields.terminal = authContext.terminalSerialNumber
+        }
+      }
+
       logger.log(level, `Request End: ${method} ${url} - ${statusCode} [${duration}ms]`, {
         correlationId,
         method,
@@ -51,6 +63,7 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
         statusCode,
         durationMs: parseFloat(duration),
         ip,
+        ...authFields,
       })
     }
   })
