@@ -1,10 +1,16 @@
 # Partner API (PlayTelecom Sales Export) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Expose read-only API endpoints for PlayTelecom to query serialized inventory sales data (SIM transactions, photos, portability evidence) using API key authentication scoped to their organization.
+**Goal:** Expose read-only API endpoints for PlayTelecom to query serialized inventory sales data (SIM transactions, photos, portability
+evidence) using API key authentication scoped to their organization.
 
-**Architecture:** Reuse the existing Stripe-like API key pattern (`sk_live_*`) from `sdk-auth.middleware.ts` but scoped to an Organization (not a Venue). A new `PartnerAPIKey` Prisma model stores the hashed key + org reference. A new middleware authenticates partner requests and attaches `req.partnerContext`. A single `GET /api/v1/partner/sales` endpoint joins SerializedItem → OrderItem → Order → Payment → SaleVerification → Terminal → Venue → Staff to return all fields PlayTelecom needs. Photos are returned as the existing public Firebase Storage URLs (same pattern as `SaleVerification.photos[]` already stores).
+**Architecture:** Reuse the existing Stripe-like API key pattern (`sk_live_*`) from `sdk-auth.middleware.ts` but scoped to an Organization
+(not a Venue). A new `PartnerAPIKey` Prisma model stores the hashed key + org reference. A new middleware authenticates partner requests and
+attaches `req.partnerContext`. A single `GET /api/v1/partner/sales` endpoint joins SerializedItem → OrderItem → Order → Payment →
+SaleVerification → Terminal → Venue → Staff to return all fields PlayTelecom needs. Photos are returned as the existing public Firebase
+Storage URLs (same pattern as `SaleVerification.photos[]` already stores).
 
 **Tech Stack:** Express + Prisma + TypeScript (existing stack). No new dependencies.
 
@@ -12,22 +18,23 @@
 
 ## File Structure
 
-| Action | File | Responsibility |
-|--------|------|----------------|
-| Create | `prisma/schema.prisma` (add model) | `PartnerAPIKey` model with organizationId + hashed key |
+| Action | File                                         | Responsibility                                             |
+| ------ | -------------------------------------------- | ---------------------------------------------------------- |
+| Create | `prisma/schema.prisma` (add model)           | `PartnerAPIKey` model with organizationId + hashed key     |
 | Create | `src/middlewares/partner-auth.middleware.ts` | Authenticate partner API keys, attach `req.partnerContext` |
-| Create | `src/routes/partner.routes.ts` | `GET /sales` endpoint with query params |
-| Create | `src/services/partner/partner.service.ts` | Query logic: join all tables, format response |
-| Create | `src/routes/superadmin/partnerKey.routes.ts` | Superadmin endpoint to generate partner API keys |
-| Modify | `src/routes/index.ts` | Mount `/partner` routes |
-| Modify | `src/routes/superadmin.routes.ts` | Mount partner key sub-routes |
-| Modify | `src/types/express.d.ts` | Add `partnerContext` to Express.Request |
+| Create | `src/routes/partner.routes.ts`               | `GET /sales` endpoint with query params                    |
+| Create | `src/services/partner/partner.service.ts`    | Query logic: join all tables, format response              |
+| Create | `src/routes/superadmin/partnerKey.routes.ts` | Superadmin endpoint to generate partner API keys           |
+| Modify | `src/routes/index.ts`                        | Mount `/partner` routes                                    |
+| Modify | `src/routes/superadmin.routes.ts`            | Mount partner key sub-routes                               |
+| Modify | `src/types/express.d.ts`                     | Add `partnerContext` to Express.Request                    |
 
 ---
 
 ## Task 1: Prisma Model — `PartnerAPIKey`
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (add model at end, before enums section)
 
 - [ ] **Step 1: Add PartnerAPIKey model to schema.prisma**
@@ -99,6 +106,7 @@ git commit -m "feat: add PartnerAPIKey model for external partner API access"
 ## Task 2: Type Declaration — `partnerContext`
 
 **Files:**
+
 - Modify: `src/types/express.d.ts`
 
 - [ ] **Step 1: Add partnerContext to Express.Request**
@@ -126,6 +134,7 @@ git commit -m "feat: add partnerContext type to Express Request"
 ## Task 3: Partner Auth Middleware
 
 **Files:**
+
 - Create: `src/middlewares/partner-auth.middleware.ts`
 
 - [ ] **Step 1: Create the middleware**
@@ -211,9 +220,7 @@ export function authenticatePartner() {
 
       const sandboxMode = mode === 'test'
       if (partner.sandboxMode !== sandboxMode) {
-        throw new BadRequestError(
-          `API key mode (${mode}) does not match partner environment (${partner.sandboxMode ? 'test' : 'live'})`
-        )
+        throw new BadRequestError(`API key mode (${mode}) does not match partner environment (${partner.sandboxMode ? 'test' : 'live'})`)
       }
 
       // Update last used tracking (fire-and-forget)
@@ -263,6 +270,7 @@ git commit -m "feat: add partner API key authentication middleware"
 ## Task 4: Partner Service — Sales Query
 
 **Files:**
+
 - Create: `src/services/partner/partner.service.ts`
 
 - [ ] **Step 1: Create the service**
@@ -333,10 +341,7 @@ class PartnerService {
         lte: to,
       },
       // Org-scoped: items that belong to the org OR items in org's venues
-      OR: [
-        { organizationId },
-        { venue: { organizationId } },
-      ],
+      OR: [{ organizationId }, { venue: { organizationId } }],
     }
 
     if (venueId) {
@@ -412,7 +417,7 @@ class PartnerService {
     })
 
     // Map to PlayTelecom response format
-    const data: PartnerSaleRecord[] = items.map((item) => {
+    const data: PartnerSaleRecord[] = items.map(item => {
       const order = item.orderItem?.order
       const payment = order?.payments?.[0]
       const verification = payment?.saleVerification
@@ -431,9 +436,7 @@ class PartnerService {
         tienda_id: venue?.id || '',
         tienda: venue?.name || '',
         vendedor_id: order?.createdBy?.id || null,
-        vendedor: order?.createdBy
-          ? `${order.createdBy.firstName} ${order.createdBy.lastName}`
-          : null,
+        vendedor: order?.createdBy ? `${order.createdBy.firstName} ${order.createdBy.lastName}` : null,
         ciudad: venue?.city || null,
         producto: item.category?.name || null,
         precio: item.orderItem?.unitPrice ? Number(item.orderItem.unitPrice) : 0,
@@ -444,10 +447,7 @@ class PartnerService {
         registro_url: verification?.photos?.[0] || null,
         latitud: terminal?.lastLatitude ? String(terminal.lastLatitude) : null,
         longitud: terminal?.lastLongitude ? String(terminal.lastLongitude) : null,
-        evidencia_portabilidad_url:
-          verification?.isPortabilidad && verification?.photos?.[1]
-            ? verification.photos[1]
-            : null,
+        evidencia_portabilidad_url: verification?.isPortabilidad && verification?.photos?.[1] ? verification.photos[1] : null,
       }
     })
 
@@ -477,6 +477,7 @@ git commit -m "feat: add partner service with sales query joining all tables"
 ## Task 5: Partner Routes
 
 **Files:**
+
 - Create: `src/routes/partner.routes.ts`
 
 - [ ] **Step 1: Create the route file**
@@ -566,16 +567,19 @@ git commit -m "feat: add GET /partner/sales endpoint for external partner querie
 ## Task 6: Mount Routes in Main Router
 
 **Files:**
+
 - Modify: `src/routes/index.ts`
 
 - [ ] **Step 1: Import and mount partner routes**
 
 Add import at top:
+
 ```typescript
 import partnerRoutes from './partner.routes'
 ```
 
 Add mount alongside existing SDK routes:
+
 ```typescript
 router.use('/partner', partnerRoutes) // Partner API (PlayTelecom, etc.) under /api/v1/partner
 ```
@@ -592,10 +596,12 @@ git commit -m "feat: mount partner routes at /api/v1/partner"
 ## Task 7: Key Generation Utility (Superadmin)
 
 **Files:**
+
 - Create: `src/routes/superadmin/partnerKey.routes.ts`
 - Modify: `src/routes/superadmin.routes.ts` (mount sub-route)
 
-Note: `superadmin.routes.ts` already applies `authenticateTokenMiddleware` + `authorizeRole([StaffRole.SUPERADMIN])` at the router level, so individual routes don't need auth checks.
+Note: `superadmin.routes.ts` already applies `authenticateTokenMiddleware` + `authorizeRole([StaffRole.SUPERADMIN])` at the router level, so
+individual routes don't need auth checks.
 
 - [ ] **Step 1: Create the partner key route file**
 
@@ -715,11 +721,13 @@ export default router
 - [ ] **Step 2: Mount in superadmin.routes.ts**
 
 Add import:
+
 ```typescript
 import partnerKeyRoutes from './superadmin/partnerKey.routes'
 ```
 
 Add mount:
+
 ```typescript
 router.use('/partner-keys', partnerKeyRoutes)
 ```
