@@ -515,6 +515,27 @@ export async function getChartData(venueId: string, chartType: string, filters: 
     case 'kitchen-performance':
       return await getKitchenPerformanceData(venueId, fromDate, toDate)
 
+    case 'sales-by-weekday':
+      return await getSalesByWeekdayData(venueId, fromDate, toDate, venue.timezone)
+
+    case 'category-mix':
+      return await getCategoryMixData(venueId, dateFilter)
+
+    case 'channel-mix':
+      return await getChannelMixData(venueId, dateFilter)
+
+    case 'sales-heatmap':
+      return await getSalesHeatmapData(venueId, fromDate, toDate, venue.timezone)
+
+    case 'discount-analysis':
+      return await getDiscountAnalysisData(venueId, dateFilter)
+
+    case 'reservation-overview':
+      return await getReservationOverviewData(venueId, fromDate, toDate, venue.timezone)
+
+    case 'staff-ranking':
+      return await getStaffRankingData(venueId, dateFilter)
+
     default:
       throw new NotFoundError(`Chart type '${chartType}' not found`)
   }
@@ -870,4 +891,246 @@ async function getKitchenPerformanceData(venueId: string, fromDate: Date, toDate
   })
 
   return { kitchen }
+}
+
+// ==========================================
+// Dashboard Engine: Additional Chart Types
+// ==========================================
+
+async function getSalesByWeekdayData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      createdAt: { gte: fromDate, lte: toDate },
+    },
+    select: { createdAt: true, total: true },
+  })
+
+  const weekdayNames = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+  const weekdayData = new Map<number, { sales: number; transactions: number }>()
+
+  orders.forEach(order => {
+    // Luxon weekday: 1=Monday...7=Sunday
+    const weekday = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).weekday
+    const existing = weekdayData.get(weekday) || { sales: 0, transactions: 0 }
+    existing.sales += Number(order.total)
+    existing.transactions += 1
+    weekdayData.set(weekday, existing)
+  })
+
+  return weekdayNames.map((name, i) => {
+    const data = weekdayData.get(i + 1) || { sales: 0, transactions: 0 }
+    return { day: name, sales: data.sales, transactions: data.transactions }
+  })
+}
+
+async function getCategoryMixData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
+  const orderItems = await prisma.orderItem.findMany({
+    where: {
+      order: {
+        venueId,
+        status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+        ...dateFilter,
+      },
+    },
+    select: { categoryName: true, total: true, quantity: true },
+  })
+
+  const categoryMap = new Map<string, { revenue: number; quantity: number }>()
+
+  orderItems.forEach(item => {
+    const category = item.categoryName || 'Sin categoría'
+    const existing = categoryMap.get(category) || { revenue: 0, quantity: 0 }
+    existing.revenue += Number(item.total || 0)
+    existing.quantity += item.quantity
+    categoryMap.set(category, existing)
+  })
+
+  const totalRevenue = Array.from(categoryMap.values()).reduce((sum, d) => sum + d.revenue, 0)
+
+  return Array.from(categoryMap.entries())
+    .map(([category, data]) => ({
+      category,
+      revenue: data.revenue,
+      quantity: data.quantity,
+      percentage: totalRevenue > 0 ? (data.revenue / totalRevenue) * 100 : 0,
+    }))
+    .sort((a, b) => b.revenue - a.revenue)
+}
+
+async function getChannelMixData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      ...dateFilter,
+    },
+    select: { type: true, total: true },
+  })
+
+  const channelMap = new Map<string, { revenue: number; count: number }>()
+
+  orders.forEach(order => {
+    const channel = order.type || 'DINE_IN'
+    const existing = channelMap.get(channel) || { revenue: 0, count: 0 }
+    existing.revenue += Number(order.total)
+    existing.count += 1
+    channelMap.set(channel, existing)
+  })
+
+  const totalRevenue = Array.from(channelMap.values()).reduce((sum, d) => sum + d.revenue, 0)
+
+  return Array.from(channelMap.entries())
+    .map(([channel, data]) => ({
+      channel,
+      revenue: data.revenue,
+      count: data.count,
+      percentage: totalRevenue > 0 ? (data.revenue / totalRevenue) * 100 : 0,
+    }))
+    .sort((a, b) => b.revenue - a.revenue)
+}
+
+async function getSalesHeatmapData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      createdAt: { gte: fromDate, lte: toDate },
+    },
+    select: { createdAt: true, total: true },
+  })
+
+  // Build heatmap: weekday (0-6) x hour (0-23)
+  const heatmap: Array<{ day: number; hour: number; value: number }> = []
+  const grid = new Map<string, number>()
+
+  orders.forEach(order => {
+    const dt = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz)
+    const key = `${dt.weekday - 1}-${dt.hour}` // 0=Mon, 6=Sun
+    grid.set(key, (grid.get(key) || 0) + Number(order.total))
+  })
+
+  for (let day = 0; day < 7; day++) {
+    for (let hour = 0; hour < 24; hour++) {
+      heatmap.push({ day, hour, value: grid.get(`${day}-${hour}`) || 0 })
+    }
+  }
+
+  return { heatmap }
+}
+
+async function getDiscountAnalysisData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      ...dateFilter,
+      discountAmount: { gt: 0 },
+    },
+    select: { total: true, discountAmount: true, subtotal: true },
+  })
+
+  const totalOrders = await prisma.order.count({
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      ...dateFilter,
+    },
+  })
+
+  const totalDiscount = orders.reduce((sum, o) => sum + Number(o.discountAmount || 0), 0)
+  const totalRevenue = orders.reduce((sum, o) => sum + Number(o.total), 0)
+
+  return {
+    ordersWithDiscount: orders.length,
+    totalOrders,
+    discountRate: totalOrders > 0 ? (orders.length / totalOrders) * 100 : 0,
+    totalDiscount,
+    averageDiscount: orders.length > 0 ? totalDiscount / orders.length : 0,
+    revenueWithDiscount: totalRevenue,
+  }
+}
+
+async function getReservationOverviewData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
+
+  // Check if venue has reservations table — return empty if not
+  const reservationCount = await prisma.reservation.count({
+    where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
+  }).catch(() => 0)
+
+  if (reservationCount === 0) {
+    return { reservations: [], summary: { total: 0, confirmed: 0, cancelled: 0, noShow: 0 } }
+  }
+
+  const reservations = await prisma.reservation.findMany({
+    where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
+    select: { createdAt: true, status: true, partySize: true },
+  })
+
+  const byDate = new Map<string, { total: number; confirmed: number; cancelled: number }>()
+
+  reservations.forEach(r => {
+    const dateStr = DateTime.fromJSDate(r.createdAt, { zone: 'utc' }).setZone(tz).toISODate()!
+    const existing = byDate.get(dateStr) || { total: 0, confirmed: 0, cancelled: 0 }
+    existing.total += 1
+    if (r.status === 'CONFIRMED' || r.status === 'COMPLETED') existing.confirmed += 1
+    if (r.status === 'CANCELLED') existing.cancelled += 1
+    byDate.set(dateStr, existing)
+  })
+
+  return {
+    reservations: Array.from(byDate.entries())
+      .map(([date, data]) => ({ date, ...data }))
+      .sort((a, b) => a.date.localeCompare(b.date)),
+    summary: {
+      total: reservations.length,
+      confirmed: reservations.filter(r => r.status === 'CONFIRMED' || r.status === 'COMPLETED').length,
+      cancelled: reservations.filter(r => r.status === 'CANCELLED').length,
+      noShow: reservations.filter(r => r.status === 'NO_SHOW').length,
+    },
+  }
+}
+
+async function getStaffRankingData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      ...dateFilter,
+      createdById: { not: null },
+    },
+    select: {
+      total: true,
+      tipAmount: true,
+      createdById: true,
+      createdBy: { select: { firstName: true, lastName: true } },
+    },
+  })
+
+  const staffMap = new Map<string, { name: string; revenue: number; orders: number; tips: number }>()
+
+  orders.forEach(order => {
+    const staffId = order.createdById!
+    const existing = staffMap.get(staffId) || {
+      name: `${order.createdBy?.firstName || ''} ${order.createdBy?.lastName || ''}`.trim() || 'Sin nombre',
+      revenue: 0,
+      orders: 0,
+      tips: 0,
+    }
+    existing.revenue += Number(order.total)
+    existing.orders += 1
+    existing.tips += Number(order.tipAmount || 0)
+    staffMap.set(staffId, existing)
+  })
+
+  return Array.from(staffMap.values())
+    .map(s => ({
+      ...s,
+      averageTicket: s.orders > 0 ? s.revenue / s.orders : 0,
+    }))
+    .sort((a, b) => b.revenue - a.revenue)
 }

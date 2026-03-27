@@ -10,6 +10,7 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
+import { logAction } from '../../services/dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { StaffRole } from '@prisma/client'
 
@@ -295,6 +296,442 @@ router.delete('/org-categories/:categoryId', orgOwnerAccess, async (req: Request
     const { orgId, categoryId } = req.params
     await prisma.itemCategory.delete({ where: { id: categoryId, organizationId: orgId } })
     res.json({ success: true, data: { message: 'Category deleted' } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// =============================================================================
+// ORG TEAM MANAGEMENT
+// =============================================================================
+
+/**
+ * GET /dashboard/organizations/:orgId/team
+ * List all staff in the org with their venue assignments, roles, and status.
+ * Query: scope (optional, default 'org')
+ */
+router.get('/team', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+
+    const staffOrgs = await prisma.staffOrganization.findMany({
+      where: { organizationId: orgId },
+      include: {
+        staff: {
+          include: {
+            venues: {
+              where: {
+                venue: { organizationId: orgId },
+              },
+              include: {
+                venue: {
+                  select: { id: true, name: true, slug: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+
+    const team = staffOrgs.map(so => ({
+      id: so.staff.id,
+      firstName: so.staff.firstName,
+      lastName: so.staff.lastName,
+      email: so.staff.email,
+      phone: so.staff.phone,
+      photoUrl: so.staff.photoUrl,
+      status: 'ACTIVE',
+      orgRole: so.role,
+      venues: so.staff.venues.map((v: any) => ({
+        id: v.venue.id,
+        staffVenueId: v.id,
+        name: v.venue.name,
+        slug: v.venue.slug,
+        role: v.role,
+        active: v.active,
+        pin: v.pin || null,
+      })),
+    }))
+
+    res.json({
+      success: true,
+      data: team,
+      meta: { scope: 'org', canViewAllOrgStaff: true },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/organizations/:orgId/team/:staffId/role
+ * Update a staff member's role across all their venues in this org.
+ * Body: { role: StaffRole }
+ */
+router.patch('/team/:staffId/role', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId, staffId } = req.params
+    const { role } = req.body as { role: StaffRole }
+    const authContext = (req as any).authContext
+
+    if (!role || !Object.values(StaffRole).includes(role)) {
+      return res.status(400).json({ success: false, error: 'validation', message: 'Rol inválido' })
+    }
+
+    // Verify staff belongs to org
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { staffId, organizationId: orgId },
+    })
+    if (!staffOrg) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Staff not found in this organization' })
+    }
+
+    // Get all org venue IDs
+    const orgVenues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true },
+    })
+    const orgVenueIds = orgVenues.map(v => v.id)
+
+    // Update role on ALL StaffVenue records for this staff in this org
+    await prisma.staffVenue.updateMany({
+      where: {
+        staffId,
+        venueId: { in: orgVenueIds },
+      },
+      data: { role },
+    })
+
+    logAction({
+      staffId: authContext?.userId || null,
+      venueId: null,
+      action: 'ROLE_UPDATED',
+      entity: 'Staff',
+      entityId: staffId,
+      data: { orgId, newRole: role },
+    })
+
+    res.json({ success: true, data: { message: 'Role updated across all venues', role } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/organizations/:orgId/team/:staffId/status
+ * Activate/deactivate a staff member across all venues.
+ * Body: { active: boolean }
+ */
+router.patch('/team/:staffId/status', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId, staffId } = req.params
+    const { active } = req.body as { active: boolean }
+    const authContext = (req as any).authContext
+
+    if (typeof active !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'validation', message: 'El campo active debe ser booleano' })
+    }
+
+    // Verify staff belongs to org
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { staffId, organizationId: orgId },
+    })
+    if (!staffOrg) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Staff not found in this organization' })
+    }
+
+    // Get all org venue IDs
+    const orgVenues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true },
+    })
+    const orgVenueIds = orgVenues.map(v => v.id)
+
+    // Update active status on ALL StaffVenue records
+    await prisma.staffVenue.updateMany({
+      where: {
+        staffId,
+        venueId: { in: orgVenueIds },
+      },
+      data: { active },
+    })
+
+    logAction({
+      staffId: authContext?.userId || null,
+      venueId: null,
+      action: active ? 'STAFF_ACTIVATED' : 'STAFF_DEACTIVATED',
+      entity: 'Staff',
+      entityId: staffId,
+      data: { orgId, active },
+    })
+
+    res.json({ success: true, data: { message: `Staff ${active ? 'activated' : 'deactivated'} across all venues`, active } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/organizations/:orgId/team/:staffId/venues
+ * Sync venue assignments for a staff member within the organization.
+ * Body: { venueIds: string[] }
+ * Adds new assignments, deactivates removed ones (soft-delete).
+ */
+router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId, staffId } = req.params
+    const { venueIds } = req.body as { venueIds: string[] }
+    const authContext = (req as any).authContext
+
+    if (!Array.isArray(venueIds)) {
+      return res.status(400).json({ success: false, error: 'validation', message: 'venueIds debe ser un arreglo' })
+    }
+
+    // Get all org venues (to validate the requested venueIds belong to this org)
+    const orgVenues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true, name: true },
+    })
+    const orgVenueIds = new Set(orgVenues.map(v => v.id))
+    const validVenueIds = venueIds.filter(id => orgVenueIds.has(id))
+
+    // Get current StaffVenue records for this staff in the org
+    const currentAssignments = await prisma.staffVenue.findMany({
+      where: {
+        staffId,
+        venueId: { in: Array.from(orgVenueIds) },
+      },
+      include: { venue: { select: { name: true } } },
+    })
+
+    const currentActiveIds = new Set(currentAssignments.filter(a => a.active).map(a => a.venueId))
+    const requestedIds = new Set(validVenueIds)
+
+    // Determine what to add and remove
+    const toAdd = validVenueIds.filter(id => !currentActiveIds.has(id))
+    const toRemove = Array.from(currentActiveIds).filter(id => !requestedIds.has(id))
+
+    // Get the user's role from any existing assignment (use as default for new assignments)
+    const existingAssignment = currentAssignments.find(a => a.active)
+    const defaultRole = existingAssignment?.role || 'VIEWER'
+
+    // Add new venue assignments
+    for (const addVenueId of toAdd) {
+      await prisma.staffVenue.upsert({
+        where: { staffId_venueId: { staffId, venueId: addVenueId } },
+        update: { active: true, role: defaultRole },
+        create: { staffId, venueId: addVenueId, role: defaultRole, active: true },
+      })
+
+      const venueName = orgVenues.find(v => v.id === addVenueId)?.name || addVenueId
+      logAction({
+        staffId: authContext?.userId || null,
+        venueId: addVenueId,
+        action: 'VENUE_ASSIGNED',
+        entity: 'Staff',
+        entityId: staffId,
+        data: { venueId: addVenueId, venueName },
+      })
+    }
+
+    // Remove (deactivate) venue assignments
+    for (const removeVenueId of toRemove) {
+      await prisma.staffVenue.update({
+        where: { staffId_venueId: { staffId, venueId: removeVenueId } },
+        data: { active: false },
+      })
+
+      const venueName = orgVenues.find(v => v.id === removeVenueId)?.name || removeVenueId
+      logAction({
+        staffId: authContext?.userId || null,
+        venueId: removeVenueId,
+        action: 'VENUE_REMOVED',
+        entity: 'Staff',
+        entityId: staffId,
+        data: { venueId: removeVenueId, venueName },
+      })
+    }
+
+    res.json({
+      success: true,
+      data: { added: toAdd.length, removed: toRemove.length },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/organizations/:orgId/team/:staffId/pin
+ * Set/update PIN for a staff member across all venues in this org.
+ * Body: { pin: string }
+ */
+router.patch('/team/:staffId/pin', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId, staffId } = req.params
+    const { pin } = req.body as { pin: string }
+    const authContext = (req as any).authContext
+
+    // Validate PIN format: 4-6 digits
+    if (!pin || !/^\d{4,6}$/.test(pin)) {
+      return res.status(400).json({ success: false, error: 'validation', message: 'El PIN debe ser de 4 a 6 dígitos' })
+    }
+
+    // Verify staff belongs to org
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { staffId, organizationId: orgId },
+    })
+    if (!staffOrg) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Staff not found in this organization' })
+    }
+
+    // Get all org venue IDs
+    const orgVenues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true },
+    })
+    const orgVenueIds = orgVenues.map(v => v.id)
+
+    // Check PIN uniqueness per venue — PIN must be unique within each venue
+    for (const venueId of orgVenueIds) {
+      const conflict = await prisma.staffVenue.findFirst({
+        where: {
+          venueId,
+          pin,
+          staffId: { not: staffId },
+          active: true,
+        },
+      })
+      if (conflict) {
+        const venueName = orgVenues.find(v => v.id === venueId)?.id || venueId
+        return res.status(409).json({
+          success: false,
+          error: 'conflict',
+          message: `El PIN ya está en uso en la sucursal ${venueName}`,
+        })
+      }
+    }
+
+    // Update PIN on ALL StaffVenue records for this staff in this org
+    await prisma.staffVenue.updateMany({
+      where: {
+        staffId,
+        venueId: { in: orgVenueIds },
+      },
+      data: { pin },
+    })
+
+    logAction({
+      staffId: authContext?.userId || null,
+      venueId: null,
+      action: 'PIN_UPDATED',
+      entity: 'Staff',
+      entityId: staffId,
+      data: { orgId },
+    })
+
+    res.json({ success: true, data: { message: 'PIN updated across all venues' } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * POST /dashboard/organizations/:orgId/team/:staffId/reset-password
+ * Reset password for a staff member and return a temporary password.
+ */
+router.post('/team/:staffId/reset-password', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId, staffId } = req.params
+    const authContext = (req as any).authContext
+
+    const result = await organizationDashboardService.resetUserPassword(orgId, staffId)
+
+    logAction({
+      staffId: authContext?.userId || null,
+      venueId: null,
+      action: 'PASSWORD_RESET',
+      entity: 'Staff',
+      entityId: staffId,
+      data: { orgId },
+    })
+
+    res.json({
+      success: true,
+      data: {
+        temporaryPassword: result.tempPassword,
+        message: result.message,
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/organizations/:orgId/team/:staffId/activity
+ * Returns activity log entries for a specific staff member across all org venues.
+ */
+router.get('/team/:staffId/activity', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId, staffId } = req.params
+
+    // Get all org venue IDs to query activity across all venues
+    const orgVenues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: { id: true },
+    })
+    const orgVenueIds = orgVenues.map(v => v.id)
+
+    const logs = await prisma.activityLog.findMany({
+      where: {
+        entity: 'Staff',
+        entityId: staffId,
+        OR: [{ venueId: { in: orgVenueIds } }, { venueId: null }],
+      },
+      include: {
+        staff: {
+          select: { firstName: true, lastName: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    })
+
+    const data = logs.map(log => ({
+      id: log.id,
+      action: log.action,
+      performedBy: log.staff ? `${log.staff.firstName} ${log.staff.lastName}`.trim() : 'Sistema',
+      data: log.data,
+      createdAt: log.createdAt.toISOString(),
+    }))
+
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/organizations/:orgId/zones
+ * Get zones for the org (for venue grouping in UI).
+ */
+router.get('/zones', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+
+    const zones = await prisma.zone.findMany({
+      where: { organizationId: orgId },
+      include: {
+        venues: {
+          select: { id: true, name: true, slug: true },
+        },
+      },
+      orderBy: { name: 'asc' },
+    })
+
+    res.json({ success: true, data: zones })
   } catch (error) {
     next(error)
   }
