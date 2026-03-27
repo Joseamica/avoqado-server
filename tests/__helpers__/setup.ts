@@ -123,6 +123,8 @@ const prismaMock: any = {
   table: createMockModel(),
   // Permission Set models
   permissionSet: createMockModel(),
+  // Item Category models
+  itemCategory: createMockModel(),
   // Commission models
   commissionConfig: createMockModel(),
   commissionTier: createMockModel(),
