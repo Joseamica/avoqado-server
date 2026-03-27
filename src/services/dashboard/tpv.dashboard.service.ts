@@ -824,8 +824,7 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
       (orgSettings.enableCardPayments as boolean) ?? orgConfig?.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
     enableBarcodeScanner:
       (orgSettings.enableBarcodeScanner as boolean) ?? orgConfig?.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
-    enableSerializedInventory:
-      (orgSettings.enableSerializedInventory as boolean) ?? DEFAULT_VENUE_TPV_SETTINGS.enableSerializedInventory,
+    enableSerializedInventory: (orgSettings.enableSerializedInventory as boolean) ?? DEFAULT_VENUE_TPV_SETTINGS.enableSerializedInventory,
     requireDepositPhoto:
       (orgSettings.requireDepositPhoto as boolean) ?? orgConfig?.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
     requireFacadePhoto:
