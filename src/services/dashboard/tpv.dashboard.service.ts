@@ -434,6 +434,7 @@ export interface TpvSettings {
   enableCashPayments?: boolean
   enableCardPayments?: boolean
   enableBarcodeScanner?: boolean
+  enableSerializedInventory?: boolean
   // Venue-level attendance toggle (sets requireClockInPhoto + requireClockInToLogin)
   attendanceTracking?: boolean
 }
@@ -755,6 +756,7 @@ export interface VenueTpvSettings {
   enableCashPayments: boolean
   enableCardPayments: boolean
   enableBarcodeScanner: boolean
+  enableSerializedInventory: boolean
   requireDepositPhoto: boolean
   requireFacadePhoto: boolean
   // Attendance — lateness detection (stored in VenueSettings, not TpvConfig)
@@ -768,6 +770,7 @@ const DEFAULT_VENUE_TPV_SETTINGS: VenueTpvSettings = {
   enableCashPayments: true,
   enableCardPayments: true,
   enableBarcodeScanner: true,
+  enableSerializedInventory: false,
   requireDepositPhoto: false,
   requireFacadePhoto: false,
   expectedCheckInTime: '09:00',
@@ -821,6 +824,8 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
       (orgSettings.enableCardPayments as boolean) ?? orgConfig?.enableCardPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCardPayments,
     enableBarcodeScanner:
       (orgSettings.enableBarcodeScanner as boolean) ?? orgConfig?.enableBarcodeScanner ?? DEFAULT_VENUE_TPV_SETTINGS.enableBarcodeScanner,
+    enableSerializedInventory:
+      (orgSettings.enableSerializedInventory as boolean) ?? DEFAULT_VENUE_TPV_SETTINGS.enableSerializedInventory,
     requireDepositPhoto:
       (orgSettings.requireDepositPhoto as boolean) ?? orgConfig?.requireDepositPhoto ?? DEFAULT_VENUE_TPV_SETTINGS.requireDepositPhoto,
     requireFacadePhoto:
@@ -857,6 +862,7 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
     enableCashPayments: savedSettings.enableCashPayments ?? defaults.enableCashPayments,
     enableCardPayments: savedSettings.enableCardPayments ?? defaults.enableCardPayments,
     enableBarcodeScanner: savedSettings.enableBarcodeScanner ?? defaults.enableBarcodeScanner,
+    enableSerializedInventory: savedSettings.enableSerializedInventory ?? defaults.enableSerializedInventory,
     requireDepositPhoto: savedSettings.requireDepositPhoto ?? defaults.requireDepositPhoto,
     requireFacadePhoto: savedSettings.requireFacadePhoto ?? defaults.requireFacadePhoto,
     expectedCheckInTime: defaults.expectedCheckInTime,
