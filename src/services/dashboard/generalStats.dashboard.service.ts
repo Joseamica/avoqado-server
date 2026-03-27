@@ -1058,9 +1058,11 @@ async function getReservationOverviewData(venueId: string, fromDate: Date, toDat
   const tz = timezone || DEFAULT_TIMEZONE
 
   // Check if venue has reservations table — return empty if not
-  const reservationCount = await prisma.reservation.count({
-    where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
-  }).catch(() => 0)
+  const reservationCount = await prisma.reservation
+    .count({
+      where: { venueId, createdAt: { gte: fromDate, lte: toDate } },
+    })
+    .catch(() => 0)
 
   if (reservationCount === 0) {
     return { reservations: [], summary: { total: 0, confirmed: 0, cancelled: 0, noShow: 0 } }
