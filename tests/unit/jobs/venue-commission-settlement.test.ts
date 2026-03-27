@@ -20,6 +20,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           tips: { toNumber: () => 0 } as any,
           commission_rate: { toNumber: () => 0.0462 } as any,
           referred_by: 'EXTERNAL',
+          tpv_serial: '2840744168',
           base_fee_rate: 0.025,
           iva_rate: 0.16,
         },
@@ -55,6 +56,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           tips: { toNumber: () => 25 } as any,
           commission_rate: { toNumber: () => 0.07 } as any,
           referred_by: 'AGGREGATOR',
+          tpv_serial: '2840744149',
           base_fee_rate: 0.025,
           iva_rate: 0.16,
         },
@@ -86,6 +88,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           tips: { toNumber: () => 10 } as any,
           commission_rate: { toNumber: () => 0.05 } as any,
           referred_by: 'EXTERNAL',
+          tpv_serial: '2840744168',
           base_fee_rate: 0.033,
           iva_rate: 0.16,
         },
@@ -111,6 +114,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
           tips: { toNumber: () => 0 } as any,
           commission_rate: { toNumber: () => 0.05 } as any,
           referred_by: 'EXTERNAL',
+          tpv_serial: '2840744168',
           base_fee_rate: 0.025,
           iva_rate: 0.16,
         },
@@ -132,6 +136,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
         {
           venueName: 'Dona Simona',
           cardType: 'DEBIT',
+          tpvSerial: '2840744168',
           txCount: 3,
           grossAmount: 300,
           tips: 15,
@@ -149,6 +154,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
         {
           venueName: 'Dona Simona',
           cardType: 'CREDIT',
+          tpvSerial: '2840744168',
           txCount: 2,
           grossAmount: 200,
           tips: 10,
@@ -184,6 +190,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
         {
           venueName: 'A',
           cardType: 'DEBIT',
+          tpvSerial: '1111',
           txCount: 1,
           grossAmount: 100,
           tips: 5,
@@ -201,6 +208,7 @@ describe('VenueCommissionSettlement — Calculations', () => {
         {
           venueName: 'B',
           cardType: 'CREDIT',
+          tpvSerial: '2222',
           txCount: 2,
           grossAmount: 200,
           tips: 10,

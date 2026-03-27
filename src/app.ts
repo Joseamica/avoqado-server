@@ -19,6 +19,7 @@ import publicMenuRoutes from './routes/publicMenu.routes'
 import webhookRoutes from './routes/webhook.routes'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
+import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
 
@@ -96,6 +97,10 @@ app.use(
 // ⚠️ Public booking/receipt routes — mounted BEFORE global CORS so wildcard origin works for widget embedding
 // These are unauthenticated endpoints (no credentials needed), safe to allow any origin
 app.use('/api/v1/public', express.json(), cookieParser(), publicRoutes)
+
+// ⚠️ Public settlement report route — token-validated, no auth middleware
+// Mounted before configureCoreMiddlewares to avoid auth checks
+app.use('/reports/settlement', express.json(), settlementReportRoutes)
 
 // Configure core middlewares (helmet, cors, compression, body-parsers, cookie-parser, session, request-logger)
 configureCoreMiddlewares(app)

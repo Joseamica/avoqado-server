@@ -8109,8 +8109,9 @@ model Aggregator {
   name     String  @unique
   venueId  String?
   baseFees Json    // {DEBIT: 0.025, CREDIT: 0.025, AMEX: 0.033, INTERNATIONAL: 0.033}
-  ivaRate  Decimal @default(0.16) @db.Decimal(5, 4) // 0.16 = 16% IVA Mexico
-  active   Boolean @default(true)
+  ivaRate     Decimal @default(0.16) @db.Decimal(5, 4) // 0.16 = 16% IVA Mexico
+  reportToken String? @unique // Secret token for public report access
+  active      Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
