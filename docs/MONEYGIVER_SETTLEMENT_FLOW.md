@@ -102,14 +102,15 @@ dispersar_a_comercio = pago_neto - comisión_MG
 
 ### Días de liquidación (D+N hábiles):
 
-| Tipo tarjeta | Días hábiles | Ejemplo (viernes) |
-|---|---|---|
-| Débito/Crédito | D+1 | Viernes → Lunes |
-| AMEX/Internacional | D+3 | Viernes → Miércoles |
+| Tipo tarjeta       | Días hábiles | Ejemplo (viernes)   |
+| ------------------ | ------------ | ------------------- |
+| Débito/Crédito     | D+1          | Viernes → Lunes     |
+| AMEX/Internacional | D+3          | Viernes → Miércoles |
 
 Días hábiles = Lunes a Viernes (excluye sábados y domingos).
 
 Los cron jobs calculan hacia atrás: "¿qué transacciones se liquidan HOY?"
+
 - Déb/Créd: busca transacciones de D-1 hábil
 - AMEX/Intl: busca transacciones de D-3 hábiles
 

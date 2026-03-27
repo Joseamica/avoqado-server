@@ -14,5 +14,7 @@ router.get('/:id', aggregatorController.getAggregatorById)
 router.post('/', aggregatorController.createAggregator)
 router.put('/:id', aggregatorController.updateAggregator)
 router.patch('/:id/toggle', aggregatorController.toggleAggregator)
+router.post('/:id/generate-token', aggregatorController.generateReportToken)
+router.delete('/:id/revoke-token', aggregatorController.revokeReportToken)
 
 export default router

@@ -23,6 +23,7 @@ export interface RawPaymentRow {
   tips: Decimal
   commission_rate: Decimal
   referred_by: string
+  tpv_serial: string
   base_fee_rate: number
   iva_rate: number
 }
@@ -30,6 +31,7 @@ export interface RawPaymentRow {
 export interface CommissionRow {
   venueName: string
   cardType: string
+  tpvSerial: string
   txCount: number
   grossAmount: number
   tips: number
@@ -47,6 +49,7 @@ export interface CommissionRow {
 
 export interface VenueBreakdown {
   venueName: string
+  tpvSerial: string
   referredBy: string
   txCount: number
   grossAmount: number
@@ -104,6 +107,7 @@ export function calculateVenueCommissions(rows: RawPaymentRow[]): CommissionRow[
     return {
       venueName: row.venue_name,
       cardType: row.card_type,
+      tpvSerial: row.tpv_serial || '',
       txCount: Number(row.tx_count),
       grossAmount,
       tips,
@@ -127,6 +131,7 @@ export function buildVenueBreakdown(rows: CommissionRow[]): VenueBreakdown[] {
   for (const row of rows) {
     const existing = map.get(row.venueName) ?? {
       venueName: row.venueName,
+      tpvSerial: row.tpvSerial,
       referredBy: row.referredBy,
       txCount: 0,
       grossAmount: 0,
@@ -368,6 +373,7 @@ export class VenueCommissionSettlementJob {
         tips: Decimal
         commission_rate: Decimal
         referred_by: string
+        tpv_serial: string
       }>
     >`
       SELECT
@@ -377,7 +383,8 @@ export class VenueCommissionSettlementJob {
         COALESCE(SUM(p.amount), 0) as gross_amount,
         COALESCE(SUM(p."tipAmount"), 0) as tips,
         vc.rate as commission_rate,
-        vc."referredBy" as referred_by
+        vc."referredBy" as referred_by,
+        STRING_AGG(DISTINCT ma."blumonSerialNumber", ', ') as tpv_serial
       FROM "Payment" p
       JOIN "TransactionCost" tc ON tc."paymentId" = p.id
       JOIN "MerchantAccount" ma ON p."merchantAccountId" = ma.id
@@ -395,6 +402,7 @@ export class VenueCommissionSettlementJob {
 
     return rows.map(row => ({
       ...row,
+      tpv_serial: row.tpv_serial || '',
       base_fee_rate: baseFees[row.card_type] ?? baseFees['OTHER'] ?? 0.025,
       iva_rate: ivaRate,
     }))
@@ -417,6 +425,7 @@ export class VenueCommissionSettlementJob {
         r => `
       <tr>
         <td style="padding:8px 12px;border-bottom:1px solid #eee">${r.venueName}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px">${r.tpvSerial}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee">${CARD_TYPE_LABELS[r.cardType] || r.cardType}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${r.txCount}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${fmt(r.grossAmount)}</td>
@@ -439,7 +448,8 @@ export class VenueCommissionSettlementJob {
         v => `
       <tr>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:600">${v.venueName}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center;font-size:11px">${v.referredBy === 'EXTERNAL' ? 'Externo' : 'Agregador'}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px">${v.tpvSerial}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center;font-size:11px">${v.referredBy === 'EXTERNAL' ? 'AVO 70/MG 30' : 'AVO 30/MG 70'}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${v.txCount}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${fmt(v.grossAmount)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#e53e3e">${fmt(v.layer1Fee)}</td>
@@ -472,20 +482,20 @@ export class VenueCommissionSettlementJob {
         <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#38a169">${fmt(grandTotals.netToVenue)}</p>
       </div>
       <div style="flex:1;background:#ebf8ff;border:1px solid #bee3f8;border-radius:8px;padding:16px">
-        <p style="margin:0;font-size:12px;color:#718096">Externo (Avoqado)</p>
+        <p style="margin:0;font-size:12px;color:#718096">AVO (70%)</p>
         <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#3182ce">${fmt(grandTotals.externalShare)}</p>
       </div>
       <div style="flex:1;background:#faf5ff;border:1px solid #e9d8fd;border-radius:8px;padding:16px">
-        <p style="margin:0;font-size:12px;color:#718096">Agregador (${aggregatorName})</p>
+        <p style="margin:0;font-size:12px;color:#718096">MG (30%)</p>
         <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#805ad5">${fmt(grandTotals.aggregatorShare)}</p>
       </div>
       <div style="flex:1;background:#fff5f5;border:1px solid #fed7d7;border-radius:8px;padding:16px">
-        <p style="margin:0;font-size:12px;color:#718096">Comision L2 Total</p>
+        <p style="margin:0;font-size:12px;color:#718096">Comision MG Total (sin IVA)</p>
         <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#e53e3e">${fmt(grandTotals.layer2Fee)}</p>
         <p style="margin:4px 0 0;font-size:11px;color:#718096">${grandTotals.txCount} txns | Bruto: ${fmt(grandTotals.grossAmount)}</p>
       </div>
       <div style="flex:1;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:16px">
-        <p style="margin:0;font-size:12px;color:#718096">IVA L1 Total</p>
+        <p style="margin:0;font-size:12px;color:#718096">IVA L1 Total (16%)</p>
         <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#d97706">${fmt(grandTotals.layer1Iva)}</p>
       </div>
     </div>
@@ -496,19 +506,20 @@ export class VenueCommissionSettlementJob {
       <thead>
         <tr style="background:#f7fafc">
           <th style="padding:8px;text-align:left;border-bottom:2px solid #e2e8f0">Venue</th>
+          <th style="padding:8px;text-align:left;border-bottom:2px solid #e2e8f0">TPV</th>
           <th style="padding:8px;text-align:left;border-bottom:2px solid #e2e8f0">Tipo</th>
           <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">#</th>
           <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Bruto</th>
-          <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Tasa L1</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Fee L1</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">IVA L1</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Neto L1</th>
-          <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Tasa L2</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Fee L2</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Neto Venue</th>
-          <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Split</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Externo</th>
-          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Agregador</th>
+          <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Tasa Blumon</th>
+          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Comision Blumon</th>
+          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">IVA (16%)</th>
+          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Neto a MG</th>
+          <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Tasa MG</th>
+          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">Comision MG</th>
+          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">A Dispersar</th>
+          <th style="padding:8px;text-align:center;border-bottom:2px solid #e2e8f0">Split AVO/MG</th>
+          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">AVO (70%)</th>
+          <th style="padding:8px;text-align:right;border-bottom:2px solid #e2e8f0">MG (30%)</th>
         </tr>
       </thead>
       <tbody>${detailRows}</tbody>
@@ -520,22 +531,23 @@ export class VenueCommissionSettlementJob {
       <thead>
         <tr style="background:#f7fafc">
           <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Venue</th>
-          <th style="padding:8px 12px;text-align:center;border-bottom:2px solid #e2e8f0">Referido</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">TPV</th>
+          <th style="padding:8px 12px;text-align:center;border-bottom:2px solid #e2e8f0">Split AVO/MG</th>
           <th style="padding:8px 12px;text-align:center;border-bottom:2px solid #e2e8f0"># Txns</th>
           <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Bruto</th>
-          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Fee L1</th>
-          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">IVA L1</th>
-          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Fee L2</th>
-          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Neto Venue</th>
-          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Externo</th>
-          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Agregador</th>
+          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Comision Blumon</th>
+          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">IVA (16%)</th>
+          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Comision MG</th>
+          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">A Dispersar</th>
+          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">AVO (70%)</th>
+          <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">MG (30%)</th>
         </tr>
       </thead>
       <tbody>${venueRows}</tbody>
     </table>
 
     <p style="margin:24px 0 0;font-size:11px;color:#a0aec0;text-align:center">
-      Generado automaticamente por Avoqado | Split: Externo 70/30 | Agregador 30/70
+      Generado automaticamente por Avoqado | Split: AVO = Avoqado | MG = Moneygiver | Comision MG no incluye IVA
     </p>
   </div>
 </div>
@@ -557,16 +569,16 @@ export class VenueCommissionSettlementJob {
     const detailRows = rows
       .map(
         r =>
-          `<Row>${strCell(r.venueName)}${strCell(CARD_TYPE_LABELS[r.cardType] || r.cardType)}${numCell(r.txCount)}${numCell(r.grossAmount)}${strCell((r.layer1Rate * 100).toFixed(1) + '%')}${numCell(r.layer1Fee)}${numCell(r.layer1Iva)}${numCell(r.netAfterLayer1)}${strCell((r.layer2Rate * 100).toFixed(2) + '%')}${numCell(r.layer2Fee)}${numCell(r.netToVenue)}${strCell(r.referredBy === 'EXTERNAL' ? '70/30' : '30/70')}${numCell(r.externalShare)}${numCell(r.aggregatorShare)}</Row>`,
+          `<Row>${strCell(r.venueName)}${strCell(r.tpvSerial)}${strCell(CARD_TYPE_LABELS[r.cardType] || r.cardType)}${numCell(r.txCount)}${numCell(r.grossAmount)}${strCell((r.layer1Rate * 100).toFixed(1) + '%')}${numCell(r.layer1Fee)}${numCell(r.layer1Iva)}${numCell(r.netAfterLayer1)}${strCell((r.layer2Rate * 100).toFixed(2) + '%')}${numCell(r.layer2Fee)}${numCell(r.netToVenue)}${strCell(r.referredBy === 'EXTERNAL' ? '70/30' : '30/70')}${numCell(r.externalShare)}${numCell(r.aggregatorShare)}</Row>`,
       )
       .join('\n')
 
-    const totalRow = `<Row ss:StyleID="Total">${strCell('TOTAL')}${strCell('')}${numCell(grandTotals.txCount)}${numCell(grandTotals.grossAmount)}${strCell('')}${numCell(grandTotals.layer1Fee)}${numCell(grandTotals.layer1Iva)}${strCell('')}${strCell('')}${numCell(grandTotals.layer2Fee)}${numCell(grandTotals.netToVenue)}${strCell('')}${numCell(grandTotals.externalShare)}${numCell(grandTotals.aggregatorShare)}</Row>`
+    const totalRow = `<Row ss:StyleID="Total">${strCell('TOTAL')}${strCell('')}${strCell('')}${numCell(grandTotals.txCount)}${numCell(grandTotals.grossAmount)}${strCell('')}${numCell(grandTotals.layer1Fee)}${numCell(grandTotals.layer1Iva)}${strCell('')}${strCell('')}${numCell(grandTotals.layer2Fee)}${numCell(grandTotals.netToVenue)}${strCell('')}${numCell(grandTotals.externalShare)}${numCell(grandTotals.aggregatorShare)}</Row>`
 
     const venueRows = venueBreakdown
       .map(
         v =>
-          `<Row>${strCell(v.venueName)}${strCell(v.referredBy === 'EXTERNAL' ? 'Externo' : 'Agregador')}${numCell(v.txCount)}${numCell(v.grossAmount)}${numCell(v.layer1Fee)}${numCell(v.layer1Iva)}${numCell(v.layer2Fee)}${numCell(v.netToVenue)}${numCell(v.externalShare)}${numCell(v.aggregatorShare)}</Row>`,
+          `<Row>${strCell(v.venueName)}${strCell(v.tpvSerial)}${strCell(v.referredBy === 'EXTERNAL' ? 'AVO 70/MG 30' : 'AVO 30/MG 70')}${numCell(v.txCount)}${numCell(v.grossAmount)}${numCell(v.layer1Fee)}${numCell(v.layer1Iva)}${numCell(v.layer2Fee)}${numCell(v.netToVenue)}${numCell(v.externalShare)}${numCell(v.aggregatorShare)}</Row>`,
       )
       .join('\n')
 
@@ -581,7 +593,7 @@ export class VenueCommissionSettlementJob {
   <Table>
     <Column ss:Width="140"/><Column ss:Width="80"/><Column ss:Width="40"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="90"/><Column ss:Width="60"/><Column ss:Width="80"/><Column ss:Width="90"/><Column ss:Width="50"/><Column ss:Width="80"/><Column ss:Width="80"/>
     <Row ss:StyleID="Header">
-      ${strCell('Venue')}${strCell('Tipo')}${strCell('#')}${strCell('Bruto')}${strCell('Tasa L1')}${strCell('Fee L1')}${strCell('IVA L1')}${strCell('Neto L1')}${strCell('Tasa L2')}${strCell('Fee L2')}${strCell('Neto Venue')}${strCell('Split')}${strCell('Externo')}${strCell('Agregador')}
+      ${strCell('Venue')}${strCell('TPV')}${strCell('Tipo')}${strCell('#')}${strCell('Bruto')}${strCell('Tasa Blumon')}${strCell('Comision Blumon')}${strCell('IVA (16%)')}${strCell('Neto a MG')}${strCell('Tasa MG')}${strCell('Comision MG')}${strCell('A Dispersar')}${strCell('Split AVO/MG')}${strCell('AVO (70%)')}${strCell('MG (30%)')}
     </Row>
     ${detailRows}
     ${totalRow}
@@ -591,7 +603,7 @@ export class VenueCommissionSettlementJob {
   <Table>
     <Column ss:Width="140"/><Column ss:Width="80"/><Column ss:Width="40"/><Column ss:Width="90"/><Column ss:Width="80"/><Column ss:Width="70"/><Column ss:Width="80"/><Column ss:Width="90"/><Column ss:Width="80"/><Column ss:Width="80"/>
     <Row ss:StyleID="Header">
-      ${strCell('Venue')}${strCell('Referido')}${strCell('# Txns')}${strCell('Bruto')}${strCell('Fee L1')}${strCell('IVA L1')}${strCell('Fee L2')}${strCell('Neto Venue')}${strCell('Externo')}${strCell('Agregador')}
+      ${strCell('Venue')}${strCell('TPV')}${strCell('Split AVO/MG')}${strCell('# Txns')}${strCell('Bruto')}${strCell('Comision Blumon')}${strCell('IVA (16%)')}${strCell('Comision MG')}${strCell('A Dispersar')}${strCell('AVO (70%)')}${strCell('MG (30%)')}
     </Row>
     ${venueRows}
   </Table>
