@@ -6,6 +6,7 @@
  */
 
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 import { CronJob } from 'cron'
 import { fromZonedTime } from 'date-fns-tz'
 import logger from '../config/logger'
@@ -241,12 +242,22 @@ export class VenueCommissionSettlementJob {
     const startTime = Date.now()
 
     try {
-      const { startUTC, endUTC, dateStr } = this.getDateRange(dateOverride)
+      // Determine settlement date (today when no override)
+      const today = dateOverride || new Date().toISOString().slice(0, 10)
+      const todayDate = new Date(`${today}T12:00:00Z`) // noon UTC avoids DST edge cases
+
+      // D-1 business day → Debit/Credit transactions from this date settle today
+      const debitCreditDate = this.subtractBusinessDays(todayDate, 1)
+      const dcDateStr = debitCreditDate.toISOString().slice(0, 10)
+
+      // D-3 business days → AMEX/International transactions from this date settle today
+      const amexIntlDate = this.subtractBusinessDays(todayDate, 3)
+      const aiDateStr = amexIntlDate.toISOString().slice(0, 10)
 
       logger.info('Generating venue commission settlement report', {
-        date: dateStr,
-        startUTC: startUTC.toISOString(),
-        endUTC: endUTC.toISOString(),
+        settlementDate: today,
+        debitCreditDate: dcDateStr,
+        amexIntlDate: aiDateStr,
       })
 
       const aggregator = await prisma.aggregator.findFirst({
@@ -260,10 +271,21 @@ export class VenueCommissionSettlementJob {
 
       const baseFees = aggregator.baseFees as Record<string, number>
       const ivaRate = Number(aggregator.ivaRate)
-      const rawRows = await this.queryPayments(startUTC, endUTC, aggregator.id, baseFees, ivaRate)
+
+      // Query both date ranges with respective card type filters
+      const dcRange = this.getDateRange(dcDateStr)
+      const aiRange = this.getDateRange(aiDateStr)
+
+      const dcRows = await this.queryPayments(dcRange.startUTC, dcRange.endUTC, aggregator.id, baseFees, ivaRate, ['DEBIT', 'CREDIT'])
+      const aiRows = await this.queryPayments(aiRange.startUTC, aiRange.endUTC, aggregator.id, baseFees, ivaRate, ['AMEX', 'INTERNATIONAL'])
+
+      const rawRows = [...dcRows, ...aiRows]
 
       if (rawRows.length === 0) {
-        logger.info('No venue commission transactions for ' + dateStr)
+        logger.info('No venue commission transactions for settlement date ' + today, {
+          debitCreditDate: dcDateStr,
+          amexIntlDate: aiDateStr,
+        })
         return
       }
 
@@ -271,16 +293,16 @@ export class VenueCommissionSettlementJob {
       const venueBreakdown = buildVenueBreakdown(commissionRows)
       const grandTotals = buildGrandTotals(commissionRows)
 
-      const html = this.generateEmailHTML(dateStr, aggregator.name, commissionRows, venueBreakdown, grandTotals)
-      const excelBuffer = this.generateExcel(dateStr, aggregator.name, commissionRows, venueBreakdown, grandTotals)
+      const html = this.generateEmailHTML(today, dcDateStr, aiDateStr, aggregator.name, commissionRows, venueBreakdown, grandTotals)
+      const excelBuffer = this.generateExcel(today, aggregator.name, commissionRows, venueBreakdown, grandTotals)
 
       await emailService.sendEmail({
         to: RECIPIENT,
-        subject: `[${aggregator.name}] Comisiones por Venue — ${dateStr}`,
+        subject: `[${aggregator.name}] Comisiones por Venue — Liquidación ${today}`,
         html,
         attachments: [
           {
-            filename: `${aggregator.name}_Comisiones_Venue_${dateStr}.xls`,
+            filename: `${aggregator.name}_Comisiones_Venue_${today}.xls`,
             content: excelBuffer,
             contentType: 'application/vnd.ms-excel',
           },
@@ -288,7 +310,9 @@ export class VenueCommissionSettlementJob {
       })
 
       logger.info('Venue commission settlement report sent', {
-        date: dateStr,
+        settlementDate: today,
+        debitCreditDate: dcDateStr,
+        amexIntlDate: aiDateStr,
         aggregator: aggregator.name,
         venues: venueBreakdown.length,
         transactions: grandTotals.txCount,
@@ -306,22 +330,25 @@ export class VenueCommissionSettlementJob {
     }
   }
 
-  private getDateRange(dateOverride?: string): { startUTC: Date; endUTC: Date; dateStr: string } {
-    let dateStr: string
-
-    if (dateOverride) {
-      dateStr = dateOverride
-    } else {
-      const now = new Date()
-      const yesterday = new Date(now)
-      yesterday.setDate(now.getDate() - 1)
-      dateStr = yesterday.toISOString().slice(0, 10)
+  /** Subtract N business days from a date (skip weekends) */
+  private subtractBusinessDays(date: Date, days: number): Date {
+    const result = new Date(date)
+    let subtracted = 0
+    while (subtracted < days) {
+      result.setDate(result.getDate() - 1)
+      // 0=Sun, 6=Sat — skip weekends
+      if (result.getDay() !== 0 && result.getDay() !== 6) {
+        subtracted++
+      }
     }
+    return result
+  }
 
+  /** Convert a YYYY-MM-DD date string to a UTC range using Mexico City midnight boundaries */
+  private getDateRange(dateStr: string): { startUTC: Date; endUTC: Date } {
     const startUTC = fromZonedTime(new Date(`${dateStr}T00:00:00`), TIMEZONE)
     const endUTC = fromZonedTime(new Date(`${dateStr}T23:59:59.999`), TIMEZONE)
-
-    return { startUTC, endUTC, dateStr }
+    return { startUTC, endUTC }
   }
 
   private async queryPayments(
@@ -330,6 +357,7 @@ export class VenueCommissionSettlementJob {
     aggregatorId: string,
     baseFees: Record<string, number>,
     ivaRate: number,
+    cardTypes: string[],
   ): Promise<RawPaymentRow[]> {
     const rows = await prisma.$queryRaw<
       Array<{
@@ -360,6 +388,7 @@ export class VenueCommissionSettlementJob {
         AND p.status = 'COMPLETED'
         AND p."createdAt" >= ${startUTC}
         AND p."createdAt" <= ${endUTC}
+        AND tc."transactionType"::text IN (${Prisma.join(cardTypes)})
       GROUP BY v.name, tc."transactionType", vc.rate, vc."referredBy"
       ORDER BY v.name, tc."transactionType"
     `
@@ -372,7 +401,9 @@ export class VenueCommissionSettlementJob {
   }
 
   private generateEmailHTML(
-    dateStr: string,
+    settlementDate: string,
+    dcDateStr: string,
+    aiDateStr: string,
     aggregatorName: string,
     rows: CommissionRow[],
     venueBreakdown: VenueBreakdown[],
@@ -429,7 +460,8 @@ export class VenueCommissionSettlementJob {
 
   <div style="background:#2d1b69;color:white;padding:24px 32px;border-radius:12px 12px 0 0">
     <h1 style="margin:0;font-size:20px">Comisiones por Venue — ${aggregatorName}</h1>
-    <p style="margin:4px 0 0;opacity:0.8;font-size:14px">Transacciones del ${dateStr}</p>
+    <p style="margin:4px 0 0;opacity:0.8;font-size:14px">Liquidación ${settlementDate}</p>
+    <p style="margin:4px 0 0;opacity:0.7;font-size:12px">Déb/Créd: transacciones del ${dcDateStr} (D+1) &nbsp;|&nbsp; AMEX/Intl: transacciones del ${aiDateStr} (D+3)</p>
   </div>
 
   <div style="background:white;padding:24px 32px;border-radius:0 0 12px 12px;box-shadow:0 2px 8px rgba(0,0,0,0.08)">

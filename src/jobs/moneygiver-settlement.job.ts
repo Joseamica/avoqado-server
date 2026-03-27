@@ -1,8 +1,13 @@
 /**
  * Moneygiver Daily Settlement Report
  *
- * Sends a daily email at 7:00 AM Mexico City time with the previous day's
- * transaction breakdown for all Moneygiver merchant accounts.
+ * Sends a daily email at 7:00 AM Mexico City time with the settlement breakdown
+ * for all Moneygiver merchant accounts, accounting for Blumon settlement cycles:
+ *
+ *   - Debit / Credit: D+1 business day  → query transactions from D-1 business day
+ *   - AMEX / International: D+3 business days → query transactions from D-3 business days
+ *
+ * Business days = Monday–Friday only (weekends are skipped).
  *
  * Rates come from Aggregator.baseFees in DB (configurable via superadmin UI).
  * IVA rate comes from Aggregator.ivaRate.
@@ -10,6 +15,7 @@
 
 import { CronJob } from 'cron'
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
@@ -102,42 +108,65 @@ export class MoneygiverSettlementJob {
     const startTime = Date.now()
 
     try {
-      // Calculate yesterday's date range in Mexico City timezone → UTC
-      const { startUTC, endUTC, dateStr } = this.getDateRange(dateOverride)
+      // Determine settlement date (today when no override)
+      const today = dateOverride || new Date().toISOString().slice(0, 10)
+      const todayDate = new Date(`${today}T12:00:00Z`) // noon UTC avoids DST edge cases
+
+      // D-1 business day → Debit/Credit transactions from this date settle today
+      const debitCreditDate = this.subtractBusinessDays(todayDate, 1)
+      const dcDateStr = debitCreditDate.toISOString().slice(0, 10)
+
+      // D-3 business days → AMEX/International transactions from this date settle today
+      const amexIntlDate = this.subtractBusinessDays(todayDate, 3)
+      const aiDateStr = amexIntlDate.toISOString().slice(0, 10)
 
       logger.info('💰 Generating Moneygiver settlement report', {
-        date: dateStr,
-        startUTC: startUTC.toISOString(),
-        endUTC: endUTC.toISOString(),
+        settlementDate: today,
+        debitCreditDate: dcDateStr,
+        amexIntlDate: aiDateStr,
       })
 
-      // Query payments grouped by venue + card type
-      const { rows, ivaRate, baseFees } = await this.queryPayments(startUTC, endUTC)
+      // Query both date ranges
+      const dcRange = this.getDateRange(dcDateStr)
+      const aiRange = this.getDateRange(aiDateStr)
 
-      if (rows.length === 0) {
-        logger.info('💰 No Moneygiver transactions for ' + dateStr)
+      const dcResult = await this.queryPayments(dcRange.startUTC, dcRange.endUTC, ['DEBIT', 'CREDIT'])
+      const aiResult = await this.queryPayments(aiRange.startUTC, aiRange.endUTC, ['AMEX', 'INTERNATIONAL'])
+
+      // Use rates from whichever query returned the aggregator (prefer dcResult)
+      const ivaRate = dcResult.ivaRate || aiResult.ivaRate
+      const baseFees = Object.keys(dcResult.baseFees).length ? dcResult.baseFees : aiResult.baseFees
+
+      // Merge rows
+      const allRows = [...dcResult.rows, ...aiResult.rows]
+
+      if (allRows.length === 0) {
+        logger.info('💰 No Moneygiver transactions for settlement date ' + today, {
+          debitCreditDate: dcDateStr,
+          amexIntlDate: aiDateStr,
+        })
         return
       }
 
       // Calculate fees and net amounts
-      const settlementRows = this.calculateSettlement(rows, ivaRate, baseFees)
+      const settlementRows = this.calculateSettlement(allRows, ivaRate, baseFees)
       const venueSummaries = this.buildVenueSummaries(settlementRows)
       const grandTotal = this.buildGrandTotal(settlementRows)
 
       // Generate email HTML
-      const html = this.generateEmailHTML(dateStr, settlementRows, venueSummaries, grandTotal)
+      const html = this.generateEmailHTML(today, dcDateStr, aiDateStr, settlementRows, venueSummaries, grandTotal)
 
       // Generate Excel attachment
-      const excelBuffer = this.generateExcel(dateStr, settlementRows, venueSummaries, grandTotal)
+      const excelBuffer = this.generateExcel(today, settlementRows, venueSummaries, grandTotal)
 
       // Send email with Excel attachment
       await emailService.sendEmail({
         to: RECIPIENT,
-        subject: `[Moneygiver] Reporte de Dispersión — ${dateStr}`,
+        subject: `[Moneygiver] Reporte de Dispersión — Liquidación ${today}`,
         html,
         attachments: [
           {
-            filename: `Moneygiver_Dispersion_${dateStr}.xls`,
+            filename: `Moneygiver_Dispersion_${today}.xls`,
             content: excelBuffer,
             contentType: 'application/vnd.ms-excel',
           },
@@ -145,7 +174,9 @@ export class MoneygiverSettlementJob {
       })
 
       logger.info('💰 Moneygiver settlement report sent', {
-        date: dateStr,
+        settlementDate: today,
+        debitCreditDate: dcDateStr,
+        amexIntlDate: aiDateStr,
         venues: venueSummaries.length,
         transactions: grandTotal.txCount,
         grossTotal: grandTotal.grossAmount.toFixed(2),
@@ -161,25 +192,29 @@ export class MoneygiverSettlementJob {
     }
   }
 
+  // ─── Business day helper ───
+
+  /** Subtract N business days from a date (skip weekends) */
+  private subtractBusinessDays(date: Date, days: number): Date {
+    const result = new Date(date)
+    let subtracted = 0
+    while (subtracted < days) {
+      result.setDate(result.getDate() - 1)
+      // 0=Sun, 6=Sat — skip weekends
+      if (result.getDay() !== 0 && result.getDay() !== 6) {
+        subtracted++
+      }
+    }
+    return result
+  }
+
   // ─── Date range ───
 
-  private getDateRange(dateOverride?: string): { startUTC: Date; endUTC: Date; dateStr: string } {
-    let dateStr: string
-
-    if (dateOverride) {
-      dateStr = dateOverride // format: YYYY-MM-DD
-    } else {
-      const now = new Date()
-      const yesterday = new Date(now)
-      yesterday.setDate(now.getDate() - 1)
-      dateStr = yesterday.toISOString().slice(0, 10)
-    }
-
-    // Convert Mexico City midnight → UTC
+  /** Convert a YYYY-MM-DD date string to a UTC range using Mexico City midnight boundaries */
+  private getDateRange(dateStr: string): { startUTC: Date; endUTC: Date } {
     const startUTC = fromZonedTime(new Date(`${dateStr}T00:00:00`), TIMEZONE)
     const endUTC = fromZonedTime(new Date(`${dateStr}T23:59:59.999`), TIMEZONE)
-
-    return { startUTC, endUTC, dateStr }
+    return { startUTC, endUTC }
   }
 
   // ─── Query ───
@@ -187,6 +222,7 @@ export class MoneygiverSettlementJob {
   private async queryPayments(
     startUTC: Date,
     endUTC: Date,
+    cardTypes: string[],
   ): Promise<{
     rows: Array<{ venue_name: string; card_type: string; tx_count: bigint; gross_amount: Decimal; tips: Decimal }>
     ivaRate: number
@@ -229,6 +265,7 @@ export class MoneygiverSettlementJob {
         AND p.status = 'COMPLETED'
         AND p."createdAt" >= ${startUTC}
         AND p."createdAt" <= ${endUTC}
+        AND tc."transactionType"::text IN (${Prisma.join(cardTypes)})
       GROUP BY v.name, tc."transactionType"
       ORDER BY v.name, tc."transactionType"
     `
@@ -308,7 +345,14 @@ export class MoneygiverSettlementJob {
 
   // ─── Email HTML ───
 
-  private generateEmailHTML(dateStr: string, rows: SettlementRow[], venueSummaries: VenueSummary[], grandTotal: VenueSummary): string {
+  private generateEmailHTML(
+    settlementDate: string,
+    dcDateStr: string,
+    aiDateStr: string,
+    rows: SettlementRow[],
+    venueSummaries: VenueSummary[],
+    grandTotal: VenueSummary,
+  ): string {
     const fmt = (n: number) => '$' + n.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     const pct = (n: number) => (n * 100).toFixed(1) + '%'
 
@@ -352,7 +396,8 @@ export class MoneygiverSettlementJob {
 
   <div style="background:#1a1a2e;color:white;padding:24px 32px;border-radius:12px 12px 0 0">
     <h1 style="margin:0;font-size:20px">💰 Reporte de Dispersión Moneygiver</h1>
-    <p style="margin:4px 0 0;opacity:0.8;font-size:14px">Transacciones del ${dateStr}</p>
+    <p style="margin:4px 0 0;opacity:0.8;font-size:14px">Liquidación del ${settlementDate}</p>
+    <p style="margin:4px 0 0;opacity:0.7;font-size:12px">Déb/Créd: transacciones del ${dcDateStr} (D+1) &nbsp;|&nbsp; AMEX/Intl: transacciones del ${aiDateStr} (D+3)</p>
   </div>
 
   <div style="background:white;padding:24px 32px;border-radius:0 0 12px 12px;box-shadow:0 2px 8px rgba(0,0,0,0.08)">
