@@ -100,6 +100,21 @@ dispersar_a_comercio = pago_neto - comisión_MG
 - **Layer 1**: Reporte de dispersión Blumon → MG (comisiones base + IVA)
 - **Layer 2**: Reporte de comisiones MG por venue (sin IVA) + split Avoqado/MG
 
+### Días de liquidación (D+N hábiles):
+
+| Tipo tarjeta | Días hábiles | Ejemplo (viernes) |
+|---|---|---|
+| Débito/Crédito | D+1 | Viernes → Lunes |
+| AMEX/Internacional | D+3 | Viernes → Miércoles |
+
+Días hábiles = Lunes a Viernes (excluye sábados y domingos).
+
+Los cron jobs calculan hacia atrás: "¿qué transacciones se liquidan HOY?"
+- Déb/Créd: busca transacciones de D-1 hábil
+- AMEX/Intl: busca transacciones de D-3 hábiles
+
+Esto hace que el reporte de la mañana coincida con lo que Blumon reportará ese día.
+
 ## Modelos de datos
 
 ### Aggregator
