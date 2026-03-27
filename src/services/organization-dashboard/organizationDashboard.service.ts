@@ -413,6 +413,7 @@ class OrganizationDashboardService {
         slug: true,
         logo: true,
         status: true,
+        state: true,
       },
     })
 
