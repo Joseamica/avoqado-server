@@ -26,11 +26,9 @@ scripts/temp-*
 .eslintcache
 .cache/eslint/
 .cache/pre-deploy-logs/
-.serena/project.yml
-.claude-flow/tasks/store.json
-.serena/project.yml
-.claude-flow/swarm/swarm-state.json
+# Claude Code / MCP tools internal data
+.claude-flow/
+.serena/
+
 scripts/seed-moneygiver-aggregator.ts
 docs/superpowers/plans/2026-03-25-moneygiver-aggregator-commissions.md
-.claude-flow/data/pending-insights.jsonl
-.serena/project.yml
