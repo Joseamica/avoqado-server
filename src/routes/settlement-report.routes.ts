@@ -1,8 +1,12 @@
 import { Router } from 'express'
 import { Request, Response } from 'express'
+import cors from 'cors'
 import * as settlementReportService from '../services/settlement-report.service'
 
 const router = Router()
+
+// Allow CORS for this public route (accessed from dashboard frontend)
+router.use(cors())
 
 /**
  * GET /reports/settlement/:token
