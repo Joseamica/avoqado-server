@@ -11,7 +11,6 @@ export async function getAggregators(req: Request, res: Response, next: NextFunc
     const { active } = req.query
     const filters: { active?: boolean } = {}
     if (active !== undefined) filters.active = active === 'true'
-
     const aggregators = await aggregatorService.getAggregators(filters)
 
     res.json({ success: true, data: aggregators, meta: { count: aggregators.length } })
