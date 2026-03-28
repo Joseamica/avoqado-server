@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as aggregatorService from '../../services/superadmin/aggregator.service'
+import { generateReportToken as genToken, revokeReportToken as revToken } from '../../services/settlement-report.service'
 import logger from '../../config/logger'
 
 /**
@@ -87,7 +88,7 @@ export async function toggleAggregator(req: Request, res: Response, next: NextFu
  */
 export async function generateReportToken(req: Request, res: Response, next: NextFunction) {
   try {
-    const token = await require('../../services/settlement-report.service').generateReportToken(req.params.id)
+    const token = await genToken(req.params.id)
     logger.info('Report token generated', { aggregatorId: req.params.id })
     res.json({ success: true, data: { token } })
   } catch (error) {
@@ -100,7 +101,7 @@ export async function generateReportToken(req: Request, res: Response, next: Nex
  */
 export async function revokeReportToken(req: Request, res: Response, next: NextFunction) {
   try {
-    await require('../../services/settlement-report.service').revokeReportToken(req.params.id)
+    await revToken(req.params.id)
     logger.info('Report token revoked', { aggregatorId: req.params.id })
     res.json({ success: true, message: 'Token revocado' })
   } catch (error) {
