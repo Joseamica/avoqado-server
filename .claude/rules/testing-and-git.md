@@ -138,3 +138,6 @@ This ensures zero prettier/eslint warnings in commits.
 - Before `git merge` -> Ask user first
 
 Always ask: "Quieres que haga commit de estos cambios?"
+
+**Co-Authored-By policy:**
+- **ONLY allowed Co-Authored-By**: `Claude Opus 4.6 (1M context) <noreply@anthropic.com>` — NEVER use `claude-flow`, `ruv@ruv.net`, or any other Co-Authored-By identity
