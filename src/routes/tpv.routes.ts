@@ -82,6 +82,7 @@ import * as orderTpvService from '../services/tpv/order.tpv.service'
 import AppError from '../errors/AppError'
 import logger from '../config/logger'
 import { Decimal } from '@prisma/client/runtime/library'
+import { PaymentStatus } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import { DEFAULT_PERMISSIONS, resolvePermissions, expandWildcards } from '../lib/permissions'
 import * as rolePermissionService from '../services/dashboard/rolePermission.service'
@@ -5817,6 +5818,114 @@ router.post(
       return res.status(200).json({ success: true, data: result })
     } catch (error) {
       logger.error(`❌ [SERIALIZED INV] Error in batch registration`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /tpv/v1/serialized-inventory/my-sales
+ * Sales history of serialized inventory items for the current staff member.
+ * Requires serialized-inventory:sell permission.
+ */
+router.get(
+  '/serialized-inventory/my-sales',
+  authenticateTokenMiddleware,
+  checkPermission('serialized-inventory:sell'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, userId: staffId } = (req as any).authContext
+
+      // Parse query params
+      const now = new Date()
+      const monthParam = (req.query.month as string) || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+      const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 100, 1), 500)
+      const offset = Math.max(parseInt(req.query.offset as string) || 0, 0)
+
+      // Validate month format YYYY-MM
+      if (!/^\d{4}-\d{2}$/.test(monthParam)) {
+        throw new AppError('month must be in YYYY-MM format', 400)
+      }
+
+      const [year, month] = monthParam.split('-').map(Number)
+      const startOfMonth = new Date(Date.UTC(year, month - 1, 1))
+      const endOfMonth = new Date(Date.UTC(year, month, 1)) // first day of next month
+
+      logger.info(`📊 [SERIALIZED INV] My sales query`, {
+        venueId,
+        staffId,
+        month: monthParam,
+        limit,
+        offset,
+        correlationId: req.correlationId,
+      })
+
+      // Query orders created by this staff member with SN prefix
+      const whereClause = {
+        venueId,
+        createdById: staffId,
+        orderNumber: { startsWith: 'SN' },
+        paymentStatus: { in: [PaymentStatus.PAID, PaymentStatus.PENDING] },
+        createdAt: { gte: startOfMonth, lt: endOfMonth },
+      }
+
+      const [orders, totalCount, totalAmountResult] = await Promise.all([
+        prisma.order.findMany({
+          where: whereClause,
+          include: { items: true },
+          orderBy: { createdAt: 'desc' },
+          take: limit,
+          skip: offset,
+        }),
+        prisma.order.count({ where: whereClause }),
+        prisma.order.aggregate({
+          where: whereClause,
+          _sum: { total: true },
+        }),
+      ])
+
+      const totalAmount = totalAmountResult._sum?.total ? parseFloat(totalAmountResult._sum.total.toString()) : 0
+
+      // Map to response format
+      // Note: Prisma enum is PAID but TPV client expects COMPLETED
+      const sales = orders.map(order => {
+        const firstItem = order.items[0]
+        const price = parseFloat(order.total.toString())
+        return {
+          id: order.id,
+          orderNumber: order.orderNumber,
+          serialNumber: firstItem?.productSku || null,
+          categoryName: firstItem?.categoryName || firstItem?.productName || null,
+          price,
+          date: order.createdAt.toISOString(),
+          paymentStatus: order.paymentStatus === PaymentStatus.PAID ? 'COMPLETED' : order.paymentStatus,
+          isGift: price === 0,
+        }
+      })
+
+      logger.info(`✅ [SERIALIZED INV] My sales returned ${sales.length} of ${totalCount}`, {
+        venueId,
+        staffId,
+        month: monthParam,
+        totalSales: totalCount,
+        totalAmount,
+        correlationId: req.correlationId,
+      })
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          month: monthParam,
+          totalSales: totalCount,
+          totalAmount,
+          sales,
+        },
+      })
+    } catch (error) {
+      logger.error(`❌ [SERIALIZED INV] Error fetching my sales`, {
         correlationId: req.correlationId,
         error: error instanceof Error ? error.message : 'Unknown error',
       })
