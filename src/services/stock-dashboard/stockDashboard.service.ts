@@ -493,7 +493,7 @@ class StockDashboardService {
 
     for (const item of recentItems) {
       const bucket = Math.floor(item.createdAt.getTime() / BULK_WINDOW_MS)
-      const key = `${item.createdBy}|${item.categoryId}|${bucket}`
+      const key = `${item.createdBy}|${item.categoryId}|${item.registeredFromVenueId || ''}|${bucket}`
       const group = regGroups.get(key) || []
       group.push(item)
       regGroups.set(key, group)
