@@ -1304,7 +1304,7 @@ class OrganizationDashboardService {
         },
       },
       orderBy: { createdAt: 'desc' },
-      take: Math.ceil(limit * 0.6), // Allocate 60% of limit to sales
+      take: limit, // Fetch up to full limit for sales
     })
 
     for (const order of recentOrders) {
@@ -1352,7 +1352,7 @@ class OrganizationDashboardService {
         staff: { select: { id: true, firstName: true, lastName: true } },
       },
       orderBy: { clockInTime: 'desc' },
-      take: Math.ceil(limit * 0.4), // Allocate 40% of limit to time entries
+      take: limit, // Fetch up to full limit for time entries
     })
 
     for (const entry of recentTimeEntries) {
