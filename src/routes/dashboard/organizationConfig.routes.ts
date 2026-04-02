@@ -512,6 +512,45 @@ router.patch('/team/:staffId/venues', orgOwnerAccess, async (req: Request, res: 
     const toAdd = validVenueIds.filter(id => !currentActiveIds.has(id))
     const toRemove = Array.from(currentActiveIds).filter(id => !requestedIds.has(id))
 
+    // ── Safety checks before removing venues ──
+    if (toRemove.length > 0) {
+      // 1. Check for active TimeEntries (check-ins without checkout)
+      const activeTimeEntries = await prisma.timeEntry.findMany({
+        where: {
+          staffId,
+          venueId: { in: toRemove },
+          status: { in: ['CLOCKED_IN', 'ON_BREAK'] },
+        },
+        include: { venue: { select: { name: true } } },
+      })
+      if (activeTimeEntries.length > 0) {
+        const venueNames = activeTimeEntries.map(te => te.venue.name).join(', ')
+        return res.status(409).json({
+          success: false,
+          error: 'active_time_entry',
+          message: `Este usuario tiene un turno activo en: ${venueNames}. Debe hacer checkout antes de ser reasignado.`,
+        })
+      }
+
+      // 2. Check for open Shifts (cash register sessions)
+      const openShifts = await prisma.shift.findMany({
+        where: {
+          staffId,
+          venueId: { in: toRemove },
+          status: 'OPEN',
+        },
+        include: { venue: { select: { name: true } } },
+      })
+      if (openShifts.length > 0) {
+        const venueNames = openShifts.map(s => s.venue.name).join(', ')
+        return res.status(409).json({
+          success: false,
+          error: 'open_shift',
+          message: `Este usuario tiene un corte de caja abierto en: ${venueNames}. Debe cerrar su turno antes de ser reasignado.`,
+        })
+      }
+    }
+
     // Get the user's role from any existing assignment (use as default for new assignments)
     const existingAssignment = currentAssignments.find(a => a.active)
     const defaultRole = existingAssignment?.role || 'VIEWER'

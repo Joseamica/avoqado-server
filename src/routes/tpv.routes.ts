@@ -5513,22 +5513,22 @@ router.get('/sales-goal', authenticateTokenMiddleware, async (req: Request, res:
       correlationId: req.correlationId,
     })
 
-    // First try to get staff-specific goal
-    let salesGoal = await salesGoalService.getStaffSalesGoal(venueId, staffId)
+    // Use goal resolution service with org inheritance (venue > org fallback)
+    const allGoals = await goalResolutionService.getEffectiveGoals(venueId)
 
-    // If no staff-specific goal, try venue-wide goal
-    if (!salesGoal) {
-      salesGoal = await salesGoalService.getPrimarySalesGoal(venueId)
-    }
+    // Find best match: staff-specific first, then venue-wide (staffId === null)
+    const staffGoal = allGoals.find(g => g.staffId === staffId)
+    const venueWideGoal = allGoals.find(g => g.staffId === null)
+    const salesGoal = staffGoal || venueWideGoal
 
     if (salesGoal) {
-      logger.info(`✅ [TPV SALES GOAL] Found sales goal`, {
+      logger.info(`✅ [TPV SALES GOAL] Found sales goal (source: ${salesGoal.source})`, {
         venueId,
         staffId,
-        goalId: salesGoal.id,
         period: salesGoal.period,
         goal: salesGoal.goal,
         currentSales: salesGoal.currentSales,
+        source: salesGoal.source,
         correlationId: req.correlationId,
       })
 

@@ -418,6 +418,8 @@ class StockDashboardService {
       itemCount?: number
       registeredFromVenueName?: string | null
       serialNumbers?: string[]
+      soldByName?: string | null
+      soldAtVenueName?: string | null
     }>
   > {
     const { itemWhere } = await this.getItemScope(venueId)
@@ -429,6 +431,16 @@ class StockDashboardService {
         venue: { select: { name: true } },
         sellingVenue: { select: { name: true } },
         registeredFromVenue: { select: { name: true } },
+        orderItem: {
+          select: {
+            order: {
+              select: {
+                createdBy: { select: { id: true, firstName: true, lastName: true } },
+                venue: { select: { name: true } },
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: limit * 4, // Get enough to group bulk uploads and still have events
@@ -458,6 +470,8 @@ class StockDashboardService {
       itemCount?: number
       registeredFromVenueName?: string | null
       serialNumbers?: string[]
+      soldByName?: string | null
+      soldAtVenueName?: string | null
     }
 
     const movements: Movement[] = []
@@ -518,6 +532,9 @@ class StockDashboardService {
       const itemVenueName = item.venueId ? item.venue?.name || null : 'Todas las tiendas'
 
       if (item.status === 'SOLD' && item.soldAt) {
+        const orderStaff = item.orderItem?.order?.createdBy
+        const soldByName = orderStaff ? `${orderStaff.firstName} ${orderStaff.lastName}`.trim() : null
+        const soldAtVenue = item.orderItem?.order?.venue?.name || item.sellingVenue?.name || null
         movements.push({
           id: `sold-${item.id}`,
           serialNumber: item.serialNumber,
@@ -526,6 +543,8 @@ class StockDashboardService {
           timestamp: item.soldAt,
           venueName: item.sellingVenue?.name || itemVenueName,
           userName: registeredByName,
+          soldByName,
+          soldAtVenueName: soldAtVenue,
         })
       }
 
