@@ -2091,9 +2091,33 @@ class OrganizationDashboardService {
             photoUrl: true,
           },
         },
-        venue: { select: { name: true } },
+        venue: { select: { name: true, timezone: true } },
       },
     })
+
+    // Load attendance settings (venue > org > defaults) for lateness calculation
+    const [venueSettingsList, orgAttendanceConfig] = await Promise.all([
+      prisma.venueSettings.findMany({
+        where: { venueId: { in: venueIds } },
+        select: { venueId: true, expectedCheckInTime: true, latenessThresholdMinutes: true },
+      }),
+      prisma.organizationAttendanceConfig.findUnique({
+        where: { organizationId: orgId },
+      }),
+    ])
+    const attendanceSettingsMap = new Map(
+      venueSettingsList.map(s => [
+        s.venueId,
+        {
+          expectedCheckInTime: s.expectedCheckInTime ?? orgAttendanceConfig?.expectedCheckInTime ?? '09:00',
+          latenessThresholdMinutes: s.latenessThresholdMinutes ?? orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
+        },
+      ]),
+    )
+    const defaultAttendanceSettings = {
+      expectedCheckInTime: orgAttendanceConfig?.expectedCheckInTime ?? '09:00',
+      latenessThresholdMinutes: orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
+    }
 
     // Get TimeEntry for the specified date
     const timeEntries = await prisma.timeEntry.findMany({
@@ -2216,6 +2240,12 @@ class OrganizationDashboardService {
 
       const fullName = `${sv.staff.firstName} ${sv.staff.lastName}`
 
+      // Lateness calculation for this venue
+      const venueTz = sv.venue.timezone || DEFAULT_TIMEZONE
+      const aSetting = attendanceSettingsMap.get(sv.venueId) || defaultAttendanceSettings
+      const [expH, expM] = aSetting.expectedCheckInTime.split(':').map(Number)
+      const deadlineMin = expH * 60 + expM + aSetting.latenessThresholdMinutes
+
       // Transform all time entries for this staff member
       const staffCashPayments = cashPayments.filter(p => p.processedById === sv.staffId && p.venueId === sv.venueId)
       const allTimeEntries = staffTimeEntries.map(te => {
@@ -2224,7 +2254,11 @@ class OrganizationDashboardService {
         const teEndMs = te.clockOutTime ? te.clockOutTime.getTime() : Infinity
         const matchingPayments = staffCashPayments.filter(p => p.createdAt.getTime() >= teStartMs && p.createdAt.getTime() <= teEndMs)
         const teCashSales = matchingPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
-        // DEBUG: remove after verifying
+
+        // Lateness: convert clockIn to venue timezone and compare
+        const localClockIn = toZonedTime(te.clockInTime, venueTz)
+        const clockInMin = localClockIn.getHours() * 60 + localClockIn.getMinutes()
+        const isLate = clockInMin > deadlineMin
 
         return {
           id: te.id,
@@ -2238,6 +2272,7 @@ class OrganizationDashboardService {
           status: te.status,
           validationStatus: te.validationStatus,
           cashSales: teCashSales,
+          isLate,
         }
       })
 
@@ -2283,6 +2318,8 @@ class OrganizationDashboardService {
         sales: salesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
         cashSales: cashSalesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
         attendancePercent: attendanceByStaff[sv.staffId] || 0,
+        // Lateness from first check-in of the day (oldest entry)
+        isLate: allTimeEntries.length > 0 ? allTimeEntries[allTimeEntries.length - 1].isLate : false,
         // All time entries for the day
         allTimeEntries,
       }
