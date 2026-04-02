@@ -23,6 +23,7 @@ interface ClockOutParams {
   longitude?: number // GPS longitude at clock-out
   accuracy?: number // GPS accuracy in meters at clock-out
   depositPhotoUrl?: string // Firebase URL: bank deposit voucher at clock-out
+  skipReason?: string // Reason for skipping checkout photos
 }
 
 interface BreakParams {
@@ -221,7 +222,7 @@ export async function clockIn(params: ClockInParams) {
  * Clock out a staff member
  */
 export async function clockOut(params: ClockOutParams) {
-  const { venueId, staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy, depositPhotoUrl } = params
+  const { venueId, staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy, depositPhotoUrl, skipReason } = params
 
   // Verify PIN
   const isValidPin = await verifyStaffPin(venueId, staffId, pin)
@@ -284,6 +285,7 @@ export async function clockOut(params: ClockOutParams) {
       clockOutLongitude: longitude, // GPS longitude
       clockOutAccuracy: accuracy, // GPS accuracy in meters
       depositPhotoUrl: depositPhotoUrl || null, // Bank deposit voucher at clock-out
+      checkoutSkipReason: skipReason || null, // Reason for skipping checkout photos
     },
     include: {
       staff: {

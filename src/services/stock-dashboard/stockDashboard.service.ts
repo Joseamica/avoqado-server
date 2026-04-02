@@ -353,42 +353,51 @@ class StockDashboardService {
     const errors: string[] = []
     let created = 0
 
-    // Process in batches of 100
-    const batchSize = 100
-    for (let i = 0; i < lines.length; i += batchSize) {
-      const batch = lines.slice(i, i + batchSize)
+    // Pre-validate serial numbers
+    const validSerials: string[] = []
+    for (const serialNumber of lines) {
+      if (serialNumber.length < 3 || serialNumber.length > 100) {
+        errors.push(`Invalid serial number: ${serialNumber}`)
+      } else {
+        validSerials.push(serialNumber)
+      }
+    }
 
-      await prisma.$transaction(async tx => {
-        for (const serialNumber of batch) {
-          // Validate serial number format (basic validation)
-          if (serialNumber.length < 3 || serialNumber.length > 100) {
-            errors.push(`Invalid serial number: ${serialNumber}`)
-            continue
-          }
-
-          // Check for duplicates
-          const existing = await tx.serializedItem.findUnique({
-            where: { venueId_serialNumber: { venueId, serialNumber } },
-          })
-
-          if (existing) {
-            duplicates.push(serialNumber)
-            continue
-          }
-
-          // Create item
-          await tx.serializedItem.create({
-            data: {
-              venueId,
-              categoryId,
-              serialNumber,
-              createdBy,
-              status: 'AVAILABLE',
-            },
-          })
-          created++
-        }
+    // Batch duplicate check outside transaction (chunked for large volumes)
+    const existingSet = new Set<string>()
+    const chunkSize = 1000
+    for (let i = 0; i < validSerials.length; i += chunkSize) {
+      const chunk = validSerials.slice(i, i + chunkSize)
+      const found = await prisma.serializedItem.findMany({
+        where: { venueId, serialNumber: { in: chunk } },
+        select: { serialNumber: true },
       })
+      for (const f of found) existingSet.add(f.serialNumber)
+    }
+    const toCreate: string[] = []
+    for (const sn of validSerials) {
+      if (existingSet.has(sn)) {
+        duplicates.push(sn)
+      } else {
+        toCreate.push(sn)
+      }
+    }
+
+    // Insert in batches with createMany
+    const batchSize = 500
+    for (let i = 0; i < toCreate.length; i += batchSize) {
+      const batch = toCreate.slice(i, i + batchSize)
+      await prisma.serializedItem.createMany({
+        data: batch.map(serialNumber => ({
+          venueId,
+          categoryId,
+          serialNumber,
+          createdBy,
+          status: 'AVAILABLE' as const,
+        })),
+        skipDuplicates: true,
+      })
+      created += batch.length
     }
 
     return {
@@ -604,51 +613,56 @@ class StockDashboardService {
     const errors: string[] = []
     let created = 0
 
-    const batchSize = 100
-    for (let i = 0; i < lines.length; i += batchSize) {
-      const batch = lines.slice(i, i + batchSize)
+    // Pre-validate serial numbers
+    const validSerials: string[] = []
+    for (const serialNumber of lines) {
+      if (serialNumber.length < 3 || serialNumber.length > 100) {
+        errors.push(`Invalid serial number: ${serialNumber}`)
+      } else {
+        validSerials.push(serialNumber)
+      }
+    }
 
-      await prisma.$transaction(async tx => {
-        for (const serialNumber of batch) {
-          if (serialNumber.length < 3 || serialNumber.length > 100) {
-            errors.push(`Invalid serial number: ${serialNumber}`)
-            continue
-          }
-
-          // Check org-level duplicates
-          const existingOrg = await tx.serializedItem.findFirst({
-            where: { organizationId, serialNumber },
-          })
-
-          if (existingOrg) {
-            duplicates.push(serialNumber)
-            continue
-          }
-
-          // Check legacy venue-level duplicates in same org
-          const existingVenue = await tx.serializedItem.findFirst({
-            where: { serialNumber, venue: { organizationId } },
-          })
-
-          if (existingVenue) {
-            duplicates.push(serialNumber)
-            continue
-          }
-
-          await tx.serializedItem.create({
-            data: {
-              organizationId,
-              venueId: null,
-              categoryId,
-              serialNumber,
-              createdBy,
-              registeredFromVenueId: venueId,
-              status: 'AVAILABLE',
-            },
-          })
-          created++
-        }
+    // Batch duplicate check outside transaction (chunked for large volumes)
+    const existingSet = new Set<string>()
+    const chunkSize = 1000
+    for (let i = 0; i < validSerials.length; i += chunkSize) {
+      const chunk = validSerials.slice(i, i + chunkSize)
+      const found = await prisma.serializedItem.findMany({
+        where: {
+          serialNumber: { in: chunk },
+          OR: [{ organizationId }, { venue: { organizationId } }],
+        },
+        select: { serialNumber: true },
       })
+      for (const f of found) existingSet.add(f.serialNumber)
+    }
+    const toCreate: string[] = []
+    for (const sn of validSerials) {
+      if (existingSet.has(sn)) {
+        duplicates.push(sn)
+      } else {
+        toCreate.push(sn)
+      }
+    }
+
+    // Insert in batches with createMany
+    const batchSize = 500
+    for (let i = 0; i < toCreate.length; i += batchSize) {
+      const batch = toCreate.slice(i, i + batchSize)
+      await prisma.serializedItem.createMany({
+        data: batch.map(serialNumber => ({
+          organizationId,
+          venueId: null,
+          categoryId,
+          serialNumber,
+          createdBy,
+          registeredFromVenueId: venueId,
+          status: 'AVAILABLE' as const,
+        })),
+        skipDuplicates: true,
+      })
+      created += batch.length
     }
 
     return {

@@ -41,10 +41,10 @@ export async function clockIn(req: Request, res: Response, next: NextFunction) {
 export async function clockOut(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const { staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy, depositPhotoUrl } = req.body
+    const { staffId, pin, checkOutPhotoUrl, latitude, longitude, accuracy, depositPhotoUrl, skipReason } = req.body
 
     logger.info(
-      `Clock-out request: venueId=${venueId}, staffId=${staffId}, hasPhoto=${!!checkOutPhotoUrl}, hasGps=${!!(latitude && longitude)}, hasDeposit=${!!depositPhotoUrl}`,
+      `Clock-out request: venueId=${venueId}, staffId=${staffId}, hasPhoto=${!!checkOutPhotoUrl}, hasGps=${!!(latitude && longitude)}, hasDeposit=${!!depositPhotoUrl}, skipReason=${skipReason || 'none'}`,
     )
 
     const timeEntry = await timeEntryService.clockOut({
@@ -56,6 +56,7 @@ export async function clockOut(req: Request, res: Response, next: NextFunction) 
       longitude,
       accuracy,
       depositPhotoUrl,
+      skipReason,
     })
 
     res.status(200).json({
