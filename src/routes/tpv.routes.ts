@@ -1,91 +1,90 @@
-import express, { Request, Response, NextFunction } from 'express'
-import { validateRequest } from '../middlewares/validation'
-import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
-import { checkPermission } from '../middlewares/checkPermission.middleware'
-import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
-import {
-  pinLoginSchema,
-  refreshTokenSchema,
-  logoutSchema,
-  venueIdParamSchema,
-  serialNumberParamSchema,
-  orderParamsSchema,
-  paymentsQuerySchema,
-  shiftQuerySchema,
-  shiftsQuerySchema,
-  shiftsSummaryQuerySchema,
-  recordPaymentParamsSchema,
-  recordFastPaymentParamsSchema,
-  recordPaymentBodySchema,
-  sendReceiptParamsSchema,
-  sendReceiptBodySchema,
-  sendWhatsAppReceiptBodySchema,
-  paymentRouteSchema,
-  tableParamsSchema,
-  assignTableSchema,
-  clearTableSchema,
-  addOrderItemsSchema,
-  removeOrderItemSchema,
-  updateGuestInfoSchema,
-  addOrderCustomerSchema,
-  removeOrderCustomerSchema,
-  createAndAddCustomerSchema,
-  compItemsSchema,
-  voidItemsSchema,
-  applyDiscountSchema,
-  getAvailableDiscountsSchema,
-  applyAutomaticDiscountsSchema,
-  applyPredefinedDiscountSchema,
-  applyManualDiscountSchema,
-  applyCouponCodeSchema,
-  validateCouponSchema,
-  removeOrderDiscountSchema,
-  getOrderDiscountsSchema,
-  createSaleVerificationSchema,
-  listSaleVerificationsSchema,
-  getSaleVerificationSchema,
-  createProofOfSaleSchema,
-  tpvFeedbackSchema,
-  initiateCryptoPaymentSchema,
-  cancelCryptoPaymentSchema,
-  getCryptoPaymentStatusSchema,
-} from '../schemas/tpv.schema'
-import { activateTerminalSchema } from '../schemas/activation.schema'
-import { trainingIdParamSchema, updateProgressSchema, getStaffProgressQuerySchema } from '../schemas/superadmin/training.schema'
-import * as venueController from '../controllers/tpv/venue.tpv.controller'
+import { PaymentStatus } from '@prisma/client'
+import { Decimal } from '@prisma/client/runtime/library'
+import express, { NextFunction, Request, Response } from 'express'
+import logger from '../config/logger'
+import * as activationController from '../controllers/tpv/activation.controller'
+import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
+import * as authController from '../controllers/tpv/auth.tpv.controller'
+import * as cryptoController from '../controllers/tpv/crypto.tpv.controller'
+import * as customerController from '../controllers/tpv/customer.tpv.controller'
+import * as discountController from '../controllers/tpv/discount.tpv.controller'
+import * as floorElementController from '../controllers/tpv/floor-element.tpv.controller'
+import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
 import * as refundController from '../controllers/tpv/refund.tpv.controller'
-import * as shiftController from '../controllers/tpv/shift.tpv.controller'
-import * as authController from '../controllers/tpv/auth.tpv.controller'
-import * as activationController from '../controllers/tpv/activation.controller'
-import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
-import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
-import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
-import * as tableController from '../controllers/tpv/table.tpv.controller'
-import * as floorElementController from '../controllers/tpv/floor-element.tpv.controller'
 import * as reportsController from '../controllers/tpv/reports.tpv.controller'
-import * as customerController from '../controllers/tpv/customer.tpv.controller'
-import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
-import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
-import * as cryptoController from '../controllers/tpv/crypto.tpv.controller'
+import * as shiftController from '../controllers/tpv/shift.tpv.controller'
+import * as tableController from '../controllers/tpv/table.tpv.controller'
+import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
+import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
 import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.controller'
 import * as trainingController from '../controllers/tpv/training.tpv.controller'
+import * as venueController from '../controllers/tpv/venue.tpv.controller'
+import AppError from '../errors/AppError'
+import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib/permissions'
+import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
+import { validateRequest } from '../middlewares/validation'
+import { activateTerminalSchema } from '../schemas/activation.schema'
+import { getStaffProgressQuerySchema, trainingIdParamSchema, updateProgressSchema } from '../schemas/superadmin/training.schema'
+import {
+  addOrderCustomerSchema,
+  addOrderItemsSchema,
+  applyAutomaticDiscountsSchema,
+  applyCouponCodeSchema,
+  applyDiscountSchema,
+  applyManualDiscountSchema,
+  applyPredefinedDiscountSchema,
+  assignTableSchema,
+  cancelCryptoPaymentSchema,
+  clearTableSchema,
+  compItemsSchema,
+  createAndAddCustomerSchema,
+  createProofOfSaleSchema,
+  createSaleVerificationSchema,
+  getAvailableDiscountsSchema,
+  getCryptoPaymentStatusSchema,
+  getOrderDiscountsSchema,
+  getSaleVerificationSchema,
+  initiateCryptoPaymentSchema,
+  listSaleVerificationsSchema,
+  logoutSchema,
+  orderParamsSchema,
+  paymentRouteSchema,
+  paymentsQuerySchema,
+  pinLoginSchema,
+  recordFastPaymentParamsSchema,
+  recordPaymentBodySchema,
+  recordPaymentParamsSchema,
+  refreshTokenSchema,
+  removeOrderCustomerSchema,
+  removeOrderDiscountSchema,
+  removeOrderItemSchema,
+  sendReceiptBodySchema,
+  sendReceiptParamsSchema,
+  sendWhatsAppReceiptBodySchema,
+  serialNumberParamSchema,
+  shiftQuerySchema,
+  shiftsQuerySchema,
+  shiftsSummaryQuerySchema,
+  tableParamsSchema,
+  tpvFeedbackSchema,
+  updateGuestInfoSchema,
+  validateCouponSchema,
+  venueIdParamSchema,
+  voidItemsSchema,
+} from '../schemas/tpv.schema'
+import * as goalResolutionService from '../services/dashboard/commission/goal-resolution.service'
 import * as productService from '../services/dashboard/product.dashboard.service'
+import * as rolePermissionService from '../services/dashboard/rolePermission.service'
 import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
 import { serializedInventoryService } from '../services/serialized-inventory/serializedInventory.service'
-import * as salesGoalService from '../services/dashboard/commission/sales-goal.service'
-import * as goalResolutionService from '../services/dashboard/commission/goal-resolution.service'
 import * as orderTpvService from '../services/tpv/order.tpv.service'
-import AppError from '../errors/AppError'
-import logger from '../config/logger'
-import { Decimal } from '@prisma/client/runtime/library'
-import { PaymentStatus } from '@prisma/client'
 import prisma from '../utils/prismaClient'
-import { DEFAULT_PERMISSIONS, resolvePermissions, expandWildcards } from '../lib/permissions'
-import * as rolePermissionService from '../services/dashboard/rolePermission.service'
 
 const router = express.Router()
 
