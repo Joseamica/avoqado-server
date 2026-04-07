@@ -158,10 +158,55 @@ export async function createPurchaseOrder(params: CreatePOParams) {
   // Generate order number
   const orderNumber = `PO-${Date.now()}`
 
+  // Resolve rawMaterialIds: if a product ID is provided, find or create a RawMaterial
+  const resolvedItems = await Promise.all(
+    items.map(async item => {
+      let rmId = item.rawMaterialId
+
+      // Check if the provided ID is a valid RawMaterial
+      if (rmId) {
+        const existing = await prisma.rawMaterial.findUnique({ where: { id: rmId } })
+        if (!existing) {
+          // It might be a Product ID — look up the product and find/create a RawMaterial
+          const product = await prisma.product.findUnique({
+            where: { id: rmId },
+            select: { id: true, name: true, sku: true },
+          })
+          if (product) {
+            let rm = await prisma.rawMaterial.findFirst({
+              where: { venueId, sku: product.sku || `PROD-${product.id.slice(-6)}`, deletedAt: null },
+            })
+            if (!rm) {
+              rm = await prisma.rawMaterial.create({
+                data: {
+                  venueId,
+                  name: product.name,
+                  sku: product.sku || `PROD-${product.id.slice(-6)}`,
+                  category: 'OTHER',
+                  currentStock: 0,
+                  minimumStock: 0,
+                  reorderPoint: 0,
+                  reservedStock: 0,
+                  costPerUnit: 0,
+                  avgCostPerUnit: 0,
+                  unit: 'PIECE',
+                  unitType: 'COUNT',
+                },
+              })
+            }
+            rmId = rm.id
+          }
+        }
+      }
+
+      return { ...item, rawMaterialId: rmId }
+    }),
+  )
+
   // Calculate totals
   let subtotal = 0
-  const itemsData = items.map(item => {
-    const unitPrice = item.unitPrice / 100 // cents to dollars
+  const itemsData = resolvedItems.map(item => {
+    const unitPrice = (item.unitPrice || 0) / 100 // cents to dollars
     const total = unitPrice * item.quantity
     subtotal += total
 
@@ -429,6 +474,7 @@ function formatPurchaseOrder(po: any) {
     id: po.id,
     venueId: po.venueId,
     orderNumber: po.orderNumber,
+    supplierName: po.supplier?.name || '',
     status: po.status,
     orderDate: po.orderDate.toISOString(),
     expectedDeliveryDate: po.expectedDeliveryDate ? po.expectedDeliveryDate.toISOString() : null,
@@ -444,6 +490,7 @@ function formatPurchaseOrder(po: any) {
     total: Math.round(Number(po.total) * 100),
     notes: po.notes,
     createdBy: po.createdBy,
+    createdByName: '',
     items: po.items
       ? po.items.map((item: any) => ({
           id: item.id,

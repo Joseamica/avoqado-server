@@ -170,9 +170,17 @@ export async function createEstimate(params: CreateEstimateParams) {
   // Generate estimate number
   const estimateNumber = await generateEstimateNumber(venueId)
 
+  // Normalize items: accept both {productName, quantity, unitPrice} and {name, qty, price}
+  const normalizedItems = items.map((item: any) => ({
+    productId: item.productId || null,
+    productName: item.productName || item.name || 'Producto',
+    quantity: item.quantity ?? item.qty ?? 1,
+    unitPrice: item.unitPrice ?? item.price ?? 0,
+  }))
+
   // Calculate totals
   let subtotal = 0
-  const itemsData = items.map(item => {
+  const itemsData = normalizedItems.map(item => {
     const unitPrice = item.unitPrice / 100 // cents to currency
     const totalPrice = unitPrice * item.quantity
     subtotal += totalPrice
@@ -195,7 +203,7 @@ export async function createEstimate(params: CreateEstimateParams) {
       venueId,
       estimateNumber,
       customerId: params.customerId || null,
-      customerName: params.customerName || null,
+      customerName: params.customerName || '',
       customerEmail: params.customerEmail || null,
       customerPhone: params.customerPhone || null,
       status: 'DRAFT',

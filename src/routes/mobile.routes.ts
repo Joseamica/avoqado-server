@@ -26,6 +26,7 @@ import * as refundMobileController from '../controllers/mobile/refund.mobile.con
 import * as estimateMobileController from '../controllers/mobile/estimate.mobile.controller'
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
+import * as kdsMobileController from '../controllers/mobile/kds.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation'
@@ -1309,6 +1310,8 @@ router.get(
  * List categories for product creation (simplified payload).
  */
 router.get('/venues/:venueId/categories', authenticateTokenMiddleware, checkPermission('menu:read'), productMobileController.listCategories)
+router.get('/venues/:venueId/products', authenticateTokenMiddleware, checkPermission('menu:read'), productMobileController.listProducts)
+router.post('/venues/:venueId/products', authenticateTokenMiddleware, checkPermission('menu:create'), productMobileController.createProduct)
 
 // ============================================================================
 // INVENTORY
@@ -1801,5 +1804,37 @@ router.delete(
   checkPermission('menu:create'),
   measurementUnitMobileController.deleteMeasurementUnit,
 )
+
+// ============================================================================
+// KDS (Kitchen Display System)
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/kds/orders
+ * List active KDS orders for a venue.
+ * Query: ?status=NEW,PREPARING,READY (default: active orders)
+ */
+router.get('/venues/:venueId/kds/orders', authenticateTokenMiddleware, kdsMobileController.listKdsOrders)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kds/orders
+ * Create a new KDS order (after payment succeeds).
+ * Body: { orderNumber, orderType?, orderId?, items: [{ productName, quantity, modifiers?, notes? }] }
+ */
+router.post('/venues/:venueId/kds/orders', authenticateTokenMiddleware, kdsMobileController.createKdsOrder)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/kds/orders/:id/status
+ * Update KDS order status.
+ * Body: { status: "PREPARING" | "READY" | "COMPLETED" }
+ */
+router.put('/venues/:venueId/kds/orders/:id/status', authenticateTokenMiddleware, kdsMobileController.updateKdsOrderStatus)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kds/orders/:id/bump
+ * Mark KDS order as COMPLETED instantly.
+ */
+router.post('/venues/:venueId/kds/orders/:id/bump', authenticateTokenMiddleware, kdsMobileController.bumpKdsOrder)
 
 export default router

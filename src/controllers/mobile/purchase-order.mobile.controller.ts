@@ -49,11 +49,20 @@ export const createPurchaseOrder = async (req: Request, res: Response, next: Nex
       return res.status(400).json({ success: false, message: 'Se requiere al menos un producto (items)' })
     }
 
+    // Map Android client field names to backend service field names
+    const mappedItems = items.map((item: any) => ({
+      rawMaterialId: item.rawMaterialId || item.productId,
+      quantity: item.quantity || item.orderedQuantity || 1,
+      unitPrice: item.unitPrice ?? (item.unitCost ? Math.round(item.unitCost * 100) : 0),
+      unit: item.unit || 'PIECE',
+      notes: item.notes || null,
+    }))
+
     const result = await poService.createPurchaseOrder({
       venueId,
       staffId,
       supplierName,
-      items,
+      items: mappedItems,
       notes,
       expectedDate,
     })

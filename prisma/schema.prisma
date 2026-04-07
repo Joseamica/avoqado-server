@@ -365,6 +365,11 @@ model Venue {
   // ==========================================
   measurementUnits MeasurementUnit[]
 
+  // ==========================================
+  // KDS (Kitchen Display System)
+  // ==========================================
+  kdsOrders KdsOrder[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -8141,4 +8146,44 @@ model VenueCommission {
 
   @@index([aggregatorId])
   @@index([active])
+}
+
+// ============================================================================
+// KDS (Kitchen Display System)
+// ============================================================================
+
+model KdsOrder {
+  id          String         @id @default(cuid())
+  venueId     String
+  venue       Venue          @relation(fields: [venueId], references: [id])
+  orderId     String?
+  orderNumber String
+  orderType   String         @default("DINE_IN")
+  status      KdsOrderStatus @default(NEW)
+  items       KdsOrderItem[]
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([venueId, status])
+}
+
+model KdsOrderItem {
+  id          String   @id @default(cuid())
+  kdsOrderId  String
+  kdsOrder    KdsOrder @relation(fields: [kdsOrderId], references: [id], onDelete: Cascade)
+  productName String
+  quantity    Int
+  modifiers   String?  // JSON array of modifier names
+  notes       String?
+
+  @@index([kdsOrderId])
+}
+
+enum KdsOrderStatus {
+  NEW
+  PREPARING
+  READY
+  COMPLETED
 }

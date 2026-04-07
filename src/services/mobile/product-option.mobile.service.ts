@@ -84,15 +84,30 @@ export async function createProductOption(params: CreateOptionParams) {
     throw new BadRequestError(`Ya existe una opción con el nombre "${name.trim()}"`)
   }
 
+  // Handle all formats: ["string"], [{value: "string"}], [{name: "string"}], or mixed
+  const normalizedValues = values
+    .map((v: any, index: number) => {
+      let val: string
+      if (typeof v === 'string') {
+        val = v
+      } else if (v && typeof v === 'object') {
+        val = v.value || v.name || v.label || String(v)
+      } else {
+        val = String(v ?? '')
+      }
+      return {
+        value: (val || '').trim(),
+        sortOrder: typeof v === 'object' && v !== null ? (v.sortOrder ?? index) : index,
+      }
+    })
+    .filter(v => v.value.length > 0)
+
   const option = await prisma.productOption.create({
     data: {
       venueId,
       name: name.trim(),
       values: {
-        create: values.map((v, index) => ({
-          value: v.value.trim(),
-          sortOrder: v.sortOrder ?? index,
-        })),
+        create: normalizedValues,
       },
     },
     include: {
@@ -154,17 +169,35 @@ export async function updateProductOption(params: UpdateOptionParams) {
     })
   }
 
+  // Handle all formats: ["string"], [{value: "string"}], [{name: "string"}], or mixed
+  const normalizedValues =
+    values && values.length > 0
+      ? values
+          .map((v: any, index: number) => {
+            let val: string
+            if (typeof v === 'string') {
+              val = v
+            } else if (v && typeof v === 'object') {
+              val = v.value || v.name || v.label || String(v)
+            } else {
+              val = String(v ?? '')
+            }
+            return {
+              value: (val || '').trim(),
+              sortOrder: typeof v === 'object' && v !== null ? (v.sortOrder ?? index) : index,
+            }
+          })
+          .filter(v => v.value.length > 0)
+      : undefined
+
   const updated = await prisma.productOption.update({
     where: { id: optionId },
     data: {
       ...(name ? { name: name.trim() } : {}),
-      ...(values && values.length > 0
+      ...(normalizedValues
         ? {
             values: {
-              create: values.map((v, index) => ({
-                value: v.value.trim(),
-                sortOrder: v.sortOrder ?? index,
-              })),
+              create: normalizedValues,
             },
           }
         : {}),
