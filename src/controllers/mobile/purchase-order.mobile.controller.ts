@@ -34,12 +34,25 @@ export const listPurchaseOrders = async (req: Request, res: Response, next: Next
 /**
  * Create purchase order
  * @route POST /api/v1/mobile/venues/:venueId/purchase-orders
+ *
+ * BUG FIX (Bug 1): Android client sends items with field names:
+ *   { productId, productName, orderedQuantity, unitCost }
+ * But the service internally expects:
+ *   { rawMaterialId, quantity, unitPrice (cents), unit, notes }
+ * The controller must translate between the mobile API contract and the
+ * internal service contract. We accept BOTH old and new field names for
+ * backward compatibility with existing clients (e.g. iOS).
+ *
+ * Also note: Android sends `expectedDeliveryDate` whereas older clients may
+ * send `expectedDate`. Accept both.
  */
 export const createPurchaseOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
     const staffId = req.authContext?.userId || ''
-    const { supplierName, items, notes, expectedDate } = req.body
+    // Accept both `expectedDeliveryDate` (Android) and `expectedDate` (legacy)
+    const { supplierName, items, notes } = req.body
+    const expectedDate = req.body.expectedDeliveryDate || req.body.expectedDate
 
     if (!supplierName) {
       return res.status(400).json({ success: false, message: 'supplierName es requerido' })
@@ -49,14 +62,36 @@ export const createPurchaseOrder = async (req: Request, res: Response, next: Nex
       return res.status(400).json({ success: false, message: 'Se requiere al menos un producto (items)' })
     }
 
-    // Map Android client field names to backend service field names
-    const mappedItems = items.map((item: any) => ({
-      rawMaterialId: item.rawMaterialId || item.productId,
-      quantity: item.quantity || item.orderedQuantity || 1,
-      unitPrice: item.unitPrice ?? (item.unitCost ? Math.round(item.unitCost * 100) : 0),
-      unit: item.unit || 'PIECE',
-      notes: item.notes || null,
-    }))
+    // Map Android client field names to backend service field names.
+    // Android sends: { productId, productName, orderedQuantity, unitCost (decimal dollars) }
+    // Service expects: { rawMaterialId, quantity, unitPrice (integer cents), unit, notes }
+    // The service has logic to resolve a Product ID into a RawMaterial automatically
+    // (see purchase-order.mobile.service.ts lines 161-204).
+    const mappedItems = items.map((item: any) => {
+      // Prefer rawMaterialId if provided (legacy), else fall back to productId (Android)
+      const rawMaterialId = item.rawMaterialId || item.productId
+
+      // Prefer explicit `quantity` if provided, else use `orderedQuantity` (Android)
+      const quantity = item.quantity ?? item.orderedQuantity ?? 1
+
+      // Unit price in cents. Accept either:
+      //   - `unitPrice` (integer cents, legacy/iOS)
+      //   - `unitCost` (decimal dollars, Android) → convert to cents
+      let unitPrice = 0
+      if (item.unitPrice != null) {
+        unitPrice = Number(item.unitPrice)
+      } else if (item.unitCost != null) {
+        unitPrice = Math.round(Number(item.unitCost) * 100)
+      }
+
+      return {
+        rawMaterialId,
+        quantity,
+        unitPrice,
+        unit: item.unit || 'PIECE',
+        notes: item.notes || null,
+      }
+    })
 
     const result = await poService.createPurchaseOrder({
       venueId,
@@ -114,6 +149,15 @@ export const updateStatus = async (req: Request, res: Response, next: NextFuncti
 /**
  * Receive stock from purchase order
  * @route POST /api/v1/mobile/venues/:venueId/purchase-orders/:poId/receive
+ *
+ * BUG FIX (Bug 2): Android client sends receive items with field names:
+ *   { items: [{ purchaseOrderItemId, receivedQuantity }] }
+ * But the service internally expects:
+ *   { items: [{ itemId, receivedQuantity }] }
+ * The controller must translate between the mobile API contract and the
+ * internal service contract. We accept BOTH old and new field names for
+ * backward compatibility, preferring `purchaseOrderItemId` (the more
+ * descriptive name used by the Android client) when both are present.
  */
 export const receiveStock = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -125,7 +169,15 @@ export const receiveStock = async (req: Request, res: Response, next: NextFuncti
       return res.status(400).json({ success: false, message: 'Se requiere al menos un item (items)' })
     }
 
-    const result = await poService.receiveStock(poId, venueId, items, staffId)
+    // Map Android field name `purchaseOrderItemId` → service field `itemId`.
+    // Prefer `purchaseOrderItemId` if both are provided (matches the mobile
+    // contract); fall back to `itemId` for legacy clients.
+    const mappedItems = items.map((item: any) => ({
+      itemId: item.purchaseOrderItemId || item.itemId,
+      receivedQuantity: Number(item.receivedQuantity) || 0,
+    }))
+
+    const result = await poService.receiveStock(poId, venueId, mappedItems, staffId)
 
     return res.json({ success: true, data: result })
   } catch (error) {

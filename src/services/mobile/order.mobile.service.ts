@@ -306,8 +306,9 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   const orderNumber = `ORD-${Date.now()}`
 
   // Calculate totals and prepare items data
+  // NOTE: Prices are treated as tax-inclusive (same behavior as TPV service).
+  // taxAmount is stored as 0 on items and order. Tax is not added on top of the price.
   let subtotal = 0
-  let totalTax = 0
   const itemsData = input.items.map(item => {
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
@@ -323,11 +324,6 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     const itemTotal = unitPrice * item.quantity
     subtotal += itemTotal
 
-    // Calculate tax using product's taxRate (default 0.16 = IVA 16%)
-    const taxRate = Number(product.taxRate ?? 0.16)
-    const itemTaxAmount = itemTotal * taxRate
-    totalTax += itemTaxAmount
-
     return {
       productId: item.productId,
       productName: product.name,
@@ -336,7 +332,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       quantity: item.quantity,
       unitPrice: new Prisma.Decimal(Number(product.price)),
       discountAmount: new Prisma.Decimal(0),
-      taxAmount: new Prisma.Decimal(itemTaxAmount),
+      taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
       notes: item.notes || null,
       modifiers: {
@@ -361,16 +357,16 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       tableId: input.tableId || null,
       servedById: input.staffId || null,
       createdById: input.staffId || null,
-      status: 'PENDING',
+      status: 'CONFIRMED',
       paymentStatus: 'PENDING',
       kitchenStatus: 'PENDING',
       type: input.orderType || 'DINE_IN',
       source: input.source || 'AVOQADO_IOS',
       subtotal: new Prisma.Decimal(subtotal),
       discountAmount: new Prisma.Decimal(0),
-      taxAmount: new Prisma.Decimal(totalTax),
-      total: new Prisma.Decimal(subtotal + totalTax),
-      remainingBalance: new Prisma.Decimal(subtotal + totalTax),
+      taxAmount: new Prisma.Decimal(0),
+      total: new Prisma.Decimal(subtotal),
+      remainingBalance: new Prisma.Decimal(subtotal),
       customerName: input.customerName || null,
       customerPhone: input.customerPhone || null,
       specialRequests: input.specialRequests || null,

@@ -469,6 +469,21 @@ export async function receiveStock(poId: string, venueId: string, items: Receive
 // HELPERS
 // ============================================================================
 
+/**
+ * Format a Prisma PurchaseOrder for the mobile API response.
+ *
+ * BUG FIX (Bug 3): The Android client expects item fields named
+ *   { productId, productName, sku, orderedQuantity, receivedQuantity, unitCost }
+ * while the internal database uses the raw-material terminology
+ *   { rawMaterialId, rawMaterialName, rawMaterialSku, quantityOrdered, quantityReceived, unitPrice }.
+ *
+ * To maintain backward compatibility with existing clients (e.g. iOS) while
+ * also satisfying the Android client's expectations, each item includes BOTH
+ * sets of field names. The mobile app's Kotlin models use @SerialName to map
+ * the legacy names onto its internal fields (see PurchaseOrderModels.kt), and
+ * the added aliases give us flexibility if/when Android switches to reading
+ * the new names directly.
+ */
 function formatPurchaseOrder(po: any) {
   return {
     id: po.id,
@@ -478,6 +493,8 @@ function formatPurchaseOrder(po: any) {
     status: po.status,
     orderDate: po.orderDate.toISOString(),
     expectedDeliveryDate: po.expectedDeliveryDate ? po.expectedDeliveryDate.toISOString() : null,
+    // Alias for Android client which reads `expectedDate`
+    expectedDate: po.expectedDeliveryDate ? po.expectedDeliveryDate.toISOString() : null,
     receivedDate: po.receivedDate ? po.receivedDate.toISOString() : null,
     supplier: po.supplier
       ? {
@@ -492,19 +509,38 @@ function formatPurchaseOrder(po: any) {
     createdBy: po.createdBy,
     createdByName: '',
     items: po.items
-      ? po.items.map((item: any) => ({
-          id: item.id,
-          rawMaterialId: item.rawMaterialId,
-          rawMaterialName: item.rawMaterial?.name || null,
-          rawMaterialSku: item.rawMaterial?.sku || null,
-          quantityOrdered: Number(item.quantityOrdered),
-          quantityReceived: Number(item.quantityReceived),
-          unit: item.unit,
-          unitPrice: Math.round(Number(item.unitPrice) * 100),
-          total: Math.round(Number(item.total) * 100),
-          receiveStatus: item.receiveStatus,
-          notes: item.notes,
-        }))
+      ? po.items.map((item: any) => {
+          const unitPriceCents = Math.round(Number(item.unitPrice) * 100)
+          const totalCents = Math.round(Number(item.total) * 100)
+          const quantityOrdered = Number(item.quantityOrdered)
+          const quantityReceived = Number(item.quantityReceived)
+
+          return {
+            id: item.id,
+            // Legacy/internal field names (preserved for iOS and backward compatibility)
+            rawMaterialId: item.rawMaterialId,
+            rawMaterialName: item.rawMaterial?.name || null,
+            rawMaterialSku: item.rawMaterial?.sku || null,
+            quantityOrdered,
+            quantityReceived,
+            unitPrice: unitPriceCents,
+            // New field aliases expected by the Android client
+            productId: item.rawMaterialId,
+            productName: item.rawMaterial?.name || null,
+            sku: item.rawMaterial?.sku || null,
+            orderedQuantity: quantityOrdered,
+            receivedQuantity: quantityReceived,
+            // `unitCost` is expressed in decimal currency (not cents) to match
+            // the Android `CreatePOItemRequest.unitCost: Double` contract.
+            unitCost: Number(item.unitPrice),
+            // Also expose the purchase-order-item id under the Android name
+            purchaseOrderItemId: item.id,
+            unit: item.unit,
+            total: totalCents,
+            receiveStatus: item.receiveStatus,
+            notes: item.notes,
+          }
+        })
       : [],
     createdAt: po.createdAt.toISOString(),
     updatedAt: po.updatedAt.toISOString(),

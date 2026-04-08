@@ -13,6 +13,8 @@ import * as reportController from '../../controllers/dashboard/inventory/report.
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
 import * as productInventoryController from '../../controllers/dashboard/productInventory.controller'
 import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
+import * as stockCountController from '../../controllers/dashboard/inventory/stockCount.controller'
+import * as inventoryTransferController from '../../controllers/dashboard/inventory/inventoryTransfer.controller'
 
 // Import schemas
 import {
@@ -1203,5 +1205,93 @@ router.get(
   validateRequest(GetGlobalMovementsQuerySchema),
   productInventoryController.getGlobalMovementsHandler,
 )
+
+// ===========================================
+// STOCK COUNTS (READ-ONLY AUDIT VIEW)
+// ===========================================
+// Stock counts are created by the mobile POS apps (iOS/Android).
+// The dashboard provides READ-ONLY access so accountants and managers
+// can audit the history. No create/update/delete endpoints here on
+// purpose — those live under /api/v1/mobile/.
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/stock-counts:
+ *   get:
+ *     tags: [Inventory - Stock Counts]
+ *     summary: List stock counts for a venue (read-only audit)
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [IN_PROGRESS, COMPLETED] }
+ *       - in: query
+ *         name: type
+ *         schema: { type: string, enum: [CYCLE, FULL] }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 50 }
+ */
+router.get('/stock-counts', checkPermission('inventory:read'), stockCountController.listStockCounts)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/stock-counts/{countId}:
+ *   get:
+ *     tags: [Inventory - Stock Counts]
+ *     summary: Get a single stock count with its items (read-only audit)
+ */
+router.get('/stock-counts/:countId', checkPermission('inventory:read'), stockCountController.getStockCount)
+
+// ===========================================
+// INVENTORY TRANSFERS (READ-ONLY AUDIT VIEW)
+// ===========================================
+// Inventory transfers are created by the mobile POS apps.
+// Dashboard only exposes read endpoints for auditing.
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/transfers:
+ *   get:
+ *     tags: [Inventory - Transfers]
+ *     summary: List inventory transfers for a venue (read-only audit)
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [DRAFT, IN_TRANSIT, COMPLETED, CANCELLED] }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 50 }
+ */
+router.get('/transfers', checkPermission('inventory:read'), inventoryTransferController.listTransfers)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/transfers/{transferId}:
+ *   get:
+ *     tags: [Inventory - Transfers]
+ *     summary: Get a single transfer with its items (read-only audit)
+ */
+router.get('/transfers/:transferId', checkPermission('inventory:read'), inventoryTransferController.getTransfer)
 
 export default router
