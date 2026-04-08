@@ -234,6 +234,7 @@ import orgItemCategoryRoutes from './dashboard/orgItemCategory.routes'
 // Organization Dashboard routes for PlayTelecom/White-Label dashboard
 import organizationDashboardRoutes from './dashboard/organizationDashboard.routes'
 import organizationConfigRoutes from './dashboard/organizationConfig.routes'
+import organizationStockControlRoutes from './dashboard/organizationStockControl.routes'
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
@@ -3517,6 +3518,9 @@ router.use('/organizations', organizationDashboardRoutes)
 // Organization Config routes — org-level goals, attendance, TPV defaults, categories
 // Receives orgId directly (no venue->org lookup hack)
 router.use('/organizations/:orgId', organizationConfigRoutes)
+
+// Organization Stock Control — white-label SIM inventory dashboard at org level
+router.use('/organizations/:orgId', organizationStockControlRoutes)
 
 // Stores Analysis routes for PlayTelecom/White-Label dashboard
 // Venue-level routes that fetch organization data with white-label access control
