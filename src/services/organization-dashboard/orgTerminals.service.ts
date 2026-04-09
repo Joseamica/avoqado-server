@@ -238,7 +238,7 @@ export async function sendRemoteActivationForOrg(orgId: string, terminalId: stri
 
 /**
  * Send a remote command to a terminal within the organization
- * Only allows org-level safe commands (no FACTORY_RESET, SHUTDOWN, etc.)
+ * Only allows org-level commands defined in ORG_ALLOWED_COMMANDS (rejects SHUTDOWN, etc.)
  */
 export async function sendCommandForOrg(
   orgId: string,

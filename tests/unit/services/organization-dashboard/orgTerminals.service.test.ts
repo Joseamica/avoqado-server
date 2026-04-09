@@ -234,7 +234,7 @@ describe('OrgTerminals Service', () => {
     it('should reject disallowed commands', async () => {
       prismaMock.terminal.findUnique.mockResolvedValue(mockTerminal)
 
-      await expect(sendCommandForOrg(orgId, terminalId, 'FACTORY_RESET' as any, staffId)).rejects.toThrow('Comando no permitido')
+      await expect(sendCommandForOrg(orgId, terminalId, 'SHUTDOWN' as any, staffId)).rejects.toThrow('Comando no permitido')
     })
 
     it('should reject command for foreign terminal', async () => {
