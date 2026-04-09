@@ -11,8 +11,24 @@ import {
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { logAction } from '../dashboard/activity-log.service'
 
-// Allowed commands at org level (excludes high-risk: FACTORY_RESET, SHUTDOWN, FORCE_UPDATE, INSTALL_VERSION)
-const ORG_ALLOWED_COMMANDS = ['LOCK', 'UNLOCK', 'MAINTENANCE_MODE', 'EXIT_MAINTENANCE', 'RESTART', 'CLEAR_CACHE', 'EXPORT_LOGS'] as const
+// Allowed commands at org level
+const ORG_ALLOWED_COMMANDS = [
+  'LOCK',
+  'UNLOCK',
+  'MAINTENANCE_MODE',
+  'EXIT_MAINTENANCE',
+  'RESTART',
+  'CLEAR_CACHE',
+  'EXPORT_LOGS',
+  'REMOTE_ACTIVATE',
+  'FACTORY_RESET',
+  'SYNC_DATA',
+  'REFRESH_MENU',
+  'FORCE_UPDATE',
+  'REQUEST_UPDATE',
+  'UPDATE_CONFIG',
+  'UPDATE_MERCHANT',
+] as const
 
 export type OrgAllowedCommand = (typeof ORG_ALLOWED_COMMANDS)[number]
 
