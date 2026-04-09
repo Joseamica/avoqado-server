@@ -2358,7 +2358,14 @@ model Payment {
 
   // authorization info
   authorizationNumber String? // "502511"
-  referenceNumber     String? // "000000188231" 
+  referenceNumber     String? // "000000188231"
+
+  // 🛡️ Client-generated idempotency key (UUID v4) — Stripe/Square/Toast pattern.
+  // Generated ONCE per logical payment attempt on the TPV and sent on every retry
+  // of that attempt, so the backend can atomically deduplicate via the unique index
+  // below. Nullable for backwards compatibility with TPV versions < v1.10.10 and
+  // for non-TPV payment sources (dashboard manual settlements, POS sync, etc.).
+  idempotencyKey String? @db.VarChar(64)
 
   cardBrand CardBrand? // MASTERCARD, VISA, etc.
   maskedPan String? // "411111******1111"
@@ -2409,6 +2416,14 @@ model Payment {
   @@index([venueId, createdAt])
   @@index([venueId, status, createdAt])
   @@index([merchantAccountId, createdAt])
+
+  // 🛡️ Idempotency guarantee: prevents duplicate payment recording from concurrent
+  // retries (TOCTOU race fixed — incident: Testarudo Cafe 2026-04-08, 5 duplicates
+  // from 2 parallel retry chains). NULLs don't collide in Postgres composite unique
+  // indexes, so rows without idempotencyKey (legacy TPV, crypto, dashboard manual
+  // settlements, POS sync, mobile) are unaffected. Scoped by venueId as defense in
+  // depth — even a hypothetical UUID collision between venues would not interfere.
+  @@unique([venueId, idempotencyKey], map: "Payment_venueId_idempotencyKey_key")
 }
 
 model PaymentAllocation {

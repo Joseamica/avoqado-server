@@ -94,17 +94,20 @@ export class OrgStockControlService {
     const byVenue = new Map<string, any[]>()
 
     for (const item of items) {
-      if (!item.registeredFromVenueId) continue
-      const list = byVenue.get(item.registeredFromVenueId) ?? []
+      // Items without registeredFromVenueId get grouped under a synthetic "unassigned" key
+      const key = item.registeredFromVenueId ?? '__unassigned__'
+      const list = byVenue.get(key) ?? []
       list.push(item)
-      byVenue.set(item.registeredFromVenueId, list)
+      byVenue.set(key, list)
     }
 
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
     const result: OrgStockSucursalAggregate[] = []
 
-    for (const [venueId, venueItems] of byVenue.entries()) {
+    for (const [venueKey, venueItems] of byVenue.entries()) {
       const first = venueItems[0]
+      const isUnassigned = venueKey === '__unassigned__'
+      const venueId = isUnassigned ? '__unassigned__' : venueKey
       const sold = venueItems.filter(i => i.status === 'SOLD').length
       const available = venueItems.filter(i => i.status === 'AVAILABLE').length
       const damaged = venueItems.filter(i => i.status === 'DAMAGED').length
@@ -129,7 +132,7 @@ export class OrgStockControlService {
 
       result.push({
         venueId,
-        venueName: first.registeredFromVenue?.name ?? 'Unknown',
+        venueName: isUnassigned ? 'Sin sucursal asignada' : (first.registeredFromVenue?.name ?? 'Unknown'),
         totalSims: total,
         available,
         sold,

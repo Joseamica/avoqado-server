@@ -1,4 +1,4 @@
-import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource } from '@prisma/client'
+import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -1183,6 +1183,15 @@ interface PaymentCreationData {
   // Links payment to the Terminal that processed it (for device-based reporting)
   // This is the Terminal.serialNumber (e.g., "AVQD-2841548417"), NOT blumonSerialNumber
   deviceSerialNumber?: string
+
+  // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
+  // Client-generated UUID v4 sent ONCE per logical payment attempt and reused
+  // on every retry. Backend deduplicates atomically via the unique index
+  // (venueId, idempotencyKey) in the Payment table.
+  //
+  // Backwards compatible: optional. TPV versions < v1.10.10 do not send it,
+  // and those requests fall back to the legacy referenceNumber-based check.
+  idempotencyKey?: string
 }
 
 /**
@@ -1318,13 +1327,38 @@ export async function recordOrderPayment(
 ) {
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
 
-  // ⭐ IDEMPOTENCY CHECK: Prevent duplicate payments using Blumon referenceNumber
-  // This allows safe retries from offline queue without creating duplicate payments
+  // 🛡️ IDEMPOTENCY CHECK - Layered defense (Stripe/Square/Toast pattern)
+  // See recordFastPayment for full explanation. Both checks run in sequence to
+  // handle the legacy→new TPV transition correctly.
+  if (paymentData.idempotencyKey) {
+    const existingByKey = await prisma.payment.findUnique({
+      where: {
+        venueId_idempotencyKey: {
+          venueId,
+          idempotencyKey: paymentData.idempotencyKey,
+        },
+      },
+      include: { receipts: true },
+    })
+
+    if (existingByKey) {
+      logger.info('🔄 Idempotent retry detected by idempotencyKey — returning existing order payment', {
+        venueId,
+        orderId,
+        idempotencyKey: paymentData.idempotencyKey,
+        existingPaymentId: existingByKey.id,
+      })
+      return { ...existingByKey, digitalReceipt: existingByKey.receipts[0] || null }
+    }
+  }
+
   if (paymentData.referenceNumber) {
+    // Always-on referenceNumber check (catches legacy retries and legacy→new transition races)
     const existingPayment = await prisma.payment.findFirst({
       where: {
         venueId,
         referenceNumber: paymentData.referenceNumber,
+        type: { not: 'REFUND' }, // Refunds share refNumber with originals — don't match against them
       },
       include: {
         receipts: true, // Include receipt data for idempotent response
@@ -1332,12 +1366,14 @@ export async function recordOrderPayment(
     })
 
     if (existingPayment) {
-      logger.warn('🔄 Duplicate payment attempt detected (idempotency check)', {
+      logger.warn('🔄 Duplicate order payment attempt detected (referenceNumber check)', {
         venueId,
         orderId,
         referenceNumber: paymentData.referenceNumber,
         existingPaymentId: existingPayment.id,
-        message: 'Returning existing payment (safe retry from offline queue)',
+        incomingIdempotencyKey: paymentData.idempotencyKey || null,
+        existingIdempotencyKey: existingPayment.idempotencyKey || null,
+        message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
       })
 
       // Return existing payment with receipt (safe retry - client gets same response)
@@ -1535,142 +1571,190 @@ export async function recordOrderPayment(
 
   // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
-  const payment = await prisma.$transaction(async tx => {
-    // Create the payment record
-    const newPayment = await tx.payment.create({
-      data: {
-        venueId,
-        orderId: activeOrder.id,
-        amount: totalAmount,
-        tipAmount,
-        method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
-        status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
-        splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
-        source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-        processor: 'TBD',
-        processorId: paymentData.mentaOperationId,
-        processorData: {
-          cardBrand: paymentData.cardBrand,
-          last4: paymentData.last4,
-          typeOfCard: paymentData.typeOfCard,
-          bank: paymentData.bank,
-          currency: paymentData.currency,
-          mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
-          mentaTicketId: paymentData.mentaTicketId,
-          isInternational: paymentData.isInternational,
-          // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
-          blumonSerialNumber: paymentData.blumonSerialNumber || null,
-          // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
-          blumonOperationNumber: paymentData.blumonOperationNumber || null,
-        },
-        // New enhanced fields in the Payment table
-        authorizationNumber: paymentData.authorizationNumber,
-        referenceNumber: paymentData.referenceNumber,
-        maskedPan: paymentData.maskedPan,
-        cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
-        entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
-        // ⭐ Provider-agnostic merchant account tracking
-        merchantAccountId,
-        // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
-        terminalId,
-        processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-        shiftId: currentShift?.id,
-        feePercentage: 0, // TODO: Calculate based on payment processor
-        feeAmount: 0, // TODO: Calculate based on amount and percentage
-        netAmount: totalAmount + tipAmount, // For now, net amount = total
-        posRawData: {
-          splitType: paymentData.splitType,
-          staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+  //
+  // 🛡️ SAFETY NET: If two concurrent requests race past the idempotency fast-path
+  // above, the @@unique([venueId, idempotencyKey]) constraint will throw P2002 on
+  // the second request. We catch that below and return the winning payment, making
+  // the concurrent retry behave exactly like an idempotent success.
+  let payment: Awaited<ReturnType<typeof prisma.payment.create>>
+  try {
+    payment = await prisma.$transaction(async tx => {
+      // Create the payment record
+      const newPayment = await tx.payment.create({
+        data: {
+          venueId,
+          orderId: activeOrder.id,
+          amount: totalAmount,
+          tipAmount,
+          method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+          status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
+          splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-          paidProductsId: paymentData.paidProductsId || [],
-          ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
-          ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
-          ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
-        },
-      },
-      include: {
-        order: {
-          include: {
-            items: true,
-            venue: true,
+          processor: 'TBD',
+          processorId: paymentData.mentaOperationId,
+          processorData: {
+            cardBrand: paymentData.cardBrand,
+            last4: paymentData.last4,
+            typeOfCard: paymentData.typeOfCard,
+            bank: paymentData.bank,
+            currency: paymentData.currency,
+            mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
+            mentaTicketId: paymentData.mentaTicketId,
+            isInternational: paymentData.isInternational,
+            // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
+            blumonSerialNumber: paymentData.blumonSerialNumber || null,
+            // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+            blumonOperationNumber: paymentData.blumonOperationNumber || null,
+          },
+          // New enhanced fields in the Payment table
+          authorizationNumber: paymentData.authorizationNumber,
+          referenceNumber: paymentData.referenceNumber,
+          // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
+          idempotencyKey: paymentData.idempotencyKey,
+          maskedPan: paymentData.maskedPan,
+          cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+          entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+          // ⭐ Provider-agnostic merchant account tracking
+          merchantAccountId,
+          // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+          terminalId,
+          processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
+          shiftId: currentShift?.id,
+          feePercentage: 0, // TODO: Calculate based on payment processor
+          feeAmount: 0, // TODO: Calculate based on amount and percentage
+          netAmount: totalAmount + tipAmount, // For now, net amount = total
+          posRawData: {
+            splitType: paymentData.splitType,
+            staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+            paidProductsId: paymentData.paidProductsId || [],
+            ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
+            ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
+            ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
           },
         },
-        processedBy: true,
-      },
-    })
-
-    // Create VenueTransaction for financial tracking and settlement
-    await tx.venueTransaction.create({
-      data: {
-        venueId,
-        paymentId: newPayment.id,
-        type: 'PAYMENT',
-        grossAmount: totalAmount + tipAmount,
-        feeAmount: newPayment.feeAmount,
-        netAmount: newPayment.netAmount,
-        status: 'PENDING', // Will be updated to SETTLED by settlement process
-      },
-    })
-
-    // Update Order.splitType if this is the first payment
-    if (!activeOrder.splitType) {
-      await tx.order.update({
-        where: { id: activeOrder.id },
-        data: { splitType: paymentData.splitType as any },
+        include: {
+          order: {
+            include: {
+              items: true,
+              venue: true,
+            },
+          },
+          processedBy: true,
+        },
       })
-    }
 
-    // Handle split payment allocations based on splitType
-    if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
-      // Create allocations for specific products
-      const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
+      // Create VenueTransaction for financial tracking and settlement
+      await tx.venueTransaction.create({
+        data: {
+          venueId,
+          paymentId: newPayment.id,
+          type: 'PAYMENT',
+          grossAmount: totalAmount + tipAmount,
+          feeAmount: newPayment.feeAmount,
+          netAmount: newPayment.netAmount,
+          status: 'PENDING', // Will be updated to SETTLED by settlement process
+        },
+      })
 
-      for (const item of orderItems) {
+      // Update Order.splitType if this is the first payment
+      if (!activeOrder.splitType) {
+        await tx.order.update({
+          where: { id: activeOrder.id },
+          data: { splitType: paymentData.splitType as any },
+        })
+      }
+
+      // Handle split payment allocations based on splitType
+      if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
+        // Create allocations for specific products
+        const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
+
+        for (const item of orderItems) {
+          await tx.paymentAllocation.create({
+            data: {
+              paymentId: newPayment.id,
+              orderItemId: item.id,
+              orderId: activeOrder.id,
+              amount: item.total, // Allocate the full item amount
+            },
+          })
+        }
+      } else {
+        // For other split types, create a general allocation to the order
         await tx.paymentAllocation.create({
           data: {
             paymentId: newPayment.id,
-            orderItemId: item.id,
             orderId: activeOrder.id,
-            amount: item.total, // Allocate the full item amount
+            amount: totalAmount,
           },
         })
       }
-    } else {
-      // For other split types, create a general allocation to the order
-      await tx.paymentAllocation.create({
-        data: {
-          paymentId: newPayment.id,
-          orderId: activeOrder.id,
-          amount: totalAmount,
-        },
-      })
-    }
 
-    // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when payment is recorded
-    if (currentShift) {
-      await tx.shift.update({
-        where: { id: currentShift.id },
-        data: {
-          totalSales: {
-            increment: totalAmount,
+      // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when payment is recorded
+      if (currentShift) {
+        await tx.shift.update({
+          where: { id: currentShift.id },
+          data: {
+            totalSales: {
+              increment: totalAmount,
+            },
+            totalTips: {
+              increment: tipAmount,
+            },
+            totalOrders: {
+              increment: 1,
+            },
           },
-          totalTips: {
-            increment: tipAmount,
-          },
-          totalOrders: {
-            increment: 1,
-          },
-        },
-      })
-      logger.info('✅ Shift totals updated', {
-        shiftId: currentShift.id,
-        incrementedSales: totalAmount,
-        incrementedTips: tipAmount,
-      })
-    }
+        })
+        logger.info('✅ Shift totals updated', {
+          shiftId: currentShift.id,
+          incrementedSales: totalAmount,
+          incrementedTips: tipAmount,
+        })
+      }
 
-    return newPayment
-  })
+      return newPayment
+    })
+  } catch (error) {
+    // 🛡️ P2002 safety net: unique constraint violation on (venueId, idempotencyKey)
+    // means another concurrent request already created this payment. Return the
+    // winner as if this was a normal idempotent retry.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const target = (error.meta as { target?: string[] } | undefined)?.target
+      const isIdempotencyConflict = Array.isArray(target) && target.includes('idempotencyKey')
+
+      if (isIdempotencyConflict && paymentData.idempotencyKey) {
+        logger.warn('🛡️ [recordOrderPayment] Concurrent race blocked by unique index — returning winner', {
+          venueId,
+          orderId,
+          idempotencyKey: paymentData.idempotencyKey,
+          target,
+        })
+
+        const winner = await prisma.payment.findUnique({
+          where: {
+            venueId_idempotencyKey: {
+              venueId,
+              idempotencyKey: paymentData.idempotencyKey,
+            },
+          },
+          include: { receipts: true },
+        })
+
+        if (winner) {
+          return { ...winner, digitalReceipt: winner.receipts[0] || null }
+        }
+
+        logger.error('🚨 [recordOrderPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
+          venueId,
+          orderId,
+          idempotencyKey: paymentData.idempotencyKey,
+        })
+      }
+    }
+    throw error
+  }
 
   logger.info('VenueTransaction created for payment', {
     paymentId: payment.id,
@@ -1947,13 +2031,53 @@ export async function recordOrderPayment(
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
 
-  // ⭐ IDEMPOTENCY CHECK: Prevent duplicate payments using Blumon referenceNumber
-  // This allows safe retries from offline queue without creating duplicate payments
+  // 🛡️ IDEMPOTENCY CHECK - Layered defense (Stripe/Square/Toast pattern)
+  //
+  // Check 1 (preferred):  idempotencyKey — client-generated UUID v4 per logical
+  //                       payment attempt. TPV >= v1.10.10 sends this.
+  // Check 2 (fallback):   referenceNumber — Blumon-generated per-transaction id.
+  //                       Both legacy TPV (< v1.10.10) AND new TPV send this.
+  //
+  // BOTH checks run in sequence (not exclusively). This is crucial for the
+  // legacy→new TPV transition: if a payment exists from an old TPV client (no
+  // idempotencyKey) and a new TPV client sends a retry with the same ref but a
+  // new idempotencyKey, Check 2 catches it and returns the existing payment
+  // instead of creating a duplicate.
+  //
+  // If a concurrent request races past BOTH fast-path checks, the @@unique
+  // constraint on (venueId, idempotencyKey) in the Payment table will throw
+  // P2002 and we catch that below as the atomic safety net.
+  if (paymentData.idempotencyKey) {
+    const existingByKey = await prisma.payment.findUnique({
+      where: {
+        venueId_idempotencyKey: {
+          venueId,
+          idempotencyKey: paymentData.idempotencyKey,
+        },
+      },
+      include: { receipts: true },
+    })
+
+    if (existingByKey) {
+      logger.info('🔄 Idempotent retry detected by idempotencyKey — returning existing payment', {
+        venueId,
+        idempotencyKey: paymentData.idempotencyKey,
+        existingPaymentId: existingByKey.id,
+      })
+      return { ...existingByKey, digitalReceipt: existingByKey.receipts[0] || null }
+    }
+  }
+
   if (paymentData.referenceNumber) {
+    // Always-on referenceNumber check — catches:
+    //   (a) Legacy TPV retries (no idempotencyKey sent)
+    //   (b) Transition-period retries (new TPV sends a fresh key, but the payment
+    //       was already created by the legacy client with no key)
     const existingPayment = await prisma.payment.findFirst({
       where: {
         venueId,
         referenceNumber: paymentData.referenceNumber,
+        type: { not: 'REFUND' }, // Refunds share referenceNumber with originals — don't match against them
       },
       include: {
         receipts: true, // Include receipt data for idempotent response
@@ -1961,11 +2085,13 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     })
 
     if (existingPayment) {
-      logger.warn('🔄 Duplicate payment attempt detected (idempotency check)', {
+      logger.warn('🔄 Duplicate payment attempt detected (referenceNumber check)', {
         venueId,
         referenceNumber: paymentData.referenceNumber,
         existingPaymentId: existingPayment.id,
-        message: 'Returning existing payment (safe retry from offline queue)',
+        incomingIdempotencyKey: paymentData.idempotencyKey || null,
+        existingIdempotencyKey: existingPayment.idempotencyKey || null,
+        message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
       })
 
       // Return existing payment with receipt (safe retry - client gets same response)
@@ -2103,171 +2229,220 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
 
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
-  const { payment, fastOrder } = await prisma.$transaction(async tx => {
-    // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
-    // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
-    // Photos are uploaded to Firebase with this same reference
-    // This ensures photos at "venues/X/verifications/2024-01-01/FAST-123456_1.jpg" match the order
-    const orderNumber = paymentData.orderReference || `FAST-${Date.now()}`
+  //
+  // 🛡️ SAFETY NET: If two concurrent requests race past the idempotency fast-path
+  // above, the @@unique([venueId, idempotencyKey]) constraint will throw P2002 on
+  // the second request. We catch that below and return the winning payment, making
+  // the concurrent retry behave exactly like an idempotent success.
+  let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
+  let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
+  try {
+    const result = await prisma.$transaction(async tx => {
+      // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
+      // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
+      // Photos are uploaded to Firebase with this same reference
+      // This ensures photos at "venues/X/verifications/2024-01-01/FAST-123456_1.jpg" match the order
+      const orderNumber = paymentData.orderReference || `FAST-${Date.now()}`
 
-    // Create fast order
-    const order = await tx.order.create({
-      data: {
-        venueId,
-        orderNumber,
-        type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
-        source: 'TPV',
-        // ⭐ Terminal that created this order (resolved from deviceSerialNumber)
-        terminalId,
-        status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
-        completedAt: new Date(),
-        subtotal: totalAmount, // Base amount (without tip)
-        taxAmount: 0, // No tax for fast payments
-        total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
-        // ✅ FIX: Include tip and paid amounts for fast orders
-        tipAmount, // Tip amount from this payment
-        paidAmount: totalAmount + tipAmount, // Total paid (base + tip)
-        remainingBalance: 0, // Fast payments are always fully paid
-        paymentStatus: 'PAID',
-        splitType: paymentData.splitType as any, // Set splitType for fast orders
-        createdById: validatedStaffId, // Track which staff created the fast order
-        servedById: validatedStaffId, // ⭐ KIOSK MODE FIX: Also set server to payment processor
-      },
-    })
+      // Create fast order
+      const order = await tx.order.create({
+        data: {
+          venueId,
+          orderNumber,
+          type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
+          source: 'TPV',
+          // ⭐ Terminal that created this order (resolved from deviceSerialNumber)
+          terminalId,
+          status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
+          completedAt: new Date(),
+          subtotal: totalAmount, // Base amount (without tip)
+          taxAmount: 0, // No tax for fast payments
+          total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
+          // ✅ FIX: Include tip and paid amounts for fast orders
+          tipAmount, // Tip amount from this payment
+          paidAmount: totalAmount + tipAmount, // Total paid (base + tip)
+          remainingBalance: 0, // Fast payments are always fully paid
+          paymentStatus: 'PAID',
+          splitType: paymentData.splitType as any, // Set splitType for fast orders
+          createdById: validatedStaffId, // Track which staff created the fast order
+          servedById: validatedStaffId, // ⭐ KIOSK MODE FIX: Also set server to payment processor
+        },
+      })
 
-    // Create the fast payment record
-    const newPayment = await tx.payment.create({
-      data: {
-        venueId,
-        orderId: order.id, // Fast payment - no order association
-        amount: totalAmount,
-        tipAmount,
-        method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
-        status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
-        splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
-        source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-        processor: 'TBD',
-        type: 'FAST',
-        processorId: paymentData.mentaOperationId,
-        processorData: {
-          cardBrand: paymentData.cardBrand,
-          last4: paymentData.last4,
-          typeOfCard: paymentData.typeOfCard,
-          bank: paymentData.bank,
-          currency: paymentData.currency,
+      // Create the fast payment record
+      const newPayment = await tx.payment.create({
+        data: {
+          venueId,
+          orderId: order.id, // Fast payment - no order association
+          amount: totalAmount,
+          tipAmount,
+          method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+          status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
+          splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
+          source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+          processor: 'TBD',
+          type: 'FAST',
+          processorId: paymentData.mentaOperationId,
+          processorData: {
+            cardBrand: paymentData.cardBrand,
+            last4: paymentData.last4,
+            typeOfCard: paymentData.typeOfCard,
+            bank: paymentData.bank,
+            currency: paymentData.currency,
+            authorizationNumber: paymentData.authorizationNumber,
+            referenceNumber: paymentData.referenceNumber,
+            isInternational: paymentData.isInternational,
+            // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
+            blumonSerialNumber: paymentData.blumonSerialNumber || null,
+            // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+            blumonOperationNumber: paymentData.blumonOperationNumber || null,
+          },
+          // New enhanced fields in the Payment table
           authorizationNumber: paymentData.authorizationNumber,
           referenceNumber: paymentData.referenceNumber,
-          isInternational: paymentData.isInternational,
-          // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
-          blumonSerialNumber: paymentData.blumonSerialNumber || null,
-          // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
-          blumonOperationNumber: paymentData.blumonOperationNumber || null,
+          // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
+          idempotencyKey: paymentData.idempotencyKey,
+          maskedPan: paymentData.maskedPan,
+          cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+          entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+          // ⭐ Provider-agnostic merchant account tracking
+          merchantAccountId,
+          // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+          terminalId,
+          processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
+          shiftId: currentShift?.id,
+          feePercentage: 0, // TODO: Calculate based on payment processor
+          feeAmount: 0, // TODO: Calculate based on amount and percentage
+          netAmount: totalAmount + tipAmount, // For now, net amount = total
+          posRawData: {
+            splitType: 'FULLPAYMENT',
+            staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
+            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+            paymentType: 'FAST',
+            ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
+          },
         },
-        // New enhanced fields in the Payment table
-        authorizationNumber: paymentData.authorizationNumber,
-        referenceNumber: paymentData.referenceNumber,
-        maskedPan: paymentData.maskedPan,
-        cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
-        entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
-        // ⭐ Provider-agnostic merchant account tracking
-        merchantAccountId,
-        // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
-        terminalId,
-        processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-        shiftId: currentShift?.id,
-        feePercentage: 0, // TODO: Calculate based on payment processor
-        feeAmount: 0, // TODO: Calculate based on amount and percentage
-        netAmount: totalAmount + tipAmount, // For now, net amount = total
-        posRawData: {
-          splitType: 'FULLPAYMENT',
-          staffId: paymentData.staffId, // ✅ CORRECTED: Use staffId field name consistently
-          source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-          paymentType: 'FAST',
-          ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
-        },
-      },
-      include: {
-        processedBy: true,
-      },
-    })
-
-    // Create VenueTransaction for financial tracking and settlement
-    await tx.venueTransaction.create({
-      data: {
-        venueId,
-        paymentId: newPayment.id,
-        type: 'PAYMENT',
-        grossAmount: totalAmount + tipAmount,
-        feeAmount: newPayment.feeAmount,
-        netAmount: newPayment.netAmount,
-        status: 'PENDING', // Will be updated to SETTLED by settlement process
-      },
-    })
-
-    // Create a general allocation for the fast payment
-    await tx.paymentAllocation.create({
-      data: {
-        paymentId: newPayment.id,
-        orderId: order.id,
-        amount: totalAmount,
-      },
-    })
-
-    // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when fast payment is recorded
-    if (currentShift) {
-      await tx.shift.update({
-        where: { id: currentShift.id },
-        data: {
-          totalSales: {
-            increment: totalAmount,
-          },
-          totalTips: {
-            increment: tipAmount,
-          },
-          totalOrders: {
-            increment: 1,
-          },
+        include: {
+          processedBy: true,
         },
       })
-      logger.info('✅ Shift totals updated (fast payment)', {
-        shiftId: currentShift.id,
-        incrementedSales: totalAmount,
-        incrementedTips: tipAmount,
-      })
-    }
 
-    // 📸 Create SaleVerification if verification photos or barcodes were provided
-    // This links the pre-uploaded Firebase photos to the payment record
-    if (
-      validatedStaffId &&
-      ((paymentData.verificationPhotos && paymentData.verificationPhotos.length > 0) ||
-        (paymentData.verificationBarcodes && paymentData.verificationBarcodes.length > 0))
-    ) {
-      await tx.saleVerification.create({
+      // Create VenueTransaction for financial tracking and settlement
+      await tx.venueTransaction.create({
         data: {
           venueId,
           paymentId: newPayment.id,
-          staffId: validatedStaffId,
-          photos: paymentData.verificationPhotos || [],
-          scannedProducts: paymentData.verificationBarcodes
-            ? paymentData.verificationBarcodes.map((barcode: string) => ({
-                barcode,
-                format: 'UNKNOWN',
-                inventoryDeducted: false,
-              }))
-            : [],
-          status: 'PENDING', // Will be processed for inventory deduction later
+          type: 'PAYMENT',
+          grossAmount: totalAmount + tipAmount,
+          feeAmount: newPayment.feeAmount,
+          netAmount: newPayment.netAmount,
+          status: 'PENDING', // Will be updated to SETTLED by settlement process
         },
       })
-      logger.info('📸 SaleVerification created for fast payment', {
-        paymentId: newPayment.id,
-        photosCount: paymentData.verificationPhotos?.length || 0,
-        barcodesCount: paymentData.verificationBarcodes?.length || 0,
-      })
-    }
 
-    return { payment: newPayment, fastOrder: order }
-  })
+      // Create a general allocation for the fast payment
+      await tx.paymentAllocation.create({
+        data: {
+          paymentId: newPayment.id,
+          orderId: order.id,
+          amount: totalAmount,
+        },
+      })
+
+      // ✅ UPDATE SHIFT TOTALS: Increment shift sales and tips when fast payment is recorded
+      if (currentShift) {
+        await tx.shift.update({
+          where: { id: currentShift.id },
+          data: {
+            totalSales: {
+              increment: totalAmount,
+            },
+            totalTips: {
+              increment: tipAmount,
+            },
+            totalOrders: {
+              increment: 1,
+            },
+          },
+        })
+        logger.info('✅ Shift totals updated (fast payment)', {
+          shiftId: currentShift.id,
+          incrementedSales: totalAmount,
+          incrementedTips: tipAmount,
+        })
+      }
+
+      // 📸 Create SaleVerification if verification photos or barcodes were provided
+      // This links the pre-uploaded Firebase photos to the payment record
+      if (
+        validatedStaffId &&
+        ((paymentData.verificationPhotos && paymentData.verificationPhotos.length > 0) ||
+          (paymentData.verificationBarcodes && paymentData.verificationBarcodes.length > 0))
+      ) {
+        await tx.saleVerification.create({
+          data: {
+            venueId,
+            paymentId: newPayment.id,
+            staffId: validatedStaffId,
+            photos: paymentData.verificationPhotos || [],
+            scannedProducts: paymentData.verificationBarcodes
+              ? paymentData.verificationBarcodes.map((barcode: string) => ({
+                  barcode,
+                  format: 'UNKNOWN',
+                  inventoryDeducted: false,
+                }))
+              : [],
+            status: 'PENDING', // Will be processed for inventory deduction later
+          },
+        })
+        logger.info('📸 SaleVerification created for fast payment', {
+          paymentId: newPayment.id,
+          photosCount: paymentData.verificationPhotos?.length || 0,
+          barcodesCount: paymentData.verificationBarcodes?.length || 0,
+        })
+      }
+
+      return { payment: newPayment, fastOrder: order }
+    })
+    payment = result.payment
+    fastOrder = result.fastOrder
+  } catch (error) {
+    // 🛡️ P2002 safety net: unique constraint violation on (venueId, idempotencyKey)
+    // means another concurrent request already created this payment. Return the
+    // winner as if this was a normal idempotent retry.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const target = (error.meta as { target?: string[] } | undefined)?.target
+      const isIdempotencyConflict = Array.isArray(target) && target.includes('idempotencyKey')
+
+      if (isIdempotencyConflict && paymentData.idempotencyKey) {
+        logger.warn('🛡️ [recordFastPayment] Concurrent race blocked by unique index — returning winner', {
+          venueId,
+          idempotencyKey: paymentData.idempotencyKey,
+          target,
+        })
+
+        const winner = await prisma.payment.findUnique({
+          where: {
+            venueId_idempotencyKey: {
+              venueId,
+              idempotencyKey: paymentData.idempotencyKey,
+            },
+          },
+          include: { receipts: true },
+        })
+
+        if (winner) {
+          return { ...winner, digitalReceipt: winner.receipts[0] || null }
+        }
+
+        logger.error('🚨 [recordFastPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
+          venueId,
+          idempotencyKey: paymentData.idempotencyKey,
+        })
+      }
+    }
+    throw error
+  }
 
   logger.info('VenueTransaction created for fast payment', {
     paymentId: payment.id,

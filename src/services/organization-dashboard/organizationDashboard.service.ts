@@ -2136,6 +2136,7 @@ class OrganizationDashboardService {
         clockOutLatitude: true,
         clockOutLongitude: true,
         checkInPhotoUrl: true,
+        facadePhotoUrl: true,
         checkOutPhotoUrl: true,
         depositPhotoUrl: true,
         status: true,
@@ -2265,6 +2266,7 @@ class OrganizationDashboardService {
           clockInTime: te.clockInTime.toISOString(),
           clockInLocation: te.clockInLatitude && te.clockInLongitude ? { lat: te.clockInLatitude, lng: te.clockInLongitude } : null,
           checkInPhotoUrl: te.checkInPhotoUrl,
+          facadePhotoUrl: te.facadePhotoUrl,
           clockOutTime: te.clockOutTime?.toISOString() || null,
           clockOutLocation: te.clockOutLatitude && te.clockOutLongitude ? { lat: te.clockOutLatitude, lng: te.clockOutLongitude } : null,
           checkOutPhotoUrl: te.checkOutPhotoUrl,
@@ -2307,12 +2309,14 @@ class OrganizationDashboardService {
             ? { lat: mostRecentEntry.clockInLatitude, lng: mostRecentEntry.clockInLongitude }
             : null,
         checkInPhotoUrl: mostRecentEntry?.checkInPhotoUrl || null,
+        facadePhotoUrl: mostRecentEntry?.facadePhotoUrl || null,
         checkOutTime: mostRecentEntry?.clockOutTime?.toISOString() || null,
         checkOutLocation:
           mostRecentEntry?.clockOutLatitude && mostRecentEntry?.clockOutLongitude
             ? { lat: mostRecentEntry.clockOutLatitude, lng: mostRecentEntry.clockOutLongitude }
             : null,
         checkOutPhotoUrl: mostRecentEntry?.checkOutPhotoUrl || null,
+        depositPhotoUrl: mostRecentEntry?.depositPhotoUrl || null,
         break: mostRecentEntry?.status === 'ON_BREAK',
         breakMinutes,
         sales: salesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,

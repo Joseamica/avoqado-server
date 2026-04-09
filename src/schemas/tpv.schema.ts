@@ -227,6 +227,19 @@ export const recordPaymentBodySchema = z.object({
       // For SERIALIZED_INVENTORY mode: backend creates PENDING SaleVerification record
       isPortabilidad: z.boolean().optional(),
       serialNumbers: z.array(z.string()).optional(),
+
+      // 🛡️ IDEMPOTENCY KEY (2026-04-08) - Stripe/Square/Toast pattern
+      // Client-generated UUID v4 sent ONCE per logical payment attempt and reused
+      // on every retry of that attempt. Backend deduplicates atomically via the
+      // unique index (venueId, idempotencyKey) in the Payment table.
+      //
+      // Backwards compatible: optional field. TPV versions < v1.10.10 do not send
+      // it, and those requests fall back to the legacy referenceNumber-based check.
+      //
+      // Format: UUID v4 string (36 chars with hyphens, e.g. "a3f9b2c1-7e8d-4a5b-9c1e-2d3f4a5b6c7d").
+      // Accepted as any string up to 64 chars to allow clients to use alternative
+      // collision-resistant schemes (ULID, nanoid) if needed.
+      idempotencyKey: z.string().min(8).max(64).optional(),
     })
     .refine(
       data => {
