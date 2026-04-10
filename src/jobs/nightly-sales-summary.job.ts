@@ -193,34 +193,29 @@ export class NightlySalesSummaryJob {
       // Process each venue
       for (const venue of venues) {
         try {
-          // Check which staff have opted out of daily sales summary
-          const optedOutStaff = await prisma.notificationPreference.findMany({
+          // Opt-in: only send to staff who explicitly enabled daily sales summary
+          const optedInStaff = await prisma.notificationPreference.findMany({
             where: {
               venueId: venue.id,
               type: NotificationType.DAILY_SALES_SUMMARY,
-              enabled: false,
+              enabled: true,
             },
             select: { staffId: true },
           })
-          const optedOutIds = new Set(optedOutStaff.map(p => p.staffId))
+          const optedInIds = new Set(optedInStaff.map(p => p.staffId))
 
-          // Get recipients (owners and admins who haven't opted out)
+          // Get recipients (only owners/admins who explicitly opted in)
           const recipients = venue.staff
-            .filter(sv => !optedOutIds.has(sv.staff.id))
+            .filter(sv => optedInIds.has(sv.staff.id))
             .map(sv => sv.staff)
-            .filter(s => s.email) // Only staff with emails
+            .filter(s => s.email)
             .map(s => ({
               email: s.email,
               name: `${s.firstName} ${s.lastName}`.trim() || 'Usuario',
             }))
 
-          // Also include venue email if set
-          if (venue.email && !recipients.find(r => r.email === venue.email)) {
-            recipients.push({
-              email: venue.email,
-              name: venue.name,
-            })
-          }
+          // NOTE: Venue email is no longer auto-included.
+          // Only staff who explicitly opt-in via notification preferences receive the summary.
 
           if (recipients.length === 0) {
             logger.debug(`No recipients found for venue ${venue.name} (${venue.id}), skipping`)
