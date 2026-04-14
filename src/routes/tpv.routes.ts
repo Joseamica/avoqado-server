@@ -5863,11 +5863,14 @@ router.get(
       })
 
       // Query orders created by this staff member with SN prefix
+      // Only PAID orders — PENDING would include abandoned/cancelled sales (e.g. payment failures)
+      // Also exclude CANCELLED orders explicitly (belt-and-suspenders)
       const whereClause = {
         venueId,
         createdById: staffId,
         orderNumber: { startsWith: 'SN' },
-        paymentStatus: { in: [PaymentStatus.PAID, PaymentStatus.PENDING] },
+        paymentStatus: PaymentStatus.PAID,
+        status: { not: 'CANCELLED' as const },
         createdAt: { gte: startOfMonth, lt: endOfMonth },
       }
 
