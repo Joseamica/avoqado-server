@@ -23,10 +23,28 @@ export async function getTerminals(
     const pageSize = parseInt(req.query.pageSize || '10', 10)
     const { status, type } = req.query
 
+    // Helper to parse comma-separated list query param
+    const parseList = (raw?: string): string[] | undefined => {
+      if (!raw) return undefined
+      const list = raw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+      return list.length > 0 ? list : undefined
+    }
+
     // 3. Llamar al servicio con los datos ya procesados
     const terminalsData = await tpvDashboardService.getTerminalsData(venueId, page, pageSize, {
+      // Legacy single-value filters
       status,
       type,
+      // Multi-select arrays (comma-separated query params)
+      statuses: parseList(req.query.statuses as string | undefined) as any,
+      types: parseList(req.query.types as string | undefined) as any,
+      versions: parseList(req.query.versions as string | undefined),
+      connections: parseList(req.query.connections as string | undefined) as any,
+      activations: parseList(req.query.activations as string | undefined) as any,
+      search: req.query.search as string | undefined,
     })
 
     // 4. Enviar la respuesta exitosa al cliente

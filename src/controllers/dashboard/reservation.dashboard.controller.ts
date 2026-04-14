@@ -24,7 +24,18 @@ function resolveVenueId(req: Request): string {
 export async function getReservations(req: Request, res: Response, next: NextFunction) {
   try {
     const venueId = resolveVenueId(req)
-    const { page, pageSize, ...filters } = req.query as any
+    const { page, pageSize, channels, ...filters } = req.query as any
+
+    // Parse multi-select `channels` (comma-separated) into array to override single `channel`
+    if (typeof channels === 'string' && channels.length > 0) {
+      const list = channels
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+      if (list.length > 0) {
+        filters.channel = list
+      }
+    }
 
     const result = await reservationService.getReservations(venueId, filters, page, pageSize)
     res.json(result)

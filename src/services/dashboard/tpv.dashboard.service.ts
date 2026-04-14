@@ -15,11 +15,27 @@ import { logAction } from './activity-log.service'
  * @param filters - Un objeto con filtros opcionales (status, type).
  * @returns Un objeto con la lista de terminales y metadatos de paginación.
  */
+export interface TerminalFilters {
+  // Legacy single-value filters (kept for backward compat)
+  status?: TerminalStatus
+  type?: TerminalType
+  // Multi-select arrays
+  statuses?: TerminalStatus[]
+  types?: TerminalType[]
+  versions?: string[]
+  // Derived filters
+  connections?: Array<'online' | 'offline'>
+  activations?: Array<'activated' | 'notActivated'>
+  search?: string
+}
+
+const ONLINE_THRESHOLD_MS = 5 * 60 * 1000 // 5 minutes — matches frontend isTerminalOnline()
+
 export async function getTerminalsData(
   venueId: string,
   page: number,
   pageSize: number,
-  filters: { status?: TerminalStatus; type?: TerminalType },
+  filters: TerminalFilters,
 ): Promise<PaginatedTerminalsResponse> {
   // 1. Validar parámetros de entrada
   if (!venueId) {
@@ -31,11 +47,65 @@ export async function getTerminalsData(
   const take = pageSize
 
   // 3. Construir la cláusula 'where' para ser reutilizada
-  const whereClause = {
-    venueId,
-    // Añadir filtros dinámicamente si fueron proporcionados
-    ...(filters.status && { status: filters.status }),
-    ...(filters.type && { type: filters.type }),
+  const whereClause: any = { venueId }
+
+  // Status filter (array > legacy single value)
+  if (filters.statuses && filters.statuses.length > 0) {
+    whereClause.status = { in: filters.statuses }
+  } else if (filters.status) {
+    whereClause.status = filters.status
+  }
+
+  // Type filter (array > legacy single value)
+  if (filters.types && filters.types.length > 0) {
+    whereClause.type = { in: filters.types }
+  } else if (filters.type) {
+    whereClause.type = filters.type
+  }
+
+  // Version filter
+  if (filters.versions && filters.versions.length > 0) {
+    whereClause.version = { in: filters.versions }
+  }
+
+  // Activation filter (activated = activatedAt not null; notActivated = activatedAt null)
+  // If both options selected → treat as "all" (no filter)
+  if (filters.activations && filters.activations.length === 1) {
+    const onlyOption = filters.activations[0]
+    if (onlyOption === 'activated') whereClause.activatedAt = { not: null }
+    if (onlyOption === 'notActivated') whereClause.activatedAt = null
+  }
+
+  // Connection filter (online = status=ACTIVE AND lastHeartbeat within 5min).
+  // Same "both selected = all" semantics.
+  if (filters.connections && filters.connections.length === 1) {
+    const threshold = new Date(Date.now() - ONLINE_THRESHOLD_MS)
+    const onlyOption = filters.connections[0]
+    if (onlyOption === 'online') {
+      whereClause.status = 'ACTIVE'
+      whereClause.lastHeartbeat = { gte: threshold }
+    } else {
+      // offline: status not ACTIVE, OR no heartbeat, OR stale heartbeat
+      whereClause.OR = [{ status: { not: 'ACTIVE' } }, { lastHeartbeat: null }, { lastHeartbeat: { lt: threshold } }]
+    }
+  }
+
+  // Search filter: matches name, serialNumber or version (case-insensitive)
+  if (filters.search && filters.search.trim().length > 0) {
+    const term = filters.search.trim()
+    const searchOr = [
+      { name: { contains: term, mode: 'insensitive' as const } },
+      { serialNumber: { contains: term, mode: 'insensitive' as const } },
+      { version: { contains: term, mode: 'insensitive' as const } },
+    ]
+    // Compose with existing OR if connection filter already set one
+    whereClause.AND = [{ OR: whereClause.OR ?? undefined }, { OR: searchOr }].filter((c: any) => c.OR !== undefined)
+    if (whereClause.AND.length === 0) {
+      whereClause.OR = searchOr
+      delete whereClause.AND
+    } else {
+      delete whereClause.OR
+    }
   }
 
   // 4. Ejecutar las consultas a la base de datos en paralelo

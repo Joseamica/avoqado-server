@@ -2,7 +2,22 @@ import { NextFunction, Request, Response } from 'express'
 import * as orderDashboardService from '../../services/dashboard/order.dashboard.service'
 
 export async function getOrdersData(
-  req: Request<{ venueId: string }, {}, {}, { page?: string; pageSize?: string }>,
+  req: Request<
+    { venueId: string },
+    {},
+    {},
+    {
+      page?: string
+      pageSize?: string
+      statuses?: string
+      types?: string
+      tableIds?: string
+      staffIds?: string
+      search?: string
+      startDate?: string
+      endDate?: string
+    }
+  >,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -11,7 +26,27 @@ export async function getOrdersData(
     const page = parseInt(req.query.page || '1')
     const pageSize = parseInt(req.query.pageSize || '10')
 
-    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize)
+    // Helper to parse comma-separated list from query string
+    const parseList = (raw?: string): string[] | undefined => {
+      if (!raw) return undefined
+      const list = raw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+      return list.length > 0 ? list : undefined
+    }
+
+    const filters: orderDashboardService.OrderFilters = {
+      statuses: parseList(req.query.statuses),
+      types: parseList(req.query.types),
+      tableIds: parseList(req.query.tableIds),
+      staffIds: parseList(req.query.staffIds),
+      search: req.query.search,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+    }
+
+    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, filters)
 
     res.status(200).json(ordersData)
   } catch (error) {

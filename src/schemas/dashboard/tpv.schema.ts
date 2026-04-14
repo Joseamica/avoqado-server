@@ -15,8 +15,16 @@ export type PaginatedTerminalsResponse = {
 export type GetTerminalsQuery = {
   page?: string
   pageSize?: string
+  // Legacy single-value filters (backward compat)
   status?: TerminalStatus
   type?: TerminalType
+  // Multi-select arrays serialized as comma-separated strings
+  statuses?: string
+  types?: string
+  versions?: string
+  connections?: string
+  activations?: string
+  search?: string
 }
 
 // Define el tipo para actualizar un TPV (basado en el schema real de Prisma)

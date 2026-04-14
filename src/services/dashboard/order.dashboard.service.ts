@@ -31,7 +31,17 @@ function flattenOrderModifiers(order: any): any {
   }
 }
 
-export async function getOrders(venueId: string, page: number, pageSize: number): Promise<PaginatedOrdersResponse> {
+export interface OrderFilters {
+  statuses?: string[]
+  types?: string[]
+  tableIds?: string[]
+  staffIds?: string[]
+  search?: string
+  startDate?: string
+  endDate?: string
+}
+
+export async function getOrders(venueId: string, page: number, pageSize: number, filters?: OrderFilters): Promise<PaginatedOrdersResponse> {
   if (!venueId) {
     throw new NotFoundError('Venue ID es requerido')
   }
@@ -40,9 +50,60 @@ export async function getOrders(venueId: string, page: number, pageSize: number)
   const take = pageSize
 
   // Exclude PENDING, CANCELLED, DELETED orders - they shouldn't appear in order list
-  const whereClause = {
+  const whereClause: any = {
     venueId,
     status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+  }
+
+  if (filters) {
+    // Status filter (overrides the default "not in [PENDING, CANCELLED, DELETED]" exclusion)
+    if (filters.statuses && filters.statuses.length > 0) {
+      whereClause.status = { in: filters.statuses }
+    }
+
+    if (filters.types && filters.types.length > 0) {
+      whereClause.type = { in: filters.types }
+    }
+
+    if (filters.tableIds && filters.tableIds.length > 0) {
+      whereClause.tableId = { in: filters.tableIds }
+    }
+
+    // staffIds maps to servedById (who attended the order)
+    if (filters.staffIds && filters.staffIds.length > 0) {
+      whereClause.servedById = { in: filters.staffIds }
+    }
+
+    if (filters.startDate || filters.endDate) {
+      whereClause.createdAt = {}
+      if (filters.startDate) whereClause.createdAt.gte = new Date(filters.startDate)
+      if (filters.endDate) whereClause.createdAt.lte = new Date(filters.endDate)
+    }
+
+    if (filters.search) {
+      const searchTerm = filters.search.trim()
+      const searchNumber = parseFloat(searchTerm)
+      whereClause.OR = [
+        // Order number (string or numeric)
+        { orderNumber: { contains: searchTerm, mode: 'insensitive' } },
+        // Total amount match (coarse match: amount in [n, n+1))
+        ...(isNaN(searchNumber) ? [] : [{ total: { gte: searchNumber, lt: searchNumber + 1 } }]),
+        // Customer name on OrderCustomer relation
+        {
+          orderCustomers: {
+            some: {
+              customer: {
+                OR: [
+                  { firstName: { contains: searchTerm, mode: 'insensitive' } },
+                  { lastName: { contains: searchTerm, mode: 'insensitive' } },
+                  { phone: { contains: searchTerm, mode: 'insensitive' } },
+                ],
+              },
+            },
+          },
+        },
+      ]
+    }
   }
 
   const [orders, total] = await prisma.$transaction([

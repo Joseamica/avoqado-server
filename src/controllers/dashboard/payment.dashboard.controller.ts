@@ -17,6 +17,12 @@ export async function getPaymentsData(
     {
       page?: string
       pageSize?: string
+      // Multi-select arrays (comma-separated)
+      merchantAccountIds?: string
+      methods?: string
+      sources?: string
+      staffIds?: string
+      // Single-value legacy params
       merchantAccountId?: string
       method?: string
       source?: string
@@ -35,8 +41,23 @@ export async function getPaymentsData(
     const page = parseInt(req.query.page || '1')
     const pageSize = parseInt(req.query.pageSize || '10')
 
+    // Helper to parse comma-separated query param into string array (drops empty entries)
+    const parseList = (raw?: string): string[] | undefined => {
+      if (!raw) return undefined
+      const list = raw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+      return list.length > 0 ? list : undefined
+    }
+
     // Extraer filtros opcionales
     const filters: paymentDashboardService.PaymentFilters = {
+      merchantAccountIds: parseList(req.query.merchantAccountIds),
+      methods: parseList(req.query.methods) as any,
+      sources: parseList(req.query.sources),
+      staffIds: parseList(req.query.staffIds),
+      // Backward-compat single-value filters
       merchantAccountId: req.query.merchantAccountId,
       method: req.query.method as any,
       source: req.query.source,

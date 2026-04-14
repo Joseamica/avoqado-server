@@ -7,6 +7,12 @@ import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schem
 import { logAction } from './activity-log.service'
 
 export interface PaymentFilters {
+  // Multi-select filter arrays (preferred)
+  merchantAccountIds?: string[]
+  methods?: PaymentMethod[]
+  sources?: string[]
+  staffIds?: string[]
+  // Single-value filters kept for backward compatibility (TPV, scripts, etc.)
   merchantAccountId?: string
   method?: PaymentMethod
   source?: string
@@ -38,21 +44,29 @@ export async function getPaymentsData(
     },
   }
 
-  // Aplicar filtros opcionales
+  // Aplicar filtros opcionales (arrays have priority over single values)
   if (filters) {
-    if (filters.merchantAccountId) {
+    if (filters.merchantAccountIds && filters.merchantAccountIds.length > 0) {
+      whereClause.merchantAccountId = { in: filters.merchantAccountIds }
+    } else if (filters.merchantAccountId) {
       whereClause.merchantAccountId = filters.merchantAccountId
     }
 
-    if (filters.method) {
+    if (filters.methods && filters.methods.length > 0) {
+      whereClause.method = { in: filters.methods }
+    } else if (filters.method) {
       whereClause.method = filters.method
     }
 
-    if (filters.source) {
+    if (filters.sources && filters.sources.length > 0) {
+      whereClause.source = { in: filters.sources }
+    } else if (filters.source) {
       whereClause.source = filters.source
     }
 
-    if (filters.staffId) {
+    if (filters.staffIds && filters.staffIds.length > 0) {
+      whereClause.processedById = { in: filters.staffIds }
+    } else if (filters.staffId) {
       whereClause.processedById = filters.staffId
     }
 

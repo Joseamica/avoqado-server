@@ -353,7 +353,8 @@ export interface ReservationFilters {
   tableId?: string
   staffId?: string
   productId?: string
-  channel?: ReservationChannel
+  // Channel accepts single value or array (multi-select)
+  channel?: ReservationChannel | ReservationChannel[]
   search?: string // name, phone, confirmation code
 }
 
@@ -379,7 +380,9 @@ export async function getReservations(venueId: string, filters: ReservationFilte
   if (filters.tableId) where.tableId = filters.tableId
   if (filters.staffId) where.assignedStaffId = filters.staffId
   if (filters.productId) where.productId = filters.productId
-  if (filters.channel) where.channel = filters.channel
+  if (filters.channel) {
+    where.channel = Array.isArray(filters.channel) ? { in: filters.channel } : filters.channel
+  }
   if (filters.search) {
     where.OR = [
       { guestName: { contains: filters.search, mode: 'insensitive' } },
