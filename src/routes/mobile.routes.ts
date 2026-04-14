@@ -1326,13 +1326,23 @@ router.post('/venues/:venueId/products', authenticateTokenMiddleware, checkPermi
  * PUT /api/v1/mobile/venues/:venueId/products/:productId
  * Update product fields.
  */
-router.put('/venues/:venueId/products/:productId', authenticateTokenMiddleware, checkPermission('menu:update'), productMobileController.updateProduct)
+router.put(
+  '/venues/:venueId/products/:productId',
+  authenticateTokenMiddleware,
+  checkPermission('menu:update'),
+  productMobileController.updateProduct,
+)
 
 /**
  * DELETE /api/v1/mobile/venues/:venueId/products/:productId
  * Soft delete a product (sets deletedAt + active=false).
  */
-router.delete('/venues/:venueId/products/:productId', authenticateTokenMiddleware, checkPermission('menu:delete'), productMobileController.deleteProduct)
+router.delete(
+  '/venues/:venueId/products/:productId',
+  authenticateTokenMiddleware,
+  checkPermission('menu:delete'),
+  productMobileController.deleteProduct,
+)
 
 // ============================================================================
 // CATEGORIES
@@ -1343,25 +1353,45 @@ router.delete('/venues/:venueId/products/:productId', authenticateTokenMiddlewar
  * GET /api/v1/mobile/venues/:venueId/categories
  * List all active categories ordered by displayOrder.
  */
-router.get('/venues/:venueId/categories', authenticateTokenMiddleware, checkPermission('menu:read'), categoryMobileController.listCategories)
+router.get(
+  '/venues/:venueId/categories',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  categoryMobileController.listCategories,
+)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/categories
  * Create a new category (generates slug from name).
  */
-router.post('/venues/:venueId/categories', authenticateTokenMiddleware, checkPermission('menu:create'), categoryMobileController.createCategory)
+router.post(
+  '/venues/:venueId/categories',
+  authenticateTokenMiddleware,
+  checkPermission('menu:create'),
+  categoryMobileController.createCategory,
+)
 
 /**
  * PATCH /api/v1/mobile/venues/:venueId/categories/:categoryId
  * Update a category.
  */
-router.patch('/venues/:venueId/categories/:categoryId', authenticateTokenMiddleware, checkPermission('menu:update'), categoryMobileController.updateCategory)
+router.patch(
+  '/venues/:venueId/categories/:categoryId',
+  authenticateTokenMiddleware,
+  checkPermission('menu:update'),
+  categoryMobileController.updateCategory,
+)
 
 /**
  * DELETE /api/v1/mobile/venues/:venueId/categories/:categoryId
  * Soft delete a category (sets active=false).
  */
-router.delete('/venues/:venueId/categories/:categoryId', authenticateTokenMiddleware, checkPermission('menu:delete'), categoryMobileController.deleteCategory)
+router.delete(
+  '/venues/:venueId/categories/:categoryId',
+  authenticateTokenMiddleware,
+  checkPermission('menu:delete'),
+  categoryMobileController.deleteCategory,
+)
 
 // ============================================================================
 // DISCOUNTS

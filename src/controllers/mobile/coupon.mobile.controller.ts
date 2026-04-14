@@ -75,16 +75,7 @@ export async function listCoupons(req: Request, res: Response) {
 export async function createCoupon(req: Request, res: Response) {
   try {
     const { venueId } = req.params
-    const {
-      discountId,
-      code,
-      maxUses,
-      maxUsesPerCustomer,
-      minPurchaseAmount,
-      validFrom,
-      validUntil,
-      active,
-    } = req.body
+    const { discountId, code, maxUses, maxUsesPerCustomer, minPurchaseAmount, validFrom, validUntil, active } = req.body
 
     if (!discountId) {
       return res.status(400).json({ success: false, message: 'discountId es requerido' })
@@ -192,15 +183,7 @@ export async function updateCoupon(req: Request, res: Response) {
       return res.status(404).json({ success: false, message: 'Cupon no encontrado' })
     }
 
-    const {
-      code,
-      maxUses,
-      maxUsesPerCustomer,
-      minPurchaseAmount,
-      validFrom,
-      validUntil,
-      active,
-    } = req.body
+    const { code, maxUses, maxUsesPerCustomer, minPurchaseAmount, validFrom, validUntil, active } = req.body
 
     // If updating code, normalize and check uniqueness
     let normalizedCode: string | undefined = undefined
@@ -480,9 +463,7 @@ export async function validateCoupon(req: Request, res: Response) {
             type: coupon.discount.type,
             value: Number(coupon.discount.value),
             scope: coupon.discount.scope,
-            maxDiscountAmount: coupon.discount.maxDiscountAmount
-              ? Number(coupon.discount.maxDiscountAmount)
-              : null,
+            maxDiscountAmount: coupon.discount.maxDiscountAmount ? Number(coupon.discount.maxDiscountAmount) : null,
           },
         },
       },

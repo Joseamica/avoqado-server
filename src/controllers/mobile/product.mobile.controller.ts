@@ -99,11 +99,7 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
         deletedAt: null,
       },
       include: productInclude,
-      orderBy: [
-        { category: { displayOrder: 'asc' } },
-        { displayOrder: 'asc' },
-        { name: 'asc' },
-      ],
+      orderBy: [{ category: { displayOrder: 'asc' } }, { displayOrder: 'asc' }, { name: 'asc' }],
     })
 
     const data = products.map(withAvailableQuantity)
