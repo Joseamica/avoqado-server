@@ -5992,6 +5992,77 @@ router.post(
 )
 
 /**
+ * POST /tpv/v1/superadmin/modules/toggle
+ * SUPERADMIN-only: toggle a module ON/OFF for the current venue directly from TPV SuperAdmin screen.
+ * Body: { moduleCode: string, enabled: boolean }
+ */
+router.post('/superadmin/modules/toggle', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const authContext = (req as any).authContext
+    const { venueId, userId: staffId, role } = authContext
+
+    if (role !== 'SUPERADMIN') {
+      throw new AppError('Solo SUPERADMIN puede cambiar módulos desde TPV', 403)
+    }
+
+    const { moduleCode, enabled } = req.body
+
+    if (!moduleCode || typeof moduleCode !== 'string') {
+      throw new AppError('moduleCode is required', 400)
+    }
+
+    if (typeof enabled !== 'boolean') {
+      throw new AppError('enabled must be a boolean', 400)
+    }
+
+    const moduleRecord = await prisma.module.findUnique({
+      where: { code: moduleCode },
+      select: { id: true, code: true },
+    })
+
+    if (!moduleRecord) {
+      throw new AppError(`Módulo no encontrado: ${moduleCode}`, 404)
+    }
+    // SUPERADMIN desde TPV puede alternar VenueModule libremente.
+    // El override per-venue tiene precedencia sobre Organization y sobre Module.active global.
+
+    // Default preset per module so the UI actually transforms on toggle.
+    // Without a preset, enableModule falls back to Module.defaultConfig, which
+    // may leave simplifiedOrderFlow=false and the UI looks unchanged.
+    const defaultPresetByModule: Record<string, string | undefined> = {
+      SERIALIZED_INVENTORY: 'telecom',
+    }
+    const preset = req.body.preset || defaultPresetByModule[moduleCode]
+
+    logger.info(`🎛️ [TPV SUPERADMIN] Toggle module ${moduleCode} = ${enabled}${preset ? ` (preset=${preset})` : ''}`, {
+      venueId,
+      staffId,
+      correlationId: req.correlationId,
+    })
+
+    const venueModule = enabled
+      ? await moduleService.enableModule(venueId, moduleCode as any, staffId, undefined, preset)
+      : await moduleService.disableModule(venueId, moduleCode as any)
+
+    if (!enabled && !venueModule) {
+      throw new AppError(`Módulo ${moduleCode} no estaba habilitado para este venue`, 404)
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Módulo ${moduleCode} ${enabled ? 'habilitado' : 'deshabilitado'}`,
+      venueModule,
+    })
+  } catch (error) {
+    logger.error(`❌ [TPV SUPERADMIN] Error toggling module`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+})
+
+/**
  * POST /tpv/v1/orders/:orderId/serialized-item
  * Add a serialized item to an existing order (mixed cart support).
  * Requires orders:update permission.
