@@ -8,12 +8,26 @@
 #   - main branch    → Render (production) only
 #
 # See: https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
+#
+# ⚠️ TEMPORARILY DISABLED (2026-04-14)
+# ------------------------------------
+# Auto-deploys on `push` are disabled while we reconfigure Fly.io secrets for the
+# avoqado-server app. The required secrets (DATABASE_URL, RABBITMQ_URL, *_SECRET,
+# STRIPE_SECRET_KEY, etc.) are missing, so the verify-fly-secrets step fails and
+# spams the CI with red builds even though the code is fine.
+#
+# To re-enable:
+#   1. Run `fly secrets set ... -a avoqado-server` for all missing secrets
+#   2. Uncomment the `push` trigger below and remove this note
+#
+# Manual runs (workflow_dispatch) remain available for on-demand demo deploys.
 
 name: 🎪 Fly.io Demo Deploy
 on:
-  push:
-    branches:
-      - develop
+  # Temporarily disabled — see comment at the top of this file
+  # push:
+  #   branches:
+  #     - develop
   workflow_dispatch:
     inputs:
       skip_tests:
