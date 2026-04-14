@@ -19,6 +19,11 @@ import * as reportsMobileController from '../controllers/mobile/reports.mobile.c
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
 import * as productMobileController from '../controllers/mobile/product.mobile.controller'
+import * as categoryMobileController from '../controllers/mobile/category.mobile.controller'
+import * as discountMobileController from '../controllers/mobile/discount.mobile.controller'
+import * as couponMobileController from '../controllers/mobile/coupon.mobile.controller'
+import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
+import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
@@ -1301,17 +1306,97 @@ router.get(
 )
 
 // ============================================================================
-// PRODUCTS & CATEGORIES
+// PRODUCTS
+// Authenticated endpoints - requires valid JWT
+// ============================================================================
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/products
+ * List all active, non-deleted products with category, inventory, modifierGroups.
+ */
+router.get('/venues/:venueId/products', authenticateTokenMiddleware, checkPermission('menu:read'), productMobileController.listProducts)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/products
+ * Create a new product.
+ */
+router.post('/venues/:venueId/products', authenticateTokenMiddleware, checkPermission('menu:create'), productMobileController.createProduct)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/products/:productId
+ * Update product fields.
+ */
+router.put('/venues/:venueId/products/:productId', authenticateTokenMiddleware, checkPermission('menu:update'), productMobileController.updateProduct)
+
+/**
+ * DELETE /api/v1/mobile/venues/:venueId/products/:productId
+ * Soft delete a product (sets deletedAt + active=false).
+ */
+router.delete('/venues/:venueId/products/:productId', authenticateTokenMiddleware, checkPermission('menu:delete'), productMobileController.deleteProduct)
+
+// ============================================================================
+// CATEGORIES
 // Authenticated endpoints - requires valid JWT
 // ============================================================================
 
 /**
  * GET /api/v1/mobile/venues/:venueId/categories
- * List categories for product creation (simplified payload).
+ * List all active categories ordered by displayOrder.
  */
-router.get('/venues/:venueId/categories', authenticateTokenMiddleware, checkPermission('menu:read'), productMobileController.listCategories)
-router.get('/venues/:venueId/products', authenticateTokenMiddleware, checkPermission('menu:read'), productMobileController.listProducts)
-router.post('/venues/:venueId/products', authenticateTokenMiddleware, checkPermission('menu:create'), productMobileController.createProduct)
+router.get('/venues/:venueId/categories', authenticateTokenMiddleware, checkPermission('menu:read'), categoryMobileController.listCategories)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/categories
+ * Create a new category (generates slug from name).
+ */
+router.post('/venues/:venueId/categories', authenticateTokenMiddleware, checkPermission('menu:create'), categoryMobileController.createCategory)
+
+/**
+ * PATCH /api/v1/mobile/venues/:venueId/categories/:categoryId
+ * Update a category.
+ */
+router.patch('/venues/:venueId/categories/:categoryId', authenticateTokenMiddleware, checkPermission('menu:update'), categoryMobileController.updateCategory)
+
+/**
+ * DELETE /api/v1/mobile/venues/:venueId/categories/:categoryId
+ * Soft delete a category (sets active=false).
+ */
+router.delete('/venues/:venueId/categories/:categoryId', authenticateTokenMiddleware, checkPermission('menu:delete'), categoryMobileController.deleteCategory)
+
+// ============================================================================
+// DISCOUNTS
+// ============================================================================
+
+router.get('/venues/:venueId/discounts', authenticateTokenMiddleware, discountMobileController.listDiscounts)
+router.post('/venues/:venueId/discounts', authenticateTokenMiddleware, discountMobileController.createDiscount)
+router.put('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, discountMobileController.updateDiscount)
+router.delete('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, discountMobileController.deleteDiscount)
+
+// ============================================================================
+// COUPONS
+// ============================================================================
+
+router.get('/venues/:venueId/coupons', authenticateTokenMiddleware, couponMobileController.listCoupons)
+router.post('/venues/:venueId/coupons', authenticateTokenMiddleware, couponMobileController.createCoupon)
+router.put('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, couponMobileController.updateCoupon)
+router.delete('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, couponMobileController.deleteCoupon)
+router.post('/venues/:venueId/coupons/validate', authenticateTokenMiddleware, couponMobileController.validateCoupon)
+
+// ============================================================================
+// TPV SETTINGS (combined terminals + settings in one call)
+// ============================================================================
+
+router.get('/venues/:venueId/settings', authenticateTokenMiddleware, tpvSettingsMobileController.getVenueTpvSettings)
+
+// ============================================================================
+// NOTIFICATIONS (user-scoped, not venue-scoped)
+// ============================================================================
+
+router.get('/notifications', authenticateTokenMiddleware, notificationMobileController.getUserNotifications)
+router.get('/notifications/unread-count', authenticateTokenMiddleware, notificationMobileController.getUnreadCount)
+router.patch('/notifications/:notificationId/read', authenticateTokenMiddleware, notificationMobileController.markAsRead)
+router.patch('/notifications/mark-all-read', authenticateTokenMiddleware, notificationMobileController.markAllAsRead)
+router.delete('/notifications/:notificationId', authenticateTokenMiddleware, notificationMobileController.deleteNotification)
 
 // ============================================================================
 // INVENTORY

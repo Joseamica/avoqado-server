@@ -507,6 +507,13 @@ export interface TpvSettings {
   enableSerializedInventory?: boolean
   // Venue-level attendance toggle (sets requireClockInPhoto + requireClockInToLogin)
   attendanceTracking?: boolean
+  // Cellular Failover (experimental — TPV auto-switches to cellular on bad Wi-Fi)
+  // Mode: OFF (disabled) | MANUAL_TOGGLE (user opts in per session)
+  //       | AUTO_SHADOW (log only, no switch) | AUTO_ENFORCED (auto-switch on bad readings)
+  cellularFailoverMode: 'OFF' | 'MANUAL_TOGGLE' | 'AUTO_SHADOW' | 'AUTO_ENFORCED'
+  cellularFailoverBadReadingsThreshold: number // consecutive bad readings to trigger switch (>=1)
+  cellularFailoverCooldownSeconds: number // min seconds between switches (>=0)
+  cellularFailoverMinCellHoldSeconds: number // min time to hold cellular after switching (>=0)
 }
 
 /**
@@ -539,6 +546,11 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showGoals: true,
   showMessages: true,
   showTrainings: true,
+  // Cellular Failover — OFF by default for canary-style rollout
+  cellularFailoverMode: 'OFF',
+  cellularFailoverBadReadingsThreshold: 3,
+  cellularFailoverCooldownSeconds: 60,
+  cellularFailoverMinCellHoldSeconds: 120,
 }
 
 /**

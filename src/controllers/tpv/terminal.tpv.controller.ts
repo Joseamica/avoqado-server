@@ -47,6 +47,11 @@ interface TpvSettings {
   showTrainings: boolean // Show "Entrenamientos" button on home screen
   // Crypto payment option (B4Bit integration)
   showCryptoOption: boolean
+  // Cellular Failover (experimental — ConnectionViewModel reads these exact names)
+  cellularFailoverMode: 'OFF' | 'MANUAL_TOGGLE' | 'AUTO_SHADOW' | 'AUTO_ENFORCED'
+  cellularFailoverBadReadingsThreshold: number
+  cellularFailoverCooldownSeconds: number
+  cellularFailoverMinCellHoldSeconds: number
 }
 
 /**
@@ -82,6 +87,11 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showTrainings: true,
   // Crypto payment disabled by default
   showCryptoOption: false,
+  // Cellular Failover — safe defaults: OFF, threshold 3, cooldown 60s, hold 120s
+  cellularFailoverMode: 'OFF',
+  cellularFailoverBadReadingsThreshold: 3,
+  cellularFailoverCooldownSeconds: 60,
+  cellularFailoverMinCellHoldSeconds: 120,
 }
 
 /**
