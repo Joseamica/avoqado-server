@@ -83,6 +83,9 @@ export interface CollectInput {
 type Transition =
   | { action: 'ASSIGN_TO_SUPERVISOR'; to: 'SUPERVISOR_HELD' }
   | { action: 'ASSIGN_TO_PROMOTER'; to: 'PROMOTER_PENDING' }
+  // Bypass path (plan extension): OWNER/SUPERADMIN skips Supervisor and hands the SIM
+  // directly to a Promoter. Distinguishable in the audit log by fromState=ADMIN_HELD.
+  | { action: 'ASSIGN_TO_PROMOTER_DIRECT'; to: 'PROMOTER_PENDING' }
   | { action: 'ACCEPT'; to: 'PROMOTER_HELD' }
   | { action: 'REJECT'; to: 'PROMOTER_REJECTED' }
   | { action: 'COLLECT_FROM_PROMOTER'; to: 'SUPERVISOR_HELD' }
@@ -92,6 +95,7 @@ type Transition =
 const VALID_FROM_STATES: Record<Transition['action'], SerializedItemCustodyState[]> = {
   ASSIGN_TO_SUPERVISOR: ['ADMIN_HELD'],
   ASSIGN_TO_PROMOTER: ['SUPERVISOR_HELD'],
+  ASSIGN_TO_PROMOTER_DIRECT: ['ADMIN_HELD'],
   ACCEPT: ['PROMOTER_PENDING'],
   REJECT: ['PROMOTER_PENDING'],
   COLLECT_FROM_PROMOTER: ['PROMOTER_PENDING', 'PROMOTER_HELD', 'PROMOTER_REJECTED'],
@@ -114,6 +118,7 @@ export function applyTransition(currentState: SerializedItemCustodyState, action
     case 'ASSIGN_TO_SUPERVISOR':
       return 'SUPERVISOR_HELD'
     case 'ASSIGN_TO_PROMOTER':
+    case 'ASSIGN_TO_PROMOTER_DIRECT':
       return 'PROMOTER_PENDING'
     case 'ACCEPT':
       return 'PROMOTER_HELD'
@@ -131,6 +136,10 @@ export function applyTransition(currentState: SerializedItemCustodyState, action
 const ACTION_TO_EVENT: Record<Transition['action'], SerializedItemCustodyEventType> = {
   ASSIGN_TO_SUPERVISOR: 'ASSIGNED_TO_SUPERVISOR',
   ASSIGN_TO_PROMOTER: 'ASSIGNED_TO_PROMOTER',
+  // Reuses the ASSIGNED_TO_PROMOTER event type to avoid a Prisma enum migration;
+  // the direct path is detectable in the timeline by `fromState = ADMIN_HELD`
+  // and `fromStaffId = null` (no intermediate Supervisor).
+  ASSIGN_TO_PROMOTER_DIRECT: 'ASSIGNED_TO_PROMOTER',
   ACCEPT: 'ACCEPTED_BY_PROMOTER',
   REJECT: 'REJECTED_BY_PROMOTER',
   COLLECT_FROM_PROMOTER: 'COLLECTED_FROM_PROMOTER',
@@ -248,6 +257,81 @@ export class SimCustodyService {
     // committed successfully — pre-transaction increments could overcount if a
     // row passed ownership checks but failed at updateWithVersion (race) or
     // event persistence. Fire-and-forget; errors logged downstream.
+    const committedCount = results.filter(r => r.status === 'ok').length
+    if (committedCount > 0) {
+      notifySimCustody({
+        kind: 'ASSIGNED_TO_PROMOTER',
+        targetStaffId: promoterStaffId,
+        title: 'Mis SIMs',
+        body: `Tienes ${committedCount} SIM${committedCount === 1 ? '' : 's'} pendiente${committedCount === 1 ? '' : 's'} de aceptar`,
+        data: { route: 'MisSims', count: String(committedCount) },
+      })
+    }
+    return buildSummary(results)
+  }
+
+  /**
+   * Admin bypass: OWNER/SUPERADMIN assigns SIMs directly to a Promoter,
+   * skipping the Supervisor step. Used for emergencies or exceptions where
+   * the normal chain (Admin → Supervisor → Promoter) is impractical.
+   *
+   * Only valid from ADMIN_HELD. Does NOT set `assignedSupervisorId` — the
+   * audit row carries `fromState=ADMIN_HELD` + `fromStaffId=null` so the
+   * bypass is always traceable. If the SIM later returns to supervisor via
+   * collect-from-promoter, the transition is legal (PROMOTER_* →
+   * SUPERVISOR_HELD) because collectFromPromoter sets the supervisor = actor.
+   *
+   * Authorization is gated at the route layer via
+   * `sim-custody:assign-to-promoter-direct` (OWNER + SUPERADMIN).
+   */
+  async assignToPromoterDirect(input: AssignToPromoterInput): Promise<BulkResult> {
+    const { actor, promoterStaffId, serialNumbers, idempotencyRequestId } = input
+    await this.assertStaffBelongsToOrg(promoterStaffId, actor.organizationId)
+
+    const results: BulkResultRow[] = []
+    for (const sn of serialNumbers) {
+      results.push(
+        await this.processOneRow(sn, async tx => {
+          const item = await this.findOrgItem(tx, actor.organizationId, sn)
+          if (!item) throw new SimCustodyError('NOT_FOUND')
+          if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
+          // Idempotent same-target noop: already assigned to same promoter.
+          if (
+            item.custodyState === 'PROMOTER_PENDING' &&
+            item.assignedPromoterId === promoterStaffId &&
+            item.assignedSupervisorId === null
+          ) {
+            return { event: ACTION_TO_EVENT.ASSIGN_TO_PROMOTER_DIRECT, item }
+          }
+          if (item.custodyState !== 'ADMIN_HELD') throw new SimCustodyError('ALREADY_ASSIGNED')
+
+          const newState = applyTransition(item.custodyState, 'ASSIGN_TO_PROMOTER_DIRECT')
+          const updated = await this.updateWithVersion(tx, item, {
+            custodyState: newState,
+            // Direct path: no Supervisor owns this SIM. Collect-from-promoter
+            // will set assignedSupervisorId = actor when the chain resumes.
+            assignedSupervisorId: null,
+            assignedSupervisorAt: null,
+            assignedPromoterId: promoterStaffId,
+            assignedPromoterAt: new Date(),
+            promoterAcceptedAt: null,
+            promoterRejectedAt: null,
+          })
+          await this.writeEvent(tx, {
+            item: updated,
+            eventType: ACTION_TO_EVENT.ASSIGN_TO_PROMOTER_DIRECT,
+            fromState: item.custodyState,
+            toState: newState,
+            fromStaffId: null, // bypass signal in timeline
+            toStaffId: promoterStaffId,
+            actorStaffId: actor.staffId,
+            idempotencyRequestId,
+          })
+          return { event: ACTION_TO_EVENT.ASSIGN_TO_PROMOTER_DIRECT, item: updated }
+        }),
+      )
+    }
+
     const committedCount = results.filter(r => r.status === 'ok').length
     if (committedCount > 0) {
       notifySimCustody({

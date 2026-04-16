@@ -303,6 +303,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'sim-custody:assign-to-supervisor': ['sim-custody:assign-to-supervisor', 'inventory:read'], // Admin bulk-assigns SIMs to a Supervisor
   'sim-custody:assign-to-promoter': ['sim-custody:assign-to-promoter', 'inventory:read'], // Supervisor assigns to Promoter
+  'sim-custody:assign-to-promoter-direct': ['sim-custody:assign-to-promoter-direct', 'sim-custody:assign-to-supervisor', 'inventory:read'], // Admin skips Supervisor and assigns directly to Promoter (bypass — restricted to OWNER/SUPERADMIN)
   'sim-custody:collect-from-promoter': ['sim-custody:collect-from-promoter', 'inventory:read'], // Supervisor reclaims from Promoter (owning-supervisor only)
   'sim-custody:collect-from-supervisor': ['sim-custody:collect-from-supervisor', 'inventory:read'], // Admin reclaims from Supervisor
   'sim-custody:view-all-supervisors': ['sim-custody:view-all-supervisors', 'inventory:read'], // Read-only cross-supervisor visibility (no mutation authority)
@@ -761,6 +762,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // SIM custody (OWNER = "Admin" in PlayTelecom role labels) — full chain control
     'sim-custody:assign-to-supervisor', // Admin bulk-assigns SIMs to a Supervisor
     'sim-custody:assign-to-promoter', // Admin can also assign down the chain if needed
+    'sim-custody:assign-to-promoter-direct', // Admin bypass — skip Supervisor and assign directly to Promoter (emergencias / excepciones)
     'sim-custody:collect-from-supervisor', // Admin reclaims from Supervisor
     'sim-custody:view-all-supervisors', // Full cross-supervisor visibility
     // Allow OWNER to use TPV inbox too (edge case: venue owner also operates as promoter).
@@ -1131,6 +1133,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'sim-custody': [
     'sim-custody:assign-to-supervisor',
     'sim-custody:assign-to-promoter',
+    'sim-custody:assign-to-promoter-direct',
     'sim-custody:collect-from-promoter',
     'sim-custody:collect-from-supervisor',
     'sim-custody:view-all-supervisors',

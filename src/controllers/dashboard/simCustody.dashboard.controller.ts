@@ -134,6 +134,36 @@ export async function assignToPromoter(req: Request, res: Response, next: NextFu
   }
 }
 
+/**
+ * OWNER/SUPERADMIN bypass: asignar directo a Promotor saltando al Supervisor.
+ * Reusa el mismo schema que /assign-to-promoter — la única diferencia es la
+ * state machine (ADMIN_HELD → PROMOTER_PENDING) y el permiso requerido.
+ */
+export async function assignToPromoterDirect(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId, orgId, role } = (req as any).authContext ?? {}
+    const { orgId: paramOrgId } = req.params
+    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+      const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
+      return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
+    }
+
+    const parse = AssignToPromoterBody.safeParse(req.body)
+    if (!parse.success) return mapZodError(res, parse.error)
+
+    const result = await simCustodyService.assignToPromoterDirect({
+      actor: { staffId: userId, organizationId: paramOrgId, role },
+      promoterStaffId: parse.data.promoterStaffId,
+      serialNumbers: parse.data.serialNumbers,
+      idempotencyRequestId: req.idempotency?.requestId ?? null,
+    })
+    res.status(200).json(result)
+  } catch (err) {
+    if (respondSimCustodyError(res, err)) return
+    next(err)
+  }
+}
+
 export async function collectFromPromoter(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
