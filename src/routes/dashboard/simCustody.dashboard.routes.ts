@@ -14,6 +14,7 @@ import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { simCustodyIdempotency } from '../../middlewares/simCustodyIdempotency.middleware'
 import {
   assignToPromoter,
+  assignToPromoterDirect,
   assignToSupervisor,
   collectFromPromoter,
   collectFromSupervisor,
@@ -58,6 +59,18 @@ router.post(
   simCustodyIdempotency({ required: true }),
   checkPermission('sim-custody:assign-to-promoter'),
   assignToPromoter,
+)
+
+// OWNER/SUPERADMIN bypass: asigna directo a Promotor sin pasar por Supervisor.
+// Requires `sim-custody:assign-to-promoter-direct` (granted to OWNER only;
+// SUPERADMIN inherits via wildcard `*:*`).
+router.post(
+  '/sim-custody/assign-to-promoter-direct',
+  authenticateTokenMiddleware,
+  bulkLimiter,
+  simCustodyIdempotency({ required: true }),
+  checkPermission('sim-custody:assign-to-promoter-direct'),
+  assignToPromoterDirect,
 )
 
 router.post(
