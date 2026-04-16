@@ -397,17 +397,21 @@ export async function inviteTeamMember(
         throw new BadRequestError('PIN must be between 4 and 10 digits')
       }
 
-      // Check if PIN is already used in this venue
+      // Check if PIN is already used in this venue (active OR inactive — the
+      // @@unique([venueId, pin]) constraint does not filter by `active`, so
+      // an inactive staff member holding this PIN also causes upsert to fail).
       const existingPinMember = await prisma.staffVenue.findFirst({
         where: {
           venueId,
-          active: true,
           pin: request.pin,
         },
+        include: { staff: { select: { firstName: true, lastName: true, active: true } } },
       })
 
       if (existingPinMember) {
-        throw new BadRequestError('PIN no disponible. Por favor, elige otro diferente.')
+        const ownerName = `${existingPinMember.staff.firstName} ${existingPinMember.staff.lastName}`.trim()
+        const suffix = !existingPinMember.active || !existingPinMember.staff.active ? ' (miembro inactivo)' : ''
+        throw new BadRequestError(`PIN no disponible. Ya lo usa ${ownerName}${suffix}. Por favor, elige otro diferente.`)
       }
     } else {
       throw new BadRequestError('PIN is required for TPV-only staff members')
@@ -534,10 +538,12 @@ export async function inviteTeamMember(
     for (const v of venuesToAssign) {
       let pinForVenue: string | null = request.pin!
 
-      // Check PIN conflict in this venue (skip primary — already validated above)
+      // Check PIN conflict in this venue (skip primary — already validated above).
+      // Match the @@unique([venueId, pin]) constraint exactly: don't filter by active,
+      // because inactive rows still hold the slot.
       if (v.id !== venueId && request.pin) {
         const existingPinMember = await prisma.staffVenue.findFirst({
-          where: { venueId: v.id, active: true, pin: request.pin },
+          where: { venueId: v.id, pin: request.pin },
           include: { staff: { select: { firstName: true, lastName: true } } },
         })
         if (existingPinMember) {

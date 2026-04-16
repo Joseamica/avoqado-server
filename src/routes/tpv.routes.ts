@@ -6697,13 +6697,12 @@ const simCustodySingleLimiter = rateLimit({
   message: { error: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
 })
 
-router.get(
-  '/sim-custody/my-sims',
-  authenticateTokenMiddleware,
-  simCustodySingleLimiter,
-  checkPermission('tpv-sim-custody:accept'), // read + accept share the same permission; non-promoters should not see inbox
-  listMySims,
-)
+// /my-sims is personal info (like /my-sales): any authenticated staff can
+// check their own custody inbox. Service filters by `assignedPromoterId ===
+// currentStaffId`, so a staff with no SIMs just sees an empty list — no 403.
+// Gating by role was too strict because PlayTelecom creates promoters with
+// heterogeneous roles (WAITER or MANAGER depending on venue setup).
+router.get('/sim-custody/my-sims', authenticateTokenMiddleware, simCustodySingleLimiter, listMySims)
 
 router.post(
   '/sim-custody/accept',
