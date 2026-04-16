@@ -1,6 +1,6 @@
 import { StaffRole } from '@prisma/client'
 
-import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
+import { NotFoundError } from '../../../../src/errors/AppError'
 import {
   getVenueRoleConfigs,
   updateVenueRoleConfigs,

@@ -30,7 +30,6 @@ export interface IdempotencyContext {
   key: string
 }
 
-// eslint-disable-next-line @typescript-eslint/no-namespace -- Express augmentation requires namespace syntax
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- Express augmentation requires namespace syntax
   namespace Express {

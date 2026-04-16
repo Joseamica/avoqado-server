@@ -639,7 +639,7 @@ export async function createCheckoutSession(
 /**
  * Completes the charge for a checkout session
  */
-export async function completeCharge(shortCode: string, sessionId: string, threeDSTransactionId?: string) {
+export async function completeCharge(shortCode: string, sessionId: string, _threeDSTransactionId?: string) {
   // 1. Find session
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId },

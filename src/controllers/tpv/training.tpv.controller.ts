@@ -1,7 +1,6 @@
 // src/controllers/tpv/training.tpv.controller.ts
 import { Request, Response, NextFunction } from 'express'
 import * as trainingService from '../../services/superadmin/training.service'
-import logger from '../../config/logger'
 
 /**
  * GET /api/v1/tpv/trainings

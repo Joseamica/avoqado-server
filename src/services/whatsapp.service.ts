@@ -58,7 +58,7 @@ type WhatsAppTemplateParam = { type: 'text'; text: string }
  * Cleans spaces/dashes, defaults to Mexico +52 for 10-digit numbers
  */
 function normalizePhone(phone: string): string {
-  const clean = phone.replace(/[\s\-\(\)]/g, '')
+  const clean = phone.replace(/[\s\-()]/g, '')
   if (clean.startsWith('+')) return clean.replace('+', '')
   if (clean.length === 10) return `52${clean}`
   return clean

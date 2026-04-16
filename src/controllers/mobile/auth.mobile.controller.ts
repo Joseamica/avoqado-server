@@ -192,7 +192,7 @@ export const passkeyVerify = async (req: Request, res: Response, next: NextFunct
  *
  * @route POST /api/v1/mobile/auth/request-reset
  */
-export const requestReset = async (req: Request, res: Response, next: NextFunction) => {
+export const requestReset = async (req: Request, res: Response, _next: NextFunction) => {
   try {
     const { email } = req.body
 

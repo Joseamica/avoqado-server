@@ -1,4 +1,3 @@
-import crypto from 'crypto'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/lib/permissions'
@@ -22,7 +21,6 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-const SESSION_TTL_MS = 15 * 60 * 1000 // 15 minutes
 const MAX_PENDING_PER_USER = 3
 const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000 // 15 minutes
 const RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 minute

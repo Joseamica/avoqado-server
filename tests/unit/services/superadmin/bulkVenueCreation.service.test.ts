@@ -47,7 +47,7 @@ jest.mock('../../../../src/config/logger', () => ({
 }))
 
 // Import after mocks
-import { bulkCreateVenues, ValidationError } from '../../../../src/services/superadmin/bulkVenueCreation.service'
+import { bulkCreateVenues } from '../../../../src/services/superadmin/bulkVenueCreation.service'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

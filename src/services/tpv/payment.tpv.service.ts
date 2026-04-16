@@ -528,13 +528,9 @@ async function updateOrderTotalsForStandalonePayment(
             // the promoter who rang the sale. We intentionally wrap in
             // try/catch (already here) so ENFORCE mode does not break payment
             // completion — the scan/sell precheck is the primary gate.
-            await serializedInventoryService.markAsSold(
-              updatedOrder.venueId,
-              item.productSku,
-              item.id,
-              undefined,
-              { staffId: updatedOrder.createdById ?? staffId },
-            )
+            await serializedInventoryService.markAsSold(updatedOrder.venueId, item.productSku, item.id, undefined, {
+              staffId: updatedOrder.createdById ?? staffId,
+            })
             logger.info('✅ Serialized item marked as SOLD', {
               orderId,
               serialNumber: item.productSku,

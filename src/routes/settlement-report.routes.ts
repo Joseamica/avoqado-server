@@ -37,7 +37,7 @@ router.get('/:token', async (req: Request, res: Response) => {
         layer2,
       },
     })
-  } catch (error) {
+  } catch {
     res.status(500).json({ error: 'Internal server error' })
   }
 })

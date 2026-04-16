@@ -1862,7 +1862,7 @@ Avoqado Dashboard
         transactionCount: number
       }
     },
-    weeklyChange: number = 0,
+    _weeklyChange: number = 0,
   ): Promise<boolean> {
     const currency = data.venueCurrency || 'MXN'
 
@@ -2193,7 +2193,6 @@ Servicios Tecnologicos Avo S.A. de C.V.
     const dateCapitalized = dateFormatted.charAt(0).toUpperCase() + dateFormatted.slice(1)
 
     const outOfStockCount = data.items.filter(i => i.isOutOfStock).length
-    const lowStockCount = data.items.length - outOfStockCount
 
     const subject = `Alertas de bajas existencias en ${data.venueName}`
     const logoUrl = 'https://avoqado.io/isotipo.svg'

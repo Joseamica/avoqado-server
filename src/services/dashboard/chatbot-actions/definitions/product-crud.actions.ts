@@ -141,10 +141,9 @@ export const productCrudActions: ActionDefinition[] = [
             })
           }
           // For RECIPE, user creates the recipe separately via "crea la receta de..."
-        } catch (err) {
+        } catch {
           // Don't fail the whole creation if inventory setup fails
           // Product is created, inventory can be configured later
-          console.error('[ProductCreate] Inventory setup failed:', err)
         }
       }
 

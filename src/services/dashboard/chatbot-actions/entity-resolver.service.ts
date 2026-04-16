@@ -332,7 +332,6 @@ export class EntityResolverService {
       }
     } else if (table === 'PurchaseOrder') {
       // PurchaseOrder — searches by orderNumber, not name. Has status, no active/deletedAt.
-      const searchField = tableConfig.nameField || 'orderNumber'
       if (mode === 'exact') {
         return prisma.$queryRaw<RawEntityRow[]>`
           SELECT id, "orderNumber" as name, status
@@ -443,7 +442,7 @@ export class EntityResolverService {
     const { resolveVia } = config
     if (!resolveVia) return { matches: 0, candidates: [], exact: false }
 
-    const { intermediateEntity, intermediateField, linkField } = resolveVia
+    const { intermediateEntity, intermediateField } = resolveVia
 
     const intermediateTableConfig = ENTITY_TABLE_MAP[intermediateEntity as SupportedEntity]
     if (!intermediateTableConfig) return { matches: 0, candidates: [], exact: false }

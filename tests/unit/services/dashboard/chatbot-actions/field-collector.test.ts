@@ -1,8 +1,4 @@
-import {
-  FieldCollectorService,
-  fieldCollector,
-  FormField,
-} from '../../../../../src/services/dashboard/chatbot-actions/field-collector.service'
+import { FieldCollectorService, fieldCollector } from '../../../../../src/services/dashboard/chatbot-actions/field-collector.service'
 import { ActionDefinition } from '../../../../../src/services/dashboard/chatbot-actions/types'
 
 // ---------------------------------------------------------------------------

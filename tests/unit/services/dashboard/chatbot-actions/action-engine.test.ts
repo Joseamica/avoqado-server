@@ -5,7 +5,6 @@ import {
   ActionClassification,
   ActionContext,
   ActionDefinition,
-  ActionResponse,
   EntityMatch,
   EntityResolutionResult,
 } from '@/services/dashboard/chatbot-actions/types'

@@ -154,7 +154,7 @@ Responde con un JSON con esta estructura exacta:
   // classifyAction
   // ---------------------------------------------------------------------------
 
-  async classifyAction(message: string, context: ActionContext, domain?: string): Promise<ActionClassification> {
+  async classifyAction(message: string, context: ActionContext, _domain?: string): Promise<ActionClassification> {
     if (this.isCircuitOpen()) {
       throw new Error('ActionClassifier circuit is open — too many consecutive failures')
     }

@@ -5,7 +5,7 @@
  * Tests template and campaign CRUD operations.
  */
 
-import { CampaignStatus, DeliveryStatus, StaffRole } from '@prisma/client'
+import { CampaignStatus, DeliveryStatus } from '@prisma/client'
 
 // Mock Prisma client
 const mockPrisma = {
