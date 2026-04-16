@@ -298,6 +298,18 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'inventory:org-manage': ['inventory:org-manage', 'inventory:read', 'serialized-inventory:create'], // Manage org-level item categories & serialized items
 
   // ===========================
+  // SIM CUSTODY (chain-of-custody for serialized inventory)
+  // PlayTelecom/telecom flow: Admin (OWNER) → Supervisor (MANAGER) → Promoter (WAITER)
+  // ===========================
+  'sim-custody:assign-to-supervisor': ['sim-custody:assign-to-supervisor', 'inventory:read'], // Admin bulk-assigns SIMs to a Supervisor
+  'sim-custody:assign-to-promoter': ['sim-custody:assign-to-promoter', 'inventory:read'], // Supervisor assigns to Promoter
+  'sim-custody:collect-from-promoter': ['sim-custody:collect-from-promoter', 'inventory:read'], // Supervisor reclaims from Promoter (owning-supervisor only)
+  'sim-custody:collect-from-supervisor': ['sim-custody:collect-from-supervisor', 'inventory:read'], // Admin reclaims from Supervisor
+  'sim-custody:view-all-supervisors': ['sim-custody:view-all-supervisors', 'inventory:read'], // Read-only cross-supervisor visibility (no mutation authority)
+  'tpv-sim-custody:accept': ['tpv-sim-custody:accept'], // Promoter accepts SIM reception on TPV
+  'tpv-sim-custody:reject': ['tpv-sim-custody:reject'], // Promoter rejects a pending SIM on TPV
+
+  // ===========================
   // COUPONS (Phase 2)
   // ===========================
   'coupons:read': ['coupons:read', 'discounts:read'],
@@ -477,6 +489,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items (scan & sell at TPV)
     'serialized-inventory:create', // Can register (Alta de Productos)
+    // SIM custody (PlayTelecom chain-of-custody) — TPV-only actions for Promoter
+    'tpv-sim-custody:accept', // Accept SIM reception on TPV
+    'tpv-sim-custody:reject', // Reject a pending SIM on TPV
   ],
 
   /**
@@ -589,6 +604,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
     'serialized-inventory:create', // Can register (Alta de Productos)
+    // SIM custody — MANAGER = "Supervisor" in PlayTelecom role labels
+    'sim-custody:assign-to-promoter', // Supervisor assigns SIMs to Promoter
+    'sim-custody:collect-from-promoter', // Owning-supervisor reclaims from Promoter
+    'sim-custody:view-all-supervisors', // Read-only peer visibility across supervisors
     // NO: tpv-messages:send (ADMIN+ only)
     // NO: tpv-terminal:settings (ADMIN+ only)
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
@@ -727,6 +746,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'goals:org-manage', // Manage org-level sales goal defaults
     'inventory:org-manage', // Manage org-level item categories & serialized items
     'attendance:org-manage', // Manage org-level attendance defaults (check-in time, lateness, geofence)
+    // SIM custody (OWNER = "Admin" in PlayTelecom role labels) — full chain control
+    'sim-custody:assign-to-supervisor', // Admin bulk-assigns SIMs to a Supervisor
+    'sim-custody:assign-to-promoter', // Admin can also assign down the chain if needed
+    'sim-custody:collect-from-supervisor', // Admin reclaims from Supervisor
+    'sim-custody:view-all-supervisors', // Full cross-supervisor visibility
     // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
   ],
 
@@ -1088,6 +1112,15 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
   // Serialized Inventory (SIMs, jewelry, etc.)
   'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],
+  // SIM custody (PlayTelecom chain-of-custody: Admin → Supervisor → Promoter)
+  'sim-custody': [
+    'sim-custody:assign-to-supervisor',
+    'sim-custody:assign-to-promoter',
+    'sim-custody:collect-from-promoter',
+    'sim-custody:collect-from-supervisor',
+    'sim-custody:view-all-supervisors',
+  ],
+  'tpv-sim-custody': ['tpv-sim-custody:accept', 'tpv-sim-custody:reject'],
   // Venue Crypto Config (per-venue B4Bit device management)
   'venue-crypto': ['venue-crypto:manage'],
   // Commission System (staff bonuses based on sales)

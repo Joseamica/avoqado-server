@@ -263,7 +263,6 @@ describe('FIFO Batch Concurrency - Race Condition Prevention', () => {
       const results = await Promise.allSettled(paymentPromises)
 
       const succeeded = results.filter((r: any) => r.status === 'fulfilled')
-      const failed = results.filter((r: any) => r.status === 'rejected')
 
       // Payments may succeed even if FIFO deduction fails (non-blocking by design).
       // The real invariant is totalDeducted ≤ available stock (checked below).

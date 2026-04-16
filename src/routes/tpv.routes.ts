@@ -2,7 +2,10 @@ import { PaymentStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import express, { NextFunction, Request, Response } from 'express'
 import logger from '../config/logger'
+import rateLimit from 'express-rate-limit'
 import * as activationController from '../controllers/tpv/activation.controller'
+import { acceptSims, listMySims, rejectSim } from '../controllers/tpv/simCustody.tpv.controller'
+import { simCustodyIdempotency } from '../middlewares/simCustodyIdempotency.middleware'
 import * as appUpdateController from '../controllers/tpv/appUpdate.tpv.controller'
 import * as authController from '../controllers/tpv/auth.tpv.controller'
 import * as cryptoController from '../controllers/tpv/crypto.tpv.controller'
@@ -5716,7 +5719,7 @@ router.post('/serialized-inventory/categories', authenticateTokenMiddleware, asy
  */
 router.post('/serialized-inventory/scan', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId } = (req as any).authContext
+    const { venueId, userId } = (req as any).authContext
     const { serialNumber } = req.body
 
     if (!serialNumber || typeof serialNumber !== 'string') {
@@ -5731,6 +5734,18 @@ router.post('/serialized-inventory/scan', authenticateTokenMiddleware, async (re
 
     const result = await serializedInventoryService.scan(venueId, serialNumber)
 
+    // Plan §1.5 — SIM custody precheck at scan time. Surfaces SIM_NOT_ACCEPTED
+    // to the promoter BEFORE they try to sell, so the ViewModel can deep-link
+    // to "Mis SIMs". Non-blocking in OFF mode, throws 400 in ENFORCE mode.
+    if (result.found && result.item && userId) {
+      const appVersionHeader = req.header('x-app-version-code')
+      const appVersionCode = appVersionHeader ? parseInt(appVersionHeader, 10) : undefined
+      await serializedInventoryService.ensureSellable(venueId, serialNumber, {
+        staffId: userId,
+        appVersionCode,
+      })
+    }
+
     logger.info(`✅ [SERIALIZED INV] Scan result: ${result.status}`, {
       venueId,
       serialNumber,
@@ -5741,6 +5756,11 @@ router.post('/serialized-inventory/scan', authenticateTokenMiddleware, async (re
 
     return res.status(200).json(result)
   } catch (error) {
+    // Surface SIM_NOT_ACCEPTED as structured error so TPV can deep-link to Mis SIMs.
+    if (error && typeof error === 'object' && 'code' in error && (error as any).code === 'SIM_NOT_ACCEPTED') {
+      const e = error as any
+      return res.status(e.httpStatus ?? 400).json({ error: e.code, message: e.message })
+    }
     logger.error(`❌ [SERIALIZED INV] Error scanning`, {
       correlationId: req.correlationId,
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -6651,6 +6671,56 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(updateProgressSchema),
   trainingController.updateProgress,
+)
+
+// ==========================================
+// SIM CUSTODY (plan §1.4)
+// /tpv/sim-custody/my-sims   GET   WAITER
+// /tpv/sim-custody/accept    POST  WAITER (bulk + idempotent)
+// /tpv/sim-custody/reject    POST  WAITER (single)
+// ==========================================
+const simCustodyActorKey = (req: any) => req.authContext?.userId ?? req.ip
+const simCustodyBulkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: simCustodyActorKey,
+  message: { error: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
+})
+const simCustodySingleLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: simCustodyActorKey,
+  message: { error: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
+})
+
+router.get(
+  '/sim-custody/my-sims',
+  authenticateTokenMiddleware,
+  simCustodySingleLimiter,
+  checkPermission('tpv-sim-custody:accept'), // read + accept share the same permission; non-promoters should not see inbox
+  listMySims,
+)
+
+router.post(
+  '/sim-custody/accept',
+  authenticateTokenMiddleware,
+  simCustodyBulkLimiter,
+  simCustodyIdempotency({ required: true }),
+  checkPermission('tpv-sim-custody:accept'),
+  acceptSims,
+)
+
+router.post(
+  '/sim-custody/reject',
+  authenticateTokenMiddleware,
+  simCustodySingleLimiter,
+  simCustodyIdempotency({ required: false }),
+  checkPermission('tpv-sim-custody:reject'),
+  rejectSim,
 )
 
 export default router

@@ -448,7 +448,7 @@ export const recipeActions: ActionDefinition[] = [
         linkField: 'productId',
       },
     },
-    serviceAdapter: async (params, context) => {
+    serviceAdapter: async (params, _context) => {
       const { entityId } = params as any
 
       // entityId is productId (from two-hop resolution via Product)

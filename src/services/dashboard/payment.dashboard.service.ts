@@ -5,6 +5,7 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
+import { MINDFORM_NEW_VENUE_ID, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
 
 export interface PaymentFilters {
   // Multi-select filter arrays (preferred)
@@ -141,6 +142,38 @@ export async function getPaymentsData(
       where: whereClause,
     }),
   ])
+
+  // ─── Legacy QR payments merge (MindForm only) ───
+  // When the venue is MindForm, we also fetch payments from the legacy avo-pwa
+  // database and merge them sorted by createdAt desc. This is a temporary bridge
+  // until the legacy QR service is decommissioned.
+  if (venueId === MINDFORM_NEW_VENUE_ID) {
+    const legacy = await getLegacyPayments({
+      startDate: filters?.startDate,
+      endDate: filters?.endDate,
+      search: filters?.search,
+    })
+
+    if (legacy.rows.length > 0) {
+      // Merge and re-sort by date desc, then re-paginate
+      const allPayments = [...payments, ...legacy.rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+
+      const combinedTotal = total + legacy.total
+      const start = skip
+      const end = skip + take
+      const paginated = allPayments.slice(start, end)
+
+      return {
+        data: paginated as any,
+        meta: {
+          total: combinedTotal,
+          page,
+          pageSize,
+          pageCount: Math.ceil(combinedTotal / pageSize),
+        },
+      }
+    }
+  }
 
   // Devolvemos el objeto con el formato esperado
   return {

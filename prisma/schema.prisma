@@ -69,6 +69,11 @@ model Organization {
   itemCategories  ItemCategory[]
   serializedItems SerializedItem[]
 
+  // SIM custody enforcement mode (plan §1.5). Controls whether markAsSold
+  // blocks sales for SIMs not yet accepted by the Promoter on TPV.
+  // Rollout: off → warn → enforce. Org-scoped so staged rollout works per tenant.
+  simCustodyEnforcementMode SimCustodyEnforcementMode @default(OFF)
+
   // Organization-level attendance config defaults (inherited by venues without custom config)
   attendanceConfig OrganizationAttendanceConfig?
 
@@ -291,8 +296,8 @@ model Venue {
   // ==========================================
   // MODULE SYSTEM - Multi-tenant feature management
   // ==========================================
-  venueModules    VenueModule[] // Modules enabled for this venue
-  itemCategories      ItemCategory[] // Categories for serialized items
+  venueModules              VenueModule[] // Modules enabled for this venue
+  itemCategories            ItemCategory[] // Categories for serialized items
   serializedItems           SerializedItem[] // Items with unique barcodes (SIMs, etc.)
   soldSerializedItems       SerializedItem[] @relation("SoldItems") // Items sold at this venue (org-level items)
   registeredSerializedItems SerializedItem[] @relation("RegisteredItems") // Audit: org-level items registered from this venue
@@ -403,19 +408,19 @@ model VenueSettings {
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // Operations
-  autoCloseShifts Boolean @default(false)
-  shiftDuration   Int     @default(8) // hours
-  enableShifts    Boolean @default(true) // Enable/disable shift system for venue
-  requirePinLogin      Boolean @default(true)
-  terminalPermissions  Json?   // Permissions for terminal session when requirePinLogin=false
+  autoCloseShifts     Boolean @default(false)
+  shiftDuration       Int     @default(8) // hours
+  enableShifts        Boolean @default(true) // Enable/disable shift system for venue
+  requirePinLogin     Boolean @default(true)
+  terminalPermissions Json? // Permissions for terminal session when requirePinLogin=false
 
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 
   // Attendance — lateness detection (nullable = inherit from org config)
   expectedCheckInTime      String? // "HH:mm" — expected check-in time (null = use org default)
-  latenessThresholdMinutes Int?    // Minutes of tolerance after expectedCheckInTime (null = use org default)
-  geofenceRadiusMeters     Int?    // Max distance (meters) from venue for valid clock-in (null = use org default)
+  latenessThresholdMinutes Int? // Minutes of tolerance after expectedCheckInTime (null = use org default)
+  geofenceRadiusMeters     Int? // Max distance (meters) from venue for valid clock-in (null = use org default)
 
   // Auto Clock-Out (HR automation - Square-style)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
@@ -601,6 +606,10 @@ model Staff {
 
   // Stock Counts
   stockCounts StockCount[] @relation("StockCountCreatedBy")
+
+  // ✅ Serialized-inventory chain-of-custody (SIM flow)
+  serializedItemsAsSupervisor SerializedItem[] @relation("SerializedItemSupervisor")
+  serializedItemsAsPromoter   SerializedItem[] @relation("SerializedItemPromoter")
 
   // Marketing Campaigns (superadmin)
   emailTemplatesCreated     EmailTemplate[]     @relation("EmailTemplateCreator")
@@ -1106,7 +1115,7 @@ model Product {
   donationCause     String? // "Tips for staff", "Red Cross", etc.
 
   // Credit Packs
-  allowCreditRedemption  Boolean @default(true)  // Whether this product accepts credit pack redemptions
+  allowCreditRedemption   Boolean @default(true) // Whether this product accepts credit pack redemptions
   requireCreditForBooking Boolean @default(false) // Whether booking requires spending a credit (blocks free bookings)
 
   // General-purpose duration (any product type, e.g., haircut = 45 min)
@@ -2402,6 +2411,13 @@ model Payment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // 🛡️ Idempotency guarantee: prevents duplicate payment recording from concurrent
+  // retries (TOCTOU race fixed — incident: Testarudo Cafe 2026-04-08, 5 duplicates
+  // from 2 parallel retry chains). NULLs don't collide in Postgres composite unique
+  // indexes, so rows without idempotencyKey (legacy TPV, crypto, dashboard manual
+  // settlements, POS sync, mobile) are unaffected. Scoped by venueId as defense in
+  // depth — even a hypothetical UUID collision between venues would not interfere.
+  @@unique([venueId, idempotencyKey], map: "Payment_venueId_idempotencyKey_key")
   @@index([source])
   @@index([authorizationNumber]) // ✅ NUEVO ÍNDICE
   @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
@@ -2416,14 +2432,6 @@ model Payment {
   @@index([venueId, createdAt])
   @@index([venueId, status, createdAt])
   @@index([merchantAccountId, createdAt])
-
-  // 🛡️ Idempotency guarantee: prevents duplicate payment recording from concurrent
-  // retries (TOCTOU race fixed — incident: Testarudo Cafe 2026-04-08, 5 duplicates
-  // from 2 parallel retry chains). NULLs don't collide in Postgres composite unique
-  // indexes, so rows without idempotencyKey (legacy TPV, crypto, dashboard manual
-  // settlements, POS sync, mobile) are unaffected. Scoped by venueId as defense in
-  // depth — even a hypothetical UUID collision between venues would not interfere.
-  @@unique([venueId, idempotencyKey], map: "Payment_venueId_idempotencyKey_key")
 }
 
 model PaymentAllocation {
@@ -3162,25 +3170,25 @@ model PartnerAPIKey {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   // Partner info
-  name           String       // "PlayTelecom Production", "PlayTelecom Test"
-  contactEmail   String?
+  name         String // "PlayTelecom Production", "PlayTelecom Test"
+  contactEmail String?
 
   // API Credentials (same format as EcommerceMerchant)
-  secretKeyHash  String       @unique // SHA-256 hash of sk_live_xxx / sk_test_xxx
+  secretKeyHash String @unique // SHA-256 hash of sk_live_xxx / sk_test_xxx
 
   // Scoping
-  sandboxMode    Boolean      @default(true) // true = sk_test_, false = sk_live_
+  sandboxMode Boolean @default(true) // true = sk_test_, false = sk_live_
 
   // Status
-  active         Boolean      @default(true)
+  active Boolean @default(true)
 
   // Audit
-  createdById    String?      // Superadmin staff ID who created this key
-  lastUsedAt     DateTime?
-  lastUsedIp     String?
+  createdById String? // Superadmin staff ID who created this key
+  lastUsedAt  DateTime?
+  lastUsedIp  String?
 
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([organizationId])
 }
@@ -6177,7 +6185,7 @@ model OrganizationModule {
 /// Represents sales channels, types, or classifications.
 /// Can be venue-scoped (venueId set) or org-scoped (organizationId set, venueId null).
 model ItemCategory {
-  id      String @id @default(cuid())
+  id      String  @id @default(cuid())
   venueId String? // Nullable: null = org-level category
   venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
@@ -6208,8 +6216,8 @@ model ItemCategory {
   serializedItems   SerializedItem[]
   stockAlertConfigs StockAlertConfig[]
 
-  @@unique([venueId, name])            // Venue-level uniqueness (NULL venueId won't conflict)
-  @@unique([organizationId, name])     // Org-level uniqueness
+  @@unique([venueId, name]) // Venue-level uniqueness (NULL venueId won't conflict)
+  @@unique([organizationId, name]) // Org-level uniqueness
   @@index([venueId])
   @@index([organizationId])
 }
@@ -6219,7 +6227,7 @@ model ItemCategory {
 /// Applies to: SIMs, jewelry, electronics, etc.
 /// Can be venue-scoped (venueId set) or org-scoped (organizationId set, venueId null).
 model SerializedItem {
-  id      String @id @default(cuid())
+  id      String  @id @default(cuid())
   venueId String? // Nullable: null = org-level item
   venue   Venue?  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
@@ -6229,7 +6237,7 @@ model SerializedItem {
 
   // Venue that sold this item (for org-level items sold at a specific venue)
   sellingVenueId String?
-  sellingVenue   Venue? @relation("SoldItems", fields: [sellingVenueId], references: [id])
+  sellingVenue   Venue?  @relation("SoldItems", fields: [sellingVenueId], references: [id])
 
   // Traceability: which venue initiated the registration of this item.
   // For org-level items (venueId=null), we can't derive this from venueId since it's null,
@@ -6238,7 +6246,7 @@ model SerializedItem {
   // like "PlayTelecom Centro registered 100 SIMs at org level on March 18".
   // Nullable: null for items registered before this field existed.
   registeredFromVenueId String?
-  registeredFromVenue   Venue? @relation("RegisteredItems", fields: [registeredFromVenueId], references: [id])
+  registeredFromVenue   Venue?  @relation("RegisteredItems", fields: [registeredFromVenueId], references: [id])
 
   // Category
   categoryId String
@@ -6255,17 +6263,37 @@ model SerializedItem {
   orderItemId String?    @unique
   orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
 
+  // ==========================================
+  // Chain-of-custody (SIM assignment flow)
+  // ADMIN_HELD → SUPERVISOR_HELD → PROMOTER_PENDING → PROMOTER_HELD → SOLD
+  // Derived mirror of `status=SOLD` kept consistent by custody service transactions.
+  // ==========================================
+  custodyState         SerializedItemCustodyState @default(ADMIN_HELD)
+  assignedSupervisorId String?
+  assignedSupervisor   Staff?                     @relation("SerializedItemSupervisor", fields: [assignedSupervisorId], references: [id])
+  assignedSupervisorAt DateTime?
+  assignedPromoterId   String?
+  assignedPromoter     Staff?                     @relation("SerializedItemPromoter", fields: [assignedPromoterId], references: [id])
+  assignedPromoterAt   DateTime?
+  promoterAcceptedAt   DateTime?
+  promoterRejectedAt   DateTime?
+  custodyVersion       Int                        @default(0)
+
+  custodyEvents SerializedItemCustodyEvent[] @relation("CustodyEventItem")
+
   // Audit
   createdAt DateTime @default(now())
   createdBy String // Staff ID that registered the item
 
-  @@unique([venueId, serialNumber])            // Legacy venue-level uniqueness
-  @@unique([organizationId, serialNumber])     // Org-level uniqueness
+  @@unique([venueId, serialNumber]) // Legacy venue-level uniqueness
+  @@unique([organizationId, serialNumber]) // Org-level uniqueness
   @@index([venueId, categoryId])
   @@index([venueId, status])
   @@index([organizationId, categoryId])
   @@index([organizationId, status])
   @@index([serialNumber])
+  @@index([assignedSupervisorId, custodyState])
+  @@index([assignedPromoterId, custodyState])
 }
 
 // ===== CREDIT ASSESSMENT ENUMS =====
@@ -6308,6 +6336,87 @@ enum SerializedItemStatus {
   SOLD // Ya vendido
   RETURNED // Devuelto
   DAMAGED // Dañado o perdido
+}
+
+// ==========================================
+// SERIALIZED INVENTORY - Chain-of-custody tracking
+// Used by PlayTelecom / telecom venues to digitize the SIM handoff flow
+// Admin (OWNER) → Supervisor (MANAGER) → Promoter (WAITER) → Sale
+// ==========================================
+enum SerializedItemCustodyState {
+  ADMIN_HELD // En almacén / sin supervisor asignado
+  SUPERVISOR_HELD // En poder del Supervisor (sin promotor)
+  PROMOTER_PENDING // Asignado a Promotor, pendiente de aceptación en TPV
+  PROMOTER_HELD // Aceptado por el Promotor, puede venderse
+  PROMOTER_REJECTED // Rechazado por el Promotor; requiere recolección del Supervisor
+  SOLD // Venta completada (mirror de status=SOLD)
+}
+
+enum SerializedItemCollectionReason {
+  STAFF_TERMINATED // Baja de empleado
+  DAMAGED_SIM // SIM defectuoso
+}
+
+// Rollout flag controlling whether markAsSold enforces SIM custody acceptance.
+// OFF (default): log only, no block. WARN: log + X-Deprecation-Warning header.
+// ENFORCE: block sale with SIM_NOT_ACCEPTED.
+enum SimCustodyEnforcementMode {
+  OFF
+  WARN
+  ENFORCE
+}
+
+enum SerializedItemCustodyEventType {
+  ASSIGNED_TO_SUPERVISOR
+  ASSIGNED_TO_PROMOTER
+  ACCEPTED_BY_PROMOTER
+  REJECTED_BY_PROMOTER
+  COLLECTED_FROM_PROMOTER
+  COLLECTED_FROM_SUPERVISOR
+  MARKED_SOLD // mirror de la venta para timeline unificada
+}
+
+// Append-only audit log for custody transitions. Source of truth for dispute
+// resolution; richer than ActivityLog since it includes from/to states and
+// optimistic-locking correlation via idempotencyRequestId.
+model SerializedItemCustodyEvent {
+  id                   String                          @id @default(cuid())
+  serializedItemId     String
+  serializedItem       SerializedItem                  @relation("CustodyEventItem", fields: [serializedItemId], references: [id], onDelete: Cascade)
+  serialNumber         String // denormalized for forensic queries even if item is deleted
+  eventType            SerializedItemCustodyEventType
+  fromState            SerializedItemCustodyState?
+  toState              SerializedItemCustodyState
+  fromStaffId          String?
+  toStaffId            String?
+  actorStaffId         String
+  reason               SerializedItemCollectionReason?
+  idempotencyRequestId String? // FK to IdempotencyRequest (bulk request → N events share this)
+  payloadVersion       Int                             @default(1)
+  createdAt            DateTime                        @default(now())
+
+  @@index([serializedItemId, createdAt])
+  @@index([serialNumber, createdAt])
+  @@index([idempotencyRequestId])
+}
+
+// Per-request idempotency cache. Scope: (org, actor, endpoint, key). A bulk
+// request produces ONE IdempotencyRequest row + N CustodyEvent rows. Replay of
+// the same key returns the cached responseBody exactly.
+model IdempotencyRequest {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorStaffId   String
+  endpoint       String // e.g. "POST /sim-custody/assign-to-supervisor"
+  idempotencyKey String // client-supplied UUID
+  requestHash    String // SHA256 of normalized body (detects key reuse with different body)
+  responseStatus Int // 200
+  responseBody   Json // full snapshot for exact replay
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime // createdAt + 24h
+
+  @@unique([organizationId, actorStaffId, endpoint, idempotencyKey])
+  @@index([expiresAt])
 }
 
 // ==========================================
@@ -6973,8 +7082,8 @@ model OrganizationAttendanceConfig {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   expectedCheckInTime      String @default("09:00") // "HH:mm" — expected check-in time
-  latenessThresholdMinutes Int    @default(30)       // Minutes of tolerance after expectedCheckInTime
-  geofenceRadiusMeters     Int    @default(500)      // Max distance (meters) from venue for valid clock-in
+  latenessThresholdMinutes Int    @default(30) // Minutes of tolerance after expectedCheckInTime
+  geofenceRadiusMeters     Int    @default(500) // Max distance (meters) from venue for valid clock-in
 
   // Module defaults (inherited by venues without terminal-level overrides)
   attendanceTracking   Boolean @default(false)
@@ -7339,98 +7448,98 @@ enum TpvMessageDeliveryStatus {
 // ==========================================
 
 model TrainingModule {
-  id             String   @id @default(cuid())
-  organizationId String?  // null = global (available to all orgs)
+  id             String        @id @default(cuid())
+  organizationId String? // null = global (available to all orgs)
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   title            String
-  description      String   @db.Text
+  description      String             @db.Text
   coverImageUrl    String?
   category         TrainingCategory   @default(GENERAL)
   difficulty       TrainingDifficulty @default(BASIC)
-  estimatedMinutes Int      @default(5)
-  isRequired       Boolean  @default(false)
-  position         Int      @default(0)
-  status           TrainingStatus @default(DRAFT)
+  estimatedMinutes Int                @default(5)
+  isRequired       Boolean            @default(false)
+  position         Int                @default(0)
+  status           TrainingStatus     @default(DRAFT)
 
   // Feature tags for auto-filtering (e.g., ["SERIALIZED_INVENTORY", "PAYMENTS"])
   // Empty = shown to ALL orgs. Non-empty = only shown if org has at least one matching module
-  featureTags    String[] @default([])
+  featureTags String[] @default([])
 
   // Venue-level filtering: if non-empty, only these venues see the training
   // Empty = all venues in the org (or all venues globally if organizationId is null)
-  venueIds       String[] @default([])
+  venueIds String[] @default([])
 
-  quizPassThreshold  Int      @default(70)   // Percentage needed to pass (1-100)
-  quizMaxAttempts    Int      @default(0)    // 0 = unlimited
+  quizPassThreshold Int @default(70) // Percentage needed to pass (1-100)
+  quizMaxAttempts   Int @default(0) // 0 = unlimited
 
-  createdBy      String
-  createdByName  String
+  createdBy     String
+  createdByName String
 
-  steps          TrainingStep[]
-  quizQuestions  TrainingQuizQuestion[]
-  progress       TrainingProgress[]
+  steps         TrainingStep[]
+  quizQuestions TrainingQuizQuestion[]
+  progress      TrainingProgress[]
 
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@map("training_modules")
 }
 
 model TrainingStep {
-  id               String   @id @default(cuid())
+  id               String         @id @default(cuid())
   trainingModuleId String
   trainingModule   TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
 
-  stepNumber       Int
-  title            String
-  instruction      String   @db.Text
-  mediaType        TrainingMediaType @default(IMAGE)
-  mediaUrl         String?
-  thumbnailUrl     String?
-  tipText          String?
+  stepNumber   Int
+  title        String
+  instruction  String            @db.Text
+  mediaType    TrainingMediaType @default(IMAGE)
+  mediaUrl     String?
+  thumbnailUrl String?
+  tipText      String?
 
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([trainingModuleId, stepNumber])
   @@map("training_steps")
 }
 
 model TrainingQuizQuestion {
-  id               String   @id @default(cuid())
+  id               String         @id @default(cuid())
   trainingModuleId String
   trainingModule   TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
 
-  questionType     TrainingQuestionType @default(MULTIPLE_CHOICE)
-  question         String
-  options          String[]
-  correctIndex     Int
-  correctIndices   Int[]    @default([])  // For MULTI_SELECT: multiple correct answers
-  position         Int      @default(0)
-  explanation      String?    // Explanation shown after quiz submission
+  questionType   TrainingQuestionType @default(MULTIPLE_CHOICE)
+  question       String
+  options        String[]
+  correctIndex   Int
+  correctIndices Int[]                @default([]) // For MULTI_SELECT: multiple correct answers
+  position       Int                  @default(0)
+  explanation    String? // Explanation shown after quiz submission
 
-  createdAt        DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@map("training_quiz_questions")
 }
 
 model TrainingProgress {
-  id               String   @id @default(cuid())
+  id               String         @id @default(cuid())
   trainingModuleId String
   trainingModule   TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
   staffId          String
   venueId          String
 
-  lastStepViewed   Int      @default(0)
-  isCompleted      Boolean  @default(false)
-  quizScore        Int?
-  quizTotal        Int?
-  quizPassed       Boolean?
-  attemptNumber    Int      @default(1)
+  lastStepViewed Int      @default(0)
+  isCompleted    Boolean  @default(false)
+  quizScore      Int?
+  quizTotal      Int?
+  quizPassed     Boolean?
+  attemptNumber  Int      @default(1)
 
-  startedAt        DateTime @default(now())
-  completedAt      DateTime?
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
 
   @@unique([trainingModuleId, staffId])
   @@map("training_progress")
@@ -7470,37 +7579,37 @@ enum TrainingQuestionType {
 // ==========================================
 
 enum ReservationStatus {
-  PENDING    // Created, awaiting confirmation
-  CONFIRMED  // Confirmed (auto or manual)
+  PENDING // Created, awaiting confirmation
+  CONFIRMED // Confirmed (auto or manual)
   CHECKED_IN // Guest arrived
-  COMPLETED  // Service delivered
-  CANCELLED  // Cancelled by customer, staff, or system (expired)
-  NO_SHOW    // Guest didn't arrive within grace period
+  COMPLETED // Service delivered
+  CANCELLED // Cancelled by customer, staff, or system (expired)
+  NO_SHOW // Guest didn't arrive within grace period
 }
 
 enum ReservationChannel {
-  DASHBOARD   // Created by staff
-  WEB         // Customer self-service (booking page/widget)
-  PHONE       // Phone booking logged by staff
-  WHATSAPP    // WhatsApp integration
-  APP         // Mobile app
-  WALK_IN     // Walk-in converted to reservation
+  DASHBOARD // Created by staff
+  WEB // Customer self-service (booking page/widget)
+  PHONE // Phone booking logged by staff
+  WHATSAPP // WhatsApp integration
+  APP // Mobile app
+  WALK_IN // Walk-in converted to reservation
   THIRD_PARTY // External sync (Google Reserve, etc.)
 }
 
 enum DepositStatus {
-  PENDING   // Deposit requested, not yet paid
+  PENDING // Deposit requested, not yet paid
   CARD_HOLD // Card captured via Stripe SetupIntent, not yet charged
-  PAID      // Payment received
-  REFUNDED  // Deposit returned to customer
+  PAID // Payment received
+  REFUNDED // Deposit returned to customer
   FORFEITED // Lost due to no-show/late cancel
 }
 
 enum WaitlistStatus {
-  WAITING   // In queue
-  NOTIFIED  // Slot opened, customer notified
-  PROMOTED  // Converted to reservation
-  EXPIRED   // No response within window
+  WAITING // In queue
+  NOTIFIED // Slot opened, customer notified
+  PROMOTED // Converted to reservation
+  EXPIRED // No response within window
   CANCELLED // Left waitlist
 }
 
@@ -7551,7 +7660,7 @@ model Reservation {
 
   // Staff assignment
   createdById String?
-  createdBy   Staff? @relation("ReservationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy   Staff?  @relation("ReservationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   // Status timestamps (audit trail for MVP — proper ReservationHistory in Phase 2)
   confirmedAt DateTime?
@@ -7594,9 +7703,9 @@ model Reservation {
 }
 
 enum ClassSessionStatus {
-  SCHEDULED  // Open for bookings
-  CANCELLED  // Cancelled — no new bookings allowed
-  COMPLETED  // Session already happened
+  SCHEDULED // Open for bookings
+  CANCELLED // Cancelled — no new bookings allowed
+  COMPLETED // Session already happened
 }
 
 model ClassSession {
@@ -7610,7 +7719,7 @@ model ClassSession {
   // Schedule
   startsAt DateTime
   endsAt   DateTime
-  duration Int      // Minutes (denormalized for queries)
+  duration Int // Minutes (denormalized for queries)
 
   // Capacity — overrides product.maxParticipants for this session
   capacity Int
@@ -7628,7 +7737,7 @@ model ClassSession {
   reservations Reservation[]
 
   createdById String?
-  createdBy   Staff? @relation("ClassSessionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy   Staff?  @relation("ClassSessionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -7706,10 +7815,10 @@ model ReservationSettings {
   requireEmail         Boolean @default(false)
 
   // Cancellation
-  allowCustomerCancel   Boolean @default(true)
-  minHoursBeforeCancel  Int?    @default(2) // minimum hours before start to allow cancellation
-  forfeitDeposit        Boolean @default(false)
-  noShowFeePercent      Int? // percentage of deposit/service charged on no-show
+  allowCustomerCancel  Boolean @default(true)
+  minHoursBeforeCancel Int?    @default(2) // minimum hours before start to allow cancellation
+  forfeitDeposit       Boolean @default(false)
+  noShowFeePercent     Int? // percentage of deposit/service charged on no-show
 
   // Reminders
   remindersEnabled  Boolean  @default(true)
@@ -7769,8 +7878,8 @@ model CreditPackItem {
   // Relations
   balances CreditItemBalance[]
 
-  @@index([creditPackId])
   @@unique([creditPackId, productId])
+  @@index([creditPackId])
 }
 
 model CreditPackPurchase {
@@ -7828,9 +7937,9 @@ model CreditItemBalance {
   // Relations
   transactions CreditTransaction[]
 
+  @@unique([creditPackPurchaseId, creditPackItemId])
   @@index([creditPackPurchaseId])
   @@index([productId])
-  @@unique([creditPackPurchaseId, creditPackItemId])
 }
 
 model CreditTransaction {
@@ -7882,12 +7991,12 @@ model PaymentLink {
   id        String @id @default(cuid())
   shortCode String @unique // 8-char alphanumeric (nanoid)
 
-  venueId              String
-  venue                Venue             @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  ecommerceMerchantId  String
-  ecommerceMerchant    EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Restrict)
-  createdById          String
-  createdBy            Staff             @relation(fields: [createdById], references: [id])
+  venueId             String
+  venue               Venue             @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  ecommerceMerchantId String
+  ecommerceMerchant   EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Restrict)
+  createdById         String
+  createdBy           Staff             @relation(fields: [createdById], references: [id])
 
   purpose PaymentLinkPurpose @default(PAYMENT)
 
@@ -7908,7 +8017,7 @@ model PaymentLink {
   redirectUrl String?
 
   // Custom fields config: [{ id, type: "TEXT"|"SELECT", label, required, options? }]
-  customFields Json?
+  customFields  Json?
   // Tipping config: { presets: [10, 15, 20], allowCustom: true } — null = disabled
   tippingConfig Json?
 
@@ -7928,8 +8037,8 @@ model PaymentLink {
 }
 
 enum PaymentLinkPurpose {
-  PAYMENT  // Accept a payment (generic)
-  ITEM     // Sell an item (linked to Product, creates Order + deducts inventory)
+  PAYMENT // Accept a payment (generic)
+  ITEM // Sell an item (linked to Product, creates Order + deducts inventory)
   DONATION // Accept a donation (open amount)
 }
 
@@ -7950,41 +8059,41 @@ enum PaymentLinkStatus {
 // ==========================================
 
 model CashDrawerSession {
-  id              String   @id @default(cuid())
+  id              String            @id @default(cuid())
   venueId         String
-  venue           Venue    @relation(fields: [venueId], references: [id])
+  venue           Venue             @relation(fields: [venueId], references: [id])
   deviceName      String?
   openedByStaffId String
   openedByName    String
-  openedAt        DateTime @default(now())
-  startingAmount  Decimal  @db.Decimal(12, 2)
+  openedAt        DateTime          @default(now())
+  startingAmount  Decimal           @db.Decimal(12, 2)
   closedByStaffId String?
   closedByName    String?
   closedAt        DateTime?
-  actualAmount    Decimal? @db.Decimal(12, 2)
-  overShort       Decimal? @db.Decimal(12, 2)
+  actualAmount    Decimal?          @db.Decimal(12, 2)
+  overShort       Decimal?          @db.Decimal(12, 2)
   closingNote     String?
-  status          CashDrawerStatus @default(OPEN)
+  status          CashDrawerStatus  @default(OPEN)
   events          CashDrawerEvent[]
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
 
   @@index([venueId])
   @@index([status])
 }
 
 model CashDrawerEvent {
-  id        String   @id @default(cuid())
+  id        String              @id @default(cuid())
   sessionId String
-  session   CashDrawerSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session   CashDrawerSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   venueId   String
   type      CashDrawerEventType
-  amount    Decimal  @db.Decimal(12, 2)
+  amount    Decimal             @db.Decimal(12, 2)
   note      String?
   staffId   String
   staffName String
   orderId   String?
-  createdAt DateTime @default(now())
+  createdAt DateTime            @default(now())
 
   @@index([sessionId])
 }
@@ -8007,18 +8116,18 @@ enum CashDrawerEventType {
 // ==========================================
 
 model InventoryTransfer {
-  id               String   @id @default(cuid())
+  id               String         @id @default(cuid())
   venueId          String
-  venue            Venue    @relation(fields: [venueId], references: [id])
+  venue            Venue          @relation(fields: [venueId], references: [id])
   fromLocationName String
   toLocationName   String
   status           TransferStatus @default(DRAFT)
   notes            String?
-  itemsJson        String?  @db.Text
+  itemsJson        String?        @db.Text
   createdById      String?
   createdByName    String
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
   @@index([venueId])
 }
@@ -8035,28 +8144,28 @@ enum TransferStatus {
 // ==========================================
 
 model Estimate {
-  id             String         @id @default(cuid())
-  venueId        String
-  venue          Venue          @relation(fields: [venueId], references: [id])
-  estimateNumber String         @unique
-  customerId     String?
-  customerName   String?
-  customerEmail  String?
-  customerPhone  String?
-  status         EstimateStatus @default(DRAFT)
-  items          EstimateItem[]
-  subtotal       Decimal        @db.Decimal(12, 2)
-  taxAmount      Decimal        @default(0) @db.Decimal(10, 2)
-  total          Decimal        @db.Decimal(12, 2)
-  notes          String?
-  validUntil     DateTime?
-  sentAt         DateTime?
-  acceptedAt     DateTime?
+  id               String         @id @default(cuid())
+  venueId          String
+  venue            Venue          @relation(fields: [venueId], references: [id])
+  estimateNumber   String         @unique
+  customerId       String?
+  customerName     String?
+  customerEmail    String?
+  customerPhone    String?
+  status           EstimateStatus @default(DRAFT)
+  items            EstimateItem[]
+  subtotal         Decimal        @db.Decimal(12, 2)
+  taxAmount        Decimal        @default(0) @db.Decimal(10, 2)
+  total            Decimal        @db.Decimal(12, 2)
+  notes            String?
+  validUntil       DateTime?
+  sentAt           DateTime?
+  acceptedAt       DateTime?
   convertedOrderId String?
-  createdById    String?
-  createdByName  String
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  createdById      String?
+  createdByName    String
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
   @@index([venueId])
   @@index([venueId, status])
@@ -8093,7 +8202,7 @@ model ProductOption {
   id        String               @id @default(cuid())
   venueId   String
   venue     Venue                @relation(fields: [venueId], references: [id])
-  name      String               // e.g., "Tamaño", "Color"
+  name      String // e.g., "Tamaño", "Color"
   values    ProductOptionValue[]
   createdAt DateTime             @default(now())
 
@@ -8104,7 +8213,7 @@ model ProductOptionValue {
   id        String        @id @default(cuid())
   optionId  String
   option    ProductOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
-  value     String        // e.g., "Grande", "Rojo"
+  value     String // e.g., "Grande", "Rojo"
   sortOrder Int           @default(0)
 }
 
@@ -8116,8 +8225,8 @@ model MeasurementUnit {
   id           String   @id @default(cuid())
   venueId      String
   venue        Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  name         String   // e.g., "Kilogramo", "Litro", "Pieza"
-  abbreviation String   // e.g., "kg", "L", "pz"
+  name         String // e.g., "Kilogramo", "Litro", "Pieza"
+  abbreviation String // e.g., "kg", "L", "pz"
   createdAt    DateTime @default(now())
 
   @@index([venueId])
@@ -8128,10 +8237,10 @@ model MeasurementUnit {
 // ==========================================
 
 model Aggregator {
-  id       String  @id @default(cuid())
-  name     String  @unique
-  venueId  String?
-  baseFees Json    // {DEBIT: 0.025, CREDIT: 0.025, AMEX: 0.033, INTERNATIONAL: 0.033}
+  id          String  @id @default(cuid())
+  name        String  @unique
+  venueId     String?
+  baseFees    Json // {DEBIT: 0.025, CREDIT: 0.025, AMEX: 0.033, INTERNATIONAL: 0.033}
   ivaRate     Decimal @default(0.16) @db.Decimal(5, 4) // 0.16 = 16% IVA Mexico
   reportToken String? @unique // Secret token for public report access
   active      Boolean @default(true)
@@ -8150,7 +8259,7 @@ model VenueCommission {
   venueId      String  @unique
   aggregatorId String
   rate         Decimal @db.Decimal(5, 4) // 0.0462 = 4.62%
-  referredBy   String  // "EXTERNAL" or "AGGREGATOR"
+  referredBy   String // "EXTERNAL" or "AGGREGATOR"
   active       Boolean @default(true)
 
   createdAt DateTime @default(now())
@@ -8190,7 +8299,7 @@ model KdsOrderItem {
   kdsOrder    KdsOrder @relation(fields: [kdsOrderId], references: [id], onDelete: Cascade)
   productName String
   quantity    Int
-  modifiers   String?  // JSON array of modifier names
+  modifiers   String? // JSON array of modifier names
   notes       String?
 
   @@index([kdsOrderId])

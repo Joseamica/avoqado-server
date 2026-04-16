@@ -175,7 +175,7 @@ describe('EntityResolverService', () => {
       // Each call should have venueId as a parameter in the tagged template
       // Prisma.$queryRaw with tagged templates passes params as array
       for (const call of mockQueryRaw.mock.calls) {
-        const [strings, ...values] = call
+        const [, ...values] = call
         // strings is the TemplateStringsArray, values are the interpolated params
         expect(values).toContain(VENUE_ID)
       }
@@ -188,7 +188,7 @@ describe('EntityResolverService', () => {
       const result = await service.resolve('RawMaterial', 'Carne', anotherVenueId, makeConfig(), 'update')
 
       expect(result.matches).toBe(1)
-      const [_strings, ...values] = mockQueryRaw.mock.calls[0]
+      const [, ...values] = mockQueryRaw.mock.calls[0]
       expect(values).toContain(anotherVenueId)
       expect(values).not.toContain(VENUE_ID)
     })

@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { TpvMessageStatus, TpvMessageTarget, TpvMessageDeliveryStatus } from '@prisma/client'
+import { TpvMessageStatus, TpvMessageDeliveryStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 

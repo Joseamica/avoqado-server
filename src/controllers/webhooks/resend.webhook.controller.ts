@@ -26,7 +26,7 @@ const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET
  * - Automatic retries with exponential backoff
  * - Event deduplication
  */
-export async function handleResendWebhook(req: Request, res: Response, next: NextFunction) {
+export async function handleResendWebhook(req: Request, res: Response, _next: NextFunction) {
   try {
     // Get the raw body as string (webhook routes use express.raw())
     const payload = req.body.toString('utf-8')

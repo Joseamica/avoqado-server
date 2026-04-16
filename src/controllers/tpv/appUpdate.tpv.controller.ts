@@ -296,18 +296,7 @@ export async function reportUpdateInstalled(req: Request, res: Response) {
  */
 export async function reportInstallAttempt(req: Request, res: Response) {
   try {
-    const {
-      versionName,
-      serialNumber,
-      success,
-      strategy,
-      errorMessage,
-      androidVersion,
-      durationMs,
-      updateSource,
-      deviceModel,
-      packageName,
-    } = req.body
+    const { versionName, serialNumber, success, strategy, errorMessage, androidVersion, durationMs, deviceModel } = req.body
 
     if (success) {
       logger.info(

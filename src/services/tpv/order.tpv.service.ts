@@ -2420,7 +2420,8 @@ export async function addSerializedItemToOrder(
     })
 
     // Mark serialized item as sold (must use tx to reference the OrderItem created in this transaction)
-    await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItem.id, tx)
+    // Plan §1.5 — pass staffId so the custody precheck runs (OFF/WARN/ENFORCE per org).
+    await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItem.id, tx, { staffId })
 
     // Calculate new totals
     const newSubtotal = Number(order.subtotal) + input.price

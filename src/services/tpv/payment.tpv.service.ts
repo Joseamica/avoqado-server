@@ -523,11 +523,14 @@ async function updateOrderTotalsForStandalonePayment(
               serialNumber: item.productSku,
               productName: item.productName,
             })
-            await serializedInventoryService.markAsSold(
-              updatedOrder.venueId,
-              item.productSku, // Serial number stored in productSku
-              item.id, // orderItemId
-            )
+            // Plan §1.5 — pass staffId so the custody precheck logs WARN-mode
+            // violations even at payment-post-hook. The order createdById is
+            // the promoter who rang the sale. We intentionally wrap in
+            // try/catch (already here) so ENFORCE mode does not break payment
+            // completion — the scan/sell precheck is the primary gate.
+            await serializedInventoryService.markAsSold(updatedOrder.venueId, item.productSku, item.id, undefined, {
+              staffId: updatedOrder.createdById ?? staffId,
+            })
             logger.info('✅ Serialized item marked as SOLD', {
               orderId,
               serialNumber: item.productSku,

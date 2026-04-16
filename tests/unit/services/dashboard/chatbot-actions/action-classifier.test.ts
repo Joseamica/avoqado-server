@@ -8,7 +8,7 @@
 // Set required env vars before importing
 process.env.OPENAI_API_KEY = 'test-key'
 
-import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals'
+import { describe, it, expect, jest, beforeEach } from '@jest/globals'
 import { ActionClassifierService } from '@/services/dashboard/chatbot-actions/action-classifier.service'
 import { ActionContext, ActionDefinition } from '@/services/dashboard/chatbot-actions/types'
 

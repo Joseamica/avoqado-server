@@ -1,4 +1,4 @@
-import { SerializedItemStatus } from '@prisma/client'
+import { SerializedItemCustodyState, SerializedItemStatus } from '@prisma/client'
 
 export interface OrgStockOverviewItem {
   id: string
@@ -16,6 +16,15 @@ export interface OrgStockOverviewItem {
   currentVenueName: string | null
   createdById: string | null
   createdByName: string | null
+  // Chain-of-custody (plan §2.2). Populated by the custody service + shown as
+  // new columns in the Detalle SIMs table.
+  custodyState: SerializedItemCustodyState
+  assignedSupervisorId: string | null
+  assignedSupervisorName: string | null
+  assignedPromoterId: string | null
+  assignedPromoterName: string | null
+  promoterAcceptedAt: string | null
+  promoterRejectedAt: string | null
 }
 
 export interface OrgStockBulkGroup {
