@@ -1,7 +1,9 @@
-import { PrismaClient, SerializedItem, SerializedItemStatus, ItemCategory, Prisma } from '@prisma/client'
+import { PrismaClient, SerializedItem, SerializedItemStatus, ItemCategory, Prisma, SimCustodyEnforcementMode } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { getMergedCategories } from '../dashboard/category-resolution.service'
+import logger from '@/config/logger'
+import { SimCustodyError } from '../../lib/sim-custody-error-codes'
 
 // ==========================================
 // SCAN RESULT TYPES
@@ -193,51 +195,126 @@ export class SerializedInventoryService {
   /**
    * Marks an item as sold (called from OrderService).
    * PRICE is passed to OrderItem.unitPrice, NOT stored in SerializedItem.
-   * @param tx - Optional transaction client (required when called inside a transaction)
+   *
+   * Plan §1.5 — SIM custody precheck is gated by Organization.simCustodyEnforcementMode:
+   *   - OFF (default)  — legacy behavior, no custody check
+   *   - WARN           — logs a warning, returns a deprecation hint (caller sets header)
+   *   - ENFORCE        — throws SIM_NOT_ACCEPTED if the Promoter hasn't accepted the SIM
+   *
+   * Anti-drift (plan §1.2): when status→SOLD, custodyState→SOLD in the same UPDATE.
+   *
+   * @param staffId - Optional. When provided, the Promoter-ownership + custody
+   *                  acceptance precheck runs (subject to enforcement mode).
+   *                  When omitted, legacy callers (dashboard, reconciliation
+   *                  scripts) skip the precheck entirely.
    */
-  async markAsSold(venueId: string, serialNumber: string, orderItemId: string, tx?: Prisma.TransactionClient): Promise<SerializedItem> {
+  async markAsSold(
+    venueId: string,
+    serialNumber: string,
+    orderItemId: string,
+    tx?: Prisma.TransactionClient,
+    opts?: { staffId?: string; appVersionCode?: number; minimumVersionWithMisSims?: number },
+  ): Promise<{ item: SerializedItem; deprecationWarning: string | null }> {
     const client = tx || this.db
 
-    // 1. Try venue-level item first
-    const venueItem = await client.serializedItem.findUnique({
-      where: { venueId_serialNumber: { venueId, serialNumber } },
-    })
+    // 1. Locate item (venue-level first, org-level fallback)
+    const item =
+      (await client.serializedItem.findUnique({
+        where: { venueId_serialNumber: { venueId, serialNumber } },
+      })) ?? (await this.findOrgItem(venueId, serialNumber, client))
 
-    if (venueItem) {
-      return client.serializedItem.update({
-        where: { id: venueItem.id },
-        data: {
-          status: 'SOLD',
-          soldAt: new Date(),
-          orderItemId,
-        },
+    if (!item) {
+      // Preserve legacy error surface: attempt update to trigger Prisma's not-found.
+      const updated = await client.serializedItem.update({
+        where: { venueId_serialNumber: { venueId, serialNumber } },
+        data: { status: 'SOLD', custodyState: 'SOLD', soldAt: new Date(), orderItemId },
       })
+      return { item: updated, deprecationWarning: null }
     }
 
-    // 2. Fallback: find org-level item
-    const orgItem = await this.findOrgItem(venueId, serialNumber, client)
+    // 2. Custody precheck (plan §1.5 rollout-controlled)
+    const deprecationWarning = await this.applyCustodyPrecheck(item, opts)
 
-    if (orgItem) {
-      return client.serializedItem.update({
-        where: { id: orgItem.id },
-        data: {
-          status: 'SOLD',
-          soldAt: new Date(),
-          orderItemId,
-          sellingVenueId: venueId,
-        },
-      })
-    }
-
-    // If neither found, the original update will throw a not-found error (preserves legacy behavior)
-    return client.serializedItem.update({
-      where: { venueId_serialNumber: { venueId, serialNumber } },
+    // 3. Update — include sellingVenueId for org-level items
+    const isOrgLevel = !item.venueId
+    const updated = await client.serializedItem.update({
+      where: { id: item.id },
       data: {
         status: 'SOLD',
+        custodyState: 'SOLD', // anti-drift mirror
         soldAt: new Date(),
         orderItemId,
+        ...(isOrgLevel ? { sellingVenueId: venueId } : {}),
       },
     })
+
+    return { item: updated, deprecationWarning }
+  }
+
+  /**
+   * Pre-flight check invoked BEFORE payment/order creation.
+   *
+   * Use this from TPV scan/sell endpoints to surface SIM_NOT_ACCEPTED to the
+   * operator early (plan §3.3). Payment-post-hook callers go through
+   * markAsSold() which runs the same precheck as defense-in-depth.
+   */
+  async ensureSellable(
+    venueId: string,
+    serialNumber: string,
+    opts: { staffId: string; appVersionCode?: number; minimumVersionWithMisSims?: number },
+  ): Promise<{ deprecationWarning: string | null }> {
+    const item =
+      (await this.db.serializedItem.findUnique({
+        where: { venueId_serialNumber: { venueId, serialNumber } },
+      })) ?? (await this.findOrgItem(venueId, serialNumber, this.db))
+    if (!item) return { deprecationWarning: null }
+    const deprecationWarning = await this.applyCustodyPrecheck(item, opts)
+    return { deprecationWarning }
+  }
+
+  private async applyCustodyPrecheck(
+    item: SerializedItem,
+    opts?: { staffId?: string; appVersionCode?: number; minimumVersionWithMisSims?: number },
+  ): Promise<string | null> {
+    if (!opts?.staffId) return null // legacy caller, skip
+
+    // Floor-version safeguard: old TPV clients always run in OFF mode.
+    if (opts.appVersionCode !== undefined && opts.minimumVersionWithMisSims !== undefined) {
+      if (opts.appVersionCode < opts.minimumVersionWithMisSims) {
+        return null
+      }
+    }
+
+    // Resolve enforcement mode via the item's organization.
+    const organizationId = item.organizationId ?? (await this.resolveOrgIdFromVenue(item.venueId))
+    if (!organizationId) return null
+
+    const org = await this.db.organization.findUnique({
+      where: { id: organizationId },
+      select: { simCustodyEnforcementMode: true },
+    })
+    const mode: SimCustodyEnforcementMode = org?.simCustodyEnforcementMode ?? 'OFF'
+    if (mode === 'OFF') return null
+
+    const custodyOk = item.custodyState === 'PROMOTER_HELD' && item.assignedPromoterId === opts.staffId
+    if (custodyOk) return null
+
+    if (mode === 'WARN') {
+      logger.warn('sim-custody precheck would fail (WARN mode)', {
+        serialNumber: item.serialNumber,
+        custodyState: item.custodyState,
+        assignedPromoterId: item.assignedPromoterId,
+        actorStaffId: opts.staffId,
+      })
+      return 'sim-custody-not-accepted'
+    }
+    throw new SimCustodyError('SIM_NOT_ACCEPTED')
+  }
+
+  private async resolveOrgIdFromVenue(venueId: string | null): Promise<string | null> {
+    if (!venueId) return null
+    const venue = await this.db.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+    return venue?.organizationId ?? null
   }
 
   /**
@@ -465,6 +542,11 @@ export class SerializedInventoryService {
 
   /**
    * Marks an item as returned (reverses sale).
+   *
+   * Plan §1.2 anti-drift: custodyState was 'SOLD' after the original sale.
+   * Reverting status → 'RETURNED' also resets custodyState back up the chain
+   * to 'ADMIN_HELD'. No promoter/supervisor retains custody after a return
+   * (business assumption — refund triage happens at the org level).
    */
   async markAsReturned(venueId: string, serialNumber: string): Promise<SerializedItem> {
     return this.db.serializedItem.update({
@@ -472,18 +554,36 @@ export class SerializedInventoryService {
       data: {
         status: 'RETURNED',
         orderItemId: null,
+        custodyState: 'ADMIN_HELD',
+        assignedSupervisorId: null,
+        assignedSupervisorAt: null,
+        assignedPromoterId: null,
+        assignedPromoterAt: null,
+        promoterAcceptedAt: null,
+        promoterRejectedAt: null,
       },
     })
   }
 
   /**
    * Marks an item as damaged.
+   *
+   * Plan §1.2 anti-drift: damaged items are removed from the sellable chain.
+   * custodyState moves to 'ADMIN_HELD' with the custody assignments cleared,
+   * mirroring a `STAFF_TERMINATED`/`DAMAGED_SIM` collect-to-admin path.
    */
   async markAsDamaged(venueId: string, serialNumber: string): Promise<SerializedItem> {
     return this.db.serializedItem.update({
       where: { venueId_serialNumber: { venueId, serialNumber } },
       data: {
         status: 'DAMAGED',
+        custodyState: 'ADMIN_HELD',
+        assignedSupervisorId: null,
+        assignedSupervisorAt: null,
+        assignedPromoterId: null,
+        assignedPromoterAt: null,
+        promoterAcceptedAt: null,
+        promoterRejectedAt: null,
       },
     })
   }

@@ -502,6 +502,15 @@ export class SocketManager implements ISocketManager {
   }
 
   /**
+   * Returns true when the given staff has at least one active Socket.IO
+   * connection registered. Used by SIM custody notifications to decide
+   * whether FCM fallback is required (plan §1.8).
+   */
+  public isUserOnline(userId: string): boolean {
+    return this.roomManager.getUserSockets(userId).length > 0
+  }
+
+  /**
    * Get server statistics
    */
   public getServerStats() {

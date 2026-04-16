@@ -69,6 +69,11 @@ model Organization {
   itemCategories  ItemCategory[]
   serializedItems SerializedItem[]
 
+  // SIM custody enforcement mode (plan §1.5). Controls whether markAsSold
+  // blocks sales for SIMs not yet accepted by the Promoter on TPV.
+  // Rollout: off → warn → enforce. Org-scoped so staged rollout works per tenant.
+  simCustodyEnforcementMode SimCustodyEnforcementMode @default(OFF)
+
   // Organization-level attendance config defaults (inherited by venues without custom config)
   attendanceConfig OrganizationAttendanceConfig?
 
@@ -601,6 +606,10 @@ model Staff {
 
   // Stock Counts
   stockCounts StockCount[] @relation("StockCountCreatedBy")
+
+  // ✅ Serialized-inventory chain-of-custody (SIM flow)
+  serializedItemsAsSupervisor SerializedItem[] @relation("SerializedItemSupervisor")
+  serializedItemsAsPromoter   SerializedItem[] @relation("SerializedItemPromoter")
 
   // Marketing Campaigns (superadmin)
   emailTemplatesCreated     EmailTemplate[]     @relation("EmailTemplateCreator")
@@ -6255,6 +6264,24 @@ model SerializedItem {
   orderItemId String?    @unique
   orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
 
+  // ==========================================
+  // Chain-of-custody (SIM assignment flow)
+  // ADMIN_HELD → SUPERVISOR_HELD → PROMOTER_PENDING → PROMOTER_HELD → SOLD
+  // Derived mirror of `status=SOLD` kept consistent by custody service transactions.
+  // ==========================================
+  custodyState          SerializedItemCustodyState @default(ADMIN_HELD)
+  assignedSupervisorId  String?
+  assignedSupervisor    Staff?                     @relation("SerializedItemSupervisor", fields: [assignedSupervisorId], references: [id])
+  assignedSupervisorAt  DateTime?
+  assignedPromoterId    String?
+  assignedPromoter      Staff?                     @relation("SerializedItemPromoter", fields: [assignedPromoterId], references: [id])
+  assignedPromoterAt    DateTime?
+  promoterAcceptedAt    DateTime?
+  promoterRejectedAt    DateTime?
+  custodyVersion        Int                        @default(0)
+
+  custodyEvents SerializedItemCustodyEvent[] @relation("CustodyEventItem")
+
   // Audit
   createdAt DateTime @default(now())
   createdBy String // Staff ID that registered the item
@@ -6266,6 +6293,8 @@ model SerializedItem {
   @@index([organizationId, categoryId])
   @@index([organizationId, status])
   @@index([serialNumber])
+  @@index([assignedSupervisorId, custodyState])
+  @@index([assignedPromoterId, custodyState])
 }
 
 // ===== CREDIT ASSESSMENT ENUMS =====
@@ -6308,6 +6337,87 @@ enum SerializedItemStatus {
   SOLD // Ya vendido
   RETURNED // Devuelto
   DAMAGED // Dañado o perdido
+}
+
+// ==========================================
+// SERIALIZED INVENTORY - Chain-of-custody tracking
+// Used by PlayTelecom / telecom venues to digitize the SIM handoff flow
+// Admin (OWNER) → Supervisor (MANAGER) → Promoter (WAITER) → Sale
+// ==========================================
+enum SerializedItemCustodyState {
+  ADMIN_HELD // En almacén / sin supervisor asignado
+  SUPERVISOR_HELD // En poder del Supervisor (sin promotor)
+  PROMOTER_PENDING // Asignado a Promotor, pendiente de aceptación en TPV
+  PROMOTER_HELD // Aceptado por el Promotor, puede venderse
+  PROMOTER_REJECTED // Rechazado por el Promotor; requiere recolección del Supervisor
+  SOLD // Venta completada (mirror de status=SOLD)
+}
+
+enum SerializedItemCollectionReason {
+  STAFF_TERMINATED // Baja de empleado
+  DAMAGED_SIM // SIM defectuoso
+}
+
+// Rollout flag controlling whether markAsSold enforces SIM custody acceptance.
+// OFF (default): log only, no block. WARN: log + X-Deprecation-Warning header.
+// ENFORCE: block sale with SIM_NOT_ACCEPTED.
+enum SimCustodyEnforcementMode {
+  OFF
+  WARN
+  ENFORCE
+}
+
+enum SerializedItemCustodyEventType {
+  ASSIGNED_TO_SUPERVISOR
+  ASSIGNED_TO_PROMOTER
+  ACCEPTED_BY_PROMOTER
+  REJECTED_BY_PROMOTER
+  COLLECTED_FROM_PROMOTER
+  COLLECTED_FROM_SUPERVISOR
+  MARKED_SOLD // mirror de la venta para timeline unificada
+}
+
+// Append-only audit log for custody transitions. Source of truth for dispute
+// resolution; richer than ActivityLog since it includes from/to states and
+// optimistic-locking correlation via idempotencyRequestId.
+model SerializedItemCustodyEvent {
+  id                   String                          @id @default(cuid())
+  serializedItemId     String
+  serializedItem       SerializedItem                  @relation("CustodyEventItem", fields: [serializedItemId], references: [id], onDelete: Cascade)
+  serialNumber         String // denormalized for forensic queries even if item is deleted
+  eventType            SerializedItemCustodyEventType
+  fromState            SerializedItemCustodyState?
+  toState              SerializedItemCustodyState
+  fromStaffId          String?
+  toStaffId            String?
+  actorStaffId         String
+  reason               SerializedItemCollectionReason?
+  idempotencyRequestId String? // FK to IdempotencyRequest (bulk request → N events share this)
+  payloadVersion       Int                             @default(1)
+  createdAt            DateTime                        @default(now())
+
+  @@index([serializedItemId, createdAt])
+  @@index([serialNumber, createdAt])
+  @@index([idempotencyRequestId])
+}
+
+// Per-request idempotency cache. Scope: (org, actor, endpoint, key). A bulk
+// request produces ONE IdempotencyRequest row + N CustodyEvent rows. Replay of
+// the same key returns the cached responseBody exactly.
+model IdempotencyRequest {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorStaffId   String
+  endpoint       String // e.g. "POST /sim-custody/assign-to-supervisor"
+  idempotencyKey String // client-supplied UUID
+  requestHash    String // SHA256 of normalized body (detects key reuse with different body)
+  responseStatus Int // 200
+  responseBody   Json // full snapshot for exact replay
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime // createdAt + 24h
+
+  @@unique([organizationId, actorStaffId, endpoint, idempotencyKey])
+  @@index([expiresAt])
 }
 
 // ==========================================

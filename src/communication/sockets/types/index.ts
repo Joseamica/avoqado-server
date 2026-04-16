@@ -148,6 +148,11 @@ export enum SocketEventType {
   TPV_MESSAGE_ACK = 'tpv_message_ack', // Terminal acknowledged/dismissed message
   TPV_MESSAGE_RESPONSE = 'tpv_message_response', // Terminal submitted survey response
 
+  // Business Events - SIM Custody (PlayTelecom chain-of-custody, plan §1.8)
+  SIM_CUSTODY_ASSIGNED_TO_PROMOTER = 'sim-custody.assigned-to-promoter',
+  SIM_CUSTODY_RECOLLECTED_FROM_PROMOTER = 'sim-custody.recollected-from-promoter',
+  SIM_CUSTODY_REJECTED_ACKNOWLEDGED = 'sim-custody.rejected-acknowledged',
+
   // Error Events
   ERROR = 'error',
   RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded',

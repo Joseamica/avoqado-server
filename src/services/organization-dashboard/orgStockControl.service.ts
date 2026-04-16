@@ -40,6 +40,10 @@ export class OrgStockControlService {
         venue: { select: { id: true, name: true } },
         sellingVenue: { select: { id: true, name: true } },
         registeredFromVenue: { select: { id: true, name: true } },
+        // Chain-of-custody relations (plan §2.2) — powers the Supervisor /
+        // Promoter columns in the Detalle SIMs table without extra queries.
+        assignedSupervisor: { select: { id: true, firstName: true, lastName: true } },
+        assignedPromoter: { select: { id: true, firstName: true, lastName: true } },
       },
       orderBy: { createdAt: 'desc' },
     })
@@ -257,23 +261,35 @@ export class OrgStockControlService {
       }
     }
 
-    const serializedItems: OrgStockOverviewItem[] = items.map(item => ({
-      id: item.id,
-      serialNumber: item.serialNumber,
-      status: item.status,
-      categoryId: item.categoryId,
-      categoryName: item.category?.name ?? 'Sin categoría',
-      createdAt: item.createdAt.toISOString(),
-      soldAt: item.soldAt?.toISOString() ?? null,
-      registeredFromVenueId: item.registeredFromVenueId ?? null,
-      registeredFromVenueName: item.registeredFromVenue?.name ?? null,
-      sellingVenueId: item.sellingVenueId ?? null,
-      sellingVenueName: item.sellingVenue?.name ?? null,
-      currentVenueId: item.venueId ?? null,
-      currentVenueName: item.venue?.name ?? null,
-      createdById: item.createdBy ?? null,
-      createdByName: item.createdBy ? (staffMap.get(item.createdBy) ?? null) : null,
-    }))
+    const serializedItems: OrgStockOverviewItem[] = items.map(item => {
+      const supervisor = (item as any).assignedSupervisor as { id: string; firstName: string; lastName: string } | null | undefined
+      const promoter = (item as any).assignedPromoter as { id: string; firstName: string; lastName: string } | null | undefined
+      return {
+        id: item.id,
+        serialNumber: item.serialNumber,
+        status: item.status,
+        categoryId: item.categoryId,
+        categoryName: item.category?.name ?? 'Sin categoría',
+        createdAt: item.createdAt.toISOString(),
+        soldAt: item.soldAt?.toISOString() ?? null,
+        registeredFromVenueId: item.registeredFromVenueId ?? null,
+        registeredFromVenueName: item.registeredFromVenue?.name ?? null,
+        sellingVenueId: item.sellingVenueId ?? null,
+        sellingVenueName: item.sellingVenue?.name ?? null,
+        currentVenueId: item.venueId ?? null,
+        currentVenueName: item.venue?.name ?? null,
+        createdById: item.createdBy ?? null,
+        createdByName: item.createdBy ? (staffMap.get(item.createdBy) ?? null) : null,
+        // Chain-of-custody fields (new)
+        custodyState: item.custodyState,
+        assignedSupervisorId: item.assignedSupervisorId ?? null,
+        assignedSupervisorName: supervisor ? `${supervisor.firstName} ${supervisor.lastName}`.trim() : null,
+        assignedPromoterId: item.assignedPromoterId ?? null,
+        assignedPromoterName: promoter ? `${promoter.firstName} ${promoter.lastName}`.trim() : null,
+        promoterAcceptedAt: item.promoterAcceptedAt?.toISOString() ?? null,
+        promoterRejectedAt: item.promoterRejectedAt?.toISOString() ?? null,
+      }
+    })
 
     const bulkGroups = this.groupByBulkUpload(items, staffMap)
     const aggregatesBySucursal = this.aggregateBySucursal(items)
