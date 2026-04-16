@@ -46,12 +46,15 @@ export const UpdateVenueSettingsSchema = z.object({
     requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
 
     // Attendance — lateness detection
+    // null = remove venue-level override so the venue inherits from
+    // OrganizationAttendanceConfig. A string/number = explicit venue override.
     expectedCheckInTime: z
       .string()
       .regex(/^\d{2}:\d{2}$/)
+      .nullable()
       .optional(),
-    latenessThresholdMinutes: z.number().int().min(0).max(120).optional(),
-    geofenceRadiusMeters: z.number().int().min(50).max(5000).optional(),
+    latenessThresholdMinutes: z.number().int().min(0).max(120).nullable().optional(),
+    geofenceRadiusMeters: z.number().int().min(50).max(5000).nullable().optional(),
 
     // Reviews
     autoReplyReviews: z.boolean().optional(),

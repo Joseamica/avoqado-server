@@ -30,9 +30,14 @@ export const DEFAULT_VENUE_SETTINGS = {
   requirePinLogin: true,
 
   // Attendance — lateness detection
-  expectedCheckInTime: '09:00', // "HH:mm" — expected check-in time
-  latenessThresholdMinutes: 30, // Minutes of tolerance after expectedCheckInTime
-  geofenceRadiusMeters: 500, // Max distance (meters) from venue for valid clock-in
+  // null = no venue-level override → attendance logic falls back to
+  // OrganizationAttendanceConfig, then to the system default ('09:00'/30/500).
+  // We DON'T hardcode '09:00'/30/500 here anymore because the venue-level
+  // TpvConfig form used to silently save these defaults on every save,
+  // turning inherited NULL values into accidental overrides (prod bug).
+  expectedCheckInTime: null as string | null, // "HH:mm" — explicit venue override
+  latenessThresholdMinutes: null as number | null, // Minutes of tolerance after expectedCheckInTime
+  geofenceRadiusMeters: null as number | null, // Max distance (meters) from venue for valid clock-in
 
   // Auto Clock-Out (HR automation - Square-style)
   autoClockOutEnabled: false, // Enable automatic clock-out at fixed time
