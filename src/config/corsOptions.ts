@@ -90,6 +90,14 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'x-client-type',
       'x-client-id',
       'x-venue-id',
+      // Idempotency-Key: bulk endpoints (sim-custody) deduplicate retries by
+      // this header. Browser blocks the real request in preflight if not
+      // whitelisted here.
+      'Idempotency-Key',
+      // TPV/Android sends X-App-Version-Code for staged-rollout gating (plan §1.5).
+      'X-App-Version-Code',
+      // Correlation ID for request tracing (used across sim-custody logs + others).
+      'X-Correlation-Id',
       'Origin',
       'X-Requested-With',
       'Accept',

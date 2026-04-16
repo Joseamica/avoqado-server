@@ -151,7 +151,10 @@ export class SimCustodyService {
    * Does NOT create items — only assigns existing (plan §1.1 policy).
    */
   async assignToSupervisor(input: AssignToSupervisorInput): Promise<BulkResult> {
-    const { actor, supervisorStaffId, fallbackCategoryId, rows, idempotencyRequestId } = input
+    // `fallbackCategoryId` kept in the API shape for backward-compat but no
+    // longer drives any validation. Pulled out intentionally so its absence
+    // in future consumer payloads doesn't surface as a TS error.
+    const { actor, supervisorStaffId, rows, idempotencyRequestId } = input
     await this.assertStaffBelongsToOrg(supervisorStaffId, actor.organizationId)
 
     const results: BulkResultRow[] = []
@@ -161,10 +164,11 @@ export class SimCustodyService {
           const item = await this.findOrgItem(tx, actor.organizationId, row.serialNumber)
           if (!item) throw new SimCustodyError('NOT_FOUND')
 
-          const requestedCategoryId = row.categoryId ?? fallbackCategoryId ?? null
-          if (requestedCategoryId && requestedCategoryId !== item.categoryId) {
-            throw new SimCustodyError('CATEGORY_MISMATCH')
-          }
+          // Plan revisión UX: la categoría del SIM no se valida al asignar
+          // (se conserva la categoría original del registro). El dialog usa
+          // `fallbackCategoryId` solo como filtro de búsqueda en el tab
+          // "Buscar"; no bloqueamos la asignación si el cliente omite el
+          // campo o envía valores heterogéneos.
           if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
           if (item.custodyState === 'SUPERVISOR_HELD' && item.assignedSupervisorId === supervisorStaffId) {
             // Idempotent inside a non-replayed call: already assigned to same supervisor → noop ok.
@@ -442,9 +446,18 @@ export class SimCustodyService {
 
   /**
    * Atomic update that bumps custodyVersion. Throws VERSION_CONFLICT if the
-   * row changed between read and write. Uses raw SQL because Prisma's
-   * `updateMany` mutation input excludes FK scalar fields (assignedSupervisorId,
-   * assignedPromoterId) and we need to set/null them alongside the state.
+   * row changed between read and write.
+   *
+   * Implementation uses a single fixed-shape `$executeRaw` call (no
+   * `Prisma.join` over a dynamic array). The previous implementation built
+   * a variable `SET` list with tagged-template nesting which, under bulk
+   * (100+ rows per request) was triggering Postgres `stack depth limit
+   * exceeded` from accumulated prepared-statement plans.
+   *
+   * Behavior: ALWAYS sets all 7 custody columns — caller passes null
+   * explicitly when it wants to clear one. Drops dead-code COALESCE sentinel
+   * paths. Also merges the post-update read by using `RETURNING *` via a
+   * Prisma raw query so we save one round-trip per row.
    */
   private async updateWithVersion(
     tx: Prisma.TransactionClient,
@@ -459,24 +472,33 @@ export class SimCustodyService {
       promoterRejectedAt?: Date | null
     },
   ): Promise<SerializedItem> {
-    // Build parameterized UPDATE. Every column uses COALESCE with a sentinel so
-    // we can leave columns untouched when the caller omits them, vs. explicit
-    // null which should clear the column.
-    const setClauses: Prisma.Sql[] = [Prisma.sql`"custodyState" = ${patch.custodyState}::"SerializedItemCustodyState"`]
-    if ('assignedSupervisorId' in patch) setClauses.push(Prisma.sql`"assignedSupervisorId" = ${patch.assignedSupervisorId}`)
-    if ('assignedSupervisorAt' in patch) setClauses.push(Prisma.sql`"assignedSupervisorAt" = ${patch.assignedSupervisorAt}`)
-    if ('assignedPromoterId' in patch) setClauses.push(Prisma.sql`"assignedPromoterId" = ${patch.assignedPromoterId}`)
-    if ('assignedPromoterAt' in patch) setClauses.push(Prisma.sql`"assignedPromoterAt" = ${patch.assignedPromoterAt}`)
-    if ('promoterAcceptedAt' in patch) setClauses.push(Prisma.sql`"promoterAcceptedAt" = ${patch.promoterAcceptedAt}`)
-    if ('promoterRejectedAt' in patch) setClauses.push(Prisma.sql`"promoterRejectedAt" = ${patch.promoterRejectedAt}`)
-    setClauses.push(Prisma.sql`"custodyVersion" = "custodyVersion" + 1`)
+    // Normalise: when a key is missing from patch, preserve current row value.
+    // When explicitly null, clear the column. When set, write the value.
+    const assignedSupervisorId =
+      'assignedSupervisorId' in patch ? patch.assignedSupervisorId : item.assignedSupervisorId
+    const assignedSupervisorAt =
+      'assignedSupervisorAt' in patch ? patch.assignedSupervisorAt : item.assignedSupervisorAt
+    const assignedPromoterId = 'assignedPromoterId' in patch ? patch.assignedPromoterId : item.assignedPromoterId
+    const assignedPromoterAt = 'assignedPromoterAt' in patch ? patch.assignedPromoterAt : item.assignedPromoterAt
+    const promoterAcceptedAt = 'promoterAcceptedAt' in patch ? patch.promoterAcceptedAt : item.promoterAcceptedAt
+    const promoterRejectedAt = 'promoterRejectedAt' in patch ? patch.promoterRejectedAt : item.promoterRejectedAt
 
-    const setSql = Prisma.join(setClauses, ', ')
-    const rowsChanged = await tx.$executeRaw(
-      Prisma.sql`UPDATE "SerializedItem" SET ${setSql} WHERE "id" = ${item.id} AND "custodyVersion" = ${item.custodyVersion}`,
-    )
-    if (rowsChanged === 0) throw new SimCustodyError('VERSION_CONFLICT')
-    return tx.serializedItem.findUniqueOrThrow({ where: { id: item.id } })
+    const rows = await tx.$queryRaw<SerializedItem[]>`
+      UPDATE "SerializedItem"
+         SET "custodyState"         = ${patch.custodyState}::"SerializedItemCustodyState",
+             "assignedSupervisorId" = ${assignedSupervisorId},
+             "assignedSupervisorAt" = ${assignedSupervisorAt},
+             "assignedPromoterId"   = ${assignedPromoterId},
+             "assignedPromoterAt"   = ${assignedPromoterAt},
+             "promoterAcceptedAt"   = ${promoterAcceptedAt},
+             "promoterRejectedAt"   = ${promoterRejectedAt},
+             "custodyVersion"       = "custodyVersion" + 1
+       WHERE "id" = ${item.id}
+         AND "custodyVersion" = ${item.custodyVersion}
+       RETURNING *
+    `
+    if (rows.length === 0) throw new SimCustodyError('VERSION_CONFLICT')
+    return rows[0]
   }
 
   private async writeEvent(

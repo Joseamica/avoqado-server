@@ -523,6 +523,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items (scan & sell at TPV)
     'serialized-inventory:create', // Can register (Alta de Productos)
+    // SIM custody — CASHIER can also be a "promoter" in PlayTelecom-style orgs
+    // where promoter role is venue-configurable. Ownership is enforced at the
+    // service layer (`assignedPromoterId === currentStaffId`).
+    'tpv-sim-custody:accept',
+    'tpv-sim-custody:reject',
   ],
 
   /**
@@ -608,6 +613,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'sim-custody:assign-to-promoter', // Supervisor assigns SIMs to Promoter
     'sim-custody:collect-from-promoter', // Owning-supervisor reclaims from Promoter
     'sim-custody:view-all-supervisors', // Read-only peer visibility across supervisors
+    // MANAGER can ALSO be a promoter in PlayTelecom (venue-configurable role).
+    // Ownership is enforced at the service layer so adding these is safe.
+    'tpv-sim-custody:accept',
+    'tpv-sim-custody:reject',
     // NO: tpv-messages:send (ADMIN+ only)
     // NO: tpv-terminal:settings (ADMIN+ only)
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
@@ -677,6 +686,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-products:write',
     'tpv-messages:read', // Can view messages
     'tpv-messages:send', // Can send messages to terminals
+    // SIM custody inbox (ADMIN operates TPV in some venues too).
+    'tpv-sim-custody:accept',
+    'tpv-sim-custody:reject',
     // NO: tpv-settings:* (OWNER only - org-level TPV config)
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
@@ -751,6 +763,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'sim-custody:assign-to-promoter', // Admin can also assign down the chain if needed
     'sim-custody:collect-from-supervisor', // Admin reclaims from Supervisor
     'sim-custody:view-all-supervisors', // Full cross-supervisor visibility
+    // Allow OWNER to use TPV inbox too (edge case: venue owner also operates as promoter).
+    'tpv-sim-custody:accept',
+    'tpv-sim-custody:reject',
     // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
   ],
 
