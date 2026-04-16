@@ -474,10 +474,8 @@ export class SimCustodyService {
   ): Promise<SerializedItem> {
     // Normalise: when a key is missing from patch, preserve current row value.
     // When explicitly null, clear the column. When set, write the value.
-    const assignedSupervisorId =
-      'assignedSupervisorId' in patch ? patch.assignedSupervisorId : item.assignedSupervisorId
-    const assignedSupervisorAt =
-      'assignedSupervisorAt' in patch ? patch.assignedSupervisorAt : item.assignedSupervisorAt
+    const assignedSupervisorId = 'assignedSupervisorId' in patch ? patch.assignedSupervisorId : item.assignedSupervisorId
+    const assignedSupervisorAt = 'assignedSupervisorAt' in patch ? patch.assignedSupervisorAt : item.assignedSupervisorAt
     const assignedPromoterId = 'assignedPromoterId' in patch ? patch.assignedPromoterId : item.assignedPromoterId
     const assignedPromoterAt = 'assignedPromoterAt' in patch ? patch.assignedPromoterAt : item.assignedPromoterAt
     const promoterAcceptedAt = 'promoterAcceptedAt' in patch ? patch.promoterAcceptedAt : item.promoterAcceptedAt
