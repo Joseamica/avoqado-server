@@ -58,13 +58,11 @@ export async function setOnboardingState(
     throw new Error('El estado excede el tamaño máximo permitido')
   }
 
-  // Prisma.JsonValue requires objects; wrap primitives if needed.
-  const payload = state === null || typeof state === 'object' ? state : { value: state }
-
+  // Prisma's Json field accepts any JSON value (including primitives) — no wrapping needed.
   const row = await prisma.staffOnboardingState.upsert({
     where: { staffId_venueId_key: { staffId, venueId, key } },
-    update: { state: payload as any },
-    create: { staffId, venueId, key, state: payload as any },
+    update: { state: state as any },
+    create: { staffId, venueId, key, state: state as any },
     select: { key: true, state: true, updatedAt: true },
   })
 

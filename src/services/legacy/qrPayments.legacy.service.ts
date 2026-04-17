@@ -133,22 +133,26 @@ export async function getLegacyPayments(
   }
 
   try {
-    const conditions = [`"venueId" = $1`, `status = 'ACCEPTED'`]
+    // All column refs MUST be prefixed with "p." because the data query joins
+    // Tip (which also has `createdAt` and `amount` columns). Without the prefix
+    // Postgres throws `column reference "createdAt" is ambiguous` and the
+    // whole legacy branch silently returns [].
+    const conditions = [`p."venueId" = $1`, `p.status = 'ACCEPTED'`]
     const params: any[] = [LEGACY_MINDFORM_VENUE_ID]
     let paramIdx = 2
 
     if (filters?.startDate) {
-      conditions.push(`"createdAt" >= $${paramIdx}`)
+      conditions.push(`p."createdAt" >= $${paramIdx}`)
       params.push(new Date(filters.startDate))
       paramIdx++
     }
     if (filters?.endDate) {
-      conditions.push(`"createdAt" <= $${paramIdx}`)
+      conditions.push(`p."createdAt" <= $${paramIdx}`)
       params.push(new Date(filters.endDate))
       paramIdx++
     }
     if (filters?.search) {
-      conditions.push(`(last4 ILIKE $${paramIdx} OR "waiterName" ILIKE $${paramIdx} OR CAST(amount AS TEXT) LIKE $${paramIdx})`)
+      conditions.push(`(p.last4 ILIKE $${paramIdx} OR p."waiterName" ILIKE $${paramIdx} OR CAST(p.amount AS TEXT) LIKE $${paramIdx})`)
       params.push(`%${filters.search}%`)
       paramIdx++
     }
@@ -174,7 +178,8 @@ export async function getLegacyPayments(
          ORDER BY p."createdAt" DESC`,
         params,
       ),
-      legacyPool.query(`SELECT COUNT(*)::int AS total FROM "Payment" WHERE ${where}`, params),
+      // Count query uses the same alias `p` so the prefixed WHERE clause works.
+      legacyPool.query(`SELECT COUNT(*)::int AS total FROM "Payment" p WHERE ${where}`, params),
     ])
 
     const rows = dataResult.rows.map(mapToPaymentShape)
