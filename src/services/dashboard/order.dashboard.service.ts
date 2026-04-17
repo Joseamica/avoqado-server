@@ -202,7 +202,7 @@ export async function getOrderById(orderId: string) {
  */
 export async function updateOrder(orderId: string, data: Partial<Order>) {
   // Extract allowed fields for SUPERADMIN editing
-  const { status, customerName, tableId, servedById, tipAmount, total, subtotal, createdAt, orderNumber, type } = data as any
+  const { status, customerId, customerName, tableId, servedById, tipAmount, total, subtotal, createdAt, orderNumber, type } = data as any
 
   // Get the current order to check previous status
   const currentOrder = await prisma.order.findUnique({
@@ -218,6 +218,7 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
     where: { id: orderId },
     data: {
       ...(status !== undefined && { status }),
+      ...(customerId !== undefined && { customerId: customerId || null }),
       ...(customerName !== undefined && { customerName }),
       ...(tableId !== undefined && { tableId: tableId || null }),
       ...(servedById !== undefined && { servedById: servedById || null }),
