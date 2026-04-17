@@ -128,6 +128,7 @@ export async function getLegacyPayments(
   filters?: LegacyPaymentFilters,
 ): Promise<{ rows: ReturnType<typeof mapToPaymentShape>[]; total: number }> {
   if (!legacyPool) {
+    logger.warn('[LegacyQRPayments] Skipping fetch — legacyPool is null (LEGACY_DATABASE_URL not configured)')
     return { rows: [], total: 0 }
   }
 
@@ -154,6 +155,13 @@ export async function getLegacyPayments(
 
     const where = conditions.join(' AND ')
 
+    logger.info('[LegacyQRPayments] Querying legacy DB', {
+      venueId: LEGACY_MINDFORM_VENUE_ID,
+      startDate: filters?.startDate,
+      endDate: filters?.endDate,
+      hasSearch: !!filters?.search,
+    })
+
     const [dataResult, countResult] = await Promise.all([
       legacyPool.query(
         `SELECT p.id, p.amount, p.status, p.method, p."cardBrand", p.last4,
@@ -172,9 +180,18 @@ export async function getLegacyPayments(
     const rows = dataResult.rows.map(mapToPaymentShape)
     const total = countResult.rows[0]?.total ?? 0
 
+    logger.info('[LegacyQRPayments] Fetched legacy payments', {
+      rowCount: rows.length,
+      totalMatching: total,
+    })
+
     return { rows, total }
   } catch (err) {
-    logger.error('[LegacyQRPayments] Failed to fetch legacy payments', err)
+    logger.error('[LegacyQRPayments] Failed to fetch legacy payments', {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+      filters,
+    })
     return { rows: [], total: 0 }
   }
 }

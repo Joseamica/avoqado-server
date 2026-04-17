@@ -17,7 +17,10 @@ import prisma from '../../utils/prismaClient'
 // MARK: - Types
 
 export interface CreateOrderItemInput {
-  productId: string
+  // Product items set productId; custom items (e.g. "Otro importe") set name + unitPrice.
+  productId?: string | null
+  name?: string | null
+  unitPrice?: number | null // cents — only used for custom items
   quantity: number
   notes?: string | null
   modifierIds?: string[]
@@ -32,6 +35,9 @@ export interface CreateOrderInput {
   customerName?: string | null
   customerPhone?: string | null
   specialRequests?: string | null
+  tip?: number // cents
+  note?: string | null
+  splitType?: string | null
 }
 
 export interface CreatedOrderResponse {
@@ -266,19 +272,28 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     throw new BadRequestError('At least one item is required')
   }
 
+  // Split items into product items (need DB lookup) and custom items (trust client name + unitPrice).
+  const productInputs = input.items.filter(
+    (item): item is CreateOrderItemInput & { productId: string } => typeof item.productId === 'string' && item.productId.length > 0,
+  )
+  const customInputs = input.items.filter(item => !item.productId)
+
   // Fetch products and validate
-  const uniqueProductIds = [...new Set(input.items.map(item => item.productId))]
-  const products = await prisma.product.findMany({
-    where: {
-      id: { in: uniqueProductIds },
-      venueId,
-    },
-    include: {
-      category: {
-        select: { name: true },
-      },
-    },
-  })
+  const uniqueProductIds = [...new Set(productInputs.map(item => item.productId))]
+  const products =
+    uniqueProductIds.length > 0
+      ? await prisma.product.findMany({
+          where: {
+            id: { in: uniqueProductIds },
+            venueId,
+          },
+          include: {
+            category: {
+              select: { name: true },
+            },
+          },
+        })
+      : []
 
   if (products.length !== uniqueProductIds.length) {
     const foundIds = products.map(p => p.id)
@@ -287,7 +302,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   }
 
   // Fetch all modifiers if any items have modifiers
-  const allModifierIds = input.items.flatMap(item => item.modifierIds || [])
+  const allModifierIds = productInputs.flatMap(item => item.modifierIds || [])
   const modifiers =
     allModifierIds.length > 0
       ? await prisma.modifier.findMany({
@@ -300,16 +315,16 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
         })
       : []
 
-  logger.info(`📱 [ORDER.MOBILE] Validated ${products.length} products, ${modifiers.length} modifiers`)
+  logger.info(`📱 [ORDER.MOBILE] Validated ${products.length} products, ${modifiers.length} modifiers, ${customInputs.length} custom items`)
 
   // Generate order number
   const orderNumber = `ORD-${Date.now()}`
 
-  // Calculate totals and prepare items data
-  // NOTE: Prices are treated as tax-inclusive (same behavior as TPV service).
+  // Calculate totals and prepare items data.
+  // NOTE: Prices are treated as tax-inclusive (Mexico: IVA is already in price).
   // taxAmount is stored as 0 on items and order. Tax is not added on top of the price.
   let subtotal = 0
-  const itemsData = input.items.map(item => {
+  const productItemsData = productInputs.map(item => {
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
 
@@ -349,6 +364,31 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     }
   })
 
+  // Custom line items ("Otro importe"): no productId, client-provided name + unitPrice (cents).
+  const customItemsData = customInputs.map(item => {
+    const unitPrice = (item.unitPrice ?? 0) / 100 // cents -> decimal
+    const itemTotal = unitPrice * item.quantity
+    subtotal += itemTotal
+    return {
+      productId: null,
+      productName: item.name || 'Otro importe',
+      productSku: null,
+      categoryName: null,
+      quantity: item.quantity,
+      unitPrice: new Prisma.Decimal(unitPrice),
+      discountAmount: new Prisma.Decimal(0),
+      taxAmount: new Prisma.Decimal(0),
+      total: new Prisma.Decimal(itemTotal),
+      notes: item.notes || null,
+    }
+  })
+
+  const itemsData = [...productItemsData, ...customItemsData]
+
+  // Tip (cents -> decimal). In Mexico, tip is added on top of the tax-inclusive subtotal.
+  const tipDecimal = (input.tip || 0) / 100
+  const total = subtotal + tipDecimal
+
   // Create order with items in a transaction
   const order = await prisma.order.create({
     data: {
@@ -365,11 +405,12 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       subtotal: new Prisma.Decimal(subtotal),
       discountAmount: new Prisma.Decimal(0),
       taxAmount: new Prisma.Decimal(0),
-      total: new Prisma.Decimal(subtotal),
-      remainingBalance: new Prisma.Decimal(subtotal),
+      tipAmount: new Prisma.Decimal(tipDecimal),
+      total: new Prisma.Decimal(total),
+      remainingBalance: new Prisma.Decimal(total),
       customerName: input.customerName || null,
       customerPhone: input.customerPhone || null,
-      specialRequests: input.specialRequests || null,
+      specialRequests: input.note || input.specialRequests || null,
       version: 1,
       items: {
         create: itemsData,
@@ -395,7 +436,9 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     },
   })
 
-  logger.info(`✅ [ORDER.MOBILE] Order created | id=${order.id} | number=${order.orderNumber} | total=${subtotal}`)
+  logger.info(
+    `✅ [ORDER.MOBILE] Order created | id=${order.id} | number=${order.orderNumber} | subtotal=${subtotal} | tip=${tipDecimal} | total=${total}`,
+  )
 
   // Emit Socket.IO event for real-time order creation
   const broadcastingService = socketManager.getBroadcastingService()
@@ -576,6 +619,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       id: true,
       orderNumber: true,
       paymentStatus: true,
+      subtotal: true,
       total: true,
       remainingBalance: true,
       venueId: true,
@@ -666,9 +710,13 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       },
     })
 
-    // Update order payment status
-    const orderTotal = Number(order.total)
-    const remainingAfterPayment = orderTotal - amountDecimal
+    // Update order payment status.
+    // Convention: order.total = subtotal + tipAmount (Mexico: tax is inclusive in subtotal).
+    // Recompute total defensively in case the order was created before tip was known.
+    const orderSubtotal = Number(order.subtotal)
+    const newTotal = orderSubtotal + tipDecimal
+    const amountPaidIncludingTip = amountDecimal + tipDecimal
+    const remainingAfterPayment = newTotal - amountPaidIncludingTip
 
     await tx.order.update({
       where: { id: orderId },
@@ -677,6 +725,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         status: remainingAfterPayment <= 0 ? 'COMPLETED' : 'PENDING',
         remainingBalance: Math.max(0, remainingAfterPayment),
         tipAmount: tipDecimal,
+        total: new Prisma.Decimal(newTotal),
         splitType: 'FULLPAYMENT',
       },
     })

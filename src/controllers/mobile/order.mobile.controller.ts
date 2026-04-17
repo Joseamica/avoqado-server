@@ -52,7 +52,7 @@ export const listOrders = async (req: Request, res: Response, next: NextFunction
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const { items, staffId, orderType, source, tableId, customerName, customerPhone, specialRequests } = req.body
+    const { items, staffId, orderType, source, tableId, customerName, customerPhone, specialRequests, tip, note, splitType } = req.body
 
     // Validate required fields
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -62,18 +62,22 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       })
     }
 
-    // Validate each item has required fields
+    // Validate each item has required fields.
+    // Accepts either a product item (with productId) or a custom line item
+    // (no productId, but must have name + unitPrice — e.g. "Otro importe").
     for (const item of items) {
-      if (!item.productId) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cada item requiere productId',
-        })
-      }
       if (!item.quantity || item.quantity < 1) {
         return res.status(400).json({
           success: false,
           message: 'Cada item requiere quantity >= 1',
+        })
+      }
+      const hasProductId = typeof item.productId === 'string' && item.productId.length > 0
+      const hasCustomFields = typeof item.name === 'string' && item.name.length > 0 && typeof item.unitPrice === 'number'
+      if (!hasProductId && !hasCustomFields) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cada item requiere productId o (name + unitPrice)',
         })
       }
     }
@@ -97,6 +101,9 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       customerName,
       customerPhone,
       specialRequests,
+      tip: typeof tip === 'number' ? tip : 0,
+      note,
+      splitType,
     })
 
     res.status(201).json({

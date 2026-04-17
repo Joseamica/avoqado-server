@@ -375,6 +375,9 @@ model Venue {
   // ==========================================
   kdsOrders KdsOrder[]
 
+  // Per-staff onboarding/tour state records scoped to this venue
+  staffOnboardingStates StaffOnboardingState[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -617,6 +620,9 @@ model Staff {
 
   // Payment Links
   paymentLinksCreated PaymentLink[]
+
+  // Per-venue onboarding/tour progress (checklists, banner dismissals, auto-launch flags)
+  onboardingStates StaffOnboardingState[]
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -8310,4 +8316,31 @@ enum KdsOrderStatus {
   PREPARING
   READY
   COMPLETED
+}
+
+// ============================================================================
+// STAFF ONBOARDING STATE
+// ============================================================================
+// Per-staff, per-venue key/value store for onboarding UX state:
+// - Tour banner dismissals (key: "tour-banner::<banner-id>")
+// - Checklist progress        (key: "inventory-checklist", etc)
+// - Welcome tour auto-launch  (key: "inventory-welcome-auto-launched")
+// Replaces localStorage so progress persists across devices and can be analyzed.
+// ============================================================================
+
+model StaffOnboardingState {
+  id      String @id @default(cuid())
+  staffId String
+  venueId String
+  key     String // e.g. "inventory-checklist", "tour-banner::inventory-welcome"
+  state   Json // Arbitrary JSON payload (booleans, step maps, timestamps)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  staff Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, venueId, key])
+  @@index([staffId, venueId])
 }
