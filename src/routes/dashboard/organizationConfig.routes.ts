@@ -49,6 +49,41 @@ async function requireOrgOwner(req: Request, res: Response, next: NextFunction) 
 
 const orgOwnerAccess = [authenticateTokenMiddleware, requireOrgOwner]
 
+/**
+ * Middleware: Verify the authenticated user is ANY staff member in the target organization.
+ * Used by lookup endpoints (like the promoter dropdown for SIM custody) where the
+ * Supervisor — who holds MANAGER role, not OWNER — legitimately needs to see the
+ * list of WAITER/CASHIER staff to assign SIMs to.
+ * SUPERADMIN bypasses.
+ */
+async function requireOrgStaff(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId, role } = (req as any).authContext
+    const { orgId } = req.params
+
+    if (role === 'SUPERADMIN') return next()
+
+    const assignment = await prisma.staffVenue.findFirst({
+      where: {
+        staffId: userId,
+        venue: { organizationId: orgId },
+        active: true,
+      },
+      select: { id: true },
+    })
+
+    if (!assignment) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: 'No perteneces a esta organización' })
+    }
+
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
+const orgStaffAccess = [authenticateTokenMiddleware, requireOrgStaff]
+
 // =============================================================================
 // ORG GOALS
 // =============================================================================
@@ -304,6 +339,75 @@ router.delete('/org-categories/:categoryId', orgOwnerAccess, async (req: Request
 // =============================================================================
 // ORG TEAM MANAGEMENT
 // =============================================================================
+
+/**
+ * GET /dashboard/organizations/:orgId/promoters
+ * Lookup endpoint used by the SIM custody "Assign to Promoter" dropdown.
+ *
+ * Returns ONLY staff with role `WAITER` or `CASHIER` in at least one venue of
+ * the org (the business rule for "Promoter" in the PlayTelecom-style flow —
+ * see `src/services/promoters/promoters.service.ts`).
+ *
+ * Accessible to any authenticated staff member of the org (including MANAGER,
+ * who holds the "Supervisor" role in PlayTelecom terminology). The stricter
+ * `/team` endpoint is reserved for OWNER-only team management operations.
+ */
+router.get('/promoters', orgStaffAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId } = req.params
+
+    const staff = await prisma.staff.findMany({
+      where: {
+        active: true,
+        venues: {
+          some: {
+            venue: { organizationId: orgId },
+            role: { in: [StaffRole.WAITER, StaffRole.CASHIER] },
+            active: true,
+          },
+        },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        venues: {
+          where: {
+            venue: { organizationId: orgId },
+            role: { in: [StaffRole.WAITER, StaffRole.CASHIER] },
+            active: true,
+          },
+          select: {
+            venueId: true,
+            role: true,
+            venue: { select: { name: true, slug: true } },
+          },
+        },
+      },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+    })
+
+    const data = staff.map(s => ({
+      id: s.id,
+      firstName: s.firstName,
+      lastName: s.lastName,
+      email: s.email,
+      phone: s.phone,
+      venues: s.venues.map(v => ({
+        venueId: v.venueId,
+        venueName: v.venue.name,
+        venueSlug: v.venue.slug,
+        role: v.role,
+      })),
+    }))
+
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+})
 
 /**
  * GET /dashboard/organizations/:orgId/team
