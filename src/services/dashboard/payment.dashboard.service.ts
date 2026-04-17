@@ -153,9 +153,7 @@ export async function getPaymentsData(
       newRows: allNewPayments.length,
     })
 
-    const merged = [...allNewPayments, ...legacy.rows].sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    )
+    const merged = [...allNewPayments, ...legacy.rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     const combinedTotal = merged.length
     const paginated = merged.slice(skip, skip + take)
 
