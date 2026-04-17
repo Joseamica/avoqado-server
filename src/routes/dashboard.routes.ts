@@ -32,6 +32,7 @@ import * as modifierInventoryAnalyticsController from '../controllers/dashboard/
 import * as notificationController from '../controllers/dashboard/notification.dashboard.controller'
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
+import * as refundController from '../controllers/dashboard/refund.dashboard.controller'
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
@@ -2949,6 +2950,20 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'), // Allows WAITER+ to view payment receipts (read-only)
   paymentController.getPaymentReceipts,
+)
+
+// Refund endpoints (manual cash/dashboard refunds — not the TPV terminal flow)
+router.post(
+  '/venues/:venueId/payments/:paymentId/refund',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  refundController.issueRefund,
+)
+router.get(
+  '/venues/:venueId/payments/:paymentId/refunds',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  refundController.listRefunds,
 )
 
 /**

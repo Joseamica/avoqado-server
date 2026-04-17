@@ -108,6 +108,68 @@ export async function getPaymentsData(
     }
   }
 
+  // ─── MindForm legacy QR bridge — short-circuit pagination ───
+  // For MindForm we CANNOT use Prisma's skip/take here, because we need to
+  // merge its legacy payments with the new-system ones before slicing the
+  // current page. Otherwise page N of the new data + all legacy gets sliced
+  // wrong and later pages end up almost empty.
+  // MindForm's total volume is small (hundreds), so we fetch all rows and
+  // slice in memory.
+  if (venueId === MINDFORM_NEW_VENUE_ID) {
+    logger.info('[Payments] MindForm detected — attempting legacy QR merge', {
+      venueId,
+      startDate: filters?.startDate,
+      endDate: filters?.endDate,
+    })
+
+    const sharedInclude = {
+      processedBy: true,
+      shift: true,
+      order: { include: { table: true } },
+      merchantAccount: {
+        include: {
+          provider: { select: { id: true, code: true, name: true } },
+        },
+      },
+      transactionCost: true,
+    }
+
+    const [allNewPayments, legacy] = await Promise.all([
+      prisma.payment.findMany({
+        where: whereClause,
+        include: sharedInclude,
+        orderBy: { createdAt: 'desc' },
+      }),
+      getLegacyPayments({
+        startDate: filters?.startDate,
+        endDate: filters?.endDate,
+        search: filters?.search,
+      }),
+    ])
+
+    logger.info('[Payments] Legacy merge result', {
+      legacyRows: legacy.rows.length,
+      legacyTotal: legacy.total,
+      newRows: allNewPayments.length,
+    })
+
+    const merged = [...allNewPayments, ...legacy.rows].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    )
+    const combinedTotal = merged.length
+    const paginated = merged.slice(skip, skip + take)
+
+    return {
+      data: paginated as any,
+      meta: {
+        total: combinedTotal,
+        page,
+        pageSize,
+        pageCount: Math.ceil(combinedTotal / pageSize),
+      },
+    }
+  }
+
   // Usamos $transaction para ejecutar ambas queries en paralelo en la misma versión de la BD
   const [payments, total] = await prisma.$transaction([
     prisma.payment.findMany({
@@ -144,48 +206,6 @@ export async function getPaymentsData(
     }),
   ])
 
-  // ─── Legacy QR payments merge (MindForm only) ───
-  // When the venue is MindForm, we also fetch payments from the legacy avo-pwa
-  // database and merge them sorted by createdAt desc. This is a temporary bridge
-  // until the legacy QR service is decommissioned.
-  if (venueId === MINDFORM_NEW_VENUE_ID) {
-    logger.info('[Payments] MindForm detected — attempting legacy QR merge', {
-      venueId,
-      startDate: filters?.startDate,
-      endDate: filters?.endDate,
-    })
-    const legacy = await getLegacyPayments({
-      startDate: filters?.startDate,
-      endDate: filters?.endDate,
-      search: filters?.search,
-    })
-    logger.info('[Payments] Legacy merge result', {
-      legacyRows: legacy.rows.length,
-      legacyTotal: legacy.total,
-      newRows: payments.length,
-    })
-
-    if (legacy.rows.length > 0) {
-      // Merge and re-sort by date desc, then re-paginate
-      const allPayments = [...payments, ...legacy.rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-
-      const combinedTotal = total + legacy.total
-      const start = skip
-      const end = skip + take
-      const paginated = allPayments.slice(start, end)
-
-      return {
-        data: paginated as any,
-        meta: {
-          total: combinedTotal,
-          page,
-          pageSize,
-          pageCount: Math.ceil(combinedTotal / pageSize),
-        },
-      }
-    }
-  }
-
   // Devolvemos el objeto con el formato esperado
   return {
     data: payments,
@@ -210,6 +230,7 @@ export async function getPaymentById(paymentId: string) {
       order: {
         include: {
           table: true, // AQUÍ INCLUIMOS LA INFORMACIÓN DE LA MESA
+          customer: true, // Customer associated with the order (nullable)
           items: {
             // Line items (products + custom "Otro importe" entries) with their modifiers,
             // so the mobile/web drawer can render the full breakdown.
