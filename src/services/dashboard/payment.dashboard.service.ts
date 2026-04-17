@@ -210,6 +210,16 @@ export async function getPaymentById(paymentId: string) {
       order: {
         include: {
           table: true, // AQUÍ INCLUIMOS LA INFORMACIÓN DE LA MESA
+          items: {
+            // Line items (products + custom "Otro importe" entries) with their modifiers,
+            // so the mobile/web drawer can render the full breakdown.
+            include: {
+              modifiers: {
+                include: { modifier: true },
+              },
+            },
+            orderBy: { sequence: 'asc' },
+          },
         },
       },
       merchantAccount: {
