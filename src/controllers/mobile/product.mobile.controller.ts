@@ -122,7 +122,7 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
 export async function createProduct(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const { name, price, sku, categoryId, type, description, taxRate, trackInventory, durationMinutes } = req.body
+    const { name, price, sku, gtin, categoryId, type, description, taxRate, trackInventory, durationMinutes } = req.body
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'name es requerido' })
@@ -150,6 +150,7 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         name: name.trim(),
         venueId,
         sku: finalSku,
+        gtin: gtin?.trim() || null,
         description: description || null,
         categoryId: finalCategoryId,
         type: type || 'FOOD_AND_BEV',

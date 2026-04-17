@@ -24,6 +24,7 @@ import * as discountMobileController from '../controllers/mobile/discount.mobile
 import * as couponMobileController from '../controllers/mobile/coupon.mobile.controller'
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
+import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
@@ -1427,6 +1428,12 @@ router.get('/notifications/unread-count', authenticateTokenMiddleware, notificat
 router.patch('/notifications/:notificationId/read', authenticateTokenMiddleware, notificationMobileController.markAsRead)
 router.patch('/notifications/mark-all-read', authenticateTokenMiddleware, notificationMobileController.markAllAsRead)
 router.delete('/notifications/:notificationId', authenticateTokenMiddleware, notificationMobileController.deleteNotification)
+
+// ============================================================================
+// SUPPLIERS
+// ============================================================================
+
+router.get('/venues/:venueId/suppliers', authenticateTokenMiddleware, supplierMobileController.listSuppliers)
 
 // ============================================================================
 // INVENTORY

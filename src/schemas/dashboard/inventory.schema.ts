@@ -682,6 +682,10 @@ export const ProductWizardStep1Schema = z.object({
     price: z.number().positive('Price must be positive'),
     categoryId: z.string().cuid('Valid category ID is required'),
     imageUrl: z.union([z.string().url(), z.literal('')]).optional(),
+    // SKU optional — if omitted/empty, backend auto-generates.
+    // GTIN optional — Global Trade Item Number (UPC/EAN barcode).
+    sku: z.string().max(64).optional(),
+    gtin: z.string().max(32).optional(),
   }),
 })
 
