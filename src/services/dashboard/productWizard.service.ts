@@ -19,6 +19,9 @@ export interface WizardStep1Data {
   price: number
   categoryId: string
   imageUrl?: string
+  // Inventory codes (optional; SKU auto-generated if empty)
+  sku?: string
+  gtin?: string
   // Product type (defaults to FOOD if omitted)
   type?: string
   // Service-specific (SERVICE, APPOINTMENTS_SERVICE)
@@ -73,29 +76,58 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data)
     throw new AppError('Category not found or does not belong to this venue', 404)
   }
 
-  // Create product
-  const product = await prisma.product.create({
-    data: {
-      venueId,
-      categoryId: data.categoryId,
-      name: data.name,
-      sku: `SKU-${Date.now()}`, // Auto-generate SKU
-      description: data.description,
-      price: new Decimal(data.price),
-      imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
-      active: true,
-      ...(data.type && { type: data.type as any }),
-      ...(data.duration && { duration: data.duration }),
-      ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
-      ...(data.layoutConfig !== undefined && {
-        layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
-      }),
-      externalData: {
-        wizardCompleted: false,
-        inventoryConfigured: false,
+  // SKU: use provided value if non-empty, otherwise auto-generate.
+  // GTIN: optional; pass through if provided, omit (NULL) otherwise.
+  const providedSku = data.sku?.trim()
+  const providedGtin = data.gtin?.trim()
+
+  // Create product. Handle unique-constraint collisions (P2002) with a
+  // user-friendly Spanish message identifying WHICH column collided, so the
+  // frontend toast can tell the user exactly which code to change instead of
+  // showing a generic 500.
+  let product
+  try {
+    product = await prisma.product.create({
+      data: {
+        venueId,
+        categoryId: data.categoryId,
+        name: data.name,
+        sku: providedSku && providedSku.length > 0 ? providedSku : `SKU-${Date.now()}`,
+        gtin: providedGtin && providedGtin.length > 0 ? providedGtin : undefined,
+        description: data.description,
+        price: new Decimal(data.price),
+        imageUrl: data.imageUrl && data.imageUrl.trim() !== '' ? data.imageUrl : undefined,
+        active: true,
+        ...(data.type && { type: data.type as any }),
+        ...(data.duration && { duration: data.duration }),
+        ...(data.maxParticipants && { maxParticipants: data.maxParticipants }),
+        ...(data.layoutConfig !== undefined && {
+          layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
+        }),
+        externalData: {
+          wizardCompleted: false,
+          inventoryConfigured: false,
+        },
       },
-    },
-  })
+    })
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const target = (error.meta?.target as string[] | string | undefined) ?? ''
+      const isSkuConflict = Array.isArray(target) ? target.includes('sku') : String(target).includes('sku')
+      const isGtinConflict = Array.isArray(target) ? target.includes('gtin') : String(target).includes('gtin')
+      if (isSkuConflict) {
+        throw new AppError(
+          `El SKU "${providedSku}" ya está en uso por otro producto en esta sucursal. Usa un código distinto o déjalo vacío para auto-generar.`,
+          409,
+        )
+      }
+      if (isGtinConflict) {
+        throw new AppError(`El GTIN "${providedGtin}" ya está asignado a otro producto en esta sucursal.`, 409)
+      }
+      throw new AppError('Ya existe un producto con esos datos en esta sucursal.', 409)
+    }
+    throw error
+  }
 
   return {
     success: true,

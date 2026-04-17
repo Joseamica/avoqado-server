@@ -239,6 +239,8 @@ import simCustodyDashboardRoutes from './dashboard/simCustody.dashboard.routes'
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
+// Per-staff, per-venue onboarding UX state (tour banners, checklists, welcome-tour flags)
+import staffOnboardingRoutes from './dashboard/staffOnboarding.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3529,6 +3531,9 @@ router.use('/organizations/:orgId', simCustodyDashboardRoutes)
 // Stores Analysis routes for PlayTelecom/White-Label dashboard
 // Venue-level routes that fetch organization data with white-label access control
 router.use('/venues/:venueId/stores-analysis', storesAnalysisRoutes)
+
+// Per-staff, per-venue onboarding UX state (tour banners, checklists, welcome-tour flags)
+router.use('/venues/:venueId', staffOnboardingRoutes)
 
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)

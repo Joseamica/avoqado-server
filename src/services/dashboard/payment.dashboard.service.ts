@@ -6,6 +6,7 @@ import prisma from '../../utils/prismaClient'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
 import { MINDFORM_NEW_VENUE_ID, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
+import logger from '../../config/logger'
 
 export interface PaymentFilters {
   // Multi-select filter arrays (preferred)
@@ -148,10 +149,20 @@ export async function getPaymentsData(
   // database and merge them sorted by createdAt desc. This is a temporary bridge
   // until the legacy QR service is decommissioned.
   if (venueId === MINDFORM_NEW_VENUE_ID) {
+    logger.info('[Payments] MindForm detected — attempting legacy QR merge', {
+      venueId,
+      startDate: filters?.startDate,
+      endDate: filters?.endDate,
+    })
     const legacy = await getLegacyPayments({
       startDate: filters?.startDate,
       endDate: filters?.endDate,
       search: filters?.search,
+    })
+    logger.info('[Payments] Legacy merge result', {
+      legacyRows: legacy.rows.length,
+      legacyTotal: legacy.total,
+      newRows: payments.length,
     })
 
     if (legacy.rows.length > 0) {
