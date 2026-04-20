@@ -150,13 +150,22 @@ export const checkPermission = (requiredPermission: string) => {
 
       // Check if user is SUPERADMIN (they have access to ALL venues)
       // SUPERADMIN is determined by having ANY StaffVenue with role = SUPERADMIN
-      const superAdminVenue = await prisma.staffVenue.findFirst({
-        where: {
-          staffId: authContext.userId,
-          role: StaffRole.SUPERADMIN,
-        },
-        select: { id: true },
-      })
+      //
+      // IMPERSONATION: bypass is disabled while impersonating so the middleware
+      // evaluates permissions against the effective (target) role, not the real
+      // SUPERADMIN's. The impersonation guard already enforces read-only so
+      // writes never reach here in practice, but this also keeps GET-route
+      // permission checks (e.g., checkPermission for a read-only dashboard API)
+      // behaving consistently with what the target would see.
+      const superAdminVenue = authContext.isImpersonating
+        ? null
+        : await prisma.staffVenue.findFirst({
+            where: {
+              staffId: authContext.userId,
+              role: StaffRole.SUPERADMIN,
+            },
+            select: { id: true },
+          })
 
       const isSuperAdmin = !!superAdminVenue
 

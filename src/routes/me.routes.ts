@@ -47,12 +47,25 @@ router.get('/access', authenticateTokenMiddleware, async (req: Request, res: Res
       throw new BadRequestError('venueId is required either in query params or JWT token')
     }
 
-    logger.info(`me.routes: Getting access for user ${userId} in venue ${targetVenueId}`)
+    logger.info(`me.routes: Getting access for user ${userId} in venue ${targetVenueId}`, {
+      isImpersonating: !!authContext.isImpersonating,
+    })
 
     // Create a cache for this request (useful if we add more endpoints that need access)
     const cache = createAccessCache()
 
-    const access = await getUserAccess(userId, targetVenueId, cache)
+    // When impersonating, disable the SUPERADMIN bypass so the access payload matches
+    // the target's effective access — not the real SUPERADMIN's.
+    const impersonation =
+      authContext.isImpersonating && authContext.impersonation
+        ? {
+            isImpersonating: true as const,
+            mode: authContext.impersonation.mode,
+            ...(authContext.impersonation.mode === 'role' ? { forcedRole: authContext.role } : {}),
+          }
+        : undefined
+
+    const access = await getUserAccess(userId, targetVenueId, cache, impersonation)
 
     res.json(access)
   } catch (error) {

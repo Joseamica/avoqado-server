@@ -98,6 +98,7 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
       }
 
       const { userId } = authContext
+      const isImpersonating = !!authContext.isImpersonating
 
       // Initialize request-level cache if not exists
       if (!req.accessCache) {
@@ -106,13 +107,19 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
 
       // Check if user is SUPERADMIN (they have access to ALL venues)
       // SUPERADMIN is determined by having ANY StaffVenue with role = SUPERADMIN
-      const superAdminVenue = await prisma.staffVenue.findFirst({
-        where: {
-          staffId: userId,
-          role: StaffRole.SUPERADMIN,
-        },
-        select: { id: true },
-      })
+      //
+      // IMPERSONATION: the SUPERADMIN bypass is intentionally disabled during an
+      // impersonation session so the middleware runs the normal access resolution
+      // for the effective user / role.
+      const superAdminVenue = isImpersonating
+        ? null
+        : await prisma.staffVenue.findFirst({
+            where: {
+              staffId: userId,
+              role: StaffRole.SUPERADMIN,
+            },
+            select: { id: true },
+          })
 
       // SUPERADMIN always passes through - they have access to ALL venues
       if (superAdminVenue) {
@@ -132,9 +139,21 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
       }
 
       // Get user access (with caching)
+      // During impersonation, pass the override so role-mode sessions see the forced role
+      // and user-mode sessions re-resolve based on the impersonated user's actual perms.
+      const impersonationOverride = isImpersonating && authContext.impersonation
+        ? {
+            isImpersonating: true as const,
+            mode: authContext.impersonation.mode as 'user' | 'role',
+            ...(authContext.impersonation.mode === 'role'
+              ? { forcedRole: authContext.role as StaffRole }
+              : {}),
+          }
+        : undefined
+
       let access: UserAccess
       try {
-        access = await getUserAccess(userId, targetVenueId, req.accessCache)
+        access = await getUserAccess(userId, targetVenueId, req.accessCache, impersonationOverride)
       } catch (error) {
         // User doesn't have access to this venue
         logger.warn(`verifyAccess: User ${userId} denied access to venue ${targetVenueId}`, error)

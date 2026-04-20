@@ -2,6 +2,7 @@ import jwt, { Secret, SignOptions } from 'jsonwebtoken'
 import { StaffRole } from '@prisma/client'
 import crypto from 'crypto'
 import dotenv from 'dotenv'
+import { ImpersonationActClaim } from './types/impersonation'
 
 dotenv.config()
 
@@ -22,11 +23,17 @@ if (!REFRESH_TOKEN_SECRET) {
  * Payload para el token de acceso.
  */
 export interface AccessTokenPayload extends jwt.JwtPayload {
-  sub: string // Staff.id
+  sub: string // Staff.id (= impersonated user id in user-mode impersonation, actor otherwise)
   orgId: string // Organization ID (derived from venue or StaffOrganization)
   venueId: string // Venue actual de operación
-  role: StaffRole // StaffVenue.role para el venueId actual
+  role: StaffRole // Effective role (= impersonated role when impersonating)
   jti: string // SECURITY: JWT ID for token blacklisting/revocation
+  /**
+   * OAuth 2.0 Token Exchange (RFC 8693) `act` claim.
+   * Present only during impersonation sessions — identifies the real actor.
+   * When present, the session is an impersonation session and must be treated as read-only.
+   */
+  act?: ImpersonationActClaim
 }
 
 /**
@@ -78,6 +85,51 @@ export function generateAccessToken(
 }
 
 /**
+ * Generates an access token for an impersonation session.
+ *
+ * The returned JWT follows the RFC 8693 `act` claim pattern:
+ * - `sub` is the impersonated user's staffId (or the actor in role-only mode).
+ * - `role` is the impersonated (effective) role.
+ * - `act` carries the real actor's identity and session metadata.
+ *
+ * The token's own JWT `exp` is set to `act.expiresAt` so that expiration
+ * is enforced at the JWT layer as well as by the impersonation guard middleware.
+ *
+ * @param subStaffId - The `sub` to embed (target userId for 'user' mode, superadmin's id for 'role' mode).
+ * @param organizationId - Organization ID (unchanged from the original session).
+ * @param venueId - Venue ID (impersonation is always venue-scoped).
+ * @param effectiveRole - The role the token grants (target role, never SUPERADMIN).
+ * @param act - Actor claim with real identity + session metadata.
+ * @returns Signed JWT string.
+ */
+export function generateImpersonationAccessToken(
+  subStaffId: string,
+  organizationId: string,
+  venueId: string,
+  effectiveRole: StaffRole,
+  act: ImpersonationActClaim,
+): string {
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const expiresInSeconds = Math.max(0, act.expiresAt - nowSeconds)
+
+  const payload: Omit<AccessTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
+    sub: subStaffId,
+    orgId: organizationId,
+    venueId: venueId,
+    role: effectiveRole,
+    jti: crypto.randomUUID(),
+    act,
+  }
+
+  const secret: Secret = ACCESS_TOKEN_SECRET!
+  const options: SignOptions = {
+    expiresIn: expiresInSeconds,
+    algorithm: 'HS256',
+  }
+  return jwt.sign(payload, secret, options)
+}
+
+/**
  * Genera un token de refresco.
  * @param staffId - ID del Staff (Staff.id)
  * @param organizationId - (Opcional) ID de la Organización
@@ -122,8 +174,21 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
   if (!Object.values(StaffRole).includes(decoded.role as StaffRole)) {
     throw new jwt.JsonWebTokenError('Rol en token de acceso no es un StaffRole válido.')
   }
-  // Note: JTI validation for blacklisting would be done here when Redis is implemented
-  // if (await isTokenBlacklisted(decoded.jti)) throw new Error('Token revoked')
+
+  // Validate `act` claim structure when present (impersonation session)
+  if (decoded.act) {
+    const a = decoded.act
+    if (!a.sub || !a.role || !a.mode || typeof a.expiresAt !== 'number' || typeof a.extensionsUsed !== 'number') {
+      throw new jwt.JsonWebTokenError('Payload del token de impersonación incompleto.')
+    }
+    if (!Object.values(StaffRole).includes(a.role as StaffRole)) {
+      throw new jwt.JsonWebTokenError('Rol de actor en token de impersonación inválido.')
+    }
+    if (a.mode !== 'user' && a.mode !== 'role') {
+      throw new jwt.JsonWebTokenError('Modo de impersonación inválido.')
+    }
+  }
+
   return decoded
 }
 
