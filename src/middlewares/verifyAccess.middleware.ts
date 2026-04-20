@@ -152,7 +152,9 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
 
       let access: UserAccess
       try {
-        access = await getUserAccess(userId, targetVenueId, req.accessCache, impersonationOverride)
+        access = impersonationOverride
+          ? await getUserAccess(userId, targetVenueId, req.accessCache, impersonationOverride)
+          : await getUserAccess(userId, targetVenueId, req.accessCache)
       } catch (error) {
         // User doesn't have access to this venue
         logger.warn(`verifyAccess: User ${userId} denied access to venue ${targetVenueId}`, error)

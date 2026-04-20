@@ -92,6 +92,7 @@ export class ActionEngine {
   startCleanup(): void {
     if (this.cleanupTimer) return
     this.cleanupTimer = setInterval(() => this.cleanupExpiredSessions(), CLEANUP_INTERVAL_MS)
+    this.cleanupTimer.unref?.()
   }
 
   stopCleanup(): void {
