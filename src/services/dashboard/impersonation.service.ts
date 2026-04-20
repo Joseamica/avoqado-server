@@ -358,6 +358,34 @@ export interface EligibleTargetsResult {
   users: EligibleTarget[]
   /** Non-SUPERADMIN roles available as role-only impersonation targets. */
   roles: StaffRole[]
+  /** The venueId the results are scoped to. Useful for the frontend to detect stale responses. */
+  venueId: string
+}
+
+/**
+ * Resolves the venueId a SUPERADMIN wants to operate on for impersonation,
+ * given the request's JWT-venue and an optional explicit override (from the
+ * URL / query / body). Validates that the venue exists.
+ *
+ * SUPERADMINs bypass venue-membership checks, so any real venue id is acceptable.
+ * This is critical when the user has URL-navigated to a different venue from
+ * the one in their JWT — the impersonation session must match what the UI shows,
+ * not the stale JWT.
+ */
+export async function resolveImpersonationVenueId(jwtVenueId: string, requestedVenueId?: string | null): Promise<string> {
+  const candidate = requestedVenueId?.trim() || jwtVenueId
+  if (!candidate) {
+    throw new ImpersonationError(400, IMPERSONATION_ERROR_CODES.INVALID_TARGET, 'venueId es requerido.')
+  }
+  // If the request asked for a different venue than the JWT, verify it exists.
+  // (SUPERADMINs already have global access, so membership isn't needed.)
+  if (candidate !== jwtVenueId) {
+    const exists = await prisma.venue.findUnique({ where: { id: candidate }, select: { id: true } })
+    if (!exists) {
+      throw new ImpersonationError(404, IMPERSONATION_ERROR_CODES.INVALID_TARGET, 'El venue objetivo no existe.')
+    }
+  }
+  return candidate
 }
 
 /**
@@ -399,7 +427,7 @@ export async function getEligibleTargets(params: { venueId: string; realUserId: 
 
   const roles: StaffRole[] = Object.values(StaffRole).filter(r => r !== StaffRole.SUPERADMIN)
 
-  return { users, roles }
+  return { users, roles, venueId: params.venueId }
 }
 
 export interface ImpersonationStatusResult {

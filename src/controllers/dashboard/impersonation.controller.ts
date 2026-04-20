@@ -9,6 +9,7 @@ import {
   stopImpersonation,
   getEligibleTargets,
   getImpersonationStatus,
+  resolveImpersonationVenueId,
 } from '../../services/dashboard/impersonation.service'
 import { IMPERSONATION_REASON_MIN_LENGTH } from '../../types/impersonation'
 import { getRealRole, getRealUserId, isImpersonatingRequest } from '../../security'
@@ -53,6 +54,13 @@ const startSchema = z
     mode: z.enum(['user', 'role'], { required_error: 'mode es requerido.' }),
     targetUserId: z.string().min(1).optional(),
     targetRole: z.enum(staffRoleValues).optional(),
+    /**
+     * Explicit venueId override. The frontend passes the venue currently shown
+     * in the URL (which may differ from the JWT venueId when the user navigated
+     * directly to another venue without switchVenue) so impersonation is scoped
+     * to what the user sees, not what the stale JWT says.
+     */
+    venueId: z.string().min(1).optional(),
     reason: z
       .string({ required_error: 'El motivo es requerido.' })
       .trim()
@@ -115,11 +123,30 @@ export async function startHandler(req: Request, res: Response, _next: NextFunct
     const body = startSchema.parse(req.body)
     const { jti, exp } = readCurrentTokenMetadata(req)
 
+    // Use the venueId the frontend sent (venue in URL) if present, otherwise the
+    // JWT's venueId. Validates existence for cross-venue requests.
+    const effectiveVenueId = await resolveImpersonationVenueId(ctx.venueId, body.venueId)
+
+    // If the caller asked for a different venue than the one in their JWT, look
+    // up its organizationId so the impersonation JWT carries the correct orgId
+    // (otherwise the downstream access service resolves org from venue anyway,
+    // but we want the JWT claim to be coherent).
+    let organizationId = ctx.orgId
+    if (effectiveVenueId !== ctx.venueId) {
+      const venue = await (
+        await import('../../utils/prismaClient')
+      ).default.venue.findUnique({
+        where: { id: effectiveVenueId },
+        select: { organizationId: true },
+      })
+      if (venue?.organizationId) organizationId = venue.organizationId
+    }
+
     const result = await startImpersonation({
       realUserId,
       realRole,
-      venueId: ctx.venueId,
-      organizationId: ctx.orgId,
+      venueId: effectiveVenueId,
+      organizationId,
       mode: body.mode,
       targetUserId: body.targetUserId,
       targetRole: body.targetRole,
@@ -257,7 +284,12 @@ export async function eligibleTargetsHandler(req: Request, res: Response, _next:
       res.status(403).json({ error: 'Forbidden', message: 'Solo un SUPERADMIN puede consultar targets.' })
       return
     }
-    const targets = await getEligibleTargets({ venueId: ctx.venueId, realUserId: getRealUserId(ctx) })
+    // Optional ?venueId= — the frontend passes the venue currently shown in
+    // the URL so targets reflect what the UI sees, not the stale JWT venueId.
+    const requestedVenueId = typeof req.query.venueId === 'string' ? req.query.venueId : undefined
+    const effectiveVenueId = await resolveImpersonationVenueId(ctx.venueId, requestedVenueId)
+
+    const targets = await getEligibleTargets({ venueId: effectiveVenueId, realUserId: getRealUserId(ctx) })
     res.status(200).json(targets)
   } catch (err) {
     sendImpersonationError(res, err, 'No se pudieron obtener los targets disponibles.')

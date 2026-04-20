@@ -127,6 +127,14 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 2: Validate refund amount
   // ═══════════════════════════════════════════════════════════════════════════
+
+  // Reject zero/negative refund amounts up-front — Blumon would accept the
+  // call but the resulting DB row is a $0 refund that only pollutes reports.
+  if (!Number.isFinite(refundData.amount) || refundData.amount <= 0) {
+    logger.error('Invalid refund amount (must be > 0)', { amount: refundData.amount })
+    throw new BadRequestError('Refund amount must be greater than zero')
+  }
+
   const refundAmountInPesos = refundData.amount / 100
   const originalAmountNumber = Number(originalPayment.amount)
   // 💸 FIX: Include tip in refundable amount - tip is part of the total transaction
@@ -209,6 +217,27 @@ export async function recordRefund(
   // STEP 4: Create refund payment and update original in transaction
   // ═══════════════════════════════════════════════════════════════════════════
   const result = await prisma.$transaction(async tx => {
+    // 🔒 Row-lock the original payment for the duration of this tx so
+    // concurrent refund attempts cannot both pass the "remaining refundable"
+    // check with stale data and each create their own refund (D8 race).
+    const lockedRows = await tx.$queryRaw<Array<{ id: string; amount: unknown; tipAmount: unknown; processorData: unknown }>>(Prisma.sql`
+      SELECT id, amount, "tipAmount", "processorData"
+      FROM "Payment"
+      WHERE id = ${refundData.originalPaymentId}
+      FOR UPDATE
+    `)
+    const locked = lockedRows[0]
+    if (!locked) {
+      throw new NotFoundError(`Payment ${refundData.originalPaymentId} disappeared`)
+    }
+    const lockedProcessorData = (locked.processorData as Record<string, unknown> | null) ?? {}
+    const lockedAlreadyRefunded = Number(lockedProcessorData.refundedAmount ?? 0)
+    const lockedTotal = Number(locked.amount) + Number(locked.tipAmount ?? 0)
+    const lockedRemaining = lockedTotal - lockedAlreadyRefunded
+    if (refundAmountInPesos > lockedRemaining + 0.001) {
+      throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
+    }
+
     // Create new Payment record with type=REFUND
     const refundPayment = await tx.payment.create({
       data: {
