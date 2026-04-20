@@ -242,6 +242,8 @@ import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
 // Per-staff, per-venue onboarding UX state (tour banners, checklists, welcome-tour flags)
 import staffOnboardingRoutes from './dashboard/staffOnboarding.routes'
+// SUPERADMIN impersonation — view the dashboard as another user/role (read-only)
+import impersonationRoutes from './dashboard/impersonation.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -278,6 +280,11 @@ const documentUpload = multer({
 
 // Superadmin routes - highest priority
 router.use('/superadmin', superadminRoutes)
+
+// Impersonation routes — session control endpoints used by the picker/banner.
+// Mounted BEFORE other authenticated dashboard routes so its paths are matched
+// by the impersonation-guard allowlist regardless of ordering elsewhere.
+router.use('/impersonation', impersonationRoutes)
 
 /**
  * @openapi

@@ -274,7 +274,7 @@ router.get('/org-categories', orgOwnerAccess, async (req: Request, res: Response
 router.post('/org-categories', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId } = req.params
-    const { name, description, suggestedPrice } = req.body
+    const { name, description, suggestedPrice } = req.body ?? {}
 
     if (!name?.trim()) {
       return res.status(400).json({ success: false, error: 'validation', message: 'El nombre es requerido' })

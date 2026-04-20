@@ -9,7 +9,42 @@ import logger from '@/config/logger'
 import emailService from '../email.service'
 
 // Main function to generate and store a digital receipt
-export async function generateAndStoreReceipt(paymentId: string, recipientEmail?: string): Promise<DigitalReceipt> {
+export async function generateAndStoreReceipt(paymentId: string, recipientEmail?: string): Promise<DigitalReceipt>
+export async function generateAndStoreReceipt(venueId: string, paymentId: string, recipientEmail?: string): Promise<DigitalReceipt>
+export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?: string): Promise<DigitalReceipt> {
+  let venueId: string | undefined
+  let paymentId: string
+  let recipientEmail: string | undefined
+
+  if (typeof arg3 === 'string') {
+    venueId = arg1
+    paymentId = arg2 as string
+    recipientEmail = arg3
+  } else if (typeof arg2 === 'undefined') {
+    paymentId = arg1
+  } else if (arg2.includes('@')) {
+    paymentId = arg1
+    recipientEmail = arg2
+  } else {
+    venueId = arg1
+    paymentId = arg2
+  }
+
+  const payment = venueId
+    ? await prisma.payment.findFirst({
+        where: {
+          id: paymentId,
+          venueId,
+        },
+      })
+    : await prisma.payment.findUnique({
+        where: { id: paymentId },
+      })
+
+  if (!payment) {
+    throw new NotFoundError(venueId ? 'Payment not found in this venue' : 'Payment not found')
+  }
+
   // Check if a digital receipt already exists for this payment
   const existingReceipt = await prisma.digitalReceipt.findFirst({
     where: { paymentId },
@@ -24,15 +59,6 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
       })
     }
     return existingReceipt
-  }
-
-  // Get payment data first
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
-  })
-
-  if (!payment) {
-    throw new NotFoundError('Payment not found')
   }
 
   // Get venue data
@@ -151,16 +177,24 @@ export async function generateAndStoreReceipt(paymentId: string, recipientEmail?
     order: {
       id: order.id,
       number: typeof order.orderNumber === 'number' ? order.orderNumber : 0,
-      items: orderItemsWithModifiers.map(item => ({
-        name: item.product?.name || 'Unknown Product',
-        quantity: item.quantity,
-        price: parseFloat((item as any).price?.toString() || '0'),
-        totalPrice: parseFloat((item as any).price?.toString() || '0') * item.quantity,
-        modifiers: item.modifiers.map(mod => ({
-          name: mod.modifier?.name || 'Unknown Modifier',
-          price: parseFloat(mod.modifier?.price?.toString() || '0'),
-        })),
-      })),
+      items: orderItemsWithModifiers.map(item => {
+        // Prefer denormalized productName (always set at create time, survives
+        // product deletion). Fall back to live product relation, then to
+        // "Importe personalizado" for custom line items with no productId.
+        const name = item.productName || item.product?.name || 'Importe personalizado'
+        const unitPrice = parseFloat(item.unitPrice?.toString() || '0')
+        const totalPrice = parseFloat(item.total?.toString() || '0')
+        return {
+          name,
+          quantity: item.quantity,
+          price: unitPrice,
+          totalPrice,
+          modifiers: item.modifiers.map(mod => ({
+            name: mod.name || mod.modifier?.name || 'Modificador',
+            price: parseFloat(mod.price?.toString() || mod.modifier?.price?.toString() || '0'),
+          })),
+        }
+      }),
       subtotal: parseFloat(order.subtotal.toString()),
       taxAmount: parseFloat((order.taxAmount || (order as any).tax || 0).toString()), // Standardized to taxAmount
       total: parseFloat(order.total.toString()),

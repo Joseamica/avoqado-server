@@ -35,14 +35,17 @@ export async function getReviewsData(venueId: string, dateFilter: DateFilter): P
  * Delete a review (SUPERADMIN only)
  * This is a hard delete - use with caution
  */
-export async function deleteReview(reviewId: string): Promise<void> {
+export async function deleteReview(venueId: string, reviewId: string): Promise<void> {
   // First verify the review exists
-  const review = await prisma.review.findUnique({
-    where: { id: reviewId },
+  const review = await prisma.review.findFirst({
+    where: {
+      id: reviewId,
+      venueId,
+    },
   })
 
   if (!review) {
-    throw new NotFoundError(`Review con ID ${reviewId} no encontrado`)
+    throw new NotFoundError(`Review con ID ${reviewId} no encontrado en este venue`)
   }
 
   // Delete the review

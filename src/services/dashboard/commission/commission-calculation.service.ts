@@ -425,7 +425,11 @@ export async function createRefundCommission(
 
   // Calculate refund ratio (for partial refunds)
   const originalBaseAmount = decimalToNumber(originalCalc.baseAmount)
-  const refundAmount = Math.abs(decimalToNumber(refundPayment.amount))
+  // Refund total = absolute(amount) + absolute(tipAmount) because since 2026-04-19
+  // refund Payments split the refund across both fields (sale vs tip) — before that
+  // they stored everything in `amount` with tipAmount=0. Sum both so the ratio is
+  // consistent regardless of which side of the fix produced the refund row.
+  const refundAmount = Math.abs(decimalToNumber(refundPayment.amount)) + Math.abs(decimalToNumber(refundPayment.tipAmount ?? 0))
   const refundRatio = originalBaseAmount > 0 ? refundAmount / originalBaseAmount : 1
 
   // Calculate negative commission proportionally

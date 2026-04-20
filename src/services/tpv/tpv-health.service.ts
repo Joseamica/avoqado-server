@@ -379,9 +379,14 @@ export class TpvHealthService {
   }
 
   /**
-   * Get detailed health info for a specific terminal
+   * Get detailed health info for a specific terminal.
+   *
+   * Venue-scoped: if `venueId` is provided, all lookups are constrained to
+   * that venue so a user cannot read health data from another venue's
+   * terminal by guessing an id/serial. Legacy callers that don't pass
+   * venueId fall back to the unscoped behavior.
    */
-  async getTerminalHealth(terminalId: string): Promise<any> {
+  async getTerminalHealth(terminalId: string, venueId?: string): Promise<any> {
     try {
       const selectFields = {
         id: true,
@@ -394,10 +399,11 @@ export class TpvHealthService {
         createdAt: true,
         updatedAt: true,
       }
+      const venueFilter = venueId ? { venueId } : {}
 
       // 1. First try to find by ID (CUID) - Dashboard sends terminal ID
-      let terminal = await prisma.terminal.findUnique({
-        where: { id: terminalId },
+      let terminal = await prisma.terminal.findFirst({
+        where: { id: terminalId, ...venueFilter },
         select: selectFields,
       })
 
@@ -410,6 +416,7 @@ export class TpvHealthService {
               equals: terminalId,
               mode: 'insensitive', // Case-insensitive matching
             },
+            ...venueFilter,
           },
           select: selectFields,
         })
@@ -424,13 +431,14 @@ export class TpvHealthService {
               equals: `AVQD-${terminalId}`,
               mode: 'insensitive', // Case-insensitive matching
             },
+            ...venueFilter,
           },
           select: selectFields,
         })
       }
 
       if (!terminal) {
-        throw new NotFoundError(`Terminal with ID or serial number ${terminalId} not found`)
+        throw new NotFoundError(`Terminal with ID or serial number ${terminalId} not found in this venue`)
       }
 
       const cutoff = new Date(Date.now() - 2 * 60 * 1000)

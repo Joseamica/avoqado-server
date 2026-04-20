@@ -4,7 +4,7 @@ import { NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { Order, OrderStatus } from '@prisma/client'
+import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { deductInventoryForProduct } from './productInventoryIntegration.service'
 import { OrderModifierForInventory } from './rawMaterial.service'
 import { logAction } from './activity-log.service'
@@ -148,20 +148,117 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
   }
 }
 /**
+ * Hoists refund metadata from `processorData` to top-level fields and attaches
+ * a `refunds[]` array to each original payment that has been (partially or fully)
+ * refunded. Pure read-side transform — no DB side effects.
+ *
+ * Refund Payments are linked to their original via
+ * `processorData.originalPaymentId` (no FK column). See
+ * `src/services/dashboard/refund.dashboard.service.ts` for where this is set.
+ *
+ * Refund-of-refund is not supported by `issueRefund()` (it rejects refunds whose
+ * original `type === REFUND`), so we mirror that invariant here: a refund whose
+ * `originalPaymentId` points at another refund will be silently skipped from the
+ * target's `refunds[]` rather than corrupting the chain.
+ */
+type MappablePayment = {
+  id: string
+  type: PaymentType | null
+  processorData: any
+  amount: Prisma.Decimal | number
+  createdAt: Date
+}
+
+export function mapOrderPaymentsWithRefunds<T extends MappablePayment>(
+  payments: T[],
+): Array<
+  T & {
+    originalPaymentId: string | null
+    refundReason: string | null
+    refunds: Array<{
+      id: string
+      amount: Prisma.Decimal | number
+      createdAt: Date
+      refundReason: string | null
+    }>
+  }
+> {
+  // Pass 1: enrich each payment with hoisted refund fields
+  const enriched = payments.map(p => {
+    const data = (p.processorData ?? {}) as Record<string, any>
+    const isRefund = p.type === PaymentType.REFUND
+    return {
+      ...p,
+      originalPaymentId: isRefund ? (data.originalPaymentId ?? null) : null,
+      refundReason: isRefund ? (data.refundReason ?? null) : null,
+      refunds: [] as Array<{
+        id: string
+        amount: Prisma.Decimal | number
+        createdAt: Date
+        refundReason: string | null
+      }>,
+    }
+  })
+
+  // Pass 2: for every original payment, collect refunds that point to it
+  const byId = new Map(enriched.map(p => [p.id, p]))
+  for (const p of enriched) {
+    if (!p.originalPaymentId) continue
+    const target = byId.get(p.originalPaymentId)
+    // Skip orphan and refund-of-refund — see JSDoc above.
+    if (!target || target.type === PaymentType.REFUND) continue
+    target.refunds.push({
+      id: p.id,
+      amount: p.amount,
+      createdAt: p.createdAt,
+      refundReason: p.refundReason,
+    })
+  }
+
+  return enriched
+}
+
+/**
  * Obtener una orden por su ID con todos sus detalles.
  */
-export async function getOrderById(orderId: string) {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
+export async function getOrderById(venueId: string, orderId: string) {
+  const order = await prisma.order.findFirst({
+    where: {
+      id: orderId,
+      venueId,
+    },
     include: {
       createdBy: true,
       servedBy: true,
       table: true,
+      terminal: true,
+      actions: {
+        include: {
+          performedBy: {
+            select: { id: true, firstName: true, lastName: true, photoUrl: true },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+      },
       payments: {
+        orderBy: { createdAt: 'asc' },
         // Incluimos los pagos asociados
         include: {
           processedBy: true, // Y quién procesó cada pago
           saleVerification: true, // 📸 PRE-payment verification photos
+          receipts: {
+            // Drawer only needs metadata, not the full dataSnapshot JSON
+            select: {
+              id: true,
+              accessKey: true,
+              status: true,
+              recipientEmail: true,
+              recipientPhone: true,
+              sentAt: true,
+              viewedAt: true,
+              createdAt: true,
+            },
+          },
         },
       },
       items: {
@@ -191,27 +288,76 @@ export async function getOrderById(orderId: string) {
   })
 
   if (!order) {
-    throw new NotFoundError(`Order with ID ${orderId} not found`)
+    throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
   }
-  return flattenOrderModifiers(order)
+  const flattened = flattenOrderModifiers(order)
+  return {
+    ...flattened,
+    payments: mapOrderPaymentsWithRefunds(flattened.payments ?? []),
+  }
 }
 
 /**
  * Actualizar una orden.
  * SUPERADMIN puede actualizar más campos que usuarios normales.
  */
-export async function updateOrder(orderId: string, data: Partial<Order>) {
+export async function updateOrder(venueId: string, orderId: string, data: Partial<Order>) {
   // Extract allowed fields for SUPERADMIN editing
   const { status, customerId, customerName, tableId, servedById, tipAmount, total, subtotal, createdAt, orderNumber, type } = data as any
 
   // Get the current order to check previous status
-  const currentOrder = await prisma.order.findUnique({
-    where: { id: orderId },
+  const currentOrder = await prisma.order.findFirst({
+    where: {
+      id: orderId,
+      venueId,
+    },
     select: { status: true, venueId: true },
   })
 
   if (!currentOrder) {
-    throw new NotFoundError(`Order with ID ${orderId} not found`)
+    throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
+  }
+
+  if (customerId) {
+    const customer = await prisma.customer.findFirst({
+      where: {
+        id: customerId,
+        venueId,
+      },
+      select: { id: true },
+    })
+
+    if (!customer) {
+      throw new NotFoundError(`Customer with ID ${customerId} not found in this venue`)
+    }
+  }
+
+  if (tableId) {
+    const table = await prisma.table.findFirst({
+      where: {
+        id: tableId,
+        venueId,
+      },
+      select: { id: true },
+    })
+
+    if (!table) {
+      throw new NotFoundError(`Table with ID ${tableId} not found in this venue`)
+    }
+  }
+
+  if (servedById) {
+    const staffVenue = await prisma.staffVenue.findFirst({
+      where: {
+        staffId: servedById,
+        venueId,
+      },
+      select: { id: true },
+    })
+
+    if (!staffVenue) {
+      throw new NotFoundError(`Staff with ID ${servedById} not found in this venue`)
+    }
   }
 
   const updatedOrder = await prisma.order.update({
@@ -368,7 +514,19 @@ export async function updateOrder(orderId: string, data: Partial<Order>) {
 /**
  * Eliminar una orden.
  */
-export async function deleteOrder(orderId: string) {
+export async function deleteOrder(venueId: string, orderId: string) {
+  const existingOrder = await prisma.order.findFirst({
+    where: {
+      id: orderId,
+      venueId,
+    },
+    select: { id: true },
+  })
+
+  if (!existingOrder) {
+    throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
+  }
+
   // Podrías añadir lógica aquí para asegurar que solo se borren órdenes canceladas, etc.
   const cancelledOrder = await prisma.order.update({
     where: { id: orderId },

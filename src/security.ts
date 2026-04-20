@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken'
 import { Request, Response, NextFunction } from 'express'
 import { IncomingHttpHeaders } from 'http'
 import logger from './config/logger'
+import { ImpersonationActClaim, ImpersonationContext } from './types/impersonation'
 
 /**
  * Estructura esperada del payload de un token JWT de Avoqado.
@@ -14,11 +15,21 @@ export interface AvoqadoJwtPayload extends jwt.JwtPayload {
   venueId: string // Venue actual de operación
   role: StaffRole // StaffVenue.role para el venueId actual
   terminalSerialNumber?: string // Terminal serial (e.g., "AVQD-2841548417") for auto-attribution
-  // permissions?: string[]; // Opcional
+  /** OAuth 2.0 RFC 8693 `act` claim — present only during impersonation sessions. */
+  act?: ImpersonationActClaim
 }
 
 /**
  * Representa el contexto de autenticación y autorización para una solicitud exitosa.
+ *
+ * Impersonation semantics (RFC 8693 `act` pattern):
+ * - `userId` / `role` reflect the EFFECTIVE identity (= impersonated user in user-mode sessions).
+ * - `realUserId` / `realRole` always reflect the PHYSICAL actor (the SUPERADMIN who initiated impersonation).
+ * - `isImpersonating` is true when an `act` claim is present in the JWT.
+ * - When not impersonating, `realUserId === userId` and `realRole === role`.
+ *
+ * Always use `userId` / `role` for scoped queries and permission checks (so the session behaves as the target).
+ * Always use `realUserId` for audit logs and for guards like "only real SUPERADMIN may impersonate".
  */
 export interface AuthContext {
   userId: string
@@ -26,6 +37,27 @@ export interface AuthContext {
   venueId: string
   role: StaffRole
   terminalSerialNumber?: string // Terminal serial from JWT (for auto-attribution on orders/payments)
+
+  // Impersonation (optional for back-compat with existing AuthContext construction sites).
+  // When absent / false, treat as non-impersonating; `realUserId`/`realRole` fall back to `userId`/`role`.
+  // The `authenticateToken` middleware always sets these explicitly via `buildAuthContextFromPayload`.
+  realUserId?: string
+  realRole?: StaffRole
+  isImpersonating?: boolean
+  impersonation?: ImpersonationContext | null
+}
+
+/**
+ * Convenience helpers so call sites don't have to remember the fallback semantics.
+ */
+export function getRealUserId(ctx: AuthContext): string {
+  return ctx.realUserId ?? ctx.userId
+}
+export function getRealRole(ctx: AuthContext): StaffRole {
+  return ctx.realRole ?? ctx.role
+}
+export function isImpersonatingRequest(ctx: AuthContext | undefined | null): boolean {
+  return !!ctx?.isImpersonating
 }
 
 /**
@@ -239,18 +271,57 @@ export function protectRoute(allowedRoles: StaffRole[]) {
     }
 
     // 3. Éxito: construir y adjuntar el contexto de autenticación a la solicitud
-    const authContext: AuthContext = {
-      userId: jwtPayload.sub,
-      orgId: jwtPayload.orgId,
-      venueId: jwtPayload.venueId,
-      role: jwtPayload.role,
-      ...(jwtPayload.terminalSerialNumber && { terminalSerialNumber: jwtPayload.terminalSerialNumber }),
-    }
+    const authContext: AuthContext = buildAuthContextFromPayload(jwtPayload)
 
     // Augmentar el objeto Request de Express. Asume que `express.d.ts` está configurado.
     req.authContext = authContext
 
     next() // Continuar al siguiente middleware o manejador de ruta
+  }
+}
+
+/**
+ * Builds the AuthContext from a verified JWT payload, resolving impersonation
+ * semantics when an `act` claim is present.
+ *
+ * Used by both `protectRoute` (here) and `authenticateTokenMiddleware`.
+ */
+export function buildAuthContextFromPayload(jwtPayload: AvoqadoJwtPayload): AuthContext {
+  const isImpersonating = !!jwtPayload.act
+  const act = jwtPayload.act
+
+  // Effective identity (reflects impersonated user)
+  const userId = jwtPayload.sub
+  const role = jwtPayload.role
+
+  // Real (physical) identity — in non-impersonation sessions this equals effective.
+  const realUserId = act?.sub ?? userId
+  const realRole = act?.role ?? role
+
+  // For user-mode impersonation, sub is the impersonated user. For role-mode, sub stays as the actor.
+  const impersonatedUserId = act?.mode === 'user' ? userId : null
+
+  const impersonation: ImpersonationContext | null = act
+    ? {
+        mode: act.mode,
+        impersonatedUserId,
+        impersonatedRole: role,
+        expiresAt: act.expiresAt,
+        extensionsUsed: act.extensionsUsed,
+        ...(act.reason ? { reason: act.reason } : {}),
+      }
+    : null
+
+  return {
+    userId,
+    orgId: jwtPayload.orgId,
+    venueId: jwtPayload.venueId,
+    role,
+    ...(jwtPayload.terminalSerialNumber && { terminalSerialNumber: jwtPayload.terminalSerialNumber }),
+    realUserId,
+    realRole,
+    isImpersonating,
+    impersonation,
   }
 }
 

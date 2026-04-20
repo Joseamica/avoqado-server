@@ -63,6 +63,11 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
     )?.createdAt ||
     new Date()
 
+  // Include both REGULAR and REFUND payments — refund Payments also carry
+  // status=COMPLETED with negative amount/tipAmount, so summing signed values
+  // naturally subtracts refunds from the expected cash in the drawer. Since
+  // 2026-04-19 refunds split across `amount` (sale) and `tipAmount` (tip), so
+  // we must sum both fields to capture the full cash impact.
   const cashPayments = await prisma.payment.findMany({
     where: {
       venueId,
@@ -70,10 +75,10 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
       status: 'COMPLETED',
       createdAt: { gt: periodStart },
     },
-    select: { amount: true },
+    select: { amount: true, tipAmount: true },
   })
 
-  const expectedAmount = cashPayments.reduce((sum, p) => sum + Number(p.amount), 0)
+  const expectedAmount = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
   const daysSinceLastCloseout = Math.floor((Date.now() - periodStart.getTime()) / (1000 * 60 * 60 * 24))
 
   return {

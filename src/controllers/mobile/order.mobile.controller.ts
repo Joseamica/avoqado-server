@@ -52,7 +52,8 @@ export const listOrders = async (req: Request, res: Response, next: NextFunction
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const { items, staffId, orderType, source, tableId, customerName, customerPhone, specialRequests, tip, note, splitType } = req.body
+    const { items, staffId, orderType, source, tableId, customerName, customerPhone, specialRequests, discount, tip, note, splitType } =
+      req.body
 
     // Validate required fields
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -101,6 +102,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       customerName,
       customerPhone,
       specialRequests,
+      discount: typeof discount === 'number' ? discount : 0,
       tip: typeof tip === 'number' ? tip : 0,
       note,
       splitType,

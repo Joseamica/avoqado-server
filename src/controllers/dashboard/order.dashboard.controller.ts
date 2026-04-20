@@ -54,27 +54,30 @@ export async function getOrdersData(
   }
 }
 
-export async function getOrder(req: Request<{ orderId: string }>, res: Response, next: NextFunction) {
+export async function getOrder(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
   try {
-    const order = await orderDashboardService.getOrderById(req.params.orderId)
+    const { venueId, orderId } = req.params
+    const order = await orderDashboardService.getOrderById(venueId, orderId)
     res.status(200).json(order)
   } catch (error) {
     next(error)
   }
 }
 
-export async function updateOrder(req: Request<{ orderId: string }>, res: Response, next: NextFunction) {
+export async function updateOrder(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
   try {
-    const updatedOrder = await orderDashboardService.updateOrder(req.params.orderId, req.body)
+    const { venueId, orderId } = req.params
+    const updatedOrder = await orderDashboardService.updateOrder(venueId, orderId, req.body)
     res.status(200).json(updatedOrder)
   } catch (error) {
     next(error)
   }
 }
 
-export async function deleteOrder(req: Request<{ orderId: string }>, res: Response, next: NextFunction) {
+export async function deleteOrder(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
   try {
-    await orderDashboardService.deleteOrder(req.params.orderId)
+    const { venueId, orderId } = req.params
+    await orderDashboardService.deleteOrder(venueId, orderId)
     res.status(204).send() // 204 No Content es una respuesta común para DELETE exitoso
   } catch (error) {
     next(error)

@@ -159,6 +159,20 @@ export function createAccessCache(): AccessCache {
 }
 
 /**
+ * Optional override used when resolving access during a SUPERADMIN impersonation session.
+ *
+ * - `isImpersonating=true` means the SUPERADMIN bypass is disabled for this resolution.
+ * - `forcedRole` is only honored in 'role'-mode impersonation (where `userId` would still
+ *   resolve to the SUPERADMIN's staffId). In 'user'-mode we pass the impersonated user's
+ *   id directly and `forcedRole` should be omitted so the per-venue role is resolved normally.
+ */
+export interface ImpersonationAccessOverride {
+  isImpersonating: true
+  mode: 'user' | 'role'
+  forcedRole?: StaffRole
+}
+
+/**
  * Get user access for a specific venue
  *
  * This function:
@@ -175,8 +189,16 @@ export function createAccessCache(): AccessCache {
  * @returns Complete UserAccess object
  * @throws Error if user has no access to venue
  */
-export async function getUserAccess(userId: string, venueId: string, cache?: AccessCache): Promise<UserAccess> {
-  const cacheKey = `${userId}:${venueId}`
+export async function getUserAccess(
+  userId: string,
+  venueId: string,
+  cache?: AccessCache,
+  impersonation?: ImpersonationAccessOverride,
+): Promise<UserAccess> {
+  // Don't share impersonation-scoped results with normal resolutions.
+  const cacheKey = impersonation
+    ? `${userId}:${venueId}:imp:${impersonation.mode}:${impersonation.forcedRole ?? ''}`
+    : `${userId}:${venueId}`
 
   // Check cache first
   if (cache?.has(cacheKey)) {
@@ -188,13 +210,18 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
 
   // First, check if user is SUPERADMIN (they have access to ALL venues)
   // SUPERADMIN is determined by having ANY StaffVenue with role = SUPERADMIN
-  const superAdminVenue = await prisma.staffVenue.findFirst({
-    where: {
-      staffId: userId,
-      role: StaffRole.SUPERADMIN,
-    },
-    select: { id: true },
-  })
+  //
+  // IMPERSONATION: when a SUPERADMIN is impersonating, the bypass is disabled so
+  // that the access they see matches the target's effective access, not their own.
+  const superAdminVenue = impersonation
+    ? null
+    : await prisma.staffVenue.findFirst({
+        where: {
+          staffId: userId,
+          role: StaffRole.SUPERADMIN,
+        },
+        select: { id: true },
+      })
 
   const isSuperAdmin = !!superAdminVenue
 
@@ -282,6 +309,11 @@ export async function getUserAccess(userId: string, venueId: string, cache?: Acc
   if (isSuperAdmin) {
     // SUPERADMIN has access to all venues
     role = StaffRole.SUPERADMIN
+    organizationId = resolvedOrgId
+  } else if (impersonation?.mode === 'role' && impersonation.forcedRole) {
+    // Role-mode impersonation: the SUPERADMIN stays as the sub but the effective role
+    // is forced to the target. The SUPERADMIN bypass above was already disabled.
+    role = impersonation.forcedRole
     organizationId = resolvedOrgId
   } else if (isOrgOwner) {
     // Org-level OWNER always gets OWNER role in all venues of their org,

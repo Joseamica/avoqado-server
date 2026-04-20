@@ -31,6 +31,13 @@ interface RefundRequestData {
   entryMode?: string | null
   isPartialRefund: boolean
   currency: string
+  /**
+   * Optional explicit tip portion of the refund, in cents. When omitted, TPV
+   * splits proportional to the original sale/tip ratio. When set, the caller
+   * controls how much of the refund comes from tip vs sale (0 = keep staff
+   * tip intact, equal to amount = tip-only refund, etc.). Bounds are validated.
+   */
+  tipRefundCents?: number
 }
 
 /**
@@ -144,6 +151,40 @@ export async function recordRefund(
     throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${remainingRefundable})`)
   }
 
+  // Split between sale (Payment.amount) and tip (Payment.tipAmount). Default
+  // is proportional; caller can override with `tipRefundCents` for explicit
+  // control ("refund only the sale, keep staff tip intact", etc.).
+  let tipRefund = 0
+  let salesRefund = refundAmountInPesos
+
+  if (typeof refundData.tipRefundCents === 'number') {
+    const overrideTip = refundData.tipRefundCents / 100
+    if (overrideTip < 0) {
+      throw new BadRequestError('tipRefundCents must be >= 0')
+    }
+    if (overrideTip > refundAmountInPesos + 0.001) {
+      throw new BadRequestError(`tipRefundCents ($${overrideTip}) exceeds total refund ($${refundAmountInPesos})`)
+    }
+    if (overrideTip > originalTipNumber + 0.001) {
+      throw new BadRequestError(`tipRefundCents ($${overrideTip}) exceeds original tip ($${originalTipNumber})`)
+    }
+    tipRefund = Math.round(overrideTip * 100) / 100
+    salesRefund = Math.round((refundAmountInPesos - tipRefund) * 100) / 100
+    if (salesRefund > originalAmountNumber + 0.001) {
+      throw new BadRequestError(`Sale portion of refund ($${salesRefund}) exceeds original sale amount ($${originalAmountNumber})`)
+    }
+  } else if (originalTipNumber > 0 && totalOriginalAmount > 0) {
+    // Default: proportional split.
+    tipRefund = Math.round(((refundAmountInPesos * originalTipNumber) / totalOriginalAmount) * 100) / 100
+    tipRefund = Math.min(tipRefund, originalTipNumber)
+    salesRefund = Math.round((refundAmountInPesos - tipRefund) * 100) / 100
+    if (salesRefund > originalAmountNumber) {
+      const excess = salesRefund - originalAmountNumber
+      salesRefund -= excess
+      tipRefund = Math.round((tipRefund + excess) * 100) / 100
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 3: Find current shift for the staff (for reconciliation)
   // ═══════════════════════════════════════════════════════════════════════════
@@ -179,9 +220,9 @@ export async function recordRefund(
         // ⭐ Terminal that processed this refund (use provided tpvId or inherit from original payment)
         terminalId: refundData.tpvId || originalPayment.terminalId || null,
 
-        // Negative amount to represent refund
-        amount: new Decimal(-refundAmountInPesos),
-        tipAmount: new Decimal(0),
+        // Negative amount/tip mirror the original split.
+        amount: new Decimal(-salesRefund),
+        tipAmount: new Decimal(-tipRefund),
 
         // Payment info
         method: originalPayment.method,
@@ -197,6 +238,13 @@ export async function recordRefund(
           isPartialRefund: refundData.isPartialRefund,
           currency: refundData.currency,
           blumonSerialNumber: refundData.blumonSerialNumber,
+          // Parity fields with dashboard/mobile refunds so downstream
+          // consumers (backfill script, reports) treat TPV refunds uniformly.
+          amountCents: Math.round(refundAmountInPesos * 100),
+          amount: refundAmountInPesos,
+          // Marker: shift totalSales decrement is applied in-line below.
+          // `scripts/backfill-refund-shift-totals.ts` skips rows with this flag.
+          shiftBackfilled: true,
         },
 
         // Authorization from Blumon SDK CancelIcc
@@ -230,14 +278,31 @@ export async function recordRefund(
       timestamp: new Date().toISOString(),
     }
 
+    // Mirror the dashboard/mobile `refunds[]` schema so readers that only know
+    // the new format (e.g. `transaction.mobile.service.ts:208`) can aggregate
+    // TPV-originated refunds without special casing. Keep `refundHistory`
+    // intact for backwards compatibility with legacy readers.
+    const existingRefundsArray = Array.isArray((processorData as Record<string, unknown>).refunds)
+      ? ((processorData as Record<string, unknown>).refunds as Prisma.JsonArray)
+      : []
+    const newRefundsEntry = {
+      refundPaymentId: refundPayment.id,
+      amount: refundAmountInPesos,
+      amountCents: Math.round(refundAmountInPesos * 100),
+      reason: refundData.reason,
+      at: new Date().toISOString(),
+    }
+
     // Build updated processorData as plain object for Prisma JSON field
     const updatedProcessorData = {
       ...processorData,
       refundedAmount: newRefundedAmount,
+      refundedAmountCents: Math.round(newRefundedAmount * 100),
       isFullyRefunded,
       lastRefundId: refundPayment.id,
       lastRefundAt: new Date().toISOString(),
       refundHistory: [...(existingHistory as Prisma.JsonArray), newRefundEntry],
+      refunds: [...existingRefundsArray, newRefundsEntry],
     } as Prisma.InputJsonValue
 
     await tx.payment.update({
@@ -246,6 +311,33 @@ export async function recordRefund(
         processorData: updatedProcessorData,
       },
     })
+
+    // Mirror dashboard/mobile: create a VenueTransaction row so accounting
+    // reports see the outgoing refund alongside the original charge.
+    await tx.venueTransaction.create({
+      data: {
+        venueId,
+        paymentId: refundPayment.id,
+        type: 'REFUND',
+        grossAmount: new Decimal(-refundAmountInPesos),
+        feeAmount: new Decimal(0),
+        netAmount: new Decimal(-refundAmountInPesos),
+        status: 'SETTLED',
+      },
+    })
+
+    // Decrement Shift.totalSales (and totalTips when applicable) so closeout
+    // reports reflect reality. Uses the same proportional split computed above
+    // so tip refunds don't incorrectly deflate sales.
+    if (shiftId) {
+      await tx.shift.update({
+        where: { id: shiftId },
+        data: {
+          totalSales: { decrement: new Decimal(salesRefund) },
+          ...(tipRefund > 0 ? { totalTips: { decrement: new Decimal(tipRefund) } } : {}),
+        },
+      })
+    }
 
     return refundPayment
   })
@@ -303,7 +395,10 @@ export async function recordRefund(
   return {
     id: result.id,
     originalPaymentId: refundData.originalPaymentId,
-    amount: Math.abs(Number(result.amount)), // Return positive amount in pesos
+    // Total refund = abs(amount) + abs(tipAmount). Since the tip-split fix
+    // (2026-04-19) Payment.amount holds only the sale portion and tipAmount
+    // holds the tip portion. TPV Android expects the TOTAL refund amount.
+    amount: Math.abs(Number(result.amount)) + Math.abs(Number(result.tipAmount ?? 0)),
     status: result.status,
     authorizationNumber: result.authorizationNumber,
     referenceNumber: result.referenceNumber,

@@ -9,16 +9,24 @@ import crypto from 'crypto'
  * Similar to Square POS device activation flow.
  * Creates a 6-character alphanumeric code that expires in 7 days.
  *
+ * Venue-scoped: `venueId` is required when called from the URL-scoped dashboard
+ * route so a user cannot generate activation codes for terminals that belong
+ * to a different venue. Legacy internal callers may omit it.
+ *
  * @param terminalId Terminal ID (CUID)
  * @param staffId Staff ID who is generating the code
+ * @param venueId Venue ID from the URL scope (optional for legacy callers)
  * @returns Activation code, expiry info
  */
-export async function generateActivationCode(terminalId: string, staffId: string) {
+export async function generateActivationCode(terminalId: string, staffId: string, venueId?: string) {
   logger.info(`Generating activation code for terminal ${terminalId} by staff ${staffId}`)
 
-  // Verify terminal exists
-  const terminal = await prisma.terminal.findUnique({
-    where: { id: terminalId },
+  // Verify terminal exists (and belongs to venueId when scoped)
+  const terminal = await prisma.terminal.findFirst({
+    where: {
+      id: terminalId,
+      ...(venueId ? { venueId } : {}),
+    },
     include: {
       venue: {
         select: { id: true, name: true },
@@ -27,7 +35,7 @@ export async function generateActivationCode(terminalId: string, staffId: string
   })
 
   if (!terminal) {
-    throw new NotFoundError('Terminal not found')
+    throw new NotFoundError('Terminal not found in this venue')
   }
 
   // Prevent generating code for already activated terminals

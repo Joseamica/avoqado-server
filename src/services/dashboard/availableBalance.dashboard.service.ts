@@ -98,6 +98,9 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
 
   // Get CASH payments separately (instant settlement, 0 fees)
   // Only show cash collected SINCE the last closeout (corte de caja)
+  // Both REGULAR and REFUND payments carry status=COMPLETED; refunds have
+  // negative amount AND (since 2026-04-19) negative tipAmount so summing
+  // signed values across both fields yields the correct net cash balance.
   const lastCloseout = await getLastCloseoutDate(venueId)
   const cashPayments = await prisma.payment.findMany({
     where: {
@@ -109,6 +112,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     },
     select: {
       amount: true,
+      tipAmount: true,
     },
   })
 
@@ -152,7 +156,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   }
 
   // Add CASH payments (instant settlement, 0 fees, 100% available)
-  const cashTotal = cashPayments.reduce((sum, p) => sum + Number(p.amount), 0)
+  const cashTotal = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
   totalSales += cashTotal
   // Cash has 0 fees, so no totalFees increment
   availableNow += cashTotal // Cash is immediately available
@@ -244,6 +248,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
 
   // Get CASH payments separately (no transaction cost)
   // Only show cash collected SINCE the last closeout (corte de caja)
+  // Include tipAmount so tip-split refunds (2026-04-19) net out correctly.
   const lastCloseoutForCash = await getLastCloseoutDate(venueId)
   const cashPayments = await prisma.payment.findMany({
     where: {
@@ -256,6 +261,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     select: {
       id: true,
       amount: true,
+      tipAmount: true,
       createdAt: true,
     },
   })
@@ -320,7 +326,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
 
   // Add CASH payments as synthetic card type (instant settlement, 0 fees)
   if (cashPayments.length > 0) {
-    const cashTotalSales = cashPayments.reduce((sum, p) => sum + Number(p.amount), 0)
+    const cashTotalSales = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
     byCardType.set('CASH', {
       totalSales: cashTotalSales,
       fees: 0, // Cash has no processing fees
@@ -610,6 +616,7 @@ export async function getSettlementCalendar(
 
   // Get CASH payments in date range (instant settlement on transaction date)
   // Only show cash collected SINCE the last closeout (corte de caja)
+  // Include tipAmount so tip-split refunds (2026-04-19) net out correctly.
   const lastCloseoutForCalendar = await getLastCloseoutDate(venueId)
   const cashPayments = await prisma.payment.findMany({
     where: {
@@ -624,6 +631,7 @@ export async function getSettlementCalendar(
     },
     select: {
       amount: true,
+      tipAmount: true,
       createdAt: true,
     },
     orderBy: {
@@ -694,7 +702,7 @@ export async function getSettlementCalendar(
   for (const payment of cashPayments) {
     const settlementDate = payment.createdAt
     const dateKey = settlementDate.toISOString().split('T')[0]
-    const netAmount = Number(payment.amount) // Cash has no fees
+    const netAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0) // Cash has no fees; include tip portion
 
     if (!calendarMap.has(dateKey)) {
       calendarMap.set(dateKey, {
