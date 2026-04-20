@@ -141,15 +141,14 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
       // Get user access (with caching)
       // During impersonation, pass the override so role-mode sessions see the forced role
       // and user-mode sessions re-resolve based on the impersonated user's actual perms.
-      const impersonationOverride = isImpersonating && authContext.impersonation
-        ? {
-            isImpersonating: true as const,
-            mode: authContext.impersonation.mode as 'user' | 'role',
-            ...(authContext.impersonation.mode === 'role'
-              ? { forcedRole: authContext.role as StaffRole }
-              : {}),
-          }
-        : undefined
+      const impersonationOverride =
+        isImpersonating && authContext.impersonation
+          ? {
+              isImpersonating: true as const,
+              mode: authContext.impersonation.mode as 'user' | 'role',
+              ...(authContext.impersonation.mode === 'role' ? { forcedRole: authContext.role as StaffRole } : {}),
+            }
+          : undefined
 
       let access: UserAccess
       try {

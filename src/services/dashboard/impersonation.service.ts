@@ -316,13 +316,7 @@ export async function stopImpersonation(params: StopImpersonationParams): Promis
   }
 
   // Issue a fresh non-impersonation token for the superadmin.
-  const accessToken = generateAccessToken(
-    params.realUserId,
-    params.organizationId,
-    params.venueId,
-    params.realRole,
-    /* rememberMe */ false,
-  )
+  const accessToken = generateAccessToken(params.realUserId, params.organizationId, params.venueId, params.realRole, /* rememberMe */ false)
 
   // Revoke the impersonation token.
   const nowSeconds = Math.floor(Date.now() / 1000)
