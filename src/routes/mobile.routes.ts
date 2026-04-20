@@ -1774,6 +1774,18 @@ router.post(
   refundMobileController.createRefund,
 )
 
+/**
+ * POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
+ * Issue an associated refund (by amount OR by items, with optional restock).
+ * Mobile wrapper that delegates to the shared dashboard refund service.
+ */
+router.post(
+  '/venues/:venueId/payments/:paymentId/refund',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  refundMobileController.issueAssociatedRefund,
+)
+
 // ============================================================================
 // ESTIMATES / PRESUPUESTOS
 // Authenticated endpoints - requires valid JWT

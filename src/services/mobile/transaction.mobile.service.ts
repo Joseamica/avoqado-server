@@ -6,9 +6,10 @@
  * returns a lighter payload suitable for mobile clients.
  */
 
-import { TransactionStatus, PaymentMethod } from '@prisma/client'
+import { PaymentMethod, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -172,6 +173,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
                 select: {
                   name: true,
                   imageUrl: true,
+                  trackInventory: true,
                 },
               },
               modifiers: {
@@ -191,6 +193,32 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     throw new NotFoundError(`Payment con ID ${paymentId} no encontrado`)
   }
 
+  const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
+
+  const refundedTotal = refunds.reduce((sum, refund) => sum + Math.abs(Number(refund.amount) || 0), 0)
+  const remainingRefundable = Math.max(0, Number(payment.amount) + Number(payment.tipAmount) - refundedTotal)
+
+  // Aggregate per-orderItemId refund totals across all refunds for this payment.
+  // Used by the mobile UI to mark lines as "Reembolsado" / "N de X ya reembolsado"
+  // and to clamp the stepper max to the remaining refundable quantity per line.
+  type PerItemRefund = { quantity: number; amount: number }
+  const refundedByOrderItemId = new Map<string, PerItemRefund>()
+  for (const refund of refunds) {
+    const pd = (refund.processorData as Record<string, unknown> | null) ?? {}
+    const refundedItems = Array.isArray(pd.refundedItems) ? (pd.refundedItems as Array<Record<string, unknown>>) : []
+    for (const ri of refundedItems) {
+      const orderItemId = typeof ri.orderItemId === 'string' ? ri.orderItemId : null
+      if (!orderItemId) continue
+      const qty = Number(ri.quantity) || 0
+      const amountCents =
+        typeof ri.amountCents === 'number' ? ri.amountCents : typeof ri.amount === 'number' ? Math.round(ri.amount * 100) : 0
+      const current = refundedByOrderItemId.get(orderItemId) ?? { quantity: 0, amount: 0 }
+      current.quantity += qty
+      current.amount += amountCents / 100
+      refundedByOrderItemId.set(orderItemId, current)
+    }
+  }
+
   return {
     id: payment.id,
     amount: Number(payment.amount),
@@ -204,17 +232,37 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     createdAt: payment.createdAt.toISOString(),
     orderNumber: payment.order?.orderNumber ?? null,
     staffName: payment.processedBy ? `${payment.processedBy.firstName ?? ''} ${payment.processedBy.lastName ?? ''}`.trim() : null,
-    items: (payment.order?.items ?? []).map(item => ({
-      id: item.id,
-      productName: item.productName ?? item.product?.name ?? 'Producto',
-      quantity: item.quantity,
-      unitPrice: Number(item.unitPrice),
-      total: Number(item.total),
-      productImageUrl: item.product?.imageUrl ?? null,
-      modifiers: item.modifiers.map(m => ({
-        name: m.name,
-        price: Number(m.price),
-      })),
-    })),
+    remainingRefundable,
+    refunds: refunds.map(refund => {
+      const processorData = (refund.processorData as Record<string, unknown>) || {}
+      return {
+        id: refund.id,
+        amount: Math.abs(Number(refund.amount) || 0),
+        reason: typeof processorData.refundReason === 'string' ? processorData.refundReason : null,
+        createdAt: refund.createdAt.toISOString(),
+        status: refund.status,
+      }
+    }),
+    items: (payment.order?.items ?? []).map(item => {
+      const prior = refundedByOrderItemId.get(item.id) ?? { quantity: 0, amount: 0 }
+      const refundedQty = Math.min(prior.quantity, item.quantity)
+      const remainingQty = Math.max(0, item.quantity - refundedQty)
+      return {
+        id: item.id,
+        productName: item.productName ?? item.product?.name ?? 'Producto',
+        quantity: item.quantity,
+        unitPrice: Number(item.unitPrice),
+        total: Number(item.total),
+        productImageUrl: item.product?.imageUrl ?? null,
+        trackInventory: item.product?.trackInventory ?? false,
+        refundedQty,
+        refundedAmount: Math.round(prior.amount * 100) / 100,
+        remainingQty,
+        modifiers: item.modifiers.map(m => ({
+          name: m.name,
+          price: Number(m.price),
+        })),
+      }
+    }),
   }
 }

@@ -247,8 +247,11 @@ export async function previewSubscriptionChange(
     logger.info('Previewing subscription change', { venueId, featureId, newFeatureCode })
 
     // Get current VenueFeature with subscription ID
-    const venueFeature = await prisma.venueFeature.findUnique({
-      where: { id: featureId },
+    const venueFeature = await prisma.venueFeature.findFirst({
+      where: {
+        id: featureId,
+        venueId,
+      },
       include: { feature: true },
     })
 
@@ -329,8 +332,11 @@ export async function updateSubscription(
     logger.info('Updating subscription', { venueId, featureId, newFeatureCode })
 
     // Get current VenueFeature
-    const venueFeature = await prisma.venueFeature.findUnique({
-      where: { id: featureId },
+    const venueFeature = await prisma.venueFeature.findFirst({
+      where: {
+        id: featureId,
+        venueId,
+      },
       include: { feature: true },
     })
 

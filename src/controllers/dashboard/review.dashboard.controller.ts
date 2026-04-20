@@ -105,7 +105,7 @@ export async function deleteReview(req: Request<{ reviewId: string; venueId: str
       userId: req.authContext?.userId,
     })
 
-    await reviewsDashboardService.deleteReview(reviewId)
+    await reviewsDashboardService.deleteReview(venueId, reviewId)
 
     res.status(204).send()
   } catch (error) {

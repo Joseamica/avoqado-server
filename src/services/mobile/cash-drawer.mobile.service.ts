@@ -42,7 +42,7 @@ interface OpenSessionParams {
   venueId: string
   staffId: string
   staffName: string
-  startingAmount: number // cents
+  startingAmount: number // dollars (e.g. 10.50 = $10.50)
   deviceName?: string
 }
 
@@ -65,7 +65,7 @@ export async function openSession(params: OpenSessionParams) {
     throw new ConflictError('Ya existe una caja abierta. Cierra la caja actual antes de abrir una nueva.')
   }
 
-  const amountDecimal = centsToDecimal(startingAmount)
+  const amountDecimal = dollarsToDecimal(startingAmount)
 
   const session = await prisma.cashDrawerSession.create({
     data: {
@@ -113,7 +113,7 @@ interface PayInOutParams {
   venueId: string
   staffId: string
   staffName: string
-  amount: number // cents
+  amount: number // dollars (e.g. 20.00 = $20.00)
   note?: string
 }
 
@@ -128,7 +128,7 @@ export async function payIn(params: PayInOutParams) {
   }
 
   const session = await getOpenSession(venueId)
-  const amountDecimal = centsToDecimal(amount)
+  const amountDecimal = dollarsToDecimal(amount)
 
   const event = await prisma.cashDrawerEvent.create({
     data: {
@@ -169,7 +169,7 @@ export async function payOut(params: PayInOutParams) {
   }
 
   const session = await getOpenSession(venueId)
-  const amountDecimal = centsToDecimal(amount)
+  const amountDecimal = dollarsToDecimal(amount)
 
   const event = await prisma.cashDrawerEvent.create({
     data: {
@@ -203,7 +203,7 @@ interface CloseSessionParams {
   venueId: string
   staffId: string
   staffName: string
-  actualAmount: number // cents
+  actualAmount: number // dollars
   note?: string
 }
 
@@ -231,7 +231,7 @@ export async function closeSession(params: CloseSessionParams) {
 
   // Calculate expected amount from events
   const expectedAmount = calculateExpectedAmount(session)
-  const actualDecimal = centsToDecimal(actualAmount)
+  const actualDecimal = dollarsToDecimal(actualAmount)
   const overShort = Number(actualDecimal) - expectedAmount
 
   const closedSession = await prisma.cashDrawerSession.update({
@@ -323,7 +323,7 @@ export async function getHistory(venueId: string, page: number = 1, pageSize: nu
 
 interface SyncEvent {
   type: 'PAY_IN' | 'PAY_OUT' | 'CASH_SALE'
-  amount: number // cents
+  amount: number // dollars
   note?: string
   staffId: string
   staffName: string
@@ -349,7 +349,7 @@ export async function syncEvents(venueId: string, events: SyncEvent[]) {
           sessionId: session.id,
           venueId,
           type: event.type,
-          amount: centsToDecimal(event.amount),
+          amount: dollarsToDecimal(event.amount),
           note: event.note || null,
           staffId: event.staffId,
           staffName: event.staffName,
@@ -410,8 +410,8 @@ function calculateExpectedAmount(session: any): number {
   return Math.round(expected * 100) / 100
 }
 
-function centsToDecimal(cents: number): Decimal {
-  return new Decimal((cents / 100).toFixed(2))
+function dollarsToDecimal(dollars: number): Decimal {
+  return new Decimal(Number(dollars).toFixed(2))
 }
 
 function formatSession(session: any) {
@@ -425,13 +425,13 @@ function formatSession(session: any) {
     openedByStaffId: session.openedByStaffId,
     openedByName: session.openedByName,
     openedAt: session.openedAt.toISOString(),
-    startingAmount: decimalToCents(session.startingAmount),
+    startingAmount: toDollars(session.startingAmount),
     closedByStaffId: session.closedByStaffId,
     closedByName: session.closedByName,
     closedAt: session.closedAt ? session.closedAt.toISOString() : null,
-    actualAmount: session.actualAmount ? decimalToCents(session.actualAmount) : null,
-    expectedAmount: Math.round(expectedAmount * 100),
-    overShort: session.overShort ? decimalToCents(session.overShort) : null,
+    actualAmount: session.actualAmount ? toDollars(session.actualAmount) : null,
+    expectedAmount: Number(expectedAmount.toFixed(2)),
+    overShort: session.overShort ? toDollars(session.overShort) : null,
     closingNote: session.closingNote,
     events: session.events ? session.events.map(formatEvent) : [],
   }
@@ -442,7 +442,7 @@ function formatEvent(event: any) {
     id: event.id,
     sessionId: event.sessionId,
     type: event.type,
-    amount: decimalToCents(event.amount),
+    amount: toDollars(event.amount),
     note: event.note,
     staffId: event.staffId,
     staffName: event.staffName,
@@ -451,6 +451,6 @@ function formatEvent(event: any) {
   }
 }
 
-function decimalToCents(val: any): number {
-  return Math.round(Number(val) * 100)
+function toDollars(val: any): number {
+  return Number(Number(val).toFixed(2))
 }

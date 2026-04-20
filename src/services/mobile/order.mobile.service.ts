@@ -13,6 +13,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
 
 // MARK: - Types
 
@@ -35,6 +36,7 @@ export interface CreateOrderInput {
   customerName?: string | null
   customerPhone?: string | null
   specialRequests?: string | null
+  discount?: number // cents
   tip?: number // cents
   note?: string | null
   splitType?: string | null
@@ -385,9 +387,10 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
 
   const itemsData = [...productItemsData, ...customItemsData]
 
+  const discountDecimal = Math.min(subtotal, Math.max(0, (input.discount || 0) / 100))
   // Tip (cents -> decimal). In Mexico, tip is added on top of the tax-inclusive subtotal.
   const tipDecimal = (input.tip || 0) / 100
-  const total = subtotal + tipDecimal
+  const total = subtotal - discountDecimal + tipDecimal
 
   // Create order with items in a transaction
   const order = await prisma.order.create({
@@ -403,7 +406,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       type: input.orderType || 'DINE_IN',
       source: input.source || 'AVOQADO_IOS',
       subtotal: new Prisma.Decimal(subtotal),
-      discountAmount: new Prisma.Decimal(0),
+      discountAmount: new Prisma.Decimal(discountDecimal),
       taxAmount: new Prisma.Decimal(0),
       tipAmount: new Prisma.Decimal(tipDecimal),
       total: new Prisma.Decimal(total),
@@ -437,7 +440,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   })
 
   logger.info(
-    `✅ [ORDER.MOBILE] Order created | id=${order.id} | number=${order.orderNumber} | subtotal=${subtotal} | tip=${tipDecimal} | total=${total}`,
+    `✅ [ORDER.MOBILE] Order created | id=${order.id} | number=${order.orderNumber} | subtotal=${subtotal} | discount=${discountDecimal} | tip=${tipDecimal} | total=${total}`,
   )
 
   // Emit Socket.IO event for real-time order creation
@@ -620,6 +623,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       orderNumber: true,
       paymentStatus: true,
       subtotal: true,
+      discountAmount: true,
       total: true,
       remainingBalance: true,
       venueId: true,
@@ -711,10 +715,11 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     })
 
     // Update order payment status.
-    // Convention: order.total = subtotal + tipAmount (Mexico: tax is inclusive in subtotal).
+    // Convention: order.total = subtotal - discountAmount + tipAmount (Mexico: tax is inclusive in subtotal).
     // Recompute total defensively in case the order was created before tip was known.
     const orderSubtotal = Number(order.subtotal)
-    const newTotal = orderSubtotal + tipDecimal
+    const orderDiscount = Number(order.discountAmount || 0)
+    const newTotal = orderSubtotal - orderDiscount + tipDecimal
     const amountPaidIncludingTip = amountDecimal + tipDecimal
     const remainingAfterPayment = newTotal - amountPaidIncludingTip
 
@@ -746,6 +751,16 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   })
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
+
+  // Auto-generate digital receipt so the dashboard drawer and "Enviar recibo"
+  // button have an accessKey immediately (mirrors TPV payment flow behavior).
+  // Fire-and-forget — receipt failures must not break the payment response.
+  generateAndStoreReceipt(venueId, payment.id).catch(err => {
+    logger.error('[ORDER.MOBILE] Failed to auto-generate digital receipt', {
+      paymentId: payment.id,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  })
 
   // Emit Socket.IO events for real-time updates
   const broadcastingService = socketManager.getBroadcastingService()

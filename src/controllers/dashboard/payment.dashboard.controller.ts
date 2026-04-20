@@ -77,10 +77,10 @@ export async function getPaymentsData(
 }
 
 // Ruta: GET /payments/:paymentId (ejemplo de cómo sería la ruta)
-export async function getPayment(req: Request<{ paymentId: string }>, res: Response, next: NextFunction) {
+export async function getPayment(req: Request<{ venueId: string; paymentId: string }>, res: Response, next: NextFunction) {
   try {
-    const { paymentId } = req.params
-    const payment = await paymentDashboardService.getPaymentById(paymentId)
+    const { venueId, paymentId } = req.params
+    const payment = await paymentDashboardService.getPaymentById(venueId, paymentId)
     res.status(200).json(payment)
   } catch (error) {
     next(error)
@@ -89,16 +89,16 @@ export async function getPayment(req: Request<{ paymentId: string }>, res: Respo
 
 // Ruta: POST /payments/:paymentId/send-receipt
 export async function sendPaymentReceipt(
-  req: Request<{ paymentId: string }, {}, { recipientEmail?: string }>,
+  req: Request<{ venueId: string; paymentId: string }, {}, { recipientEmail?: string }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { paymentId } = req.params
+    const { venueId, paymentId } = req.params
     const { recipientEmail } = req.body
 
     // Generar y almacenar el recibo digital
-    const receipt = await receiptDashboardService.generateAndStoreReceipt(paymentId, recipientEmail)
+    const receipt = await receiptDashboardService.generateAndStoreReceipt(venueId, paymentId, recipientEmail)
 
     // Enviar el recibo por correo asíncronamente (sin hacer esperar al cliente)
     setTimeout(async () => {
@@ -201,7 +201,7 @@ export async function updatePayment(
       fields: Object.keys(updateData),
     })
 
-    const updatedPayment = await paymentDashboardService.updatePayment(paymentId, updateData)
+    const updatedPayment = await paymentDashboardService.updatePayment(venueId, paymentId, updateData)
 
     res.status(200).json(updatedPayment)
   } catch (error) {
@@ -240,7 +240,7 @@ export async function deletePayment(
       userId: req.authContext?.userId,
     })
 
-    await paymentDashboardService.deletePayment(paymentId)
+    await paymentDashboardService.deletePayment(venueId, paymentId)
 
     res.status(204).send()
   } catch (error) {

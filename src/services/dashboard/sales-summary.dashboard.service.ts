@@ -146,15 +146,21 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // because some orders synced from POS don't have OrderItem records)
   // NOTE: items = grossSalesResult._sum.subtotal (already queried above)
 
-  // 3. Refunds - Sum of refunded payment amounts
+  // 3. Refunds — sum of refund Payments (type=REFUND, status=COMPLETED).
+  // The legacy query filtered `status='REFUNDED'` which matched a handful of
+  // pre-sprint hack records (original Payments flipped to status=REFUNDED with
+  // a negative amount) and missed every real refund since the 2026-04 refund
+  // sprint, which creates Payments with type=REFUND, status=COMPLETED, negative
+  // amount and negative tipAmount (post-2026-04-19 tip split fix).
   const refundsResult = await prisma.payment.aggregate({
     where: {
       venueId,
       ...dateFilter,
-      status: 'REFUNDED',
+      type: 'REFUND',
     },
     _sum: {
       amount: true,
+      tipAmount: true,
     },
     _count: true,
   })
@@ -227,7 +233,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   const grossSales = Number(grossSalesResult._sum.subtotal || 0)
   const items = Number(grossSalesResult._sum.subtotal || 0)
   const discounts = Number(grossSalesResult._sum.discountAmount || 0)
-  const refunds = Number(refundsResult._sum.amount || 0)
+  // Refund amounts are stored negative on Payment.amount/tipAmount. Sum both so
+  // the total includes the tip portion (tip split fix 2026-04-19), take abs so
+  // downstream consumers treat "refunds" as a positive magnitude.
+  const refunds = Math.abs(Number(refundsResult._sum.amount || 0) + Number(refundsResult._sum.tipAmount || 0))
   const taxes = Number(grossSalesResult._sum.taxAmount || 0)
   const tips = Number(tipsResult._sum.tipAmount || 0)
   const platformFees = Number(platformFeesResult._sum.feeAmount || 0)
@@ -420,16 +429,18 @@ async function calculateTimePeriodMetrics(
     ORDER BY ${orderByExpression}
   `
 
-  // Query refunds grouped by period
+  // Query refunds grouped by period — REFUND Payments have negative amount and
+  // (since 2026-04-19) negative tipAmount. Use ABS so "refunds" is a positive
+  // magnitude matching the consumer contract of the non-raw aggregate above.
   const refundsQuery = `
     SELECT
       ${groupByExpression} as period,
-      COALESCE(SUM(amount), 0) as refunds
+      COALESCE(SUM(ABS(amount) + ABS("tipAmount")), 0) as refunds
     FROM "Payment"
     WHERE "venueId" = $1
       AND "createdAt" >= $2
       AND "createdAt" <= $3
-      AND status = 'REFUNDED'
+      AND type = 'REFUND'
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `

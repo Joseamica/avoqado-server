@@ -219,9 +219,12 @@ export async function getPaymentsData(
 /**
  * Función para obtener un solo pago, adaptada al nuevo schema.
  */
-export async function getPaymentById(paymentId: string) {
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
+export async function getPaymentById(venueId: string, paymentId: string) {
+  const payment = await prisma.payment.findFirst({
+    where: {
+      id: paymentId,
+      venueId,
+    },
     include: {
       processedBy: true, // Staff que procesó el pago
       shift: true, // Información del turno
@@ -232,7 +235,11 @@ export async function getPaymentById(paymentId: string) {
           items: {
             // Line items (products + custom "Otro importe" entries) with their modifiers,
             // so the mobile/web drawer can render the full breakdown.
+            // We also pull the product's trackInventory flag for the refund/restock flow.
             include: {
+              product: {
+                select: { id: true, trackInventory: true },
+              },
               modifiers: {
                 include: { modifier: true },
               },
@@ -258,7 +265,7 @@ export async function getPaymentById(paymentId: string) {
   })
 
   if (!payment) {
-    throw new NotFoundError(`Payment con ID ${paymentId} no encontrado`)
+    throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
   }
 
   return payment
@@ -281,14 +288,17 @@ export interface UpdatePaymentData {
   entryMode?: CardEntryMode
 }
 
-export async function updatePayment(paymentId: string, data: UpdatePaymentData) {
+export async function updatePayment(venueId: string, paymentId: string, data: UpdatePaymentData) {
   // First verify the payment exists
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
+  const payment = await prisma.payment.findFirst({
+    where: {
+      id: paymentId,
+      venueId,
+    },
   })
 
   if (!payment) {
-    throw new NotFoundError(`Payment con ID ${paymentId} no encontrado`)
+    throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
   }
 
   // Update the payment
@@ -344,17 +354,20 @@ export async function updatePayment(paymentId: string, data: UpdatePaymentData) 
  * Delete a payment (SUPERADMIN only)
  * This is a hard delete - use with caution
  */
-export async function deletePayment(paymentId: string): Promise<void> {
+export async function deletePayment(venueId: string, paymentId: string): Promise<void> {
   // First verify the payment exists
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
+  const payment = await prisma.payment.findFirst({
+    where: {
+      id: paymentId,
+      venueId,
+    },
     include: {
       transactionCost: true,
     },
   })
 
   if (!payment) {
-    throw new NotFoundError(`Payment con ID ${paymentId} no encontrado`)
+    throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
   }
 
   // Delete related records first (cascading)

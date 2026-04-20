@@ -393,12 +393,16 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
     },
   }
 
-  // Fetch only valid payments: COMPLETED status, non-cancelled orders
-  // Filters applied at database level to avoid loading unnecessary data
+  // Fetch only valid payments: COMPLETED status, non-cancelled orders, and
+  // exclude refund payments (type=REFUND). Refund Payments also carry
+  // status=COMPLETED but they're corrections, not sales — including them here
+  // makes the "Total ventas" KPI negative on days that only had refunds and
+  // inflates downstream derived metrics (avg ticket, tips, etc.).
   const validPayments = await prisma.payment.findMany({
     where: {
       venueId,
       status: TransactionStatus.COMPLETED,
+      type: { not: 'REFUND' },
       createdAt: {
         gte: fromDate,
         lte: toDate,
@@ -412,6 +416,7 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
       amount: true,
       method: true,
       tipAmount: true,
+      type: true,
       createdAt: true,
     },
     orderBy: {
@@ -636,10 +641,13 @@ async function getBestSellingProductsData(venueId: string, dateFilter: any) {
 }
 
 async function getTipsOverTimeData(venueId: string, dateFilter: any) {
+  // Exclude refund payments — their tipAmount is negative (post 2026-04-19
+  // tip-split fix) and would under-report tips earned on sales.
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
       status: TransactionStatus.COMPLETED,
+      type: { not: 'REFUND' },
       ...dateFilter,
     },
     select: {
@@ -657,10 +665,13 @@ async function getTipsOverTimeData(venueId: string, dateFilter: any) {
 }
 
 async function getSalesByPaymentMethodData(venueId: string, dateFilter: any) {
+  // Exclude refund payments from the "sales by method" breakdown — refunds
+  // have negative amount and would show up as deductions in the chart.
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
       status: TransactionStatus.COMPLETED,
+      type: { not: 'REFUND' },
       ...dateFilter,
     },
     select: {

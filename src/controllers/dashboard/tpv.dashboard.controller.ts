@@ -231,9 +231,9 @@ export async function getTerminalHealth(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { tpvId } = req.params
+    const { venueId, tpvId } = req.params
 
-    const terminalHealth = await tpvHealthService.getTerminalHealth(tpvId)
+    const terminalHealth = await tpvHealthService.getTerminalHealth(tpvId, venueId)
 
     res.status(200).json(terminalHealth)
   } catch (error) {
@@ -251,7 +251,7 @@ export async function generateActivationCode(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { terminalId } = req.params
+    const { venueId, terminalId } = req.params
     const authContext = (req as any).authContext
     const staffId = authContext?.userId || authContext?.staffId
 
@@ -259,7 +259,7 @@ export async function generateActivationCode(
       throw new BadRequestError('Staff ID required to generate activation code')
     }
 
-    const activationData = await generateActivationCodeService(terminalId, staffId)
+    const activationData = await generateActivationCodeService(terminalId, staffId, venueId)
 
     res.status(200).json(activationData)
   } catch (error) {

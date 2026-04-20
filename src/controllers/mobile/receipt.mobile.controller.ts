@@ -16,22 +16,38 @@ import logger from '@/config/logger'
  * Find or create a receipt by accessKey or paymentId.
  * If paymentId is given and no receipt exists, generates one.
  */
-async function findOrCreateReceipt(receiptAccessKey?: string, paymentId?: string) {
+async function findOrCreateReceipt(venueId: string, receiptAccessKey?: string, paymentId?: string) {
   if (receiptAccessKey) {
-    return prisma.digitalReceipt.findUnique({
+    const receipt = await prisma.digitalReceipt.findUnique({
       where: { accessKey: receiptAccessKey },
+      include: {
+        payment: {
+          select: { venueId: true },
+        },
+      },
     })
+
+    if (!receipt || receipt.payment?.venueId !== venueId) {
+      return null
+    }
+
+    return receipt
   }
 
   if (paymentId) {
     // Look for existing receipt
     const existing = await prisma.digitalReceipt.findFirst({
-      where: { paymentId },
+      where: {
+        paymentId,
+        payment: {
+          venueId,
+        },
+      },
     })
     if (existing) return existing
 
     // Generate receipt on-the-fly
-    return receiptService.generateAndStoreReceipt(paymentId)
+    return receiptService.generateAndStoreReceipt(venueId, paymentId)
   }
 
   return null
@@ -45,6 +61,7 @@ async function findOrCreateReceipt(receiptAccessKey?: string, paymentId?: string
  */
 export async function sendReceiptEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const { venueId } = req.params
     const { receiptAccessKey, paymentId, email } = req.body
 
     if ((!receiptAccessKey && !paymentId) || !email) {
@@ -55,7 +72,7 @@ export async function sendReceiptEmail(req: Request, res: Response, next: NextFu
       return
     }
 
-    const receipt = await findOrCreateReceipt(receiptAccessKey, paymentId)
+    const receipt = await findOrCreateReceipt(venueId, receiptAccessKey, paymentId)
 
     if (!receipt) {
       res.status(404).json({
@@ -96,6 +113,7 @@ export async function sendReceiptEmail(req: Request, res: Response, next: NextFu
  */
 export async function sendReceiptWhatsapp(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const { venueId } = req.params
     const { receiptAccessKey, paymentId, phone } = req.body
 
     if ((!receiptAccessKey && !paymentId) || !phone) {
@@ -106,7 +124,7 @@ export async function sendReceiptWhatsapp(req: Request, res: Response, next: Nex
       return
     }
 
-    const receipt = await findOrCreateReceipt(receiptAccessKey, paymentId)
+    const receipt = await findOrCreateReceipt(venueId, receiptAccessKey, paymentId)
 
     if (!receipt) {
       res.status(404).json({
