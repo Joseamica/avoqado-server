@@ -367,12 +367,16 @@ async function updateOrderTotalsForStandalonePayment(
   // ✅ FIX: Use subtotal as base (doesn't include tips), not order.total (which may already include tips from previous payments)
   const orderSubtotal = parseFloat(order.subtotal.toString())
 
+  // Subtract order-level discount (e.g., 100% cortesía applied via applyManualDiscount).
+  // Without this, discounted orders never reach isFullyPaid and stay in PENDING.
+  const orderDiscount = order.discountAmount ? parseFloat(order.discountAmount.toString()) : 0
+
   // ✅ FIX: Calculate cumulative tip from all completed payments + current tip
   const previousTips = order.payments.reduce((sum, payment) => sum + parseFloat(payment.tipAmount.toString()), 0)
   const totalTip = previousTips + tipAmount
 
   // ✅ FIX: Calculate new total including tips (consistent with fast payments)
-  const newTotal = orderSubtotal + totalTip
+  const newTotal = orderSubtotal - orderDiscount + totalTip
 
   // Calculate remaining amount (based on new total)
   const remainingAmount = Math.max(0, newTotal - totalPaid)

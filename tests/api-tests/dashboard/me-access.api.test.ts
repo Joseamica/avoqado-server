@@ -26,6 +26,7 @@ const mockUserAccess = {
   whiteLabelEnabled: false,
   enabledFeatures: [],
   featureAccess: {},
+  featureMetadata: {},
 }
 
 const mockWhiteLabelAccess = {
@@ -113,6 +114,7 @@ describe('GET /api/v1/me/access', () => {
         whiteLabelEnabled: expect.any(Boolean),
         enabledFeatures: expect.any(Array),
         featureAccess: expect.any(Object),
+        featureMetadata: expect.any(Object),
       })
     })
   })

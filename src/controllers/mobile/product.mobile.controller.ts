@@ -177,12 +177,14 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
 // ---------------------------------------------------------------------------
 
 /**
- * Update an existing product's fields.
+ * Update an existing product's fields. Whitelists writable fields so a client
+ * sending unknown keys (e.g. a new iOS/Android build with a field that hasn't
+ * shipped to the schema yet) returns a clean 200 instead of Prisma's
+ * "Unknown argument" 500.
  */
 export async function updateProduct(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, productId } = req.params
-    const data = req.body
 
     // Verify the product belongs to this venue and is not deleted
     const existing = await prisma.product.findFirst({
@@ -193,6 +195,48 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Producto no encontrado' })
     }
+
+    // Whitelist: only these fields may be updated via the mobile endpoint.
+    // Anything else in req.body (e.g. `priceType`, `id`, relations) is ignored.
+    const allowed = [
+      'name',
+      'description',
+      'type',
+      'sku',
+      'gtin',
+      'imageUrl',
+      'price',
+      'cost',
+      'taxRate',
+      'active',
+      'featured',
+      'trackInventory',
+      'categoryId',
+      'displayOrder',
+      'tags',
+      'allergens',
+      'calories',
+      'prepTime',
+      'cookingNotes',
+      'isAlcoholic',
+      'kitchenName',
+      'abbreviation',
+      'durationMinutes',
+      'inventoryMethod',
+      'unit',
+      'suggestedAmounts',
+      'allowCustomAmount',
+    ] as const
+
+    const data: Record<string, unknown> = {}
+    for (const key of allowed) {
+      if (key in req.body) data[key] = (req.body as Record<string, unknown>)[key]
+    }
+
+    // Coerce numeric fields that may arrive as strings from older mobile builds.
+    if (data.price !== undefined && data.price !== null) data.price = parseFloat(String(data.price))
+    if (data.cost !== undefined && data.cost !== null) data.cost = parseFloat(String(data.cost))
+    if (data.taxRate !== undefined && data.taxRate !== null) data.taxRate = parseFloat(String(data.taxRate))
 
     const product = await prisma.product.update({
       where: { id: productId },

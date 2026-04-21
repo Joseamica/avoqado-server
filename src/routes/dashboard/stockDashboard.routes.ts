@@ -202,15 +202,25 @@ router.post('/org-bulk-upload', whiteLabelStockWrite, async (req: Request, res: 
 /**
  * GET /dashboard/stock/movements
  * Returns: Recent stock movements (registrations, sales)
- * Query: limit (default 20)
+ * Query: limit (default 20), dateFrom?, dateTo? (ISO strings)
  */
 router.get('/movements', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     // Use target venueId from URL params
     const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { limit = '20' } = req.query
+    const { limit = '20', dateFrom, dateTo } = req.query
 
-    const movements = await stockDashboardService.getRecentMovements(venueId, parseInt(limit as string, 10))
+    // Parse optional ISO dates defensively — invalid strings fall back to
+    // "no filter" rather than throwing, so a TPV sending garbage doesn't 500.
+    const parsedFrom = typeof dateFrom === 'string' ? new Date(dateFrom) : undefined
+    const parsedTo = typeof dateTo === 'string' ? new Date(dateTo) : undefined
+    const safeFrom = parsedFrom && !isNaN(parsedFrom.getTime()) ? parsedFrom : undefined
+    const safeTo = parsedTo && !isNaN(parsedTo.getTime()) ? parsedTo : undefined
+
+    const movements = await stockDashboardService.getRecentMovements(venueId, parseInt(limit as string, 10), {
+      dateFrom: safeFrom,
+      dateTo: safeTo,
+    })
 
     res.json({
       success: true,

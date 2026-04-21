@@ -58,6 +58,7 @@ describe('verifyAccess Middleware', () => {
     whiteLabelEnabled: false,
     enabledFeatures: [],
     featureAccess: {},
+    featureMetadata: {},
   }
 
   beforeEach(() => {

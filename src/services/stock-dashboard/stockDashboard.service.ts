@@ -411,10 +411,17 @@ class StockDashboardService {
 
   /**
    * Get recent stock movements (registrations and sales)
+   *
+   * Date filtering: when `dateFrom`/`dateTo` are provided, we narrow the
+   * underlying items query by `createdAt` (registrations) OR `soldAt` (sales,
+   * returns, damaged). This lets the UI show older windows without having to
+   * pull 500+ rows at once. Both dates are optional for backwards compat with
+   * the TPV, which only sends `limit`.
    */
   async getRecentMovements(
     venueId: string,
     limit: number = 20,
+    options: { dateFrom?: Date; dateTo?: Date } = {},
   ): Promise<
     Array<{
       id: string
@@ -432,9 +439,26 @@ class StockDashboardService {
     }>
   > {
     const { itemWhere } = await this.getItemScope(venueId)
+    const { dateFrom, dateTo } = options
+
+    // When a date window is given, include rows whose registration OR sale
+    // timestamp falls inside it. Without this OR, filtering by `createdAt`
+    // alone would hide items that were registered earlier but sold in-range.
+    const dateFilter =
+      dateFrom || dateTo
+        ? {
+            OR: [
+              { createdAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } },
+              { soldAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } },
+            ],
+          }
+        : null
+
+    const where = dateFilter ? { AND: [itemWhere, dateFilter] } : { ...itemWhere }
+
     // Get recent items — includes org-level items
     const recentItems = await prisma.serializedItem.findMany({
-      where: { ...itemWhere },
+      where,
       include: {
         category: true,
         venue: { select: { name: true } },
@@ -570,8 +594,20 @@ class StockDashboardService {
       }
     }
 
+    // Filter emitted movements by the window (a single item can produce a
+    // REGISTERED event + a SOLD event at different times — we only want the
+    // events whose own timestamp lands inside the range).
+    const windowed = dateFilter
+      ? movements.filter(m => {
+          const ts = m.timestamp.getTime()
+          if (dateFrom && ts < dateFrom.getTime()) return false
+          if (dateTo && ts > dateTo.getTime()) return false
+          return true
+        })
+      : movements
+
     // Sort by timestamp descending and limit
-    return movements.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()).slice(0, limit)
+    return windowed.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()).slice(0, limit)
   }
 
   /**

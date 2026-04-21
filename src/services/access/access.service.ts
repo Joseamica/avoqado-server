@@ -16,6 +16,7 @@ import prisma from '@/utils/prismaClient'
 import { DEFAULT_PERMISSIONS, resolvePermissions } from '@/lib/permissions'
 import { getEffectivePermissions } from '@/lib/resolveEffectivePermissions'
 import logger from '@/config/logger'
+import { getFeatureMetadataForVenue, FeatureMetadata } from '@/services/access/feature-metadata.service'
 
 /**
  * Feature access configuration from white-label module config
@@ -50,6 +51,8 @@ export interface UserAccess {
   enabledFeatures: string[]
   /** Access status for each enabled feature */
   featureAccess: Record<string, FeatureAccessResult>
+  /** Metadata for all globally active features (for paywall/upsell UI) */
+  featureMetadata: Record<string, FeatureMetadata>
 }
 
 /**
@@ -443,6 +446,17 @@ export async function getUserAccess(
     whiteLabelEnabled,
     enabledFeatures,
     featureAccess,
+    featureMetadata: {},
+  }
+
+  try {
+    access.featureMetadata = await getFeatureMetadataForVenue(venueId)
+  } catch (error) {
+    logger.warn('accessService.getUserAccess: Failed to resolve feature metadata, returning empty metadata', {
+      venueId,
+      userId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
   }
 
   // Store in cache
@@ -455,6 +469,7 @@ export async function getUserAccess(
     permissionCount: resolvedPermissions.length,
     whiteLabelEnabled,
     featureCount: enabledFeatures.length,
+    featureMetadataCount: Object.keys(access.featureMetadata).length,
   })
 
   return access

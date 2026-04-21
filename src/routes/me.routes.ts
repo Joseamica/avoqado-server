@@ -18,7 +18,7 @@ const router = Router()
  * GET /api/v1/me/access
  *
  * Get the current user's access information for a specific venue.
- * Returns core permissions, white-label status, and feature access.
+ * Returns core permissions, white-label status, feature access, and feature metadata.
  *
  * Query params:
  * - venueId (optional): Target venue ID. If not provided, uses the venue from JWT token.
@@ -32,7 +32,8 @@ const router = Router()
  *   corePermissions: string[],
  *   whiteLabelEnabled: boolean,
  *   enabledFeatures: string[],
- *   featureAccess: { [code: string]: { allowed: boolean, reason?: string, dataScope: string } }
+ *   featureAccess: { [code: string]: { allowed: boolean, reason?: string, dataScope: string } },
+ *   featureMetadata: { [code: string]: FeatureMetadata }
  * }
  */
 router.get('/access', authenticateTokenMiddleware, async (req: Request, res: Response, next: NextFunction) => {
