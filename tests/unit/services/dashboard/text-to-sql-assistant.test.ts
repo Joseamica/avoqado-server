@@ -152,6 +152,27 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
     })
   })
 
+  describe('Fallback Intent Classification', () => {
+    it('should classify recipe count queries as simple recipeCount intent', () => {
+      const query = 'cuantas recetas tengo'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('recipeCount')
+      expect(classification.requiresDateRange).toBe(false)
+    })
+
+    it('should keep product count queries as complex', () => {
+      const query = 'cuantos productos tengo'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(false)
+      expect(classification.intent).toBeUndefined()
+    })
+  })
+
   describe('Importance Detection', () => {
     it('should detect important queries with rankings', () => {
       const rankingQuery = '¿Quién es el mejor mesero?'

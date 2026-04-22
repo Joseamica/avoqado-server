@@ -463,6 +463,9 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  *                 type: string
  *                 enum: [AVOQADO_IOS, AVOQADO_ANDROID]
  *                 default: AVOQADO_IOS
+ *               customerId:
+ *                 type: string
+ *                 description: Optional customer to link order as pay-later account receivable
  *     responses:
  *       201:
  *         description: Order created successfully

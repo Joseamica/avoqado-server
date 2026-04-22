@@ -154,6 +154,13 @@ export interface InventoryAlert {
 }
 
 /**
+ * Recipe count summary for the current venue.
+ */
+export interface RecipeCountSummary {
+  totalRecipes: number
+}
+
+/**
  * Pending orders statistics by status
  */
 export interface PendingOrdersStats {
@@ -705,6 +712,29 @@ export class SharedQueryService {
       .sort((a, b) => a.stockPercentage - b.stockPercentage)
 
     return alerts
+  }
+
+  /**
+   * Get total active recipes for a venue.
+   *
+   * Used by:
+   * - AI Chatbot for "¿cuántas recetas tengo?" queries
+   *
+   * @param venueId - Venue ID (multi-tenant isolation)
+   * @returns Total number of active recipes linked to active, non-deleted products
+   */
+  static async getRecipeCount(venueId: string): Promise<RecipeCountSummary> {
+    const totalRecipes = await prisma.recipe.count({
+      where: {
+        product: {
+          venueId,
+          active: true,
+          deletedAt: null,
+        },
+      },
+    })
+
+    return { totalRecipes }
   }
 
   /**

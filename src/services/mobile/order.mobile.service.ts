@@ -33,6 +33,7 @@ export interface CreateOrderInput {
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
+  customerId?: string | null
   customerName?: string | null
   customerPhone?: string | null
   specialRequests?: string | null
@@ -391,6 +392,34 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // Tip (cents -> decimal). In Mexico, tip is added on top of the tax-inclusive subtotal.
   const tipDecimal = (input.tip || 0) / 100
   const total = subtotal - discountDecimal + tipDecimal
+  const normalizedCustomerId = input.customerId?.trim() || null
+  let resolvedCustomerName = input.customerName || null
+  let resolvedCustomerPhone = input.customerPhone || null
+
+  if (normalizedCustomerId) {
+    const customer = await prisma.customer.findUnique({
+      where: { id: normalizedCustomerId },
+      select: {
+        id: true,
+        venueId: true,
+        firstName: true,
+        lastName: true,
+        phone: true,
+      },
+    })
+
+    if (!customer || customer.venueId !== venueId) {
+      throw new NotFoundError('Customer not found')
+    }
+
+    if (!resolvedCustomerName) {
+      const fullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim()
+      resolvedCustomerName = fullName.length > 0 ? fullName : null
+    }
+    if (!resolvedCustomerPhone) {
+      resolvedCustomerPhone = customer.phone || null
+    }
+  }
 
   // Create order with items in a transaction
   const order = await prisma.order.create({
@@ -405,16 +434,27 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       kitchenStatus: 'PENDING',
       type: input.orderType || 'DINE_IN',
       source: input.source || 'AVOQADO_IOS',
+      customerId: normalizedCustomerId,
       subtotal: new Prisma.Decimal(subtotal),
       discountAmount: new Prisma.Decimal(discountDecimal),
       taxAmount: new Prisma.Decimal(0),
       tipAmount: new Prisma.Decimal(tipDecimal),
       total: new Prisma.Decimal(total),
       remainingBalance: new Prisma.Decimal(total),
-      customerName: input.customerName || null,
-      customerPhone: input.customerPhone || null,
+      customerName: resolvedCustomerName,
+      customerPhone: resolvedCustomerPhone,
       specialRequests: input.note || input.specialRequests || null,
       version: 1,
+      orderCustomers: normalizedCustomerId
+        ? {
+            create: [
+              {
+                customerId: normalizedCustomerId,
+                isPrimary: true,
+              },
+            ],
+          }
+        : undefined,
       items: {
         create: itemsData,
       },

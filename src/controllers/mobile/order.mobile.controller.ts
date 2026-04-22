@@ -52,8 +52,21 @@ export const listOrders = async (req: Request, res: Response, next: NextFunction
 export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const { items, staffId, orderType, source, tableId, customerName, customerPhone, specialRequests, discount, tip, note, splitType } =
-      req.body
+    const {
+      items,
+      staffId,
+      orderType,
+      source,
+      tableId,
+      customerId,
+      customerName,
+      customerPhone,
+      specialRequests,
+      discount,
+      tip,
+      note,
+      splitType,
+    } = req.body
 
     // Validate required fields
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -99,6 +112,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       orderType: orderType || 'TAKEOUT',
       source: source || 'AVOQADO_IOS',
       tableId,
+      customerId,
       customerName,
       customerPhone,
       specialRequests,

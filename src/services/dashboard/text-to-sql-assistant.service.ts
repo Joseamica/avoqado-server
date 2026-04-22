@@ -283,6 +283,7 @@ interface IntentClassificationResult {
     | 'businessOverview'
     // NEW: Operational intents (Phase 2 expansion)
     | 'inventoryAlerts'
+    | 'recipeCount'
     | 'pendingOrders'
     | 'activeShifts'
     | 'profitAnalysis'
@@ -375,6 +376,7 @@ class TextToSqlAssistantService {
     reviews: ['Review'],
     businessOverview: ['Payment', 'Order', 'OrderItem', 'Product', 'MenuCategory', 'Review'],
     inventoryAlerts: ['RawMaterial'],
+    recipeCount: ['Recipe', 'Product'],
     pendingOrders: ['Order'],
     activeShifts: ['Shift', 'Staff', 'Order'],
     profitAnalysis: ['Payment', 'OrderItem', 'Order', 'Product', 'Recipe'],
@@ -2416,6 +2418,19 @@ Ejemplos de respuestas CORRECTAS:
               break
             }
 
+            case 'recipeCount': {
+              const recipeSummary = await SharedQueryService.getRecipeCount(query.venueId)
+              if (recipeSummary.totalRecipes === 0) {
+                naturalResponse = '📭 No tienes recetas activas configuradas en este momento.'
+              } else if (recipeSummary.totalRecipes === 1) {
+                naturalResponse = '📚 Tienes 1 receta activa en tu inventario.'
+              } else {
+                naturalResponse = `📚 Tienes ${recipeSummary.totalRecipes} recetas activas en tu inventario.`
+              }
+              serviceResult = recipeSummary
+              break
+            }
+
             case 'pendingOrders': {
               // Real-time query - no date range needed
               const pendingStats = await SharedQueryService.getPendingOrders(query.venueId)
@@ -3401,6 +3416,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         type: 'bar',
         title: 'Órdenes Pendientes',
       },
+      recipeCount: {
+        type: 'bar',
+        title: 'Recetas Activas',
+      },
     }
 
     const config = chartConfigs[intent]
@@ -3683,6 +3702,20 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
               xAxis: { key: 'name', label: 'Orden' },
               yAxis: { key: 'total', label: 'Total ($)' },
               dataKeys: [{ key: 'total', label: 'Total', color: '#f59e0b' }],
+            },
+          }
+        }
+
+        case 'recipeCount': {
+          const totalRecipes = typeof data?.totalRecipes === 'number' ? data.totalRecipes : 0
+          return {
+            type: 'bar',
+            title: 'Recetas Activas',
+            data: [{ name: 'Recetas', total: totalRecipes }],
+            config: {
+              xAxis: { key: 'name', label: 'Tipo' },
+              yAxis: { key: 'total', label: 'Cantidad' },
+              dataKeys: [{ key: 'total', label: 'Total', color: '#3b82f6' }],
             },
           }
         }
@@ -5852,6 +5885,20 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     // Extract date range with explicit flag (for transparency in responses)
     const { dateRange, wasExplicit } = this.extractDateRangeWithExplicit(lowerMessage)
 
+    // Special-case: "cuántas recetas tengo" should be treated as a simple real-time query.
+    const asksRecipeCount =
+      /\b(recetas?|recipe)\b/.test(lowerMessage) &&
+      /\b(cuant[ao]s?|cantidad|total|numero|n[úu]mero|tengo|hay)\b/.test(lowerMessage)
+    if (asksRecipeCount) {
+      return {
+        isSimpleQuery: true,
+        intent: 'recipeCount',
+        confidence: 0.95,
+        reason: 'Detected recipe count query (real-time, no date range needed)',
+        requiresDateRange: false,
+      }
+    }
+
     // CRITICAL: Check if query is complex (has comparisons, filters, etc.)
     // Complex queries should NOT be classified as "simple" even if they match intent patterns
     const isComplex = this.detectComplexity(message)
@@ -6225,6 +6272,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - staffPerformance: mejor mesero/empleado, quién vendió más, quién es el que más vende, rendimiento staff, propinas por persona. INCLUYE "quién" + verbo de venta/propina aunque no diga "empleado"
 - reviews: reseñas, calificaciones, estrellas, opiniones clientes
 - inventoryAlerts: inventario bajo, stock faltante, qué me falta (dateRange=null)
+- recipeCount: cuántas recetas tengo, total de recetas en inventario (dateRange=null)
 - pendingOrders: órdenes pendientes, pedidos abiertos (dateRange=null)
 - activeShifts: turnos activos, quién trabaja AHORA, quién está en turno (dateRange=null). SOLO para saber quién está trabajando en este momento
 - profitAnalysis: utilidad, márgenes, ganancias, costos
@@ -6254,10 +6302,11 @@ REGLAS CRÍTICAS:
    - Si pregunta "cuántas órdenes hay", "qué método de pago se usa más", "cuántas reseñas" SIN periodo → dateRange="allTime", wasDateExplicit=false (quiere el total, no solo este mes)
    - Si pregunta "cuánto vendí", "ventas", "ticket promedio" SIN periodo → dateRange="thisMonth", wasDateExplicit=false
    - La regla: preguntas de TOTALES/CONTEO sin periodo → allTime. Preguntas de RENDIMIENTO/VENTAS sin periodo → thisMonth
-7. Para inventoryAlerts/pendingOrders/activeShifts → dateRange=null
+7. Para inventoryAlerts/recipeCount/pendingOrders/activeShifts → dateRange=null
 8. "today"/"yesterday"/"this week" en inglés = today/yesterday/thisWeek (SIMPLE, no complejo)
-9. "cuántos meseros/empleados tengo" / "cuántos productos tengo" → complex (es un conteo que necesita SQL). NO es activeShifts
+9. "cuántos meseros/empleados tengo" / "cuántos productos tengo" / "cuántas mesas tengo" → complex (es un conteo que necesita SQL). NO es activeShifts
 10. activeShifts es SOLO para "quién trabaja AHORA" / "turnos abiertos". NO para conteo de staff total
+11. EXCEPCIÓN: "cuántas recetas tengo" / "total de recetas" → recipeCount (simple, dateRange=null)
 
 dateRanges válidos: today, yesterday, thisWeek, lastWeek, thisMonth, lastMonth, last7days, last30days, allTime, null
 
@@ -6331,6 +6380,7 @@ Responde SOLO JSON (sin markdown):
         'reviews',
         'businessOverview',
         'inventoryAlerts',
+        'recipeCount',
         'pendingOrders',
         'activeShifts',
         'profitAnalysis',
@@ -6369,7 +6419,7 @@ Responde SOLO JSON (sin markdown):
       }
 
       // Simple intent — route to SharedQueryService
-      const realTimeIntents = new Set(['inventoryAlerts', 'pendingOrders', 'activeShifts'])
+      const realTimeIntents = new Set(['inventoryAlerts', 'recipeCount', 'pendingOrders', 'activeShifts'])
       const requiresDateRange = !realTimeIntents.has(intent)
 
       const parsedDateRangeRaw = parsed.dateRange === 'null' || parsed.dateRange === null ? null : parsed.dateRange
@@ -6807,7 +6857,7 @@ Responde SOLO JSON (sin markdown):
     const newDateRange = this.extractDateRange(message.toLowerCase())
 
     // Real-time intents don't need date ranges
-    const realTimeIntents = ['inventoryAlerts', 'pendingOrders', 'activeShifts']
+    const realTimeIntents = ['inventoryAlerts', 'recipeCount', 'pendingOrders', 'activeShifts']
     const isPreviousRealTime = realTimeIntents.includes(context.previousIntent as string)
 
     // If we have a new date range or previous was real-time, inherit the intent
