@@ -127,6 +127,9 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
             },
           },
         },
+        _count: {
+          select: { items: true }, // Cheap count for "N productos" cell in /orders list
+        },
       },
       orderBy: { updatedAt: 'desc' },
       skip,

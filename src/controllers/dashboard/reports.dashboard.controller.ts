@@ -17,7 +17,10 @@ import { getPayLaterAgingReport } from '@/services/dashboard/reports.dashboard.s
  */
 export async function payLaterAgingReport(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = req.authContext!
+    const venueId = (req.params.venueId as string | undefined) || req.authContext?.venueId
+    if (!venueId) {
+      throw new Error('Venue ID not found for pay-later-aging report')
+    }
 
     const report = await getPayLaterAgingReport(venueId)
 

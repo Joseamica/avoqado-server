@@ -22,6 +22,7 @@ const router = express.Router()
  * @permission tpv-reports:pay-later-aging
  */
 router.get('/pay-later-aging', checkPermission('tpv-reports:pay-later-aging'), payLaterAgingReport)
+router.get('/venues/:venueId/pay-later-aging', checkPermission('tpv-reports:pay-later-aging'), payLaterAgingReport)
 
 /**
  * GET /api/v1/dashboard/reports/sales-summary

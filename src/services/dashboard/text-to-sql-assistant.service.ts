@@ -1802,7 +1802,9 @@ Ejemplos de respuestas CORRECTAS:
             query.message,
           )
 
-        if (semanticCheck.isInjection && semanticCheck.confidence >= 70 && !isCrudMessage) {
+        const shouldBypassSemanticBlock = this.shouldBypassSemanticInjectionBlock(query.message)
+
+        if (semanticCheck.isInjection && semanticCheck.confidence >= 70 && !isCrudMessage && !shouldBypassSemanticBlock) {
           logger.warn('🛡️ Semantic prompt injection blocked', {
             userId: query.userId,
             venueId: query.venueId,
@@ -1838,6 +1840,16 @@ Ejemplos de respuestas CORRECTAS:
               violationType: SecurityViolationType.PROMPT_INJECTION,
             },
           }
+        }
+
+        if (semanticCheck.isInjection && semanticCheck.confidence >= 70 && shouldBypassSemanticBlock) {
+          logger.warn('⚠️ Semantic injection classifier flagged a likely benign business query; bypassing block', {
+            userId: query.userId,
+            venueId: query.venueId,
+            confidence: semanticCheck.confidence,
+            reason: semanticCheck.reason,
+            messagePreview: query.message.substring(0, 120),
+          })
         }
 
         // Step 0.1c: Scan conversation history for injection attempts.
@@ -5862,6 +5874,34 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
     // Skip short entries (greetings, confirmations) — not worth an API call.
     return entry.content.length >= 20
+  }
+
+  /**
+   * Semantic classifier can occasionally flag short, benign business questions.
+   * We only bypass that block for clearly read-only business asks with no suspicious markers.
+   */
+  private shouldBypassSemanticInjectionBlock(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message)
+
+    const isBusinessReadQuery =
+      /\b(inventario|stock|recetas?|insumos?|ventas?|ordenes?|pedidos?|clientes?|productos?|reseñas?|resenas?)\b/.test(normalizedMessage) &&
+      /\b(cuant[oa]s?|que|cuales?|dame|muestr(?:a|ame)|mostrar|tengo|hay|lista(?:r)?)\b/.test(normalizedMessage)
+
+    if (!isBusinessReadQuery) {
+      return false
+    }
+
+    const hasSuspiciousInjectionSignals =
+      /\b(prompt|sistema|instrucciones|ignore|ignora|olvida|disregard|actua como|ahora eres|pretende ser|role|admin|root|schema|information_schema|pg_catalog)\b/.test(
+        normalizedMessage,
+      ) || /<\/?(system|assistant|user)>/.test(normalizedMessage)
+
+    if (hasSuspiciousInjectionSignals) {
+      return false
+    }
+
+    // Keep this bypass narrow: short/normal business asks only.
+    return normalizedMessage.length <= 180
   }
 
   /**

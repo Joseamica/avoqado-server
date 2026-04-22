@@ -394,10 +394,9 @@ export async function getRecentCustomers(venueId: string, limit: number = 10): P
     where: {
       venueId,
       active: true,
-      lastVisitAt: { not: null },
     },
     take: limit,
-    orderBy: { lastVisitAt: 'desc' },
+    orderBy: [{ lastVisitAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
     select: {
       id: true,
       firstName: true,

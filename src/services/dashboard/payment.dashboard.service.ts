@@ -115,6 +115,12 @@ export async function getPaymentsData(
   // wrong and later pages end up almost empty.
   // MindForm's total volume is small (hundreds), so we fetch all rows and
   // slice in memory.
+  //
+  // ⚠️ This list endpoint keeps its own MindForm branch because it needs
+  // relations (processedBy, order.table, merchantAccount, transactionCost) that
+  // the analytics helper doesn't fetch. When the native QR module ships and
+  // this branch is removed, also delete src/services/legacy/mergedPayments.service.ts
+  // and revert the /home analytics callers to direct prisma.payment.findMany.
   if (venueId === MINDFORM_NEW_VENUE_ID) {
     logger.info('[Payments] MindForm detected — attempting legacy QR merge', {
       venueId,

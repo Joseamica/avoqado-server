@@ -5,6 +5,9 @@ import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard
 import { SharedQueryService } from './shared-query.service'
 import { parseDateRange, DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { DateTime } from 'luxon'
+// ⚠️ TECH DEBT — delete when MindForm migrates to native QR module.
+// See: src/services/legacy/mergedPayments.service.ts for full context.
+import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
 
 export async function getGeneralStatsData(venueId: string, filters: GeneralStatsQuery = {}): Promise<GeneralStatsResponse> {
   // Validate venue exists
@@ -355,14 +358,19 @@ async function generateWeeklyTrendsData(_venueId: string, _fromDate: Date, _toDa
   }))
 }
 
-function mapPaymentMethod(method: PaymentMethod): string {
+// Accepts both the native Prisma `PaymentMethod` enum and the legacy MindForm
+// string form ('CARD'/'CASH') already produced by qrPayments.legacy.service →
+// mergedPayments.service. Falling through would bucket legacy QR payments as
+// 'OTHER' and hide them from the "Sales by method" pie chart on /home.
+function mapPaymentMethod(method: PaymentMethod | string): string {
   switch (method) {
-    case PaymentMethod.CASH:
+    case 'CASH':
       return 'CASH'
-    case PaymentMethod.CREDIT_CARD:
-    case PaymentMethod.DEBIT_CARD:
+    case 'CREDIT_CARD':
+    case 'DEBIT_CARD':
+    case 'CARD': // legacy MindForm passthrough
       return 'CARD'
-    case PaymentMethod.DIGITAL_WALLET:
+    case 'DIGITAL_WALLET':
       return 'OTHER'
     default:
       return 'OTHER'
@@ -398,30 +406,14 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   // status=COMPLETED but they're corrections, not sales — including them here
   // makes the "Total ventas" KPI negative on days that only had refunds and
   // inflates downstream derived metrics (avg ticket, tips, etc.).
-  const validPayments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: TransactionStatus.COMPLETED,
-      type: { not: 'REFUND' },
-      createdAt: {
-        gte: fromDate,
-        lte: toDate,
-      },
-      order: {
-        status: { not: OrderStatus.CANCELLED },
-      },
-    },
-    select: {
-      id: true,
-      amount: true,
-      method: true,
-      tipAmount: true,
-      type: true,
-      createdAt: true,
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
+  //
+  // ⚠️ Uses fetchPaymentsForAnalytics instead of prisma.payment.findMany directly
+  // so MindForm's legacy QR payments are included in KPIs. For ~999 other
+  // venues this is a no-op (single string comparison, zero extra queries).
+  // Remove once MindForm is on the native QR module.
+  const validPayments = await fetchPaymentsForAnalytics(venueId, {
+    fromDate,
+    toDate,
   })
 
   // Fetch reviews for star rating
@@ -440,12 +432,12 @@ export async function getBasicMetricsData(venueId: string, filters: GeneralStats
   // Transform data for basic metrics
   const transformedPayments = validPayments.map(payment => ({
     id: payment.id,
-    amount: Number(payment.amount),
+    amount: payment.amount,
     method: mapPaymentMethod(payment.method),
     createdAt: payment.createdAt.toISOString(),
     tips: [
       {
-        amount: Number(payment.tipAmount),
+        amount: payment.tipAmount,
       },
     ],
   }))
@@ -640,49 +632,36 @@ async function getBestSellingProductsData(venueId: string, dateFilter: any) {
   return { products }
 }
 
-async function getTipsOverTimeData(venueId: string, dateFilter: any) {
+async function getTipsOverTimeData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
   // Exclude refund payments — their tipAmount is negative (post 2026-04-19
   // tip-split fix) and would under-report tips earned on sales.
-  const payments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: TransactionStatus.COMPLETED,
-      type: { not: 'REFUND' },
-      ...dateFilter,
-    },
-    select: {
-      tipAmount: true,
-      createdAt: true,
-    },
+  // ⚠️ Uses fetchPaymentsForAnalytics so MindForm legacy QR is included.
+  // Remove helper + revert to prisma.payment.findMany once native QR ships.
+  const payments = await fetchPaymentsForAnalytics(venueId, {
+    fromDate: dateFilter.createdAt.gte,
+    toDate: dateFilter.createdAt.lte,
   })
 
   const transformedPayments = payments.map(payment => ({
     createdAt: payment.createdAt.toISOString(),
-    tips: [{ amount: Number(payment.tipAmount) }],
+    tips: [{ amount: payment.tipAmount }],
   }))
 
   return { payments: transformedPayments }
 }
 
-async function getSalesByPaymentMethodData(venueId: string, dateFilter: any) {
+async function getSalesByPaymentMethodData(venueId: string, dateFilter: { createdAt: { gte: Date; lte: Date } }) {
   // Exclude refund payments from the "sales by method" breakdown — refunds
   // have negative amount and would show up as deductions in the chart.
-  const payments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: TransactionStatus.COMPLETED,
-      type: { not: 'REFUND' },
-      ...dateFilter,
-    },
-    select: {
-      amount: true,
-      method: true,
-      createdAt: true,
-    },
+  // ⚠️ Uses fetchPaymentsForAnalytics so MindForm legacy QR is included.
+  // Remove helper + revert to prisma.payment.findMany once native QR ships.
+  const payments = await fetchPaymentsForAnalytics(venueId, {
+    fromDate: dateFilter.createdAt.gte,
+    toDate: dateFilter.createdAt.lte,
   })
 
   const transformedPayments = payments.map(payment => ({
-    amount: Number(payment.amount),
+    amount: payment.amount,
     method: mapPaymentMethod(payment.method),
     createdAt: payment.createdAt.toISOString(),
   }))
