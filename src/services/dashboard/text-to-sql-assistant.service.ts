@@ -5887,8 +5887,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
     // Special-case: "cuántas recetas tengo" should be treated as a simple real-time query.
     const asksRecipeCount =
-      /\b(recetas?|recipe)\b/.test(lowerMessage) &&
-      /\b(cuant[ao]s?|cantidad|total|numero|n[úu]mero|tengo|hay)\b/.test(lowerMessage)
+      /\b(recetas?|recipe)\b/.test(lowerMessage) && /\b(cuant[ao]s?|cantidad|total|numero|n[úu]mero|tengo|hay)\b/.test(lowerMessage)
     if (asksRecipeCount) {
       return {
         isSimpleQuery: true,
