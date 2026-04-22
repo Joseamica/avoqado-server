@@ -1844,9 +1844,11 @@ Ejemplos de respuestas CORRECTAS:
         if (query.conversationHistory && query.conversationHistory.length > 0) {
           const historyToScan = query.conversationHistory.slice(-5)
           for (const entry of historyToScan) {
-            const content = typeof entry.content === 'string' ? entry.content : String(entry.content)
-            // Skip short entries (greetings, confirmations) — not worth an API call
-            if (content.length < 20) continue
+            if (!this.shouldScanHistoryEntryForInjection(entry)) {
+              continue
+            }
+
+            const content = entry.content
 
             const historyCheck = await SemanticInjectionDetectorService.detect(content, this.openai)
             if (historyCheck.isInjection && historyCheck.confidence >= 70) {
@@ -5723,10 +5725,18 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
   private getOperationalHelpResponse(message: string): OperationalHelpResponse | null {
     const normalizedMessage = this.normalizeTextForMatch(message)
+    const isInventoryDataQuery =
+      /\b(inventario|stock|recetas?|insumos?|materia prima|raw material)\b/.test(normalizedMessage) &&
+      /\b(cuant[oa]s?|cantidad|total|tengo|hay|lista(?:r)?|muestr(?:a|ame)|dame|cuales?)\b/.test(normalizedMessage)
 
-    const hasHowToSignal =
-      /\b(como|how|donde|pasos|guia|ayuda|help|puedo|quiero|configuro|configurar|creo|crear|editar)\b/.test(normalizedMessage) ||
-      /\?$/.test(normalizedMessage)
+    // Inventory analytics queries should go to the data pipeline, not operational help.
+    if (isInventoryDataQuery) {
+      return null
+    }
+
+    const hasHowToSignal = /\b(como|how|donde|pasos|guia|ayuda|help|puedo|quiero|configuro|configurar|creo|crear|editar)\b/.test(
+      normalizedMessage,
+    )
 
     if (!hasHowToSignal) {
       return null
@@ -5806,6 +5816,19 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
 
     return null
+  }
+
+  /**
+   * Only user-provided history entries should be scanned for semantic prompt injection.
+   * Scanning assistant responses can create false-positive loops after a blocked response.
+   */
+  private shouldScanHistoryEntryForInjection(entry: ConversationEntry): boolean {
+    if (entry.role !== 'user') {
+      return false
+    }
+
+    // Skip short entries (greetings, confirmations) — not worth an API call.
+    return entry.content.length >= 20
   }
 
   /**
