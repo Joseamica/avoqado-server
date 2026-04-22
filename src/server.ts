@@ -137,11 +137,15 @@ const gracefulShutdown = async (signal: string) => {
     }
   })
 
-  // Force shutdown after 30 seconds
+  // Force shutdown after timeout. In dev we want fast restarts so the port
+  // frees up quickly for tsx watch; in every other environment (prod, staging,
+  // unset) we give Rabbit/Socket/DB time to drain cleanly during rolling deploys.
+  // Fail-safe: default to the conservative 30s unless NODE_ENV is explicitly 'development'.
+  const shutdownTimeoutMs = process.env.NODE_ENV === 'development' ? 3000 : 30000
   setTimeout(() => {
-    logger.error('Forced shutdown after timeout')
+    logger.error(`Forced shutdown after ${shutdownTimeoutMs}ms timeout`)
     process.exit(1)
-  }, 30000)
+  }, shutdownTimeoutMs)
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

@@ -28,6 +28,30 @@ const isCrudBridgeMessage = (message: string): boolean => {
   )
 }
 
+const extractReferencedVenueSlug = (message: string): string | null => {
+  const normalized = normalizeForSecurityCheck(message)
+
+  // Match patterns like:
+  // - "en el venue avoqado-full"
+  // - "venue avoqado-full"
+  // - "sucursal avoqado-full"
+  const match = normalized.match(/\b(?:venue|sucursal|branch)\s+([a-z0-9][a-z0-9-]{1,62})\b/)
+  return match?.[1] || null
+}
+
+const isCrossVenueRequest = (message: string, currentVenueSlug: string): boolean => {
+  const normalized = normalizeForSecurityCheck(message)
+  const normalizedCurrentVenueSlug = normalizeForSecurityCheck(currentVenueSlug)
+  const referencedVenueSlug = extractReferencedVenueSlug(message)
+
+  if (referencedVenueSlug && referencedVenueSlug !== normalizedCurrentVenueSlug) {
+    return true
+  }
+
+  // Explicit intent to access another branch/venue
+  return /\b(otra|otro)\s+(sucursal|venue|branch)\b/.test(normalized)
+}
+
 /**
  * Clasifica el riesgo de seguridad de una consulta.
  */
@@ -157,6 +181,37 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       expectedVenueSlug: venueSlug,
       expectedUserId: userId,
     })
+
+    if (isCrossVenueRequest(message, authContext.venueSlug)) {
+      logger.warn('🚨 Cross-venue query attempt blocked in assistant', {
+        userId: authContext.userId,
+        venueId: authContext.venueId,
+        currentVenueSlug: authContext.venueSlug,
+        queryPreview: message.substring(0, 120),
+      })
+
+      res.json({
+        success: true,
+        data: {
+          response: 'No puedo acceder a información de otra sucursal. Solo puedo responder con datos del venue activo en tu sesión.',
+          suggestions: [
+            'Muéstrame el inventario de esta sucursal',
+            '¿Cuántas recetas tengo en este venue?',
+            'Dame las alertas de inventario de esta sucursal',
+          ],
+          metadata: {
+            confidence: 1,
+            queryGenerated: false,
+            queryExecuted: false,
+            blocked: true,
+            riskLevel: 'critical',
+            reasonCode: 'cross_venue_request_blocked',
+            routedTo: 'Blocked',
+          },
+        },
+      })
+      return
+    }
 
     // Verificar permisos para consultas sensibles
     if (sensitiveRiskLevel !== 'none' && !crudBridgeMessage && !hasPermissionForSensitiveRisk(authContext.role, sensitiveRiskLevel)) {
