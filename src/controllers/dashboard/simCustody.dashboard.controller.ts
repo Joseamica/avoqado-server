@@ -242,7 +242,38 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
       orderBy: { createdAt: 'asc' },
       take: 200,
     })
-    res.status(200).json({ serialNumber, events })
+
+    // Enrich with staff names so the dashboard timeline can show who the
+    // supervisor / promoter actually is. Done as a separate query (not a
+    // Prisma relation) because SerializedItemCustodyEvent intentionally uses
+    // plain String FKs — events must survive Staff deletion for forensic use.
+    const staffIds = Array.from(
+      new Set(
+        events.flatMap(e =>
+          [e.fromStaffId, e.toStaffId, e.actorStaffId].filter((id): id is string => typeof id === 'string' && id.length > 0),
+        ),
+      ),
+    )
+
+    const staffById = new Map<string, { id: string; firstName: string | null; lastName: string | null }>()
+    if (staffIds.length > 0) {
+      const staffRows = await prisma.staff.findMany({
+        where: { id: { in: staffIds } },
+        select: { id: true, firstName: true, lastName: true },
+      })
+      for (const s of staffRows) staffById.set(s.id, s)
+    }
+
+    const hydrate = (id: string | null) => (id ? (staffById.get(id) ?? { id, firstName: null, lastName: null }) : null)
+
+    const enrichedEvents = events.map(e => ({
+      ...e,
+      fromStaff: hydrate(e.fromStaffId),
+      toStaff: hydrate(e.toStaffId),
+      actorStaff: hydrate(e.actorStaffId),
+    }))
+
+    res.status(200).json({ serialNumber, events: enrichedEvents })
   } catch (err) {
     next(err)
   }

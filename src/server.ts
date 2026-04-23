@@ -50,102 +50,115 @@ let liveDemoCleanupJob: CronJob | null = null
 const gracefulShutdown = async (signal: string) => {
   logger.info(`Received ${signal}. Starting graceful shutdown...`)
 
-  // Stop accepting new HTTP connections
-  httpServer.close(async () => {
-    logger.info('Http server closed.')
+  const isDev = process.env.NODE_ENV === 'development'
 
-    try {
-      // Only stop services that were started (skip in demo mode)
-      if (process.env.DEMO_MODE !== 'true') {
-        // Stop command processing services
-        logger.info('Stopping command services...')
-        await commandListener.stop()
-        commandRetryService.stop()
+  // Stop accepting new connections AND force-close active ones. Without
+  // closeAllConnections(), httpServer.close()'s callback never fires while
+  // Socket.io keep-alive clients (TPVs) remain connected — the port would
+  // stay bound until the force-exit timeout, racing against tsx watch's
+  // respawn on file save and producing EADDRINUSE.
+  httpServer.close(() => logger.info('Http server closed.'))
+  httpServer.closeAllConnections?.()
 
-        // Stop TPV health monitor
-        logger.info('Stopping TPV health monitor...')
-        tpvHealthMonitorJob.stop()
+  // Dev fast-path: tsx watch spawns the replacement process within ~100ms
+  // of killing the old one. Running the full Rabbit/Socket/DB cleanup would
+  // hold the port past that deadline. Local dev doesn't need graceful
+  // draining — Rabbit and Postgres tolerate abrupt client disconnects fine.
+  if (isDev) {
+    logger.info('Dev mode: skipping graceful cleanup, exiting immediately')
+    return process.exit(0)
+  }
 
-        // Stop subscription cancellation job
-        logger.info('Stopping subscription cancellation job...')
-        subscriptionCancellationJob.stop()
+  // Prod / staging path: full graceful cleanup. Runs regardless of whether
+  // httpServer.close()'s callback fired, since we no longer wait for it.
+  try {
+    // Only stop services that were started (skip in demo mode)
+    if (process.env.DEMO_MODE !== 'true') {
+      // Stop command processing services
+      logger.info('Stopping command services...')
+      await commandListener.stop()
+      commandRetryService.stop()
 
-        // Stop settlement detection job
-        logger.info('Stopping settlement detection job...')
-        settlementDetectionJob.stop()
+      // Stop TPV health monitor
+      logger.info('Stopping TPV health monitor...')
+      tpvHealthMonitorJob.stop()
 
-        // Stop abandoned orders cleanup job
-        logger.info('Stopping abandoned orders cleanup job...')
-        abandonedOrdersCleanupJob.stop()
+      // Stop subscription cancellation job
+      logger.info('Stopping subscription cancellation job...')
+      subscriptionCancellationJob.stop()
 
-        // Stop commission aggregation job
-        logger.info('Stopping commission aggregation job...')
-        commissionAggregationJob.stop()
+      // Stop settlement detection job
+      logger.info('Stopping settlement detection job...')
+      settlementDetectionJob.stop()
 
-        // Stop auto clock-out job
-        logger.info('Stopping auto clock-out job...')
-        autoClockOutJob.stop()
+      // Stop abandoned orders cleanup job
+      logger.info('Stopping abandoned orders cleanup job...')
+      abandonedOrdersCleanupJob.stop()
 
-        // Stop nightly sales summary job
-        logger.info('Stopping nightly sales summary job...')
-        nightlySalesSummaryJob.stop()
+      // Stop commission aggregation job
+      logger.info('Stopping commission aggregation job...')
+      commissionAggregationJob.stop()
 
-        // Stop nightly low stock digest job
-        logger.info('Stopping nightly low stock digest job...')
-        nightlyLowStockJob.stop()
+      // Stop auto clock-out job
+      logger.info('Stopping auto clock-out job...')
+      autoClockOutJob.stop()
 
-        // Stop settlement jobs
-        moneygiverSettlementJob.stop()
-        venueCommissionSettlementJob.stop()
+      // Stop nightly sales summary job
+      logger.info('Stopping nightly sales summary job...')
+      nightlySalesSummaryJob.stop()
 
-        // Stop live demo cleanup job
-        if (liveDemoCleanupJob) {
-          logger.info('Stopping live demo cleanup job...')
-          liveDemoCleanupJob.stop()
-        }
+      // Stop nightly low stock digest job
+      logger.info('Stopping nightly low stock digest job...')
+      nightlyLowStockJob.stop()
 
-        // Shutdown Socket.io server
-        logger.info('Shutting down Socket.io server...')
-        await shutdownSocketServer()
+      // Stop settlement jobs
+      moneygiverSettlementJob.stop()
+      venueCommissionSettlementJob.stop()
 
-        // Close RabbitMQ connections
-        logger.info('Closing RabbitMQ connections...')
-        await closeRabbitMQConnection()
-      } else {
-        // In DEMO_MODE, stop the live demo cleanup job
-        if (liveDemoCleanupJob) {
-          logger.info('Stopping live demo cleanup job...')
-          liveDemoCleanupJob.stop()
-        }
+      // Stop live demo cleanup job
+      if (liveDemoCleanupJob) {
+        logger.info('Stopping live demo cleanup job...')
+        liveDemoCleanupJob.stop()
       }
 
-      // Stop server metrics collection
-      stopMetricsCollection()
+      // Shutdown Socket.io server
+      logger.info('Shutting down Socket.io server...')
+      await shutdownSocketServer()
 
-      // Close database connections
-      logger.info('Closing database connections...')
-      await pgPool.end()
-      logger.info('PostgreSQL pool has been closed.')
-
-      await prisma.$disconnect()
-      logger.info('Prisma client has been disconnected.')
-
-      process.exit(0)
-    } catch (error) {
-      logger.error('Error during graceful shutdown:', error)
-      process.exit(1)
+      // Close RabbitMQ connections
+      logger.info('Closing RabbitMQ connections...')
+      await closeRabbitMQConnection()
+    } else {
+      // In DEMO_MODE, stop the live demo cleanup job
+      if (liveDemoCleanupJob) {
+        logger.info('Stopping live demo cleanup job...')
+        liveDemoCleanupJob.stop()
+      }
     }
-  })
 
-  // Force shutdown after timeout. In dev we want fast restarts so the port
-  // frees up quickly for tsx watch; in every other environment (prod, staging,
-  // unset) we give Rabbit/Socket/DB time to drain cleanly during rolling deploys.
-  // Fail-safe: default to the conservative 30s unless NODE_ENV is explicitly 'development'.
-  const shutdownTimeoutMs = process.env.NODE_ENV === 'development' ? 3000 : 30000
-  setTimeout(() => {
-    logger.error(`Forced shutdown after ${shutdownTimeoutMs}ms timeout`)
+    // Stop server metrics collection
+    stopMetricsCollection()
+
+    // Close database connections
+    logger.info('Closing database connections...')
+    await pgPool.end()
+    logger.info('PostgreSQL pool has been closed.')
+
+    await prisma.$disconnect()
+    logger.info('Prisma client has been disconnected.')
+
+    process.exit(0)
+  } catch (error) {
+    logger.error('Error during graceful shutdown:', error)
     process.exit(1)
-  }, shutdownTimeoutMs)
+  }
+
+  // Force shutdown after 30s if the prod cleanup above stalls on a hanging
+  // Rabbit/Socket/DB handle. Dev path already returned above with process.exit(0).
+  setTimeout(() => {
+    logger.error('Forced shutdown after 30s timeout')
+    process.exit(1)
+  }, 30000)
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
