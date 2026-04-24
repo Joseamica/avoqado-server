@@ -7690,8 +7690,9 @@ model Reservation {
   // Relations (Phase 2)
   waitlistPromotion ReservationWaitlistEntry?
 
-  // Credit Packs
-  creditTransaction CreditTransaction?
+  // Credit Packs — a single reservation can produce multiple transactions
+  // (REDEEM at booking, REFUND on cancellation, etc.)
+  creditTransactions CreditTransaction[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -7825,6 +7826,14 @@ model ReservationSettings {
   minHoursBeforeCancel Int?    @default(2) // minimum hours before start to allow cancellation
   forfeitDeposit       Boolean @default(false)
   noShowFeePercent     Int? // percentage of deposit/service charged on no-show
+  // Credit pack refund policy on cancellation:
+  //   "NEVER"      - never refund credits (customer always loses them)
+  //   "ALWAYS"     - always refund 100% regardless of timing
+  //   "TIME_BASED" - refund 100% if cancelled >= creditFreeRefundHoursBefore, else creditLateRefundPercent
+  creditRefundMode             String  @default("TIME_BASED") // NEVER | ALWAYS | TIME_BASED
+  creditFreeRefundHoursBefore  Int     @default(12)
+  creditLateRefundPercent      Int     @default(0) // 0-100, applied when cancelled inside the late window
+  creditNoShowRefund           Boolean @default(false) // refund credits if marked NO_SHOW
 
   // Reminders
   remindersEnabled  Boolean  @default(true)
@@ -7963,8 +7972,9 @@ model CreditTransaction {
   type     CreditTransactionType
   quantity Int // +N for PURCHASE, -1 for REDEEM, etc.
 
-  // Context: what triggered this transaction
-  reservationId String?      @unique
+  // Context: what triggered this transaction.
+  // Not unique — a single reservation can have a REDEEM and a later REFUND linked to it.
+  reservationId String?
   reservation   Reservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
   orderId       String?
   order         Order?       @relation(fields: [orderId], references: [id], onDelete: SetNull)

@@ -6,8 +6,9 @@
   "scripts": {
     "build": "npx prisma generate && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
     "start": "node -r tsconfig-paths/register dist/src/server.js",
-    "dev": "NODE_ENV=development tsx watch src/server.ts | pino-pretty",
-    "dev:nodemon": "NODE_ENV=development nodemon --watch src --ext ts,json --exec tsx src/server.ts | pino-pretty",
+    "predev": "npm run kill-port",
+    "dev": "NODE_ENV=development nodemon --watch src --ext ts,json --exec tsx src/server.ts | pino-pretty",
+    "dev:tsx-watch": "NODE_ENV=development tsx watch src/server.ts | pino-pretty",
     "dev:simple-logging": "NODE_ENV=development SIMPLE_LOGGING=true tsx watch src/server.ts",
     "dev:slow": "NODE_ENV=development nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts | pino-pretty",
     "kill-port": "bash scripts/kill-port.sh",

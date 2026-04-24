@@ -254,6 +254,10 @@ export const updateReservationSettingsBodySchema = z
         minHoursBeforeStart: z.number().int().min(0).max(720).nullable().optional(),
         forfeitDeposit: z.boolean().optional(),
         noShowFeePercent: z.number().int().min(0).max(100).nullable().optional(),
+        creditRefundMode: z.enum(['NEVER', 'ALWAYS', 'TIME_BASED']).optional(),
+        creditFreeRefundHoursBefore: z.number().int().min(0).max(720).optional(),
+        creditLateRefundPercent: z.number().int().min(0).max(100).optional(),
+        creditNoShowRefund: z.boolean().optional(),
       })
       .optional(),
     waitlist: z

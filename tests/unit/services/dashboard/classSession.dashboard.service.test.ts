@@ -123,10 +123,13 @@ describe('ClassSession Dashboard Service', () => {
   // ============================================================
 
   describe('createClassSession', () => {
+    // Use a date 30 days in the future so the past-time guard doesn't trip the test
+    // as wall-clock advances. Picks 10:00–11:00 UTC on day+30.
+    const futureDay = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)
     const createDto = {
       productId: PRODUCT_ID,
-      startsAt: '2026-03-01T10:00:00Z',
-      endsAt: '2026-03-01T11:00:00Z',
+      startsAt: `${futureDay}T10:00:00Z`,
+      endsAt: `${futureDay}T11:00:00Z`,
       capacity: 10,
       assignedStaffId: undefined,
       internalNotes: undefined,

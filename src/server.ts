@@ -75,6 +75,13 @@ const gracefulShutdown = async (signal: string) => {
 
   // Prod / staging path: full graceful cleanup. Runs regardless of whether
   // httpServer.close()'s callback fired, since we no longer wait for it.
+  // Hard 30s deadline armed BEFORE the cleanup awaits — if Rabbit/Socket/DB
+  // hangs, we still exit. .unref() so a clean exit before 30s isn't blocked.
+  setTimeout(() => {
+    logger.error('Forced shutdown after 30s timeout')
+    process.exit(1)
+  }, 30000).unref()
+
   try {
     // Only stop services that were started (skip in demo mode)
     if (process.env.DEMO_MODE !== 'true') {
@@ -156,13 +163,6 @@ const gracefulShutdown = async (signal: string) => {
     logger.error('Error during graceful shutdown:', error)
     process.exit(1)
   }
-
-  // Force shutdown after 30s if the prod cleanup above stalls on a hanging
-  // Rabbit/Socket/DB handle. Dev path already returned above with process.exit(0).
-  setTimeout(() => {
-    logger.error('Forced shutdown after 30s timeout')
-    process.exit(1)
-  }, 30000)
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
@@ -355,10 +355,12 @@ const startApplication = async (retries = 3) => {
           if (err.code === 'EADDRINUSE') {
             // Final attempt failed — likely an orphan process is holding the
             // port (not a restart race). Tell the dev how to recover.
+            // -sTCP:LISTEN filters to the binding process only, so we don't
+            // accidentally kill Chrome tabs or ngrok clients connected to it.
             logger.error(
               `Port ${PORT} still busy after ${maxAttempts} attempts. ` +
                 `An orphan process is likely holding it. Run:\n` +
-                `   lsof -ti:${PORT} | xargs kill -9\n` +
+                `   lsof -ti:${PORT} -sTCP:LISTEN | xargs kill -9\n` +
                 `Then restart 'npm run dev'.`,
             )
           } else {

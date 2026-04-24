@@ -222,7 +222,24 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
     const { venueSlug, cancelSecret } = req.params
     const reservation = await reservationService.getReservationByCancelSecret(venueSlug, cancelSecret)
 
-    // Public-safe response
+    // Compute the cancellation/refund preview so the widget can show
+    // "if you cancel now, you'll get N credits back" before confirming.
+    const settings = await getReservationSettings(reservation.venueId)
+    const cancellationPreview = computeCancellationPreview({
+      startsAt: reservation.startsAt,
+      cancellationPolicy: settings.cancellation,
+    })
+
+    // Look up how many credits this reservation actually consumed (if any),
+    // so we can multiply the policy percent against a real number for the UI.
+    const prisma = (await import('../../utils/prismaClient')).default
+    const redeems = await prisma.creditTransaction.findMany({
+      where: { venueId: reservation.venueId, reservationId: reservation.id, type: 'REDEEM' },
+      select: { quantity: true },
+    })
+    const creditsUsed = redeems.reduce((sum, t) => sum + Math.abs(t.quantity), 0)
+    const creditsRefundable = Math.floor((creditsUsed * cancellationPreview.refundPercent) / 100)
+
     res.json({
       confirmationCode: reservation.confirmationCode,
       status: reservation.status,
@@ -242,10 +259,41 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       specialRequests: reservation.specialRequests,
       depositAmount: reservation.depositAmount,
       depositStatus: reservation.depositStatus,
+      cancellation: {
+        allowed: settings.cancellation.allowCustomerCancel,
+        minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
+        creditsUsed,
+        creditsRefundable,
+        refundPercent: cancellationPreview.refundPercent,
+        policyLabel: cancellationPreview.label,
+      },
     })
   } catch (error) {
     next(error)
   }
+}
+
+/**
+ * Pure helper: given a reservation startsAt + venue cancellation policy, compute the
+ * refund percent that WOULD apply if cancelled right now. Used both by the GET
+ * preview and shown in the widget before the confirm step.
+ */
+function computeCancellationPreview(args: {
+  startsAt: Date
+  cancellationPolicy: {
+    creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'
+    creditFreeRefundHoursBefore: number
+    creditLateRefundPercent: number
+  }
+}): { refundPercent: number; label: string } {
+  const { creditRefundMode, creditFreeRefundHoursBefore, creditLateRefundPercent } = args.cancellationPolicy
+  if (creditRefundMode === 'NEVER') return { refundPercent: 0, label: 'NEVER' }
+  if (creditRefundMode === 'ALWAYS') return { refundPercent: 100, label: 'ALWAYS' }
+  const hoursUntilStart = (args.startsAt.getTime() - Date.now()) / 3_600_000
+  if (hoursUntilStart >= creditFreeRefundHoursBefore) {
+    return { refundPercent: 100, label: `TIME_BASED:free` }
+  }
+  return { refundPercent: Math.max(0, Math.min(100, creditLateRefundPercent)), label: `TIME_BASED:late` }
 }
 
 /**
@@ -278,6 +326,8 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
       status: cancelled.status,
       cancelledAt: cancelled.cancelledAt,
       depositStatus: cancelled.depositStatus,
+      creditsRefunded: (cancelled as any).creditsRefunded ?? 0,
+      refundPolicy: (cancelled as any).policyApplied ?? null,
     })
   } catch (error) {
     next(error)

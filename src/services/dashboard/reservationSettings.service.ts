@@ -60,6 +60,10 @@ export interface ReservationConfig {
     minHoursBeforeStart: number | null
     forfeitDeposit: boolean
     noShowFeePercent: number | null
+    creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'
+    creditFreeRefundHoursBefore: number
+    creditLateRefundPercent: number
+    creditNoShowRefund: boolean
   }
   waitlist: {
     enabled: boolean
@@ -106,6 +110,10 @@ type ReservationSettingsUpdateInput = Partial<{
   minHoursBeforeStart: number | null
   forfeitDeposit: boolean
   noShowFeePercent: number | null
+  creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'
+  creditFreeRefundHoursBefore: number
+  creditLateRefundPercent: number
+  creditNoShowRefund: boolean
   remindersEnabled: boolean
   reminderChannels: string[]
   reminderMinBefore: number[]
@@ -156,6 +164,10 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       minHoursBeforeStart: settings.minHoursBeforeCancel,
       forfeitDeposit: settings.forfeitDeposit,
       noShowFeePercent: settings.noShowFeePercent,
+      creditRefundMode: (settings.creditRefundMode as 'NEVER' | 'ALWAYS' | 'TIME_BASED') ?? 'TIME_BASED',
+      creditFreeRefundHoursBefore: settings.creditFreeRefundHoursBefore,
+      creditLateRefundPercent: settings.creditLateRefundPercent,
+      creditNoShowRefund: settings.creditNoShowRefund,
     },
     waitlist: {
       enabled: settings.waitlistEnabled,
@@ -240,6 +252,10 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.minHoursBeforeStart !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeStart
   if (data.forfeitDeposit !== undefined) normalized.forfeitDeposit = data.forfeitDeposit
   if (data.noShowFeePercent !== undefined) normalized.noShowFeePercent = data.noShowFeePercent
+  if (data.creditRefundMode !== undefined) normalized.creditRefundMode = data.creditRefundMode
+  if (data.creditFreeRefundHoursBefore !== undefined) normalized.creditFreeRefundHoursBefore = data.creditFreeRefundHoursBefore
+  if (data.creditLateRefundPercent !== undefined) normalized.creditLateRefundPercent = data.creditLateRefundPercent
+  if (data.creditNoShowRefund !== undefined) normalized.creditNoShowRefund = data.creditNoShowRefund
   if (data.remindersEnabled !== undefined) normalized.remindersEnabled = data.remindersEnabled
   if (data.reminderChannels !== undefined) normalized.reminderChannels = data.reminderChannels
   if (data.reminderMinBefore !== undefined) normalized.reminderMinBefore = data.reminderMinBefore
@@ -276,6 +292,12 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.cancellation.minHoursBeforeStart !== undefined) normalized.minHoursBeforeCancel = data.cancellation.minHoursBeforeStart
     if (data.cancellation.forfeitDeposit !== undefined) normalized.forfeitDeposit = data.cancellation.forfeitDeposit
     if (data.cancellation.noShowFeePercent !== undefined) normalized.noShowFeePercent = data.cancellation.noShowFeePercent
+    if (data.cancellation.creditRefundMode !== undefined) normalized.creditRefundMode = data.cancellation.creditRefundMode
+    if (data.cancellation.creditFreeRefundHoursBefore !== undefined)
+      normalized.creditFreeRefundHoursBefore = data.cancellation.creditFreeRefundHoursBefore
+    if (data.cancellation.creditLateRefundPercent !== undefined)
+      normalized.creditLateRefundPercent = data.cancellation.creditLateRefundPercent
+    if (data.cancellation.creditNoShowRefund !== undefined) normalized.creditNoShowRefund = data.cancellation.creditNoShowRefund
   }
 
   if (data.waitlist) {
@@ -319,6 +341,10 @@ function getDefaultConfig(): ReservationConfig {
       minHoursBeforeStart: 2,
       forfeitDeposit: false,
       noShowFeePercent: null,
+      creditRefundMode: 'TIME_BASED',
+      creditFreeRefundHoursBefore: 12,
+      creditLateRefundPercent: 0,
+      creditNoShowRefund: false,
     },
     waitlist: {
       enabled: true,

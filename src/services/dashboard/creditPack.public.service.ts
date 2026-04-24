@@ -383,6 +383,107 @@ export async function checkRedemptionEligibility(venueId: string, customerId: st
 }
 
 /**
+ * Refund credits for a cancelled reservation according to the venue's policy.
+ *
+ * Looks up the original REDEEM transaction(s) for this reservation, computes the refund
+ * portion based on policy (NEVER / ALWAYS / TIME_BASED) + how far in advance the cancel
+ * happened, increments the balance, and writes a REFUND CreditTransaction so the audit
+ * trail stays linkable.
+ *
+ * Returns `{ creditsRefunded: N, policyApplied: '...' }` for the caller to surface to the
+ * customer. Does nothing if the reservation never used credits.
+ *
+ * Safe to call outside a transaction — internal updates are atomic per row.
+ */
+export async function refundCreditsForReservation(args: {
+  venueId: string
+  reservationId: string
+  startsAt: Date
+  policy: {
+    creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'
+    creditFreeRefundHoursBefore: number
+    creditLateRefundPercent: number
+  }
+  reasonPrefix?: string
+}): Promise<{ creditsRefunded: number; policyApplied: string }> {
+  const { venueId, reservationId, startsAt, policy, reasonPrefix } = args
+
+  // Find the original REDEEM transaction(s) for this reservation.
+  // We sum their negative quantities to know how many credits were spent on it.
+  const redeems = await prisma.creditTransaction.findMany({
+    where: { venueId, reservationId, type: 'REDEEM' },
+  })
+
+  if (redeems.length === 0) return { creditsRefunded: 0, policyApplied: 'no-credits-used' }
+
+  const totalSpent = redeems.reduce((sum, t) => sum + Math.abs(t.quantity), 0)
+  if (totalSpent <= 0) return { creditsRefunded: 0, policyApplied: 'no-credits-used' }
+
+  // Compute refund amount based on policy
+  let refundPercent = 0
+  let policyApplied = ''
+  if (policy.creditRefundMode === 'NEVER') {
+    refundPercent = 0
+    policyApplied = 'NEVER'
+  } else if (policy.creditRefundMode === 'ALWAYS') {
+    refundPercent = 100
+    policyApplied = 'ALWAYS'
+  } else {
+    // TIME_BASED
+    const hoursUntilStart = (startsAt.getTime() - Date.now()) / 3_600_000
+    if (hoursUntilStart >= policy.creditFreeRefundHoursBefore) {
+      refundPercent = 100
+      policyApplied = `TIME_BASED:free (≥${policy.creditFreeRefundHoursBefore}h)`
+    } else {
+      refundPercent = Math.max(0, Math.min(100, policy.creditLateRefundPercent))
+      policyApplied = `TIME_BASED:late (${refundPercent}%)`
+    }
+  }
+
+  if (refundPercent === 0) {
+    logger.info(`💸 [CREDIT REFUND] No refund per policy (${policyApplied}) — reservation=${reservationId} spent=${totalSpent}`)
+    return { creditsRefunded: 0, policyApplied }
+  }
+
+  // Refund proportionally per redeem transaction (rounded down — never refund more than spent).
+  // For a single REDEEM with quantity=-3 and refundPercent=50 → refund 1 (floor of 1.5).
+  let totalRefunded = 0
+  for (const tx of redeems) {
+    const refundQty = Math.floor((Math.abs(tx.quantity) * refundPercent) / 100)
+    if (refundQty <= 0) continue
+    if (!tx.creditItemBalanceId) continue
+
+    await prisma.$transaction([
+      prisma.creditItemBalance.update({
+        where: { id: tx.creditItemBalanceId },
+        data: { remainingQuantity: { increment: refundQty } },
+      }),
+      prisma.creditTransaction.create({
+        data: {
+          venueId,
+          customerId: tx.customerId,
+          creditPackPurchaseId: tx.creditPackPurchaseId,
+          creditItemBalanceId: tx.creditItemBalanceId,
+          type: 'REFUND',
+          quantity: refundQty,
+          reservationId,
+          reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied}`,
+        },
+      }),
+      // If the purchase was marked EXHAUSTED but now has balance again, restore ACTIVE.
+      prisma.creditPackPurchase.updateMany({
+        where: { id: tx.creditPackPurchaseId, status: CreditPurchaseStatus.EXHAUSTED },
+        data: { status: CreditPurchaseStatus.ACTIVE },
+      }),
+    ])
+    totalRefunded += refundQty
+  }
+
+  logger.info(`💸 [CREDIT REFUND] reservation=${reservationId} refunded=${totalRefunded}/${totalSpent} policy=${policyApplied}`)
+  return { creditsRefunded: totalRefunded, policyApplied }
+}
+
+/**
  * Redeem 1 credit for a reservation (called within serializable transaction)
  */
 export async function redeemForReservation(venueId: string, customerId: string, balanceId: string, reservationId: string) {

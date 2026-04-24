@@ -4,6 +4,9 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
+import { getReservationSettings } from './reservationSettings.service'
+// creditPack.public.service is imported lazily inside cancelReservation/markNoShow to avoid
+// the circular import — creditPack imports `withSerializableRetry` from this module.
 
 // ==========================================
 // RESERVATION SERVICE — Core CRUD + State Machine
@@ -497,9 +500,22 @@ async function transitionReservation(
     ...extraData,
   }
 
-  const updated = await prisma.reservation.update({
+  // RACE GUARD: only update if the row is still in the source status we just read.
+  // Two concurrent cancel requests would both pass validateTransition above (since
+  // they both saw `CONFIRMED`), then both run the unguarded `update`, both succeed,
+  // both fire downstream side-effects (refund, notifications). The conditional
+  // updateMany makes exactly one of them succeed (rowsAffected=1) and the rest get
+  // rowsAffected=0 → we throw the same error the validator would.
+  const guarded = await prisma.reservation.updateMany({
+    where: { id: reservationId, status: reservation.status },
+    data: updateData as any, // updateMany accepts the same scalar fields as update
+  })
+  if (guarded.count === 0) {
+    throw new BadRequestError('La reservacion ya fue modificada por otro proceso. Recarga e intenta de nuevo.')
+  }
+
+  const updated = await prisma.reservation.findUniqueOrThrow({
     where: { id: reservationId },
-    data: updateData,
     include: RESERVATION_INCLUDE,
   })
 
@@ -540,7 +556,27 @@ export async function completeReservation(venueId: string, reservationId: string
 }
 
 export async function markNoShow(venueId: string, reservationId: string, markedBy: string) {
-  return transitionReservation(venueId, reservationId, 'NO_SHOW', markedBy)
+  const updated = await transitionReservation(venueId, reservationId, 'NO_SHOW', markedBy)
+
+  // Optional: refund credits on no-show if the venue policy says so.
+  try {
+    const settings = await getReservationSettings(venueId)
+    if (settings.cancellation.creditNoShowRefund) {
+      const creditPackService = await import('./creditPack.public.service')
+      await creditPackService.refundCreditsForReservation({
+        venueId,
+        reservationId: updated.id,
+        startsAt: updated.startsAt,
+        // ALWAYS so noShow refund is full when the toggle is on
+        policy: { creditRefundMode: 'ALWAYS', creditFreeRefundHoursBefore: 0, creditLateRefundPercent: 100 },
+        reasonPrefix: 'No-show refund',
+      })
+    }
+  } catch (err) {
+    logger.error(`❌ [CREDIT REFUND] No-show refund failed for ${updated.confirmationCode}`, err)
+  }
+
+  return updated
 }
 
 export async function cancelReservation(
@@ -549,10 +585,37 @@ export async function cancelReservation(
   cancelledBy: string, // Staff ID, "CUSTOMER", or "SYSTEM"
   reason?: string,
 ) {
-  return transitionReservation(venueId, reservationId, 'CANCELLED', cancelledBy, reason, {
+  const updated = await transitionReservation(venueId, reservationId, 'CANCELLED', cancelledBy, reason, {
     cancelledBy,
     cancellationReason: reason,
   })
+
+  // Apply venue cancellation policy: refund credits if applicable.
+  // Wrapped in try/catch — a refund failure must never block the cancellation itself
+  // (the reservation IS cancelled regardless; refund is a best-effort follow-up).
+  let refundResult: { creditsRefunded: number; policyApplied: string } = {
+    creditsRefunded: 0,
+    policyApplied: 'no-credits-used',
+  }
+  try {
+    const settings = await getReservationSettings(venueId)
+    const creditPackService = await import('./creditPack.public.service')
+    refundResult = await creditPackService.refundCreditsForReservation({
+      venueId,
+      reservationId: updated.id,
+      startsAt: updated.startsAt,
+      policy: {
+        creditRefundMode: settings.cancellation.creditRefundMode,
+        creditFreeRefundHoursBefore: settings.cancellation.creditFreeRefundHoursBefore,
+        creditLateRefundPercent: settings.cancellation.creditLateRefundPercent,
+      },
+      reasonPrefix: cancelledBy === 'CUSTOMER' ? 'Customer cancellation' : 'Staff cancellation',
+    })
+  } catch (err) {
+    logger.error(`❌ [CREDIT REFUND] Failed for reservation ${updated.confirmationCode}`, err)
+  }
+
+  return Object.assign(updated, refundResult)
 }
 
 // ---- Update ----

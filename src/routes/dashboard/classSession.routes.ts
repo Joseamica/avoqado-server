@@ -7,6 +7,7 @@ import {
   sessionParamsSchema,
   attendeeParamsSchema,
   createClassSessionSchema,
+  createClassSessionBulkSchema,
   updateClassSessionSchema,
   listClassSessionsQuerySchema,
   addAttendeeSchema,
@@ -34,6 +35,15 @@ router.post(
   checkPermission('reservations:create'),
   validateRequest(z.object({ body: createClassSessionSchema })),
   controller.createClassSession,
+)
+
+// ---- Bulk create (recurring) ----
+
+router.post(
+  '/bulk',
+  checkPermission('reservations:create'),
+  validateRequest(z.object({ body: createClassSessionBulkSchema })),
+  controller.createClassSessionsBulk,
 )
 
 // ---- Get one ----

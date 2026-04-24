@@ -61,7 +61,44 @@ export const addAttendeeSchema = z.object({
   customerId: z.string().cuid().optional().nullable(),
 })
 
+// ---- Bulk (recurring) creation ----
+//
+// Lets the dashboard create N sessions in one request based on a recurrence rule.
+// Server expands the rule, validates each instance, and creates them in a single
+// serializable transaction. Conflicting dates are skipped (not failed) so partial
+// runs don't leave the calendar half-populated.
+export const createClassSessionBulkSchema = z
+  .object({
+    productId: z.string().cuid('Product ID inválido'),
+    /** ISO date (YYYY-MM-DD) in venue timezone — first occurrence */
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (YYYY-MM-DD)'),
+    /** Local time (HH:mm) for every occurrence */
+    startTime: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida (HH:mm)'),
+    /** Local time (HH:mm) for every occurrence */
+    endTime: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida (HH:mm)'),
+    /** Days of week to include (0 = Sunday … 6 = Saturday) — must contain at least one */
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1, 'Selecciona al menos un día'),
+    /** End condition — exactly one of endDate / occurrences */
+    endDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (YYYY-MM-DD)')
+      .optional(),
+    occurrences: z.number().int().min(1).max(104).optional(),
+    capacity: z.number().int().min(1, 'La capacidad mínima es 1'),
+    assignedStaffId: z.string().cuid('Staff ID inválido').optional().nullable(),
+    internalNotes: z.string().max(2000).optional().nullable(),
+  })
+  .refine(d => !!d.endDate !== !!d.occurrences, {
+    message: 'Especifica endDate o occurrences (no ambos)',
+    path: ['endDate'],
+  })
+  .refine(d => d.startTime < d.endTime, {
+    message: 'La hora de fin debe ser posterior a la de inicio',
+    path: ['endTime'],
+  })
+
 export type CreateClassSessionDto = z.infer<typeof createClassSessionSchema>
 export type UpdateClassSessionDto = z.infer<typeof updateClassSessionSchema>
 export type ListClassSessionsQuery = z.infer<typeof listClassSessionsQuerySchema>
 export type AddAttendeeDto = z.infer<typeof addAttendeeSchema>
+export type CreateClassSessionBulkDto = z.infer<typeof createClassSessionBulkSchema>

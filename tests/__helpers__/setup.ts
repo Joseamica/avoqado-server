@@ -18,12 +18,16 @@ process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
 // Comprehensive Prisma Mock Setup
 const createMockModel = () => ({
   findUnique: jest.fn(),
+  findUniqueOrThrow: jest.fn(),
   findFirst: jest.fn(),
+  findFirstOrThrow: jest.fn(),
   findMany: jest.fn(),
   create: jest.fn(),
   createMany: jest.fn(),
+  createManyAndReturn: jest.fn(),
   update: jest.fn(),
   updateMany: jest.fn(),
+  updateManyAndReturn: jest.fn(),
   upsert: jest.fn(),
   delete: jest.fn(),
   deleteMany: jest.fn(),

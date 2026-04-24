@@ -47,6 +47,21 @@ export async function createClassSession(req: Request, res: Response, next: Next
 }
 
 /**
+ * POST /venues/:venueId/class-sessions/bulk
+ */
+export async function createClassSessionsBulk(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const tz = await getVenueTz(venueId)
+    const result = await classSessionService.createClassSessionsBulk(venueId, req.body, userId, tz)
+    res.status(201).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * GET /venues/:venueId/class-sessions/:sessionId
  */
 export async function getClassSession(req: Request, res: Response, next: NextFunction) {

@@ -1,12 +1,14 @@
 import crypto from 'crypto'
 import prisma from '../../utils/prismaClient'
 import { fromZonedTime } from 'date-fns-tz'
+import { DateTime } from 'luxon'
 import { NotFoundError, BadRequestError, ConflictError } from '../../errors/AppError'
 import type {
   CreateClassSessionDto,
   UpdateClassSessionDto,
   AddAttendeeDto,
   ListClassSessionsQuery,
+  CreateClassSessionBulkDto,
 } from '../../schemas/dashboard/classSession.schema'
 import { ReservationStatus } from '@prisma/client'
 import { withSerializableRetry } from './reservation.dashboard.service'
@@ -109,6 +111,11 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
   const endsAt = new Date(data.endsAt)
   const duration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
 
+  // Reject scheduling in the past (small grace window for clock skew)
+  if (startsAt.getTime() < Date.now() - 60_000) {
+    throw new BadRequestError('No se puede agendar una clase en el pasado')
+  }
+
   const session = await prisma.classSession.create({
     data: {
       venueId,
@@ -133,6 +140,122 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
   })
 
   return session
+}
+
+// ---- Bulk create (recurring) ----
+
+const MAX_BULK_OCCURRENCES = 104 // ~2 years of weekly classes
+
+export async function createClassSessionsBulk(
+  venueId: string,
+  data: CreateClassSessionBulkDto,
+  createdById: string,
+  venueTimezone: string,
+) {
+  const product = await prisma.product.findFirst({
+    where: { id: data.productId, venueId },
+    select: { id: true, type: true },
+  })
+  if (!product) throw new NotFoundError('Producto no encontrado')
+  if (product.type !== 'CLASS') throw new BadRequestError('El producto debe ser de tipo Clase')
+
+  if (data.assignedStaffId) {
+    const staffVenue = await prisma.staffVenue.findFirst({
+      where: { staffId: data.assignedStaffId, venueId },
+      select: { id: true },
+    })
+    if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
+  }
+
+  // Expand recurrence rule into concrete (date, startsAt, endsAt) instances.
+  // ALL date arithmetic happens in the venue's local timezone via Luxon — using JS
+  // Date.getDay() would return weekdays in the Node process timezone, off-by-one
+  // when Node runs in UTC and the venue is UTC-N.
+  const weekdaySet = new Set(data.weekdays)
+  const startCursor = DateTime.fromISO(data.startDate, { zone: venueTimezone })
+  if (!startCursor.isValid) throw new BadRequestError('startDate inválida')
+  const endCursor = data.endDate ? DateTime.fromISO(data.endDate, { zone: venueTimezone }) : null
+  if (data.endDate && (!endCursor || !endCursor.isValid)) throw new BadRequestError('endDate inválida')
+
+  // Luxon weekday: 1=Mon..7=Sun. Our schema uses JS convention 0=Sun..6=Sat — translate.
+  const luxonWeekday = (jsDay: number) => (jsDay === 0 ? 7 : jsDay)
+  const wantedLuxonWeekdays = new Set(Array.from(weekdaySet).map(luxonWeekday))
+
+  const instances: { startsAt: Date; endsAt: Date; duration: number; localDate: string }[] = []
+  let cursor = startCursor
+  let occurrencesCreated = 0
+  const cap = data.occurrences ?? MAX_BULK_OCCURRENCES
+  const hardLimit = endCursor ? Math.ceil(endCursor.diff(startCursor, 'days').days) + 7 : MAX_BULK_OCCURRENCES * 7
+
+  for (let i = 0; i < hardLimit && occurrencesCreated < cap; i++) {
+    if (endCursor && cursor > endCursor) break
+    if (wantedLuxonWeekdays.has(cursor.weekday)) {
+      const localDate = cursor.toISODate()! // YYYY-MM-DD in venue tz
+      const startsAt = fromZonedTime(`${localDate}T${data.startTime}:00`, venueTimezone)
+      const endsAt = fromZonedTime(`${localDate}T${data.endTime}:00`, venueTimezone)
+      const duration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
+      // Skip past instances silently — useful when startDate is today and weekdays
+      // include today but we already passed the time.
+      if (startsAt.getTime() >= Date.now() - 60_000) {
+        instances.push({ startsAt, endsAt, duration, localDate })
+        occurrencesCreated++
+      }
+    }
+    cursor = cursor.plus({ days: 1 })
+  }
+
+  if (instances.length === 0) {
+    throw new BadRequestError('La regla de recurrencia no genera ninguna sesión válida')
+  }
+
+  // Find existing sessions on those dates so we can skip conflicts.
+  const allStarts = instances.map(i => i.startsAt)
+  const earliest = new Date(Math.min(...allStarts.map(d => d.getTime())))
+  const latest = new Date(Math.max(...allStarts.map(d => d.getTime())))
+  const existing = await prisma.classSession.findMany({
+    where: {
+      venueId,
+      productId: data.productId,
+      startsAt: { gte: earliest, lte: latest },
+    },
+    select: { startsAt: true },
+  })
+  const existingTimestamps = new Set(existing.map(e => e.startsAt.getTime()))
+
+  const toCreate = instances.filter(i => !existingTimestamps.has(i.startsAt.getTime()))
+  const skipped = instances.length - toCreate.length
+
+  // Single transaction so partial failures roll back. Each row is independent so we
+  // don't need SERIALIZABLE — REPEATABLE READ is enough; rely on default.
+  const created = await prisma.$transaction(
+    toCreate.map(i =>
+      prisma.classSession.create({
+        data: {
+          venueId,
+          productId: data.productId,
+          startsAt: i.startsAt,
+          endsAt: i.endsAt,
+          duration: i.duration,
+          capacity: data.capacity,
+          assignedStaffId: data.assignedStaffId ?? null,
+          internalNotes: data.internalNotes ?? null,
+          createdById,
+        },
+        select: { id: true, startsAt: true, endsAt: true },
+      }),
+    ),
+  )
+
+  logAction({
+    staffId: createdById,
+    venueId,
+    action: 'CLASS_SESSION_BULK_CREATED',
+    entity: 'ClassSession',
+    entityId: data.productId,
+    data: { created: created.length, skipped, weekdays: data.weekdays },
+  })
+
+  return { created, count: created.length, skipped }
 }
 
 // ---- Update ----

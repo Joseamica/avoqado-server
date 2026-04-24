@@ -9,7 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
-- **Recent customers endpoint**: Removed `lastVisitAt: { not: null }` filter from `getRecentCustomers` — new customers with no visits were excluded. Now returns all active customers, ordered by most recent visit first (nulls last), then by creation date
+- **Recent customers endpoint**: Removed `lastVisitAt: { not: null }` filter from `getRecentCustomers` — new customers with no visits were
+  excluded. Now returns all active customers, ordered by most recent visit first (nulls last), then by creation date
 - **Command Center timezone bugs**: All date boundary calculations in `commandCenter.service.ts` now use venue timezone instead of UTC.
   Affected methods: `getSummary()`, `getInsights()`, `getTopSellers()`, `getCategoryBreakdown()`, `getStockVsSales()`. "Today", "this week",
   and "this month" now correctly correspond to the venue's local midnight rather than UTC midnight. Raw SQL date grouping in sales trend

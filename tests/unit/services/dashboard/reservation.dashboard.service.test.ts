@@ -81,6 +81,11 @@ describe('Reservation Dashboard Service', () => {
       price: new Prisma.Decimal(100),
       eventCapacity: 20,
     })
+    // transitionReservation now uses an atomic guarded updateMany + a findUniqueOrThrow
+    // re-read for the race-condition fix. Default both to "happy path" so old tests that
+    // only mocked .update keep working — individual tests can override findUniqueOrThrow
+    // when they want a specific shape returned to the caller.
+    prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
   })
 
   // ==========================================
@@ -448,11 +453,12 @@ describe('Reservation Dashboard Service', () => {
 
         prismaMock.reservation.findFirst.mockResolvedValue(mockPending)
         prismaMock.reservation.update.mockResolvedValue(mockConfirmed)
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(mockConfirmed)
 
         const result = await confirmReservation(VENUE_ID, 'res-1', STAFF_ID)
 
         expect(result.status).toBe('CONFIRMED')
-        expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
           expect.objectContaining({
             data: expect.objectContaining({
               status: 'CONFIRMED',
@@ -473,11 +479,12 @@ describe('Reservation Dashboard Service', () => {
       it('should transition CONFIRMED -> CHECKED_IN', async () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
         prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
 
         const result = await checkInReservation(VENUE_ID, 'res-1', STAFF_ID)
 
         expect(result.status).toBe('CHECKED_IN')
-        expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
           expect.objectContaining({
             data: expect.objectContaining({
               status: 'CHECKED_IN',
@@ -498,11 +505,12 @@ describe('Reservation Dashboard Service', () => {
       it('should transition CHECKED_IN -> COMPLETED', async () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN' }))
         prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'COMPLETED' }))
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'COMPLETED' }))
 
         const result = await completeReservation(VENUE_ID, 'res-1')
 
         expect(result.status).toBe('COMPLETED')
-        expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
           expect.objectContaining({
             data: expect.objectContaining({
               status: 'COMPLETED',
@@ -523,11 +531,12 @@ describe('Reservation Dashboard Service', () => {
       it('should transition CONFIRMED -> NO_SHOW', async () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
         prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'NO_SHOW' }))
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'NO_SHOW' }))
 
         const result = await markNoShow(VENUE_ID, 'res-1', STAFF_ID)
 
         expect(result.status).toBe('NO_SHOW')
-        expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
           expect.objectContaining({
             data: expect.objectContaining({
               status: 'NO_SHOW',
@@ -554,11 +563,18 @@ describe('Reservation Dashboard Service', () => {
             cancellationReason: 'Changed plans',
           }),
         )
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(
+          createMockReservation({
+            status: 'CANCELLED',
+            cancelledBy: 'CUSTOMER',
+            cancellationReason: 'Changed plans',
+          }),
+        )
 
         const result = await cancelReservation(VENUE_ID, 'res-1', 'CUSTOMER', 'Changed plans')
 
         expect(result.status).toBe('CANCELLED')
-        expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
           expect.objectContaining({
             data: expect.objectContaining({
               status: 'CANCELLED',
@@ -573,6 +589,7 @@ describe('Reservation Dashboard Service', () => {
       it('should transition CONFIRMED -> CANCELLED', async () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
         prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'CANCELLED' }))
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CANCELLED' }))
 
         const result = await cancelReservation(VENUE_ID, 'res-1', STAFF_ID)
         expect(result.status).toBe('CANCELLED')
@@ -621,6 +638,7 @@ describe('Reservation Dashboard Service', () => {
 
       prismaMock.reservation.findFirst.mockResolvedValueOnce(existing)
       prismaMock.reservation.update.mockResolvedValue(updated)
+      prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(updated)
 
       const result = await updateReservation(VENUE_ID, 'res-1', { guestName: 'Updated Name', partySize: 4 }, STAFF_ID)
 
@@ -689,6 +707,7 @@ describe('Reservation Dashboard Service', () => {
       prismaMock.reservation.findFirst.mockResolvedValueOnce(existing)
       prismaMock.$queryRaw.mockResolvedValueOnce([]) // table conflict check
       prismaMock.reservation.update.mockResolvedValue(rescheduled)
+      prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(rescheduled)
 
       await rescheduleReservation(VENUE_ID, 'res-1', new Date('2026-03-02T16:00:00Z'), new Date('2026-03-02T17:30:00Z'), STAFF_ID)
 

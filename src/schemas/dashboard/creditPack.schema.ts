@@ -142,6 +142,8 @@ export const publicBalanceQuerySchema = z.object({
   query: z.object({
     email: z.string().email().optional(),
     phone: z.string().optional(),
+    seats: z.string().regex(/^\d+$/).optional(),
+    productId: z.string().optional(),
   }),
 })
 
