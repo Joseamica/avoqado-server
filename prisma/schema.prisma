@@ -4695,6 +4695,11 @@ enum OrderType {
   TAKEOUT
   DELIVERY
   PICKUP
+  /// Bookkeeping entry for money received outside of Avoqado (e.g. admin
+  /// records a BUQ / Clip payment after the fact). These orders have no
+  /// items, no inventory impact, and should be filtered out of operational
+  /// reports like "kitchen prep queue" — but kept in revenue totals.
+  MANUAL_ENTRY
 }
 
 enum OrderSource {
@@ -4708,6 +4713,9 @@ enum OrderSource {
   PHONE // Phone order
   POS // Direct from POS
   PAYMENT_LINK // Payment link checkout
+  /// Admin entered the payment directly from the dashboard — the underlying
+  /// transaction happened outside Avoqado.
+  DASHBOARD_MANUAL
 }
 
 enum TableShape {

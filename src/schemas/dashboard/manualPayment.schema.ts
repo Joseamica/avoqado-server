@@ -9,7 +9,32 @@ import { PaymentMethod, PaymentSource } from '@prisma/client'
 export const createManualPaymentSchema = z.object({
   body: z
     .object({
-      orderId: z.string().min(1, 'El ID de la orden es requerido'),
+      /**
+       * OPTIONAL. When provided (and non-empty), the payment is attached to
+       * an existing order. When omitted OR empty string, the backend creates
+       * a shadow Order of type MANUAL_ENTRY to anchor the payment — used for
+       * bookkeeping entries that never passed through Avoqado.
+       * The transform coerces '' → undefined so FE form state doesn't break.
+       */
+      orderId: z
+        .string()
+        .optional()
+        .transform(v => (v && v.length > 0 ? v : undefined)),
+      /** Waiter to whom tip / commission should be attributed. Optional. */
+      waiterId: z
+        .string()
+        .optional()
+        .transform(v => (v && v.length > 0 ? v : undefined)),
+      /** Taxes on this manual sale (defaults to 0). Only used for shadow orders. */
+      taxAmount: z
+        .string()
+        .regex(/^\d+(\.\d{1,2})?$/, 'El IVA debe ser un número con máximo 2 decimales')
+        .optional(),
+      /** Discount applied (defaults to 0). Only used for shadow orders. */
+      discountAmount: z
+        .string()
+        .regex(/^\d+(\.\d{1,2})?$/, 'El descuento debe ser un número con máximo 2 decimales')
+        .optional(),
       amount: z
         .string()
         .regex(/^\d+(\.\d{1,2})?$/, 'El monto debe ser un número con máximo 2 decimales')

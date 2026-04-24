@@ -40,4 +40,15 @@ router.get(
   manualPaymentController.getExternalSources,
 )
 
+/**
+ * GET /api/v1/dashboard/venues/:venueId/payments/waiters
+ * Lists active staff eligible to be attributed as the waiter (tip + commission
+ * credit) on a manual payment. Gated by the same permission as creation.
+ */
+router.get(
+  '/waiters',
+  checkPermission('payment:create-manual'),
+  manualPaymentController.getEligibleWaiters,
+)
+
 export default router

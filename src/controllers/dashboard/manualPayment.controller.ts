@@ -24,3 +24,13 @@ export async function getExternalSources(req: Request, res: Response, next: Next
     next(err)
   }
 }
+
+export async function getEligibleWaiters(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = (req as any).authContext
+    const waiters = await manualPaymentService.getEligibleWaiters(venueId)
+    res.json({ success: true, data: waiters })
+  } catch (err) {
+    next(err)
+  }
+}
