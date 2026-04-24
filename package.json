@@ -18,7 +18,7 @@
     "studio": "prisma studio",
     "studio:render": "USE_RENDER_DB=true npx prisma studio",
     "test": "jest",
-    "test:unit": "NODE_OPTIONS='--max-old-space-size=4096' jest tests/unit --maxWorkers=2",
+    "test:unit": "NODE_OPTIONS='--max-old-space-size=4096' jest tests/unit --maxWorkers=2 --workerIdleMemoryLimit=512MB",
     "test:integration": "jest --selectProjects=integration",
     "test:api": "jest tests/api-tests",
     "test:workflows": "jest tests/workflows",

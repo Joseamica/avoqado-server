@@ -216,6 +216,7 @@ import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
+import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import reportsRoutes from './dashboard/reports.routes'
 import commissionRoutes from './dashboard/commission.routes'
 import reservationRoutes from './dashboard/reservation.routes'
@@ -2896,6 +2897,10 @@ router.post(
   validateRequest(SettleOrderSchema),
   orderController.settleOrder,
 )
+
+// Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId
+// so that `/manual` and `/external-sources` are not captured by the `:paymentId` param.
+router.use('/venues/:venueId/payments', authenticateTokenMiddleware, manualPaymentRoutes)
 
 router.get(
   '/venues/:venueId/payments/:paymentId',

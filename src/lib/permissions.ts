@@ -100,6 +100,15 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'orders:read', // Need to see original order
   ],
 
+  // Manual payment recording (ADMIN+) — captures payments received outside Avoqado
+  // (cash, external terminal, bank transfer, etc.). Singular `payment:` namespace is
+  // intentional to distinguish from the broader `payments:*` resource.
+  'payment:create-manual': [
+    'payment:create-manual',
+    'payments:read', // Need to view payments after recording them
+    'orders:read', // Manual payments can be attached to orders
+  ],
+
   // ===========================
   // SHIFTS
   // ===========================
@@ -636,6 +645,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'menu:*',
     'orders:*',
     'payments:*',
+    'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
     'shifts:*',
     'reviews:*',
     'teams:*',
@@ -708,6 +718,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'menu:*',
     'orders:*',
     'payments:*',
+    'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
     'shifts:*',
     'reviews:*',
     'teams:*',
@@ -1068,6 +1079,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel'],
   payments: ['payments:read', 'payments:create', 'payments:refund'],
+  // Singular `payment` namespace for admin-only, one-off payment actions.
+  payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
   tpv: [
     'tpv:read',

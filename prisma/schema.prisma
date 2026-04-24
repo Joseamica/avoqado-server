@@ -2382,6 +2382,11 @@ model Payment {
   // for non-TPV payment sources (dashboard manual settlements, POS sync, etc.).
   idempotencyKey String? @db.VarChar(64)
 
+  /// Free-text provider name for manual/external payments when `source = OTHER`
+  /// (e.g. "BUQ", "Clip", "Mercado Pago manual"). NULL otherwise. Admin-annotated
+  /// to attribute payments that don't map to our built-in PaymentSource enum.
+  externalSource String? @db.VarChar(50)
+
   cardBrand CardBrand? // MASTERCARD, VISA, etc.
   maskedPan String? // "411111******1111"
   entryMode CardEntryMode? // CONTACTLESS, CHIP, SWIPE, etc.
@@ -2438,6 +2443,7 @@ model Payment {
   @@index([venueId, createdAt])
   @@index([venueId, status, createdAt])
   @@index([merchantAccountId, createdAt])
+  @@index([venueId, externalSource])
 }
 
 model PaymentAllocation {
