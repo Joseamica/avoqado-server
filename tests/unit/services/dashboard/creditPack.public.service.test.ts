@@ -278,7 +278,10 @@ describe('CreditPack Public Service', () => {
         phone: '+525551234567',
       })
       expect(result.purchases).toHaveLength(1)
-      expect(result.purchases[0]).toEqual(purchase)
+      expect(result.purchases[0]).toEqual({
+        ...purchase,
+        itemBalances: (purchase as any).itemBalances.map((b: any) => ({ ...b, sufficient: true })),
+      })
     })
 
     it('should return null customer when not found', async () => {

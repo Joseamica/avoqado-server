@@ -322,27 +322,53 @@ const startApplication = async (retries = 3) => {
       // Without this retry, hot-reloads cascade into fatal EADDRINUSE crashes.
       // Only active in dev; prod listens once and fails fast so the platform
       // (Render/systemd) can restart cleanly.
-      const listenWithRetry = (attempt = 1, maxAttempts = NODE_ENV === 'development' ? 10 : 1) => {
-        const onError = (err: NodeJS.ErrnoException) => {
-          if (err.code === 'EADDRINUSE' && attempt < maxAttempts) {
-            logger.warn(`Port ${PORT} busy (attempt ${attempt}/${maxAttempts}). Retrying in 500ms…`)
-            setTimeout(() => listenWithRetry(attempt + 1, maxAttempts), 500)
-            return
-          }
-          // Hand off to normal error handling for non-EADDRINUSE or final attempt
-          logger.error('HTTP server failed to bind', { code: err.code, port: PORT, attempt })
-          process.exit(1)
-        }
-        httpServer.once('error', onError)
-        httpServer.listen(PORT, () => {
+      //
+      // Bump maxListeners a bit: each failed listen() attempt adds internal
+      // handlers on the Server emitter. Default is 10; we allow enough headroom
+      // for our retry count without triggering a noisy MaxListenersExceeded
+      // warning during a recovery sequence.
+      httpServer.setMaxListeners(25)
+
+      const isDevEnv = NODE_ENV === 'development'
+      const maxAttempts = isDevEnv ? 10 : 1
+      const retryDelayMs = 500
+
+      const listenWithRetry = (attempt = 1) => {
+        // Success + error handlers are scoped to THIS attempt only — we remove
+        // both before scheduling the next retry so listeners don't accumulate.
+        const onListening = () => {
           httpServer.removeListener('error', onError)
           if (attempt > 1) logger.info(`Port ${PORT} freed on attempt ${attempt}`)
           logger.info(`🚀 Server running at http://localhost:${PORT} in ${NODE_ENV} mode`)
           logger.info(`📚 API documentation available at http://localhost:${PORT}/api-docs`)
-          if (NODE_ENV === 'development') {
+          if (isDevEnv) {
             logger.warn('⚠️  Application is running in Development mode.')
           }
-        })
+        }
+        const onError = (err: NodeJS.ErrnoException) => {
+          httpServer.removeListener('listening', onListening)
+          if (err.code === 'EADDRINUSE' && attempt < maxAttempts) {
+            logger.warn(`Port ${PORT} busy (attempt ${attempt}/${maxAttempts}). Retrying in ${retryDelayMs}ms…`)
+            setTimeout(() => listenWithRetry(attempt + 1), retryDelayMs)
+            return
+          }
+          if (err.code === 'EADDRINUSE') {
+            // Final attempt failed — likely an orphan process is holding the
+            // port (not a restart race). Tell the dev how to recover.
+            logger.error(
+              `Port ${PORT} still busy after ${maxAttempts} attempts. ` +
+                `An orphan process is likely holding it. Run:\n` +
+                `   lsof -ti:${PORT} | xargs kill -9\n` +
+                `Then restart 'npm run dev'.`,
+            )
+          } else {
+            logger.error('HTTP server failed to bind', { code: err.code, port: PORT, attempt })
+          }
+          process.exit(1)
+        }
+        httpServer.once('listening', onListening)
+        httpServer.once('error', onError)
+        httpServer.listen(PORT)
       }
       listenWithRetry()
 
