@@ -267,6 +267,79 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
         refundPercent: cancellationPreview.refundPercent,
         policyLabel: cancellationPreview.label,
       },
+      // Reschedule eligibility — same window as cancel, plus the venue toggle.
+      // Only meaningful for class reservations (`classSessionId` present).
+      reschedule: {
+        allowed:
+          settings.cancellation.allowCustomerReschedule &&
+          !!(reservation as any).classSessionId &&
+          (reservation.status === 'CONFIRMED' || reservation.status === 'PENDING') &&
+          isWithinWindow(reservation.startsAt, settings.cancellation.minHoursBeforeStart),
+        minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
+        productId: (reservation as any).productId ?? null,
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+function isWithinWindow(startsAt: Date, minHoursBefore: number | null): boolean {
+  if (minHoursBefore == null) return true
+  const hoursUntilStart = (startsAt.getTime() - Date.now()) / 3_600_000
+  return hoursUntilStart >= minHoursBefore
+}
+
+/**
+ * POST /public/venues/:venueSlug/reservations/:cancelSecret/reschedule
+ *
+ * Body: { classSessionId: string, spotIds?: string[] }
+ *
+ * Same-product swap of a class reservation. Mirrors the venue's cancellation window
+ * for the time check. Credit transactions are NOT touched (same product = same N
+ * credits stay attached). For class swap to a different product, the customer must
+ * cancel and re-book.
+ */
+export async function rescheduleReservation(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug, cancelSecret } = req.params
+    const { classSessionId, spotIds } = req.body as { classSessionId: string; spotIds?: string[] }
+
+    if (!classSessionId) {
+      throw new BadRequestError('classSessionId es requerido')
+    }
+
+    const reservation = await reservationService.getReservationByCancelSecret(venueSlug, cancelSecret)
+    const settings = await getReservationSettings(reservation.venueId)
+
+    if (!settings.cancellation.allowCustomerReschedule) {
+      throw new BadRequestError('Este negocio no permite cambiar horarios en línea. Contacta al negocio directamente.')
+    }
+    if (settings.cancellation.minHoursBeforeStart != null) {
+      const hoursUntilStart = (reservation.startsAt.getTime() - Date.now()) / 3_600_000
+      if (hoursUntilStart < settings.cancellation.minHoursBeforeStart) {
+        throw new BadRequestError(
+          `No puedes cambiar el horario con menos de ${settings.cancellation.minHoursBeforeStart} horas de anticipacion.`,
+        )
+      }
+    }
+
+    const updated = await reservationService.rescheduleClassReservation({
+      venueId: reservation.venueId,
+      reservationId: reservation.id,
+      newClassSessionId: classSessionId,
+      newSpotIds: Array.isArray(spotIds) ? spotIds : undefined,
+      rescheduledBy: 'CUSTOMER',
+      reason: req.body?.reason,
+    })
+
+    res.json({
+      confirmationCode: updated.confirmationCode,
+      status: updated.status,
+      startsAt: updated.startsAt,
+      endsAt: updated.endsAt,
+      partySize: updated.partySize,
+      spotIds: updated.spotIds,
     })
   } catch (error) {
     next(error)

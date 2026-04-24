@@ -174,6 +174,12 @@ export const cancelBodySchema = z.object({
   reason: z.string().max(1000).optional(),
 })
 
+export const publicRescheduleBodySchema = z.object({
+  classSessionId: z.string().min(1, 'classSessionId es requerido'),
+  spotIds: z.array(z.string().min(1)).max(100).optional(),
+  reason: z.string().max(1000).optional(),
+})
+
 export const addToWaitlistBodySchema = z
   .object({
     customerId: z.string().optional(),
@@ -258,6 +264,7 @@ export const updateReservationSettingsBodySchema = z
         creditFreeRefundHoursBefore: z.number().int().min(0).max(720).optional(),
         creditLateRefundPercent: z.number().int().min(0).max(100).optional(),
         creditNoShowRefund: z.boolean().optional(),
+        allowCustomerReschedule: z.boolean().optional(),
       })
       .optional(),
     waitlist: z

@@ -4,10 +4,13 @@
  * Integration with B4Bit crypto payment gateway for accepting cryptocurrency payments.
  * Supports 13 cryptocurrencies including BTC, ETH, USDT, USDC, etc.
  *
- * Environment Configuration:
- * - B4BIT_API_BASE_URL: API base URL (dev-pay.b4bit.com for test, pos.b4bit.com for prod)
- * - B4BIT_API_KEY: API key for authentication
- * - B4BIT_WEBHOOK_SECRET: Secret for webhook signature verification
+ * Authentication (per https://docs.b4bit.com/pay/api/autenticacion/):
+ * - Only header required: `X-Device-Id: <api-key-uuid4>`
+ * - No login/signIn endpoint exists. No Authorization header is used
+ * - `secretKey` is used ONLY for webhook HMAC signature validation — never sent
+ *
+ * Per-venue credentials (deviceId + secretKey) live in `VenueCryptoConfig`.
+ * Minimum chargeable amount: $20.00 MXN (B4Bit business rule).
  */
 
 import { PaymentMethod } from '@prisma/client'
@@ -31,23 +34,16 @@ import type {
   ProcessWebhookResult,
 } from './types'
 
-// B4Bit URLs by environment (no env vars needed for URLs)
+// B4Bit API base URL by environment (no env vars needed — no login endpoint either)
 const isProduction = process.env.NODE_ENV === 'production'
-const B4BIT_URLS = {
-  baseUrl: isProduction ? 'https://pos.b4bit.com' : 'https://dev-payments.b4bit.com',
-  loginUrl: isProduction ? 'https://pay.b4bit.com' : 'https://dev-pay.b4bit.com',
-}
+const B4BIT_BASE_URL = isProduction ? 'https://pos.b4bit.com' : 'https://dev-payments.b4bit.com'
 
-// Global B4Bit configuration (shared credentials from environment)
+// Minimum chargeable amount: $20 MXN (B4Bit business rule).
+// Expressed in centavos to match the `amount` param used across the payment layer.
+const B4BIT_MINIMUM_AMOUNT_CENTAVOS = 2000
+
 const getB4BitGlobalConfig = (): B4BitGlobalConfig => {
-  const username = process.env.B4BIT_USERNAME || ''
-  const password = process.env.B4BIT_PASSWORD || ''
-
-  if (!username || !password) {
-    logger.warn('⚠️ B4BIT_USERNAME/PASSWORD not configured - crypto payments will fail')
-  }
-
-  return { baseUrl: B4BIT_URLS.baseUrl, loginUrl: B4BIT_URLS.loginUrl, username, password }
+  return { baseUrl: B4BIT_BASE_URL }
 }
 
 /**
@@ -87,61 +83,6 @@ const _getB4BitConfig = (): B4BitConfig => {
   }
 }
 
-// Cache for auth token (expires after 23 hours to be safe)
-let cachedAuthToken: { token: string; expiresAt: number } | null = null
-
-/**
- * Authenticate with B4Bit and get access token
- * Caches token for 23 hours to avoid repeated logins
- */
-async function getAuthToken(): Promise<string> {
-  const config = getB4BitGlobalConfig()
-
-  // Return cached token if still valid
-  if (cachedAuthToken && Date.now() < cachedAuthToken.expiresAt) {
-    return cachedAuthToken.token
-  }
-
-  logger.info('🔐 B4Bit: Authenticating...')
-
-  try {
-    const response = await fetch(`${config.loginUrl}/api/user/signIn`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        username: config.username,
-        password: config.password,
-      }),
-    })
-
-    const data = await response.json()
-
-    if (data.hasError || !data.result?.token) {
-      logger.error('❌ B4Bit: Authentication failed', {
-        error: data.error?.customerDescription || 'Unknown error',
-      })
-      throw new Error(data.error?.customerDescription || 'B4Bit authentication failed')
-    }
-
-    // Cache token for 23 hours
-    cachedAuthToken = {
-      token: data.result.token,
-      expiresAt: Date.now() + 23 * 60 * 60 * 1000,
-    }
-
-    logger.info('✅ B4Bit: Authenticated successfully', {
-      merchants: data.result.merchants?.length || 0,
-    })
-
-    return data.result.token
-  } catch (error: any) {
-    logger.error('❌ B4Bit: Authentication error', { error: error.message })
-    throw error
-  }
-}
-
 /**
  * Check if B4Bit mock mode is enabled for development/testing
  * Set B4BIT_MOCK=true to enable mock responses
@@ -155,7 +96,7 @@ const _isB4BitMockEnabled = (): boolean => {
  *
  * B4Bit API uses:
  * - Endpoint: POST /api/v1/orders/
- * - Auth: Authorization: Token xxx + X-Device-Id header
+ * - Auth: X-Device-Id header only (no login, no Authorization header)
  * - Content-Type: multipart/form-data
  * - Main param: expected_output_amount (fiat amount)
  *
@@ -175,10 +116,7 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: 
   })
 
   try {
-    // Get auth token (cached)
-    const authToken = await getAuthToken()
-
-    logger.debug('🔗 B4Bit: Calling API', { url, hasToken: !!authToken, hasDeviceId: !!venueConfig.deviceId })
+    logger.debug('🔗 B4Bit: Calling API', { url, hasDeviceId: !!venueConfig.deviceId })
 
     // Build form data (B4Bit API expects multipart/form-data)
     // B4Bit field names: expected_output_amount, fiat_currency (or output_currency)
@@ -197,7 +135,6 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: 
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Token ${authToken}`,
         'X-Device-Id': venueConfig.deviceId,
       },
       body: formData,
@@ -307,6 +244,12 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
   // Convert centavos to decimal (5500 centavos = $55.00 MXN)
   const totalAmount = amount + tip
   const fiatAmount = totalAmount / 100
+
+  // B4Bit minimum charge: $20 MXN. Reject below threshold before hitting their API
+  // (they return a confusing validation error otherwise).
+  if (totalAmount < B4BIT_MINIMUM_AMOUNT_CENTAVOS) {
+    throw new BadRequestError(`El monto mínimo para pagar con cripto es $${B4BIT_MINIMUM_AMOUNT_CENTAVOS / 100} MXN`)
+  }
 
   logger.info('🚀 Initiating crypto payment', {
     venueId,
@@ -843,12 +786,9 @@ export async function getPaymentStatus(
   const url = `${globalConfig.baseUrl}/api/v1/orders/info/${requestId}/`
 
   try {
-    const authToken = await getAuthToken()
-
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        Authorization: `Token ${authToken}`,
         'X-Device-Id': venueConfig.deviceId,
       },
     })

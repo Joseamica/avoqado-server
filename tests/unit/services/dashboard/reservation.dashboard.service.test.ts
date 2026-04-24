@@ -724,6 +724,152 @@ describe('Reservation Dashboard Service', () => {
   })
 
   // ==========================================
+  // RESCHEDULE CLASS RESERVATION (public-facing)
+  // ==========================================
+
+  describe('rescheduleClassReservation', () => {
+    const futureBase = Date.now() + 24 * 3_600_000 // tomorrow, well outside any window
+    const oldStart = new Date(futureBase)
+    const oldEnd = new Date(futureBase + 60 * 60_000)
+    const newStart = new Date(futureBase + 4 * 3_600_000)
+    const newEnd = new Date(futureBase + 5 * 3_600_000)
+
+    function makeClassReservation(overrides: Record<string, any> = {}) {
+      return createMockReservation({
+        id: 'res-class-1',
+        classSessionId: 'old-session',
+        productId: 'prod-class',
+        partySize: 2,
+        spotIds: ['1', '2'],
+        startsAt: oldStart,
+        endsAt: oldEnd,
+        ...overrides,
+      })
+    }
+
+    function mockNewSession(overrides: Record<string, any> = {}) {
+      return [{
+        id: 'new-session',
+        productId: 'prod-class',
+        startsAt: newStart,
+        endsAt: newEnd,
+        duration: 60,
+        capacity: 10,
+        status: 'SCHEDULED',
+        ...overrides,
+      }]
+    }
+
+    it('moves the reservation to the new session and never touches credit transactions', async () => {
+      const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation())
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce(mockNewSession())   // FOR UPDATE on new session
+        .mockResolvedValueOnce([{ total: 0n }])    // enrolled count
+      prismaMock.reservation.findMany.mockResolvedValue([]) // no spot collisions
+      prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(
+        makeClassReservation({ classSessionId: 'new-session', startsAt: newStart, endsAt: newEnd }),
+      )
+
+      const result = await reservationService.rescheduleClassReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-class-1',
+        newClassSessionId: 'new-session',
+        rescheduledBy: 'CUSTOMER',
+      })
+
+      expect(result.classSessionId).toBe('new-session')
+      // Critical: a reschedule MUST NOT create credit transactions (same product = same N credits)
+      expect(prismaMock.creditTransaction.create).not.toHaveBeenCalled()
+      // The atomic guard is enforced via updateMany with the previous status + classSessionId
+      expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 'res-class-1',
+            status: 'CONFIRMED',
+            classSessionId: 'old-session',
+          }),
+          data: expect.objectContaining({
+            classSessionId: 'new-session',
+            startsAt: newStart,
+            endsAt: newEnd,
+          }),
+        }),
+      )
+    })
+
+    it('rejects swap to a different product with a clear message', async () => {
+      const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation())
+      prismaMock.$queryRaw.mockResolvedValueOnce(mockNewSession({ productId: 'OTHER-PRODUCT' }))
+
+      await expect(
+        reservationService.rescheduleClassReservation({
+          venueId: VENUE_ID,
+          reservationId: 'res-class-1',
+          newClassSessionId: 'new-session',
+          rescheduledBy: 'CUSTOMER',
+        }),
+      ).rejects.toThrow(/misma clase/i)
+      expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('rejects when the new session is full', async () => {
+      const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation({ partySize: 3 }))
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce(mockNewSession({ capacity: 5 }))
+        .mockResolvedValueOnce([{ total: 4n }]) // already 4 enrolled, +3 = 7 > 5
+      prismaMock.reservation.findMany.mockResolvedValue([])
+
+      await expect(
+        reservationService.rescheduleClassReservation({
+          venueId: VENUE_ID,
+          reservationId: 'res-class-1',
+          newClassSessionId: 'new-session',
+          rescheduledBy: 'CUSTOMER',
+        }),
+      ).rejects.toThrow(ConflictError)
+    })
+
+    it('returns the same reservation untouched when target session equals current', async () => {
+      const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation({ classSessionId: 'old-session' }))
+      prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(makeClassReservation({ classSessionId: 'old-session' }))
+
+      await reservationService.rescheduleClassReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-class-1',
+        newClassSessionId: 'old-session', // same as current
+        rescheduledBy: 'CUSTOMER',
+      })
+
+      // No DB writes — pure read
+      expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    })
+
+    it('rejects when the race-guard updateMany returns 0 rows', async () => {
+      const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation())
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce(mockNewSession())
+        .mockResolvedValueOnce([{ total: 0n }])
+      prismaMock.reservation.findMany.mockResolvedValue([])
+      prismaMock.reservation.updateMany.mockResolvedValueOnce({ count: 0 } as any) // race lost
+
+      await expect(
+        reservationService.rescheduleClassReservation({
+          venueId: VENUE_ID,
+          reservationId: 'res-class-1',
+          newClassSessionId: 'new-session',
+          rescheduledBy: 'CUSTOMER',
+        }),
+      ).rejects.toThrow(/otro proceso/i)
+    })
+  })
+
+  // ==========================================
   // STATS
   // ==========================================
 

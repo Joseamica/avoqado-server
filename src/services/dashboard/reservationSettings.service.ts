@@ -64,6 +64,7 @@ export interface ReservationConfig {
     creditFreeRefundHoursBefore: number
     creditLateRefundPercent: number
     creditNoShowRefund: boolean
+    allowCustomerReschedule: boolean
   }
   waitlist: {
     enabled: boolean
@@ -114,6 +115,7 @@ type ReservationSettingsUpdateInput = Partial<{
   creditFreeRefundHoursBefore: number
   creditLateRefundPercent: number
   creditNoShowRefund: boolean
+  allowCustomerReschedule: boolean
   remindersEnabled: boolean
   reminderChannels: string[]
   reminderMinBefore: number[]
@@ -168,6 +170,7 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       creditFreeRefundHoursBefore: settings.creditFreeRefundHoursBefore,
       creditLateRefundPercent: settings.creditLateRefundPercent,
       creditNoShowRefund: settings.creditNoShowRefund,
+      allowCustomerReschedule: settings.allowCustomerReschedule,
     },
     waitlist: {
       enabled: settings.waitlistEnabled,
@@ -256,6 +259,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.creditFreeRefundHoursBefore !== undefined) normalized.creditFreeRefundHoursBefore = data.creditFreeRefundHoursBefore
   if (data.creditLateRefundPercent !== undefined) normalized.creditLateRefundPercent = data.creditLateRefundPercent
   if (data.creditNoShowRefund !== undefined) normalized.creditNoShowRefund = data.creditNoShowRefund
+  if (data.allowCustomerReschedule !== undefined) normalized.allowCustomerReschedule = data.allowCustomerReschedule
   if (data.remindersEnabled !== undefined) normalized.remindersEnabled = data.remindersEnabled
   if (data.reminderChannels !== undefined) normalized.reminderChannels = data.reminderChannels
   if (data.reminderMinBefore !== undefined) normalized.reminderMinBefore = data.reminderMinBefore
@@ -298,6 +302,8 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.cancellation.creditLateRefundPercent !== undefined)
       normalized.creditLateRefundPercent = data.cancellation.creditLateRefundPercent
     if (data.cancellation.creditNoShowRefund !== undefined) normalized.creditNoShowRefund = data.cancellation.creditNoShowRefund
+    if (data.cancellation.allowCustomerReschedule !== undefined)
+      normalized.allowCustomerReschedule = data.cancellation.allowCustomerReschedule
   }
 
   if (data.waitlist) {
@@ -345,6 +351,7 @@ function getDefaultConfig(): ReservationConfig {
       creditFreeRefundHoursBefore: 12,
       creditLateRefundPercent: 0,
       creditNoShowRefund: false,
+      allowCustomerReschedule: true,
     },
     waitlist: {
       enabled: true,

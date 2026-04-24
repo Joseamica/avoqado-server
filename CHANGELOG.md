@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **B4Bit crypto auth simplified — fully login-less**: Removed the B4Bit username/password login flow entirely. Per B4Bit docs (https://docs.b4bit.com/pay/api/autenticacion/), the only required header is `X-Device-Id: <api-key-uuid4>` — no `Authorization` header, no signIn endpoint. Changes across three layers:
+  - `b4bit.service.ts` (payment path): removed `getAuthToken()`, `cachedAuthToken`, `loginUrl` config, and `Authorization: Token` from `createPaymentOrder`/`getPaymentStatus`
+  - `cryptoConfig.dashboard.service.ts` (setup wizard): removed `getAuthData()`, `cachedAuth`, `listB4BitDevices()`, `loginUrl`, `username`/`password` from config, and `Authorization: Token` from `completeCryptoSetup` validation
+  - `dashboard.routes.ts` + `cryptoConfig.dashboard.controller.ts`: removed `GET /dashboard/crypto/devices` route + `listDevices` controller
+  - Web dashboard (`CryptoConfigSection.tsx`): replaced the "Select device" dropdown (which depended on `signIn`) with a manual Device ID text input where the admin pastes the UUID directly from the B4Bit dashboard. Removed `listDevices()` from `crypto-config.service.ts`
+  - **Env vars `B4BIT_USERNAME` and `B4BIT_PASSWORD` are no longer used** — safe to remove from all environments. `secretKey` still used ONLY for webhook HMAC validation
+
+### Added
+
+- **B4Bit minimum amount validation**: `initiateCryptoPayment` now rejects orders below $20 MXN (2000 centavos) with a clear error `El monto mínimo para pagar con cripto es $20 MXN`. Prevents confusing validation errors from B4Bit's API when merchants try to charge small amounts
+
 ### Fixed
 
 - **Recent customers endpoint**: Removed `lastVisitAt: { not: null }` filter from `getRecentCustomers` — new customers with no visits were

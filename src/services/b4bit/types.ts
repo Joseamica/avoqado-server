@@ -8,25 +8,22 @@
 /**
  * B4Bit API Environment Configuration
  *
- * DEV:  baseUrl=https://dev-payments.b4bit.com, loginUrl=https://dev-pay.b4bit.com
- * PROD: baseUrl=https://pos.b4bit.com, loginUrl=https://pay.b4bit.com
- */
-/**
- * Global B4Bit config (from environment - shared across all venues)
+ * DEV:  baseUrl=https://dev-payments.b4bit.com
+ * PROD: baseUrl=https://pos.b4bit.com
+ *
+ * Auth: X-Device-Id header only (see https://docs.b4bit.com/pay/api/autenticacion/).
+ * No login/signIn step. `secretKey` is used ONLY for webhook HMAC verification.
  */
 export interface B4BitGlobalConfig {
   baseUrl: string // API server (dev-payments.b4bit.com or pos.b4bit.com)
-  loginUrl: string // Frontend/login server (dev-pay.b4bit.com or pay.b4bit.com)
-  username: string // B4Bit account email
-  password: string // B4Bit account password
 }
 
 /**
  * Per-venue B4Bit device config (from database)
  */
 export interface B4BitVenueConfig {
-  deviceId: string // Device identifier (API Key UUID)
-  secretKey?: string | null // Webhook secret key
+  deviceId: string // Device identifier (API Key UUID) — sent in X-Device-Id header
+  secretKey?: string | null // Webhook secret key — HMAC validation only, never sent
 }
 
 /**
@@ -34,9 +31,6 @@ export interface B4BitVenueConfig {
  */
 export interface B4BitConfig {
   baseUrl: string
-  loginUrl: string
-  username: string
-  password: string
   deviceId: string
   webhookSecret?: string
 }

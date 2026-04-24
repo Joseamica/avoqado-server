@@ -14,7 +14,6 @@ import {
   disableCrypto,
   getWebhookUrl,
   getB4BitDashboardUrl,
-  listB4BitDevices,
 } from '../../services/dashboard/cryptoConfig.dashboard.service'
 
 /**
@@ -120,16 +119,3 @@ export async function disableCryptoHandler(req: Request, res: Response): Promise
   }
 }
 
-/**
- * GET /dashboard/crypto/devices
- * List available B4Bit devices
- */
-export async function listDevices(_req: Request, res: Response): Promise<void> {
-  try {
-    const devices = await listB4BitDevices()
-    res.status(200).json({ success: true, data: devices })
-  } catch (error: any) {
-    logger.error('❌ Failed to list B4Bit devices', { error: error.message })
-    res.status(500).json({ success: false, message: error.message })
-  }
-}

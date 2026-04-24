@@ -4,11 +4,12 @@
  * Manages per-venue B4Bit device configuration.
  * Each venue gets its own B4Bit device (deviceId + secretKey).
  *
- * Flow:
+ * Flow (100% login-less, per https://docs.b4bit.com/pay/api/autenticacion/):
  * 1. Superadmin enables crypto for a venue → creates PENDING_SETUP record
- * 2. Superadmin creates device in B4Bit dashboard manually
- * 3. Superadmin enters Device ID + Secret Key → validated via GET /currencies → ACTIVE
- * 4. Payments use venue-specific deviceId + secretKey
+ * 2. Superadmin creates device in B4Bit dashboard manually and copies Device ID + Secret Key
+ * 3. Superadmin pastes both values in Avoqado dashboard → validated via GET /currencies with
+ *    only X-Device-Id header (no login, no Authorization header) → ACTIVE
+ * 4. Payments use venue-specific deviceId + secretKey (see b4bit.service.ts)
  */
 
 import { CryptoConfigStatus } from '@prisma/client'
@@ -17,71 +18,12 @@ import { BadRequestError, InternalServerError, NotFoundError } from '../../error
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 
-// B4Bit URLs by environment (automatic, no env vars needed)
+// B4Bit API base URL by environment. No loginUrl — auth is X-Device-Id header only.
 const isProduction = process.env.NODE_ENV === 'production'
-const B4BIT_URLS = {
-  baseUrl: isProduction ? 'https://pos.b4bit.com' : 'https://dev-payments.b4bit.com',
-  loginUrl: isProduction ? 'https://pay.b4bit.com' : 'https://dev-pay.b4bit.com',
-}
+const B4BIT_BASE_URL = isProduction ? 'https://pos.b4bit.com' : 'https://dev-payments.b4bit.com'
 
 function getB4BitGlobalConfig() {
-  return {
-    baseUrl: B4BIT_URLS.baseUrl,
-    loginUrl: B4BIT_URLS.loginUrl,
-    username: process.env.B4BIT_USERNAME || '',
-    password: process.env.B4BIT_PASSWORD || '',
-  }
-}
-
-// Cached auth data (token + devices from signIn response)
-let cachedAuth: {
-  token: string
-  devices: { device_name: string; device_identifier: string }[]
-  expiresAt: number
-} | null = null
-
-async function getAuthData() {
-  if (cachedAuth && Date.now() < cachedAuth.expiresAt) {
-    return cachedAuth
-  }
-
-  const config = getB4BitGlobalConfig()
-  const response = await fetch(`${config.loginUrl}/api/user/signIn`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: config.username, password: config.password }),
-  })
-
-  const data = await response.json()
-  if (data.hasError || !data.result?.token) {
-    throw new InternalServerError('B4Bit authentication failed')
-  }
-
-  const devices = data.result.merchants?.flatMap((m: any) => m.devices || []) || []
-
-  cachedAuth = {
-    token: data.result.token,
-    devices,
-    expiresAt: Date.now() + 23 * 60 * 60 * 1000,
-  }
-
-  return cachedAuth
-}
-
-async function getAuthToken(): Promise<string> {
-  const auth = await getAuthData()
-  return auth.token
-}
-
-/**
- * List available B4Bit devices (from signIn response)
- */
-export async function listB4BitDevices() {
-  const auth = await getAuthData()
-  return auth.devices.map(d => ({
-    deviceId: d.device_identifier,
-    name: d.device_name,
-  }))
+  return { baseUrl: B4BIT_BASE_URL }
 }
 
 /**
@@ -150,15 +92,15 @@ export async function completeCryptoSetup(venueId: string, deviceId: string, sec
     throw new BadRequestError('Crypto está desactivado. Reactívalo primero.')
   }
 
-  // Validate credentials by making a test API call with the device ID
+  // Validate credentials by making a test API call with the device ID.
+  // Per B4Bit docs (https://docs.b4bit.com/pay/api/autenticacion/), X-Device-Id
+  // is the ONLY header needed — no Authorization header, no login.
   const config = getB4BitGlobalConfig()
-  const authToken = await getAuthToken()
 
   try {
     const testResponse = await fetch(`${config.baseUrl}/api/v1/currencies/`, {
       method: 'GET',
       headers: {
-        Authorization: `Token ${authToken}`,
         'X-Device-Id': deviceId,
       },
     })
@@ -237,7 +179,8 @@ export function getWebhookUrl(): string {
 }
 
 export function getB4BitDashboardUrl(): string {
-  return B4BIT_URLS.loginUrl
+  // Superadmin-facing UI link to the B4Bit admin dashboard where devices and secrets are managed.
+  return isProduction ? 'https://pay.b4bit.com' : 'https://dev-pay.b4bit.com'
 }
 
 function sanitizeConfig(config: {

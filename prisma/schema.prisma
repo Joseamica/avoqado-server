@@ -7826,6 +7826,10 @@ model ReservationSettings {
   minHoursBeforeCancel Int?    @default(2) // minimum hours before start to allow cancellation
   forfeitDeposit       Boolean @default(false)
   noShowFeePercent     Int? // percentage of deposit/service charged on no-show
+  // Reschedule: customers can swap to a different slot of the SAME class up to N hours
+  // before the start. We default to mirror the cancel window (industry-standard pattern
+  // — reschedule is essentially atomic cancel+rebook).
+  allowCustomerReschedule  Boolean @default(true)
   // Credit pack refund policy on cancellation:
   //   "NEVER"      - never refund credits (customer always loses them)
   //   "ALWAYS"     - always refund 100% regardless of timing

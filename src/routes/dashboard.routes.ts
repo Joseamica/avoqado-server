@@ -3498,8 +3498,6 @@ router.put(
   checkPermission('system:manage'),
   cryptoConfigController.disableCryptoHandler as any,
 )
-router.get('/crypto/devices', authenticateTokenMiddleware, checkPermission('system:manage'), cryptoConfigController.listDevices as any)
-
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
 

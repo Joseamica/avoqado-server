@@ -807,6 +807,168 @@ export async function rescheduleReservation(
   return rescheduled
 }
 
+// ---- Class Reservation Reschedule (public-facing) ----
+
+/**
+ * Move a class reservation to a different ClassSession of the SAME product.
+ *
+ * "Same product only" by design (v1):
+ *   - No credit refund/redeem — the same N credits stay attached to the same product.
+ *   - No price diff to settle.
+ *   - Mirrors the Mindbody/ClassPass default behaviour.
+ *
+ * Atomic via serializable transaction + capacity check + the same race-guarded updateMany
+ * we use for cancel transitions, so two simultaneous reschedule requests can't double-book.
+ *
+ * Spot collision: if the product has a layout and `newSpotIds` is provided, we validate
+ * against the layout AND against currently active reservations on the new session.
+ */
+export async function rescheduleClassReservation(args: {
+  venueId: string
+  reservationId: string
+  newClassSessionId: string
+  newSpotIds?: string[]
+  rescheduledBy: string // 'CUSTOMER' or staff id
+  reason?: string
+}) {
+  const { venueId, reservationId, newClassSessionId, rescheduledBy, reason } = args
+  const requestedSpotIds = args.newSpotIds ?? []
+
+  return withSerializableRetry(async tx => {
+    // 1. Load + validate the existing reservation
+    const reservation = await tx.reservation.findFirst({
+      where: { id: reservationId, venueId },
+    })
+    if (!reservation) throw new NotFoundError('Reservacion no encontrada')
+    if (!reservation.classSessionId) {
+      throw new BadRequestError('Solo puedes cambiar el horario de una reserva de clase')
+    }
+    if (reservation.status !== 'CONFIRMED' && reservation.status !== 'PENDING') {
+      throw new BadRequestError(`No puedes cambiar el horario de una reserva ${reservation.status}`)
+    }
+
+    // 2. No-op: same session — return as-is
+    if (reservation.classSessionId === newClassSessionId) {
+      return tx.reservation.findUniqueOrThrow({
+        where: { id: reservationId },
+        include: RESERVATION_INCLUDE,
+      })
+    }
+
+    // 3. Lock the NEW session row so capacity math is consistent under contention
+    const newSessions = await tx.$queryRaw<
+      { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
+    >`
+      SELECT id, "productId", "startsAt", "endsAt", duration, capacity, status
+      FROM "ClassSession"
+      WHERE id = ${newClassSessionId} AND "venueId" = ${venueId}
+      FOR UPDATE
+    `
+    if (newSessions.length === 0) throw new NotFoundError('La nueva sesion no existe')
+    const newSession = newSessions[0]
+    if (newSession.status !== 'SCHEDULED') {
+      throw new BadRequestError('Esta sesion ya no acepta reservaciones')
+    }
+
+    // 4. v1: same product only. Cross-class swap would require credit refund/redeem.
+    if (newSession.productId !== reservation.productId) {
+      throw new BadRequestError(
+        'Solo puedes cambiar a otro horario de la misma clase. Para cambiar de clase, cancela y reserva de nuevo.',
+      )
+    }
+
+    // 5. Capacity in the new session must accommodate this party — and we must NOT count
+    //    our own reservation if it had previously been reserved in the same target session
+    //    (defensive: technically we'd return at step 2, but kept for safety).
+    const enrolledResult = await tx.$queryRaw<{ total: bigint }[]>`
+      SELECT COALESCE(SUM("partySize"), 0) AS total
+      FROM "Reservation"
+      WHERE "classSessionId" = ${newClassSessionId}
+        AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
+        AND id <> ${reservationId}
+    `
+    const enrolled = Number(enrolledResult[0].total)
+    if (enrolled + reservation.partySize > newSession.capacity) {
+      throw new ConflictError(
+        `No hay cupo en el nuevo horario. Disponibles: ${newSession.capacity - enrolled}, necesitas: ${reservation.partySize}`,
+      )
+    }
+
+    // 6. Spot validation if the product has a layout and the user picked specific spots
+    if (requestedSpotIds.length > 0) {
+      const product = await tx.product.findFirst({
+        where: { id: reservation.productId!, venueId },
+        select: { layoutConfig: true },
+      })
+      const layout = product?.layoutConfig as { spots?: { id: string; enabled: boolean }[] } | null
+      if (layout?.spots) {
+        const validSpotIds = new Set(layout.spots.filter(s => s.enabled).map(s => s.id))
+        for (const spotId of requestedSpotIds) {
+          if (!validSpotIds.has(spotId)) {
+            throw new BadRequestError(`Lugar "${spotId}" no es valido`)
+          }
+        }
+      }
+      const taken = await tx.reservation.findMany({
+        where: {
+          classSessionId: newClassSessionId,
+          status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+          id: { not: reservationId },
+          spotIds: { hasSome: requestedSpotIds },
+        },
+        select: { spotIds: true },
+      })
+      if (taken.length > 0) {
+        const conflicts = taken.flatMap(r => r.spotIds).filter(id => requestedSpotIds.includes(id))
+        throw new ConflictError(`Los lugares ${conflicts.join(', ')} ya estan reservados`)
+      }
+    }
+
+    const newDuration = Math.round((newSession.endsAt.getTime() - newSession.startsAt.getTime()) / 60000)
+    const statusLog = appendStatusLog(reservation.statusLog, reservation.status, rescheduledBy, reason ?? 'Reservation rescheduled')
+
+    // 7. Race-guarded update: only proceed if status hasn't changed under us.
+    const guarded = await tx.reservation.updateMany({
+      where: { id: reservationId, status: reservation.status, classSessionId: reservation.classSessionId },
+      data: {
+        classSessionId: newClassSessionId,
+        startsAt: newSession.startsAt,
+        endsAt: newSession.endsAt,
+        duration: newDuration,
+        spotIds: requestedSpotIds.length > 0 ? requestedSpotIds : reservation.spotIds,
+        statusLog,
+      },
+    })
+    if (guarded.count === 0) {
+      throw new BadRequestError('La reservacion ya fue modificada por otro proceso. Recarga e intenta de nuevo.')
+    }
+
+    const updated = await tx.reservation.findUniqueOrThrow({
+      where: { id: reservationId },
+      include: RESERVATION_INCLUDE,
+    })
+
+    logger.info(
+      `🔄 [RESCHEDULE] ${updated.confirmationCode} ${reservation.classSessionId} → ${newClassSessionId} by=${rescheduledBy}`,
+    )
+    logAction({
+      staffId: rescheduledBy === 'CUSTOMER' ? undefined : rescheduledBy,
+      venueId,
+      action: 'RESERVATION_RESCHEDULED',
+      entity: 'Reservation',
+      entityId: updated.id,
+      data: {
+        confirmationCode: updated.confirmationCode,
+        from: reservation.classSessionId,
+        to: newClassSessionId,
+        by: rescheduledBy,
+      },
+    })
+
+    return updated
+  })
+}
+
 // ---- Calendar View ----
 
 export async function getReservationsCalendar(venueId: string, dateFrom: Date, dateTo: Date, groupBy?: 'table' | 'staff') {

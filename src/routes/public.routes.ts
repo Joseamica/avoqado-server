@@ -16,6 +16,7 @@ import {
   publicCreateReservationBodySchema,
   getAvailabilityQuerySchema,
   cancelBodySchema,
+  publicRescheduleBodySchema,
 } from '../schemas/dashboard/reservation.schema'
 import {
   publicPacksParamsSchema,
@@ -86,6 +87,13 @@ router.post(
   cancelLimit,
   validateRequest(z.object({ params: publicReservationParamsSchema, body: cancelBodySchema })),
   reservationPublicController.cancelReservation,
+)
+
+router.post(
+  '/venues/:venueSlug/reservations/:cancelSecret/reschedule',
+  cancelLimit, // same rate envelope — destructive-ish public mutation
+  validateRequest(z.object({ params: publicReservationParamsSchema, body: publicRescheduleBodySchema })),
+  reservationPublicController.rescheduleReservation,
 )
 
 // ---- Public Credit Pack / Bundle Routes (unauthenticated) ----
