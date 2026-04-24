@@ -50,7 +50,11 @@ let liveDemoCleanupJob: CronJob | null = null
 const gracefulShutdown = async (signal: string) => {
   logger.info(`Received ${signal}. Starting graceful shutdown...`)
 
-  const isDev = process.env.NODE_ENV === 'development'
+  // Use the Zod-validated NODE_ENV (imported from ./config/env) instead of
+  // process.env.NODE_ENV directly. Zod's default() populates the parsed value
+  // but does NOT write back to process.env, so process.env.NODE_ENV can be
+  // undefined even when NODE_ENV === 'development' from the config module.
+  const isDev = NODE_ENV === 'development'
 
   // Stop accepting new connections AND force-close active ones. Without
   // closeAllConnections(), httpServer.close()'s callback never fires while
@@ -65,7 +69,7 @@ const gracefulShutdown = async (signal: string) => {
   // hold the port past that deadline. Local dev doesn't need graceful
   // draining — Rabbit and Postgres tolerate abrupt client disconnects fine.
   if (isDev) {
-    logger.info('Dev mode: skipping graceful cleanup, exiting immediately')
+    logger.info(`[Shutdown] Dev fast-exit on ${signal} — skipping graceful cleanup (NODE_ENV=${NODE_ENV})`)
     return process.exit(0)
   }
 
@@ -312,13 +316,35 @@ const startApplication = async (retries = 3) => {
 
     // Start HTTP server
     if (require.main === module || NODE_ENV !== 'test') {
-      httpServer.listen(PORT, () => {
-        logger.info(`🚀 Server running at http://localhost:${PORT} in ${NODE_ENV} mode`)
-        logger.info(`📚 API documentation available at http://localhost:${PORT}/api-docs`)
-        if (NODE_ENV === 'development') {
-          logger.warn('⚠️  Application is running in Development mode.')
+      // Listen with EADDRINUSE retry — protects against tsx watch's "Rerunning..."
+      // mode where a new process is spawned WITHOUT sending SIGTERM to the old
+      // one, leaving a brief window (~100-500ms) where the port is still bound.
+      // Without this retry, hot-reloads cascade into fatal EADDRINUSE crashes.
+      // Only active in dev; prod listens once and fails fast so the platform
+      // (Render/systemd) can restart cleanly.
+      const listenWithRetry = (attempt = 1, maxAttempts = NODE_ENV === 'development' ? 10 : 1) => {
+        const onError = (err: NodeJS.ErrnoException) => {
+          if (err.code === 'EADDRINUSE' && attempt < maxAttempts) {
+            logger.warn(`Port ${PORT} busy (attempt ${attempt}/${maxAttempts}). Retrying in 500ms…`)
+            setTimeout(() => listenWithRetry(attempt + 1, maxAttempts), 500)
+            return
+          }
+          // Hand off to normal error handling for non-EADDRINUSE or final attempt
+          logger.error('HTTP server failed to bind', { code: err.code, port: PORT, attempt })
+          process.exit(1)
         }
-      })
+        httpServer.once('error', onError)
+        httpServer.listen(PORT, () => {
+          httpServer.removeListener('error', onError)
+          if (attempt > 1) logger.info(`Port ${PORT} freed on attempt ${attempt}`)
+          logger.info(`🚀 Server running at http://localhost:${PORT} in ${NODE_ENV} mode`)
+          logger.info(`📚 API documentation available at http://localhost:${PORT}/api-docs`)
+          if (NODE_ENV === 'development') {
+            logger.warn('⚠️  Application is running in Development mode.')
+          }
+        })
+      }
+      listenWithRetry()
 
       // Start server metrics collection (health monitoring)
       // Wire app.ts live monitors → metrics service

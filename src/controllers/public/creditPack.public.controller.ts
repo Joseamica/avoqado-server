@@ -35,15 +35,31 @@ export async function getAvailablePacks(req: Request, res: Response, next: NextF
 }
 
 /**
- * GET /public/venues/:venueSlug/credit-packs/balance?email=&phone=
+ * GET /public/venues/:venueSlug/credit-packs/balance?email=&phone=&seats=N&productId=
+ *
+ * `seats` (optional): when provided, each balance is annotated with `sufficient: boolean`
+ *   indicating whether remainingQuantity >= seats. Widget uses this to disable balances
+ *   that can't cover the requested party size.
+ * `productId` (optional): when provided, balances for other products are filtered out of
+ *   the response purely as a UX convenience.
  */
 export async function getCustomerBalance(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
-    const { email, phone } = req.query as { email?: string; phone?: string }
+    const { email, phone, seats, productId } = req.query as {
+      email?: string
+      phone?: string
+      seats?: string
+      productId?: string
+    }
 
-    const result = await creditPackPublicService.lookupCustomerCredits(venue.id, email, phone)
+    const seatsNum = seats ? Math.max(1, parseInt(seats, 10) || 1) : undefined
+
+    const result = await creditPackPublicService.lookupCustomerCredits(venue.id, email, phone, {
+      seats: seatsNum,
+      productId,
+    })
 
     res.json(result)
   } catch (error) {

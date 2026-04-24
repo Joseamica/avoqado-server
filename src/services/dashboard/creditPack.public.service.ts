@@ -52,12 +52,24 @@ export async function getAvailablePacks(venueId: string, productId?: string) {
 }
 
 /**
- * Lookup customer credits by email or phone
+ * Lookup customer credits by email or phone.
+ *
+ * Optional `opts.seats`: annotates each itemBalance with `sufficient: remainingQuantity >= seats`
+ *   so the widget can disable balances that can't cover the booking.
+ * Optional `opts.productId`: filters balances to only those that match the productId.
  */
-export async function lookupCustomerCredits(venueId: string, email?: string, phone?: string) {
+export async function lookupCustomerCredits(
+  venueId: string,
+  email?: string,
+  phone?: string,
+  opts?: { seats?: number; productId?: string },
+) {
   if (!email && !phone) {
     throw new BadRequestError('Se requiere email o telefono para consultar creditos')
   }
+
+  const seats = opts?.seats
+  const productId = opts?.productId
 
   // Find customer
   const customer = await prisma.customer.findFirst({
@@ -69,7 +81,7 @@ export async function lookupCustomerCredits(venueId: string, email?: string, pho
   })
 
   if (!customer) {
-    return { customer: null, purchases: [] }
+    return { customer: null, purchases: [], requestedSeats: seats ?? null }
   }
 
   // Get active purchases with balances
@@ -86,6 +98,7 @@ export async function lookupCustomerCredits(venueId: string, email?: string, pho
         where: {
           remainingQuantity: { gt: 0 },
           product: { allowCreditRedemption: true },
+          ...(productId ? { productId } : {}),
         },
         include: {
           product: {
@@ -102,6 +115,18 @@ export async function lookupCustomerCredits(venueId: string, email?: string, pho
     orderBy: { expiresAt: 'asc' },
   })
 
+  // Annotate each balance with `sufficient` flag when seats was requested.
+  // Drop empty purchases (no matching balances) when productId filter was applied.
+  const annotated = purchases
+    .map(p => ({
+      ...p,
+      itemBalances: p.itemBalances.map(b => ({
+        ...b,
+        sufficient: seats != null ? b.remainingQuantity >= seats : true,
+      })),
+    }))
+    .filter(p => (productId ? p.itemBalances.length > 0 : true))
+
   return {
     customer: {
       id: customer.id,
@@ -110,7 +135,8 @@ export async function lookupCustomerCredits(venueId: string, email?: string, pho
       email: customer.email,
       phone: customer.phone,
     },
-    purchases,
+    purchases: annotated,
+    requestedSeats: seats ?? null,
   }
 }
 

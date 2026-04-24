@@ -185,6 +185,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
         depositRequired: false,
         depositAmount: null,
         creditRedeemed: reservation.creditRedeemed || false,
+        creditsUsed: reservation.creditsUsed || 0,
       })
     }
 
@@ -421,7 +422,9 @@ async function createClassReservation(
     })
 
     // ---- Credit redemption (if creditItemBalanceId provided) ----
+    // Charges N credits where N = requestedPartySize (one credit per seat).
     let creditRedeemed = false
+    let creditsUsed = 0
     if (body.creditItemBalanceId) {
       // Find customer by email/phone
       const customer = await tx.customer.findFirst({
@@ -449,12 +452,14 @@ async function createClassReservation(
 
       const balance = balances[0]
 
-      if (balance.remainingQuantity <= 0) {
-        throw new BadRequestError('No hay creditos disponibles')
-      }
-
       if (balance.productId !== session.productId) {
         throw new BadRequestError('El credito no corresponde al producto de esta clase')
+      }
+
+      if (balance.remainingQuantity < requestedPartySize) {
+        throw new BadRequestError(
+          `No tienes suficientes creditos. Disponibles: ${balance.remainingQuantity}, necesarios: ${requestedPartySize}. Compra mas creditos para continuar.`,
+        )
       }
 
       // Verify purchase is active and not expired
@@ -475,13 +480,13 @@ async function createClassReservation(
         throw new BadRequestError('Los creditos han expirado')
       }
 
-      // Decrement balance
+      // Decrement balance by partySize (one credit per seat)
       await tx.creditItemBalance.update({
         where: { id: body.creditItemBalanceId },
-        data: { remainingQuantity: { decrement: 1 } },
+        data: { remainingQuantity: { decrement: requestedPartySize } },
       })
 
-      // Create credit transaction
+      // Create single credit transaction with negative quantity = seats
       await tx.creditTransaction.create({
         data: {
           venueId,
@@ -489,8 +494,9 @@ async function createClassReservation(
           creditPackPurchaseId: balance.creditPackPurchaseId,
           creditItemBalanceId: body.creditItemBalanceId,
           type: 'REDEEM',
-          quantity: -1,
+          quantity: -requestedPartySize,
           reservationId: reservation.id,
+          reason: requestedPartySize > 1 ? `Reserva de ${requestedPartySize} lugares` : null,
         },
       })
 
@@ -510,15 +516,16 @@ async function createClassReservation(
       }
 
       creditRedeemed = true
+      creditsUsed = requestedPartySize
       logger.info(
-        `✅ [CREDIT REDEEM] Credit redeemed for reservation ${reservation.confirmationCode} | balance=${body.creditItemBalanceId}`,
+        `✅ [CREDIT REDEEM] ${requestedPartySize} credit(s) redeemed for reservation ${reservation.confirmationCode} | balance=${body.creditItemBalanceId}`,
       )
     }
 
     logger.info(
-      `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}${creditRedeemed ? ' (credit)' : ''}`,
+      `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}${creditRedeemed ? ` (${creditsUsed} credit${creditsUsed > 1 ? 's' : ''})` : ''}`,
     )
 
-    return { ...reservation, creditRedeemed }
+    return { ...reservation, creditRedeemed, creditsUsed }
   })
 }
