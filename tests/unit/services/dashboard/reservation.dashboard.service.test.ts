@@ -748,24 +748,26 @@ describe('Reservation Dashboard Service', () => {
     }
 
     function mockNewSession(overrides: Record<string, any> = {}) {
-      return [{
-        id: 'new-session',
-        productId: 'prod-class',
-        startsAt: newStart,
-        endsAt: newEnd,
-        duration: 60,
-        capacity: 10,
-        status: 'SCHEDULED',
-        ...overrides,
-      }]
+      return [
+        {
+          id: 'new-session',
+          productId: 'prod-class',
+          startsAt: newStart,
+          endsAt: newEnd,
+          duration: 60,
+          capacity: 10,
+          status: 'SCHEDULED',
+          ...overrides,
+        },
+      ]
     }
 
     it('moves the reservation to the new session and never touches credit transactions', async () => {
       const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
       prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation())
       prismaMock.$queryRaw
-        .mockResolvedValueOnce(mockNewSession())   // FOR UPDATE on new session
-        .mockResolvedValueOnce([{ total: 0n }])    // enrolled count
+        .mockResolvedValueOnce(mockNewSession()) // FOR UPDATE on new session
+        .mockResolvedValueOnce([{ total: 0n }]) // enrolled count
       prismaMock.reservation.findMany.mockResolvedValue([]) // no spot collisions
       prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(
         makeClassReservation({ classSessionId: 'new-session', startsAt: newStart, endsAt: newEnd }),
@@ -817,9 +819,7 @@ describe('Reservation Dashboard Service', () => {
     it('rejects when the new session is full', async () => {
       const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
       prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation({ partySize: 3 }))
-      prismaMock.$queryRaw
-        .mockResolvedValueOnce(mockNewSession({ capacity: 5 }))
-        .mockResolvedValueOnce([{ total: 4n }]) // already 4 enrolled, +3 = 7 > 5
+      prismaMock.$queryRaw.mockResolvedValueOnce(mockNewSession({ capacity: 5 })).mockResolvedValueOnce([{ total: 4n }]) // already 4 enrolled, +3 = 7 > 5
       prismaMock.reservation.findMany.mockResolvedValue([])
 
       await expect(
@@ -852,9 +852,7 @@ describe('Reservation Dashboard Service', () => {
     it('rejects when the race-guard updateMany returns 0 rows', async () => {
       const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
       prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation())
-      prismaMock.$queryRaw
-        .mockResolvedValueOnce(mockNewSession())
-        .mockResolvedValueOnce([{ total: 0n }])
+      prismaMock.$queryRaw.mockResolvedValueOnce(mockNewSession()).mockResolvedValueOnce([{ total: 0n }])
       prismaMock.reservation.findMany.mockResolvedValue([])
       prismaMock.reservation.updateMany.mockResolvedValueOnce({ count: 0 } as any) // race lost
 

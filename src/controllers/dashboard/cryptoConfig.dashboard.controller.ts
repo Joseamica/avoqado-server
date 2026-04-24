@@ -118,4 +118,3 @@ export async function disableCryptoHandler(req: Request, res: Response): Promise
     res.status(status).json({ success: false, message: error.message })
   }
 }
-

@@ -872,9 +872,7 @@ export async function rescheduleClassReservation(args: {
 
     // 4. v1: same product only. Cross-class swap would require credit refund/redeem.
     if (newSession.productId !== reservation.productId) {
-      throw new BadRequestError(
-        'Solo puedes cambiar a otro horario de la misma clase. Para cambiar de clase, cancela y reserva de nuevo.',
-      )
+      throw new BadRequestError('Solo puedes cambiar a otro horario de la misma clase. Para cambiar de clase, cancela y reserva de nuevo.')
     }
 
     // 5. Capacity in the new session must accommodate this party — and we must NOT count
@@ -948,9 +946,7 @@ export async function rescheduleClassReservation(args: {
       include: RESERVATION_INCLUDE,
     })
 
-    logger.info(
-      `🔄 [RESCHEDULE] ${updated.confirmationCode} ${reservation.classSessionId} → ${newClassSessionId} by=${rescheduledBy}`,
-    )
+    logger.info(`🔄 [RESCHEDULE] ${updated.confirmationCode} ${reservation.classSessionId} → ${newClassSessionId} by=${rescheduledBy}`)
     logAction({
       staffId: rescheduledBy === 'CUSTOMER' ? undefined : rescheduledBy,
       venueId,
