@@ -30,6 +30,7 @@ import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
+import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import { getStaffProgressQuerySchema, trainingIdParamSchema, updateProgressSchema } from '../schemas/superadmin/training.schema'
@@ -90,6 +91,13 @@ import * as orderTpvService from '../services/tpv/order.tpv.service'
 import prisma from '../utils/prismaClient'
 
 const router = express.Router()
+
+// Touch terminal.lastHeartbeat as a side-effect of any authenticated TPV request.
+// Hooks into res.on('finish') so it runs after the route handler (when authContext
+// is populated) and after the response is sent (zero added latency). Public TPV
+// endpoints (heartbeat, activation, check-update) carry no authContext and are
+// skipped by the middleware itself. See middleware file for full design notes.
+router.use(touchTerminalHeartbeatMiddleware)
 
 /**
  * @openapi
