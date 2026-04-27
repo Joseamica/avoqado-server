@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import { OrgRole, StaffRole, PermissionSet } from '@prisma/client'
-import { hasPermission } from '@/lib/permissions'
+import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
@@ -194,10 +194,10 @@ export const checkPermission = (requiredPermission: string) => {
         })
       }
 
-      // If permission set is assigned, use its permissions directly
+      // If a permission set is assigned, evaluate that effective list directly.
       let authorized: boolean
       if (permissionSet) {
-        authorized = permissionSet.permissions.includes(requiredPermission)
+        authorized = evaluatePermissionList(permissionSet.permissions, requiredPermission)
       } else {
         // Load custom permissions from VenueRolePermission table
         let customPermissions: string[] | null = null
@@ -296,7 +296,7 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
       // Check permission set first, then fall back to role-based
       let authorized: boolean
       if (permissionSet) {
-        authorized = requiredPermissions.some(perm => permissionSet.permissions.includes(perm))
+        authorized = requiredPermissions.some(perm => evaluatePermissionList(permissionSet.permissions, perm))
       } else {
         let customPermissions: string[] | null = null
 
@@ -390,7 +390,7 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
       // Check permission set first, then fall back to role-based
       let authorized: boolean
       if (permissionSet) {
-        authorized = requiredPermissions.every(perm => permissionSet.permissions.includes(perm))
+        authorized = requiredPermissions.every(perm => evaluatePermissionList(permissionSet.permissions, perm))
       } else {
         let customPermissions: string[] | null = null
 

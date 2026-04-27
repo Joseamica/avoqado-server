@@ -346,7 +346,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // Orders - TPV-specific actions
   'tpv-orders:comp': ['tpv-orders:comp', 'orders:read', 'orders:update'],
   'tpv-orders:void': ['tpv-orders:void', 'orders:read', 'orders:update'],
-  'tpv-orders:discount': ['tpv-orders:discount', 'orders:read', 'orders:update', 'discounts:read'],
+  'tpv-orders:discount': ['tpv-orders:discount', 'orders:read', 'orders:update', 'discounts:read', 'discounts:apply'],
 
   // Time Entries
   'tpv-time-entries:read': ['tpv-time-entries:read', 'teams:read'],
@@ -937,6 +937,26 @@ export function hasPermission(role: StaffRole, customPermissions: string[] | nul
 }
 
 /**
+ * Evaluates an already-effective permission list without merging role defaults.
+ *
+ * Use this for PermissionSet permissions, which replace role-based permissions
+ * instead of extending them.
+ */
+export function evaluatePermissionList(effectivePermissions: string[], requiredPermission: string): boolean {
+  const resolvedSet = resolvePermissions(effectivePermissions)
+  const allPermissions = Array.from(resolvedSet)
+
+  if (allPermissions.includes('*:*')) return true
+  if (allPermissions.includes(requiredPermission)) return true
+
+  const [resource, action] = requiredPermission.split(':')
+  if (allPermissions.includes(`${resource}:*`)) return true
+  if (allPermissions.includes(`*:${action}`)) return true
+
+  return false
+}
+
+/**
  * Check if a role can modify permissions for another role
  *
  * @param modifierRole The role attempting to modify permissions
@@ -1108,7 +1128,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   customers: ['customers:read', 'customers:create', 'customers:update', 'customers:delete', 'customers:settle-balance'],
   'customer-groups': ['customer-groups:read', 'customer-groups:create', 'customer-groups:update', 'customer-groups:delete'],
   loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust'],
-  discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete'],
+  discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete', 'discounts:apply'],
   coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete'],
   features: ['features:read', 'features:update'],
   notifications: ['notifications:send'],
