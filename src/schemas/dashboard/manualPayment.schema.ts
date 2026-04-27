@@ -25,6 +25,16 @@ export const createManualPaymentSchema = z.object({
         .string()
         .optional()
         .transform(v => (v && v.length > 0 ? v : undefined)),
+      /** Customer to attribute the payment to. Triggers loyalty points if venue has loyalty enabled. */
+      customerId: z
+        .string()
+        .optional()
+        .transform(v => (v && v.length > 0 ? v : undefined)),
+      /** Table the manual entry belongs to (Mode 2 only). Optional. */
+      tableId: z
+        .string()
+        .optional()
+        .transform(v => (v && v.length > 0 ? v : undefined)),
       /** Taxes on this manual sale (defaults to 0). Only used for shadow orders. */
       taxAmount: z
         .string()
