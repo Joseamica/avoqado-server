@@ -4077,7 +4077,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discount',
   authenticateTokenMiddleware,
-  checkPermission('tpv-orders:discount'),
+  checkPermission('discounts:apply'),
   validateRequest(applyDiscountSchema),
   orderController.applyDiscount,
 )
@@ -4440,7 +4440,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/auto',
   authenticateTokenMiddleware,
-  checkPermission('tpv-orders:discount'),
+  checkPermission('discounts:apply'),
   validateRequest(applyAutomaticDiscountsSchema),
   discountController.applyAutomaticDiscounts,
 )
@@ -4493,7 +4493,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/apply',
   authenticateTokenMiddleware,
-  checkPermission('tpv-orders:discount'),
+  checkPermission('discounts:apply'),
   validateRequest(applyPredefinedDiscountSchema),
   discountController.applyPredefinedDiscount,
 )
@@ -4552,11 +4552,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/manual',
   authenticateTokenMiddleware,
-  // 'orders:discount' is not in DEFAULT_PERMISSIONS for any role and not in
-  // the implicit-dependency map, so only SUPERADMIN (which bypasses the check)
-  // could ever pass it. The TPV-side permission everyone actually uses is
-  // 'tpv-orders:discount', which OWNER, ADMIN and MANAGER have by default.
-  checkPermission('tpv-orders:discount'),
+  checkPermission('discounts:apply'),
   validateRequest(applyManualDiscountSchema),
   discountController.applyManualDiscount,
 )
@@ -4605,7 +4601,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/coupon',
   authenticateTokenMiddleware,
-  checkPermission('tpv-orders:discount'),
+  checkPermission('discounts:apply'),
   validateRequest(applyCouponCodeSchema),
   discountController.applyCouponCode,
 )
@@ -4712,7 +4708,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/discounts/:discountId',
   authenticateTokenMiddleware,
-  checkPermission('tpv-orders:discount'),
+  checkPermission('discounts:apply'),
   validateRequest(removeOrderDiscountSchema),
   discountController.removeDiscount,
 )
@@ -5212,12 +5208,12 @@ router.get(
  *       401:
  *         description: Unauthorized
  *       403:
- *         description: Forbidden (lacks menu:write permission)
+ *         description: Forbidden (lacks menu:create permission)
  */
 router.post(
   '/venues/:venueId/products/quick-add',
   authenticateTokenMiddleware,
-  checkPermission('menu:write'),
+  checkPermission('menu:create'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { venueId } = req.params
