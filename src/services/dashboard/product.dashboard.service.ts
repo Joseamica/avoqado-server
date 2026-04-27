@@ -5,6 +5,7 @@ import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
+import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 
 export interface CreateProductDto {
   name: string
@@ -240,12 +241,21 @@ function calculateAvailablePortions(recipe: any): number {
 
   const portionsPerIngredient = recipe.lines.map((line: any) => {
     const stock = Number(line.rawMaterial?.currentStock ?? 0)
-    const needed = Number(line.quantity ?? 0)
+    const rawNeeded = Number(line.quantity ?? 0)
 
-    if (needed === 0) {
+    if (rawNeeded === 0) {
       return Infinity // Optional ingredient (skip)
     }
 
+    // Convert RecipeLine.unit → RawMaterial.unit before dividing — same fix as
+    // deductStockForRecipe / RecipeDetailDialog. Without this, "9210 GRAM stock /
+    // 0.062 KILOGRAM per portion" reports 148,544 portions instead of 148.
+    const lineUnit = line.unit
+    const rmUnit = line.rawMaterial?.unit ?? lineUnit
+    let needed = rawNeeded
+    if (lineUnit !== rmUnit && areUnitsCompatible(lineUnit, rmUnit)) {
+      needed = convertUnit(rawNeeded, lineUnit, rmUnit).toNumber()
+    }
     return Math.floor(stock / needed)
   })
 
