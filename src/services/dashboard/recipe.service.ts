@@ -450,6 +450,20 @@ export async function addRecipeLine(
     data: { totalCost: newTotalCost },
   })
 
+  logAction({
+    venueId,
+    action: 'RECIPE_LINE_ADDED',
+    entity: 'RecipeLine',
+    entityId: recipeLine.id,
+    data: {
+      productId,
+      ingredient: rawMaterial.name,
+      quantity: data.quantity,
+      unit: data.unit,
+      costPerServing: costPerServing.toNumber(),
+    },
+  })
+
   return recipeLine
 }
 
@@ -548,7 +562,7 @@ export async function removeRecipeLine(venueId: string, productId: string, recip
           venueId: true,
         },
       },
-      lines: true,
+      lines: { include: { rawMaterial: { select: { name: true } } } },
     },
   })
 
@@ -571,6 +585,20 @@ export async function removeRecipeLine(venueId: string, productId: string, recip
       data: { totalCost: recipe.totalCost.minus(line.costPerServing || 0) },
     }),
   ])
+
+  logAction({
+    venueId,
+    action: 'RECIPE_LINE_REMOVED',
+    entity: 'RecipeLine',
+    entityId: recipeLineId,
+    data: {
+      productId,
+      ingredient: line.rawMaterial.name,
+      quantity: line.quantity.toNumber(),
+      unit: line.unit,
+      costPerServingRemoved: line.costPerServing?.toNumber() ?? 0,
+    },
+  })
 }
 
 /**
