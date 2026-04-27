@@ -9,6 +9,8 @@ import { Request, Response } from 'express'
 import { terminalPaymentService } from '../../services/terminal-payment.service'
 import { terminalRegistry } from '../../communication/sockets/terminal-registry'
 import logger from '../../config/logger'
+import { BadRequestError } from '../../errors/AppError'
+import { validateStaffVenue } from '../../utils/staff-venue.util'
 
 /**
  * POST /api/v1/mobile/venues/:venueId/terminal-payment
@@ -19,7 +21,7 @@ import logger from '../../config/logger'
 export async function sendTerminalPayment(req: Request, res: Response) {
   try {
     const { venueId } = req.params
-    const { terminalId, amountCents, tipCents, rating, skipReview, orderId, requestId } = req.body
+    const { terminalId, amountCents, tipCents, rating, skipReview, orderId, requestId, processedByStaffId } = req.body
     const userId = (req as any).authContext?.userId
 
     // Validate required fields
@@ -46,6 +48,11 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       })
     }
 
+    let validatedProcessedByStaffId: string | undefined
+    if (processedByStaffId) {
+      validatedProcessedByStaffId = await validateStaffVenue(processedByStaffId, venueId)
+    }
+
     logger.info(`💳 [API] Terminal payment request`, {
       venueId,
       terminalId,
@@ -53,6 +60,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       tipCents,
       orderId,
       userId,
+      processedByStaffId: validatedProcessedByStaffId,
     })
 
     const result = await terminalPaymentService.sendPaymentToTerminal({
@@ -65,6 +73,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       venueId,
       requestedBy: userId,
       senderDeviceName: req.headers['x-device-name'] as string | undefined,
+      processedByStaffId: validatedProcessedByStaffId,
       requestId, // Client-generated for cancel tracking
     })
 
@@ -88,6 +97,13 @@ export async function sendTerminalPayment(req: Request, res: Response) {
     // Terminal registered via HTTP heartbeat but no socket → 422
     if (message.includes('no tiene conexión de socket')) {
       return res.status(422).json({
+        success: false,
+        message,
+      })
+    }
+
+    if (error instanceof BadRequestError) {
+      return res.status(400).json({
         success: false,
         message,
       })

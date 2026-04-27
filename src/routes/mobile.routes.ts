@@ -9,6 +9,7 @@ import { Router } from 'express'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as orderMobileController from '../controllers/mobile/order.mobile.controller'
 import * as timeEntryMobileController from '../controllers/mobile/time-entry.mobile.controller'
+import * as staffMobileController from '../controllers/mobile/staff.mobile.controller'
 import * as pushMobileController from '../controllers/mobile/push.mobile.controller'
 import * as transactionMobileController from '../controllers/mobile/transaction.mobile.controller'
 import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
@@ -508,6 +509,8 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  *         description: Not authenticated
  */
 router.post('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermission('orders:create'), orderMobileController.createOrder)
+
+router.get('/venues/:venueId/staff', authenticateTokenMiddleware, checkPermission('teams:read'), staffMobileController.getActiveStaff)
 
 /**
  * @openapi
@@ -1267,6 +1270,20 @@ router.post(
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentMobileController.recordFastPayment,
+)
+
+router.post(
+  '/venues/:venueId/payments/:paymentId/customer',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  paymentMobileController.attachCustomerToPayment,
+)
+
+router.post(
+  '/venues/:venueId/payments/customer',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  paymentMobileController.attachCustomerToLatestPayment,
 )
 
 // ============================================================================

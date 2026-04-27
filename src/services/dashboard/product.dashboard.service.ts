@@ -295,7 +295,13 @@ export async function getProducts(
               rawMaterial: {
                 select: {
                   id: true,
+                  name: true,
+                  sku: true,
+                  unit: true,
                   currentStock: true,
+                  minimumStock: true,
+                  avgCostPerUnit: true,
+                  active: true,
                 },
               },
             },
@@ -365,7 +371,13 @@ export async function getProduct(venueId: string, productId: string): Promise<an
               rawMaterial: {
                 select: {
                   id: true,
+                  name: true,
+                  sku: true,
+                  unit: true,
                   currentStock: true,
+                  minimumStock: true,
+                  avgCostPerUnit: true,
+                  active: true,
                 },
               },
             },
@@ -943,7 +955,13 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
               rawMaterial: {
                 select: {
                   id: true,
+                  name: true,
+                  sku: true,
+                  unit: true,
                   currentStock: true,
+                  minimumStock: true,
+                  avgCostPerUnit: true,
+                  active: true,
                 },
               },
             },

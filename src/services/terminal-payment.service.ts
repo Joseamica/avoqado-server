@@ -23,12 +23,14 @@ export interface TerminalPaymentRequest {
   venueId: string
   requestedBy: string // userId
   senderDeviceName?: string
+  processedByStaffId?: string
   requestId?: string // Client-generated for cancel tracking
 }
 
 export interface TerminalPaymentResult {
   requestId: string
   status: 'success' | 'failed' | 'timeout'
+  paymentId?: string
   transactionId?: string
   cardDetails?: {
     lastFour?: string
@@ -141,6 +143,7 @@ class TerminalPaymentService {
         skipReview: request.skipReview ?? true,
         orderId: request.orderId,
         senderDeviceName: request.senderDeviceName,
+        processedByStaffId: request.processedByStaffId,
         venueId,
         timestamp: new Date().toISOString(),
       }
@@ -170,6 +173,7 @@ class TerminalPaymentService {
     logger.info(`✅ [TerminalPayment] Payment result received`, {
       requestId: result.requestId,
       status: result.status,
+      paymentId: result.paymentId,
       transactionId: result.transactionId,
       terminalId: pending.terminalId,
     })

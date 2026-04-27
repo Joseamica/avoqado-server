@@ -13,6 +13,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
 
 // MARK: - Types
@@ -69,6 +70,16 @@ export interface CreatedOrderResponse {
 }
 
 // MARK: - Helper Functions
+
+function customerDisplayName(customer: {
+  firstName?: string | null
+  lastName?: string | null
+  email?: string | null
+  phone?: string | null
+}): string | null {
+  const fullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim()
+  return fullName || customer.email || customer.phone || null
+}
 
 /**
  * Helper function to flatten OrderItemModifier structure for mobile compatibility
@@ -260,15 +271,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     `📱 [ORDER.MOBILE] Creating order with ${input.items.length} items | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | source=${input.source || 'AVOQADO_IOS'}`,
   )
 
-  // Validate staff
-  if (input.staffId) {
-    const staff = await prisma.staff.findUnique({
-      where: { id: input.staffId },
-    })
-    if (!staff) {
-      throw new NotFoundError('Staff member not found')
-    }
-  }
+  const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
 
   // Validate items array
   if (!input.items || input.items.length === 0) {
@@ -427,8 +430,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       venueId,
       orderNumber,
       tableId: input.tableId || null,
-      servedById: input.staffId || null,
-      createdById: input.staffId || null,
+      servedById: validatedStaffId || null,
+      createdById: validatedStaffId || null,
       status: 'CONFIRMED',
       paymentStatus: 'PENDING',
       kitchenStatus: 'PENDING',
@@ -678,17 +681,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     throw new BadRequestError('Order is already paid')
   }
 
-  // Validate staff ID if provided
-  const effectiveStaffId = input.staffId || null
-  if (effectiveStaffId) {
-    const staff = await prisma.staff.findUnique({
-      where: { id: effectiveStaffId },
-      select: { id: true },
-    })
-    if (!staff) {
-      logger.warn(`Staff ID ${effectiveStaffId} not found, proceeding without staff association`)
-    }
-  }
+  const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
 
   // Find current open shift for this staff member (if any)
   let currentShift = null
@@ -831,6 +824,189 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     method: 'CASH',
     status: 'COMPLETED',
   }
+}
+
+export async function attachCustomerToPayment(venueId: string, paymentId: string, customerId: string) {
+  const normalizedPaymentId = paymentId?.trim()
+  const normalizedCustomerId = customerId?.trim()
+
+  if (!normalizedPaymentId) {
+    throw new BadRequestError('paymentId es requerido')
+  }
+  if (!normalizedCustomerId) {
+    throw new BadRequestError('customerId es requerido')
+  }
+
+  const payment = await prisma.payment.findFirst({
+    where: {
+      id: normalizedPaymentId,
+      venueId,
+    },
+    select: {
+      id: true,
+      orderId: true,
+    },
+  })
+
+  if (!payment) {
+    throw new NotFoundError('Payment not found')
+  }
+
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId)
+}
+
+export async function attachCustomerToLatestPayment(
+  venueId: string,
+  input: {
+    customerId: string
+    amountCents: number
+    tipCents?: number
+    staffId?: string | null
+  },
+) {
+  const normalizedCustomerId = input.customerId?.trim()
+  if (!normalizedCustomerId) {
+    throw new BadRequestError('customerId es requerido')
+  }
+  if (!Number.isFinite(input.amountCents) || input.amountCents <= 0) {
+    throw new BadRequestError('amountCents es requerido')
+  }
+
+  const since = new Date(Date.now() - 15 * 60 * 1000)
+  const amount = new Prisma.Decimal(input.amountCents / 100)
+  const tipAmount = new Prisma.Decimal((input.tipCents || 0) / 100)
+  const processedById = input.staffId?.trim() || undefined
+
+  const payment = await prisma.payment.findFirst({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      amount,
+      tipAmount,
+      ...(processedById ? { processedById } : {}),
+      createdAt: { gte: since },
+    },
+    orderBy: {
+      createdAt: 'desc',
+    },
+    select: {
+      id: true,
+      orderId: true,
+    },
+  })
+
+  if (!payment) {
+    throw new NotFoundError('Payment not found')
+  }
+
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId)
+}
+
+export async function attachCustomerToOrder(venueId: string, orderId: string, customerId: string) {
+  const normalizedCustomerId = customerId?.trim()
+
+  if (!normalizedCustomerId) {
+    throw new BadRequestError('customerId es requerido')
+  }
+
+  const [order, customer] = await Promise.all([
+    prisma.order.findFirst({
+      where: {
+        id: orderId,
+        venueId,
+      },
+      select: {
+        id: true,
+        orderNumber: true,
+      },
+    }),
+    prisma.customer.findUnique({
+      where: { id: normalizedCustomerId },
+      select: {
+        id: true,
+        venueId: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+      },
+    }),
+  ])
+
+  if (!order) {
+    throw new NotFoundError('Order not found')
+  }
+  if (!customer || customer.venueId !== venueId) {
+    throw new NotFoundError('Customer not found')
+  }
+
+  const displayName = customerDisplayName(customer)
+
+  const result = await prisma.$transaction(async tx => {
+    const existingAssociation = await tx.orderCustomer.findUnique({
+      where: {
+        orderId_customerId: {
+          orderId,
+          customerId: normalizedCustomerId,
+        },
+      },
+    })
+
+    const hasPrimaryCustomer = await tx.orderCustomer.findFirst({
+      where: {
+        orderId,
+        isPrimary: true,
+      },
+      select: { id: true },
+    })
+
+    if (!existingAssociation) {
+      await tx.orderCustomer.create({
+        data: {
+          orderId,
+          customerId: normalizedCustomerId,
+          isPrimary: !hasPrimaryCustomer,
+        },
+      })
+    } else if (!hasPrimaryCustomer && !existingAssociation.isPrimary) {
+      await tx.orderCustomer.update({
+        where: { id: existingAssociation.id },
+        data: { isPrimary: true },
+      })
+    }
+
+    return tx.order.update({
+      where: { id: orderId },
+      data: {
+        customerId: normalizedCustomerId,
+        customerName: displayName,
+        customerPhone: customer.phone || null,
+        customerEmail: customer.email || null,
+      },
+      select: {
+        id: true,
+        orderNumber: true,
+        customerId: true,
+        customerName: true,
+        customerPhone: true,
+        customerEmail: true,
+      },
+    })
+  })
+
+  logger.info(`✅ [ORDER.MOBILE] Customer attached to payment order | order=${order.orderNumber} | customer=${normalizedCustomerId}`)
+
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
+      orderId,
+      orderNumber: order.orderNumber,
+      customerId: normalizedCustomerId,
+      customerName: displayName,
+    })
+  }
+
+  return result
 }
 
 /**

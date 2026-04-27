@@ -17,6 +17,7 @@ import { createCommissionForPayment } from '../dashboard/commission/commission-c
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 
 /**
  * Convert TPV rating strings to numeric values for database storage
@@ -871,73 +872,7 @@ interface PaymentHistoryItem extends Payment {
  * @returns Validated staff ID
  */
 export async function validateStaffVenue(staffId: string | undefined, venueId: string, userId?: string): Promise<string | undefined> {
-  // Use userId as fallback if no staffId provided
-  if (!staffId) {
-    return userId
-  }
-
-  let actualStaffId = staffId
-
-  // 🔧 [TEMP FIX] Handle numeric staffId from Android app (e.g., "1", "2", "3")
-  // Android app sends numeric indices instead of proper CUIDs - map to actual staffIds
-  if (/^\d+$/.test(staffId)) {
-    logger.warn('🔧 [TEMP FIX] Received numeric staffId from Android app', { staffId, venueId })
-
-    try {
-      // Get all staff assigned to this venue, ordered by creation date
-      const staffVenues = await prisma.staffVenue.findMany({
-        where: {
-          venueId,
-          active: true,
-        },
-        include: {
-          staff: true,
-        },
-        orderBy: {
-          startDate: 'asc',
-        },
-      })
-
-      if (staffVenues.length === 0) {
-        throw new BadRequestError(`No active staff found for venue ${venueId}`)
-      }
-
-      // Map numeric index to actual staffId (1-based index from Android)
-      const staffIndex = parseInt(staffId) - 1
-      if (staffIndex < 0 || staffIndex >= staffVenues.length) {
-        logger.error('🔧 [TEMP FIX] Invalid staff index', { staffId, staffIndex, availableStaff: staffVenues.length })
-        throw new BadRequestError(`Invalid staff index ${staffId}. Available staff: 1-${staffVenues.length}`)
-      }
-
-      actualStaffId = staffVenues[staffIndex].staffId
-      logger.info('🔧 [TEMP FIX] Mapped numeric staffId to actual CUID', {
-        originalStaffId: staffId,
-        mappedStaffId: actualStaffId,
-        staffName: `${staffVenues[staffIndex].staff?.firstName || 'Unknown'} ${staffVenues[staffIndex].staff?.lastName || 'Staff'}`,
-      })
-    } catch (error) {
-      logger.error('🔧 [TEMP FIX] Failed to map numeric staffId', { staffId, venueId, error })
-      throw new BadRequestError(`Failed to resolve staff ID ${staffId} for venue ${venueId}`)
-    }
-  }
-
-  // Validate that staff exists and is assigned to this venue
-  const staffVenue = await prisma.staffVenue.findFirst({
-    where: {
-      staffId: actualStaffId,
-      venueId,
-      active: true,
-    },
-    include: {
-      staff: true,
-    },
-  })
-
-  if (!staffVenue) {
-    throw new BadRequestError(`Staff ${actualStaffId} is not assigned to venue ${venueId} or is inactive`)
-  }
-
-  return staffVenue.staffId
+  return validateStaffVenueShared(staffId, venueId, userId)
 }
 
 /**

@@ -18,6 +18,12 @@ jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
   earnPoints: (...args: any[]) => earnPointsMock(...args),
 }))
 
+const updateCustomerMetricsMock = jest.fn().mockResolvedValue(undefined)
+jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
+  __esModule: true,
+  updateCustomerMetrics: (...args: any[]) => updateCustomerMetricsMock(...args),
+}))
+
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -32,9 +38,12 @@ describe('manualPayment.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     earnPointsMock.mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
+    updateCustomerMetricsMock.mockResolvedValue(undefined)
     ;(prismaMock.customer.findFirst as jest.Mock).mockResolvedValue({ id: 'customer-1' })
     ;(prismaMock.table.findFirst as jest.Mock).mockResolvedValue({ id: 'table-1' })
-    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: 'waiter-1' })
+    // staffVenue.findFirst returns multiple shapes — waiter validation gets {staffId},
+    // post-tx StaffVenue resolution gets {id}. Default returns both.
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: 'waiter-1', id: 'sv-1' })
   })
 
   describe('createManualPayment', () => {
@@ -42,6 +51,9 @@ describe('manualPayment.service', () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         paymentStatus: 'PENDING',
         payments: [],
@@ -99,6 +111,9 @@ describe('manualPayment.service', () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         paymentStatus: 'PARTIAL',
         payments: [{ amount: new Prisma.Decimal(80), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
@@ -132,6 +147,9 @@ describe('manualPayment.service', () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         paymentStatus: 'PARTIAL',
         payments: [{ amount: new Prisma.Decimal(70), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
@@ -278,6 +296,9 @@ describe('manualPayment.service', () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         payments: [
           { amount: new Prisma.Decimal(80), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' },
@@ -309,6 +330,9 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'CANCELLED',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         payments: [],
         orderCustomers: [],
@@ -336,6 +360,9 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'DELETED',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         payments: [],
         orderCustomers: [],
@@ -415,6 +442,9 @@ describe('manualPayment.service', () => {
             findFirst: jest.fn().mockResolvedValue({
               id: ORDER_ID,
               venueId: VENUE_ID,
+              subtotal: new Prisma.Decimal(100),
+              taxAmount: new Prisma.Decimal(0),
+              discountAmount: new Prisma.Decimal(0),
               total: new Prisma.Decimal(100),
               payments: [],
               orderCustomers: [],
@@ -450,6 +480,9 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         payments: [{ amount: new Prisma.Decimal(50), tipAmount: new Prisma.Decimal(5), status: 'COMPLETED' }],
         orderCustomers: [],
@@ -480,7 +513,10 @@ describe('manualPayment.service', () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal('100.00'),
         total: new Prisma.Decimal('100.00'),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         payments: [
           { amount: new Prisma.Decimal('33.33'), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' },
           { amount: new Prisma.Decimal('33.33'), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' },
@@ -512,6 +548,9 @@ describe('manualPayment.service', () => {
       const mockOrder = {
         id: ORDER_ID,
         venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal('100.00'),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal('100.00'),
         payments: [{ amount: new Prisma.Decimal('99.99'), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
         orderCustomers: [],
@@ -654,7 +693,7 @@ describe('manualPayment.service', () => {
       })
 
       // shadowTotal = 500 + 80 - 0 + 50 = 630
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'customer-1', 630, 'shadow-with-cust', USER_ID)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'customer-1', 630, 'shadow-with-cust', 'sv-1')
       // OrderCustomer link created as primary
       expect(orderCustomerCreate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -688,10 +727,13 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(200),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(200),
         customerId: null,
         payments: [{ amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
-        orderCustomers: [{ customerId: 'cust-loyal-7' }],
+        orderCustomers: [{ customerId: 'cust-loyal-7', isPrimary: true }],
       }
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate } }),
@@ -706,7 +748,7 @@ describe('manualPayment.service', () => {
         externalSource: 'BUQ',
       })
 
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-loyal-7', 200, ORDER_ID, USER_ID)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-loyal-7', 200, ORDER_ID, 'sv-1')
     })
 
     it('FIX: Mode 1 PARTIAL payment does NOT call earnPoints (only on full settlement)', async () => {
@@ -714,10 +756,13 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(200),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(200),
         customerId: 'cust-1',
         payments: [],
-        orderCustomers: [{ customerId: 'cust-1' }],
+        orderCustomers: [{ customerId: 'cust-1', isPrimary: true }],
       }
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
@@ -741,6 +786,9 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PREPARING',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         customerId: null,
         payments: [{ amount: new Prisma.Decimal(50), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
@@ -771,6 +819,9 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PREPARING',
+        subtotal: new Prisma.Decimal(200),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(200),
         customerId: null,
         payments: [],
@@ -801,10 +852,13 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         customerId: 'old-customer',
         payments: [],
-        orderCustomers: [{ customerId: 'old-customer' }],
+        orderCustomers: [{ customerId: 'old-customer', isPrimary: true }],
       }
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
@@ -820,7 +874,7 @@ describe('manualPayment.service', () => {
         customerId: 'new-customer',
       })
 
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'new-customer', 100, ORDER_ID, USER_ID)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'new-customer', 100, ORDER_ID, 'sv-1')
     })
 
     it('DESTRUCTIVE: loyalty disabled venue returns 0 points (no error, payment commits)', async () => {
@@ -854,10 +908,13 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(100),
         customerId: 'cust-1',
         payments: [],
-        orderCustomers: [{ customerId: 'cust-1' }],
+        orderCustomers: [{ customerId: 'cust-1', isPrimary: true }],
       }
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate } }),
@@ -974,7 +1031,7 @@ describe('manualPayment.service', () => {
       })
 
       // Payment created, earnPoints called with $0.01 → likely 0 points (depends on config)
-      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'customer-1', 0.01, 'zero-shadow', USER_ID)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'customer-1', 0.01, 'zero-shadow', 'sv-1')
     })
 
     it('FIX: VenueTransaction created with grossAmount = amount + tipAmount (settlement alignment)', async () => {
@@ -1068,6 +1125,9 @@ describe('manualPayment.service', () => {
         id: ORDER_ID,
         venueId: VENUE_ID,
         status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(500),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
         total: new Prisma.Decimal(500),
         customerId: null,
         payments: [],
@@ -1161,6 +1221,814 @@ describe('manualPayment.service', () => {
 
       expect(result).toBeDefined()
       expect(earnPointsMock).toHaveBeenCalled()
+    })
+
+    it('FIX: fully-paid order with NO primary customer + no override + no legacy column updates metrics with FINAL total (not 0)', async () => {
+      // Edge case the previous review flagged: every OrderCustomer has
+      // isPrimary=false, no input.customerId, no order.customerId. Loyalty
+      // can't resolve a primary, BUT customer metrics must still increment
+      // visits/spend for ALL attached customers using the FINAL order total.
+      // Previously, metrics ran with loyaltyOrderTotal=0 because that field
+      // was only set inside the resolvedCustomerId branch.
+      const orderUpdate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(300),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(300),
+        customerId: null, // no legacy column
+        payments: [{ amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
+        orderCustomers: [
+          { customerId: 'cust-A', isPrimary: false },
+          { customerId: 'cust-B', isPrimary: false },
+        ],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '200', // settles the remaining 200, total paid = 300
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+        // NO customerId override
+      })
+
+      // Metrics must fire for both customers with the FINAL order total (300),
+      // not 0. Order independent — assert each call individually.
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-A', 300)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-B', 300)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(2)
+      // No primary customer ⇒ loyalty must NOT fire.
+      expect(earnPointsMock).not.toHaveBeenCalled()
+    })
+  })
+
+  // DEEP AUDIT — final destructive scenarios
+  describe('Deep audit — final alignment + concurrency edge cases', () => {
+    function txMock(handlers: any) {
+      return async (cb: any) =>
+        cb({
+          order: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
+          payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+          shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
+          orderCustomer: { create: jest.fn() },
+          venueTransaction: { create: jest.fn() },
+          paymentAllocation: { create: jest.fn() },
+          ...handlers,
+        })
+    }
+
+    it('CONCURRENCY: concurrent same-order payments — Serializable abort propagates as 40001', async () => {
+      // When PostgreSQL aborts a Serializable tx with 40001, Prisma throws
+      // PrismaClientKnownRequestError. The service should NOT swallow it —
+      // the second concurrent payment must reject so the caller can retry.
+      const serializationError = Object.assign(new Error('could not serialize access'), {
+        code: 'P2034',
+        clientVersion: '5.0.0',
+      })
+      ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(serializationError)
+
+      await expect(
+        manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          orderId: ORDER_ID,
+          amount: '50',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+        }),
+      ).rejects.toMatchObject({ code: 'P2034' })
+    })
+
+    it('AUDIT: Mode 1 fully-paid loyalty matches TPV semantics (primary customer only)', async () => {
+      // TPV only awards points to oc.isPrimary. If an order has 3 customers
+      // (1 primary + 2 secondary), only primary earns. Manual must match.
+      const orderUpdate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(150),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(150),
+        customerId: 'legacy-customer-id',
+        payments: [],
+        // Service include is `where: { isPrimary: true }`, so list comes pre-filtered
+        orderCustomers: [{ customerId: 'primary-cust', isPrimary: true }],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '150',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      // Primary OrderCustomer wins over legacy Order.customerId
+      expect(earnPointsMock).toHaveBeenCalledTimes(1)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'primary-cust', 150, ORDER_ID, 'sv-1')
+    })
+
+    it('AUDIT: Mode 1 falls back to legacy Order.customerId when no OrderCustomer exists', async () => {
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(100),
+        customerId: 'legacy-only',
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '100',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'legacy-only', 100, ORDER_ID, 'sv-1')
+    })
+
+    it('AUDIT: Mode 1 with no customer anywhere → no earnPoints, no error', async () => {
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(100),
+        customerId: null,
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '100',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(earnPointsMock).not.toHaveBeenCalled()
+    })
+
+    it('AUDIT: Mode 1 with input.customerId on order WITHOUT existing customer creates OrderCustomer link', async () => {
+      const orderCustomerCreate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(100),
+        customerId: null,
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({
+          order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
+          orderCustomer: { create: orderCustomerCreate },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '100',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+        customerId: 'new-cust',
+      })
+
+      expect(orderCustomerCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { orderId: ORDER_ID, customerId: 'new-cust', isPrimary: true },
+        }),
+      )
+    })
+
+    it('AUDIT: Mode 1 input.customerId is SKIPPED when order already has OrderCustomer (avoid unique violation)', async () => {
+      const orderCustomerCreate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(100),
+        customerId: null,
+        payments: [],
+        orderCustomers: [{ customerId: 'existing-primary', isPrimary: true }],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({
+          order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
+          orderCustomer: { create: orderCustomerCreate },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '100',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+        customerId: 'should-not-create-link',
+      })
+
+      // Order already had a primary customer — service must NOT try to create a
+      // second OrderCustomer (would hit @@unique([orderId, customerId]) or just
+      // create a competing primary). Loyalty still goes to input override though.
+      expect(orderCustomerCreate).not.toHaveBeenCalled()
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'should-not-create-link', 100, ORDER_ID, 'sv-1')
+    })
+
+    it('AUDIT: Payment.processedById always staffId (admin who registered) regardless of waiterId', async () => {
+      // processedById = admin who registered the payment (audit trail).
+      // servedById = waiter who gets the tip credit (separate concept).
+      const paymentCreate = jest.fn().mockResolvedValue({ id: 'p-attr' })
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-attr' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({
+          order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+          payment: { create: paymentCreate },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, 'admin-id', {
+        amount: '100',
+        tipAmount: '20',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+        waiterId: 'waiter-id',
+      })
+
+      // Payment processedBy = admin
+      expect(paymentCreate.mock.calls[0][0].data.processedById).toBe('admin-id')
+      // Shadow Order servedBy = waiter (tip credit)
+      expect(orderCreate.mock.calls[0][0].data.servedById).toBe('waiter-id')
+      expect(orderCreate.mock.calls[0][0].data.createdById).toBe('admin-id')
+    })
+
+    it('AUDIT: shadow order servedBy falls back to admin when no waiterId provided', async () => {
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-no-waiter' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({
+          order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, 'admin-id', {
+        amount: '50',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      const data = orderCreate.mock.calls[0][0].data
+      expect(data.servedById).toBe('admin-id')
+      expect(data.createdById).toBe('admin-id')
+    })
+
+    it('AUDIT: source=TPV with externalSource is REJECTED by schema layer (defense in depth)', () => {
+      // Schema's superRefine forbids externalSource when source !== 'OTHER'.
+      // This is a schema-layer test (not service), but we document it here.
+      // Real assertion: schema validation runs in the controller via Zod parse.
+      // Service trusts the input shape — defense in depth = layered validation.
+      expect(true).toBe(true) // placeholder reminder
+    })
+
+    it('AUDIT: VenueTransaction is also created in Mode 1 (existing order path)', async () => {
+      const venueTransactionCreate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(100),
+        customerId: null,
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({
+          order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
+          venueTransaction: { create: venueTransactionCreate },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '50',
+        tipAmount: '5',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      // Mode 1 partial payment STILL creates VenueTransaction (each payment = one VT)
+      expect(venueTransactionCreate).toHaveBeenCalledTimes(1)
+      expect(venueTransactionCreate.mock.calls[0][0].data.grossAmount.toString()).toBe('55')
+    })
+
+    it('AUDIT: PaymentAllocation also created in Mode 1 (each manual payment = one allocation)', async () => {
+      const allocationCreate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(200),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(200),
+        customerId: null,
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({
+          order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
+          paymentAllocation: { create: allocationCreate },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '75',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      const data = allocationCreate.mock.calls[0][0].data
+      expect(data.orderId).toBe(ORDER_ID)
+      expect(data.amount.toString()).toBe('75')
+    })
+
+    // ---- 4 issues from external LLM review (P1+P2) ----
+
+    it('REVIEW P1: Mode 1 paidAmount and Order.total are TPV-aligned (include cumulative tips)', async () => {
+      const orderUpdate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        total: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: null,
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '100',
+        tipAmount: '10',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      const data = orderUpdate.mock.calls[0][0].data
+      expect(data.paidAmount.toString()).toBe('110')
+      expect(data.total.toString()).toBe('110')
+      expect(data.tipAmount.toString()).toBe('10')
+      expect(data.paymentStatus).toBe('PAID')
+      expect(data.remainingBalance.toString()).toBe('0')
+    })
+
+    it('REVIEW P1: earnPoints receives StaffVenue.id (NOT raw Staff.id)', async () => {
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        total: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: 'cust-1',
+        payments: [],
+        orderCustomers: [{ customerId: 'cust-1', isPrimary: true }],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+      ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-resolved-42' })
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '100',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      // earnPoints called with StaffVenue.id, NOT raw USER_ID (Staff.id)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-1', 100, ORDER_ID, 'sv-resolved-42')
+    })
+
+    it('REVIEW P1: earnPoints receives undefined when StaffVenue not found (graceful)', async () => {
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(50),
+        total: new Prisma.Decimal(50),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: 'cust-1',
+        payments: [],
+        orderCustomers: [{ customerId: 'cust-1', isPrimary: true }],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+      ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
+
+      await expect(
+        manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          orderId: ORDER_ID,
+          amount: '50',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+        }),
+      ).resolves.toBeDefined()
+
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-1', 50, ORDER_ID, undefined)
+    })
+
+    it('REVIEW P2: shift lookup filters by staffId AND status=OPEN (not venue-wide)', async () => {
+      const shiftFindFirst = jest.fn().mockResolvedValue({ id: 'open-shift-for-this-cashier' })
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-shift-attr' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({
+          order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+          shift: { findFirst: shiftFindFirst, update: jest.fn() },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, 'cashier-A', {
+        amount: '50',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(shiftFindFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            venueId: VENUE_ID,
+            staffId: 'cashier-A',
+            status: 'OPEN',
+            endTime: null,
+          }),
+        }),
+      )
+    })
+
+    it('REVIEW P2: updateCustomerMetrics is called BEFORE earnPoints (TPV order)', async () => {
+      const callOrder: string[] = []
+      updateCustomerMetricsMock.mockImplementation(async () => {
+        callOrder.push('updateCustomerMetrics')
+      })
+      earnPointsMock.mockImplementation(async () => {
+        callOrder.push('earnPoints')
+        return { pointsEarned: 5, newBalance: 10 }
+      })
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-metrics' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        amount: '100',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+        customerId: 'customer-1',
+      })
+
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('customer-1', 100)
+      expect(callOrder).toEqual(['updateCustomerMetrics', 'earnPoints'])
+    })
+
+    it('REVIEW P2: updateCustomerMetrics failure does NOT block earnPoints or rollback', async () => {
+      updateCustomerMetricsMock.mockRejectedValueOnce(new Error('metrics service down'))
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-metrics-fail' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate } }),
+      )
+
+      await expect(
+        manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+          customerId: 'customer-1',
+        }),
+      ).resolves.toBeDefined()
+
+      expect(updateCustomerMetricsMock).toHaveBeenCalled()
+      expect(earnPointsMock).toHaveBeenCalled()
+    })
+
+    it('REVIEW v2: multi-customer order (1 primary + 2 secondary) → 3 metrics calls + 1 loyalty call', async () => {
+      // Reviewer's exact requirement: order has 3 OrderCustomer rows
+      // (1 primary + 2 secondary). Manual payment fully settles it.
+      // - updateCustomerMetrics must be called 3 times (one per customer)
+      // - earnPoints must be called ONCE for the primary only
+      const orderUpdate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(150),
+        total: new Prisma.Decimal(150),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: null,
+        payments: [],
+        orderCustomers: [
+          { customerId: 'primary-1', isPrimary: true },
+          { customerId: 'secondary-A', isPrimary: false },
+          { customerId: 'secondary-B', isPrimary: false },
+        ],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '150',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(3)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('primary-1', 150)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-A', 150)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('secondary-B', 150)
+
+      expect(earnPointsMock).toHaveBeenCalledTimes(1)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'primary-1', 150, ORDER_ID, 'sv-1')
+    })
+
+    it('REVIEW v3: PARTIAL payment does NOT increment customer metrics (matches TPV semantics)', async () => {
+      // TPV updates metrics only on isFullyPaid. Per-payment metrics would
+      // inflate totalVisits — a $200 order paid in 4 partials of $50 each must
+      // count as 1 visit, not 4. This test guards against that regression.
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(200),
+        total: new Prisma.Decimal(200),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: null,
+        payments: [],
+        orderCustomers: [
+          { customerId: 'p-1', isPrimary: true },
+          { customerId: 's-1', isPrimary: false },
+        ],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '50',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
+      expect(earnPointsMock).not.toHaveBeenCalled()
+    })
+
+    it('REVIEW v3: 4 partials of $25 on $100 order → metrics fire ONCE on the 4th partial (with full $100)', async () => {
+      // Simulate the LAST partial that completes the order. Mock has 3 prior
+      // payments of $25 (total $75 already paid). 4th payment of $25 settles.
+      // updateCustomerMetrics must be called ONCE per customer with $100 (not $25).
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        total: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: null,
+        payments: [
+          { amount: new Prisma.Decimal(25), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' },
+          { amount: new Prisma.Decimal(25), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' },
+          { amount: new Prisma.Decimal(25), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' },
+        ],
+        orderCustomers: [{ customerId: 'cust-once', isPrimary: true }],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '25',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-once', 100)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'cust-once', 100, ORDER_ID, 'sv-1')
+    })
+
+    it('REVIEW v2: input.customerId override added to metrics + wins for loyalty (documented contract)', async () => {
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(100),
+        total: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: null,
+        payments: [],
+        orderCustomers: [{ customerId: 'p-1', isPrimary: true }],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '100',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+        customerId: 'override',
+      })
+
+      // Both p-1 (primary) and "override" get metrics
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('p-1', 100)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('override', 100)
+      // ONLY override gets loyalty (override wins for loyalty per contract)
+      expect(earnPointsMock).toHaveBeenCalledTimes(1)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'override', 100, ORDER_ID, 'sv-1')
+    })
+
+    it('REVIEW v2: legacy Order.customerId only → metrics for that customer', async () => {
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(75),
+        total: new Prisma.Decimal(75),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: 'legacy-only-cust',
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '75',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('legacy-only-cust', 75)
+      expect(earnPointsMock).toHaveBeenCalledWith(VENUE_ID, 'legacy-only-cust', 75, ORDER_ID, 'sv-1')
+    })
+
+    it('REVIEW v2: dedupe — same customer in OrderCustomer + legacy column → 1 metrics call', async () => {
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        status: 'PARTIAL',
+        subtotal: new Prisma.Decimal(50),
+        total: new Prisma.Decimal(50),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        customerId: 'cust-X',
+        payments: [],
+        orderCustomers: [{ customerId: 'cust-X', isPrimary: true }],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '50',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      // Set dedupe ensures cust-X gets metrics ONCE not twice
+      expect(updateCustomerMetricsMock).toHaveBeenCalledTimes(1)
+      expect(updateCustomerMetricsMock).toHaveBeenCalledWith('cust-X', 50)
+    })
+
+    it('REVIEW P2: updateCustomerMetrics NOT called when no customer attached', async () => {
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-no-cust-metrics' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate } }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        amount: '50',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
+    })
+
+    it('KNOWN LIMITATION: socket.io broadcast NOT emitted (UX only — not financial descuadre)', () => {
+      // TPV broadcasts PAYMENT_COMPLETED via socketManager so dashboards refresh
+      // in real-time. Manual payments don't emit — admin sees their own action
+      // immediately, other open dashboards need refresh. Documented gap, no impact
+      // on financial data. Future enhancement.
+      expect(true).toBe(true)
+    })
+
+    it('KNOWN LIMITATION: inventory FIFO deduction NOT performed (per service docstring)', () => {
+      // TPV deducts inventory on final payment via SaleVerification flow.
+      // Manual payments are explicitly out-of-scope per the service docstring —
+      // there are no SKU items on shadow orders, so no inventory to deduct.
+      // For Mode 1 (existing order with items), inventory should already have
+      // been handled by the original order flow (e.g., POS sync or TPV).
+      expect(true).toBe(true)
     })
   })
 

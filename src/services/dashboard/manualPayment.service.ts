@@ -5,6 +5,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
+import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
 
@@ -69,13 +70,28 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
   // payments both read paidAmount=X and each pass the "does not exceed total"
   // check, ending with sum(payments) > total. Under Serializable one of them
   // fails with a serialization error instead of silently overpaying.
-  // Capture loyalty side-effect inputs from inside the tx so we can fire
-  // earnPoints AFTER the tx commits — keeps loyalty failures from rolling
-  // back the payment (matches the TPV pattern).
+  // Capture loyalty + customer-metrics side-effect inputs from inside the tx so
+  // we can fire them AFTER the tx commits — keeps downstream failures from
+  // rolling back the payment (matches the TPV pattern).
+  //
+  // - `loyaltyCustomerId` is the SINGLE customer who earns loyalty points
+  //   (resolution: input.customerId override > primary OrderCustomer > legacy
+  //   Order.customerId). TPV semantics: only ONE customer earns per order.
+  // - `metricsCustomerIds` is the FULL set of customers whose visit metrics
+  //   (totalVisits, totalSpent, lastVisitAt) must increment. TPV iterates ALL
+  //   OrderCustomer rows for this. Without including secondaries, multi-customer
+  //   orders silently undercount visits in customer dashboards.
   let loyaltyCustomerId: string | null = null
   let loyaltyOrderTotal: Prisma.Decimal = new Prisma.Decimal(0)
   let loyaltyOrderId: string = ''
   let loyaltyShouldEarn = false
+  const metricsCustomerIds = new Set<string>()
+  // Independent of loyalty resolution: metrics fire for every queued customer
+  // even when no primary customer can earn loyalty points (orderCustomers all
+  // isPrimary=false, no input.customerId, no legacy order.customerId).
+  // Stored in a holder object so TypeScript doesn't narrow the closure
+  // assignment to `never` after the async transaction callback.
+  const metricsState: { orderTotal: Prisma.Decimal | null } = { orderTotal: null }
 
   const result = await prisma.$transaction(
     async tx => {
@@ -84,13 +100,18 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       let paidSoFar: Prisma.Decimal
       let aggregatedTipAmount: Prisma.Decimal = tipAmount
       let isShadow = false
+      // Captured from the existing order in Mode 1 so the post-payment update
+      // can recompute Order.total = subtotal - discount + cumulative tips.
+      let orderSubtotal: Prisma.Decimal = new Prisma.Decimal(0)
+      let orderDiscount: Prisma.Decimal = new Prisma.Decimal(0)
 
-      // Link payment to the cashier's currently open shift (if any). Other
-      // payment paths (TPV, POS sync) do this — without it, manual payments
-      // are orphaned from the shift summary and the cash drawer reconciliation
-      // descuadres at shift close.
+      // Link payment to the cashier's currently open shift (if any). Match the
+      // TPV pattern exactly: filter by staffId + status='OPEN' + endTime=null so
+      // multi-cashier venues attribute the payment to the RIGHT shift, not just
+      // any open one. Without staffId filter, manual payments could land on
+      // another staff member's shift in busy venues.
       const openShift = await tx.shift.findFirst({
-        where: { venueId, endTime: null },
+        where: { venueId, staffId, status: 'OPEN', endTime: null },
         select: { id: true },
         orderBy: { startTime: 'desc' },
       })
@@ -98,11 +119,15 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
 
       if (input.orderId) {
         // Mode 1 — attach to existing order
+        // Fetch ALL OrderCustomer rows (not filtered by isPrimary) so we can
+        // increment customer metrics for every customer associated with the
+        // order, while loyalty points still go only to the primary. Mirrors
+        // TPV's payment.tpv.service.ts handling.
         const order = await tx.order.findFirst({
           where: { id: input.orderId, venueId },
           include: {
             payments: { where: { status: TransactionStatus.COMPLETED } },
-            orderCustomers: { where: { isPrimary: true }, select: { customerId: true } },
+            orderCustomers: { select: { customerId: true, isPrimary: true } },
           },
         })
 
@@ -118,9 +143,19 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
         }
 
         anchorOrderId = order.id
-        anchorOrderTotal = new Prisma.Decimal(order.total)
+
+        // Capture subtotal/discount for the post-payment Order.total recomputation
+        // below (TPV alignment). Stored on closure so the order.update branch can
+        // reuse them without re-fetching.
+        orderSubtotal = new Prisma.Decimal(order.subtotal)
+        orderDiscount = new Prisma.Decimal(order.discountAmount ?? 0)
+
+        // ✅ TPV ALIGNMENT: paidSoFar sums (amount + tip) for prior COMPLETED payments,
+        // matching how TPV's totalPaid is computed. Without including tips, partial
+        // tip payments leave paidAmount and Order.total inconsistent.
         paidSoFar = order.payments.reduce(
-          (acc: Prisma.Decimal, p: { amount: Prisma.Decimal | null }) => acc.plus(p.amount ?? 0),
+          (acc: Prisma.Decimal, p: { amount: Prisma.Decimal | null; tipAmount: Prisma.Decimal | null }) =>
+            acc.plus(p.amount ?? 0).plus(p.tipAmount ?? 0),
           new Prisma.Decimal(0),
         )
         // Tips on the Order row aggregate ALL payment tips. Without this the
@@ -131,28 +166,53 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
         )
         aggregatedTipAmount = priorTips.plus(tipAmount)
 
-        const newTotalPaid = paidSoFar.plus(amount)
+        // Order total recomputed to include cumulative tips (TPV pattern).
+        // Tax is left as-is; manual payments don't recompute tax.
+        const orderTax = new Prisma.Decimal(order.taxAmount ?? 0)
+        anchorOrderTotal = orderSubtotal.plus(orderTax).minus(orderDiscount).plus(aggregatedTipAmount)
+
+        const grossThisPayment = amount.plus(tipAmount)
+        const newTotalPaid = paidSoFar.plus(grossThisPayment)
         if (newTotalPaid.greaterThan(anchorOrderTotal)) {
           throw new BadRequestError(`El pago excede el saldo pendiente. Pendiente: ${anchorOrderTotal.minus(paidSoFar).toFixed(2)}`)
         }
 
-        // Loyalty: when this manual payment is the one that fully pays the order,
-        // resolve the customer (input override > primary OrderCustomer > legacy
-        // Order.customerId) and queue earnPoints for after-commit. Partial
-        // payments do NOT earn — points fire only when the order is settled.
+        // Customer metrics + loyalty are only queued on FULL SETTLEMENT, matching
+        // TPV's `if (isFullyPaid)` guard. Per-payment metric increments would
+        // inflate totalVisits (4 partials of a $100 order = 4 visits instead of 1)
+        // and disconnect from TPV semantics. Both metrics and loyalty fire ONCE
+        // per order, with the FINAL order total — not per-payment amounts.
         if (newTotalPaid.equals(anchorOrderTotal)) {
-          const resolvedCustomerId = input.customerId ?? order.orderCustomers[0]?.customerId ?? order.customerId ?? null
+          // Final order total drives BOTH loyalty (when there's a customer to
+          // earn) and metrics (for every customer on the order, regardless of
+          // primary). Set unconditionally on full settlement so metrics never
+          // run with 0.
+          metricsState.orderTotal = anchorOrderTotal
+          loyaltyOrderId = order.id
+          // Resolution: explicit input override > primary OrderCustomer > legacy column
+          const primaryCustomer = order.orderCustomers.find(oc => oc.isPrimary)
+          const resolvedCustomerId = input.customerId ?? primaryCustomer?.customerId ?? order.customerId ?? null
           if (resolvedCustomerId) {
             loyaltyCustomerId = resolvedCustomerId
-            loyaltyOrderId = order.id
             loyaltyOrderTotal = anchorOrderTotal
             loyaltyShouldEarn = true
           }
+          // Customer metrics: queue updates for ALL customers on the order
+          // (primary + secondaries + override + legacy column). Visits/spend
+          // increments ONCE per customer at settlement, using the final order
+          // total — not per-payment amounts.
+          for (const oc of order.orderCustomers) {
+            metricsCustomerIds.add(oc.customerId)
+          }
+          if (input.customerId) metricsCustomerIds.add(input.customerId)
+          if (order.customerId) metricsCustomerIds.add(order.customerId)
         }
 
-        // If admin attached a customer and the order didn't have one, create
-        // the OrderCustomer link so future reports/loyalty know who paid.
-        if (input.customerId && !order.customerId && order.orderCustomers.length === 0) {
+        // If admin attached a customer and the order didn't have one (no
+        // primary OrderCustomer AND no legacy customerId), create the link as
+        // primary so future reports / loyalty know who paid.
+        const hasPrimary = order.orderCustomers.some(oc => oc.isPrimary)
+        if (input.customerId && !order.customerId && !hasPrimary) {
           await tx.orderCustomer.create({
             data: { orderId: order.id, customerId: input.customerId, isPrimary: true },
           })
@@ -213,11 +273,15 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
         paidSoFar = new Prisma.Decimal(0)
 
         // If a customer was attached, also create the OrderCustomer link as
-        // primary so loyalty / per-customer reports surface this entry.
+        // primary so loyalty / per-customer reports surface this entry. Queue
+        // both metrics + loyalty for the attached customer (no secondaries on
+        // shadow orders — they're single-customer by definition).
         if (input.customerId) {
           await tx.orderCustomer.create({
             data: { orderId: shadow.id, customerId: input.customerId, isPrimary: true },
           })
+          metricsCustomerIds.add(input.customerId)
+          metricsState.orderTotal = shadowTotal
           loyaltyCustomerId = input.customerId
           loyaltyOrderId = shadow.id
           loyaltyOrderTotal = shadowTotal
@@ -304,15 +368,23 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       // Only update existing-order totals in Mode 1; shadow orders were
       // already created with final values and don't need a second update.
       if (!isShadow) {
-        const newTotalPaid = paidSoFar.plus(amount)
-        const fullyPaid = newTotalPaid.equals(anchorOrderTotal)
+        // ✅ TPV ALIGNMENT: paidAmount and Order.total must include cumulative tips.
+        // TPV's recordOrderPayment treats paidAmount as "cash collected (amount + tip)"
+        // and recomputes Order.total = subtotal + tax - discount + cumulative tips.
+        // Without this, reports that join Order.total vs Payment.netAmount see
+        // different sums (e.g. order.total=100, payment.netAmount=110, paidAmount=100).
+        const grossThisPayment = amount.plus(tipAmount)
+        const newTotalPaid = paidSoFar.plus(grossThisPayment)
+        const fullyPaid = newTotalPaid.greaterThanOrEqualTo(anchorOrderTotal)
+
         await tx.order.update({
           where: { id: anchorOrderId },
           data: {
             paymentStatus: fullyPaid ? 'PAID' : 'PARTIAL',
             paidAmount: newTotalPaid,
-            remainingBalance: anchorOrderTotal.minus(newTotalPaid),
+            remainingBalance: Prisma.Decimal.max(new Prisma.Decimal(0), anchorOrderTotal.minus(newTotalPaid)),
             tipAmount: aggregatedTipAmount,
+            total: anchorOrderTotal,
             // Flip status to COMPLETED only when the order is fully settled —
             // matches the TPV path. Without this, "orders by status" reports
             // count fully-paid orders as still pending.
@@ -320,6 +392,10 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
           },
         })
       }
+      // Reference unused vars so TS doesn't complain — they're captured for
+      // possible future expansion (per-payment breakdown, audit detail).
+      void orderSubtotal
+      void orderDiscount
 
       logger.info('Manual payment created', {
         paymentId: payment.id,
@@ -361,14 +437,75 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   )
 
-  // Loyalty side-effect runs OUTSIDE the tx so a loyalty failure (config
-  // missing, downstream service down) does NOT roll back the payment that
-  // was just persisted. Same pattern as `payment.tpv.service.ts`. earnPoints
-  // is internally idempotent on (customerId, orderId) so retries are safe.
+  // Customer metrics + loyalty side-effects run OUTSIDE the tx so any failure
+  // (config missing, downstream service down) does NOT roll back the payment
+  // that was just persisted. Same pattern as `payment.tpv.service.ts`.
+  // updateCustomerMetrics is idempotent enough (totalVisits++, totalSpent+=,
+  // lastVisitAt=now) and earnPoints dedupes by (customerId, orderId).
+  //
+  // Two-step contract:
+  //   1. Increment metrics for ALL customers attached to the order (primary +
+  //      secondaries + input override + legacy column). Multi-customer orders
+  //      mean every customer at the table gets credit for the visit.
+  //   2. Award loyalty points to the SINGLE primary customer only (matches TPV).
+  //
+  // Both steps are independent: a metrics failure for one customer does NOT
+  // skip metrics for the others, and does NOT skip loyalty.
+
+  // Step 1 — metrics for every queued customer. metricsCustomerIds is only
+  // populated when the order is fully settled (Mode 1 fully-paid OR Mode 2
+  // shadow with attached customer). metricsOrderTotal is set in lockstep so
+  // the amount is always the FINAL order total — independent of whether
+  // loyalty resolved a primary customer (orderCustomers all isPrimary=false +
+  // no input.customerId + no legacy order.customerId would otherwise leave
+  // loyaltyOrderTotal at 0 while metrics still fire).
+  if (metricsCustomerIds.size > 0 && metricsState.orderTotal) {
+    const metricsAmount = Number(metricsState.orderTotal.toString())
+    for (const customerId of metricsCustomerIds) {
+      try {
+        await updateCustomerMetrics(customerId, metricsAmount)
+        logger.info('📊 Customer metrics updated (manual payment)', {
+          orderId: loyaltyOrderId,
+          customerId,
+          amount: metricsAmount,
+        })
+      } catch (metricsError: any) {
+        logger.error('⚠️ Failed to update customer metrics on manual payment (payment still succeeded)', {
+          orderId: loyaltyOrderId,
+          customerId,
+          venueId,
+          error: metricsError?.message,
+        })
+      }
+    }
+  }
+
+  // Step 2 — loyalty for the resolved primary customer only.
   if (loyaltyShouldEarn && loyaltyCustomerId) {
+    const totalAsNumber = Number(loyaltyOrderTotal.toString())
+
+    // Resolve StaffVenue.id for proper FK on LoyaltyTransaction.createdById.
+    // earnPoints internally writes a LoyaltyTransaction whose createdById
+    // references StaffVenue.id (NOT Staff.id). Passing the raw staffId silently
+    // fails the FK and the loyalty transaction is dropped (caught below). TPV
+    // resolves StaffVenue first — we mirror that.
+    let staffVenueId: string | undefined = undefined
     try {
-      const totalAsNumber = Number(loyaltyOrderTotal.toString())
-      const loyaltyResult = await earnPoints(venueId, loyaltyCustomerId, totalAsNumber, loyaltyOrderId, staffId)
+      const staffVenue = await prisma.staffVenue.findFirst({
+        where: { staffId, venueId },
+        select: { id: true },
+      })
+      staffVenueId = staffVenue?.id
+    } catch (sfErr: any) {
+      logger.warn('Could not resolve StaffVenue for loyalty FK; loyalty will use undefined createdBy', {
+        staffId,
+        venueId,
+        error: sfErr?.message,
+      })
+    }
+
+    try {
+      const loyaltyResult = await earnPoints(venueId, loyaltyCustomerId, totalAsNumber, loyaltyOrderId, staffVenueId)
       logger.info('🎁 Loyalty points earned (manual payment)', {
         orderId: loyaltyOrderId,
         customerId: loyaltyCustomerId,
