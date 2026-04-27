@@ -217,9 +217,12 @@ export const UpdateRecipeSchema = z.object({
   }),
   body: z.object({
     portionYield: z.number().int().positive().optional(),
-    prepTime: z.number().int().positive().optional(),
-    cookTime: z.number().int().positive().optional(),
-    notes: z.string().optional(),
+    // .nullish() (= .optional().nullable()) so the dashboard can send null for
+    // empty time fields. CreateRecipeSchema already does this; UpdateRecipeSchema
+    // didn't and rejected legitimate "I cleared the field" submissions.
+    prepTime: z.number().int().positive().nullish(),
+    cookTime: z.number().int().positive().nullish(),
+    notes: z.string().nullish(),
     lines: z
       .array(
         z.object({
