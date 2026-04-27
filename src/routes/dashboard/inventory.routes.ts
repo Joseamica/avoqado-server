@@ -26,6 +26,7 @@ import {
   CreateRecipeSchema,
   UpdateRecipeSchema,
   AddRecipeLineSchema,
+  UpdateRecipeLineSchema,
   ProductIdParamsSchema,
   CreatePricingPolicySchema,
   UpdatePricingPolicySchema,
@@ -311,6 +312,20 @@ router.post(
  *     summary: Remove ingredient from recipe
  */
 router.delete('/products/:productId/recipe/lines/:recipeLineId', checkPermission('inventory:delete'), recipeController.removeRecipeLine)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/recipe/lines/{recipeLineId}:
+ *   patch:
+ *     tags: [Inventory - Recipes]
+ *     summary: Update a single ingredient (inline edit)
+ */
+router.patch(
+  '/products/:productId/recipe/lines/:recipeLineId',
+  checkPermission('inventory:update'),
+  validateRequest(UpdateRecipeLineSchema),
+  recipeController.updateRecipeLine,
+)
 
 /**
  * @openapi

@@ -11,6 +11,12 @@ import {
   Unit,
 } from '@prisma/client'
 
+// Some legacy products and raw materials in production use non-cuid-v1 IDs
+// (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003"). Strict z.cuid()
+// rejects them with 400 before the controller can 404. Use cuidLikeId() for
+// productId and rawMaterialId only — venueId/supplierId/etc. remain cuid.
+const cuidLikeId = () => z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/, { message: 'Invalid ID format' })
+
 // ==========================================
 // RAW MATERIAL SCHEMAS
 // ==========================================
@@ -82,7 +88,7 @@ export const CreateRawMaterialSchema = z.object({
 export const UpdateRawMaterialSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    rawMaterialId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
   }),
   body: z
     .object({
@@ -159,7 +165,7 @@ export const UpdateRawMaterialSchema = z.object({
 export const AdjustStockSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    rawMaterialId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
   }),
   body: z.object({
     quantity: z.number(),
@@ -185,7 +191,7 @@ export const GetRawMaterialsQuerySchema = z.object({
 export const CreateRecipeSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     portionYield: z.number().int().positive().default(1),
@@ -194,7 +200,7 @@ export const CreateRecipeSchema = z.object({
     notes: z.string().optional(),
     lines: z.array(
       z.object({
-        rawMaterialId: z.string().cuid(),
+        rawMaterialId: cuidLikeId(),
         quantity: z.number().positive(),
         unit: z.nativeEnum(Unit),
         isOptional: z.boolean().default(false),
@@ -207,7 +213,7 @@ export const CreateRecipeSchema = z.object({
 export const UpdateRecipeSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     portionYield: z.number().int().positive().optional(),
@@ -217,7 +223,7 @@ export const UpdateRecipeSchema = z.object({
     lines: z
       .array(
         z.object({
-          rawMaterialId: z.string().cuid(),
+          rawMaterialId: cuidLikeId(),
           quantity: z.number().positive(),
           unit: z.nativeEnum(Unit),
           isOptional: z.boolean().default(false),
@@ -231,15 +237,31 @@ export const UpdateRecipeSchema = z.object({
 export const AddRecipeLineSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
-    rawMaterialId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
     quantity: z.number().positive(),
     unit: z.nativeEnum(Unit),
     isOptional: z.boolean().default(false),
     substituteNotes: z.string().nullish(), // Accept null, undefined, or string
   }),
+})
+
+export const UpdateRecipeLineSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    productId: cuidLikeId(),
+    recipeLineId: cuidLikeId(),
+  }),
+  body: z
+    .object({
+      quantity: z.number().positive().optional(),
+      unit: z.nativeEnum(Unit).optional(),
+      isOptional: z.boolean().optional(),
+      substituteNotes: z.string().nullish().optional(),
+    })
+    .refine(d => Object.keys(d).length > 0, { message: 'At least one field is required' }),
 })
 
 // ==========================================
@@ -298,7 +320,7 @@ export const CreateSupplierPricingSchema = z.object({
   }),
   body: z
     .object({
-      rawMaterialId: z.string().cuid(),
+      rawMaterialId: cuidLikeId(),
       pricePerUnit: z.number().positive(),
       unit: z.nativeEnum(Unit),
       minimumQuantity: z.number().positive().default(1),
@@ -324,7 +346,7 @@ export const CreateSupplierPricingSchema = z.object({
 export const GetSupplierRecommendationsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    rawMaterialId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
   }),
   query: z.object({
     quantity: z.string().transform(Number).optional(),
@@ -351,7 +373,7 @@ export const CreatePurchaseOrderSchema = z.object({
     shippingZipCode: z.string().optional(),
     items: z.array(
       z.object({
-        rawMaterialId: z.string().cuid(),
+        rawMaterialId: cuidLikeId(),
         quantityOrdered: z.number().positive(),
         unit: z.nativeEnum(Unit),
         unitPrice: z.number().positive(),
@@ -372,7 +394,7 @@ export const UpdatePurchaseOrderSchema = z.object({
     items: z
       .array(
         z.object({
-          rawMaterialId: z.string().cuid(),
+          rawMaterialId: cuidLikeId(),
           quantityOrdered: z.number().positive(),
           unit: z.nativeEnum(Unit),
           unitPrice: z.number().positive(),
@@ -498,7 +520,7 @@ export const ReceiveNoItemsSchema = z.object({
 export const CreatePricingPolicySchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     pricingStrategy: z.nativeEnum(PricingStrategy),
@@ -511,7 +533,7 @@ export const CreatePricingPolicySchema = z.object({
 export const UpdatePricingPolicySchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     pricingStrategy: z.nativeEnum(PricingStrategy).optional(),
@@ -525,7 +547,7 @@ export const UpdatePricingPolicySchema = z.object({
 export const CalculatePriceSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
 })
 
@@ -595,7 +617,7 @@ export const GetIngredientUsageReportSchema = z.object({
     .object({
       startDate: z.string().datetime(),
       endDate: z.string().datetime(),
-      rawMaterialId: z.string().cuid().optional(),
+      rawMaterialId: cuidLikeId().optional(),
     })
     .refine(
       data => {
@@ -621,7 +643,7 @@ export const VenueIdParamsSchema = z.object({
 export const RawMaterialIdParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    rawMaterialId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
   }),
 })
 
@@ -642,7 +664,7 @@ export const PurchaseOrderIdParamsSchema = z.object({
 export const ProductIdParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
 })
 
@@ -653,7 +675,7 @@ export const ProductIdParamsSchema = z.object({
 export const AdjustProductInventoryStockSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     quantity: z.number(),
@@ -691,7 +713,7 @@ export const ProductWizardStep1Schema = z.object({
 
 export const ProductWizardStep2Schema = z.object({
   params: z.object({
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z
     .object({
@@ -716,7 +738,7 @@ export const ProductWizardStep2Schema = z.object({
 export const ProductWizardStep3SimpleStockSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     initialStock: z.number().min(0, 'Initial stock must be non-negative'),
@@ -728,7 +750,7 @@ export const ProductWizardStep3SimpleStockSchema = z.object({
 export const ProductWizardStep3RecipeSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     portionYield: z.number().int().positive('Portion yield must be positive'),
@@ -738,7 +760,7 @@ export const ProductWizardStep3RecipeSchema = z.object({
     ingredients: z
       .array(
         z.object({
-          rawMaterialId: z.string().cuid(),
+          rawMaterialId: cuidLikeId(),
           quantity: z.number().positive('Quantity must be positive'),
           unit: z.nativeEnum(Unit),
           isOptional: z.boolean().default(false),
@@ -817,7 +839,7 @@ export const CreateProductWithInventorySchema = z.object({
         notes: z.string().optional(),
         ingredients: z.array(
           z.object({
-            rawMaterialId: z.string().cuid(),
+            rawMaterialId: cuidLikeId(),
             quantity: z.number().positive(),
             unit: z.nativeEnum(Unit),
             isOptional: z.boolean().default(false),
@@ -831,14 +853,14 @@ export const CreateProductWithInventorySchema = z.object({
 
 export const GetWizardProgressSchema = z.object({
   params: z.object({
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
 })
 
 export const SetProductInventoryMethodSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
   body: z.object({
     inventoryMethod: InventoryMethodEnum,
@@ -847,7 +869,7 @@ export const SetProductInventoryMethodSchema = z.object({
 
 export const PreviewCostChangeSchema = z.object({
   params: z.object({
-    rawMaterialId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
   }),
   query: z.object({
     proposedNewCost: z
@@ -859,7 +881,7 @@ export const PreviewCostChangeSchema = z.object({
 
 export const TriggerCostRecalculationSchema = z.object({
   params: z.object({
-    rawMaterialId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
   }),
   body: z.object({
     oldCost: z.number().min(0),
@@ -888,7 +910,7 @@ export const GetRecipeCostVariancesSchema = z.object({
 export const ConfigureVariableIngredientSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
     recipeLineId: z.string().cuid(),
   }),
   body: z.object({
@@ -900,7 +922,7 @@ export const ConfigureVariableIngredientSchema = z.object({
 export const RecipeLineIdParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),
-    productId: z.string().cuid(),
+    productId: cuidLikeId(),
   }),
 })
 

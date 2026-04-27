@@ -157,41 +157,41 @@ async function deductSimpleStock(venueId: string, productId: string, quantity: n
       throw new AppError('Product not found', 404)
     }
 
-    // 2. Get current inventory record
-    const inventory = await tx.inventory.findUnique({
-      where: { productId },
-    })
+    // 2. CONDITIONAL ATOMIC DECREMENT — single SQL statement that decrements
+    // ONLY if currentStock >= quantity, returning the new value. If 0 rows
+    // were affected we know stock was insufficient. This is the only way to
+    // prevent the race condition where N concurrent sales pass the check
+    // independently and overdraw to negative stock (real bug found in
+    // destructive E2E test, 2026-04-27: 3×4u sales of 10u stock → -2).
+    const updateResult = await tx.$queryRaw<Array<{ id: string; currentStock: any; previousStock: any }>>`
+      UPDATE "Inventory"
+      SET "currentStock" = "currentStock" - ${new Decimal(quantity)},
+          "updatedAt" = NOW()
+      WHERE "productId" = ${productId}
+        AND "currentStock" >= ${new Decimal(quantity)}
+      RETURNING id, "currentStock", ("currentStock" + ${new Decimal(quantity)}) AS "previousStock"
+    `
 
-    if (!inventory) {
-      throw new AppError(
-        `No inventory record for product "${product.name}". Create inventory via Product Wizard or manual stock adjustment.`,
-        404,
-      )
-    }
-
-    // 3. Check stock (Optimistic check - technically could race between this check and update,
-    // but the atomic decrement below ensures we don't drift.
-    // Ideally we would use tx.inventory.update({ where: { currentStock: { gte: quantity } } }) but Prisma doesn't support that easily yet.
-    if (inventory.currentStock.lessThan(quantity)) {
+    if (updateResult.length === 0) {
+      // Either no inventory row OR insufficient stock — distinguish for caller.
+      const inventory = await tx.inventory.findUnique({ where: { productId } })
+      if (!inventory) {
+        throw new AppError(
+          `No inventory record for product "${product.name}". Create inventory via Product Wizard or manual stock adjustment.`,
+          404,
+        )
+      }
       throw new AppError(
         `Insufficient stock for ${product.name}. Available: ${inventory.currentStock.toNumber()}, Requested: ${quantity}`,
         400,
       )
     }
 
-    // 4. ATOMIC DECREMENT and return new value
-    // This prevents "lost updates" race condition
-    const updatedInventory = await tx.inventory.update({
-      where: { productId },
-      data: {
-        currentStock: { decrement: quantity },
-      },
-    })
-
-    // 5. Create Movement Log based on the operation
-    // We calculate "previous" from the "new" + quantity to be consistent with the atomic op
-    const newStock = updatedInventory.currentStock
-    const previousStock = newStock.add(quantity)
+    const inventoryId = updateResult[0].id
+    const newStock = new Decimal(updateResult[0].currentStock)
+    const previousStock = new Decimal(updateResult[0].previousStock)
+    // Synthetic shape to keep downstream code happy
+    const inventory = { id: inventoryId } as { id: string }
 
     await tx.inventoryMovement.create({
       data: {

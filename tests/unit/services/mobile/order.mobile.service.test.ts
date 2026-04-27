@@ -24,6 +24,13 @@ describe('order.mobile.service', () => {
       id: 'staff-1',
       venueId: 'venue-1',
     })
+    // validateStaffVenue (added in src/utils/staff-venue.util.ts) requires this mock
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      id: 'sv-1',
+      staffId: 'staff-1',
+      venueId: 'venue-1',
+      active: true,
+    })
     prismaMock.product.findMany.mockResolvedValue([
       {
         id: 'prod-1',
@@ -106,6 +113,12 @@ describe('order.mobile.service', () => {
       venueId: 'venue-1',
     })
     prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      id: 'sv-1',
+      staffId: 'staff-1',
+      venueId: 'venue-1',
+      active: true,
+    })
     prismaMock.shift.findFirst.mockResolvedValue(null)
     prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })

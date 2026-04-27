@@ -4069,7 +4069,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discount',
   authenticateTokenMiddleware,
-  checkPermission('orders:discount'),
+  checkPermission('tpv-orders:discount'),
   validateRequest(applyDiscountSchema),
   orderController.applyDiscount,
 )
@@ -4432,7 +4432,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/auto',
   authenticateTokenMiddleware,
-  checkPermission('orders:discount'),
+  checkPermission('tpv-orders:discount'),
   validateRequest(applyAutomaticDiscountsSchema),
   discountController.applyAutomaticDiscounts,
 )
@@ -4485,7 +4485,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/apply',
   authenticateTokenMiddleware,
-  checkPermission('orders:discount'),
+  checkPermission('tpv-orders:discount'),
   validateRequest(applyPredefinedDiscountSchema),
   discountController.applyPredefinedDiscount,
 )
@@ -4544,7 +4544,11 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/manual',
   authenticateTokenMiddleware,
-  checkPermission('orders:discount'),
+  // 'orders:discount' is not in DEFAULT_PERMISSIONS for any role and not in
+  // the implicit-dependency map, so only SUPERADMIN (which bypasses the check)
+  // could ever pass it. The TPV-side permission everyone actually uses is
+  // 'tpv-orders:discount', which OWNER, ADMIN and MANAGER have by default.
+  checkPermission('tpv-orders:discount'),
   validateRequest(applyManualDiscountSchema),
   discountController.applyManualDiscount,
 )
@@ -4593,7 +4597,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts/coupon',
   authenticateTokenMiddleware,
-  checkPermission('orders:discount'),
+  checkPermission('tpv-orders:discount'),
   validateRequest(applyCouponCodeSchema),
   discountController.applyCouponCode,
 )
@@ -4700,7 +4704,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/discounts/:discountId',
   authenticateTokenMiddleware,
-  checkPermission('orders:discount'),
+  checkPermission('tpv-orders:discount'),
   validateRequest(removeOrderDiscountSchema),
   discountController.removeDiscount,
 )

@@ -6,6 +6,28 @@ import { CreateRawMaterialDto, UpdateRawMaterialDto, AdjustStockDto } from '../.
 import { createStockBatch, deductStockFIFO } from './fifoBatch.service'
 import { sendLowStockAlertNotification } from './notification.service'
 import { logAction } from './activity-log.service'
+import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
+
+/**
+ * Convert a quantity to a raw material's storage unit. Recipes and modifiers can
+ * declare their own unit (e.g. "0.062 KILOGRAM" of a protein stored in GRAM);
+ * deductStockFIFO expects the value already in rawMaterial.unit, so callers must
+ * normalize first or stock will diverge by a factor of 1000.
+ *
+ * Throws BadRequestError if the units are dimensionally incompatible (mass vs
+ * volume) — that's a misconfigured recipe, not something to silently coerce.
+ */
+function toRawMaterialUnit(quantity: Decimal | number, fromUnit: Unit, rawMaterial: { id: string; name: string; unit: Unit }): number {
+  if (fromUnit === rawMaterial.unit) {
+    return new Decimal(quantity).toNumber()
+  }
+  if (!areUnitsCompatible(fromUnit, rawMaterial.unit)) {
+    throw new BadRequestError(
+      `Recipe/modifier unit ${fromUnit} is incompatible with raw material "${rawMaterial.name}" stored in ${rawMaterial.unit}`,
+    )
+  }
+  return convertUnit(quantity, fromUnit, rawMaterial.unit).toNumber()
+}
 
 /**
  * Helper function to get UnitType from Unit
@@ -181,7 +203,12 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
 /**
  * Update an existing raw material
  */
-export async function updateRawMaterial(venueId: string, rawMaterialId: string, data: UpdateRawMaterialDto): Promise<RawMaterial> {
+export async function updateRawMaterial(
+  venueId: string,
+  rawMaterialId: string,
+  data: UpdateRawMaterialDto,
+  staffId?: string,
+): Promise<RawMaterial> {
   const existing = await prisma.rawMaterial.findFirst({
     where: { id: rawMaterialId, venueId },
   })
@@ -201,20 +228,114 @@ export async function updateRawMaterial(venueId: string, rawMaterialId: string, 
     updateData.unitType = getUnitType(unit)
   }
 
-  const rawMaterial = await prisma.rawMaterial.update({
-    where: { id: rawMaterialId },
-    data: updateData,
+  // If cost changed, every recipe that references this RM has stale
+  // costPerServing/totalCost. Recompute them inside the same transaction so
+  // the dashboard shows accurate margins immediately. The historical
+  // RawMaterialMovement.costImpact is intentionally NOT touched (it reflects
+  // the cost AT the moment of the movement).
+  const costChanging = data.costPerUnit !== undefined && !new Decimal(data.costPerUnit).equals(existing.costPerUnit)
+
+  const rawMaterial = await prisma.$transaction(async tx => {
+    const updated = await tx.rawMaterial.update({
+      where: { id: rawMaterialId },
+      data: updateData,
+    })
+
+    if (costChanging) {
+      await recomputeRecipesUsingRawMaterial(tx, venueId, rawMaterialId, staffId, {
+        oldCost: existing.costPerUnit,
+        newCost: updated.costPerUnit,
+      })
+    }
+
+    return updated
   })
 
   logAction({
     venueId,
+    staffId,
     action: 'RAW_MATERIAL_UPDATED',
     entity: 'RawMaterial',
     entityId: rawMaterial.id,
-    data: { name: rawMaterial.name },
+    data: {
+      name: rawMaterial.name,
+      costChanged: costChanging,
+      oldCostPerUnit: costChanging ? existing.costPerUnit.toNumber() : undefined,
+      newCostPerUnit: costChanging ? rawMaterial.costPerUnit.toNumber() : undefined,
+    },
   })
 
   return rawMaterial
+}
+
+/**
+ * Recompute Recipe.totalCost + RecipeLine.costPerServing for every recipe that
+ * uses a given RawMaterial. Called whenever the RM's costPerUnit changes so the
+ * dashboard never shows stale costs (the bug where Hazelnut treat displayed
+ * "$2,242 per dátil" because the recipe stored a frozen costPerServing).
+ *
+ * Logs a single RECIPES_RECOMPUTED activity entry summarizing the deltas.
+ */
+async function recomputeRecipesUsingRawMaterial(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  rawMaterialId: string,
+  staffId: string | undefined,
+  costChange: { oldCost: Decimal; newCost: Decimal },
+): Promise<void> {
+  const recipes = await tx.recipe.findMany({
+    where: { lines: { some: { rawMaterialId } }, product: { venueId } },
+    include: {
+      product: { select: { id: true, name: true, venueId: true } },
+      lines: { include: { rawMaterial: { select: { id: true, name: true, unit: true, costPerUnit: true } } } },
+    },
+  })
+
+  const recipeUpdates: Array<{ productName: string; oldTotal: number; newTotal: number }> = []
+
+  for (const recipe of recipes) {
+    let newTotal = new Decimal(0)
+    const lineUpdates: Array<{ lineId: string; newCost: Decimal }> = []
+    for (const line of recipe.lines) {
+      const rm = line.rawMaterial
+      let qtyInRm: Decimal
+      if (line.unit === rm.unit) {
+        qtyInRm = line.quantity
+      } else if (areUnitsCompatible(line.unit, rm.unit)) {
+        qtyInRm = convertUnit(line.quantity, line.unit, rm.unit)
+      } else {
+        // Schema validation prevents this going forward; skip stale rows.
+        continue
+      }
+      const newCostPerServing = qtyInRm.mul(rm.costPerUnit).div(recipe.portionYield)
+      newTotal = newTotal.add(newCostPerServing)
+      lineUpdates.push({ lineId: line.id, newCost: newCostPerServing })
+    }
+    for (const lu of lineUpdates) {
+      await tx.recipeLine.update({ where: { id: lu.lineId }, data: { costPerServing: lu.newCost } })
+    }
+    if (!newTotal.equals(recipe.totalCost)) {
+      await tx.recipe.update({ where: { id: recipe.id }, data: { totalCost: newTotal } })
+      recipeUpdates.push({ productName: recipe.product.name, oldTotal: recipe.totalCost.toNumber(), newTotal: newTotal.toNumber() })
+    }
+  }
+
+  if (recipeUpdates.length > 0) {
+    logAction({
+      venueId,
+      staffId,
+      action: 'RECIPES_RECOMPUTED',
+      entity: 'RawMaterial',
+      entityId: rawMaterialId,
+      data: {
+        trigger: 'cost_change',
+        oldCost: costChange.oldCost.toNumber(),
+        newCost: costChange.newCost.toNumber(),
+        recipesAffected: recipeUpdates.length,
+        recipes: recipeUpdates,
+      },
+    })
+  }
 }
 
 /**
@@ -652,8 +773,15 @@ export async function deductStockForModifiers(
     // SUBSTITUTION modifiers are handled in deductStockForRecipe
     if (modifier.inventoryMode !== 'ADDITION') continue
 
-    // Calculate total quantity: modifier.quantityPerUnit × orderItem.quantity × modifier selection qty
-    const totalQuantity = modifier.quantityPerUnit.mul(orderItemQuantity).mul(modifierQty).toNumber()
+    // Calculate total quantity: modifier.quantityPerUnit × orderItem.quantity × modifier selection qty.
+    // Convert from modifier.unit → rawMaterial.unit before deducting.
+    const modRawMaterial = await prisma.rawMaterial.findUniqueOrThrow({
+      where: { id: modifier.rawMaterialId },
+      select: { id: true, name: true, unit: true },
+    })
+    const modifierUnit = modifier.unit ?? modRawMaterial.unit
+    const totalInModifierUnit = modifier.quantityPerUnit.mul(orderItemQuantity).mul(modifierQty)
+    const totalQuantity = toRawMaterialUnit(totalInModifierUnit, modifierUnit, modRawMaterial)
 
     await deductStockFIFO(venueId, modifier.rawMaterialId, totalQuantity, RawMaterialMovementType.USAGE, {
       reason: `Modifier: ${modifier.name}`,
@@ -745,6 +873,10 @@ export async function deductStockForRecipe(
     return
   }
 
+  // Capture per-ingredient deductions for the audit log so the activity feed
+  // can show "Sold 1x Hazelnut treat → 62g Proteina, 21g Sarais, 125g Dátiles".
+  const deductionTrace: Array<{ rawMaterialId: string; ingredient: string; quantity: number; unit: string }> = []
+
   // Process each ingredient in the recipe using FIFO
   for (const line of recipe.lines) {
     if (line.isOptional) continue // Skip optional ingredients
@@ -761,13 +893,28 @@ export async function deductStockForRecipe(
       )
 
       if (substitutionModifier) {
-        // Use modifier's ingredient instead of recipe default
-        const totalQty = substitutionModifier.modifier.quantityPerUnit!.mul(quantity).mul(substitutionModifier.quantity).toNumber()
+        // Use modifier's ingredient instead of recipe default. Convert from
+        // modifier.unit → rawMaterial.unit (modifier may declare grams while
+        // the raw material is stored in kilograms or vice-versa).
+        const subRawMaterial = await prisma.rawMaterial.findUniqueOrThrow({
+          where: { id: substitutionModifier.modifier.rawMaterialId! },
+          select: { id: true, name: true, unit: true },
+        })
+        const subModifierUnit = substitutionModifier.modifier.unit ?? subRawMaterial.unit
+        const totalQtyInRecipeUnit = substitutionModifier.modifier.quantityPerUnit!.mul(quantity).mul(substitutionModifier.quantity)
+        const totalQty = toRawMaterialUnit(totalQtyInRecipeUnit, subModifierUnit, subRawMaterial)
 
         await deductStockFIFO(venueId, substitutionModifier.modifier.rawMaterialId!, totalQty, RawMaterialMovementType.USAGE, {
           reason: `Substitution: ${substitutionModifier.modifier.name} for ${recipe.product?.name}`,
           reference: orderId,
           createdBy: staffId,
+        })
+
+        deductionTrace.push({
+          rawMaterialId: substitutionModifier.modifier.rawMaterialId!,
+          ingredient: `${subRawMaterial.name} (substituted via ${substitutionModifier.modifier.name})`,
+          quantity: totalQty,
+          unit: subRawMaterial.unit,
         })
 
         // Check for low stock on the substituted ingredient
@@ -777,8 +924,11 @@ export async function deductStockForRecipe(
       }
     }
 
-    // Use default recipe ingredient (no substitution or not a variable ingredient)
-    const deductionQuantity = line.quantity.mul(quantity).toNumber() // quantity per portion × portions sold
+    // Use default recipe ingredient (no substitution or not a variable ingredient).
+    // Convert RecipeLine.unit → rawMaterial.unit so that "0.062 KILOGRAM"
+    // becomes "62 GRAM" when the raw material is stored in grams.
+    const deductionInRecipeUnit = line.quantity.mul(quantity) // quantity per portion × portions sold
+    const deductionQuantity = toRawMaterialUnit(deductionInRecipeUnit, line.unit, line.rawMaterial)
 
     // Use FIFO to deduct from oldest batches
     await deductStockFIFO(venueId, line.rawMaterialId, deductionQuantity, RawMaterialMovementType.USAGE, {
@@ -787,7 +937,33 @@ export async function deductStockForRecipe(
       createdBy: staffId,
     })
 
+    deductionTrace.push({
+      rawMaterialId: line.rawMaterialId,
+      ingredient: line.rawMaterial.name,
+      quantity: deductionQuantity,
+      unit: line.rawMaterial.unit,
+    })
+
     // Check for low stock after deduction
     await checkAndCreateLowStockAlert(venueId, line.rawMaterialId)
+  }
+
+  // Single audit entry per order/product for the whole deduction. This is the
+  // bridge ActivityLog was missing for sale events — without it there's no
+  // searchable trail of "what got consumed when this order was paid".
+  if (deductionTrace.length > 0) {
+    logAction({
+      venueId,
+      staffId,
+      action: 'INVENTORY_DEDUCTED_FOR_SALE',
+      entity: 'Order',
+      entityId: orderId,
+      data: {
+        productId,
+        productName: recipe.product?.name,
+        portionsSold: quantity,
+        ingredients: deductionTrace,
+      },
+    })
   }
 }

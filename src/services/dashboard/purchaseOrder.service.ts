@@ -12,6 +12,7 @@ import {
 } from '../../schemas/dashboard/inventory.schema'
 import { Decimal } from '@prisma/client/runtime/library'
 import { createStockBatch } from './fifoBatch.service'
+import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import { sendPurchaseOrderEmail } from '../resend.service'
 import logger from '@/config/logger'
 import PDFDocument from 'pdfkit'
@@ -628,7 +629,10 @@ export async function receivePurchaseOrder(
       expirationDate.setDate(expirationDate.getDate() + orderItem.rawMaterial.shelfLifeDays)
     }
 
-    // Create FIFO batch for this received quantity
+    // Create FIFO batch for this received quantity. createStockBatch normalizes
+    // (quantity, unit, costPerUnit) to the raw material's storage unit
+    // internally — we still need to compute the same normalized quantity here
+    // because RawMaterial.currentStock and the movement record use the RM unit.
     const batchPromise = createStockBatch(venueId, orderItem.rawMaterialId, {
       purchaseOrderItemId: orderItem.id,
       quantity: receivedItem.quantityReceived,
@@ -639,6 +643,20 @@ export async function receivePurchaseOrder(
     })
 
     batchCreations.push({ itemId: orderItem.id, batchPromise })
+
+    // Validate dimensional compatibility BEFORE mutating stock — same guard
+    // as createStockBatch, but applied here too because we increment
+    // currentStock independently and would otherwise diverge from the batch.
+    if (orderItem.unit !== orderItem.rawMaterial.unit && !areUnitsCompatible(orderItem.unit, orderItem.rawMaterial.unit)) {
+      throw new AppError(
+        `Cannot receive ${orderItem.rawMaterial.name}: PO unit ${orderItem.unit} is incompatible with raw material unit ${orderItem.rawMaterial.unit}`,
+        400,
+      )
+    }
+    const receivedInRmUnit =
+      orderItem.unit === orderItem.rawMaterial.unit
+        ? new Decimal(receivedItem.quantityReceived)
+        : convertUnit(receivedItem.quantityReceived, orderItem.unit, orderItem.rawMaterial.unit)
 
     // Update order item quantity received and set receiveStatus
     operations.push(
@@ -651,8 +669,11 @@ export async function receivePurchaseOrder(
       }),
     )
 
-    // Update raw material stock
-    const newStock = orderItem.rawMaterial.currentStock.add(receivedItem.quantityReceived)
+    // Update raw material stock — must add the RM-unit-converted quantity, not
+    // the raw PO quantity, otherwise receiving "1 KG" of a GRAM raw material
+    // would only bump currentStock by 1 (interpreted as 1 GRAM) while the
+    // batch correctly stores 1000g.
+    const newStock = orderItem.rawMaterial.currentStock.add(receivedInRmUnit)
     operations.push(
       prisma.rawMaterial.update({
         where: { id: orderItem.rawMaterialId },
@@ -666,24 +687,32 @@ export async function receivePurchaseOrder(
   // Wait for all batches to be created (outside transaction to avoid nesting)
   const createdBatches = await Promise.all(batchCreations.map(bc => bc.batchPromise))
 
-  // Create movement records linked to batches
+  // Create movement records linked to batches. Movement.quantity, unit,
+  // previousStock, newStock and costImpact must all reference the RM unit so
+  // they reconcile cleanly with RawMaterial.currentStock and StockBatch
+  // (both also normalized).
   for (let i = 0; i < data.items.length; i++) {
     const receivedItem = data.items[i]
     const orderItem = order.items.find(item => item.id === receivedItem.purchaseOrderItemId)!
     const batch = createdBatches[i]
+    const receivedInRmUnit =
+      orderItem.unit === orderItem.rawMaterial.unit
+        ? new Decimal(receivedItem.quantityReceived)
+        : convertUnit(receivedItem.quantityReceived, orderItem.unit, orderItem.rawMaterial.unit)
 
     operations.push(
       prisma.rawMaterialMovement.create({
         data: {
           rawMaterialId: orderItem.rawMaterialId,
           venueId,
-          batchId: batch.id, // Link to created batch
+          batchId: batch.id,
           type: RawMaterialMovementType.PURCHASE,
-          quantity: receivedItem.quantityReceived,
-          unit: orderItem.unit,
+          quantity: receivedInRmUnit,
+          unit: orderItem.rawMaterial.unit,
           previousStock: orderItem.rawMaterial.currentStock,
-          newStock: orderItem.rawMaterial.currentStock.add(receivedItem.quantityReceived),
-          costImpact: batch.costPerUnit.mul(receivedItem.quantityReceived), // Cost from batch
+          newStock: orderItem.rawMaterial.currentStock.add(receivedInRmUnit),
+          // batch.costPerUnit is already per-RM-unit (createStockBatch normalized it).
+          costImpact: batch.costPerUnit.mul(receivedInRmUnit),
           reason: `Purchase order ${order.orderNumber} received (Batch: ${batch.batchNumber})`,
           reference: order.id,
           createdBy: staffId,

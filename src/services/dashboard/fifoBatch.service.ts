@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 import { logAction } from './activity-log.service'
+import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 
 /**
  * Generate unique batch number for a raw material
@@ -61,6 +62,27 @@ export async function createStockBatch(
     throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
   }
 
+  // INVARIANT: every batch is stored in the raw material's unit. Callers may
+  // pass the inbound delivery in any compatible unit (a 1 KG bag for a raw
+  // material kept in GRAM), but the batch row — and therefore costPerUnit —
+  // is always normalized. This guarantees deductStockFIFO and
+  // RawMaterial.currentStock stay consistent. Incompatible units (mass vs
+  // volume) are rejected loudly rather than silently corrupting stock.
+  if (data.unit !== rawMaterial.unit && !areUnitsCompatible(data.unit, rawMaterial.unit)) {
+    throw new AppError(
+      `Cannot create batch: unit ${data.unit} is incompatible with raw material "${rawMaterial.name}" stored in ${rawMaterial.unit}`,
+      400,
+    )
+  }
+  const normalizedQuantity = convertUnit(data.quantity, data.unit, rawMaterial.unit)
+  // costPerUnit must be expressed per-rawMaterial-unit too, otherwise FIFO
+  // cost tracking inverts. If the caller said "$10 per KG" but RM is GRAM,
+  // we convert to "$0.01 per GRAM".
+  const normalizedCostPerUnit =
+    data.unit === rawMaterial.unit
+      ? new Decimal(data.costPerUnit)
+      : new Decimal(data.costPerUnit).mul(new Decimal(data.quantity)).div(normalizedQuantity)
+
   // Generate unique batch number
   const batchNumber = await generateBatchNumber(venueId, rawMaterialId)
 
@@ -71,10 +93,10 @@ export async function createStockBatch(
       rawMaterialId,
       purchaseOrderItemId: data.purchaseOrderItemId,
       batchNumber,
-      initialQuantity: new Decimal(data.quantity),
-      remainingQuantity: new Decimal(data.quantity),
-      unit: data.unit,
-      costPerUnit: new Decimal(data.costPerUnit),
+      initialQuantity: normalizedQuantity,
+      remainingQuantity: normalizedQuantity,
+      unit: rawMaterial.unit,
+      costPerUnit: normalizedCostPerUnit,
       receivedDate: data.receivedDate,
       expirationDate: data.expirationDate,
       status: BatchStatus.ACTIVE,
@@ -650,7 +672,11 @@ export async function getVenueCostingMethod(venueId: string): Promise<'FIFO' | '
 }
 
 /**
- * Calculate cost impact for a quantity using the venue's costing method
+ * Calculate cost impact for a quantity using the venue's costing method.
+ * `quantity` MUST be expressed in the raw material's storage unit. If callers
+ * have a recipe-side quantity in a different unit (e.g. KILOGRAM for a GRAM
+ * raw material), convert with toRawMaterialUnit() first — otherwise STANDARD_COST
+ * and WEIGHTED_AVERAGE silently return 1000× wrong totals.
  */
 export async function calculateCostImpact(
   venueId: string,

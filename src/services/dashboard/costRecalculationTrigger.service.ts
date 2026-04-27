@@ -1,5 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { recalculateRecipeCost } from './recipe.service'
+import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import logger from '@/config/logger'
 
 /**
@@ -262,6 +263,7 @@ export async function previewCostChange(rawMaterialId: string, proposedNewCost: 
     select: {
       id: true,
       name: true,
+      unit: true,
       costPerUnit: true,
     },
   })
@@ -274,7 +276,8 @@ export async function previewCostChange(rawMaterialId: string, proposedNewCost: 
   const costChange = proposedNewCost - currentCost
   const percentageChange = currentCost > 0 ? (costChange / currentCost) * 100 : 0
 
-  // Find affected recipes
+  // Find affected recipes — also fetch line.unit so we can normalize quantities
+  // before multiplying by costChange (was the same 1000× bug as deductStockForRecipe).
   const affectedRecipes = await prisma.recipe.findMany({
     where: {
       lines: {
@@ -297,6 +300,7 @@ export async function previewCostChange(rawMaterialId: string, proposedNewCost: 
         },
         select: {
           quantity: true,
+          unit: true,
         },
       },
     },
@@ -304,7 +308,13 @@ export async function previewCostChange(rawMaterialId: string, proposedNewCost: 
 
   const preview = affectedRecipes.map(recipe => {
     const currentRecipeCost = recipe.totalCost.toNumber()
-    const ingredientQuantity = recipe.lines.reduce((sum, line) => sum + line.quantity.toNumber(), 0)
+    // Convert each line.quantity to RM unit before summing — recipe quantities
+    // can be in different units than the RawMaterial they reference.
+    const ingredientQuantity = recipe.lines.reduce((sum, line) => {
+      if (line.unit === rawMaterial.unit) return sum + line.quantity.toNumber()
+      if (!areUnitsCompatible(line.unit, rawMaterial.unit)) return sum // skip incompatible (shouldn't happen post-validation)
+      return sum + convertUnit(line.quantity, line.unit, rawMaterial.unit).toNumber()
+    }, 0)
     const ingredientCostImpact = ingredientQuantity * costChange
     const estimatedNewRecipeCost = currentRecipeCost + ingredientCostImpact
 

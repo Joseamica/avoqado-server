@@ -77,8 +77,9 @@ export async function updateRawMaterial(req: Request, res: Response, next: NextF
   try {
     const { venueId, rawMaterialId } = req.params
     const data = req.body
+    const staffId = req.authContext?.userId
 
-    const rawMaterial = await rawMaterialService.updateRawMaterial(venueId, rawMaterialId, data)
+    const rawMaterial = await rawMaterialService.updateRawMaterial(venueId, rawMaterialId, data, staffId)
 
     res.json({
       success: true,

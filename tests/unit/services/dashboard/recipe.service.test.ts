@@ -75,6 +75,7 @@ describe('Recipe Service - Active/Deleted Validation', () => {
         venueId: mockVenueId,
         name: 'Carne',
         costPerUnit: new Decimal(5),
+        unit: 'KILOGRAM',
         active: true,
         deletedAt: null,
       }
@@ -173,6 +174,8 @@ describe('Recipe Service - Active/Deleted Validation', () => {
         id: 'raw-active',
         venueId: mockVenueId,
         name: 'Carne',
+        unit: 'KILOGRAM',
+        costPerUnit: new Decimal(5),
         active: true,
         deletedAt: null,
       }
@@ -211,6 +214,7 @@ describe('Recipe Service - Active/Deleted Validation', () => {
         venueId: mockVenueId,
         name: 'Carne',
         costPerUnit: new Decimal(5),
+        unit: 'KILOGRAM',
         active: true,
         deletedAt: null,
       }
@@ -294,6 +298,7 @@ describe('Recipe Service - Active/Deleted Validation', () => {
         venueId: mockVenueId,
         name: 'Tomate',
         costPerUnit: new Decimal(2),
+        unit: 'KILOGRAM',
         active: true,
         deletedAt: null,
       }

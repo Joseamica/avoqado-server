@@ -65,6 +65,10 @@ describe('ProductInventoryIntegration Service', () => {
           product: {
             findUnique: jest.fn().mockResolvedValue(mockProduct),
           },
+          // Conditional UPDATE returns the new row (success path)
+          $queryRaw: jest
+            .fn()
+            .mockResolvedValue([{ id: mockInventory.id, currentStock: new Decimal(98), previousStock: new Decimal(100) }]),
           inventory: {
             findUnique: jest.fn().mockResolvedValue(mockInventory),
             update: jest.fn().mockResolvedValue({
@@ -120,6 +124,8 @@ describe('ProductInventoryIntegration Service', () => {
           product: {
             findUnique: jest.fn().mockResolvedValue(mockProduct),
           },
+          // Conditional UPDATE affects 0 rows (no inventory record)
+          $queryRaw: jest.fn().mockResolvedValue([]),
           inventory: {
             findUnique: jest.fn().mockResolvedValue(null), // No inventory!
           },
@@ -145,12 +151,13 @@ describe('ProductInventoryIntegration Service', () => {
       // Mock top-level product.findUnique (called by getProductInventoryMethod)
       prismaMock.product.findUnique.mockResolvedValue(mockProduct as any)
 
-      // Mock interactive transaction - checks fail before update
+      // Mock interactive transaction - conditional UPDATE returns 0 rows (insufficient)
       prismaMock.$transaction.mockImplementation(async (callback: any) => {
         const txMock = {
           product: {
             findUnique: jest.fn().mockResolvedValue(mockProduct),
           },
+          $queryRaw: jest.fn().mockResolvedValue([]),
           inventory: {
             findUnique: jest.fn().mockResolvedValue(mockInventory),
           },
@@ -196,6 +203,7 @@ describe('ProductInventoryIntegration Service', () => {
           product: {
             findUnique: jest.fn().mockResolvedValue(mockProduct),
           },
+          $queryRaw: jest.fn().mockResolvedValue([{ id: 'inv-456', currentStock: new Decimal(45), previousStock: new Decimal(50) }]),
           inventory: {
             findUnique: jest.fn().mockResolvedValue(mockInventory),
             update: jest.fn().mockResolvedValue({
@@ -244,6 +252,7 @@ describe('ProductInventoryIntegration Service', () => {
           product: {
             findUnique: jest.fn().mockResolvedValue(mockProduct),
           },
+          $queryRaw: jest.fn().mockResolvedValue([{ id: mockInventory.id, currentStock: new Decimal(0), previousStock: new Decimal(10) }]),
           inventory: {
             findUnique: jest.fn().mockResolvedValue(mockInventory),
             update: jest.fn().mockResolvedValue({

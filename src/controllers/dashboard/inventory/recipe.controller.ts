@@ -106,6 +106,24 @@ export async function addRecipeLine(req: Request, res: Response, next: NextFunct
 }
 
 /**
+ * Update a single recipe line (inline edit: quantity, unit, optional flag, notes)
+ */
+export async function updateRecipeLine(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, productId, recipeLineId } = req.params
+    const staffId = (req as any).authContext?.userId
+    const recipeLine = await recipeService.updateRecipeLine(venueId, productId, recipeLineId, req.body, staffId)
+    res.json({
+      success: true,
+      message: 'Recipe line updated',
+      data: recipeLine,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * Remove an ingredient from a recipe
  */
 export async function removeRecipeLine(req: Request, res: Response, next: NextFunction) {
