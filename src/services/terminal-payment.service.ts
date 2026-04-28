@@ -5,7 +5,7 @@
  * iOS sends POST → backend holds connection → emits to terminal →
  * terminal processes payment → emits result → backend resolves HTTP response.
  *
- * Uses a pending payment store with 60-second TTL.
+ * Uses a pending payment store with a long TTL so TPV retry attempts can complete.
  */
 
 import { v4 as uuidv4 } from 'uuid'
@@ -29,7 +29,7 @@ export interface TerminalPaymentRequest {
 
 export interface TerminalPaymentResult {
   requestId: string
-  status: 'success' | 'failed' | 'timeout'
+  status: 'success' | 'failed' | 'cancelled' | 'timeout'
   paymentId?: string
   transactionId?: string
   cardDetails?: {
@@ -44,6 +44,20 @@ export interface TerminalPaymentResult {
   }
 }
 
+export interface TerminalReceiptPrintRequest {
+  terminalId: string
+  venueId: string
+  requestedBy: string
+  requestId?: string
+  receipt: Record<string, unknown>
+}
+
+export interface TerminalReceiptPrintResult {
+  requestId: string
+  status: 'success' | 'failed' | 'timeout'
+  errorMessage?: string
+}
+
 interface PendingPayment {
   resolve: (result: TerminalPaymentResult) => void
   reject: (error: Error) => void
@@ -54,10 +68,22 @@ interface PendingPayment {
   createdAt: Date
 }
 
-const PAYMENT_TIMEOUT_MS = 60_000 // 60 seconds
+interface PendingReceiptPrint {
+  resolve: (result: TerminalReceiptPrintResult) => void
+  reject: (error: Error) => void
+  timeout: NodeJS.Timeout
+  requestId: string
+  terminalId: string
+  venueId: string
+  createdAt: Date
+}
+
+const PAYMENT_TIMEOUT_MS = 300_000 // 5 minutes
+const RECEIPT_PRINT_TIMEOUT_MS = 30_000 // 30 seconds
 
 class TerminalPaymentService {
   private pendingPayments = new Map<string, PendingPayment>()
+  private pendingReceiptPrints = new Map<string, PendingReceiptPrint>()
 
   /**
    * Send a payment request to a terminal and wait for the result.
@@ -118,7 +144,7 @@ class TerminalPaymentService {
         resolve({
           requestId,
           status: 'timeout',
-          errorMessage: 'La terminal no respondió en 60 segundos',
+          errorMessage: 'La terminal no respondió en 5 minutos',
         })
       }, PAYMENT_TIMEOUT_MS)
 
@@ -184,6 +210,84 @@ class TerminalPaymentService {
   }
 
   /**
+   * Send a receipt print request to a terminal and wait for the result.
+   */
+  async printReceiptOnTerminal(request: TerminalReceiptPrintRequest): Promise<TerminalReceiptPrintResult> {
+    const { terminalId, venueId } = request
+    const terminalEntry = terminalRegistry.getTerminal(terminalId)
+    if (!terminalEntry) {
+      throw new Error(`La terminal ${terminalId} no está conectada`)
+    }
+    if (!terminalEntry.socketId) {
+      throw new Error(`La terminal ${terminalId} está registrada pero no tiene conexión de socket. Reinicia la app de la terminal.`)
+    }
+    const socketId = terminalEntry.socketId
+
+    const io = socketManager.getServer()
+    if (!io) {
+      throw new Error('Servidor de Socket.IO no inicializado')
+    }
+
+    const requestId = request.requestId || uuidv4()
+
+    return new Promise<TerminalReceiptPrintResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingReceiptPrints.delete(requestId)
+        logger.warn(`⏰ [TerminalReceiptPrint] Request timed out`, { requestId, terminalId })
+        resolve({
+          requestId,
+          status: 'timeout',
+          errorMessage: 'La terminal no respondió a la impresión',
+        })
+      }, RECEIPT_PRINT_TIMEOUT_MS)
+
+      this.pendingReceiptPrints.set(requestId, {
+        resolve,
+        reject,
+        timeout,
+        requestId,
+        terminalId,
+        venueId,
+        createdAt: new Date(),
+      })
+
+      io.to(socketId).emit('terminal:print_receipt_request', {
+        requestId,
+        terminalId,
+        venueId,
+        receipt: request.receipt,
+        timestamp: new Date().toISOString(),
+      })
+      logger.info(`🖨️ [TerminalReceiptPrint] Emitted to socket ${socketId}`, { requestId, terminalId })
+    })
+  }
+
+  /**
+   * Handle receipt print result from a terminal.
+   */
+  handleReceiptPrintResult(result: TerminalReceiptPrintResult): boolean {
+    const pending = this.pendingReceiptPrints.get(result.requestId)
+    if (!pending) {
+      logger.warn(`⚠️ [TerminalReceiptPrint] No pending print request for requestId`, {
+        requestId: result.requestId,
+      })
+      return false
+    }
+
+    clearTimeout(pending.timeout)
+    this.pendingReceiptPrints.delete(result.requestId)
+
+    logger.info(`🖨️ [TerminalReceiptPrint] Result received`, {
+      requestId: result.requestId,
+      status: result.status,
+      terminalId: pending.terminalId,
+    })
+
+    pending.resolve(result)
+    return true
+  }
+
+  /**
    * Cancel a pending payment and notify the terminal.
    * requestId ensures TPV only cancels if it's still processing THAT specific payment.
    */
@@ -216,7 +320,7 @@ class TerminalPaymentService {
         this.pendingPayments.delete(requestId)
         pending.resolve({
           requestId,
-          status: 'failed',
+          status: 'cancelled',
           errorMessage: 'Cancelado por el usuario',
         })
       }

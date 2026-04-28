@@ -1316,6 +1316,17 @@ router.post(
 )
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/terminals/:terminalId/print-receipt
+ * Print a receipt on a connected TPV terminal.
+ */
+router.post(
+  '/venues/:venueId/terminals/:terminalId/print-receipt',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  terminalPaymentMobileController.printReceiptOnTerminal,
+)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/terminals/online
  * List terminals currently connected via Socket.IO.
  */

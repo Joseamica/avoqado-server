@@ -16,7 +16,7 @@ import { validateStaffVenue } from '../../utils/staff-venue.util'
  * POST /api/v1/mobile/venues/:venueId/terminal-payment
  *
  * Send a payment request to a specific terminal.
- * Long-polls until the terminal responds or 60s timeout.
+ * Long-polls until the terminal succeeds, is cancelled, or reaches the server timeout.
  */
 export async function sendTerminalPayment(req: Request, res: Response) {
   try {
@@ -77,7 +77,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       requestId, // Client-generated for cancel tracking
     })
 
-    const httpStatus = result.status === 'success' ? 200 : result.status === 'timeout' ? 504 : 422
+    const httpStatus = result.status === 'success' ? 200 : result.status === 'timeout' ? 504 : result.status === 'cancelled' ? 409 : 422
 
     return res.status(httpStatus).json({
       success: result.status === 'success',
@@ -115,6 +115,70 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       venueId: req.params.venueId,
       terminalId: req.body.terminalId,
       amountCents: req.body.amountCents,
+    })
+
+    return res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+    })
+  }
+}
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/terminals/:terminalId/print-receipt
+ *
+ * Send a receipt snapshot to a TPV terminal for physical printing.
+ */
+export async function printReceiptOnTerminal(req: Request, res: Response) {
+  try {
+    const { venueId, terminalId } = req.params
+    const { requestId, receipt } = req.body
+    const userId = (req as any).authContext?.userId
+
+    if (!terminalId || !receipt) {
+      return res.status(400).json({
+        success: false,
+        message: 'terminalId y receipt son requeridos',
+      })
+    }
+
+    const terminal = terminalRegistry.getTerminal(terminalId)
+    if (terminal && terminal.venueId !== venueId) {
+      return res.status(403).json({
+        success: false,
+        message: 'La terminal no pertenece a este establecimiento',
+      })
+    }
+
+    const result = await terminalPaymentService.printReceiptOnTerminal({
+      terminalId,
+      venueId,
+      requestedBy: userId,
+      requestId,
+      receipt,
+    })
+
+    const httpStatus = result.status === 'success' ? 200 : result.status === 'timeout' ? 504 : 422
+    return res.status(httpStatus).json({
+      success: result.status === 'success',
+      ...result,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Error desconocido'
+
+    if (message.includes('no está conectada')) {
+      return res.status(404).json({ success: false, message })
+    }
+
+    if (message.includes('no tiene conexión de socket')) {
+      return res.status(422).json({ success: false, message })
+    }
+
+    logger.error('Error in printReceiptOnTerminal', {
+      error: message,
+      stack: error instanceof Error ? error.stack : undefined,
+      venueId: req.params.venueId,
+      terminalId: req.params.terminalId,
     })
 
     return res.status(500).json({
