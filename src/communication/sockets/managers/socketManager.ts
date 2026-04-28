@@ -339,10 +339,11 @@ export class SocketManager implements ISocketManager {
     // Terminal Payment Result (TPV → Server → iOS HTTP response)
     socket.on('terminal:payment_result', (payload, callback) => {
       try {
-        const { requestId, status, transactionId, cardDetails, errorMessage, receipt } = payload
+        const { requestId, status, paymentId, transactionId, cardDetails, errorMessage, receipt } = payload
         logger.info('💳 Terminal payment result received', {
           requestId,
           status,
+          paymentId,
           transactionId,
           socketId: socket.id,
         })
@@ -350,6 +351,7 @@ export class SocketManager implements ISocketManager {
         const handled = terminalPaymentService.handlePaymentResult({
           requestId,
           status,
+          paymentId,
           transactionId,
           cardDetails,
           errorMessage,
@@ -359,6 +361,33 @@ export class SocketManager implements ISocketManager {
         if (callback) callback({ success: handled })
       } catch (error) {
         logger.error('Error processing terminal payment result', {
+          socketId: socket.id,
+          payload,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        if (callback) callback({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+      }
+    })
+
+    // Terminal Receipt Print Result (TPV → Server → Android HTTP response)
+    socket.on('terminal:print_receipt_result', (payload, callback) => {
+      try {
+        const { requestId, status, errorMessage } = payload
+        logger.info('🖨️ Terminal receipt print result received', {
+          requestId,
+          status,
+          socketId: socket.id,
+        })
+
+        const handled = terminalPaymentService.handleReceiptPrintResult({
+          requestId,
+          status,
+          errorMessage,
+        })
+
+        if (callback) callback({ success: handled })
+      } catch (error) {
+        logger.error('Error processing terminal receipt print result', {
           socketId: socket.id,
           payload,
           error: error instanceof Error ? error.message : 'Unknown error',

@@ -524,7 +524,7 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showTipScreen: true,
   showReceiptScreen: true,
   defaultTipPercentage: null,
-  tipSuggestions: [15, 18, 20, 25],
+  tipSuggestions: [10, 15, 20],
   requirePinLogin: false,
   // Step 4: Verification disabled by default (only for retail/telecomunicaciones)
   showVerificationScreen: false,
