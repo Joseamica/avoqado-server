@@ -179,6 +179,25 @@ export interface RecipeListSummary {
 }
 
 /**
+ * Recipe usage ranking for the current venue.
+ */
+export interface RecipeUsageItem {
+  recipeId: string
+  productId: string
+  recipeName: string
+  productName: string
+  quantityUsed: number
+  orderCount: number
+  revenue: number
+}
+
+export interface RecipeUsageSummary {
+  totalRecipes: number
+  topRecipes: RecipeUsageItem[]
+  limit: number
+}
+
+/**
  * Pending orders statistics by status
  */
 export interface PendingOrdersStats {
@@ -803,6 +822,73 @@ export class SharedQueryService {
         productName: recipe.product.name,
         portionYield: Number(recipe.portionYield ?? 0),
         totalCost: Number(recipe.totalCost ?? 0),
+      })),
+    }
+  }
+
+  /**
+   * Get recipe usage ranked by order item quantity.
+   *
+   * Used by:
+   * - AI Chatbot for "¿qué receta se usa más?" queries
+   *
+   * @param venueId - Venue ID (multi-tenant isolation)
+   * @param limit - Max recipes to return in chat response
+   * @returns Total active recipes plus top recipes by usage
+   */
+  static async getRecipeUsage(venueId: string, limit = 5): Promise<RecipeUsageSummary> {
+    const totalRecipes = await prisma.recipe.count({
+      where: {
+        product: {
+          venueId,
+          active: true,
+          deletedAt: null,
+        },
+      },
+    })
+
+    const topRecipes = await prisma.$queryRaw<
+      Array<{
+        recipeId: string
+        productId: string
+        productName: string
+        quantityUsed: bigint
+        orderCount: bigint
+        revenue: Prisma.Decimal
+      }>
+    >`
+      SELECT
+        r."id" as "recipeId",
+        p."id" as "productId",
+        p."name" as "productName",
+        COALESCE(SUM(oi."quantity"), 0)::bigint as "quantityUsed",
+        COUNT(DISTINCT o."id")::bigint as "orderCount",
+        COALESCE(SUM(oi."total"), 0) as "revenue"
+      FROM "Recipe" r
+      INNER JOIN "Product" p ON r."productId" = p."id"
+      INNER JOIN "OrderItem" oi ON oi."productId" = p."id"
+      INNER JOIN "Order" o ON oi."orderId" = o."id"
+      WHERE p."venueId"::text = ${venueId}
+        AND p."active" = true
+        AND p."deletedAt" IS NULL
+        AND o."venueId"::text = ${venueId}
+        AND o."status" NOT IN ('CANCELLED', 'DELETED')
+      GROUP BY r."id", p."id", p."name"
+      ORDER BY "quantityUsed" DESC, "revenue" DESC, p."name" ASC
+      LIMIT ${limit}
+    `
+
+    return {
+      totalRecipes,
+      limit,
+      topRecipes: topRecipes.map(recipe => ({
+        recipeId: recipe.recipeId,
+        productId: recipe.productId,
+        recipeName: recipe.productName,
+        productName: recipe.productName,
+        quantityUsed: Number(recipe.quantityUsed),
+        orderCount: Number(recipe.orderCount),
+        revenue: recipe.revenue?.toNumber() || 0,
       })),
     }
   }

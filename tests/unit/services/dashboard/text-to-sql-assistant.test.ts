@@ -198,6 +198,29 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.requiresDateRange).toBe(false)
     })
 
+    it('should classify recipe usage queries before recipe count queries', () => {
+      const query = 'me gustaria saber cuantas recetas tengo y la que mas se usa'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('recipeUsage')
+      expect(classification.requiresDateRange).toBe(false)
+    })
+
+    it('should route anaphoric recipe usage follow-ups using recent recipe context', async () => {
+      // @ts-expect-error - accessing private method for testing
+      const routed = await service.routeWithLLM('cual es la que mas se usa', [
+        { role: 'user', content: 'me gustaria saber cuantas recetas tengo' },
+        { role: 'assistant', content: 'Tienes 24 recetas activas en tu inventario.' },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('recipeUsage')
+      expect(routed.classification.requiresDateRange).toBe(false)
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
     it('should keep product count queries as complex', () => {
       const query = 'cuantos productos tengo'
       // @ts-expect-error - accessing private method for testing

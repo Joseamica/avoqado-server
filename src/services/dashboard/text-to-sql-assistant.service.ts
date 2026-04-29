@@ -286,6 +286,7 @@ interface IntentClassificationResult {
     | 'inventoryAlerts'
     | 'recipeCount'
     | 'recipeList'
+    | 'recipeUsage'
     | 'pendingOrders'
     | 'activeShifts'
     | 'profitAnalysis'
@@ -380,6 +381,7 @@ class TextToSqlAssistantService {
     inventoryAlerts: ['RawMaterial'],
     recipeCount: ['Recipe', 'Product'],
     recipeList: ['Recipe', 'Product'],
+    recipeUsage: ['Recipe', 'Product', 'OrderItem', 'Order'],
     pendingOrders: ['Order'],
     activeShifts: ['Shift', 'Staff', 'Order'],
     profitAnalysis: ['Payment', 'OrderItem', 'Order', 'Product', 'Recipe'],
@@ -2496,6 +2498,32 @@ Ejemplos de respuestas CORRECTAS:
               break
             }
 
+            case 'recipeUsage': {
+              const recipeSummary = await SharedQueryService.getRecipeUsage(query.venueId, 5)
+              if (recipeSummary.totalRecipes === 0) {
+                naturalResponse = '📭 No tienes recetas activas configuradas en este momento.'
+              } else if (recipeSummary.topRecipes.length === 0) {
+                naturalResponse = `📚 Tienes ${recipeSummary.totalRecipes} recetas activas, pero todavía no hay ventas registradas para calcular cuál se usa más.`
+              } else {
+                const topRecipe = recipeSummary.topRecipes[0]
+                const recipeLines = recipeSummary.topRecipes
+                  .map(
+                    (recipe, index) => `${index + 1}. ${recipe.recipeName} (${recipe.quantityUsed} usados en ${recipe.orderCount} órdenes)`,
+                  )
+                  .join('\n')
+                naturalResponse = [
+                  `📚 Tienes ${recipeSummary.totalRecipes} recetas activas.`,
+                  '',
+                  `La receta que más se usa es **${topRecipe.recipeName}**: ${topRecipe.quantityUsed} usados en ${topRecipe.orderCount} órdenes.`,
+                  '',
+                  'Top recetas por uso:',
+                  recipeLines,
+                ].join('\n')
+              }
+              serviceResult = recipeSummary
+              break
+            }
+
             case 'pendingOrders': {
               // Real-time query - no date range needed
               const pendingStats = await SharedQueryService.getPendingOrders(query.venueId)
@@ -3489,6 +3517,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         type: 'bar',
         title: 'Recetas Activas',
       },
+      recipeUsage: {
+        type: 'bar',
+        title: 'Recetas Más Usadas',
+      },
     }
 
     const config = chartConfigs[intent]
@@ -3804,6 +3836,25 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
               xAxis: { key: 'name', label: 'Receta' },
               yAxis: { key: 'costo', label: 'Costo unitario' },
               dataKeys: [{ key: 'costo', label: 'Costo unitario', color: '#3b82f6' }],
+            },
+          }
+        }
+
+        case 'recipeUsage': {
+          if (!Array.isArray(data?.topRecipes) || data.topRecipes.length === 0) {
+            return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.NO_DATA }
+          }
+          return {
+            type: 'bar',
+            title: 'Recetas Más Usadas',
+            data: data.topRecipes.map((recipe: any) => ({
+              name: recipe.recipeName || recipe.productName || 'Receta',
+              total: recipe.quantityUsed || 0,
+            })),
+            config: {
+              xAxis: { key: 'name', label: 'Receta' },
+              yAxis: { key: 'total', label: 'Usos' },
+              dataKeys: [{ key: 'total', label: 'Usos', color: '#10b981' }],
             },
           }
         }
@@ -6040,9 +6091,25 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
    */
   private classifyIntent(message: string): IntentClassificationResult {
     const lowerMessage = message.toLowerCase().trim()
+    const normalizedMessage = this.normalizeTextForMatch(message)
 
     // Extract date range with explicit flag (for transparency in responses)
     const { dateRange, wasExplicit } = this.extractDateRangeWithExplicit(lowerMessage)
+
+    const asksRecipeUsage =
+      /\b(recetas?|recipe)\b/.test(normalizedMessage) &&
+      /\b(mas\s+(se\s+)?(usa|usan|usada|usadas|vendida|vendidas|pedido|pedida|pedidas)|top|ranking|popular|populares)\b/.test(
+        normalizedMessage,
+      )
+    if (asksRecipeUsage) {
+      return {
+        isSimpleQuery: true,
+        intent: 'recipeUsage',
+        confidence: 0.95,
+        reason: 'Detected recipe usage ranking query (real-time, no date range needed)',
+        requiresDateRange: false,
+      }
+    }
 
     // Special-case: "cuántas recetas tengo" should be treated as a simple real-time query.
     const asksRecipeCount =
@@ -6423,6 +6490,42 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     classification: IntentClassificationResult
     tokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number }
   }> {
+    const deterministicClassification = this.classifyIntent(message)
+    if (
+      deterministicClassification.isSimpleQuery &&
+      deterministicClassification.intent &&
+      this.isRealTimeSharedIntent(deterministicClassification.intent)
+    ) {
+      return {
+        classification: {
+          ...deterministicClassification,
+          reason: `${deterministicClassification.reason}; deterministic real-time intent pre-route`,
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }
+    }
+
+    const normalizedMessage = this.normalizeTextForMatch(message)
+    const asksAnaphoricRecipeUsage =
+      /\b(cual|cu[aá]l|la|el)\b.*\b(mas\s+(se\s+)?(usa|usan|usada|usadas|vendida|vendidas|pedido|pedida|pedidas)|popular)\b/.test(
+        normalizedMessage,
+      )
+    const recentHistoryMentionsRecipes =
+      conversationHistory?.slice(-4).some(turn => /\b(recetas?|recipe)\b/.test(this.normalizeTextForMatch(turn.content))) ?? false
+
+    if (asksAnaphoricRecipeUsage && recentHistoryMentionsRecipes) {
+      return {
+        classification: {
+          isSimpleQuery: true,
+          intent: 'recipeUsage',
+          confidence: 0.9,
+          reason: 'Detected recipe usage follow-up from recent recipe context',
+          requiresDateRange: false,
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }
+    }
+
     // Build conversation context string for the LLM (last 4 turns max)
     let conversationContext = ''
     if (conversationHistory && conversationHistory.length > 0) {
@@ -6445,6 +6548,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - inventoryAlerts: inventario bajo, stock faltante, qué me falta (dateRange=null)
 - recipeCount: cuántas recetas tengo, total de recetas en inventario (dateRange=null)
 - recipeList: cuáles/qué recetas tengo, lista de recetas, muéstrame recetas (dateRange=null)
+- recipeUsage: receta más usada/vendida/popular, qué receta se usa más, cuántas recetas tengo y cuál se usa más (dateRange=null)
 - pendingOrders: órdenes pendientes, pedidos abiertos (dateRange=null)
 - activeShifts: turnos activos, quién trabaja AHORA, quién está en turno (dateRange=null). SOLO para saber quién está trabajando en este momento
 - profitAnalysis: utilidad, márgenes, ganancias, costos
@@ -6474,11 +6578,11 @@ REGLAS CRÍTICAS:
    - Si pregunta "cuántas órdenes hay", "qué método de pago se usa más", "cuántas reseñas" SIN periodo → dateRange="allTime", wasDateExplicit=false (quiere el total, no solo este mes)
    - Si pregunta "cuánto vendí", "ventas", "ticket promedio" SIN periodo → dateRange="thisMonth", wasDateExplicit=false
    - La regla: preguntas de TOTALES/CONTEO sin periodo → allTime. Preguntas de RENDIMIENTO/VENTAS sin periodo → thisMonth
-7. Para inventoryAlerts/recipeCount/recipeList/pendingOrders/activeShifts → dateRange=null
+7. Para inventoryAlerts/recipeCount/recipeList/recipeUsage/pendingOrders/activeShifts → dateRange=null
 8. "today"/"yesterday"/"this week" en inglés = today/yesterday/thisWeek (SIMPLE, no complejo)
 9. "cuántos meseros/empleados tengo" / "cuántos productos tengo" / "cuántas mesas tengo" → complex (es un conteo que necesita SQL). NO es activeShifts
 10. activeShifts es SOLO para "quién trabaja AHORA" / "turnos abiertos". NO para conteo de staff total
-11. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList
+11. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList. "qué receta se usa más" / "cuál es la que más se usa" con contexto de recetas → recipeUsage
 
 dateRanges válidos: today, yesterday, thisWeek, lastWeek, thisMonth, lastMonth, last7days, last30days, allTime, null
 
@@ -6554,6 +6658,7 @@ Responde SOLO JSON (sin markdown):
         'inventoryAlerts',
         'recipeCount',
         'recipeList',
+        'recipeUsage',
         'pendingOrders',
         'activeShifts',
         'profitAnalysis',
@@ -6655,7 +6760,7 @@ Responde SOLO JSON (sin markdown):
   }
 
   private isRealTimeSharedIntent(intent: string): boolean {
-    return ['inventoryAlerts', 'recipeCount', 'recipeList', 'pendingOrders', 'activeShifts'].includes(intent)
+    return ['inventoryAlerts', 'recipeCount', 'recipeList', 'recipeUsage', 'pendingOrders', 'activeShifts'].includes(intent)
   }
 
   /** @deprecated Use routeWithLLM instead. Kept as fallback when LLM is unavailable. */
@@ -7048,7 +7153,7 @@ Responde SOLO JSON (sin markdown):
     const newDateRange = this.extractDateRange(message.toLowerCase())
 
     // Real-time intents don't need date ranges
-    const realTimeIntents = ['inventoryAlerts', 'recipeCount', 'recipeList', 'pendingOrders', 'activeShifts']
+    const realTimeIntents = ['inventoryAlerts', 'recipeCount', 'recipeList', 'recipeUsage', 'pendingOrders', 'activeShifts']
     const isPreviousRealTime = realTimeIntents.includes(context.previousIntent as string)
 
     // If we have a new date range or previous was real-time, inherit the intent
