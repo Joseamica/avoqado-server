@@ -1793,14 +1793,11 @@ Ejemplos de respuestas CORRECTAS:
           })
         }
 
-        // When mutations are enabled, CRUD messages (crear, eliminar, actualizar, etc.)
-        // are legitimate commands, not injection attempts. Skip the block if the message
-        // looks like a CRUD operation and mutations are enabled.
-        const isCrudMessage =
-          CHATBOT_MUTATIONS_ENABLED &&
-          /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|cambia|cambiar|ajusta|ajustar|registra|registrar|recib[eio]|recibir|aprob[ao]|aprobar|cancel[ao]|cancelar|desactiva|desactivar|modifica|modificar|dar de alta|quita|quitar|pon[me]*|reconoc[eo]|reconocer|resuelv[eo]|resolver|reactiva|reactivar|rechaz[ao]|rechazar|envi[ao]|enviar|manda|mandar|aplica|aplicar|recalcula|recalcular|dismiss|add|create|delete|remove|update|adjust|resolve|acknowledge)\b/i.test(
-            query.message,
-          )
+        // CRUD messages (crear, eliminar, actualizar, etc.) are legitimate
+        // business commands, not prompt injection. This must not depend on
+        // CHATBOT_ENABLE_MUTATIONS: if mutations are disabled, the user should
+        // get a read-only/unsupported response, not a security false-positive.
+        const isCrudMessage = this.isCrudMutationMessage(query.message)
         const crudMessageHasInjectionSignals = isCrudMessage && this.hasExplicitPromptInjectionSignals(query.message)
 
         const shouldBypassSemanticBlock = this.shouldBypassSemanticInjectionBlock(query.message)
@@ -5929,6 +5926,12 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       /\b(schema|esquema|information_schema|pg_catalog|tablas internas|internal tables)\b/.test(normalizedMessage) ||
       /\b(admin|superadmin|root|permisos?|permissions?|escalate|privilegios?)\b/.test(normalizedMessage) ||
       /<\/?(system|assistant|user)>|\[(system|assistant|user)\]/i.test(message)
+    )
+  }
+
+  private isCrudMutationMessage(message: string): boolean {
+    return /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|cambia|cambiar|ajusta|ajustar|registra|registrar|recib[eio]|recibir|aprob[ao]|aprobar|cancel[ao]|cancelar|desactiva|desactivar|modifica|modificar|dar de alta|quita|quitar|pon[me]*|reconoc[eo]|reconocer|resuelv[eo]|resolver|reactiva|reactivar|rechaz[ao]|rechazar|envi[ao]|enviar|manda|mandar|aplica|aplicar|recalcula|recalcular|dismiss|add|create|delete|remove|update|adjust|resolve|acknowledge)\b/i.test(
+      message,
     )
   }
 

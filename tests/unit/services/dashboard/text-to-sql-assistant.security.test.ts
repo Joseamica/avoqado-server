@@ -10,10 +10,13 @@ import textToSqlAssistantService from '@/services/dashboard/text-to-sql-assistan
 describe('TextToSqlAssistantService security helpers', () => {
   const service = textToSqlAssistantService as unknown as {
     hasExplicitPromptInjectionSignals(message: string): boolean
+    isCrudMutationMessage(message: string): boolean
     shouldBypassSemanticInjectionBlock(message: string): boolean
   }
 
-  it('should not treat normal inventory CRUD wording as prompt injection', () => {
+  it('should detect normal inventory CRUD wording without treating it as prompt injection', () => {
+    expect(service.isCrudMutationMessage('quiero modificar mi inventario')).toBe(true)
+    expect(service.isCrudMutationMessage('ajusta el stock de tomate en -3 kilos por merma')).toBe(true)
     expect(service.hasExplicitPromptInjectionSignals('quiero modificar mi inventario')).toBe(false)
     expect(service.hasExplicitPromptInjectionSignals('ajusta el stock de tomate en -3 kilos por merma')).toBe(false)
   })
