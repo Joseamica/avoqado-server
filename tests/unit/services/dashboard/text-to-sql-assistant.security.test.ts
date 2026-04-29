@@ -1,3 +1,6 @@
+// Mock OPENAI_API_KEY before importing service (constructor throws otherwise)
+process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-api-key-for-unit-tests'
+
 import textToSqlAssistantService from '@/services/dashboard/text-to-sql-assistant.service'
 
 describe('TextToSqlAssistantService security helpers', () => {
