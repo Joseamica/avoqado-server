@@ -1,5 +1,9 @@
-// Mock OPENAI_API_KEY before importing service (constructor throws otherwise)
+// Seed env vars BEFORE importing service:
+// - OPENAI_API_KEY: constructor throws without it.
+// - CHATBOT_ENABLE_MUTATIONS: numeric disambiguation bypass is gated behind this flag
+//   and read at module-load time, so it must be set before import.
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-api-key-for-unit-tests'
+process.env.CHATBOT_ENABLE_MUTATIONS = 'true'
 
 import textToSqlAssistantService from '@/services/dashboard/text-to-sql-assistant.service'
 
