@@ -403,7 +403,7 @@ export const inventoryActions: ActionDefinition[] = [
     },
     previewTemplate: {
       title: 'Ajustar stock: {{name}}',
-      summary: 'Se ajustará el stock del insumo "{{name}}" en {{quantity}} unidades. Tipo: {{type}}.',
+      summary: 'Se ajustará el stock del insumo "{{entityName}}" en {{quantity}} {{unit}}. Tipo: {{type}}.',
       showDiff: true,
       showImpact: true,
     },

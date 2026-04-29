@@ -38,10 +38,19 @@ const mockPrisma = prisma as unknown as {
 
 jest.mock('@/lib/permissions', () => ({
   hasPermission: jest.fn(),
+  evaluatePermissionList: jest.fn(),
 }))
 
-import { hasPermission } from '@/lib/permissions'
+import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 const mockHasPermission = hasPermission as jest.Mock
+const mockEvaluatePermissionList = evaluatePermissionList as jest.Mock
+
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+}))
+
+import { logAction } from '@/services/dashboard/activity-log.service'
+const mockLogAction = logAction as jest.Mock
 
 // ---------------------------------------------------------------------------
 // Mock logger
@@ -265,6 +274,7 @@ describe('ActionEngine', () => {
 
     // Default: hasPermission returns true
     mockHasPermission.mockReturnValue(true)
+    mockEvaluatePermissionList.mockReturnValue(true)
 
     // Default: prisma.$transaction passthrough
     mockPrisma.$transaction.mockImplementation((fn: () => unknown) => fn())
@@ -318,6 +328,15 @@ describe('ActionEngine', () => {
       expect(confirmResult.message).toBe('Listo.')
       expect(confirmResult.entityId).toBe('rm-new-1')
       expect(mockService.createRawMaterial).toHaveBeenCalled()
+      expect(mockLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          staffId: USER_ID,
+          venueId: VENUE_ID,
+          action: 'chatbot.rawMaterial.create.confirmed',
+          entity: 'RawMaterial',
+          entityId: 'rm-new-1',
+        }),
+      )
     })
   })
 
@@ -360,6 +379,30 @@ describe('ActionEngine', () => {
       expect(result.message).toBe('No tienes permiso para esta acción.')
       // Entity resolver should NOT have been called
       expect(mockResolver.resolve).not.toHaveBeenCalled()
+    })
+
+    it('should evaluate effective permissions without falling back to role defaults', async () => {
+      const definition = makeUpdateDefinition()
+      actionRegistry.register(definition)
+      mockHasPermission.mockReturnValue(true)
+      mockEvaluatePermissionList.mockReturnValue(false)
+
+      const result = await engine.processAction(
+        makeClassification({
+          actionType: 'rawMaterial.update',
+          params: { costPerUnit: 100 },
+          entityName: 'Carne',
+        }),
+        makeContext({
+          role: StaffRole.MANAGER,
+          permissions: [],
+          permissionsAreEffective: true,
+        }),
+      )
+
+      expect(result.type).toBe('permission_denied')
+      expect(mockEvaluatePermissionList).toHaveBeenCalledWith([], 'rawMaterial:update')
+      expect(mockHasPermission).not.toHaveBeenCalled()
     })
   })
 
@@ -421,10 +464,79 @@ describe('ActionEngine', () => {
       const result = await engine.processAction(classification, makeContext())
 
       expect(result.type).toBe('disambiguate')
-      expect(result.message).toBe('¿Cuál de estas?')
+      expect(result.message).toContain('Encontré varias opciones')
+      expect(result.message).toContain('1. Carne Molida')
+      expect(result.message).toContain('2. Carne de Res')
+      expect(result.message).toContain('nombre exacto')
       expect(result.candidates).toHaveLength(2)
       expect(result.candidates![0].name).toBe('Carne Molida')
       expect(result.candidates![1].name).toBe('Carne de Res')
+    })
+
+    it('should continue the original action after the user selects a candidate by number', async () => {
+      const definition = makeUpdateDefinition()
+      actionRegistry.register(definition)
+
+      const candidates: EntityMatch[] = [
+        { id: 'rm-1', name: 'Carne Molida', score: 0.9 },
+        { id: 'rm-2', name: 'Carne de Res', score: 0.85 },
+      ]
+      mockResolver.resolve.mockResolvedValue({
+        matches: 2,
+        candidates,
+        exact: false,
+      } satisfies EntityResolutionResult)
+
+      const context = makeContext()
+      const classification = makeClassification({
+        actionType: 'rawMaterial.update',
+        params: { costPerUnit: 100 },
+        entityName: 'Carne',
+      })
+
+      const firstResult = await engine.processAction(classification, context)
+      expect(firstResult.type).toBe('disambiguate')
+
+      const preview = makePreview('continued-action-id', 'medium')
+      mockPreview.generatePreview.mockResolvedValue(preview)
+
+      const continued = await engine.continueDisambiguation('2', context)
+
+      expect(continued?.type).toBe('preview')
+      expect(continued?.actionId).toBe('continued-action-id')
+      expect(mockPreview.generatePreview).toHaveBeenCalledWith(definition, classification.params, candidates[1], context)
+    })
+
+    it('should repeat candidates when disambiguation selection is not exact', async () => {
+      const definition = makeUpdateDefinition()
+      actionRegistry.register(definition)
+
+      const candidates: EntityMatch[] = [
+        { id: 'rm-1', name: 'Tomate Roma', score: 0.9 },
+        { id: 'rm-2', name: 'tomate rojo', score: 0.85 },
+      ]
+      mockResolver.resolve.mockResolvedValue({
+        matches: 2,
+        candidates,
+        exact: false,
+      } satisfies EntityResolutionResult)
+
+      const context = makeContext()
+      await engine.processAction(
+        makeClassification({
+          actionType: 'rawMaterial.update',
+          params: { costPerUnit: 100 },
+          entityName: 'tomate',
+        }),
+        context,
+      )
+
+      const continued = await engine.continueDisambiguation('tomate', context)
+
+      expect(continued?.type).toBe('disambiguate')
+      expect(continued?.message).toContain('1. Tomate Roma')
+      expect(continued?.message).toContain('2. tomate rojo')
+      expect(mockPreview.generatePreview).not.toHaveBeenCalled()
     })
   })
 

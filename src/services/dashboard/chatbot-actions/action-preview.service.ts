@@ -125,6 +125,7 @@ export class ActionPreviewService {
 
     // Build template data: merge params + resolved entity name if available
     const templateData: Record<string, unknown> = {
+      ...(targetEntity?.data ?? {}),
       ...params,
       ...(targetEntity ? { entityName: targetEntity.name } : {}),
     }
@@ -150,7 +151,12 @@ export class ActionPreviewService {
     // Build diff if requested and we have a target entity with data
     let diff: Record<string, { before: unknown; after: unknown }> | undefined
     if (definition.previewTemplate.showDiff && targetEntity?.data) {
-      const built = this.buildDiff(targetEntity.data as Record<string, unknown>, params)
+      const diffParams = { ...params }
+      if (definition.operation === 'custom' && definition.entityResolution?.searchField) {
+        delete diffParams[definition.entityResolution.searchField]
+      }
+
+      const built = this.buildDiff(targetEntity.data as Record<string, unknown>, diffParams)
       if (Object.keys(built).length > 0) {
         diff = built
       }

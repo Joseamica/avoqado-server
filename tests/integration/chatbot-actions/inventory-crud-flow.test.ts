@@ -55,10 +55,16 @@ const mockPrisma = prisma as unknown as {
 
 jest.mock('@/lib/permissions', () => ({
   hasPermission: jest.fn(),
+  evaluatePermissionList: jest.fn(),
 }))
 
-import { hasPermission } from '@/lib/permissions'
+import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 const mockHasPermission = hasPermission as jest.Mock
+const mockEvaluatePermissionList = evaluatePermissionList as jest.Mock
+
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+}))
 
 // ---------------------------------------------------------------------------
 // Mock rawMaterial service — avoid deep Prisma interaction inside adapters
@@ -157,6 +163,7 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
 
     // Default: permission granted
     mockHasPermission.mockReturnValue(true)
+    mockEvaluatePermissionList.mockReturnValue(true)
 
     // Default: prisma.$transaction passthrough (calls the callback with no tx arg)
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn({}))

@@ -75,7 +75,7 @@ export class EntityResolverService {
       return { matches: 1, candidates: [match], exact: true, resolved: match }
     }
     if (exactRows.length > 1) {
-      const candidates = exactRows.map(r => ({ id: r.id, name: r.name, score: 1.0 }))
+      const candidates = exactRows.map(r => ({ id: r.id, name: r.name, score: 1.0, data: this.extractRowData(r) }))
       return { matches: candidates.length, candidates, exact: false }
     }
 
@@ -97,6 +97,7 @@ export class EntityResolverService {
           id: r.id,
           name: r.name,
           score: Number(r.score ?? 0),
+          data: this.extractRowData(r),
         }))
         return { matches: candidates.length, candidates, exact: false }
       }
@@ -111,7 +112,7 @@ export class EntityResolverService {
         return { matches: 1, candidates: [match], exact: false, resolved: match }
       }
       if (skuRows.length > 1) {
-        const candidates = skuRows.map(r => ({ id: r.id, name: r.name, score: 0.5 }))
+        const candidates = skuRows.map(r => ({ id: r.id, name: r.name, score: 0.5, data: this.extractRowData(r) }))
         return { matches: candidates.length, candidates, exact: false }
       }
     }
@@ -186,7 +187,7 @@ export class EntityResolverService {
       } else if (mode === 'fuzzy') {
         if (needsActiveFilter && hasActive) {
           return prisma.$queryRaw<RawEntityRow[]>`
-            SELECT id, name, similarity(name, ${searchTerm}) AS score
+            SELECT *, similarity(name, ${searchTerm}) AS score
             FROM "RawMaterial"
             WHERE similarity(name, ${searchTerm}) > 0.3
               AND "venueId" = ${venueId}
@@ -197,7 +198,7 @@ export class EntityResolverService {
           `
         } else if (needsDeletedFilter) {
           return prisma.$queryRaw<RawEntityRow[]>`
-            SELECT id, name, similarity(name, ${searchTerm}) AS score
+            SELECT *, similarity(name, ${searchTerm}) AS score
             FROM "RawMaterial"
             WHERE similarity(name, ${searchTerm}) > 0.3
               AND "venueId" = ${venueId}
@@ -207,7 +208,7 @@ export class EntityResolverService {
           `
         } else {
           return prisma.$queryRaw<RawEntityRow[]>`
-            SELECT id, name, similarity(name, ${searchTerm}) AS score
+            SELECT *, similarity(name, ${searchTerm}) AS score
             FROM "RawMaterial"
             WHERE similarity(name, ${searchTerm}) > 0.3
               AND "venueId" = ${venueId}

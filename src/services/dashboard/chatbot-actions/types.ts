@@ -81,6 +81,12 @@ export interface ActionContext {
   userId: string
   role: StaffRole
   permissions: string[] | null
+  /**
+   * True when `permissions` already contains the centralized, effective permission
+   * list for this user in this venue (including PermissionSet + white-label filtering).
+   * In that mode the Action Engine must not merge role defaults again.
+   */
+  permissionsAreEffective?: boolean
   ipAddress?: string
 }
 

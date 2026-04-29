@@ -1,6 +1,7 @@
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { hasPermission } from '@/lib/permissions'
+import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { actionRegistry } from './action-registry'
 import { ActionClassifierService } from './action-classifier.service'
 import { EntityResolverService } from './entity-resolver.service'
@@ -36,6 +37,15 @@ interface RateLimitEntry {
   timestamps: number[]
 }
 
+interface PendingDisambiguationSession {
+  definition: ActionDefinition
+  classification: ActionClassification
+  candidates: EntityMatch[]
+  context: ActionContext
+  createdAt: Date
+  expiresAt: Date
+}
+
 // ---------------------------------------------------------------------------
 // ActionEngine — main orchestrator
 // ---------------------------------------------------------------------------
@@ -49,6 +59,7 @@ export class ActionEngine {
 
   // In-memory stores
   private readonly pendingSessions = new Map<string, PendingActionSession>()
+  private readonly pendingDisambiguations = new Map<string, PendingDisambiguationSession>()
   private readonly idempotencyCache = new Map<string, ActionResponse>()
   private readonly mutationRates = new Map<string, RateLimitEntry>()
   private readonly deleteRates = new Map<string, RateLimitEntry>()
@@ -149,7 +160,7 @@ export class ActionEngine {
     this.sanitizeParams(classification.params)
 
     // Permission check
-    if (!hasPermission(context.role, context.permissions, definition.permission)) {
+    if (!this.hasRequiredPermission(context, definition.permission)) {
       return { type: 'permission_denied', message: 'No tienes permiso para esta acción.' }
     }
 
@@ -190,10 +201,22 @@ export class ActionEngine {
           // Clear winner — use it directly
           targetEntity = top
         } else {
+          this.storePendingDisambiguation(context, {
+            definition,
+            classification: {
+              ...classification,
+              params: { ...classification.params },
+            },
+            candidates: resolution.candidates,
+            context,
+            createdAt: new Date(),
+            expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+          })
+
           return {
             type: 'disambiguate',
-            message: '¿Cuál de estas?',
-            candidates: resolution.candidates,
+            message: this.buildDisambiguationMessage(resolution.candidates),
+            candidates: this.toPublicCandidates(resolution.candidates),
           }
         }
       } else {
@@ -201,6 +224,60 @@ export class ActionEngine {
       }
     }
 
+    return this.createPreviewSession(definition, classification, targetEntity, context)
+  }
+
+  /**
+   * Continue a previously disambiguated action. This lets the next chat message
+   * choose an entity without losing the original action params (quantity, reason,
+   * adjustment type, etc.).
+   */
+  async continueDisambiguation(message: string, context: ActionContext): Promise<ActionResponse | null> {
+    const key = this.getDisambiguationKey(context)
+    const session = this.pendingDisambiguations.get(key)
+    if (!session) {
+      return null
+    }
+
+    if (new Date() > session.expiresAt) {
+      this.pendingDisambiguations.delete(key)
+      return null
+    }
+
+    if (session.context.venueId !== context.venueId || session.context.userId !== context.userId) {
+      this.pendingDisambiguations.delete(key)
+      return { type: 'error', message: 'No tienes acceso a esta sesión.' }
+    }
+
+    if (!this.hasRequiredPermission(context, session.definition.permission)) {
+      this.pendingDisambiguations.delete(key)
+      return { type: 'permission_denied', message: 'No tienes permiso para esta acción.' }
+    }
+
+    const selected = this.resolveDisambiguationSelection(message, session.candidates)
+    if (!selected) {
+      return {
+        type: 'disambiguate',
+        message: this.buildDisambiguationMessage(session.candidates),
+        candidates: this.toPublicCandidates(session.candidates),
+      }
+    }
+
+    const rateLimitError = this.checkRateLimit(context.userId, session.definition.operation)
+    if (rateLimitError) {
+      return rateLimitError
+    }
+
+    this.pendingDisambiguations.delete(key)
+    return this.createPreviewSession(session.definition, session.classification, selected, context)
+  }
+
+  private async createPreviewSession(
+    definition: ActionDefinition,
+    classification: ActionClassification,
+    targetEntity: EntityMatch | undefined,
+    context: ActionContext,
+  ): Promise<ActionResponse> {
     // Missing fields
     const missingFields = this.fieldCollector.getMissingFields(definition, classification.params)
     if (missingFields.length > 0) {
@@ -300,12 +377,10 @@ export class ActionEngine {
       return { type: 'error', message: 'No tienes acceso a esta sesión.' }
     }
 
-    // TODO: In production, re-validate role by fetching fresh role from DB.
-    // For now, use the role from context.
     const currentRole = context.role
 
-    // Re-validate permission with current role
-    if (!hasPermission(currentRole, context.permissions, session.definition.permission)) {
+    // Re-validate permission with the fresh context provided by the caller.
+    if (!this.hasRequiredPermission({ ...context, role: currentRole }, session.definition.permission)) {
       return { type: 'permission_denied', message: 'No tienes permiso para esta acción.' }
     }
 
@@ -353,14 +428,44 @@ export class ActionEngine {
       return { type: 'error', message: `Error al ejecutar la acción: ${errMsg.substring(0, 200)}` }
     }
 
-    // TODO: Proper audit log — store before/after state in an AuditLog table.
-    // For now, log to console.
     logger.info('ActionEngine: action confirmed', {
       actionId,
       actionType: session.definition.actionType,
       userId: context.userId,
       venueId: context.venueId,
       entityId: result?.id,
+    })
+
+    logAction({
+      staffId: context.userId,
+      venueId: context.venueId,
+      action: `chatbot.${session.definition.actionType}.confirmed`,
+      entity: session.definition.entity,
+      entityId: (result?.id as string | undefined) ?? session.targetEntity?.id,
+      ipAddress: context.ipAddress,
+      data: {
+        actionId,
+        actionType: session.definition.actionType,
+        operation: session.definition.operation,
+        dangerLevel: session.definition.dangerLevel,
+        params: session.params,
+        targetEntity: session.targetEntity
+          ? {
+              id: session.targetEntity.id,
+              name: session.targetEntity.name,
+            }
+          : undefined,
+        preview: {
+          summary: session.preview.summary,
+          diff: session.preview.diff,
+          impact: session.preview.impact,
+        },
+        result: result
+          ? {
+              id: result.id,
+            }
+          : undefined,
+      } as any,
     })
 
     // Build response
@@ -544,6 +649,12 @@ export class ActionEngine {
       }
     }
 
+    for (const [key, session] of this.pendingDisambiguations) {
+      if (now > session.expiresAt) {
+        this.pendingDisambiguations.delete(key)
+      }
+    }
+
     // Also clean up idempotency cache entries that have been there too long.
     // The setTimeout-based TTL handles individual entries, but this is a safety net.
     // No-op for now since individual deletes handle it via setTimeout.
@@ -560,6 +671,18 @@ export class ActionEngine {
   private hasAnyMutationPermission(context: ActionContext): boolean {
     const { permissions } = context
 
+    if (context.permissionsAreEffective) {
+      return (permissions || []).some(
+        p =>
+          p === '*:*' ||
+          p.endsWith(':*') ||
+          p.includes(':create') ||
+          p.includes(':update') ||
+          p.includes(':adjust') ||
+          p.includes(':delete'),
+      )
+    }
+
     // If permissions list is null/empty, fall back to role-based defaults.
     // hasPermission handles this internally — we just check if any mutation
     // action could possibly succeed.
@@ -572,7 +695,66 @@ export class ActionEngine {
     }
 
     // Check if any permission string contains a mutation verb
-    return permissions.some(p => p.includes(':create') || p.includes(':update') || p.includes(':delete') || p === '*:*')
+    return permissions.some(
+      p => p.includes(':create') || p.includes(':update') || p.includes(':adjust') || p.includes(':delete') || p === '*:*',
+    )
+  }
+
+  /**
+   * Checks permissions without accidentally re-granting role defaults when the
+   * caller already supplied the centralized effective permission list.
+   */
+  private hasRequiredPermission(context: ActionContext, requiredPermission: string): boolean {
+    if (context.permissionsAreEffective) {
+      if (context.role === 'SUPERADMIN') {
+        return true
+      }
+      return evaluatePermissionList(context.permissions || [], requiredPermission)
+    }
+
+    return hasPermission(context.role, context.permissions, requiredPermission)
+  }
+
+  private buildDisambiguationMessage(candidates: EntityMatch[]): string {
+    const options = candidates
+      .slice(0, 5)
+      .map((candidate, index) => `${index + 1}. ${candidate.name}`)
+      .join('\n')
+
+    return ['Encontré varias opciones. ¿Cuál quieres usar?', options, 'Responde con el número o el nombre exacto para continuar.'].join(
+      '\n',
+    )
+  }
+
+  private toPublicCandidates(candidates: EntityMatch[]): EntityMatch[] {
+    return candidates.map(({ id, name, score }) => ({ id, name, score }))
+  }
+
+  private getDisambiguationKey(context: ActionContext): string {
+    return `${context.venueId}:${context.userId}`
+  }
+
+  private storePendingDisambiguation(context: ActionContext, session: PendingDisambiguationSession): void {
+    this.pendingDisambiguations.set(this.getDisambiguationKey(context), session)
+  }
+
+  private resolveDisambiguationSelection(message: string, candidates: EntityMatch[]): EntityMatch | null {
+    const normalized = this.normalizeForSelection(message)
+    const numericChoice = normalized.match(/^\d+$/)
+    if (numericChoice) {
+      const index = Number(numericChoice[0]) - 1
+      return candidates[index] || null
+    }
+
+    return candidates.find(candidate => this.normalizeForSelection(candidate.name) === normalized) || null
+  }
+
+  private normalizeForSelection(value: string): string {
+    return value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim()
   }
 
   /**

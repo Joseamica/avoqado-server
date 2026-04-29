@@ -107,6 +107,10 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   // Inventory
   'inventory:read': 'AVOQADO_INVENTORY',
   'inventory:write': 'AVOQADO_INVENTORY',
+  'inventory:create': 'AVOQADO_INVENTORY',
+  'inventory:update': 'AVOQADO_INVENTORY',
+  'inventory:adjust': 'AVOQADO_INVENTORY',
+  'inventory:delete': 'AVOQADO_INVENTORY',
   'inventory:org-manage': 'SERIALIZED_INVENTORY',
   'attendance:org-manage': 'STORES_ANALYSIS',
 
