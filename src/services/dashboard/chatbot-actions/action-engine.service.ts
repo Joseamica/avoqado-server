@@ -15,6 +15,7 @@ import {
   ActionResponse,
   DetectionResult,
   EntityMatch,
+  FORBIDDEN_LLM_PARAMS,
   PendingActionSession,
 } from './types'
 
@@ -121,7 +122,9 @@ export class ActionEngine {
     // Step 1: Ask the classifier whether this is a query or an action
     const { intent, domain } = await this.classifier.detectIntent(message)
 
-    if (intent === 'query') {
+    const forceActionClassification = intent === 'query' && this.looksLikeCrudAction(message)
+
+    if (intent === 'query' && !forceActionClassification) {
       return { isAction: false }
     }
 
@@ -145,6 +148,25 @@ export class ActionEngine {
     }
   }
 
+  private looksLikeCrudAction(message: string): boolean {
+    const normalized = message
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+
+    const hasMutationVerb =
+      /\b(crea|crear|agrega|agregar|alta|elimina|eliminar|borra|borrar|actualiza|actualizar|cambia|cambiar|ajusta|ajustar|registra|registrar|recibe|recibir|aprobar|aprueba|cancelar|cancela|desactiva|desactivar|modifica|modificar|quita|quitar|resolver|resuelve|reactiva|reactivar|rechaza|rechazar|aplica|aplicar|recalcula|recalcular|create|add|delete|remove|update|adjust|resolve|acknowledge)\b/.test(
+        normalized,
+      )
+
+    const hasBusinessObject =
+      /\b(inventario|stock|insumo|insumos|materia prima|materias primas|ingrediente|ingredientes|producto|productos|receta|recetas|proveedor|proveedores|orden de compra|ordenes de compra|purchase order|alerta|alertas|precio|precios|categoria|categorias|menu)\b/.test(
+        normalized,
+      )
+
+    return hasMutationVerb && hasBusinessObject
+  }
+
   // ---------------------------------------------------------------------------
   // 2. processAction
   // ---------------------------------------------------------------------------
@@ -155,6 +177,10 @@ export class ActionEngine {
     if (!definition) {
       return { type: 'error', message: 'Acción no reconocida' }
     }
+
+    // Treat all LLM arguments as untrusted: strip forbidden/system fields,
+    // remove unknown params, drop null optional values, then sanitize strings.
+    this.normalizeParamsForDefinition(classification.params, definition)
 
     // Sanitize all string params: strip HTML, limit length, block injection patterns
     this.sanitizeParams(classification.params)
@@ -178,7 +204,7 @@ export class ActionEngine {
     ) {
       const searchTerm = classification.entityName ?? (classification.params.name as string | undefined) ?? ''
       if (!searchTerm) {
-        return { type: 'not_found', message: `No encontré ${definition.entity} con ese nombre.` }
+        return { type: 'not_found', message: `No encontré ${this.getEntityDisplayName(definition.entity)} con ese nombre.` }
       }
 
       const resolution = await this.entityResolver.resolve(
@@ -190,7 +216,7 @@ export class ActionEngine {
       )
 
       if (resolution.matches === 0) {
-        return { type: 'not_found', message: `No encontré ${definition.entity} con ese nombre.` }
+        return { type: 'not_found', message: `No encontré ${this.getEntityDisplayName(definition.entity)} con ese nombre.` }
       }
 
       if (resolution.matches >= 2) {
@@ -425,7 +451,7 @@ export class ActionEngine {
         actionType: session.definition.actionType,
         params: session.params,
       })
-      return { type: 'error', message: `Error al ejecutar la acción: ${errMsg.substring(0, 200)}` }
+      return { type: 'error', message: this.getSafeExecutionErrorMessage(err) }
     }
 
     logger.info('ActionEngine: action confirmed', {
@@ -436,7 +462,7 @@ export class ActionEngine {
       entityId: result?.id,
     })
 
-    logAction({
+    await logAction({
       staffId: context.userId,
       venueId: context.venueId,
       action: `chatbot.${session.definition.actionType}.confirmed`,
@@ -640,6 +666,111 @@ export class ActionEngine {
     }
   }
 
+  /**
+   * Normalizes LLM-provided params against the registered action schema.
+   *
+   * Security properties:
+   * - System-owned fields are removed at any depth (`venueId`, `userId`,
+   *   `entityId`, `permissions`, etc.).
+   * - Top-level params are allowlisted to declared fields + listField only.
+   * - listField item objects are allowlisted to declared item fields only.
+   * - `null`/`undefined` values are removed so optional nullable tool outputs
+   *   do not reach service adapters.
+   */
+  private normalizeParamsForDefinition(params: Record<string, unknown>, definition: ActionDefinition): void {
+    const allowedTopLevel = new Set([...Object.keys(definition.fields), ...(definition.listField ? [definition.listField.name] : [])])
+
+    for (const key of Object.keys(params)) {
+      if (!allowedTopLevel.has(key) || this.isForbiddenLlmParam(key) || params[key] === null || params[key] === undefined) {
+        delete params[key]
+        continue
+      }
+
+      if (definition.listField && key === definition.listField.name) {
+        const value = params[key]
+        if (!Array.isArray(value)) {
+          delete params[key]
+          continue
+        }
+
+        const allowedItemFields = new Set(Object.keys(definition.listField.itemFields))
+        params[key] = value
+          .filter(item => item && typeof item === 'object' && !Array.isArray(item))
+          .map(item => this.normalizeObjectAgainstAllowlist(item as Record<string, unknown>, allowedItemFields))
+          .filter(item => Object.keys(item).length > 0)
+        continue
+      }
+
+      params[key] = this.stripForbiddenParamsDeep(params[key])
+    }
+  }
+
+  private normalizeObjectAgainstAllowlist(value: Record<string, unknown>, allowedFields: Set<string>): Record<string, unknown> {
+    const normalized: Record<string, unknown> = {}
+
+    for (const [key, itemValue] of Object.entries(value)) {
+      if (!allowedFields.has(key) || this.isForbiddenLlmParam(key) || itemValue === null || itemValue === undefined) {
+        continue
+      }
+      normalized[key] = this.stripForbiddenParamsDeep(itemValue)
+    }
+
+    return normalized
+  }
+
+  private stripForbiddenParamsDeep(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      return value.map(item => this.stripForbiddenParamsDeep(item))
+    }
+
+    if (value && typeof value === 'object') {
+      const normalized: Record<string, unknown> = {}
+      for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+        if (this.isForbiddenLlmParam(key) || nestedValue === null || nestedValue === undefined) {
+          continue
+        }
+        normalized[key] = this.stripForbiddenParamsDeep(nestedValue)
+      }
+      return normalized
+    }
+
+    return value
+  }
+
+  private isForbiddenLlmParam(key: string): boolean {
+    return (FORBIDDEN_LLM_PARAMS as readonly string[]).includes(key)
+  }
+
+  private getSafeExecutionErrorMessage(err: unknown): string {
+    const prismaCode = (err as { code?: string })?.code
+    if (prismaCode === 'P2002') {
+      return 'Ya existe un registro con esos datos.'
+    }
+
+    const statusCode = (err as { statusCode?: number })?.statusCode
+    const isOperational = (err as { isOperational?: boolean })?.isOperational === true
+    if (isOperational && typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500 && err instanceof Error) {
+      return err.message.substring(0, 200)
+    }
+
+    return 'No pude ejecutar la acción. Revisa los datos e intenta de nuevo.'
+  }
+
+  private getEntityDisplayName(entity: string): string {
+    const labels: Record<string, string> = {
+      RawMaterial: 'ese insumo',
+      Product: 'ese producto',
+      Supplier: 'ese proveedor',
+      PurchaseOrder: 'esa orden de compra',
+      Recipe: 'esa receta',
+      RecipeLine: 'ese ingrediente de la receta',
+      Inventory: 'ese registro de inventario',
+      LowStockAlert: 'esa alerta',
+    }
+
+    return labels[entity] ?? 'ese registro'
+  }
+
   private cleanupExpiredSessions(): void {
     const now = new Date()
 
@@ -828,7 +959,6 @@ export class ActionEngine {
 
   /**
    * Fetches an entity's updatedAt for optimistic locking check.
-   * Supports RawMaterial, Product, Supplier.
    */
   private async fetchEntityForLocking(entity: string, entityId: string, venueId: string): Promise<{ updatedAt: unknown } | null> {
     try {
@@ -845,6 +975,26 @@ export class ActionEngine {
           })
         case 'Supplier':
           return prisma.supplier.findFirst({
+            where: { id: entityId, venueId },
+            select: { updatedAt: true },
+          })
+        case 'Recipe':
+          return prisma.recipe.findFirst({
+            where: { id: entityId, product: { venueId } },
+            select: { updatedAt: true },
+          })
+        case 'RecipeLine':
+          return prisma.recipeLine.findFirst({
+            where: { id: entityId, recipe: { product: { venueId } } },
+            select: { updatedAt: true },
+          })
+        case 'PurchaseOrder':
+          return prisma.purchaseOrder.findFirst({
+            where: { id: entityId, venueId },
+            select: { updatedAt: true },
+          })
+        case 'Inventory':
+          return prisma.inventory.findFirst({
             where: { id: entityId, venueId },
             select: { updatedAt: true },
           })

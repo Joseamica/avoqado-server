@@ -60,6 +60,7 @@ export const assistantActionConfirmSchema = z.object({
     confirmed: z.literal(true, {
       errorMap: () => ({ message: 'Debes confirmar explícitamente la acción.' }),
     }),
+    doubleConfirmed: z.boolean().optional().default(false),
   }),
 })
 

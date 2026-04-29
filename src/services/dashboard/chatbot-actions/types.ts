@@ -184,4 +184,19 @@ export interface ActionResponse {
 // Security constants
 // ---------------------------------------------------------------------------
 
-export const FORBIDDEN_LLM_PARAMS = ['venueId', 'orgId', 'userId', 'id', 'createdAt', 'updatedAt', 'deletedAt'] as const
+export const FORBIDDEN_LLM_PARAMS = [
+  'venueId',
+  'orgId',
+  'organizationId',
+  'userId',
+  'staffId',
+  'role',
+  'permissions',
+  'permissionsAreEffective',
+  'id',
+  'entityId',
+  'createdAt',
+  'updatedAt',
+  'deletedAt',
+  'deletedBy',
+] as const

@@ -4,7 +4,7 @@
  * Activity Log Service
  *
  * Centralized utility for writing and querying audit trail entries.
- * - logAction(): Fire-and-forget writer — NEVER throws
+ * - logAction(): Best-effort writer — NEVER throws
  * - queryActivityLogs(): Paginated query for the API
  * - getDistinctActions(): Unique action strings for filter dropdowns
  */
@@ -25,12 +25,14 @@ export interface LogActionParams {
 }
 
 /**
- * Fire-and-forget audit log writer.
+ * Best-effort audit log writer.
  * Wraps prisma.activityLog.create() in try/catch — NEVER throws.
+ * Callers may await it when they need audit persistence attempted before
+ * returning a response.
  */
-export function logAction(params: LogActionParams): void {
-  prisma.activityLog
-    .create({
+export async function logAction(params: LogActionParams): Promise<void> {
+  try {
+    await prisma.activityLog.create({
       data: {
         staffId: params.staffId ?? null,
         venueId: params.venueId ?? null,
@@ -42,13 +44,13 @@ export function logAction(params: LogActionParams): void {
         userAgent: params.userAgent ?? null,
       },
     })
-    .catch(error => {
-      logger.error('[ActivityLog] Failed to write audit log', {
-        action: params.action,
-        entity: params.entity,
-        error: error.message,
-      })
+  } catch (error) {
+    logger.error('[ActivityLog] Failed to write audit log', {
+      action: params.action,
+      entity: params.entity,
+      error: error instanceof Error ? error.message : 'Unknown error',
     })
+  }
 }
 
 export interface QueryActivityLogsParams {

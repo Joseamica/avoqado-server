@@ -369,13 +369,14 @@ export const previewAssistantAction = async (req: Request, res: Response, next: 
 
 export const confirmAssistantAction = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { actionId, idempotencyKey, confirmed }: AssistantActionConfirmDto = req.body
+    const { actionId, idempotencyKey, confirmed, doubleConfirmed }: AssistantActionConfirmDto = req.body
     const authContext = await resolveAuthenticatedVenueContext(req)
 
     const result = await textToSqlAssistantService.confirmAction({
       actionId,
       idempotencyKey,
       confirmed,
+      doubleConfirmed,
       venueId: authContext.venueId,
       userId: authContext.userId,
       userRole: authContext.role as UserRole,

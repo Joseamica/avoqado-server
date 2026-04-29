@@ -30,7 +30,7 @@ function makeDefinition(overrides: Partial<ActionDefinition> = {}): ActionDefini
   }
 }
 
-function makeMenuDefinition(): ActionDefinition {
+function makeMenuDefinition(overrides: Partial<ActionDefinition> = {}): ActionDefinition {
   return {
     actionType: 'menu.update',
     entity: 'Menu',
@@ -54,6 +54,7 @@ function makeMenuDefinition(): ActionDefinition {
       title: 'Actualizar menú',
       summary: 'Se actualizará el menú {{menuId}}',
     },
+    ...overrides,
   }
 }
 
@@ -198,31 +199,42 @@ describe('ActionRegistry', () => {
       const tool = registry.getToolDefinitions('product')[0]
       const { required } = tool.function.parameters
 
+      // OpenAI strict schemas require every property to be listed in required.
+      // Optional business fields are represented as nullable.
       expect(required).toContain('name')
       expect(required).toContain('price')
-      expect(required).not.toContain('categoryId')
-      expect(required).not.toContain('active')
+      expect(required).toContain('categoryId')
+      expect(required).toContain('active')
+    })
+
+    it('should generate strict function schemas with additionalProperties disabled', () => {
+      registry.register(makeDefinition())
+
+      const tool = registry.getToolDefinitions('product')[0]
+
+      expect(tool.function.strict).toBe(true)
+      expect(tool.function.parameters.additionalProperties).toBe(false)
     })
 
     it('should map string fields to { type: "string" }', () => {
       registry.register(makeDefinition())
 
       const tool = registry.getToolDefinitions('product')[0]
-      expect(tool.function.parameters.properties.name).toEqual({ type: 'string' })
+      expect(tool.function.parameters.properties.name).toEqual({ type: 'string', description: 'Nombre del producto' })
     })
 
     it('should map decimal fields to { type: "number" }', () => {
       registry.register(makeDefinition())
 
       const tool = registry.getToolDefinitions('product')[0]
-      expect(tool.function.parameters.properties.price).toEqual({ type: 'number' })
+      expect(tool.function.parameters.properties.price).toEqual({ type: 'number', description: 'Precio' })
     })
 
-    it('should map boolean fields to { type: "boolean" }', () => {
+    it('should map optional boolean fields to nullable boolean', () => {
       registry.register(makeDefinition())
 
       const tool = registry.getToolDefinitions('product')[0]
-      expect(tool.function.parameters.properties.active).toEqual({ type: 'boolean' })
+      expect(tool.function.parameters.properties.active).toEqual({ type: ['boolean', 'null'] })
     })
 
     it('should map enum fields with their options', () => {
@@ -246,6 +258,26 @@ describe('ActionRegistry', () => {
 
       const tool = registry.getToolDefinitions('stock')[0]
       expect(tool.function.parameters.properties.quantity).toEqual({ type: 'number' })
+    })
+
+    it('should make optional enum values nullable including enum null', () => {
+      registry.register(
+        makeMenuDefinition({
+          fields: {
+            status: {
+              type: 'enum',
+              required: false,
+              options: ['active', 'inactive', 'draft'],
+            },
+          },
+        }),
+      )
+
+      const tool = registry.getToolDefinitions('menu')[0]
+      expect(tool.function.parameters.properties.status).toEqual({
+        type: ['string', 'null'],
+        enum: ['active', 'inactive', 'draft', null],
+      })
     })
 
     it('should return an empty array when domain has no actions', () => {
@@ -306,6 +338,19 @@ describe('ActionRegistry', () => {
       // categoryId and active are optional
       const result = schema.safeParse({ name: 'Agua', price: 20 })
       expect(result.success).toBe(true)
+    })
+
+    it('should reject unknown fields in backend Zod schemas', () => {
+      registry.register(makeDefinition())
+      const schema = registry.getZodSchema('product.create')!
+
+      const result = schema.safeParse({
+        name: 'Agua',
+        price: 20,
+        venueId: 'attacker-controlled-venue',
+      })
+
+      expect(result.success).toBe(false)
     })
 
     it('should enforce min value for decimal fields', () => {

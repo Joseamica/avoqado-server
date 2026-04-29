@@ -216,6 +216,7 @@ interface AssistantActionConfirmRequest {
   actionId: string
   idempotencyKey: string
   confirmed: true
+  doubleConfirmed?: boolean
   venueId: string
   userId: string
   userRole: UserRole
@@ -284,6 +285,7 @@ interface IntentClassificationResult {
     // NEW: Operational intents (Phase 2 expansion)
     | 'inventoryAlerts'
     | 'recipeCount'
+    | 'recipeList'
     | 'pendingOrders'
     | 'activeShifts'
     | 'profitAnalysis'
@@ -377,6 +379,7 @@ class TextToSqlAssistantService {
     businessOverview: ['Payment', 'Order', 'OrderItem', 'Product', 'MenuCategory', 'Review'],
     inventoryAlerts: ['RawMaterial'],
     recipeCount: ['Recipe', 'Product'],
+    recipeList: ['Recipe', 'Product'],
     pendingOrders: ['Order'],
     activeShifts: ['Shift', 'Staff', 'Order'],
     profitAnalysis: ['Payment', 'OrderItem', 'Order', 'Product', 'Recipe'],
@@ -1862,7 +1865,8 @@ Ejemplos de respuestas CORRECTAS:
         // Step 0.1c: Scan conversation history for injection attempts.
         // An attacker could embed injection in prior conversation entries that go directly to LLM.
         // Only scan the last 5 entries to keep cost bounded.
-        if (query.conversationHistory && query.conversationHistory.length > 0) {
+        const currentMessageIsSafeCrud = isCrudMessage && !crudMessageHasInjectionSignals
+        if (!currentMessageIsSafeCrud && query.conversationHistory && query.conversationHistory.length > 0) {
           const historyToScan = query.conversationHistory.slice(-5)
           for (const entry of historyToScan) {
             if (!this.shouldScanHistoryEntryForInjection(entry)) {
@@ -1870,9 +1874,13 @@ Ejemplos de respuestas CORRECTAS:
             }
 
             const content = entry.content
+            if (this.normalizeTextForMatch(content) === this.normalizeTextForMatch(query.message)) {
+              continue
+            }
 
             const historyCheck = await SemanticInjectionDetectorService.detect(content, this.openai)
-            if (historyCheck.isInjection && historyCheck.confidence >= 70) {
+            const shouldBypassHistorySemanticBlock = this.shouldBypassSemanticInjectionBlock(content)
+            if (historyCheck.isInjection && historyCheck.confidence >= 70 && !shouldBypassHistorySemanticBlock) {
               logger.warn('🛡️ Injection detected in conversation history', {
                 userId: query.userId,
                 venueId: query.venueId,
@@ -2468,6 +2476,21 @@ Ejemplos de respuestas CORRECTAS:
                 naturalResponse = '📚 Tienes 1 receta activa en tu inventario.'
               } else {
                 naturalResponse = `📚 Tienes ${recipeSummary.totalRecipes} recetas activas en tu inventario.`
+              }
+              serviceResult = recipeSummary
+              break
+            }
+
+            case 'recipeList': {
+              const recipeSummary = await SharedQueryService.getRecipeList(query.venueId, 20)
+              if (recipeSummary.totalRecipes === 0) {
+                naturalResponse = '📭 No tienes recetas activas configuradas en este momento.'
+              } else {
+                const recipeLines = recipeSummary.recipes
+                  .map((recipe, index) => `${index + 1}. ${recipe.name || recipe.productName || 'Receta sin nombre'}`)
+                  .join('\n')
+                const moreText = recipeSummary.hasMore ? `\n\nMostré ${recipeSummary.recipes.length} de ${recipeSummary.totalRecipes}.` : ''
+                naturalResponse = `📚 Tienes ${recipeSummary.totalRecipes} recetas activas:\n\n${recipeLines}${moreText}`
               }
               serviceResult = recipeSummary
               break
@@ -3462,6 +3485,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         type: 'bar',
         title: 'Recetas Activas',
       },
+      recipeList: {
+        type: 'bar',
+        title: 'Recetas Activas',
+      },
     }
 
     const config = chartConfigs[intent]
@@ -3758,6 +3785,25 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
               xAxis: { key: 'name', label: 'Tipo' },
               yAxis: { key: 'total', label: 'Cantidad' },
               dataKeys: [{ key: 'total', label: 'Total', color: '#3b82f6' }],
+            },
+          }
+        }
+
+        case 'recipeList': {
+          if (!Array.isArray(data?.recipes) || data.recipes.length === 0) {
+            return { skipped: true, reason: VISUALIZATION_SKIP_REASONS.NO_DATA }
+          }
+          return {
+            type: 'bar',
+            title: 'Recetas Activas',
+            data: data.recipes.slice(0, 10).map((recipe: any) => ({
+              name: recipe.name || recipe.productName || 'Receta',
+              costo: recipe.totalCost || 0,
+            })),
+            config: {
+              xAxis: { key: 'name', label: 'Receta' },
+              yAxis: { key: 'costo', label: 'Costo unitario' },
+              dataKeys: [{ key: 'costo', label: 'Costo unitario', color: '#3b82f6' }],
             },
           }
         }
@@ -4723,7 +4769,12 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         fallbackRole: (request.userRole as unknown as StaffRole) || StaffRole.VIEWER,
         ipAddress: request.ipAddress,
       })
-      const result = await this.actionEngine.confirmAction(request.actionId, request.idempotencyKey, actionContext)
+      const result = await this.actionEngine.confirmAction(
+        request.actionId,
+        request.idempotencyKey,
+        actionContext,
+        request.doubleConfirmed === true,
+      )
       return result as unknown as Record<string, unknown>
     }
 
@@ -5908,6 +5959,11 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       return false
     }
 
+    const normalizedContent = this.normalizeTextForMatch(entry.content)
+    if (/^confirmo(?: definitivamente)? esta accion\.?$/.test(normalizedContent)) {
+      return false
+    }
+
     // Skip short entries (greetings, confirmations) — not worth an API call.
     return entry.content.length >= 20
   }
@@ -5948,6 +6004,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     }
 
     if (CHATBOT_MUTATIONS_ENABLED && /^\d{1,3}$/.test(normalizedMessage)) {
+      return true
+    }
+
+    if (this.isCrudMutationMessage(message)) {
       return true
     }
 
@@ -5993,6 +6053,19 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         intent: 'recipeCount',
         confidence: 0.95,
         reason: 'Detected recipe count query (real-time, no date range needed)',
+        requiresDateRange: false,
+      }
+    }
+
+    const asksRecipeList =
+      /\b(recetas?|recipe)\b/.test(lowerMessage) &&
+      /\b(cuales?|cu[aá]les?|que|qu[eé]|lista|listado|muestra|muestrame|mu[eé]strame|ver|dame)\b/.test(lowerMessage)
+    if (asksRecipeList) {
+      return {
+        isSimpleQuery: true,
+        intent: 'recipeList',
+        confidence: 0.95,
+        reason: 'Detected recipe list query (real-time, no date range needed)',
         requiresDateRange: false,
       }
     }
@@ -6371,6 +6444,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - reviews: reseñas, calificaciones, estrellas, opiniones clientes
 - inventoryAlerts: inventario bajo, stock faltante, qué me falta (dateRange=null)
 - recipeCount: cuántas recetas tengo, total de recetas en inventario (dateRange=null)
+- recipeList: cuáles/qué recetas tengo, lista de recetas, muéstrame recetas (dateRange=null)
 - pendingOrders: órdenes pendientes, pedidos abiertos (dateRange=null)
 - activeShifts: turnos activos, quién trabaja AHORA, quién está en turno (dateRange=null). SOLO para saber quién está trabajando en este momento
 - profitAnalysis: utilidad, márgenes, ganancias, costos
@@ -6400,11 +6474,11 @@ REGLAS CRÍTICAS:
    - Si pregunta "cuántas órdenes hay", "qué método de pago se usa más", "cuántas reseñas" SIN periodo → dateRange="allTime", wasDateExplicit=false (quiere el total, no solo este mes)
    - Si pregunta "cuánto vendí", "ventas", "ticket promedio" SIN periodo → dateRange="thisMonth", wasDateExplicit=false
    - La regla: preguntas de TOTALES/CONTEO sin periodo → allTime. Preguntas de RENDIMIENTO/VENTAS sin periodo → thisMonth
-7. Para inventoryAlerts/recipeCount/pendingOrders/activeShifts → dateRange=null
+7. Para inventoryAlerts/recipeCount/recipeList/pendingOrders/activeShifts → dateRange=null
 8. "today"/"yesterday"/"this week" en inglés = today/yesterday/thisWeek (SIMPLE, no complejo)
 9. "cuántos meseros/empleados tengo" / "cuántos productos tengo" / "cuántas mesas tengo" → complex (es un conteo que necesita SQL). NO es activeShifts
 10. activeShifts es SOLO para "quién trabaja AHORA" / "turnos abiertos". NO para conteo de staff total
-11. EXCEPCIÓN: "cuántas recetas tengo" / "total de recetas" → recipeCount (simple, dateRange=null)
+11. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList
 
 dateRanges válidos: today, yesterday, thisWeek, lastWeek, thisMonth, lastMonth, last7days, last30days, allTime, null
 
@@ -6479,6 +6553,7 @@ Responde SOLO JSON (sin markdown):
         'businessOverview',
         'inventoryAlerts',
         'recipeCount',
+        'recipeList',
         'pendingOrders',
         'activeShifts',
         'profitAnalysis',
@@ -6502,6 +6577,21 @@ Responde SOLO JSON (sin markdown):
       const isSimple = parsed.isSimple === true && intent && validIntents.has(intent)
 
       if (!isSimple) {
+        const deterministicClassification = this.classifyIntent(message)
+        if (
+          deterministicClassification.isSimpleQuery &&
+          deterministicClassification.intent &&
+          this.isRealTimeSharedIntent(deterministicClassification.intent)
+        ) {
+          return {
+            classification: {
+              ...deterministicClassification,
+              reason: `${deterministicClassification.reason}; deterministic real-time intent override`,
+            },
+            tokenUsage,
+          }
+        }
+
         // LLM says this is complex or unknown → route to TextToSQL pipeline
         return {
           classification: {
@@ -6517,8 +6607,7 @@ Responde SOLO JSON (sin markdown):
       }
 
       // Simple intent — route to SharedQueryService
-      const realTimeIntents = new Set(['inventoryAlerts', 'recipeCount', 'pendingOrders', 'activeShifts'])
-      const requiresDateRange = !realTimeIntents.has(intent)
+      const requiresDateRange = !this.isRealTimeSharedIntent(intent)
 
       const parsedDateRangeRaw = parsed.dateRange === 'null' || parsed.dateRange === null ? null : parsed.dateRange
       const parsedDateRange = validDateRanges.has(parsedDateRangeRaw as RelativeDateRange | null)
@@ -6563,6 +6652,10 @@ Responde SOLO JSON (sin markdown):
       confidence: 0.0,
       reason: `${reason} → falling back to TextToSQL pipeline`,
     }
+  }
+
+  private isRealTimeSharedIntent(intent: string): boolean {
+    return ['inventoryAlerts', 'recipeCount', 'recipeList', 'pendingOrders', 'activeShifts'].includes(intent)
   }
 
   /** @deprecated Use routeWithLLM instead. Kept as fallback when LLM is unavailable. */
@@ -6955,7 +7048,7 @@ Responde SOLO JSON (sin markdown):
     const newDateRange = this.extractDateRange(message.toLowerCase())
 
     // Real-time intents don't need date ranges
-    const realTimeIntents = ['inventoryAlerts', 'recipeCount', 'pendingOrders', 'activeShifts']
+    const realTimeIntents = ['inventoryAlerts', 'recipeCount', 'recipeList', 'pendingOrders', 'activeShifts']
     const isPreviousRealTime = realTimeIntents.includes(context.previousIntent as string)
 
     // If we have a new date range or previous was real-time, inherit the intent

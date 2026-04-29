@@ -20,7 +20,10 @@ jest.mock('@/utils/prismaClient', () => ({
     rawMaterial: { findFirst: jest.fn() },
     product: { findFirst: jest.fn() },
     supplier: { findFirst: jest.fn() },
-    recipeLine: { count: jest.fn() },
+    recipe: { findFirst: jest.fn() },
+    recipeLine: { count: jest.fn(), findFirst: jest.fn() },
+    purchaseOrder: { findFirst: jest.fn() },
+    inventory: { findFirst: jest.fn() },
   },
 }))
 
@@ -30,6 +33,10 @@ const mockPrisma = prisma as unknown as {
   rawMaterial: { findFirst: jest.Mock }
   product: { findFirst: jest.Mock }
   supplier: { findFirst: jest.Mock }
+  recipe: { findFirst: jest.Mock }
+  recipeLine: { count: jest.Mock; findFirst: jest.Mock }
+  purchaseOrder: { findFirst: jest.Mock }
+  inventory: { findFirst: jest.Mock }
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +438,8 @@ describe('ActionEngine', () => {
       const result = await engine.processAction(classification, makeContext())
 
       expect(result.type).toBe('not_found')
-      expect(result.message).toContain('No encontré')
+      expect(result.message).toBe('No encontré ese insumo con ese nombre.')
+      expect(result.message).not.toContain('RawMaterial')
     })
   })
 
@@ -588,6 +596,105 @@ describe('ActionEngine', () => {
 
       expect(result.type).toBe('error')
       expect(result.message).toBe('name: Este campo es requerido')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // 7b. LLM param hardening
+  // -------------------------------------------------------------------------
+
+  describe('processAction — LLM param hardening', () => {
+    it('should strip forbidden and unknown params before preview and execution', async () => {
+      const definition = makeDefinition()
+      actionRegistry.register(definition)
+
+      const preview = makePreview('strip-action-id')
+      mockPreview.generatePreview.mockResolvedValue(preview)
+
+      const context = makeContext()
+      await engine.processAction(
+        makeClassification({
+          params: {
+            name: 'Carne Molida',
+            unit: 'kg',
+            venueId: 'attacker-venue',
+            userId: 'attacker-user',
+            entityId: 'attacker-entity',
+            permissions: ['*:*'],
+            unknownField: 'should-not-pass',
+          },
+        }),
+        context,
+      )
+
+      expect(mockPreview.generatePreview).toHaveBeenCalledWith(definition, { name: 'Carne Molida', unit: 'kg' }, undefined, context)
+
+      const mockService = {
+        createRawMaterial: jest.fn().mockResolvedValue({ id: 'rm-strip-1' }),
+      }
+      engine.registerService('RawMaterialService', mockService)
+
+      const result = await engine.confirmAction('strip-action-id', 'strip-key', context)
+
+      expect(result.type).toBe('confirmed')
+      expect(mockService.createRawMaterial).toHaveBeenCalledWith({
+        name: 'Carne Molida',
+        unit: 'kg',
+        venueId: VENUE_ID,
+      })
+    })
+
+    it('should strip unknown and forbidden fields from list items', async () => {
+      const adapterFn = jest.fn().mockResolvedValue({ id: 'po-1' })
+      const definition = makeDefinition({
+        actionType: 'purchaseOrder.create',
+        fields: {
+          supplierName: { type: 'string', required: true },
+        },
+        listField: {
+          name: 'items',
+          minItems: 1,
+          description: 'items de la orden',
+          itemFields: {
+            rawMaterialName: { type: 'string', required: true },
+            quantity: { type: 'decimal', required: true, min: 0 },
+          },
+        },
+        serviceAdapter: adapterFn,
+      })
+      actionRegistry.register(definition)
+
+      mockPreview.generatePreview.mockResolvedValue(makePreview('list-strip-id'))
+
+      const context = makeContext()
+      await engine.processAction(
+        makeClassification({
+          actionType: 'purchaseOrder.create',
+          params: {
+            supplierName: 'Verduras Express',
+            items: [
+              {
+                rawMaterialName: 'Tomate',
+                quantity: 3,
+                venueId: 'attacker-venue',
+                entityId: 'attacker-id',
+                injected: 'drop table',
+              },
+            ],
+          },
+        }),
+        context,
+      )
+
+      await engine.confirmAction('list-strip-id', 'list-strip-key', context)
+
+      expect(adapterFn).toHaveBeenCalledWith(
+        {
+          supplierName: 'Verduras Express',
+          items: [{ rawMaterialName: 'Tomate', quantity: 3 }],
+        },
+        context,
+      )
     })
   })
 
@@ -920,6 +1027,76 @@ describe('ActionEngine', () => {
 
       expect(result.type).toBe('error')
       expect(result.message).toBe('Ya existe un registro con esos datos.')
+    })
+
+    it('should not expose raw internal execution errors to the user', async () => {
+      const definition = makeDefinition()
+      actionRegistry.register(definition)
+
+      const preview = makePreview('safe-error-action-id')
+      mockPreview.generatePreview.mockResolvedValue(preview)
+
+      const context = makeContext()
+      await engine.processAction(makeClassification(), context)
+
+      const mockService = {
+        createRawMaterial: jest.fn().mockRejectedValue(new Error('database password leaked in stack trace')),
+      }
+      engine.registerService('RawMaterialService', mockService)
+
+      const result = await engine.confirmAction('safe-error-action-id', 'safe-error-key', context)
+
+      expect(result.type).toBe('error')
+      expect(result.message).toBe('No pude ejecutar la acción. Revisa los datos e intenta de nuevo.')
+      expect(result.message).not.toContain('password')
+    })
+  })
+
+  describe('confirmAction — optimistic locking coverage', () => {
+    it('should validate PurchaseOrder updatedAt before confirming', async () => {
+      const definition = makeUpdateDefinition({
+        actionType: 'purchaseOrder.update',
+        entity: 'PurchaseOrder',
+        permission: 'rawMaterial:update',
+      })
+      actionRegistry.register(definition)
+
+      const entityMatch = makeEntityMatch({
+        id: 'po-1',
+        name: 'PO-1',
+        data: { updatedAt: new Date('2026-01-01T00:00:00Z') },
+      })
+      mockResolver.resolve.mockResolvedValue({
+        matches: 1,
+        candidates: [entityMatch],
+        exact: true,
+        resolved: entityMatch,
+      } satisfies EntityResolutionResult)
+
+      mockPreview.generatePreview.mockResolvedValue(makePreview('po-lock-id'))
+
+      const context = makeContext()
+      await engine.processAction(
+        makeClassification({
+          actionType: 'purchaseOrder.update',
+          entityName: 'PO-1',
+          params: { name: 'PO-1' },
+        }),
+        context,
+      )
+
+      mockPrisma.purchaseOrder.findFirst.mockResolvedValue({
+        updatedAt: new Date('2026-01-02T00:00:00Z'),
+      })
+
+      const result = await engine.confirmAction('po-lock-id', 'po-lock-key', context)
+
+      expect(result.type).toBe('error')
+      expect(result.message).toContain('datos cambiaron')
+      expect(mockPrisma.purchaseOrder.findFirst).toHaveBeenCalledWith({
+        where: { id: 'po-1', venueId: VENUE_ID },
+        select: { updatedAt: true },
+      })
     })
   })
 

@@ -6,21 +6,27 @@ import { ActionDefinition, FieldDefinition } from './types'
 // ---------------------------------------------------------------------------
 
 interface OpenAIPropertySchema {
-  type: string
-  enum?: string[]
+  type: string | string[]
+  enum?: Array<string | null>
   description?: string
-  items?: OpenAIPropertySchema & { properties?: Record<string, OpenAIPropertySchema> }
+  items?: OpenAIPropertySchema & {
+    properties?: Record<string, OpenAIPropertySchema>
+    required?: string[]
+    additionalProperties?: boolean
+  }
 }
 
 interface OpenAIFunctionParameters {
   type: 'object'
   properties: Record<string, OpenAIPropertySchema>
   required: string[]
+  additionalProperties: false
 }
 
 interface OpenAIFunctionDefinition {
   name: string
   description: string
+  strict: true
   parameters: OpenAIFunctionParameters
 }
 
@@ -98,13 +104,9 @@ class ActionRegistry {
 
   private buildToolDefinition(def: ActionDefinition): OpenAIToolDefinition {
     const properties: Record<string, OpenAIPropertySchema> = {}
-    const required: string[] = []
 
     for (const [fieldName, field] of Object.entries(def.fields)) {
       properties[fieldName] = this.fieldToOpenAISchema(field)
-      if (field.required) {
-        required.push(fieldName)
-      }
     }
 
     // Include listField as an array parameter for OpenAI function calling
@@ -119,6 +121,8 @@ class ActionRegistry {
         items: {
           type: 'object',
           properties: itemProperties,
+          required: Object.keys(itemProperties),
+          additionalProperties: false,
         },
       }
     }
@@ -128,16 +132,38 @@ class ActionRegistry {
       function: {
         name: def.actionType.replace(/\./g, '--'),
         description: def.description,
+        strict: true,
         parameters: {
           type: 'object',
           properties,
-          required,
+          // OpenAI strict tool schemas require every property to be listed in
+          // required. Optional business fields are represented as nullable and
+          // are pruned before backend validation/execution.
+          required: Object.keys(properties),
+          additionalProperties: false,
         },
       },
     }
   }
 
   private fieldToOpenAISchema(field: FieldDefinition): OpenAIPropertySchema {
+    const schema = this.baseOpenAISchema(field)
+    if (field.prompt) {
+      schema.description = field.prompt
+    }
+
+    const optionalForModel = !field.required || field.default !== undefined
+    if (optionalForModel) {
+      schema.type = Array.isArray(schema.type) ? Array.from(new Set([...schema.type, 'null'])) : [schema.type, 'null']
+      if (schema.enum) {
+        schema.enum = Array.from(new Set([...schema.enum, null]))
+      }
+    }
+
+    return schema
+  }
+
+  private baseOpenAISchema(field: FieldDefinition): OpenAIPropertySchema {
     switch (field.type) {
       case 'enum':
         return { type: 'string', enum: field.options ?? [] }
@@ -175,14 +201,14 @@ class ActionRegistry {
       for (const [fieldName, field] of Object.entries(def.listField.itemFields)) {
         itemShape[fieldName] = this.fieldToZodSchema(field)
       }
-      const itemSchema = z.object(itemShape)
+      const itemSchema = z.object(itemShape).strict()
       const arraySchema = z.array(itemSchema).min(def.listField.minItems, {
         message: `Se requiere al menos ${def.listField.minItems} elemento(s)`,
       })
       shape[def.listField.name] = arraySchema.optional()
     }
 
-    return z.object(shape)
+    return z.object(shape).strict()
   }
 
   private fieldToZodSchema(field: FieldDefinition): z.ZodTypeAny {

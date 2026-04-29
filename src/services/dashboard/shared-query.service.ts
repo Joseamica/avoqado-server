@@ -161,6 +161,24 @@ export interface RecipeCountSummary {
 }
 
 /**
+ * Recipe list item for the current venue.
+ */
+export interface RecipeListItem {
+  id: string
+  name: string | null
+  productName: string
+  portionYield: number
+  totalCost: number
+}
+
+export interface RecipeListSummary {
+  totalRecipes: number
+  recipes: RecipeListItem[]
+  limit: number
+  hasMore: boolean
+}
+
+/**
  * Pending orders statistics by status
  */
 export interface PendingOrdersStats {
@@ -735,6 +753,58 @@ export class SharedQueryService {
     })
 
     return { totalRecipes }
+  }
+
+  /**
+   * Get active recipes for a venue.
+   *
+   * Used by:
+   * - AI Chatbot for "¿cuáles son mis recetas?" queries
+   *
+   * @param venueId - Venue ID (multi-tenant isolation)
+   * @param limit - Max recipes to return in chat response
+   * @returns Active recipes linked to active, non-deleted products
+   */
+  static async getRecipeList(venueId: string, limit = 20): Promise<RecipeListSummary> {
+    const where = {
+      product: {
+        venueId,
+        active: true,
+        deletedAt: null,
+      },
+    }
+
+    const [totalRecipes, recipes] = await Promise.all([
+      prisma.recipe.count({ where }),
+      prisma.recipe.findMany({
+        where,
+        take: limit,
+        orderBy: [{ product: { name: 'asc' } }],
+        select: {
+          id: true,
+          portionYield: true,
+          totalCost: true,
+          product: {
+            select: {
+              name: true,
+            },
+          },
+        },
+      }),
+    ])
+
+    return {
+      totalRecipes,
+      limit,
+      hasMore: totalRecipes > recipes.length,
+      recipes: recipes.map(recipe => ({
+        id: recipe.id,
+        name: recipe.product.name,
+        productName: recipe.product.name,
+        portionYield: Number(recipe.portionYield ?? 0),
+        totalCost: Number(recipe.totalCost ?? 0),
+      })),
+    }
   }
 
   /**

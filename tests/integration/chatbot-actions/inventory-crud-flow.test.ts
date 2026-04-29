@@ -411,6 +411,60 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
   })
 
   // -------------------------------------------------------------------------
+  // 7b. Destructive flow
+  // -------------------------------------------------------------------------
+
+  describe('Destructive flow: high-danger actions', () => {
+    it('should require double confirmation before executing a high-danger action', async () => {
+      const destructiveAdapter = jest.fn().mockResolvedValue({ id: 'danger-target-1' })
+      actionRegistry.register({
+        actionType: 'test.destructive.delete',
+        entity: 'TestEntity',
+        operation: 'delete',
+        permission: 'inventory:delete',
+        dangerLevel: 'high',
+        service: 'testService',
+        method: 'delete',
+        serviceAdapter: destructiveAdapter,
+        description: 'Deletes a destructive test entity',
+        examples: ['elimina entidad destructiva de prueba'],
+        fields: {},
+        previewTemplate: {
+          title: 'Eliminar entidad de prueba',
+          summary: 'Se eliminará una entidad destructiva de prueba.',
+          showImpact: true,
+        },
+      })
+
+      const context = makeContext()
+      const preview = await engine.processAction(
+        {
+          actionType: 'test.destructive.delete',
+          params: {
+            venueId: 'attacker-venue',
+            permissions: ['*:*'],
+          },
+          confidence: 1,
+        },
+        context,
+      )
+
+      expect(preview.type).toBe('preview')
+      expect(preview.preview?.dangerLevel).toBe('high')
+
+      const firstConfirm = await engine.confirmAction(preview.actionId!, 'danger-key-1', context)
+
+      expect(firstConfirm.type).toBe('double_confirm')
+      expect(destructiveAdapter).not.toHaveBeenCalled()
+
+      const secondConfirm = await engine.confirmAction(preview.actionId!, 'danger-key-2', context, true)
+
+      expect(secondConfirm.type).toBe('confirmed')
+      expect(destructiveAdapter).toHaveBeenCalledWith({}, context)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // 8. Rate limiting flow
   // -------------------------------------------------------------------------
 
