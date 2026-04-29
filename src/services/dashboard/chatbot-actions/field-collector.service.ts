@@ -33,6 +33,21 @@ class FieldCollectorService {
         // Fields with a default value aren't truly missing — they'll use the default
         if (fieldDef.default !== undefined) continue
         missing.push(fieldName)
+        continue
+      }
+
+      const shouldPromptForBelowMin =
+        definition.actionType === 'menu.product.create' &&
+        fieldName === 'price' &&
+        (fieldDef.type === 'decimal' || fieldDef.type === 'integer') &&
+        fieldDef.min !== undefined
+
+      if (shouldPromptForBelowMin) {
+        const numericValue = typeof value === 'number' ? value : Number(value)
+        const min = fieldDef.min as number
+        if (!Number.isFinite(numericValue) || numericValue < min) {
+          missing.push(fieldName)
+        }
       }
     }
 
@@ -90,15 +105,20 @@ class FieldCollectorService {
       return label
     })
 
+    const optionalProductCodeHint =
+      definition.actionType === 'menu.product.create'
+        ? ' Si tienes SKU o GTIN/código de barras, también puedes incluirlo; si no, genero un SKU y dejo GTIN vacío.'
+        : ''
+
     if (parts.length === 1) {
-      return `Solo me falta ${parts[0]}. ¿Cuál le ponemos?`
+      return `Solo me falta ${parts[0]}. ¿Cuál le ponemos?${optionalProductCodeHint}`
     }
 
     const last = parts[parts.length - 1]
     const rest = parts.slice(0, parts.length - 1)
     const joined = `${rest.join(', ')} y ${last}`
 
-    return `Para completar necesito: ${joined}. ¿Cuáles serían?`
+    return `Para completar necesito: ${joined}. ¿Cuáles serían?${optionalProductCodeHint}`
   }
 
   /**

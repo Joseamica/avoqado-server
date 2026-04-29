@@ -166,6 +166,18 @@ const buildSanitizedMetadata = (metadata: Record<string, any> | undefined, confi
     sanitizedMetadata.idempotency = metadata.idempotency
   }
 
+  if (metadata && 'planId' in metadata) {
+    sanitizedMetadata.planId = metadata.planId
+  }
+
+  if (metadata && 'planMode' in metadata) {
+    sanitizedMetadata.planMode = metadata.planMode
+  }
+
+  if (metadata && 'steps' in metadata) {
+    sanitizedMetadata.steps = metadata.steps
+  }
+
   return sanitizedMetadata
 }
 

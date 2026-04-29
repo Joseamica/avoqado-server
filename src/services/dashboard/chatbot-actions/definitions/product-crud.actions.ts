@@ -33,13 +33,19 @@ export const productCrudActions: ActionDefinition[] = [
         type: 'decimal',
         required: true,
         prompt: '¿Cuál es el precio del producto?',
-        min: 0,
+        min: 0.01,
       },
       sku: {
         type: 'string',
         required: false,
         prompt: '¿Cuál es el SKU o código del producto?',
         transform: 'uppercase',
+        unique: true,
+      },
+      gtin: {
+        type: 'string',
+        required: false,
+        prompt: '¿Cuál es el GTIN/código de barras del producto? Si no tiene, puedo continuar sin GTIN.',
         unique: true,
       },
       type: {
@@ -51,7 +57,7 @@ export const productCrudActions: ActionDefinition[] = [
       },
       categoryId: {
         type: 'string',
-        required: false,
+        required: true,
         prompt: '¿A qué categoría pertenece el producto?',
       },
       trackInventory: {
@@ -85,7 +91,8 @@ export const productCrudActions: ActionDefinition[] = [
       },
     },
     serviceAdapter: async (params, context) => {
-      const { name, price, sku, type, categoryId, description, trackInventory, inventoryMethod, initialStock, costPerUnit } = params as any
+      const { name, price, sku, gtin, type, categoryId, description, trackInventory, inventoryMethod, initialStock, costPerUnit } =
+        params as any
 
       // Resolve categoryId by name
       let resolvedCategoryId = categoryId as string | undefined
@@ -96,14 +103,7 @@ export const productCrudActions: ActionDefinition[] = [
         })
         resolvedCategoryId = category?.id
       }
-      if (!resolvedCategoryId) {
-        const fallback = await prisma.menuCategory.findFirst({
-          where: { venueId: context.venueId, active: true },
-          select: { id: true },
-        })
-        resolvedCategoryId = fallback?.id
-      }
-      if (!resolvedCategoryId) throw new Error('No se encontró una categoría para el producto.')
+      if (!resolvedCategoryId) throw new Error('No encontré esa categoría. Indica una categoría activa del menú.')
 
       // Auto-generate SKU if not provided
       const finalSku = (sku as string) || name.toString().toUpperCase().replace(/\s+/g, '-').substring(0, 20)
@@ -113,6 +113,7 @@ export const productCrudActions: ActionDefinition[] = [
         name: name as string,
         price: Number(price),
         sku: finalSku,
+        gtin: gtin as string | undefined,
         type: (type as any) || 'FOOD_AND_BEV',
         categoryId: resolvedCategoryId,
         description: description as string | undefined,
@@ -151,7 +152,7 @@ export const productCrudActions: ActionDefinition[] = [
     },
     previewTemplate: {
       title: 'Crear producto: {{name}}',
-      summary: 'Se creará el producto "{{name}}" (SKU: {{sku}}) a ${{price}}. {{trackInventory}}{{inventoryMethod}}',
+      summary: 'Se creará el producto "{{name}}" a ${{price}} en la categoría "{{categoryId}}". SKU: {{sku}}. GTIN: {{gtin}}.',
       showDiff: false,
       showImpact: false,
     },

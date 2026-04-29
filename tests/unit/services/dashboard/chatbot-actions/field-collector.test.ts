@@ -164,6 +164,20 @@ describe('FieldCollectorService', () => {
       const missing = collector.getMissingFields(def, params)
       expect(missing).toContain('name')
     })
+
+    it('should treat product create price below min as missing', () => {
+      const def = makeDefinition({
+        actionType: 'menu.product.create',
+        fields: {
+          name: { type: 'string', required: true, prompt: 'el nombre del producto' },
+          price: { type: 'decimal', required: true, prompt: 'el precio', min: 0.01 },
+        },
+      })
+      const params = { name: 'Producto Gratis', price: 0 }
+
+      const missing = collector.getMissingFields(def, params)
+      expect(missing).toContain('price')
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -305,6 +319,15 @@ describe('FieldCollectorService', () => {
       const def = makeDefinition()
       const prompt = collector.buildConversationalPrompt(def, [])
       expect(prompt).toBeTruthy()
+    })
+
+    it('should suggest SKU/GTIN when product creation is missing required fields', () => {
+      const def = makeDefinition({ actionType: 'menu.product.create' })
+      const prompt = collector.buildConversationalPrompt(def, ['price', 'categoryId'])
+
+      expect(prompt).toContain('GTIN')
+      expect(prompt).toContain('SKU')
+      expect(prompt).toContain('genero un SKU')
     })
   })
 

@@ -29,6 +29,7 @@ import * as productService from './product.dashboard.service'
 import { ActionEngine } from './chatbot-actions/action-engine.service'
 import { ActionContext } from './chatbot-actions/types'
 import { registerAllActions } from './chatbot-actions/definitions'
+import { ConversationOrchestratorService } from './chatbot-conversation/conversation-orchestrator.service'
 
 interface TextToSqlQuery {
   message: string
@@ -120,7 +121,16 @@ interface TextToSqlResponse {
     rowsReturned?: number
     executionTime?: number
     dataSourcesUsed: string[]
-    routedTo?: 'SharedQueryService' | 'TextToSqlPipeline' | 'Blocked' | 'ActionPreview' | 'ActionConfirm' | 'FastPath' | 'LLMRouter'
+    routedTo?:
+      | 'SharedQueryService'
+      | 'TextToSqlPipeline'
+      | 'Blocked'
+      | 'ActionPreview'
+      | 'ActionConfirm'
+      | 'ActionEngine'
+      | 'ConversationOrchestrator'
+      | 'FastPath'
+      | 'LLMRouter'
     intent?: IntentClassificationResult['intent']
     riskLevel?: 'low' | 'medium' | 'high' | 'critical'
     reasonCode?: string
@@ -129,6 +139,15 @@ interface TextToSqlResponse {
     warnings?: string[] // Semantic validation warnings
     userRole?: UserRole // User role for auditing
     action?: CreateProductActionMetadata
+    planId?: string
+    planMode?: 'single' | 'multi_step' | 'clarification' | 'unsupported'
+    steps?: Array<{
+      id: string
+      kind: 'query' | 'action' | 'clarify' | 'unsupported'
+      tool?: string
+      actionType?: string
+      status: 'executed' | 'preview' | 'blocked' | 'skipped' | 'needs_input'
+    }>
     idempotency?: {
       key: string
       replayed: boolean
@@ -240,6 +259,7 @@ interface ParsedCreateProductActionCommand {
 
 const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
 const CHATBOT_MUTATIONS_ENABLED = process.env.CHATBOT_ENABLE_MUTATIONS === 'true'
+const CHATBOT_CONVERSATION_PLANNER_ENABLED = process.env.CHATBOT_ENABLE_CONVERSATION_PLANNER === 'true'
 const MAX_PROMPT_CONTEXT_CHARS = 600
 const MAX_REFERENCES_CONTEXT_CHARS = 3000
 const ACTION_SESSION_TTL_MS = 15 * 60 * 1000
@@ -360,6 +380,7 @@ class TextToSqlAssistantService {
   private schemaContext: string
   private learningService: AILearningService
   private actionEngine: ActionEngine
+  private conversationOrchestrator: ConversationOrchestratorService
   private currentQueryMetadata: Record<string, string> = {}
   private static readonly pendingActionSessions: Map<string, PendingAssistantActionSession> = new Map()
   private static readonly idempotencyResults: Map<
@@ -399,6 +420,7 @@ class TextToSqlAssistantService {
     this.learningService = new AILearningService()
     this.actionEngine = new ActionEngine()
     registerAllActions()
+    this.conversationOrchestrator = new ConversationOrchestratorService(this.openai, this.actionEngine)
     this.initializeActionSessionCleanup()
   }
 
@@ -1920,6 +1942,40 @@ Ejemplos de respuestas CORRECTAS:
               }
             }
           }
+        }
+      }
+
+      // ── Conversation Planner Hook ──
+      if (CHATBOT_CONVERSATION_PLANNER_ENABLED) {
+        try {
+          const orchestrated = await this.conversationOrchestrator.process({
+            message: query.message,
+            conversationHistory: query.conversationHistory,
+            venueId: query.venueId,
+            userId: query.userId,
+            userRole,
+            fallbackStaffRole: (query.userRole as unknown as StaffRole) || StaffRole.VIEWER,
+            ipAddress: query.ipAddress,
+            includeVisualization: query.includeVisualization,
+          })
+
+          if (orchestrated) {
+            logger.info('🧭 Conversation planner handled query', {
+              venueId: query.venueId,
+              userId: query.userId,
+              planId: orchestrated.metadata.planId,
+              planMode: orchestrated.metadata.planMode,
+              steps: orchestrated.metadata.steps,
+            })
+            return orchestrated as unknown as TextToSqlResponse
+          }
+        } catch (error) {
+          logger.error('[ConversationPlanner] Error in planner/orchestrator flow; falling back to legacy pipeline', {
+            error: error instanceof Error ? { message: error.message, stack: error.stack } : error,
+            message: query.message,
+            venueId: query.venueId,
+            userId: query.userId,
+          })
         }
       }
 

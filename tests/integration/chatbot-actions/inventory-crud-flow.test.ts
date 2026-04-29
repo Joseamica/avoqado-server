@@ -31,6 +31,9 @@ jest.mock('@/utils/prismaClient', () => ({
     product: {
       findFirst: jest.fn(),
     },
+    menuCategory: {
+      findFirst: jest.fn(),
+    },
     supplier: {
       findFirst: jest.fn(),
     },
@@ -45,6 +48,7 @@ const mockPrisma = prisma as unknown as {
   $transaction: jest.Mock
   rawMaterial: { findFirst: jest.Mock; create: jest.Mock; update: jest.Mock }
   product: { findFirst: jest.Mock }
+  menuCategory: { findFirst: jest.Mock }
   supplier: { findFirst: jest.Mock }
   recipeLine: { count: jest.Mock }
 }
@@ -109,6 +113,9 @@ jest.mock('@/services/dashboard/product.dashboard.service', () => ({
   updateProductVisibility: jest.fn(),
   updateProductPrice: jest.fn(),
 }))
+
+import * as productService from '@/services/dashboard/product.dashboard.service'
+const mockCreateProduct = productService.createProduct as jest.Mock
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -216,6 +223,93 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
           unit: 'KILOGRAM',
           costPerUnit: 45,
           currentStock: 50,
+        }),
+      )
+    })
+  })
+
+  describe('Menu product create hardening', () => {
+    it('should ask for price and category instead of previewing a product at $0 without category', async () => {
+      registerAllActions()
+
+      const result = await engine.processAction(
+        {
+          actionType: 'menu.product.create',
+          params: {
+            name: 'test',
+            price: 0,
+          },
+          confidence: 0.95,
+        },
+        makeContext({ permissions: ['menu:create'] }),
+      )
+
+      expect(result.type).toBe('requires_input')
+      expect(result.message).toContain('precio')
+      expect(result.message).toContain('categoría')
+      expect(result.message).toContain('GTIN')
+      expect(result.actionId).toBeUndefined()
+      expect(mockCreateProduct).not.toHaveBeenCalled()
+    })
+
+    it('should require category and not use the first active category as a silent fallback', async () => {
+      registerAllActions()
+
+      const result = await engine.processAction(
+        {
+          actionType: 'menu.product.create',
+          params: {
+            name: 'Agua Mineral',
+            price: 25,
+          },
+          confidence: 0.95,
+        },
+        makeContext({ permissions: ['menu:create'] }),
+      )
+
+      expect(result.type).toBe('requires_input')
+      expect(result.message).toContain('categoría')
+      expect(mockPrisma.menuCategory.findFirst).not.toHaveBeenCalled()
+      expect(mockCreateProduct).not.toHaveBeenCalled()
+    })
+
+    it('should include GTIN in preview and creation params when provided', async () => {
+      registerAllActions()
+
+      mockPrisma.menuCategory.findFirst.mockResolvedValue({ id: 'category-bebidas' })
+      mockCreateProduct.mockResolvedValue({ id: 'product-agua', name: 'Agua Mineral', sku: 'AGU600' })
+
+      const context = makeContext({ permissions: ['menu:create'] })
+      const processResult = await engine.processAction(
+        {
+          actionType: 'menu.product.create',
+          params: {
+            name: 'Agua Mineral',
+            price: 25,
+            categoryId: 'Bebidas',
+            sku: 'AGU600',
+            gtin: '7501234567890',
+          },
+          confidence: 0.95,
+        },
+        context,
+      )
+
+      expect(processResult.type).toBe('preview')
+      expect(processResult.message).toContain('GTIN: 7501234567890')
+      expect(processResult.message).not.toContain('false')
+
+      const confirmResult = await engine.confirmAction(processResult.actionId!, 'idem-product-create-gtin', context)
+
+      expect(confirmResult.type).toBe('confirmed')
+      expect(mockCreateProduct).toHaveBeenCalledWith(
+        VENUE_ID,
+        expect.objectContaining({
+          name: 'Agua Mineral',
+          price: 25,
+          sku: 'AGU600',
+          gtin: '7501234567890',
+          categoryId: 'category-bebidas',
         }),
       )
     })
