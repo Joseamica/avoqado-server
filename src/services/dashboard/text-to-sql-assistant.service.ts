@@ -1826,13 +1826,14 @@ Ejemplos de respuestas CORRECTAS:
         // get a read-only/unsupported response, not a security false-positive.
         const isCrudMessage = this.isCrudMutationMessage(query.message)
         const crudMessageHasInjectionSignals = isCrudMessage && this.hasExplicitPromptInjectionSignals(query.message)
+        const isActionFieldReply = this.isLikelyActionFieldReply(query.message, query.conversationHistory)
 
         const shouldBypassSemanticBlock = this.shouldBypassSemanticInjectionBlock(query.message)
 
         if (
           semanticCheck.isInjection &&
           semanticCheck.confidence >= 70 &&
-          (!isCrudMessage || crudMessageHasInjectionSignals) &&
+          ((!isCrudMessage && !isActionFieldReply) || crudMessageHasInjectionSignals) &&
           !shouldBypassSemanticBlock
         ) {
           logger.warn('🛡️ Semantic prompt injection blocked', {
@@ -1875,7 +1876,7 @@ Ejemplos de respuestas CORRECTAS:
         if (
           semanticCheck.isInjection &&
           semanticCheck.confidence >= 70 &&
-          (shouldBypassSemanticBlock || (isCrudMessage && !crudMessageHasInjectionSignals))
+          (shouldBypassSemanticBlock || isActionFieldReply || (isCrudMessage && !crudMessageHasInjectionSignals))
         ) {
           logger.warn('⚠️ Semantic injection classifier flagged a likely benign business query; bypassing block', {
             userId: query.userId,
@@ -1889,7 +1890,7 @@ Ejemplos de respuestas CORRECTAS:
         // Step 0.1c: Scan conversation history for injection attempts.
         // An attacker could embed injection in prior conversation entries that go directly to LLM.
         // Only scan the last 5 entries to keep cost bounded.
-        const currentMessageIsSafeCrud = isCrudMessage && !crudMessageHasInjectionSignals
+        const currentMessageIsSafeCrud = (isCrudMessage || isActionFieldReply) && !crudMessageHasInjectionSignals
         if (!currentMessageIsSafeCrud && query.conversationHistory && query.conversationHistory.length > 0) {
           const historyToScan = query.conversationHistory.slice(-5)
           for (const entry of historyToScan) {
@@ -1942,6 +1943,51 @@ Ejemplos de respuestas CORRECTAS:
               }
             }
           }
+        }
+      }
+
+      // Pending action continuations must run before the general conversation planner.
+      // Otherwise short field replies can be treated as standalone questions.
+      if (CHATBOT_MUTATIONS_ENABLED) {
+        try {
+          const actionContext = await this.buildActionContext({
+            venueId: query.venueId,
+            userId: query.userId,
+            fallbackRole: (query.userRole as unknown as StaffRole) || StaffRole.VIEWER,
+            ipAddress: query.ipAddress,
+          })
+
+          const continuedFieldCollection = await this.actionEngine.continueFieldCollection(query.message, actionContext)
+          const continuedAction = continuedFieldCollection ?? (await this.actionEngine.continueDisambiguation(query.message, actionContext))
+
+          if (continuedAction) {
+            return {
+              response: continuedAction.message,
+              confidence: 1,
+              metadata: {
+                queryGenerated: false,
+                queryExecuted: false,
+                dataSourcesUsed: ['chatbot.action_engine'],
+                routedTo: 'ActionEngine' as any,
+                riskLevel: 'low' as any,
+                reasonCode: `action_${continuedAction.type}`,
+                action: {
+                  type: continuedAction.type,
+                  actionId: continuedAction.actionId,
+                  preview: continuedAction.preview,
+                  missingFields: continuedAction.missingFields,
+                  formFields: continuedAction.formFields,
+                  candidates: continuedAction.candidates,
+                  entityId: continuedAction.entityId,
+                } as any,
+              },
+            }
+          }
+        } catch (error) {
+          logger.error('[ActionEngine] Error continuing pending action before planner', {
+            error: error instanceof Error ? { message: error.message, stack: error.stack } : error,
+            message: query.message,
+          })
         }
       }
 
@@ -2006,6 +2052,7 @@ Ejemplos de respuestas CORRECTAS:
                   actionId: continuedAction.actionId,
                   preview: continuedAction.preview,
                   missingFields: continuedAction.missingFields,
+                  formFields: continuedAction.formFields,
                   candidates: continuedAction.candidates,
                   entityId: continuedAction.entityId,
                 } as any,
@@ -2034,6 +2081,7 @@ Ejemplos de respuestas CORRECTAS:
                   actionId: result.actionId,
                   preview: result.preview,
                   missingFields: result.missingFields,
+                  formFields: result.formFields,
                   candidates: result.candidates,
                   entityId: result.entityId,
                 } as any,
@@ -6128,6 +6176,45 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
     // Keep this bypass narrow: short/normal business asks only.
     return normalizedMessage.length <= 180
+  }
+
+  /**
+   * Field-value replies can mention "ai" or other words that confuse the
+   * semantic guard when read without context. Only bypass when the assistant
+   * just asked for action fields and the new user message has no explicit
+   * prompt-injection markers.
+   */
+  private isLikelyActionFieldReply(message: string, conversationHistory?: ConversationEntry[]): boolean {
+    if (!CHATBOT_MUTATIONS_ENABLED || this.hasExplicitPromptInjectionSignals(message)) {
+      return false
+    }
+
+    const normalizedMessage = this.normalizeTextForMatch(message)
+    if (!normalizedMessage || normalizedMessage.length > 300) {
+      return false
+    }
+
+    const recentAssistantPrompt = conversationHistory
+      ?.slice(-6)
+      .reverse()
+      .find(entry => entry.role === 'assistant')?.content
+
+    if (!recentAssistantPrompt) {
+      return false
+    }
+
+    const normalizedPrompt = this.normalizeTextForMatch(recentAssistantPrompt)
+    const askedForActionFields =
+      /\b(para completar necesito|solo me falta|completa los campos faltantes)\b/.test(normalizedPrompt) &&
+      /\b(nombre del producto|precio del producto|categoria|sku|gtin|codigo de barras|stock|inventario|insumo|proveedor|receta)\b/.test(
+        normalizedPrompt,
+      )
+
+    if (!askedForActionFields) {
+      return false
+    }
+
+    return normalizedMessage.length <= 120
   }
 
   /**

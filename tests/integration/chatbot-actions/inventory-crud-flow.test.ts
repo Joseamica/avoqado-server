@@ -248,6 +248,7 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
       expect(result.message).toContain('precio')
       expect(result.message).toContain('categoría')
       expect(result.message).toContain('GTIN')
+      expect(result.formFields?.map(field => field.name)).toEqual(['name', 'price', 'sku', 'gtin', 'categoryId'])
       expect(result.actionId).toBeUndefined()
       expect(mockCreateProduct).not.toHaveBeenCalled()
     })
@@ -309,6 +310,59 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
           price: 25,
           sku: 'AGU600',
           gtin: '7501234567890',
+          categoryId: 'category-bebidas',
+        }),
+      )
+    })
+
+    it('should keep product creation pending and collect fields across chat turns', async () => {
+      registerAllActions()
+
+      mockPrisma.menuCategory.findFirst.mockResolvedValue({ id: 'category-bebidas' })
+      mockCreateProduct.mockResolvedValue({ id: 'product-ai-test', name: 'producto de prueba creado por ai' })
+
+      const context = makeContext({ permissions: ['menu:create'] })
+
+      const firstTurn = await engine.processAction(
+        {
+          actionType: 'menu.product.create',
+          params: {},
+          confidence: 0.95,
+        },
+        context,
+      )
+
+      expect(firstTurn.type).toBe('requires_input')
+      expect(firstTurn.message).toContain('nombre del producto')
+      expect(firstTurn.message).toContain('precio')
+      expect(firstTurn.message).toContain('categoría')
+      expect(firstTurn.formFields?.map(field => field.name)).toEqual(['name', 'price', 'sku', 'gtin', 'categoryId'])
+
+      const nameTurn = await engine.continueFieldCollection('producto de prueba creado por ai', context)
+
+      expect(nameTurn).not.toBeNull()
+      expect(nameTurn?.type).toBe('requires_input')
+      expect(nameTurn?.message).toContain('precio')
+      expect(nameTurn?.message).toContain('categoría')
+      expect(nameTurn?.formFields?.map(field => field.name)).toEqual(['name', 'price', 'sku', 'gtin', 'categoryId'])
+      expect(mockCreateProduct).not.toHaveBeenCalled()
+
+      const previewTurn = await engine.continueFieldCollection('price: 50\ncategoryId: Bebidas', context)
+
+      expect(previewTurn).not.toBeNull()
+      expect(previewTurn?.type).toBe('preview')
+      expect(previewTurn?.message).toContain('producto de prueba creado por ai')
+      expect(previewTurn?.message).toContain('$50')
+      expect(previewTurn?.actionId).toBeDefined()
+
+      const confirmTurn = await engine.confirmAction(previewTurn!.actionId!, 'idem-product-ai-test', context)
+
+      expect(confirmTurn.type).toBe('confirmed')
+      expect(mockCreateProduct).toHaveBeenCalledWith(
+        VENUE_ID,
+        expect.objectContaining({
+          name: 'producto de prueba creado por ai',
+          price: 50,
           categoryId: 'category-bebidas',
         }),
       )

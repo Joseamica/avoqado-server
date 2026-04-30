@@ -521,6 +521,7 @@ export class ConversationOrchestratorService {
       actionId: result.actionId,
       preview: result.preview,
       missingFields: result.missingFields,
+      formFields: result.formFields,
       candidates: result.candidates,
       entityId: result.entityId,
     }

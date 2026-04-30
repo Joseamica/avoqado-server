@@ -58,9 +58,8 @@ class FieldCollectorService {
    * Determines whether the interaction should fall back to a form.
    * Defaults to false (conversation-first UX).
    *
-   * Returns true ONLY when:
-   *  - missingFields.length > 5 AND the definition has at least one enum or reference field, OR
-   *  - userMessage contains "formulario" or "form" (case-insensitive)
+   * Returns true when the user explicitly asks for a form, product creation is
+   * missing fields, or a create action has multiple missing fields.
    */
   shouldUseForm(definition: ActionDefinition, missingFields: string[], userMessage?: string): boolean {
     if (userMessage) {
@@ -68,6 +67,14 @@ class FieldCollectorService {
       if (lower.includes('formulario') || lower.includes('form')) {
         return true
       }
+    }
+
+    if (definition.actionType === 'menu.product.create') {
+      return true
+    }
+
+    if (definition.operation === 'create' && missingFields.length >= 2) {
+      return true
     }
 
     if (missingFields.length > 5) {
@@ -127,8 +134,14 @@ class FieldCollectorService {
    */
   buildFormFields(definition: ActionDefinition, extractedParams: Record<string, unknown>, missingFields: string[]): FormField[] {
     const missingSet = new Set(missingFields)
+    const fieldEntries =
+      definition.actionType === 'menu.product.create'
+        ? Object.entries(definition.fields).filter(([fieldName]) => ['name', 'price', 'categoryId', 'sku', 'gtin'].includes(fieldName))
+        : Object.entries(definition.fields).filter(
+            ([fieldName, fieldDef]) => missingSet.has(fieldName) || extractedParams[fieldName] !== undefined,
+          )
 
-    return Object.entries(definition.fields).map(([fieldName, fieldDef]) => {
+    return fieldEntries.map(([fieldName, fieldDef]) => {
       const formField: FormField = {
         name: fieldName,
         label: fieldDef.prompt ?? fieldName,

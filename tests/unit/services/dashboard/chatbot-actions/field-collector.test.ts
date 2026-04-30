@@ -192,14 +192,14 @@ describe('FieldCollectorService', () => {
       expect(collector.shouldUseForm(def, missing)).toBe(false)
     })
 
-    it('should return false when ≤5 missing fields, even with enum fields', () => {
+    it('should return true for create actions with multiple missing fields', () => {
       const def = makeDefinitionWithEnum()
       const missing = ['name', 'unit'] // 2 missing, has enum
 
-      expect(collector.shouldUseForm(def, missing)).toBe(false)
+      expect(collector.shouldUseForm(def, missing)).toBe(true)
     })
 
-    it('should return false when >5 missing fields but no enum or reference fields', () => {
+    it('should return true for large create forms even without enum or reference fields', () => {
       const defNoEnumNoRef: ActionDefinition = {
         actionType: 'log.create',
         entity: 'Log',
@@ -222,7 +222,7 @@ describe('FieldCollectorService', () => {
       }
       const missing = ['f1', 'f2', 'f3', 'f4', 'f5', 'f6']
 
-      expect(collector.shouldUseForm(defNoEnumNoRef, missing)).toBe(false)
+      expect(collector.shouldUseForm(defNoEnumNoRef, missing)).toBe(true)
     })
 
     it('should return true when >5 missing fields AND definition has enum fields', () => {
@@ -246,11 +246,11 @@ describe('FieldCollectorService', () => {
       expect(collector.shouldUseForm(def, missing, 'show me the Form')).toBe(true)
     })
 
-    it('should return false when userMessage is present but does not contain form keywords', () => {
+    it('should still use a form for create actions with multiple missing fields even without form keywords', () => {
       const def = makeDefinition()
       const missing = ['name', 'price']
 
-      expect(collector.shouldUseForm(def, missing, 'el nombre es Taco')).toBe(false)
+      expect(collector.shouldUseForm(def, missing, 'el nombre es Taco')).toBe(true)
     })
   })
 
@@ -372,14 +372,14 @@ describe('FieldCollectorService', () => {
       expect(unitField?.options).toEqual(['kg', 'litros', 'piezas'])
     })
 
-    it('should include all fields (both missing and pre-filled)', () => {
+    it('should include missing and pre-filled fields only', () => {
       const def = makeDefinitionWithEnum()
       const extracted = { name: 'Harina' }
       const missing = ['unit']
 
       const fields = collector.buildFormFields(def, extracted, missing)
 
-      expect(fields.length).toBe(Object.keys(def.fields).length)
+      expect(fields.map(field => field.name)).toEqual(['name', 'unit'])
     })
 
     it('should set required correctly for each field', () => {
@@ -389,13 +389,13 @@ describe('FieldCollectorService', () => {
       const nameField = fields.find(f => f.name === 'name')
       expect(nameField?.required).toBe(true)
 
-      const categoryField = fields.find(f => f.name === 'categoryId')
-      expect(categoryField?.required).toBe(false)
+      const priceField = fields.find(f => f.name === 'price')
+      expect(priceField?.required).toBe(true)
     })
 
     it('should use field prompt as label, falling back to field name', () => {
       const def = makeDefinitionWithEnum()
-      const fields = collector.buildFormFields(def, {}, [])
+      const fields = collector.buildFormFields(def, {}, ['unit'])
 
       const unitField = fields.find(f => f.name === 'unit')
       expect(unitField?.label).toBe('la unidad')

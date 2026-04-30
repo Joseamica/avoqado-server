@@ -175,6 +175,14 @@ export interface ActionResponse {
   message: string
   preview?: ActionPreview
   missingFields?: string[]
+  formFields?: Array<{
+    name: string
+    label: string
+    type: FieldDefinition['type']
+    required: boolean
+    value?: unknown
+    options?: string[]
+  }>
   candidates?: EntityMatch[]
   entityId?: string
   actionId?: string

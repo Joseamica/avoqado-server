@@ -47,6 +47,14 @@ interface PendingDisambiguationSession {
   expiresAt: Date
 }
 
+interface PendingFieldCollectionSession {
+  definition: ActionDefinition
+  classification: ActionClassification
+  context: ActionContext
+  createdAt: Date
+  expiresAt: Date
+}
+
 // ---------------------------------------------------------------------------
 // ActionEngine — main orchestrator
 // ---------------------------------------------------------------------------
@@ -61,6 +69,7 @@ export class ActionEngine {
   // In-memory stores
   private readonly pendingSessions = new Map<string, PendingActionSession>()
   private readonly pendingDisambiguations = new Map<string, PendingDisambiguationSession>()
+  private readonly pendingFieldCollections = new Map<string, PendingFieldCollectionSession>()
   private readonly idempotencyCache = new Map<string, ActionResponse>()
   private readonly mutationRates = new Map<string, RateLimitEntry>()
   private readonly deleteRates = new Map<string, RateLimitEntry>()
@@ -298,6 +307,60 @@ export class ActionEngine {
     return this.createPreviewSession(session.definition, session.classification, selected, context)
   }
 
+  /**
+   * Continue an action that was missing required fields. This keeps the action
+   * intent server-side, so short replies like "producto de prueba creado por ai"
+   * are treated as field values instead of fresh standalone prompts.
+   */
+  async continueFieldCollection(message: string, context: ActionContext): Promise<ActionResponse | null> {
+    const key = this.getDisambiguationKey(context)
+    const session = this.pendingFieldCollections.get(key)
+    if (!session) {
+      return null
+    }
+
+    if (new Date() > session.expiresAt) {
+      this.pendingFieldCollections.delete(key)
+      return null
+    }
+
+    if (session.context.venueId !== context.venueId || session.context.userId !== context.userId) {
+      this.pendingFieldCollections.delete(key)
+      return { type: 'error', message: 'No tienes acceso a esta sesión.' }
+    }
+
+    if (!this.hasRequiredPermission(context, session.definition.permission)) {
+      this.pendingFieldCollections.delete(key)
+      return { type: 'permission_denied', message: 'No tienes permiso para esta acción.' }
+    }
+
+    const currentMissingFields = this.fieldCollector.getMissingFields(session.definition, session.classification.params)
+    const extractedParams = this.extractFieldCollectionParams(message, session.definition, currentMissingFields)
+
+    if (Object.keys(extractedParams).length === 0) {
+      const useForm = this.fieldCollector.shouldUseForm(session.definition, currentMissingFields)
+      return {
+        type: 'requires_input',
+        missingFields: currentMissingFields,
+        message: this.fieldCollector.buildConversationalPrompt(session.definition, currentMissingFields),
+        ...(useForm
+          ? { formFields: this.fieldCollector.buildFormFields(session.definition, session.classification.params, currentMissingFields) }
+          : {}),
+      }
+    }
+
+    const nextClassification: ActionClassification = {
+      ...session.classification,
+      params: {
+        ...session.classification.params,
+        ...extractedParams,
+      },
+    }
+
+    this.pendingFieldCollections.delete(key)
+    return this.processAction(nextClassification, context)
+  }
+
   private async createPreviewSession(
     definition: ActionDefinition,
     classification: ActionClassification,
@@ -307,14 +370,25 @@ export class ActionEngine {
     // Missing fields
     const missingFields = this.fieldCollector.getMissingFields(definition, classification.params)
     if (missingFields.length > 0) {
+      this.storePendingFieldCollection(context, {
+        definition,
+        classification: {
+          ...classification,
+          params: { ...classification.params },
+        },
+        context,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      })
+
       const useForm = this.fieldCollector.shouldUseForm(definition, missingFields)
       if (useForm) {
         const formFields = this.fieldCollector.buildFormFields(definition, classification.params, missingFields)
         return {
           type: 'requires_input',
           missingFields,
-          message: 'Completa los campos faltantes.',
-          ...({ formFields } as Record<string, unknown>),
+          message: this.fieldCollector.buildConversationalPrompt(definition, missingFields),
+          formFields,
         } as ActionResponse
       }
       return {
@@ -786,6 +860,12 @@ export class ActionEngine {
       }
     }
 
+    for (const [key, session] of this.pendingFieldCollections) {
+      if (now > session.expiresAt) {
+        this.pendingFieldCollections.delete(key)
+      }
+    }
+
     // Also clean up idempotency cache entries that have been there too long.
     // The setTimeout-based TTL handles individual entries, but this is a safety net.
     // No-op for now since individual deletes handle it via setTimeout.
@@ -867,6 +947,154 @@ export class ActionEngine {
 
   private storePendingDisambiguation(context: ActionContext, session: PendingDisambiguationSession): void {
     this.pendingDisambiguations.set(this.getDisambiguationKey(context), session)
+  }
+
+  private storePendingFieldCollection(context: ActionContext, session: PendingFieldCollectionSession): void {
+    this.pendingFieldCollections.set(this.getDisambiguationKey(context), session)
+  }
+
+  private extractFieldCollectionParams(message: string, definition: ActionDefinition, missingFields: string[]): Record<string, unknown> {
+    const structuredParams = this.extractStructuredFieldParams(message, definition)
+
+    if (definition.actionType === 'menu.product.create') {
+      return {
+        ...this.extractMenuProductCreateFieldParams(message, missingFields),
+        ...structuredParams,
+      }
+    }
+
+    if (Object.keys(structuredParams).length > 0) {
+      return structuredParams
+    }
+
+    if (missingFields.length === 1) {
+      const fieldName = missingFields[0]
+      const fieldDefinition = definition.fields[fieldName]
+      const trimmed = message.trim()
+
+      if (trimmed && (fieldDefinition?.type === 'string' || fieldDefinition?.type === 'reference')) {
+        return { [fieldName]: trimmed }
+      }
+    }
+
+    return {}
+  }
+
+  private extractStructuredFieldParams(message: string, definition: ActionDefinition): Record<string, unknown> {
+    const params: Record<string, unknown> = {}
+    const lines = message
+      .split(/\r?\n|,/)
+      .map(line => line.trim())
+      .filter(Boolean)
+
+    for (const line of lines) {
+      const match = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.+)$/)
+      if (!match?.[1] || match[2] === undefined) {
+        continue
+      }
+
+      const fieldName = match[1].trim()
+      const fieldDefinition = definition.fields[fieldName]
+      if (!fieldDefinition || this.isForbiddenLlmParam(fieldName)) {
+        continue
+      }
+
+      const rawValue = match[2].trim()
+      if (!rawValue) {
+        continue
+      }
+
+      const parsedValue = this.parseStructuredFieldValue(rawValue, fieldDefinition.type)
+      if (parsedValue !== undefined) {
+        params[fieldName] = parsedValue
+      }
+    }
+
+    return params
+  }
+
+  private parseStructuredFieldValue(value: string, type: ActionDefinition['fields'][string]['type']): unknown {
+    if (type === 'decimal' || type === 'integer') {
+      const numericValue = Number(value.replace(',', '.'))
+      if (!Number.isFinite(numericValue)) {
+        return undefined
+      }
+      return type === 'integer' ? Math.trunc(numericValue) : numericValue
+    }
+
+    if (type === 'boolean') {
+      const normalized = this.normalizeForSelection(value)
+      if (/^(true|si|sí|yes|1|activo|activa)$/.test(normalized)) return true
+      if (/^(false|no|0|inactivo|inactiva)$/.test(normalized)) return false
+      return undefined
+    }
+
+    return value
+  }
+
+  private extractMenuProductCreateFieldParams(message: string, missingFields: string[]): Record<string, unknown> {
+    const params: Record<string, unknown> = {}
+    const missing = new Set(missingFields)
+    const trimmed = message.trim()
+    const normalized = this.normalizeForSelection(trimmed)
+
+    if (missing.has('price')) {
+      const explicitPrice = normalized.match(/\bprecio\s*(?:de|es|seria|sería)?\s*\$?\s*(\d+(?:[.,]\d{1,2})?)\b/i)
+      const moneyPrice = trimmed.match(/\$\s*(\d+(?:[.,]\d{1,2})?)/)
+      const pesosPrice = normalized.match(/\b(\d+(?:[.,]\d{1,2})?)\s*(?:pesos|mxn)\b/i)
+      const match = explicitPrice || moneyPrice || pesosPrice
+      if (match?.[1]) {
+        params.price = Number(match[1].replace(',', '.'))
+      }
+    }
+
+    if (missing.has('categoryId')) {
+      const categoryMatch = normalized.match(
+        /\bcategor(?:ia|ía)\s*(?:es|seria|sería|de|del producto|:)?\s*["']?([^,"']+?)["']?(?:\s+(?:precio|sku|gtin|codigo|código)\b|$)/i,
+      )
+      if (categoryMatch?.[1]) {
+        params.categoryId = categoryMatch[1].trim()
+      } else if (missingFields.length === 1 && trimmed.length > 0) {
+        params.categoryId = trimmed
+      }
+    }
+
+    const skuMatch = trimmed.match(/\bsku\s*[:#-]?\s*([A-Za-z0-9_-]{2,64})\b/i)
+    if (skuMatch?.[1]) {
+      params.sku = skuMatch[1]
+    }
+
+    const gtinMatch = trimmed.match(/\b(?:gtin|codigo(?:\s+de\s+barras)?|código(?:\s+de\s+barras)?|barcode)\s*[:#-]?\s*([0-9]{8,14})\b/i)
+    if (gtinMatch?.[1]) {
+      params.gtin = gtinMatch[1]
+    }
+
+    if (missing.has('name')) {
+      let name = trimmed
+        .replace(/\b(el\s+)?nombre\s+del\s+producto\s+(?:seria|sería|es|será|sera)\s+/i, '')
+        .replace(/\bproducto\s+se\s+llama\s+/i, '')
+        .replace(/\bprecio\s*(?:de|es|seria|sería)?\s*\$?\s*\d+(?:[.,]\d{1,2})?\b/gi, '')
+        .replace(/\$\s*\d+(?:[.,]\d{1,2})?/g, '')
+        .replace(/\b\d+(?:[.,]\d{1,2})?\s*(?:pesos|mxn)\b/gi, '')
+        .replace(
+          /\bcategor(?:ia|ía)\s*(?:es|seria|sería|de|del producto|:)?\s*["']?([^,"']+?)["']?(?:\s+(?:precio|sku|gtin|codigo|código)\b|$)/gi,
+          '',
+        )
+        .replace(/\bsku\s*[:#-]?\s*[A-Za-z0-9_-]{2,64}\b/gi, '')
+        .replace(/\b(?:gtin|codigo(?:\s+de\s+barras)?|código(?:\s+de\s+barras)?|barcode)\s*[:#-]?\s*[0-9]{8,14}\b/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+      if (!name && missingFields.length === 1) {
+        name = trimmed
+      }
+
+      if (name) {
+        params.name = name
+      }
+    }
+
+    return params
   }
 
   private resolveDisambiguationSelection(message: string, candidates: EntityMatch[]): EntityMatch | null {
