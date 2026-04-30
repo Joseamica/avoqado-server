@@ -246,10 +246,18 @@ export async function rescheduleReservation(req: Request, res: Response, next: N
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
     const { id } = req.params
-    const { startsAt, endsAt } = req.body
+    const { startsAt, endsAt, notificationChannel, customMessage } = req.body
     const settings = await getReservationSettings(venueId)
 
-    const reservation = await reservationService.rescheduleReservation(venueId, id, new Date(startsAt), new Date(endsAt), userId, settings)
+    const reservation = await reservationService.rescheduleReservation(
+      venueId,
+      id,
+      new Date(startsAt),
+      new Date(endsAt),
+      userId,
+      settings,
+      { notificationChannel, customMessage },
+    )
     res.json(reservation)
   } catch (error) {
     next(error)

@@ -777,6 +777,11 @@ export async function updateReservation(
 
 // ---- Reschedule ----
 
+export type RescheduleNotification = {
+  notificationChannel?: 'push' | 'whatsapp' | 'email' | 'sms' | 'none'
+  customMessage?: string
+}
+
 export async function rescheduleReservation(
   venueId: string,
   reservationId: string,
@@ -784,6 +789,7 @@ export async function rescheduleReservation(
   newEndsAt: Date,
   rescheduledBy: string,
   moduleConfig?: any,
+  notification?: RescheduleNotification,
 ) {
   const duration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60000)
 
@@ -795,13 +801,32 @@ export async function rescheduleReservation(
     moduleConfig,
   )
 
+  const channel = notification?.notificationChannel
+  if (channel === 'whatsapp') {
+    logger.warn(
+      `[RESERVATION] WhatsApp reschedule notification requested for ${rescheduled.confirmationCode} but no approved 'reservation_reschedule' template exists yet — skipped`,
+    )
+  } else if (channel === 'email') {
+    logger.warn(
+      `[RESERVATION] Email reschedule notification requested for ${rescheduled.confirmationCode} but email-on-reschedule is not wired yet — skipped`,
+    )
+  } else if (channel === 'sms') {
+    logger.warn(`[RESERVATION] SMS reschedule notification requested for ${rescheduled.confirmationCode} but SMS infra is not configured — skipped`)
+  }
+
   logAction({
     staffId: rescheduledBy,
     venueId,
     action: 'RESERVATION_RESCHEDULED',
     entity: 'Reservation',
     entityId: rescheduled.id,
-    data: { startsAt: newStartsAt, endsAt: newEndsAt, confirmationCode: rescheduled.confirmationCode },
+    data: {
+      startsAt: newStartsAt,
+      endsAt: newEndsAt,
+      confirmationCode: rescheduled.confirmationCode,
+      notificationChannel: channel ?? null,
+      customMessage: notification?.customMessage ?? null,
+    },
   })
 
   return rescheduled

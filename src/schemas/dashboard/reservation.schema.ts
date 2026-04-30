@@ -160,10 +160,14 @@ export const updateReservationBodySchema = z
     },
   )
 
+export const rescheduleNotificationChannelSchema = z.enum(['push', 'whatsapp', 'email', 'sms', 'none'])
+
 export const rescheduleBodySchema = z
   .object({
     startsAt: z.coerce.date({ required_error: 'La nueva fecha de inicio es requerida' }),
     endsAt: z.coerce.date({ required_error: 'La nueva fecha de fin es requerida' }),
+    notificationChannel: rescheduleNotificationChannelSchema.optional(),
+    customMessage: z.string().max(500).optional(),
   })
   .refine(data => data.endsAt > data.startsAt, {
     message: 'La fecha de fin debe ser posterior a la fecha de inicio',
