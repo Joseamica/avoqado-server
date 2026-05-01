@@ -35,6 +35,11 @@ import { Decimal } from '@prisma/client/runtime/library'
 // MOCK HELPERS
 // ==========================================
 
+// Future-proof expiration: always 1 year from "now" so tests never become
+// flaky as the calendar passes the hardcoded date. Replaces the original
+// new Date('2026-05-01') which silently expired on 2026-05-01.
+const FUTURE_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+
 const createMockPack = (overrides: Record<string, any> = {}) => ({
   id: 'pack-123',
   venueId: 'venue-123',
@@ -67,7 +72,7 @@ const createMockPurchase = (overrides: Record<string, any> = {}) => ({
   customerId: 'customer-123',
   creditPackId: 'pack-123',
   purchasedAt: new Date('2026-02-01'),
-  expiresAt: new Date('2026-05-01'),
+  expiresAt: FUTURE_EXPIRES_AT,
   status: 'ACTIVE' as const,
   stripeCheckoutSessionId: 'cs_test_123',
   stripePaymentIntentId: 'pi_test_123',
@@ -829,7 +834,7 @@ describe('Credit Pack Dashboard Service', () => {
           venueId: 'venue-123',
           customerId: 'customer-123',
           status: CreditPurchaseStatus.ACTIVE,
-          expiresAt: new Date('2026-05-01'),
+          expiresAt: FUTURE_EXPIRES_AT,
         },
       })
       prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
@@ -933,7 +938,7 @@ describe('Credit Pack Dashboard Service', () => {
           venueId: 'venue-123',
           customerId: 'customer-123',
           status: CreditPurchaseStatus.ACTIVE,
-          expiresAt: new Date('2026-05-01'),
+          expiresAt: FUTURE_EXPIRES_AT,
         },
       })
       prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
@@ -950,7 +955,7 @@ describe('Credit Pack Dashboard Service', () => {
           venueId: 'venue-123',
           customerId: 'customer-123',
           status: CreditPurchaseStatus.ACTIVE,
-          expiresAt: new Date('2026-05-01'),
+          expiresAt: FUTURE_EXPIRES_AT,
         },
       })
       prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
@@ -977,7 +982,7 @@ describe('Credit Pack Dashboard Service', () => {
           venueId: 'venue-123',
           customerId: 'customer-123',
           status: CreditPurchaseStatus.ACTIVE,
-          expiresAt: new Date('2026-05-01'),
+          expiresAt: FUTURE_EXPIRES_AT,
         },
       })
       prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
@@ -1000,7 +1005,7 @@ describe('Credit Pack Dashboard Service', () => {
           venueId: 'venue-123',
           customerId: 'customer-123',
           status: CreditPurchaseStatus.ACTIVE,
-          expiresAt: new Date('2026-05-01'),
+          expiresAt: FUTURE_EXPIRES_AT,
         },
       })
       prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
@@ -1573,7 +1578,7 @@ describe('Credit Pack Dashboard Service', () => {
             venueId: 'venue-123',
             customerId: 'customer-123',
             status: CreditPurchaseStatus.ACTIVE,
-            expiresAt: new Date('2026-05-01'),
+            expiresAt: FUTURE_EXPIRES_AT,
           },
         })
         prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
