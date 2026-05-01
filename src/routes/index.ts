@@ -14,6 +14,7 @@ import sdkRoutes from './sdk.routes'
 import partnerRoutes from './partner.routes'
 import mobileRoutes from './mobile.routes'
 import meRoutes from './me.routes'
+import consumerRoutes from './consumer.routes'
 import { tpvVersionGate } from '../middlewares/tpv-version-gate.middleware'
 
 const router = express.Router({ mergeParams: true })
@@ -31,6 +32,7 @@ router.use('/demo', demoRoutes) // Legacy demo redirects for obsolete QR codes
 router.use('/sdk', sdkRoutes) // Avoqado Payment SDK routes under /api/v1/sdk
 router.use('/partner', partnerRoutes) // Partner API (PlayTelecom, etc.) under /api/v1/partner
 router.use('/mobile', mobileRoutes) // Mobile app routes (iOS, Android) under /api/v1/mobile
+router.use('/consumer', consumerRoutes) // Public consumer app routes under /api/v1/consumer
 router.use('/me', meRoutes) // Current user routes under /api/v1/me
 
 export default router

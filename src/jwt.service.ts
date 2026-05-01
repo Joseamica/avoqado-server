@@ -264,6 +264,11 @@ export interface CustomerTokenPayload extends jwt.JwtPayload {
   type: 'customer' // Distinguishes from staff tokens
 }
 
+export interface ConsumerTokenPayload extends jwt.JwtPayload {
+  sub: string // Consumer.id
+  type: 'consumer'
+}
+
 /**
  * Genera un token de acceso para clientes (portal público).
  * Expiración: 30 días.
@@ -289,6 +294,31 @@ export function verifyCustomerToken(token: string): CustomerTokenPayload {
   }) as CustomerTokenPayload
   if (!decoded.sub || !decoded.venueId || decoded.type !== 'customer') {
     throw new jwt.JsonWebTokenError('Token de cliente inválido.')
+  }
+  return decoded
+}
+
+/**
+ * Genera un token para consumidores de la app publica de Avoqado.
+ * Expiracion: 30 dias. El refresh se puede agregar cuando haya sesiones multi-device.
+ */
+export function generateConsumerToken(consumerId: string): string {
+  const payload: Omit<ConsumerTokenPayload, 'iat' | 'exp'> = {
+    sub: consumerId,
+    type: 'consumer',
+  }
+  return jwt.sign(payload, ACCESS_TOKEN_SECRET!, {
+    expiresIn: 2592000,
+    algorithm: 'HS256',
+  })
+}
+
+export function verifyConsumerToken(token: string): ConsumerTokenPayload {
+  const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!, {
+    algorithms: ['HS256'],
+  }) as ConsumerTokenPayload
+  if (!decoded.sub || decoded.type !== 'consumer') {
+    throw new jwt.JsonWebTokenError('Token de consumidor inválido.')
   }
   return decoded
 }

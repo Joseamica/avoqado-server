@@ -3142,9 +3142,10 @@ model EcommerceMerchant {
 
   // Provider-specific credentials (encrypted JSON)
   // For Blumon Hosted Checkout: { blumonMerchantId, blumonApiKey, blumonPosId, webhookSecret }
-  // For Stripe: { stripeAccountId, stripeSecretKey }
+  // For Stripe Connect: { connectAccountId }
   // For Square: { squareApplicationId, squareAccessToken }
   providerCredentials Json
+  providerMerchantId  String?
 
   // Cost Structure (what provider charges Avoqado)
   costStructureId String?
@@ -3164,8 +3165,17 @@ model EcommerceMerchant {
   dashboardUser   Staff?  @relation(fields: [dashboardUserId], references: [id])
 
   // Status & mode
-  active      Boolean @default(true)
-  sandboxMode Boolean @default(true) // Start in sandbox
+  active                 Boolean          @default(true)
+  sandboxMode            Boolean          @default(true) // Start in sandbox
+  onboardingStatus       OnboardingStatus @default(NOT_STARTED)
+  chargesEnabled         Boolean          @default(false)
+  payoutsEnabled         Boolean          @default(false)
+  requirementsDue        String[]         @default([])
+  onboardingLinkUrl      String?
+  onboardingLinkExpiry   DateTime?
+  platformFeeBps         Int              @default(100)
+  reserveBps             Int?
+  offboardingInitiatedAt DateTime?
 
   // Audit
   createdById String? // Staff ID who onboarded this merchant
@@ -3178,12 +3188,21 @@ model EcommerceMerchant {
   updatedAt DateTime @updatedAt
 
   @@unique([venueId, channelName]) // One venue can have multiple e-commerce channels with unique names
+  @@unique([providerId, providerMerchantId])
   @@index([venueId])
   @@index([publicKey])
   @@index([contactEmail])
   @@index([active])
   @@index([sandboxMode])
   @@index([providerId])
+  @@index([onboardingStatus])
+}
+
+enum OnboardingStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  RESTRICTED
 }
 
 // ============================================================
@@ -3473,6 +3492,36 @@ model StripeWebhookEvent {
   @@index([eventId])
   @@index([processed])
   @@index([retryCount]) // For monitoring retry patterns
+}
+
+model ProcessedStripeEvent {
+  id            String   @id @default(cuid())
+  stripeEventId String
+  endpoint      String // 'platform' | 'connect'
+  eventType     String
+  account       String?
+  processedAt   DateTime @default(now())
+  payload       Json
+
+  @@unique([endpoint, stripeEventId])
+  @@index([eventType, processedAt])
+  @@index([account])
+}
+
+model MoneyAnomaly {
+  id            String    @id @default(cuid())
+  detectedAt    DateTime  @default(now())
+  category      String
+  reservationId String?
+  stripeEventId String?
+  expectedState Json
+  observedState Json
+  resolution    String?
+  resolvedAt    DateTime?
+  resolvedBy    String?
+
+  @@unique([stripeEventId, category])
+  @@index([category, resolvedAt])
 }
 
 // ==========================================
@@ -3948,6 +3997,10 @@ model Customer {
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
+  // Global consumer identity for the public Avoqado app.
+  consumerId String?
+  consumer   Consumer? @relation(fields: [consumerId], references: [id], onDelete: SetNull)
+
   // Customer grouping
   customerGroupId String?
   customerGroup   CustomerGroup? @relation(fields: [customerGroupId], references: [id], onDelete: SetNull)
@@ -3995,7 +4048,52 @@ model Customer {
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
   @@index([venueId])
+  @@index([consumerId])
   @@index([customerGroupId])
+}
+
+model Consumer {
+  id String @id @default(cuid())
+
+  email String? @unique
+  phone String?
+
+  firstName String?
+  lastName  String?
+  avatarUrl String?
+  locale    String  @default("es")
+
+  marketingConsent Boolean   @default(false)
+  active           Boolean   @default(true)
+  lastLoginAt      DateTime?
+
+  authAccounts ConsumerAuthAccount[]
+  customers    Customer[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([phone])
+  @@index([active])
+}
+
+model ConsumerAuthAccount {
+  id String @id @default(cuid())
+
+  consumerId String
+  consumer   Consumer @relation(fields: [consumerId], references: [id], onDelete: Cascade)
+
+  provider        AuthProvider
+  providerSubject String
+  email           String?
+  emailVerified   Boolean      @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, providerSubject])
+  @@index([consumerId])
+  @@index([email])
 }
 
 model CustomerGroup {
@@ -7647,6 +7745,14 @@ enum DepositStatus {
   PAID // Payment received
   REFUNDED // Deposit returned to customer
   FORFEITED // Lost due to no-show/late cancel
+  EXPIRED // Payment window closed
+  DISPUTED // Chargeback/dispute in flight
+}
+
+enum RefundStatus {
+  PENDING // Refund requested, Stripe call in flight or queued
+  SUCCEEDED // Stripe acknowledged refund
+  FAILED // Stripe refused or retries exhausted
 }
 
 enum WaitlistStatus {
@@ -7701,6 +7807,16 @@ model Reservation {
   depositProcessorRef String? // Stripe PaymentIntent ID or processor reference
   depositPaidAt       DateTime?
   depositRefundedAt   DateTime?
+  checkoutSessionId   String?
+  depositExpiresAt    DateTime?
+  idempotencyKey      String?        @unique
+
+  // Refund lifecycle (orthogonal to depositStatus)
+  refundStatus       RefundStatus?
+  refundRequestedAt  DateTime?
+  refundProcessorRef String?
+  refundFailedReason String?
+  refundRetryCount   Int           @default(0)
 
   // Staff assignment
   createdById String?
@@ -7745,6 +7861,8 @@ model Reservation {
   @@index([venueId, assignedStaffId, startsAt])
   @@index([customerId])
   @@index([cancelSecret])
+  @@index([depositStatus, depositExpiresAt])
+  @@index([refundStatus, refundRequestedAt])
 }
 
 enum ClassSessionStatus {
@@ -7846,7 +7964,7 @@ model ReservationSettings {
   depositFixedAmount   Decimal? @db.Decimal(10, 2)
   depositPercentage    Int? // percentage of service price
   depositPartySizeGte  Int? // require deposit for parties >= this size
-  depositPaymentWindow Int? // hours to complete payment
+  depositPaymentWindow Int? // minutes to complete payment
 
   // Waitlist
   waitlistEnabled      Boolean @default(true)
