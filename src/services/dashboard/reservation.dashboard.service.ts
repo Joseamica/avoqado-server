@@ -5,6 +5,8 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 import { getReservationSettings } from './reservationSettings.service'
+import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
+import emailService from '../email.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow to avoid
 // the circular import — creditPack imports `withSerializableRetry` from this module.
 
@@ -793,6 +795,19 @@ export async function rescheduleReservation(
 ) {
   const duration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60000)
 
+  // Capture pre-update snapshot so we can show "old → new" in notifications and
+  // pull venue/customer fields without a second round-trip after the update.
+  const original = await prisma.reservation.findFirst({
+    where: { id: reservationId, venueId },
+    include: {
+      customer: { select: { firstName: true, lastName: true, phone: true, email: true } },
+      product: { select: { name: true } },
+      venue: { select: { name: true, timezone: true } },
+    },
+  })
+  if (!original) throw new NotFoundError('Reservacion no encontrada')
+  const originalStartsAt = original.startsAt
+
   const rescheduled = await updateReservation(
     venueId,
     reservationId,
@@ -802,16 +817,58 @@ export async function rescheduleReservation(
   )
 
   const channel = notification?.notificationChannel
-  if (channel === 'whatsapp') {
-    logger.warn(
-      `[RESERVATION] WhatsApp reschedule notification requested for ${rescheduled.confirmationCode} but no approved 'reservation_reschedule' template exists yet — skipped`,
-    )
-  } else if (channel === 'email') {
-    logger.warn(
-      `[RESERVATION] Email reschedule notification requested for ${rescheduled.confirmationCode} but email-on-reschedule is not wired yet — skipped`,
-    )
-  } else if (channel === 'sms') {
-    logger.warn(`[RESERVATION] SMS reschedule notification requested for ${rescheduled.confirmationCode} but SMS infra is not configured — skipped`)
+  if (channel && channel !== 'none' && channel !== 'push') {
+    const customerName =
+      [original.customer?.firstName, original.customer?.lastName].filter(Boolean).join(' ').trim() || rescheduled.guestName || 'cliente'
+    const phone = original.customer?.phone || rescheduled.guestPhone
+    const email = original.customer?.email || rescheduled.guestEmail
+    const venueName = original.venue?.name || 'Avoqado'
+    const tz = original.venue?.timezone || 'America/Mexico_City'
+
+    const formatDate = (d: Date) =>
+      new Intl.DateTimeFormat('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone: tz }).format(d)
+    const formatTime = (d: Date) =>
+      new Intl.DateTimeFormat('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz }).format(d)
+
+    if (channel === 'whatsapp') {
+      if (phone) {
+        try {
+          await sendReservationRescheduleWhatsApp(phone, {
+            customerName,
+            venueName,
+            date: formatDate(newStartsAt),
+            time: formatTime(newStartsAt),
+            message: notification?.customMessage,
+          })
+          logger.info(`✅ [RESERVATION] WhatsApp reschedule sent for ${rescheduled.confirmationCode} → ${phone}`)
+        } catch (err) {
+          logger.error(`❌ [RESERVATION] WhatsApp reschedule failed for ${rescheduled.confirmationCode}: ${(err as Error).message}`)
+        }
+      } else {
+        logger.warn(`[RESERVATION] WhatsApp reschedule requested for ${rescheduled.confirmationCode} but customer has no phone — skipped`)
+      }
+    } else if (channel === 'email') {
+      if (email) {
+        try {
+          await emailService.sendReservationRescheduledEmail(email, {
+            customerName,
+            venueName,
+            serviceName: original.product?.name,
+            oldDateTime: `${formatDate(originalStartsAt)}, ${formatTime(originalStartsAt)}`,
+            newDateTime: `${formatDate(newStartsAt)}, ${formatTime(newStartsAt)}`,
+            confirmationCode: rescheduled.confirmationCode,
+            customMessage: notification?.customMessage,
+          })
+          logger.info(`✅ [RESERVATION] Email reschedule sent for ${rescheduled.confirmationCode} → ${email}`)
+        } catch (err) {
+          logger.error(`❌ [RESERVATION] Email reschedule failed for ${rescheduled.confirmationCode}: ${(err as Error).message}`)
+        }
+      } else {
+        logger.warn(`[RESERVATION] Email reschedule requested for ${rescheduled.confirmationCode} but customer has no email — skipped`)
+      }
+    } else if (channel === 'sms') {
+      logger.warn(`[RESERVATION] SMS reschedule requested for ${rescheduled.confirmationCode} but SMS infra is not configured — skipped`)
+    }
   }
 
   logAction({

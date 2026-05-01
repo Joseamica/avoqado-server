@@ -1,6 +1,8 @@
-import { SaleVerificationStatus, Prisma } from '@prisma/client'
+import { SaleVerificationStatus, SaleVerificationRejectionReason, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import socketManager from '../../communication/sockets'
+import { SocketEventType } from '../../communication/sockets/types'
 
 // ============================================================
 // Sale Verification Dashboard Service
@@ -32,6 +34,16 @@ interface SaleVerificationDashboardResponse {
   updatedAt: Date
   /** True if this payment has an associated sale verification record */
   hasVerification: boolean
+  // Back-office review metadata (PlayTelecom / Walmart documentation flow)
+  reviewedById: string | null
+  reviewedAt: Date | null
+  reviewNotes: string | null
+  rejectionReasons: SaleVerificationRejectionReason[]
+  reviewedBy: {
+    id: string
+    firstName: string
+    lastName: string
+  } | null
   // Joined data
   staff: {
     id: string
@@ -179,6 +191,13 @@ export async function listSaleVerificationsWithDetails(
                 photoUrl: true,
               },
             },
+            reviewedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
           },
         },
       },
@@ -205,6 +224,11 @@ export async function listSaleVerificationsWithDetails(
       createdAt: v?.createdAt ?? p.createdAt,
       updatedAt: v?.updatedAt ?? p.createdAt,
       hasVerification,
+      reviewedById: v?.reviewedById ?? null,
+      reviewedAt: v?.reviewedAt ?? null,
+      reviewNotes: v?.reviewNotes ?? null,
+      rejectionReasons: v?.rejectionReasons ?? [],
+      reviewedBy: v?.reviewedBy ?? null,
       staff: v?.staff ?? null,
       payment: {
         id: p.id,
@@ -397,4 +421,155 @@ export async function getStaffWithVerifications(venueId: string): Promise<
       verificationCount: count,
     }
   })
+}
+
+// ============================================================
+// Back-Office Review (PlayTelecom / Walmart documentation flow)
+// ============================================================
+
+export type ReviewDecision = 'APPROVE' | 'REJECT'
+
+export interface ReviewSaleVerificationParams {
+  saleVerificationId: string
+  reviewedById: string
+  decision: ReviewDecision
+  rejectionReasons?: SaleVerificationRejectionReason[]
+  reviewNotes?: string
+}
+
+interface ServiceError extends Error {
+  statusCode?: number
+}
+
+function createServiceError(message: string, statusCode: number): ServiceError {
+  const err = new Error(message) as ServiceError
+  err.statusCode = statusCode
+  return err
+}
+
+/**
+ * Approve or reject a sale verification (back-office documentation review).
+ *
+ * Decisions:
+ *   - APPROVE → status=COMPLETED, rejectionReasons cleared
+ *   - REJECT  → status=FAILED, rejectionReasons stored, reviewNotes optional but encouraged
+ *
+ * Validations:
+ *   - Verification must exist and belong to the given venue
+ *   - Verification must be in PENDING status (no double-review)
+ *   - Rejection requires at least one rejectionReason OR reviewNotes (not silent rejection)
+ *
+ * Side-effects:
+ *   - Emits SALE_VERIFICATION_REVIEWED socket event to the promoter (staff) so their TPV refreshes in real time
+ */
+export async function reviewSaleVerification(
+  venueId: string,
+  params: ReviewSaleVerificationParams,
+): Promise<SaleVerificationDashboardResponse> {
+  logger.info(
+    `[SALE VERIFICATION REVIEW] Verification ${params.saleVerificationId} ${params.decision} by ${params.reviewedById} on venue ${venueId}`,
+  )
+
+  const existing = await prisma.saleVerification.findUnique({
+    where: { id: params.saleVerificationId },
+    select: { id: true, venueId: true, staffId: true, paymentId: true, status: true },
+  })
+
+  if (!existing) {
+    throw createServiceError('Sale verification not found', 404)
+  }
+
+  if (existing.venueId !== venueId) {
+    throw createServiceError('Sale verification does not belong to this venue', 403)
+  }
+
+  if (existing.status !== 'PENDING') {
+    throw createServiceError(`Sale verification already reviewed (status=${existing.status})`, 409)
+  }
+
+  const trimmedNotes = params.reviewNotes?.trim() || null
+  const reasons = params.rejectionReasons ?? []
+
+  if (params.decision === 'REJECT' && reasons.length === 0 && !trimmedNotes) {
+    throw createServiceError('Rejection requires at least one reason or notes', 400)
+  }
+
+  const newStatus: 'COMPLETED' | 'FAILED' = params.decision === 'APPROVE' ? 'COMPLETED' : 'FAILED'
+
+  const updated = await prisma.saleVerification.update({
+    where: { id: params.saleVerificationId },
+    data: {
+      status: newStatus,
+      reviewedById: params.reviewedById,
+      reviewedAt: new Date(),
+      reviewNotes: trimmedNotes,
+      rejectionReasons: params.decision === 'REJECT' ? reasons : [],
+    },
+    include: {
+      staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
+      reviewedBy: { select: { id: true, firstName: true, lastName: true } },
+      payment: {
+        select: {
+          id: true,
+          amount: true,
+          status: true,
+          createdAt: true,
+          order: { select: { id: true, orderNumber: true, total: true, tags: true } },
+        },
+      },
+    },
+  })
+
+  // Emit socket event to the promoter — best-effort, never fail the request
+  try {
+    socketManager.broadcastToUser(existing.staffId, SocketEventType.SALE_VERIFICATION_REVIEWED, {
+      saleVerificationId: updated.id,
+      paymentId: updated.paymentId,
+      status: updated.status,
+      reviewedAt: updated.reviewedAt,
+      reviewNotes: updated.reviewNotes,
+      rejectionReasons: updated.rejectionReasons,
+      reviewedBy: updated.reviewedBy ? `${updated.reviewedBy.firstName} ${updated.reviewedBy.lastName}`.trim() : null,
+    })
+  } catch (err: any) {
+    logger.warn(`[SALE VERIFICATION REVIEW] Socket emit failed for staff ${existing.staffId}: ${err?.message ?? err}`)
+  }
+
+  return {
+    id: updated.id,
+    venueId: updated.venueId,
+    paymentId: updated.paymentId,
+    staffId: updated.staffId,
+    photos: updated.photos,
+    scannedProducts: (updated.scannedProducts as unknown as ScannedProduct[]) ?? [],
+    status: updated.status,
+    inventoryDeducted: updated.inventoryDeducted,
+    deviceId: updated.deviceId,
+    notes: updated.notes,
+    createdAt: updated.createdAt,
+    updatedAt: updated.updatedAt,
+    hasVerification: true,
+    reviewedById: updated.reviewedById,
+    reviewedAt: updated.reviewedAt,
+    reviewNotes: updated.reviewNotes,
+    rejectionReasons: updated.rejectionReasons,
+    reviewedBy: updated.reviewedBy ?? null,
+    staff: updated.staff ?? null,
+    payment: updated.payment
+      ? {
+          id: updated.payment.id,
+          amount: typeof updated.payment.amount === 'number' ? updated.payment.amount : Number(updated.payment.amount),
+          status: updated.payment.status,
+          createdAt: updated.payment.createdAt,
+          order: updated.payment.order
+            ? {
+                id: updated.payment.order.id,
+                orderNumber: updated.payment.order.orderNumber,
+                total: Number(updated.payment.order.total),
+                tags: updated.payment.order.tags,
+              }
+            : null,
+        }
+      : null,
+  }
 }

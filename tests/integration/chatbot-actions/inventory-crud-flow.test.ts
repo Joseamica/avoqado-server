@@ -367,6 +367,55 @@ describe('Chatbot Action Engine — Inventory CRUD Flow (Integration)', () => {
         }),
       )
     })
+
+    it('should not consume unrelated questions while product field collection is pending', async () => {
+      registerAllActions()
+
+      const context = makeContext({ permissions: ['menu:create'] })
+
+      const firstTurn = await engine.processAction(
+        {
+          actionType: 'menu.product.create',
+          params: { name: 'producto pendiente' },
+          confidence: 0.95,
+        },
+        context,
+      )
+
+      expect(firstTurn.type).toBe('requires_input')
+
+      const unrelatedTurn = await engine.continueFieldCollection('qué recetas tengo y cómo está el clima', context)
+
+      expect(unrelatedTurn).toBeNull()
+      expect(mockCreateProduct).not.toHaveBeenCalled()
+    })
+
+    it('should cancel pending product field collection explicitly', async () => {
+      registerAllActions()
+
+      const context = makeContext({ permissions: ['menu:create'] })
+
+      const firstTurn = await engine.processAction(
+        {
+          actionType: 'menu.product.create',
+          params: { name: 'producto pendiente' },
+          confidence: 0.95,
+        },
+        context,
+      )
+
+      expect(firstTurn.type).toBe('requires_input')
+
+      const cancelTurn = await engine.continueFieldCollection('cancelar', context)
+
+      expect(cancelTurn?.type).toBe('error')
+      expect(cancelTurn?.message).toContain('Cancelé')
+
+      const staleTurn = await engine.continueFieldCollection('price: 50\ncategoryId: Bebidas', context)
+
+      expect(staleTurn).toBeNull()
+      expect(mockCreateProduct).not.toHaveBeenCalled()
+    })
   })
 
   // -------------------------------------------------------------------------

@@ -704,7 +704,9 @@ describe('Reservation Dashboard Service', () => {
         duration: 90,
       })
 
-      prismaMock.reservation.findFirst.mockResolvedValueOnce(existing)
+      prismaMock.reservation.findFirst
+        .mockResolvedValueOnce(existing) // 1st: pre-update snapshot in rescheduleReservation
+        .mockResolvedValueOnce(existing) // 2nd: lookup inside updateReservation transaction
       prismaMock.$queryRaw.mockResolvedValueOnce([]) // table conflict check
       prismaMock.reservation.update.mockResolvedValue(rescheduled)
       prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(rescheduled)

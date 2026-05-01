@@ -1950,37 +1950,40 @@ Ejemplos de respuestas CORRECTAS:
       // Otherwise short field replies can be treated as standalone questions.
       if (CHATBOT_MUTATIONS_ENABLED) {
         try {
-          const actionContext = await this.buildActionContext({
-            venueId: query.venueId,
-            userId: query.userId,
-            fallbackRole: (query.userRole as unknown as StaffRole) || StaffRole.VIEWER,
-            ipAddress: query.ipAddress,
-          })
+          if (this.shouldAttemptPendingActionContinuation(query.message, query.conversationHistory)) {
+            const actionContext = await this.buildActionContext({
+              venueId: query.venueId,
+              userId: query.userId,
+              fallbackRole: (query.userRole as unknown as StaffRole) || StaffRole.VIEWER,
+              ipAddress: query.ipAddress,
+            })
 
-          const continuedFieldCollection = await this.actionEngine.continueFieldCollection(query.message, actionContext)
-          const continuedAction = continuedFieldCollection ?? (await this.actionEngine.continueDisambiguation(query.message, actionContext))
+            const continuedFieldCollection = await this.actionEngine.continueFieldCollection(query.message, actionContext)
+            const continuedAction =
+              continuedFieldCollection ?? (await this.actionEngine.continueDisambiguation(query.message, actionContext))
 
-          if (continuedAction) {
-            return {
-              response: continuedAction.message,
-              confidence: 1,
-              metadata: {
-                queryGenerated: false,
-                queryExecuted: false,
-                dataSourcesUsed: ['chatbot.action_engine'],
-                routedTo: 'ActionEngine' as any,
-                riskLevel: 'low' as any,
-                reasonCode: `action_${continuedAction.type}`,
-                action: {
-                  type: continuedAction.type,
-                  actionId: continuedAction.actionId,
-                  preview: continuedAction.preview,
-                  missingFields: continuedAction.missingFields,
-                  formFields: continuedAction.formFields,
-                  candidates: continuedAction.candidates,
-                  entityId: continuedAction.entityId,
-                } as any,
-              },
+            if (continuedAction) {
+              return {
+                response: continuedAction.message,
+                confidence: 1,
+                metadata: {
+                  queryGenerated: false,
+                  queryExecuted: false,
+                  dataSourcesUsed: ['chatbot.action_engine'],
+                  routedTo: 'ActionEngine' as any,
+                  riskLevel: 'low' as any,
+                  reasonCode: `action_${continuedAction.type}`,
+                  action: {
+                    type: continuedAction.type,
+                    actionId: continuedAction.actionId,
+                    preview: continuedAction.preview,
+                    missingFields: continuedAction.missingFields,
+                    formFields: continuedAction.formFields,
+                    candidates: continuedAction.candidates,
+                    entityId: continuedAction.entityId,
+                  } as any,
+                },
+              }
             }
           }
         } catch (error) {
@@ -6178,6 +6181,71 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return normalizedMessage.length <= 180
   }
 
+  private shouldAttemptPendingActionContinuation(message: string, conversationHistory?: ConversationEntry[]): boolean {
+    if (!CHATBOT_MUTATIONS_ENABLED || this.hasExplicitPromptInjectionSignals(message)) {
+      return false
+    }
+
+    return (
+      this.isPendingActionCancelReply(message, conversationHistory) ||
+      this.isStructuredActionFieldReply(message) ||
+      this.isLikelyActionFieldReply(message, conversationHistory) ||
+      this.isLikelyActionDisambiguationReply(message, conversationHistory)
+    )
+  }
+
+  private isPendingActionCancelReply(message: string, conversationHistory?: ConversationEntry[]): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message)
+
+    if (!/^(cancelar|cancela|cancelalo|cancel|ya no|olvidalo|descartar|descarta|mejor no|no continuar)$/.test(normalizedMessage)) {
+      return false
+    }
+
+    const recentAssistantPrompt = conversationHistory
+      ?.slice(-6)
+      .reverse()
+      .find(entry => entry.role === 'assistant')?.content
+
+    if (!recentAssistantPrompt) {
+      return false
+    }
+
+    const normalizedPrompt = this.normalizeTextForMatch(recentAssistantPrompt)
+    return /\b(para completar necesito|completa los campos|encontre varias opciones|vista previa de accion)\b/.test(normalizedPrompt)
+  }
+
+  private isStructuredActionFieldReply(message: string): boolean {
+    return /^(name|price|sku|gtin|categoryId|quantity|unit|reason|supplierId|recipeId|ingredientId)\s*:/im.test(message)
+  }
+
+  private isLikelyActionDisambiguationReply(message: string, conversationHistory?: ConversationEntry[]): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message)
+
+    if (!normalizedMessage || normalizedMessage.length > 120) {
+      return false
+    }
+
+    const recentAssistantPrompt = conversationHistory
+      ?.slice(-6)
+      .reverse()
+      .find(entry => entry.role === 'assistant')?.content
+
+    if (!recentAssistantPrompt) {
+      return false
+    }
+
+    const normalizedPrompt = this.normalizeTextForMatch(recentAssistantPrompt)
+    const askedForDisambiguation = /\b(encontre varias opciones|cual quieres usar|responde con el numero|nombre exacto)\b/.test(
+      normalizedPrompt,
+    )
+
+    if (!askedForDisambiguation) {
+      return false
+    }
+
+    return /^\d{1,3}$/.test(normalizedMessage) || normalizedMessage.length <= 80
+  }
+
   /**
    * Field-value replies can mention "ai" or other words that confuse the
    * semantic guard when read without context. Only bypass when the assistant
@@ -6191,6 +6259,10 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
     const normalizedMessage = this.normalizeTextForMatch(message)
     if (!normalizedMessage || normalizedMessage.length > 300) {
+      return false
+    }
+
+    if (this.looksLikeStandaloneAssistantRequest(normalizedMessage) && !this.isStructuredActionFieldReply(message)) {
       return false
     }
 
@@ -6217,6 +6289,27 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return normalizedMessage.length <= 120
   }
 
+  private looksLikeStandaloneAssistantRequest(normalizedMessage: string): boolean {
+    const startsLikeQuery =
+      /^(que|cual|cuantas?|cuantos?|como|dime|muestrame|mostrar|lista|listar|consulta|consultar|quiero saber|me gustaria saber)\b/.test(
+        normalizedMessage,
+      )
+
+    const mentionsBusinessQueryObject =
+      /\b(recetas?|inventario|stock|insumos?|productos?|ventas?|ordenes?|pedidos?|clientes?|resenas?|proveedores?)\b/.test(
+        normalizedMessage,
+      )
+
+    const mentionsOutOfDomain = /\b(clima|tiempo|noticias?|web|internet|google|correo|email)\b/.test(normalizedMessage)
+
+    const startsNewMutation =
+      /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|ajusta|ajustar|modifica|modificar|cambia|cambiar)\b/.test(
+        normalizedMessage,
+      ) && /\b(producto|productos|receta|recetas|inventario|stock|insumo|insumos|proveedor|proveedores)\b/.test(normalizedMessage)
+
+    return (startsLikeQuery && mentionsBusinessQueryObject) || mentionsOutOfDomain || startsNewMutation
+  }
+
   /**
    * Classify query intent for routing to SharedQueryService or text-to-SQL
    *
@@ -6241,7 +6334,7 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
 
     const asksRecipeUsage =
       /\b(recetas?|recipe)\b/.test(normalizedMessage) &&
-      /\b(mas\s+(se\s+)?(usa|usan|usada|usadas|vendida|vendidas|pedido|pedida|pedidas)|top|ranking|popular|populares)\b/.test(
+      /\b(mas\s+(se\s+)?(usa|usan|usada|usadas|vendida|vendidas|pedido|pedida|pedidas)|(se\s+)?usa[n]?\s+mas|top|ranking|popular|populares)\b/.test(
         normalizedMessage,
       )
     if (asksRecipeUsage) {

@@ -142,6 +142,16 @@ interface TpvFeedbackEmailData {
   deviceManufacturer: string
 }
 
+interface ReservationRescheduledEmailData {
+  customerName: string
+  venueName: string
+  serviceName?: string
+  oldDateTime: string // pre-formatted "16 de marzo de 2026, 11:00"
+  newDateTime: string
+  confirmationCode: string
+  customMessage?: string
+}
+
 class EmailService {
   private isAvailable: boolean = false
 
@@ -2309,6 +2319,119 @@ Administrar inventario: ${data.dashboardUrl}
 
 ---
 Servicios Tecnologicos Avo S.A. de C.V.`
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
+  async sendReservationRescheduledEmail(email: string, data: ReservationRescheduledEmailData): Promise<boolean> {
+    const subject = `Tu reservacion en ${data.venueName} cambio de horario`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const serviceLine = data.serviceName ? `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${data.serviceName}</p>` : ''
+    const customMessageBlock = data.customMessage
+      ? `
+    <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Nota de ${data.venueName}</p>
+      <p style="font-size: 15px; margin: 0; color: #000; white-space: pre-wrap;">${data.customMessage}</p>
+    </div>`
+      : ''
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reservacion reagendada</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <!-- Header with Logo -->
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <!-- Title -->
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Cambio de horario</h1>
+      <p style="font-size: 15px; color: #666; margin: 0;">Reservacion ${data.confirmationCode}</p>
+    </div>
+
+    <!-- Greeting -->
+    <div style="padding-bottom: 16px;">
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola ${data.customerName},</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">
+        Tu reservacion en <strong>${data.venueName}</strong> se cambio a un nuevo horario.
+      </p>
+      ${serviceLine}
+    </div>
+
+    ${customMessageBlock}
+
+    <!-- Old vs New -->
+    <table cellpadding="0" cellspacing="0" border="0" style="width: 100%; margin-bottom: 32px; border-collapse: collapse;">
+      <tr>
+        <td style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; vertical-align: top;">
+          <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px;">Original</p>
+          <p style="font-size: 16px; color: #666; margin: 0; text-decoration: line-through;">${data.oldDateTime}</p>
+        </td>
+      </tr>
+      <tr><td style="height: 12px;"></td></tr>
+      <tr>
+        <td style="padding: 16px 20px; background-color: #ecfdf5; border-radius: 8px; border-left: 4px solid #1f9d55; vertical-align: top;">
+          <p style="font-size: 13px; font-weight: 600; color: #1f9d55; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px;">Nuevo horario</p>
+          <p style="font-size: 18px; font-weight: 600; color: #000; margin: 0;">${data.newDateTime}</p>
+        </td>
+      </tr>
+    </table>
+
+    <p style="font-size: 14px; color: #666; margin: 0 0 24px 0;">
+      Si tienes preguntas, contacta directamente con ${data.venueName}.
+    </p>
+
+    <!-- Footer -->
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 40px 0 24px 0;">
+    <div>
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
+        Servicios Tecnologicos Avo S.A. de C.V.<br>
+        Ciudad de Mexico, Mexico
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #666;">
+        Recibiste este correo porque tienes una reservacion activa en ${data.venueName}.
+      </p>
+      <p style="margin: 16px 0 0 0; font-size: 14px;">
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>
+    `
+
+    const text = `
+Hola ${data.customerName},
+
+Tu reservacion en ${data.venueName} (${data.confirmationCode}) se cambio a un nuevo horario.
+
+${data.serviceName ? `Servicio: ${data.serviceName}\n` : ''}${data.customMessage ? `Nota de ${data.venueName}:\n${data.customMessage}\n\n` : ''}Original: ${data.oldDateTime}
+Nuevo horario: ${data.newDateTime}
+
+Si tienes preguntas, contacta directamente con ${data.venueName}.
+
+Saludos,
+Equipo de Avoqado
+    `
 
     return this.sendEmail({
       to: email,

@@ -619,6 +619,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
     'serialized-inventory:create', // Can register (Alta de Productos)
+    // Back-office sale verification review (PlayTelecom / Walmart)
+    'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     // SIM custody — MANAGER = "Supervisor" in PlayTelecom role labels
     'sim-custody:assign-to-promoter', // Supervisor assigns SIMs to Promoter
     'sim-custody:collect-from-promoter', // Owning-supervisor reclaims from Promoter
@@ -656,6 +658,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
     'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
+    'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     'inventory:org-manage', // Manage org-level item categories & serialized items
     // Commission System (can manage but NOT payout - OWNER only)
     'commissions:read',
@@ -766,6 +769,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
     'serialized-inventory:create', // Can register (Alta de Productos)
+    'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     // Org-level management
     'goals:org-manage', // Manage org-level sales goal defaults
     'inventory:org-manage', // Manage org-level item categories & serialized items
@@ -1162,6 +1166,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
   // Serialized Inventory (SIMs, jewelry, etc.)
   'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],
+  // Sale Verifications back-office review (PlayTelecom / Walmart documentation flow)
+  'sale-verifications': ['sale-verifications:review'],
   // SIM custody (PlayTelecom chain-of-custody: Admin → Supervisor → Promoter)
   'sim-custody': [
     'sim-custody:assign-to-supervisor',

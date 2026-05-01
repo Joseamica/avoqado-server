@@ -208,6 +208,16 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.requiresDateRange).toBe(false)
     })
 
+    it('should classify recipe usage when phrased as "se usa más"', () => {
+      const query = 'cuántas recetas tengo y cuál se usa más'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('recipeUsage')
+      expect(classification.requiresDateRange).toBe(false)
+    })
+
     it('should route anaphoric recipe usage follow-ups using recent recipe context', async () => {
       // @ts-expect-error - accessing private method for testing
       const routed = await service.routeWithLLM('cual es la que mas se usa', [

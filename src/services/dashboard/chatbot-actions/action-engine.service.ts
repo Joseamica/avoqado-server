@@ -319,6 +319,14 @@ export class ActionEngine {
       return null
     }
 
+    if (this.isPendingFieldCollectionCancelMessage(message)) {
+      this.pendingFieldCollections.delete(key)
+      return {
+        type: 'error',
+        message: 'Cancelé la acción pendiente. Puedes pedirme otra cosa cuando quieras.',
+      }
+    }
+
     if (new Date() > session.expiresAt) {
       this.pendingFieldCollections.delete(key)
       return null
@@ -336,6 +344,13 @@ export class ActionEngine {
 
     const currentMissingFields = this.fieldCollector.getMissingFields(session.definition, session.classification.params)
     const extractedParams = this.extractFieldCollectionParams(message, session.definition, currentMissingFields)
+
+    if (
+      Object.keys(extractedParams).length === 0 &&
+      !this.isLikelyPendingFieldCollectionReply(message, session.definition, currentMissingFields)
+    ) {
+      return null
+    }
 
     if (Object.keys(extractedParams).length === 0) {
       const useForm = this.fieldCollector.shouldUseForm(session.definition, currentMissingFields)
@@ -951,6 +966,70 @@ export class ActionEngine {
 
   private storePendingFieldCollection(context: ActionContext, session: PendingFieldCollectionSession): void {
     this.pendingFieldCollections.set(this.getDisambiguationKey(context), session)
+  }
+
+  private isPendingFieldCollectionCancelMessage(message: string): boolean {
+    const normalized = this.normalizeForSelection(message)
+    return /^(cancelar|cancela|cancelalo|cancélalo|cancel|ya no|olvidalo|olvídalo|descartar|descarta|mejor no|no continuar)$/.test(
+      normalized,
+    )
+  }
+
+  private isLikelyPendingFieldCollectionReply(message: string, definition: ActionDefinition, missingFields: string[]): boolean {
+    const trimmed = message.trim()
+    const normalized = this.normalizeForSelection(trimmed)
+
+    if (!normalized || normalized.length > 300) {
+      return false
+    }
+
+    if (this.hasStructuredFieldLabels(message, definition)) {
+      return true
+    }
+
+    if (this.looksLikeStandaloneAssistantRequest(normalized)) {
+      return false
+    }
+
+    // Short free-text replies are valid for a single missing string/reference field,
+    // e.g. category/product names after the assistant asked for that exact value.
+    if (missingFields.length === 1) {
+      const fieldDefinition = definition.fields[missingFields[0]]
+      return fieldDefinition?.type === 'string' || fieldDefinition?.type === 'reference'
+    }
+
+    // Product creation is the main flow where the first missing value can be a
+    // plain product name. Keep this narrow so unrelated questions are not hijacked
+    // by an old pending session.
+    return definition.actionType === 'menu.product.create' && missingFields.includes('name') && normalized.length <= 120
+  }
+
+  private hasStructuredFieldLabels(message: string, definition: ActionDefinition): boolean {
+    return message.split(/\r?\n|,/).some(line => {
+      const match = line.trim().match(/^([A-Za-z0-9_.-]+)\s*:/)
+      return Boolean(match?.[1] && definition.fields[match[1].trim()])
+    })
+  }
+
+  private looksLikeStandaloneAssistantRequest(normalizedMessage: string): boolean {
+    const startsLikeQuery =
+      /^(que|cual|cuantas?|cuantos?|como|dime|muestrame|mostrar|lista|listar|consulta|consultar|quiero saber|me gustaria saber)\b/.test(
+        normalizedMessage,
+      )
+
+    const mentionsBusinessQueryObject =
+      /\b(recetas?|inventario|stock|insumos?|productos?|ventas?|ordenes?|pedidos?|clientes?|resenas?|reseñas?|proveedores?)\b/.test(
+        normalizedMessage,
+      )
+
+    const mentionsOutOfDomain = /\b(clima|tiempo|noticias?|web|internet|google|correo|email)\b/.test(normalizedMessage)
+
+    const startsNewMutation =
+      /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|ajusta|ajustar|modifica|modificar|cambia|cambiar)\b/.test(
+        normalizedMessage,
+      ) && /\b(producto|productos|receta|recetas|inventario|stock|insumo|insumos|proveedor|proveedores)\b/.test(normalizedMessage)
+
+    return (startsLikeQuery && mentionsBusinessQueryObject) || mentionsOutOfDomain || startsNewMutation
   }
 
   private extractFieldCollectionParams(message: string, definition: ActionDefinition, missingFields: string[]): Record<string, unknown> {

@@ -5905,7 +5905,27 @@ router.get(
       const [orders, totalCount, totalAmountResult] = await Promise.all([
         prisma.order.findMany({
           where: whereClause,
-          include: { items: true },
+          include: {
+            items: true,
+            // Include payments + their sale verification to surface back-office review status
+            // (PlayTelecom / Walmart documentation flow). Each order typically has one payment,
+            // but if multiple exist we use the most recent verified one.
+            payments: {
+              include: {
+                saleVerification: {
+                  select: {
+                    id: true,
+                    status: true,
+                    reviewedAt: true,
+                    reviewNotes: true,
+                    rejectionReasons: true,
+                    photos: true,
+                  },
+                },
+              },
+              orderBy: { createdAt: 'desc' },
+            },
+          },
           orderBy: { createdAt: 'desc' },
           take: limit,
           skip: offset,
@@ -5924,6 +5944,11 @@ router.get(
       const sales = orders.map(order => {
         const firstItem = order.items[0]
         const price = parseFloat(order.total.toString())
+
+        // Pick the verification from the most recent payment that has one.
+        // payments is already ordered by createdAt desc.
+        const verification = order.payments.find(p => p.saleVerification != null)?.saleVerification ?? null
+
         return {
           id: order.id,
           orderNumber: order.orderNumber,
@@ -5933,6 +5958,13 @@ router.get(
           date: order.createdAt.toISOString(),
           paymentStatus: order.paymentStatus === PaymentStatus.PAID ? 'COMPLETED' : order.paymentStatus,
           isGift: price === 0,
+          // Back-office review status (nullable for backwards compat with old TPV clients)
+          verificationId: verification?.id ?? null,
+          verificationStatus: verification?.status ?? null,
+          reviewedAt: verification?.reviewedAt ? verification.reviewedAt.toISOString() : null,
+          reviewNotes: verification?.reviewNotes ?? null,
+          rejectionReasons: verification?.rejectionReasons ?? null,
+          hasPhotos: (verification?.photos?.length ?? 0) > 0,
         }
       })
 

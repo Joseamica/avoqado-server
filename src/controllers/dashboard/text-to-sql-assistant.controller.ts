@@ -5,6 +5,7 @@ import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { UserRole } from '../../services/dashboard/table-access-control.service'
+import { getUserAccess, type ImpersonationAccessOverride } from '../../services/access/access.service'
 
 const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
 type SensitiveRiskLevel = 'none' | 'medium' | 'high' | 'critical'
@@ -86,6 +87,19 @@ const hasPermissionForSensitiveRisk = (userRole: string, riskLevel: SensitiveRis
   return true
 }
 
+const buildImpersonationAccessOverride = (req: Request): ImpersonationAccessOverride | undefined => {
+  const authContext = req.authContext
+  if (!authContext?.isImpersonating || !authContext.impersonation) {
+    return undefined
+  }
+
+  return {
+    isImpersonating: true,
+    mode: authContext.impersonation.mode,
+    ...(authContext.impersonation.mode === 'role' ? { forcedRole: authContext.role } : {}),
+  }
+}
+
 const resolveAuthenticatedVenueContext = async (
   req: Request,
   options?: {
@@ -119,12 +133,50 @@ const resolveAuthenticatedVenueContext = async (
   }
 
   if (options?.expectedVenueSlug && currentVenueRecord.slug !== options.expectedVenueSlug) {
-    logger.warn('🚨 venueSlug mismatch detected in Text-to-SQL request', {
-      expectedVenueId: req.authContext.venueId,
-      expectedSlug: currentVenueRecord?.slug,
-      receivedSlug: options.expectedVenueSlug,
+    const requestedVenue = await prisma.venue.findUnique({
+      where: { slug: options.expectedVenueSlug },
+      select: { id: true, slug: true },
     })
-    throw new ForbiddenError('El venue seleccionado no coincide con tu sesión activa.')
+
+    if (!requestedVenue) {
+      logger.warn('🚨 unknown venueSlug in Text-to-SQL request', {
+        tokenVenueId: req.authContext.venueId,
+        tokenSlug: currentVenueRecord.slug,
+        receivedSlug: options.expectedVenueSlug,
+        userId: req.authContext.userId,
+      })
+      throw new ForbiddenError('El venue seleccionado no existe o no está disponible.')
+    }
+
+    try {
+      const access = await getUserAccess(req.authContext.userId, requestedVenue.id, undefined, buildImpersonationAccessOverride(req))
+
+      logger.info('🔁 Text-to-SQL resolved request venue from selected slug', {
+        userId: req.authContext.userId,
+        tokenVenueId: req.authContext.venueId,
+        tokenSlug: currentVenueRecord.slug,
+        requestedVenueId: requestedVenue.id,
+        requestedSlug: requestedVenue.slug,
+        role: access.role,
+      })
+
+      return {
+        venueId: requestedVenue.id,
+        userId: req.authContext.userId,
+        role: access.role,
+        venueSlug: requestedVenue.slug,
+      }
+    } catch (error) {
+      logger.warn('🚨 venueSlug mismatch denied in Text-to-SQL request', {
+        tokenVenueId: req.authContext.venueId,
+        tokenSlug: currentVenueRecord.slug,
+        requestedVenueId: requestedVenue.id,
+        requestedSlug: requestedVenue.slug,
+        userId: req.authContext.userId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw new ForbiddenError('No tienes acceso al venue seleccionado.')
+    }
   }
 
   return {

@@ -10369,6 +10369,57 @@ router.get(
   saleVerificationController.getStaffWithVerifications,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/sale-verifications/{id}/review:
+ *   patch:
+ *     tags: [Sale Verifications]
+ *     summary: Approve or reject a sale verification (back-office documentation review)
+ *     description: |
+ *       Used by PlayTelecom back-office to confirm Walmart documentation (vinculación + portabilidad).
+ *       Emits `sale-verification.reviewed` socket event to the promoter so their TPV refreshes.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [decision]
+ *             properties:
+ *               decision:
+ *                 type: string
+ *                 enum: [APPROVE, REJECT]
+ *               rejectionReasons:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   enum: [REVIEW_PORTABILIDAD, REVIEW_DUPLICATE_VINCULACION, OTHER]
+ *               reviewNotes:
+ *                 type: string
+ *     responses:
+ *       200: { description: Verification reviewed }
+ *       400: { description: Invalid decision or missing rejection reason }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { description: Verification belongs to another venue }
+ *       404: { description: Verification not found }
+ *       409: { description: Verification already reviewed }
+ */
+router.patch(
+  '/venues/:venueId/sale-verifications/:id/review',
+  authenticateTokenMiddleware,
+  checkPermission('sale-verifications:review'),
+  saleVerificationController.reviewSaleVerification,
+)
+
 // ==========================================
 // TPV MESSAGES - Dashboard → Terminal messaging
 // ==========================================

@@ -15,6 +15,7 @@
  * - purchase_confirmation: Purchase confirmation (3 params: name, venue, amount)
  * - reservation_confirmation: Reservation confirmation (4 params: name, venue, date, time)
  * - reservation_reminder: Reservation reminder (4 params: name, venue, date, time)
+ * - reservation_reschedule: Reservation reschedule (5 params: name, venue, date, time, message)
  * - order_status_update: Order status update (3 params: name, venue, status)
  */
 
@@ -176,6 +177,28 @@ export async function sendReservationReminderWhatsApp(phone: string, data: Whats
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.date },
     { type: 'text', text: data.time },
+  ])
+}
+
+/**
+ * Send reservation reschedule via WhatsApp
+ * Template: reservation_reschedule — params:
+ *   {{1}}=name, {{2}}=venue, {{3}}=date, {{4}}=time, {{5}}=staff message (or default)
+ *
+ * If `data.message` is empty/undefined, sends a sensible default in {{5}} so the
+ * Meta template (which requires non-empty variables) does not reject the send.
+ */
+export async function sendReservationRescheduleWhatsApp(
+  phone: string,
+  data: WhatsAppReservationData & { message?: string },
+): Promise<boolean> {
+  const fifth = data.message?.trim() || 'Te esperamos.'
+  return sendTemplateMessage(phone, 'reservation_reschedule', [
+    { type: 'text', text: data.customerName },
+    { type: 'text', text: data.venueName },
+    { type: 'text', text: data.date },
+    { type: 'text', text: data.time },
+    { type: 'text', text: fifth },
   ])
 }
 

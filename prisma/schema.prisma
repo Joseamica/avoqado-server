@@ -549,8 +549,11 @@ model Staff {
   // ✅ NEW: Settlement simulations
   settlementSimulations SettlementSimulation[]
 
-  // 📸 Step 4: Sale Verifications processed by this staff
-  saleVerifications SaleVerification[]
+  // 📸 Step 4: Sale Verifications processed by this staff (promoter who uploaded photos)
+  saleVerifications SaleVerification[] @relation("SaleVerificationStaff")
+
+  // Back-office: Sale Verifications reviewed (approved/rejected) by this staff
+  reviewedSaleVerifications SaleVerification[] @relation("SaleVerificationReviewer")
 
   // ✅ NEW: E-commerce Merchant (SDK client) dashboard access
   ecommerceMerchant EcommerceMerchant?
@@ -2507,7 +2510,7 @@ model SaleVerification {
   paymentId String  @unique // One verification per payment
   payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
   staffId   String
-  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  staff     Staff   @relation("SaleVerificationStaff", fields: [staffId], references: [id], onDelete: Restrict)
 
   // Photo URLs (Firebase Storage paths)
   photos String[] // Array of URLs: venues/{venueId}/verificaciones/{paymentId}/*.jpg
@@ -2526,7 +2529,19 @@ model SaleVerification {
 
   // Metadata
   deviceId String? // TPV device that captured the verification
-  notes    String? // Optional notes from staff
+  notes    String? // Optional notes from staff (promoter)
+
+  // ============================================================
+  // Back-office review (PlayTelecom / Walmart documentation flow)
+  // ============================================================
+  // When a back-office reviewer approves/rejects the documentation:
+  //   - decision APPROVE → status=COMPLETED, rejectionReasons=[]
+  //   - decision REJECT  → status=FAILED, rejectionReasons populated
+  reviewedById     String?
+  reviewedBy       Staff?                            @relation("SaleVerificationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt       DateTime?
+  reviewNotes      String? // Free-text feedback from back-office reviewer
+  rejectionReasons SaleVerificationRejectionReason[] @default([])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2536,6 +2551,7 @@ model SaleVerification {
   @@index([staffId])
   @@index([status])
   @@index([createdAt])
+  @@index([reviewedById])
 }
 
 model VenueTransaction {
@@ -4890,6 +4906,14 @@ enum SaleVerificationStatus {
   COMPLETED // Successfully processed
   FAILED // Failed to process
   SKIPPED // User skipped verification
+}
+
+// Back-office rejection reasons for sale verification documentation
+// Used by PlayTelecom (Walmart) to flag missing/incorrect documentation
+enum SaleVerificationRejectionReason {
+  REVIEW_PORTABILIDAD
+  REVIEW_DUPLICATE_VINCULACION
+  OTHER
 }
 
 enum InvitationType {
@@ -7836,22 +7860,22 @@ model ReservationSettings {
   requireEmail         Boolean @default(false)
 
   // Cancellation
-  allowCustomerCancel  Boolean @default(true)
-  minHoursBeforeCancel Int?    @default(2) // minimum hours before start to allow cancellation
-  forfeitDeposit       Boolean @default(false)
-  noShowFeePercent     Int? // percentage of deposit/service charged on no-show
+  allowCustomerCancel         Boolean @default(true)
+  minHoursBeforeCancel        Int?    @default(2) // minimum hours before start to allow cancellation
+  forfeitDeposit              Boolean @default(false)
+  noShowFeePercent            Int? // percentage of deposit/service charged on no-show
   // Reschedule: customers can swap to a different slot of the SAME class up to N hours
   // before the start. We default to mirror the cancel window (industry-standard pattern
   // — reschedule is essentially atomic cancel+rebook).
-  allowCustomerReschedule  Boolean @default(true)
+  allowCustomerReschedule     Boolean @default(true)
   // Credit pack refund policy on cancellation:
   //   "NEVER"      - never refund credits (customer always loses them)
   //   "ALWAYS"     - always refund 100% regardless of timing
   //   "TIME_BASED" - refund 100% if cancelled >= creditFreeRefundHoursBefore, else creditLateRefundPercent
-  creditRefundMode             String  @default("TIME_BASED") // NEVER | ALWAYS | TIME_BASED
-  creditFreeRefundHoursBefore  Int     @default(12)
-  creditLateRefundPercent      Int     @default(0) // 0-100, applied when cancelled inside the late window
-  creditNoShowRefund           Boolean @default(false) // refund credits if marked NO_SHOW
+  creditRefundMode            String  @default("TIME_BASED") // NEVER | ALWAYS | TIME_BASED
+  creditFreeRefundHoursBefore Int     @default(12)
+  creditLateRefundPercent     Int     @default(0) // 0-100, applied when cancelled inside the late window
+  creditNoShowRefund          Boolean @default(false) // refund credits if marked NO_SHOW
 
   // Reminders
   remindersEnabled  Boolean  @default(true)

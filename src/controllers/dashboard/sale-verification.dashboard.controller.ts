@@ -1,7 +1,7 @@
 import { Request, Response } from 'express'
 import * as saleVerificationDashboardService from '../../services/dashboard/sale-verification.dashboard.service'
 import logger from '../../config/logger'
-import { SaleVerificationStatus } from '@prisma/client'
+import { SaleVerificationStatus, SaleVerificationRejectionReason } from '@prisma/client'
 
 // ============================================================
 // Sale Verification Dashboard Controller
@@ -121,6 +121,70 @@ export async function getStaffWithVerifications(req: Request, res: Response): Pr
     })
   } catch (error: any) {
     logger.error(`[SALE VERIFICATION DASHBOARD CONTROLLER] Error getting staff: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}
+
+/**
+ * PATCH /dashboard/venues/:venueId/sale-verifications/:id/review
+ *
+ * Back-office documentation review (PlayTelecom / Walmart).
+ * Approves or rejects the photo documentation for a sale verification.
+ *
+ * Body:
+ *   - decision: 'APPROVE' | 'REJECT' (required)
+ *   - rejectionReasons?: SaleVerificationRejectionReason[] (required-ish for REJECT)
+ *   - reviewNotes?: string (optional free-text feedback for promoter)
+ */
+export async function reviewSaleVerification(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, id } = req.params
+    const { decision, rejectionReasons, reviewNotes } = req.body as {
+      decision?: string
+      rejectionReasons?: SaleVerificationRejectionReason[]
+      reviewNotes?: string
+    }
+
+    const reviewedById = req.authContext?.userId
+    if (!reviewedById) {
+      res.status(401).json({ success: false, message: 'No reviewer staff context' })
+      return
+    }
+
+    if (decision !== 'APPROVE' && decision !== 'REJECT') {
+      res.status(400).json({ success: false, message: "decision must be 'APPROVE' or 'REJECT'" })
+      return
+    }
+
+    // Validate rejection reasons enum values (defensive — Prisma will also throw on bad enum)
+    const validReasons: SaleVerificationRejectionReason[] = ['REVIEW_PORTABILIDAD', 'REVIEW_DUPLICATE_VINCULACION', 'OTHER']
+    if (Array.isArray(rejectionReasons)) {
+      const invalid = rejectionReasons.filter(r => !validReasons.includes(r))
+      if (invalid.length > 0) {
+        res.status(400).json({ success: false, message: `Invalid rejectionReasons: ${invalid.join(', ')}` })
+        return
+      }
+    }
+
+    logger.info(`[SALE VERIFICATION DASHBOARD CONTROLLER] PATCH ${id}/review by ${reviewedById} decision=${decision}`)
+
+    const updated = await saleVerificationDashboardService.reviewSaleVerification(venueId, {
+      saleVerificationId: id,
+      reviewedById,
+      decision,
+      rejectionReasons,
+      reviewNotes,
+    })
+
+    res.status(200).json({
+      success: true,
+      data: updated,
+    })
+  } catch (error: any) {
+    logger.error(`[SALE VERIFICATION DASHBOARD CONTROLLER] Error reviewing verification: ${error.message}`)
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',

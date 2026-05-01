@@ -153,6 +153,10 @@ export enum SocketEventType {
   SIM_CUSTODY_RECOLLECTED_FROM_PROMOTER = 'sim-custody.recollected-from-promoter',
   SIM_CUSTODY_REJECTED_ACKNOWLEDGED = 'sim-custody.rejected-acknowledged',
 
+  // Business Events - Sale Verification Review (PlayTelecom / Walmart documentation flow)
+  // Emitted when back-office approves/rejects a sale verification from the dashboard
+  SALE_VERIFICATION_REVIEWED = 'sale-verification.reviewed',
+
   // Error Events
   ERROR = 'error',
   RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded',

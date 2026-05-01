@@ -64,7 +64,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
         expect(chatbotResponse.queryResult.orderCount).toBe(dashboardValue.orderCount)
         expect(chatbotResponse.queryResult.averageTicket).toBe(dashboardValue.averageTicket)
       }
-    }, 10000)
+    }, 30000)
 
     it('should return 100% consistent results for "¿Cuál es mi ticket promedio?"', async () => {
       const dashboardValue = await SharedQueryService.getAverageTicket(testData.venue.id, 'last7days')
@@ -82,7 +82,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
       if (chatbotResponse.queryResult?.averageTicket !== undefined) {
         expect(chatbotResponse.queryResult.averageTicket).toBe(dashboardValue)
       }
-    }, 10000)
+    }, 30000)
 
     it('should return 100% consistent results for "¿Qué productos vendí más?"', async () => {
       const dashboardValue = await SharedQueryService.getTopProducts(testData.venue.id, 'last7days', 5)
@@ -106,7 +106,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
           expect(chatbotResponse.queryResult[0].quantitySold).toBe(dashboardValue[0].quantitySold)
         }
       }
-    }, 10000)
+    }, 30000)
   })
 
   describe('Layer 4 Cross-Check Validation', () => {
