@@ -2718,7 +2718,7 @@ class OrganizationDashboardService {
 
     const venueWhere = venueId ? { id: venueId, organizationId: orgId } : { organizationId: orgId }
 
-    // Get completed orders with serialized items
+    // Get completed orders with serialized items + sale verification (back-office review status)
     const orders = await prisma.order.findMany({
       where: {
         venue: venueWhere,
@@ -2728,7 +2728,15 @@ class OrganizationDashboardService {
       include: {
         venue: { select: { name: true, city: true, state: true } },
         createdBy: { select: { firstName: true, lastName: true } },
-        payments: { select: { amount: true, status: true } },
+        payments: {
+          select: {
+            amount: true,
+            status: true,
+            saleVerification: {
+              select: { status: true, isPortabilidad: true },
+            },
+          },
+        },
         items: { select: { productName: true, productSku: true, unitPrice: true } },
       },
       orderBy: { createdAt: 'asc' },
@@ -2743,6 +2751,29 @@ class OrganizationDashboardService {
       const iccid = order.items?.[0]?.productSku || ''
       const productName = order.items?.[0]?.productName || 'Venta'
 
+      // Pull back-office review status from the most recent payment with a SaleVerification.
+      // SaleVerification is the source of truth for both portabilidad and review status —
+      // it's what the promoter captured at the TPV and what back-office acts on.
+      const verification = (order.payments || []).map((p: any) => p.saleVerification).find((v: any) => v != null) as
+        | { status: string; isPortabilidad: boolean }
+        | undefined
+
+      const isPortabilidad: boolean = verification?.isPortabilidad ?? (Array.isArray(order.tags) && order.tags.includes('portabilidad'))
+
+      // Map verification status → human-readable label expected by back-office (per Asana spec):
+      //   COMPLETED → "Venta correcta"
+      //   PENDING   → "En revisión"
+      //   FAILED    → "Venta sin documentación completa"
+      //   null      → "Sin verificación" (no photos uploaded — separate from FAILED)
+      const saleStatus =
+        verification == null
+          ? 'Sin verificación'
+          : verification.status === 'COMPLETED'
+            ? 'Venta correcta'
+            : verification.status === 'FAILED'
+              ? 'Venta sin documentación completa'
+              : 'En revisión'
+
       return {
         row: idx + 1,
         city: order.venue?.city || order.venue?.state || '',
@@ -2752,6 +2783,9 @@ class OrganizationDashboardService {
         promoter: order.createdBy ? `${order.createdBy.firstName} ${order.createdBy.lastName}` : 'N/A',
         date: order.createdAt.toISOString().split('T')[0],
         amount: totalPaid,
+        // Back-office review columns (PlayTelecom / Walmart documentation flow)
+        isPortabilidad,
+        saleStatus,
       }
     })
 
@@ -2765,10 +2799,21 @@ class OrganizationDashboardService {
     const data = await this.getClosingReportData(orgId, dateStr, venueId)
 
     const worksheetData = [
-      ['#', 'Ciudad', 'Tienda', 'ICCID', 'Tipo Venta', 'Promotor', 'Fecha', 'Monto Cobrado'],
-      ...data.rows.map(r => [r.row, r.city, r.store, r.iccid, r.saleType, r.promoter, r.date, r.amount]),
+      ['#', 'Ciudad', 'Tienda', 'ICCID', 'Tipo Venta', 'Es Portabilidad', 'Status de Venta', 'Promotor', 'Fecha', 'Monto Cobrado'],
+      ...data.rows.map(r => [
+        r.row,
+        r.city,
+        r.store,
+        r.iccid,
+        r.saleType,
+        r.isPortabilidad ? 'Si' : 'No',
+        r.saleStatus,
+        r.promoter,
+        r.date,
+        r.amount,
+      ]),
       [],
-      ['', '', '', '', '', '', 'TOTAL COBRADO:', data.totalAmount],
+      ['', '', '', '', '', '', '', '', 'TOTAL COBRADO:', data.totalAmount],
     ]
 
     const wb = XLSX.utils.book_new()
