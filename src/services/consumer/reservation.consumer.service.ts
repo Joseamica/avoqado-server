@@ -3,6 +3,8 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
+import { calculateApplicationFee, toStripeAmount } from '@/services/payments/providers/money'
+import { getProvider } from '@/services/payments/provider-registry'
 import logger from '@/config/logger'
 
 type ConsumerReservationInput = {
@@ -36,6 +38,58 @@ async function resolveVenue(venueSlug: string) {
   })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
   return venue
+}
+
+async function resolveActiveStripeMerchant(venueId: string) {
+  return prisma.ecommerceMerchant.findFirst({
+    where: {
+      venueId,
+      active: true,
+      chargesEnabled: true,
+      provider: { code: 'STRIPE_CONNECT', active: true },
+    },
+    include: { provider: true },
+    orderBy: { createdAt: 'desc' },
+  })
+}
+
+async function previewDepositRequirement(venueId: string, input: ConsumerReservationInput, settings: any) {
+  if (!settings.deposits?.enabled || settings.deposits.mode === 'none') {
+    return { required: false, amount: null as any }
+  }
+
+  if (settings.deposits.mode === 'card_hold') {
+    throw new BadRequestError('El modo card_hold aun no esta soportado para reservas en la app')
+  }
+
+  let servicePrice: number | null = null
+  if (input.productId) {
+    const product = await prisma.product.findFirst({
+      where: { id: input.productId, venueId, active: true },
+      select: { price: true },
+    })
+    servicePrice = product?.price ? Number(product.price) : null
+  }
+
+  return reservationService.calculateDepositAmount(settings.deposits, input.partySize ?? 1, servicePrice)
+}
+
+function getStripeChargeBounds() {
+  return {
+    min: Number(process.env.STRIPE_MIN_CHARGE_MXN_CENTS ?? 1000),
+    max: Number(process.env.STRIPE_MAX_CHARGE_MXN_CENTS ?? 5000000),
+  }
+}
+
+function buildConsumerPaymentReturnUrl(path: 'success' | 'cancelled', venueSlug: string, reservationId: string) {
+  const baseUrl = (process.env.CONSUMER_APP_RETURN_URL || 'avoqado://payment-result').replace(/\/$/, '')
+  const params = new URLSearchParams({
+    payment: path,
+    venueSlug,
+    reservationId,
+  })
+  const checkoutSessionParam = path === 'success' ? '&session_id={CHECKOUT_SESSION_ID}' : ''
+  return `${baseUrl}?${params.toString()}${checkoutSessionParam}`
 }
 
 async function ensureVenueCustomer(venueId: string, consumerId: string) {
@@ -157,6 +211,24 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('startsAt, endsAt y duration son requeridos')
   }
 
+  const depositPreview = await previewDepositRequirement(venue.id, input, settings)
+  const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
+
+  if (depositPreview.required && !stripeMerchant) {
+    throw new BadRequestError('Este negocio aun no tiene pagos en linea configurados')
+  }
+
+  if (depositPreview.required && depositPreview.amount) {
+    const stripeAmount = toStripeAmount(depositPreview.amount)
+    const bounds = getStripeChargeBounds()
+    if (stripeAmount < bounds.min) {
+      throw new BadRequestError('El deposito es menor al minimo permitido por Stripe')
+    }
+    if (stripeAmount > bounds.max) {
+      throw new BadRequestError('El deposito excede el maximo permitido por transaccion')
+    }
+  }
+
   const reservation = await reservationService.createReservation(
     venue.id,
     {
@@ -176,6 +248,39 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     settings,
   )
 
+  let checkoutUrl: string | null = null
+  if (reservation.depositAmount && stripeMerchant) {
+    const stripeAmount = toStripeAmount(reservation.depositAmount)
+    const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
+    const provider = getProvider(stripeMerchant)
+    const session = await provider.createCheckoutSession(stripeMerchant, {
+      amount: stripeAmount,
+      currency: 'mxn',
+      applicationFeeAmount,
+      successUrl: buildConsumerPaymentReturnUrl('success', venue.slug, reservation.id),
+      cancelUrl: buildConsumerPaymentReturnUrl('cancelled', venue.slug, reservation.id),
+      expiresAt: reservation.depositExpiresAt ?? new Date(Date.now() + 30 * 60_000),
+      customerEmail: reservation.guestEmail ?? undefined,
+      metadata: {
+        type: 'reservation_deposit',
+        source: 'consumer_app',
+        reservationId: reservation.id,
+        venueId: venue.id,
+        confirmationCode: reservation.confirmationCode,
+      },
+      description: `Reserva ${venue.name}`,
+      statementDescriptorSuffix: 'RESERVA',
+      idempotencyKey: reservation.idempotencyKey ?? `reservation:${reservation.id}:deposit:v1`,
+      paymentMethodTypes: ['card'],
+    })
+
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: { checkoutSessionId: session.id },
+    })
+    checkoutUrl = session.url
+  }
+
   return {
     confirmationCode: reservation.confirmationCode,
     cancelSecret: reservation.cancelSecret,
@@ -184,6 +289,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     status: reservation.status,
     depositRequired: !!reservation.depositAmount,
     depositAmount: reservation.depositAmount ? Number(reservation.depositAmount) : null,
+    checkoutUrl,
   }
 }
 

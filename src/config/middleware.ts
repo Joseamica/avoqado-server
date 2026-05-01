@@ -10,6 +10,8 @@ import { NODE_ENV, COOKIE_SECRET, BODY_JSON_LIMIT, BODY_URLENCODED_LIMIT } from 
 import sessionMiddleware from './session'
 
 export const configureCoreMiddlewares = (app: Express) => {
+  app.set('trust proxy', 1)
+
   // Apply compression first for all responses
   app.use(compression())
 
