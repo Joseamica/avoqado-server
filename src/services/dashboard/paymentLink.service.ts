@@ -13,8 +13,8 @@ import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppE
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
-import { getBlumonEcommerceService } from '@/services/sdk/blumon-ecommerce.service'
 import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
+import { getProvider } from '@/services/payments/provider-registry'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -479,6 +479,7 @@ export async function createCheckoutSession(
           id: true,
           sandboxMode: true,
           providerCredentials: true,
+          provider: { select: { code: true } },
         },
       },
       product: {
@@ -559,18 +560,11 @@ export async function createCheckoutSession(
   // Add tip to total charge amount
   chargeAmount = chargeAmount + tipAmount
 
-  // 3. Get Blumon service
-  const credentials = paymentLink.ecommerceMerchant.providerCredentials as Record<string, any>
-  const accessToken = credentials.accessToken
-  if (!accessToken) {
-    throw new BadRequestError('Configuración de pago incompleta para este venue')
-  }
-
-  const blumonService = getBlumonEcommerceService(paymentLink.ecommerceMerchant.sandboxMode)
+  // 3. Resolve provider
 
   // 4. Tokenize card
-  const tokenResult = await blumonService.tokenizeCard({
-    accessToken,
+  const provider = getProvider(paymentLink.ecommerceMerchant)
+  const tokenResult = await provider.tokenizeCard(paymentLink.ecommerceMerchant, {
     pan: cardData.pan,
     cvv: cardData.cvv,
     expMonth: cardData.expMonth,
@@ -652,6 +646,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           id: true,
           sandboxMode: true,
           providerCredentials: true,
+          provider: { select: { code: true } },
         },
       },
     },
@@ -680,13 +675,9 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
     throw new BadRequestError('Token de tarjeta no encontrado en la sesión')
   }
 
-  // 3. Get Blumon service and charge
-  const credentials = session.ecommerceMerchant.providerCredentials as Record<string, any>
-  const accessToken = credentials.accessToken
-  const blumonService = getBlumonEcommerceService(session.ecommerceMerchant.sandboxMode)
-
-  const chargeResult = await blumonService.authorizePayment({
-    accessToken,
+  // 3. Resolve provider and charge
+  const provider = getProvider(session.ecommerceMerchant)
+  const chargeResult = await provider.authorizeCardPayment(session.ecommerceMerchant, {
     amount: Number(session.amount),
     currency: session.currency === 'MXN' ? '484' : session.currency,
     cardToken,

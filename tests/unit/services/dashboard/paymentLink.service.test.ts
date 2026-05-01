@@ -126,6 +126,7 @@ const createMockCheckoutSession = (overrides: Record<string, any> = {}) => ({
     id: 'merchant-123',
     sandboxMode: true,
     providerCredentials: { accessToken: 'test-token' },
+    provider: { code: 'BLUMON' },
   },
   ...overrides,
 })

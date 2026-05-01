@@ -7,7 +7,7 @@
  */
 
 import { Router } from 'express'
-import { handleStripeWebhook } from '../controllers/webhook.controller'
+import { handleStripeConnectWebhook, handleStripeWebhook } from '../controllers/webhook.controller'
 import { handleBlumonTPVWebhook, blumonWebhookHealthCheck } from '../controllers/tpv/blumon-webhook.tpv.controller'
 import { handleB4BitWebhook, b4bitWebhookHealthCheck } from '../controllers/tpv/b4bit-webhook.tpv.controller'
 import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/webhooks/resend.webhook.controller'
@@ -58,6 +58,8 @@ const router = Router()
  *         description: Webhook secret not configured
  */
 router.post('/stripe', handleStripeWebhook)
+router.post('/stripe/platform', handleStripeWebhook)
+router.post('/stripe/connect', handleStripeConnectWebhook)
 
 /**
  * @openapi

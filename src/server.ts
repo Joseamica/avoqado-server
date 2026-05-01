@@ -19,6 +19,7 @@ import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
+import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
@@ -105,6 +106,9 @@ const gracefulShutdown = async (signal: string) => {
       // Stop abandoned orders cleanup job
       logger.info('Stopping abandoned orders cleanup job...')
       abandonedOrdersCleanupJob.stop()
+
+      logger.info('Stopping reservation deposit reconciliation job...')
+      reservationDepositReconciliationJob.stop()
 
       // Stop commission aggregation job
       logger.info('Stopping commission aggregation job...')
@@ -267,6 +271,9 @@ const startApplication = async (retries = 3) => {
 
       // Start abandoned orders cleanup job
       abandonedOrdersCleanupJob.start()
+
+      // Start Stripe reservation deposit reconciliation job
+      reservationDepositReconciliationJob.start()
 
       // Start commission aggregation job (daily at 3:00 AM Mexico City)
       commissionAggregationJob.start()

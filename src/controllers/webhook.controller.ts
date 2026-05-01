@@ -8,6 +8,8 @@ import { Request, Response, NextFunction } from 'express'
 import Stripe from 'stripe'
 import logger from '../config/logger'
 import { handleStripeWebhookEvent } from '../services/stripe.webhook.service'
+import { StripeConnectProvider } from '../services/payments/providers/stripe-connect.provider'
+import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
 
 // Initialize Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
@@ -93,6 +95,55 @@ export async function handleStripeWebhook(req: Request, res: Response, _next: Ne
       message: 'Webhook received but processing failed',
       eventId: event.id,
       eventType: event.type,
+    })
+  }
+}
+
+/**
+ * Handle Stripe Connect webhook events.
+ * POST /webhooks/stripe/connect
+ */
+export async function handleStripeConnectWebhook(req: Request, res: Response, _next: NextFunction): Promise<void> {
+  const signature = req.headers['stripe-signature'] as string
+
+  if (!signature) {
+    logger.error('❌ Connect Webhook: Missing stripe-signature header')
+    res.status(400).json({ success: false, error: 'Missing stripe-signature header' })
+    return
+  }
+
+  try {
+    const provider = new StripeConnectProvider()
+    const event = await provider.verifyWebhookSignature(req.body, signature, 'connect')
+
+    logger.info('✅ Connect Webhook: Signature verified', {
+      eventId: event.id,
+      eventType: event.type,
+      account: event.account,
+    })
+
+    await processStripeConnectWebhookEvent(event)
+
+    res.status(200).json({
+      success: true,
+      message: 'Connect webhook processed successfully',
+      eventId: event.id,
+      eventType: event.type,
+    })
+  } catch (error) {
+    logger.error('❌ Connect Webhook: Event processing failed', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+
+    const message = error instanceof Error ? error.message : ''
+    if (message.includes('signature') || message.includes('No signatures found')) {
+      res.status(400).json({ success: false, error: 'Invalid signature' })
+      return
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Webhook processing failed',
     })
   }
 }

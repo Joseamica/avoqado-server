@@ -7,6 +7,7 @@ import { logAction } from './activity-log.service'
 import { getReservationSettings } from './reservationSettings.service'
 import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
+import { getProvider } from '../payments/provider-registry'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow to avoid
 // the circular import — creditPack imports `withSerializableRetry` from this module.
 
@@ -108,7 +109,7 @@ interface DepositConfig {
   requiredForPartySizeGte: number | null
 }
 
-function calculateDepositAmount(
+export function calculateDepositAmount(
   config: DepositConfig,
   partySize: number,
   servicePrice?: number | null,
@@ -209,8 +210,8 @@ export async function createReservation(venueId: string, data: CreateReservation
 
   const confirmationCode = generateConfirmationCode()
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
-  const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
   const requestedPartySize = data.partySize ?? 1
+  const depositIdempotencyKey = `reservation:${crypto.randomUUID()}:deposit:v1`
 
   const reservation = await withSerializableRetry(async tx => {
     const { product } = await validateResourceOwnership(tx, venueId, {
@@ -222,13 +223,18 @@ export async function createReservation(venueId: string, data: CreateReservation
     // Calculate deposit with validated product price (if configured as percentage)
     let depositAmount: Prisma.Decimal | null = null
     let depositStatus: string | null = null
+    let depositExpiresAt: Date | null = null
     if (moduleConfig?.deposits) {
       const deposit = calculateDepositAmount(moduleConfig.deposits, requestedPartySize, product?.price ? Number(product.price) : null)
       if (deposit.required && deposit.amount) {
         depositAmount = deposit.amount
         depositStatus = 'PENDING'
+        const requestedWindowMin = moduleConfig.deposits.paymentWindowHrs ?? 30
+        const effectiveWindowMin = Math.min(Math.max(requestedWindowMin, 30), 1440)
+        depositExpiresAt = new Date(Date.now() + effectiveWindowMin * 60_000)
       }
     }
+    const initialStatus: ReservationStatus = depositAmount ? 'PENDING' : autoConfirm ? 'CONFIRMED' : 'PENDING'
 
     // Layer 1: Check table overlap (FOR UPDATE NOWAIT)
     if (data.tableId) {
@@ -315,8 +321,10 @@ export async function createReservation(venueId: string, data: CreateReservation
         assignedStaffId: data.assignedStaffId,
         depositAmount,
         depositStatus: depositStatus as any,
+        depositExpiresAt,
+        idempotencyKey: depositAmount ? depositIdempotencyKey : undefined,
         createdById,
-        confirmedAt: autoConfirm ? new Date() : null,
+        confirmedAt: initialStatus === 'CONFIRMED' ? new Date() : null,
         specialRequests: data.specialRequests,
         internalNotes: data.internalNotes,
         tags: data.tags ?? [],
@@ -617,7 +625,118 @@ export async function cancelReservation(
     logger.error(`❌ [CREDIT REFUND] Failed for reservation ${updated.confirmationCode}`, err)
   }
 
+  await handleReservationDepositCancellation(updated.id, venueId)
+
   return Object.assign(updated, refundResult)
+}
+
+async function handleReservationDepositCancellation(reservationId: string, venueId: string): Promise<void> {
+  const reservation = await prisma.reservation.findFirst({
+    where: { id: reservationId, venueId },
+    select: {
+      id: true,
+      confirmationCode: true,
+      startsAt: true,
+      depositStatus: true,
+      depositProcessorRef: true,
+      refundStatus: true,
+    },
+  })
+  if (
+    !reservation ||
+    reservation.depositStatus !== 'PAID' ||
+    !reservation.depositProcessorRef ||
+    reservation.refundStatus === 'SUCCEEDED'
+  ) {
+    return
+  }
+
+  const settings = await getReservationSettings(venueId)
+  const minHoursBeforeStart = settings.cancellation.minHoursBeforeStart ?? 0
+  const hoursUntilStart = (reservation.startsAt.getTime() - Date.now()) / 3_600_000
+  const shouldForfeit = settings.cancellation.forfeitDeposit && hoursUntilStart < minHoursBeforeStart
+
+  if (shouldForfeit) {
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: { depositStatus: 'FORFEITED' },
+    })
+    logger.info(`💰 [RESERVATION DEPOSIT] Forfeited deposit for ${reservation.confirmationCode}`)
+    return
+  }
+
+  const merchant = await prisma.ecommerceMerchant.findFirst({
+    where: {
+      venueId,
+      active: true,
+      provider: { code: 'STRIPE_CONNECT', active: true },
+    },
+    include: { provider: true },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  if (!merchant) {
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: {
+        refundStatus: 'FAILED',
+        refundRequestedAt: new Date(),
+        refundFailedReason: 'No active Stripe Connect merchant found for reservation deposit refund',
+      },
+    })
+    logger.error(`❌ [RESERVATION DEPOSIT] Refund failed for ${reservation.confirmationCode}: missing Stripe merchant`)
+    return
+  }
+
+  await prisma.reservation.update({
+    where: { id: reservation.id },
+    data: {
+      refundStatus: 'PENDING',
+      refundRequestedAt: new Date(),
+      refundFailedReason: null,
+    },
+  })
+
+  try {
+    const provider = getProvider(merchant)
+    const refund = await provider.refund(merchant, {
+      paymentIntentId: reservation.depositProcessorRef,
+      refundApplicationFee: true,
+      reason: 'requested_by_customer',
+      idempotencyKey: `reservation-deposit-refund:${reservation.id}:v1`,
+      metadata: {
+        type: 'reservation_deposit_refund',
+        reservationId: reservation.id,
+        venueId,
+        confirmationCode: reservation.confirmationCode,
+      },
+    })
+
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: {
+        refundStatus: refund.status,
+        refundProcessorRef: refund.refundId,
+        refundFailedReason: null,
+        ...(refund.status === 'SUCCEEDED'
+          ? {
+              depositStatus: 'REFUNDED',
+              depositRefundedAt: new Date(),
+            }
+          : {}),
+      },
+    })
+  } catch (error: any) {
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: {
+        refundStatus: 'FAILED',
+        refundFailedReason: error?.message ?? 'Stripe refund failed',
+        refundRetryCount: { increment: 1 },
+      },
+    })
+    logger.error(`❌ [RESERVATION DEPOSIT] Refund failed for ${reservation.confirmationCode}`, error)
+  }
 }
 
 // ---- Update ----

@@ -6,6 +6,8 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
+import { calculateApplicationFee, toStripeAmount } from '../../services/payments/providers/money'
+import { getProvider } from '../../services/payments/provider-registry'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -26,6 +28,47 @@ async function resolveVenueBySlug(venueSlug: string) {
   })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
   return venue
+}
+
+async function resolveActiveStripeMerchant(venueId: string) {
+  return prisma.ecommerceMerchant.findFirst({
+    where: {
+      venueId,
+      active: true,
+      chargesEnabled: true,
+      provider: { code: 'STRIPE_CONNECT', active: true },
+    },
+    include: { provider: true },
+    orderBy: { createdAt: 'desc' },
+  })
+}
+
+async function previewDepositRequirement(venueId: string, body: any, settings: any) {
+  if (!settings.deposits?.enabled || settings.deposits.mode === 'none') {
+    return { required: false, amount: null as any }
+  }
+
+  if (settings.deposits.mode === 'card_hold') {
+    throw new BadRequestError('El modo card_hold aun no esta soportado para reservas publicas')
+  }
+
+  let servicePrice: number | null = null
+  if (body.productId) {
+    const product = await prisma.product.findFirst({
+      where: { id: body.productId, venueId, active: true },
+      select: { price: true },
+    })
+    servicePrice = product?.price ? Number(product.price) : null
+  }
+
+  return reservationService.calculateDepositAmount(settings.deposits, body.partySize ?? 1, servicePrice)
+}
+
+function getStripeChargeBounds() {
+  return {
+    min: Number(process.env.STRIPE_MIN_CHARGE_MXN_CENTS ?? 1000),
+    max: Number(process.env.STRIPE_MAX_CHARGE_MXN_CENTS ?? 5000000),
+  }
 }
 
 /**
@@ -189,6 +232,24 @@ export async function createReservation(req: Request, res: Response, next: NextF
       })
     }
 
+    const depositPreview = await previewDepositRequirement(venue.id, req.body, settings)
+    const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
+
+    if (depositPreview.required && !stripeMerchant) {
+      throw new BadRequestError('Este negocio aun no tiene pagos en linea configurados')
+    }
+
+    if (depositPreview.required && depositPreview.amount) {
+      const stripeAmount = toStripeAmount(depositPreview.amount)
+      const bounds = getStripeChargeBounds()
+      if (stripeAmount < bounds.min) {
+        throw new BadRequestError('El deposito es menor al minimo permitido por Stripe')
+      }
+      if (stripeAmount > bounds.max) {
+        throw new BadRequestError('El deposito excede el maximo permitido por transaccion')
+      }
+    }
+
     const reservation = await reservationService.createReservation(
       venue.id,
       {
@@ -199,6 +260,39 @@ export async function createReservation(req: Request, res: Response, next: NextF
       settings,
     )
 
+    let checkoutUrl: string | null = null
+    if (reservation.depositAmount && stripeMerchant) {
+      const stripeAmount = toStripeAmount(reservation.depositAmount)
+      const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
+      const provider = getProvider(stripeMerchant)
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
+      const session = await provider.createCheckoutSession(stripeMerchant, {
+        amount: stripeAmount,
+        currency: 'mxn',
+        applicationFeeAmount,
+        successUrl: `${frontendUrl}/book/${venueSlug}?payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`,
+        cancelUrl: `${frontendUrl}/book/${venueSlug}?payment=cancelled&reservationId=${reservation.id}`,
+        expiresAt: reservation.depositExpiresAt ?? new Date(Date.now() + 30 * 60_000),
+        customerEmail: reservation.guestEmail ?? undefined,
+        metadata: {
+          type: 'reservation_deposit',
+          reservationId: reservation.id,
+          venueId: venue.id,
+          confirmationCode: reservation.confirmationCode,
+        },
+        description: `Reserva ${venue.name}`,
+        statementDescriptorSuffix: 'RESERVA',
+        idempotencyKey: reservation.idempotencyKey ?? `reservation:${reservation.id}:deposit:v1`,
+        paymentMethodTypes: ['card'],
+      })
+
+      await prisma.reservation.update({
+        where: { id: reservation.id },
+        data: { checkoutSessionId: session.id },
+      })
+      checkoutUrl = session.url
+    }
+
     // Return only public-safe data + cancelSecret
     res.status(201).json({
       confirmationCode: reservation.confirmationCode,
@@ -208,6 +302,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
       status: reservation.status,
       depositRequired: !!reservation.depositAmount,
       depositAmount: reservation.depositAmount,
+      checkoutUrl,
     })
   } catch (error) {
     next(error)

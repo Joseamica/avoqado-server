@@ -12,6 +12,7 @@
 import { Router } from 'express'
 import { validateRequest } from '@/middlewares/validation'
 import * as ecommerceMerchantController from '@/controllers/dashboard/ecommerceMerchant.controller'
+import * as stripeConnectController from '@/controllers/dashboard/stripeConnect.controller'
 import {
   listVenueEcommerceMerchantsSchema,
   getEcommerceMerchantSchema,
@@ -20,6 +21,7 @@ import {
   toggleEcommerceMerchantWithVenueSchema,
   regenerateKeysWithVenueSchema,
 } from '@/schemas/dashboard/ecommerceMerchant.schema'
+import { createStripeOnboardingLinkSchema, getStripeOnboardingStatusSchema } from '@/schemas/dashboard/stripeConnect.schema'
 
 const router = Router({ mergeParams: true }) // mergeParams: true to access :venueId from parent
 
@@ -114,6 +116,22 @@ router.get('/:id/keys', validateRequest(getEcommerceMerchantSchema), ecommerceMe
  * Permission: venue:manage or owner/admin of venue
  */
 router.post('/:id/regenerate-keys', validateRequest(regenerateKeysWithVenueSchema), ecommerceMerchantController.regenerateAPIKeys)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STRIPE CONNECT ONBOARDING
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/ecommerce-merchants/:id/stripe-onboard
+ * Creates a fresh Stripe Connect onboarding link for a STRIPE_CONNECT merchant.
+ */
+router.post('/:id/stripe-onboard', validateRequest(createStripeOnboardingLinkSchema), stripeConnectController.createOnboardingLink)
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/ecommerce-merchants/:id/onboarding-status
+ * Retrieves and syncs Stripe Connect onboarding status.
+ */
+router.get('/:id/onboarding-status', validateRequest(getStripeOnboardingStatusSchema), stripeConnectController.getOnboardingStatus)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DELETE
