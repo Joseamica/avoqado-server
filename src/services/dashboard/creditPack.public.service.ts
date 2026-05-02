@@ -71,14 +71,23 @@ export async function lookupCustomerCredits(
   const seats = opts?.seats
   const productId = opts?.productId
 
-  // Find customer
-  const customer = await prisma.customer.findFirst({
-    where: {
-      venueId,
-      ...(email ? { email } : {}),
-      ...(phone ? { phone } : {}),
-    },
-  })
+  // Find customer (strict by both when both are present, then fallback by either)
+  let customer = null
+  if (email && phone) {
+    customer = await prisma.customer.findFirst({
+      where: { venueId, email, phone },
+    })
+  }
+  if (!customer && email) {
+    customer = await prisma.customer.findFirst({
+      where: { venueId, email },
+    })
+  }
+  if (!customer && phone) {
+    customer = await prisma.customer.findFirst({
+      where: { venueId, phone },
+    })
+  }
 
   if (!customer) {
     return { customer: null, purchases: [], requestedSeats: seats ?? null }
@@ -147,7 +156,7 @@ export async function createCheckoutSession(
   venueId: string,
   packId: string,
   email: string | undefined,
-  phone: string,
+  phone: string | undefined,
   successUrl: string,
   cancelUrl: string,
 ) {
@@ -227,7 +236,7 @@ export async function createCheckoutSession(
       type: 'credit_pack_purchase',
       venueId,
       packId: pack.id,
-      customerPhone: phone,
+      ...(phone ? { customerPhone: phone } : {}),
       ...(email && { customerEmail: email }),
     },
     ...(email && { customer_email: email }),
@@ -255,6 +264,10 @@ export async function fulfillPurchase(checkoutSessionId: string) {
 
   if (metadata.type !== 'credit_pack_purchase') {
     return // Not a credit pack purchase
+  }
+
+  if (session.payment_status !== 'paid') {
+    throw new BadRequestError('La sesion de Checkout aun no esta pagada')
   }
 
   const { venueId, packId, customerPhone, customerEmail } = metadata
@@ -578,32 +591,53 @@ async function findOrCreateCustomer(venueId: string, email?: string, phone?: str
     throw new BadRequestError('Se requiere email o telefono del cliente')
   }
 
-  // Try to find by email first, then phone
-  let customer = null
+  // Resolve by both unique keys up front to avoid collisions when one key
+  // belongs to a different customer record.
+  const [emailCustomer, phoneCustomer] = await Promise.all([
+    email ? prisma.customer.findUnique({ where: { venueId_email: { venueId, email } } }) : Promise.resolve(null),
+    phone ? prisma.customer.findUnique({ where: { venueId_phone: { venueId, phone } } }) : Promise.resolve(null),
+  ])
 
-  if (email) {
-    customer = await prisma.customer.findUnique({
-      where: { venueId_email: { venueId, email } },
-    })
-  }
+  let customer = emailCustomer ?? phoneCustomer
+  const sameCustomer = emailCustomer && phoneCustomer && emailCustomer.id === phoneCustomer.id
 
-  if (!customer && phone) {
-    customer = await prisma.customer.findUnique({
-      where: { venueId_phone: { venueId, phone } },
-    })
+  // If both identifiers exist but point to different rows, use the phone row
+  // (phone is mandatory in checkout payload and tends to be more current).
+  if (emailCustomer && phoneCustomer && !sameCustomer) {
+    customer = phoneCustomer
   }
 
   if (customer) {
-    // Update missing fields
-    if ((email && !customer.email) || (phone && !customer.phone)) {
+    const updateData: { email?: string; phone?: string } = {}
+
+    // Only fill missing fields when no conflicting owner exists.
+    if (email && !customer.email) {
+      const emailOwner = await prisma.customer.findUnique({
+        where: { venueId_email: { venueId, email } },
+        select: { id: true },
+      })
+      if (!emailOwner || emailOwner.id === customer.id) {
+        updateData.email = email
+      }
+    }
+
+    if (phone && !customer.phone) {
+      const phoneOwner = await prisma.customer.findUnique({
+        where: { venueId_phone: { venueId, phone } },
+        select: { id: true },
+      })
+      if (!phoneOwner || phoneOwner.id === customer.id) {
+        updateData.phone = phone
+      }
+    }
+
+    if (Object.keys(updateData).length > 0) {
       customer = await prisma.customer.update({
         where: { id: customer.id },
-        data: {
-          ...(email && !customer.email ? { email } : {}),
-          ...(phone && !customer.phone ? { phone } : {}),
-        },
+        data: updateData,
       })
     }
+
     return customer
   }
 

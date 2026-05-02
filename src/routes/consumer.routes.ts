@@ -5,8 +5,11 @@ import { authenticateConsumer } from '@/middlewares/consumerAuth.middleware'
 import * as authController from '@/controllers/consumer/auth.consumer.controller'
 import * as venueController from '@/controllers/consumer/venue.consumer.controller'
 import * as reservationController from '@/controllers/consumer/reservation.consumer.controller'
+import * as creditController from '@/controllers/consumer/credit.consumer.controller'
 import {
+  consumerCreateCreditCheckoutSchema,
   consumerCreateReservationSchema,
+  consumerFinalizeCreditCheckoutSchema,
   consumerOAuthSchema,
   consumerVenueParamsSchema,
   searchConsumerVenuesSchema,
@@ -32,5 +35,19 @@ router.post(
 )
 
 router.get('/reservations', readLimit, authenticateConsumer, reservationController.mine)
+router.post(
+  '/venues/:venueSlug/credit-packs/:packId/checkout',
+  writeLimit,
+  authenticateConsumer,
+  validateRequest(consumerCreateCreditCheckoutSchema),
+  creditController.createCheckout,
+)
+router.post(
+  '/credits/checkout/finalize',
+  writeLimit,
+  authenticateConsumer,
+  validateRequest(consumerFinalizeCreditCheckoutSchema),
+  creditController.finalizeCheckout,
+)
 
 export default router

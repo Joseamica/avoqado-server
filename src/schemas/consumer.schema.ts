@@ -66,3 +66,19 @@ export const consumerCreateReservationSchema = z.object({
       },
     ),
 })
+
+export const consumerFinalizeCreditCheckoutSchema = z.object({
+  body: z.object({
+    sessionId: z
+      .string()
+      .min(8, 'sessionId invalido')
+      .regex(/^cs_/, 'sessionId invalido'),
+  }),
+})
+
+export const consumerCreateCreditCheckoutSchema = z.object({
+  params: z.object({
+    venueSlug: z.string().min(1),
+    packId: z.string().min(1),
+  }),
+})
