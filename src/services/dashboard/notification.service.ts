@@ -3,6 +3,7 @@ import { NotificationType, NotificationChannel, NotificationPriority, AlertType,
 import * as resendService from '../resend.service'
 import * as pushService from '../mobile/push.mobile.service'
 import * as whatsappService from '../whatsapp.service'
+import socketManager from '../../communication/sockets'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
@@ -177,11 +178,31 @@ export async function sendNotification(payload: NotificationPayload): Promise<an
     for (const channel of channels) {
       try {
         switch (channel) {
-          case NotificationChannel.IN_APP:
-            // In-app notifications are already stored in database
+          case NotificationChannel.IN_APP: {
+            // In-app notifications are stored in DB; emit Socket.IO so the
+            // dashboard bell updates in realtime and the browser fires its
+            // native notification (when permission has been granted).
+            const broadcastingService = socketManager.getBroadcastingService()
+            if (broadcastingService) {
+              broadcastingService.broadcastNewNotification({
+                notificationId: notification.id,
+                recipientId: notification.recipientId,
+                venueId: notification.venueId || '',
+                userId: notification.recipientId,
+                type: notification.type,
+                title: notification.title,
+                message: notification.message,
+                priority: notification.priority as 'LOW' | 'NORMAL' | 'HIGH',
+                isRead: notification.isRead,
+                actionUrl: notification.actionUrl || undefined,
+                actionLabel: notification.actionLabel || undefined,
+                metadata: (notification.metadata as Record<string, any>) || undefined,
+              })
+            }
             results.inApp = true
             logger.info(`In-app notification created: ${notification.id}`)
             break
+          }
 
           case NotificationChannel.EMAIL:
             // TODO: Integrate with email service (SendGrid, AWS SES, etc.)
