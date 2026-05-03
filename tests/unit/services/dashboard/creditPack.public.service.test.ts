@@ -645,6 +645,7 @@ describe('CreditPack Public Service', () => {
       customer_email: null,
       amount_total: 60000, // $600 in cents
       payment_intent: 'pi_test_123',
+      payment_status: 'paid',
       ...overrides,
     })
 
@@ -1342,6 +1343,7 @@ describe('CreditPack Public Service', () => {
         customer_email: null,
         amount_total: 60000,
         payment_intent: 'pi_test_123',
+        payment_status: 'paid',
       })
 
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(existingPurchase)
