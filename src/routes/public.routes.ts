@@ -8,6 +8,7 @@ import * as reservationPublicController from '../controllers/public/reservation.
 import * as creditPackPublicController from '../controllers/public/creditPack.public.controller'
 import * as customerPortalController from '../controllers/public/customerPortal.public.controller'
 import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
+import { submitContact, submitLabsBrief } from '../controllers/public/landing.public.controller'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
 import {
@@ -149,5 +150,11 @@ router.get(
   validateRequest(publicSessionSchema),
   paymentLinkPublicController.getSessionStatus,
 )
+
+// ---- Landing Page Routes (unauthenticated) — called from avoqado.io frontend ----
+// nodemailer doesn't work on Cloudflare Pages Functions, so the landing proxies
+// email submissions to this server which uses Resend (HTTP).
+router.post('/contact', writeLimit, submitContact)
+router.post('/labs/submit', writeLimit, submitLabsBrief)
 
 export default router

@@ -408,8 +408,46 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
     if (!data.credentials) {
       throw new BadRequestError('Credentials object is required')
     }
-    // For non-Blumon providers, require merchantId and apiKey
-    if (provider.code !== 'BLUMON') {
+
+    // Schema-driven validation: if the provider declares
+    // `configSchema.credentialFields`, validate the submitted credentials
+    // against that schema. This makes provider integration data-driven —
+    // adding a new provider only requires defining its schema, no service
+    // changes.
+    const credentialFields = (provider.configSchema as any)?.credentialFields as
+      | Array<{ key: string; label?: string; required?: boolean; pattern?: string; minLength?: number; maxLength?: number }>
+      | undefined
+
+    if (Array.isArray(credentialFields) && credentialFields.length > 0) {
+      const errors: string[] = []
+      for (const field of credentialFields) {
+        const value = data.credentials[field.key]
+        const isEmpty = value === undefined || value === null || value === ''
+        const label = field.label || field.key
+
+        if (field.required && isEmpty) {
+          errors.push(`${label} es obligatorio`)
+          continue
+        }
+        if (isEmpty) continue
+
+        const stringValue = String(value)
+        if (field.minLength != null && stringValue.length < field.minLength) {
+          errors.push(`${label} debe tener al menos ${field.minLength} caracteres`)
+        }
+        if (field.maxLength != null && stringValue.length > field.maxLength) {
+          errors.push(`${label} no puede exceder ${field.maxLength} caracteres`)
+        }
+        if (field.pattern && !new RegExp(field.pattern).test(stringValue)) {
+          errors.push(`${label} tiene un formato inválido`)
+        }
+      }
+      if (errors.length > 0) {
+        throw new BadRequestError(`Credenciales inválidas para ${provider.name}: ${errors.join('; ')}`)
+      }
+    } else if (provider.code !== 'BLUMON') {
+      // Legacy fallback for providers without a configSchema (Menta, Stripe, etc.)
+      // — keep the historical merchantId + apiKey requirement.
       if (!data.credentials.merchantId || !data.credentials.apiKey) {
         throw new BadRequestError('Credentials must include merchantId and apiKey')
       }
