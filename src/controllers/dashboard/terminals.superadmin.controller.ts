@@ -65,7 +65,7 @@ export const getTerminalById = async (req: Request, res: Response, next: NextFun
  */
 export const createTerminal = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { venueId, serialNumber, name, type, brand, model, assignedMerchantIds, generateActivationCode } = req.body
+    const { venueId, serialNumber, name, type, brand, model, assignedMerchantIds, generateActivationCode, configOverrides } = req.body
 
     // Get staffId from authenticated user (assuming req.user exists)
     const staffId = (req as any).user?.userId || 'superadmin'
@@ -80,6 +80,7 @@ export const createTerminal = async (req: Request, res: Response, next: NextFunc
       assignedMerchantIds,
       generateActivationCode,
       staffId,
+      configOverrides,
     })
 
     const message =

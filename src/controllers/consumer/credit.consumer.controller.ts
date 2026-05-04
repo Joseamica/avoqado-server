@@ -23,3 +23,13 @@ export async function finalizeCheckout(req: Request, res: Response, next: NextFu
     next(error)
   }
 }
+
+export async function mine(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { consumerId } = (req as any).consumerAuth as ConsumerAuthContext
+    const result = await creditConsumerService.getConsumerCredits(consumerId)
+    res.json(result)
+  } catch (error) {
+    next(error)
+  }
+}

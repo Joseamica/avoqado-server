@@ -31,6 +31,10 @@ const createTerminalSchema = z.object({
     model: z.string().optional(),
     assignedMerchantIds: z.array(z.string()).optional(),
     generateActivationCode: z.boolean().optional(),
+    // Optional pre-configuration applied right after creation. Validated by
+    // updateTpvSettings/TpvSettings shape; loose schema here keeps the route
+    // tolerant to additive settings without needing route updates.
+    configOverrides: z.record(z.unknown()).optional(),
   }),
 })
 

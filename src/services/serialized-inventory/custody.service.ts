@@ -183,7 +183,13 @@ export class SimCustodyService {
             // Idempotent inside a non-replayed call: already assigned to same supervisor → noop ok.
             return { event: ACTION_TO_EVENT.ASSIGN_TO_SUPERVISOR, item }
           }
-          if (item.custodyState !== 'ADMIN_HELD') throw new SimCustodyError('ALREADY_ASSIGNED')
+          if (item.custodyState !== 'ADMIN_HELD') {
+            // Surface WHO currently holds the SIM so OWNER doesn't have to guess
+            // which Supervisor to chase down. Falls back silently when the FK
+            // can't be resolved (cleared assignment race, deleted Staff, etc.).
+            const detail = await this.formatCurrentHolderDetail(tx, item)
+            throw new SimCustodyError('ALREADY_ASSIGNED', detail)
+          }
 
           const newState = applyTransition(item.custodyState, 'ASSIGN_TO_SUPERVISOR')
           const updated = await this.updateWithVersion(tx, item, {
@@ -303,7 +309,10 @@ export class SimCustodyService {
           ) {
             return { event: ACTION_TO_EVENT.ASSIGN_TO_PROMOTER_DIRECT, item }
           }
-          if (item.custodyState !== 'ADMIN_HELD') throw new SimCustodyError('ALREADY_ASSIGNED')
+          if (item.custodyState !== 'ADMIN_HELD') {
+            const detail = await this.formatCurrentHolderDetail(tx, item)
+            throw new SimCustodyError('ALREADY_ASSIGNED', detail)
+          }
 
           const newState = applyTransition(item.custodyState, 'ASSIGN_TO_PROMOTER_DIRECT')
           const updated = await this.updateWithVersion(tx, item, {
@@ -645,6 +654,26 @@ export class SimCustodyService {
       select: { id: true },
     })
     if (!membership) throw new SimCustodyError('TENANT_MISMATCH')
+  }
+
+  /**
+   * Builds a "Custodiado por <Nombre>." sentence for an ALREADY_ASSIGNED error
+   * so the OWNER knows which person to chase. Returns undefined when the
+   * holder can't be resolved — the base error message remains useful on its own.
+   */
+  private async formatCurrentHolderDetail(
+    tx: Prisma.TransactionClient,
+    item: Pick<SerializedItem, 'assignedSupervisorId' | 'assignedPromoterId'>,
+  ): Promise<string | undefined> {
+    const holderId = item.assignedSupervisorId ?? item.assignedPromoterId
+    if (!holderId) return undefined
+    const staff = await tx.staff.findUnique({
+      where: { id: holderId },
+      select: { firstName: true, lastName: true },
+    })
+    if (!staff) return undefined
+    const fullName = `${staff.firstName ?? ''} ${staff.lastName ?? ''}`.trim()
+    return fullName ? `Custodiado por ${fullName}.` : undefined
   }
 
   /**

@@ -35,3 +35,13 @@ export async function createDepositCheckout(req: Request, res: Response, next: N
     next(error)
   }
 }
+
+export async function finalizeDepositCheckout(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { consumerId } = (req as any).consumerAuth as ConsumerAuthContext
+    const result = await reservationConsumerService.finalizeDepositCheckoutForConsumer(consumerId, req.body.sessionId)
+    res.json(result)
+  } catch (error) {
+    next(error)
+  }
+}

@@ -420,6 +420,70 @@ export async function createDepositCheckoutForConsumer(consumerId: string, venue
   return createReservationDepositCheckout(venue, reservation, `reservation:${reservation.id}:deposit:retry:${Date.now()}`)
 }
 
+export async function finalizeDepositCheckoutForConsumer(consumerId: string, sessionId: string) {
+  const reservation = await prisma.reservation.findFirst({
+    where: {
+      checkoutSessionId: sessionId,
+      customer: { consumerId },
+    },
+    select: {
+      id: true,
+      venueId: true,
+      confirmationCode: true,
+      cancelSecret: true,
+      status: true,
+      depositStatus: true,
+      checkoutSessionId: true,
+      venue: { select: { slug: true } },
+    },
+  })
+
+  if (!reservation) {
+    throw new NotFoundError('Reserva no encontrada')
+  }
+
+  const stripeMerchant = await resolveActiveStripeMerchant(reservation.venueId)
+  if (!stripeMerchant) {
+    throw new BadRequestError('Este negocio aun no tiene pagos en linea configurados')
+  }
+
+  const provider = getProvider(stripeMerchant)
+  const paymentStatus = await provider.getPaymentStatus(stripeMerchant, sessionId)
+
+  if (paymentStatus.status === 'PAID' && reservation.depositStatus !== 'PAID') {
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: {
+        status: ReservationStatus.CONFIRMED,
+        confirmedAt: new Date(),
+        depositStatus: 'PAID',
+        depositPaidAt: paymentStatus.paidAt ?? new Date(),
+        depositProcessorRef: paymentStatus.paymentIntentId,
+      },
+    })
+  }
+
+  const latest = await prisma.reservation.findUnique({
+    where: { id: reservation.id },
+    select: {
+      confirmationCode: true,
+      cancelSecret: true,
+      status: true,
+      depositStatus: true,
+      venue: { select: { slug: true } },
+    },
+  })
+
+  return {
+    confirmationCode: latest?.confirmationCode ?? reservation.confirmationCode,
+    cancelSecret: latest?.cancelSecret ?? reservation.cancelSecret,
+    venueSlug: latest?.venue.slug ?? reservation.venue.slug,
+    status: latest?.status ?? reservation.status,
+    depositStatus: latest?.depositStatus ?? reservation.depositStatus,
+    paymentStatus: paymentStatus.status,
+  }
+}
+
 const reservationSelect = {
   confirmationCode: true,
   cancelSecret: true,

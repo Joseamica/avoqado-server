@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateActivationCode as generateActivationCodeUtil } from './terminal-activation.service'
 import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
+import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
 
 /**
  * Get All Terminals (Cross-Venue)
@@ -100,6 +101,7 @@ export async function createTerminal(data: {
   assignedMerchantIds?: string[]
   generateActivationCode?: boolean
   staffId?: string
+  configOverrides?: Partial<TpvSettings>
 }) {
   logger.info('Creating terminal:', {
     venueId: data.venueId,
@@ -230,6 +232,22 @@ export async function createTerminal(data: {
       logger.info('[Terminal Create] No existing merchants found with matching serial for auto-attach', {
         serialNumber: data.serialNumber,
       })
+    }
+  }
+
+  // Apply optional pre-configuration overrides (e.g. tip suggestions, kiosk mode,
+  // home-screen visibility flags). Reuses updateTpvSettings so the same diff vs
+  // org defaults + config.settings (Android compat) logic runs.
+  if (data.configOverrides && Object.keys(data.configOverrides).length > 0) {
+    try {
+      await updateTpvSettings(terminal.id, data.configOverrides)
+      logger.info(`Initial TPV settings applied to terminal ${terminal.id}`, {
+        keys: Object.keys(data.configOverrides),
+      })
+    } catch (err) {
+      // Don't fail the whole creation if pre-configuration has a problem;
+      // the terminal already exists and can be configured later.
+      logger.error(`Failed to apply initial TPV settings to terminal ${terminal.id}`, { error: err })
     }
   }
 

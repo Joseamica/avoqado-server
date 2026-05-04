@@ -107,3 +107,69 @@ export async function finalizeCreditCheckout(consumerId: string, sessionId: stri
     customerId: hydrated.customer.id,
   }
 }
+
+export async function getConsumerCredits(consumerId: string) {
+  const now = new Date()
+  const purchases = await prisma.creditPackPurchase.findMany({
+    where: {
+      status: 'ACTIVE',
+      customer: { consumerId },
+      OR: [{ expiresAt: null }, { expiresAt: { gte: now } }],
+      itemBalances: { some: { remainingQuantity: { gt: 0 } } },
+    },
+    select: {
+      id: true,
+      purchasedAt: true,
+      expiresAt: true,
+      status: true,
+      amountPaid: true,
+      venue: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          logo: true,
+          timezone: true,
+        },
+      },
+      creditPack: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      itemBalances: {
+        where: { remainingQuantity: { gt: 0 } },
+        select: {
+          id: true,
+          originalQuantity: true,
+          remainingQuantity: true,
+          product: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              duration: true,
+            },
+          },
+        },
+        orderBy: { remainingQuantity: 'desc' },
+      },
+    },
+    orderBy: [{ expiresAt: 'asc' }, { purchasedAt: 'desc' }],
+    take: 100,
+  })
+
+  const totalRemaining = purchases.reduce(
+    (sum, purchase) => sum + purchase.itemBalances.reduce((itemSum, item) => itemSum + item.remainingQuantity, 0),
+    0,
+  )
+
+  return {
+    totalRemaining,
+    purchases: purchases.map(purchase => ({
+      ...purchase,
+      amountPaid: Number(purchase.amountPaid),
+    })),
+  }
+}

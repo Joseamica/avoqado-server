@@ -502,12 +502,18 @@ export class SerializedInventoryService {
 
   /**
    * Gets item by serial number.
+   *
+   * Falls back to org-level pool when venue-scoped unique lookup misses, so
+   * SIMs in custody (venueId=NULL after assignment to Supervisor/Promoter)
+   * remain findable. Mirrors the venue→org pattern in scan()/markAsSold().
    */
   async getItemBySerialNumber(venueId: string, serialNumber: string): Promise<(SerializedItem & { category: ItemCategory }) | null> {
-    return this.db.serializedItem.findUnique({
-      where: { venueId_serialNumber: { venueId, serialNumber } },
-      include: { category: true },
-    })
+    return (
+      (await this.db.serializedItem.findUnique({
+        where: { venueId_serialNumber: { venueId, serialNumber } },
+        include: { category: true },
+      })) ?? (await this.findOrgItem(venueId, serialNumber))
+    )
   }
 
   /**
