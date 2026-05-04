@@ -343,6 +343,13 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       duration: reservation.duration,
       partySize: reservation.partySize,
       guestName: reservation.guestName,
+      venue: reservation.venue
+        ? {
+            name: reservation.venue.name,
+            slug: reservation.venue.slug,
+            timezone: reservation.venue.timezone,
+          }
+        : null,
       product: reservation.product,
       assignedStaff: reservation.assignedStaff
         ? {

@@ -11,6 +11,7 @@ import {
   consumerCreateReservationSchema,
   consumerFinalizeCreditCheckoutSchema,
   consumerOAuthSchema,
+  consumerReservationDepositCheckoutSchema,
   consumerVenueParamsSchema,
   searchConsumerVenuesSchema,
 } from '@/schemas/consumer.schema'
@@ -35,6 +36,13 @@ router.post(
 )
 
 router.get('/reservations', readLimit, authenticateConsumer, reservationController.mine)
+router.post(
+  '/venues/:venueSlug/reservations/:cancelSecret/payment',
+  writeLimit,
+  authenticateConsumer,
+  validateRequest(consumerReservationDepositCheckoutSchema),
+  reservationController.createDepositCheckout,
+)
 router.post(
   '/venues/:venueSlug/credit-packs/:packId/checkout',
   writeLimit,

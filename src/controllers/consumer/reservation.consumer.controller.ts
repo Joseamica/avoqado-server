@@ -21,3 +21,17 @@ export async function mine(req: Request, res: Response, next: NextFunction) {
     next(error)
   }
 }
+
+export async function createDepositCheckout(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { consumerId } = (req as any).consumerAuth as ConsumerAuthContext
+    const result = await reservationConsumerService.createDepositCheckoutForConsumer(
+      consumerId,
+      req.params.venueSlug,
+      req.params.cancelSecret,
+    )
+    res.json(result)
+  } catch (error) {
+    next(error)
+  }
+}

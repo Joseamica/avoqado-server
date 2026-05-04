@@ -442,6 +442,7 @@ export async function getReservationByCancelSecret(venueId: string, cancelSecret
       table: { select: { id: true, number: true } },
       product: { select: { id: true, name: true, price: true } },
       assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+      venue: { select: { name: true, slug: true, timezone: true } },
     },
   })
   if (!reservation) throw new NotFoundError('Reservacion no encontrada')

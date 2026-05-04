@@ -92,6 +92,76 @@ function buildConsumerPaymentReturnUrl(path: 'success' | 'cancelled', venueSlug:
   return `${baseUrl}?${params.toString()}${checkoutSessionParam}`
 }
 
+async function createReservationDepositCheckout(
+  venue: { id: string; slug: string; name: string },
+  reservation: {
+    id: string
+    confirmationCode: string
+    guestEmail: string | null
+    depositAmount: any
+    depositExpiresAt: Date | null
+    idempotencyKey?: string | null
+  },
+  idempotencyKey?: string,
+) {
+  const stripeMerchant = await resolveActiveStripeMerchant(venue.id)
+  if (!stripeMerchant) {
+    throw new BadRequestError('Este negocio aun no tiene pagos en linea configurados')
+  }
+
+  const stripeAmount = toStripeAmount(reservation.depositAmount)
+  const bounds = getStripeChargeBounds()
+  if (stripeAmount < bounds.min) {
+    throw new BadRequestError('El deposito es menor al minimo permitido por Stripe')
+  }
+  if (stripeAmount > bounds.max) {
+    throw new BadRequestError('El deposito excede el maximo permitido por transaccion')
+  }
+
+  const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
+  const provider = getProvider(stripeMerchant)
+  const expiresAt =
+    reservation.depositExpiresAt && reservation.depositExpiresAt > new Date()
+      ? reservation.depositExpiresAt
+      : new Date(Date.now() + 30 * 60_000)
+  const session = await provider.createCheckoutSession(stripeMerchant, {
+    amount: stripeAmount,
+    currency: 'mxn',
+    applicationFeeAmount,
+    successUrl: buildConsumerPaymentReturnUrl('success', venue.slug, reservation.id),
+    cancelUrl: buildConsumerPaymentReturnUrl('cancelled', venue.slug, reservation.id),
+    expiresAt,
+    customerEmail: reservation.guestEmail ?? undefined,
+    metadata: {
+      type: 'reservation_deposit',
+      source: 'consumer_app',
+      reservationId: reservation.id,
+      venueId: venue.id,
+      confirmationCode: reservation.confirmationCode,
+    },
+    description: `Reserva ${venue.name}`,
+    statementDescriptorSuffix: 'RESERVA',
+    idempotencyKey: idempotencyKey ?? reservation.idempotencyKey ?? `reservation:${reservation.id}:deposit:v1`,
+    paymentMethodTypes: ['card'],
+  })
+
+  await prisma.reservation.update({
+    where: { id: reservation.id },
+    data: {
+      checkoutSessionId: session.id,
+      depositStatus: 'PENDING',
+      depositExpiresAt: session.expiresAt,
+    },
+  })
+
+  return {
+    checkoutUrl: session.url,
+    reservationId: reservation.id,
+    confirmationCode: reservation.confirmationCode,
+    depositAmount: Number(reservation.depositAmount),
+  }
+}
+
 async function ensureVenueCustomer(venueId: string, consumerId: string) {
   const consumer = await prisma.consumer.findUnique({
     where: { id: consumerId },
@@ -250,35 +320,8 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
 
   let checkoutUrl: string | null = null
   if (reservation.depositAmount && stripeMerchant) {
-    const stripeAmount = toStripeAmount(reservation.depositAmount)
-    const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
-    const provider = getProvider(stripeMerchant)
-    const session = await provider.createCheckoutSession(stripeMerchant, {
-      amount: stripeAmount,
-      currency: 'mxn',
-      applicationFeeAmount,
-      successUrl: buildConsumerPaymentReturnUrl('success', venue.slug, reservation.id),
-      cancelUrl: buildConsumerPaymentReturnUrl('cancelled', venue.slug, reservation.id),
-      expiresAt: reservation.depositExpiresAt ?? new Date(Date.now() + 30 * 60_000),
-      customerEmail: reservation.guestEmail ?? undefined,
-      metadata: {
-        type: 'reservation_deposit',
-        source: 'consumer_app',
-        reservationId: reservation.id,
-        venueId: venue.id,
-        confirmationCode: reservation.confirmationCode,
-      },
-      description: `Reserva ${venue.name}`,
-      statementDescriptorSuffix: 'RESERVA',
-      idempotencyKey: reservation.idempotencyKey ?? `reservation:${reservation.id}:deposit:v1`,
-      paymentMethodTypes: ['card'],
-    })
-
-    await prisma.reservation.update({
-      where: { id: reservation.id },
-      data: { checkoutSessionId: session.id },
-    })
-    checkoutUrl = session.url
+    const checkout = await createReservationDepositCheckout(venue, reservation)
+    checkoutUrl = checkout.checkoutUrl
   }
 
   return {
@@ -329,6 +372,54 @@ export async function getConsumerReservations(consumerId: string) {
   return { upcoming, past }
 }
 
+export async function createDepositCheckoutForConsumer(consumerId: string, venueSlug: string, cancelSecret: string) {
+  const venue = await resolveVenue(venueSlug)
+  const customers = await prisma.customer.findMany({
+    where: { consumerId, venueId: venue.id },
+    select: { id: true },
+  })
+  const customerIds = customers.map(customer => customer.id)
+
+  if (customerIds.length === 0) {
+    throw new NotFoundError('Reserva no encontrada')
+  }
+
+  const reservation = await prisma.reservation.findFirst({
+    where: {
+      venueId: venue.id,
+      cancelSecret,
+      customerId: { in: customerIds },
+    },
+    select: {
+      id: true,
+      confirmationCode: true,
+      status: true,
+      guestEmail: true,
+      depositAmount: true,
+      depositStatus: true,
+      depositExpiresAt: true,
+    },
+  })
+
+  if (!reservation) {
+    throw new NotFoundError('Reserva no encontrada')
+  }
+  if (reservation.status === 'CANCELLED') {
+    throw new BadRequestError('Esta reserva ya fue cancelada')
+  }
+  if (!reservation.depositAmount) {
+    throw new BadRequestError('Esta reserva no requiere deposito')
+  }
+  if (reservation.depositStatus === 'PAID') {
+    throw new BadRequestError('El deposito de esta reserva ya fue pagado')
+  }
+  if (['REFUNDED', 'FORFEITED', 'DISPUTED'].includes(reservation.depositStatus ?? '')) {
+    throw new BadRequestError('El deposito de esta reserva no se puede pagar desde la app')
+  }
+
+  return createReservationDepositCheckout(venue, reservation, `reservation:${reservation.id}:deposit:retry:${Date.now()}`)
+}
+
 const reservationSelect = {
   confirmationCode: true,
   cancelSecret: true,
@@ -339,6 +430,9 @@ const reservationSelect = {
   partySize: true,
   spotIds: true,
   guestName: true,
+  specialRequests: true,
+  depositAmount: true,
+  depositStatus: true,
   venue: { select: { name: true, slug: true, logo: true, timezone: true } },
   product: { select: { id: true, name: true, price: true, type: true } },
 } as const

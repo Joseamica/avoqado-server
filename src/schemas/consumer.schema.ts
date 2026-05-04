@@ -79,3 +79,10 @@ export const consumerCreateCreditCheckoutSchema = z.object({
     packId: z.string().min(1),
   }),
 })
+
+export const consumerReservationDepositCheckoutSchema = z.object({
+  params: z.object({
+    venueSlug: z.string().min(1),
+    cancelSecret: z.string().min(8),
+  }),
+})
