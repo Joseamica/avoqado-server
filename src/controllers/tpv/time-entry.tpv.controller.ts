@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as timeEntryService from '../../services/tpv/time-entry.tpv.service'
 import logger from '../../config/logger'
+import prisma from '../../utils/prismaClient'
 
 /**
  * Clock in a staff member
@@ -46,6 +47,53 @@ export async function clockOut(req: Request, res: Response, next: NextFunction) 
     logger.info(
       `Clock-out request: venueId=${venueId}, staffId=${staffId}, hasPhoto=${!!checkOutPhotoUrl}, hasGps=${!!(latitude && longitude)}, hasDeposit=${!!depositPhotoUrl}, skipReason=${skipReason || 'none'}`,
     )
+
+    // Audit log — see field report 2026-05-05. Captures whether the request
+    // would be rejected by the upcoming hard validation (gated by versionCode
+    // >= 58). Pure logging, no behavior change. Wrapped in try/catch so a slow
+    // Terminal query never breaks the clock-out path.
+    try {
+      const authContext = (req as any).authContext as { terminalSerialNumber?: string } | undefined
+      const terminalSerialNumber = authContext?.terminalSerialNumber ?? null
+      const versionHeader = req.headers['x-app-version-code']
+      const appVersionCode = versionHeader ? parseInt(versionHeader as string, 10) : null
+
+      let requireClockOutPhoto: boolean | null = null
+      let requireDepositPhoto: boolean | null = null
+      if (terminalSerialNumber) {
+        const terminal = await prisma.terminal.findFirst({
+          where: { serialNumber: terminalSerialNumber },
+          select: { config: true },
+        })
+        const settings = (terminal?.config as any)?.settings ?? {}
+        requireClockOutPhoto = typeof settings.requireClockOutPhoto === 'boolean' ? settings.requireClockOutPhoto : null
+        requireDepositPhoto = typeof settings.requireDepositPhoto === 'boolean' ? settings.requireDepositPhoto : null
+      }
+
+      const hasPhoto = !!checkOutPhotoUrl
+      const hasGps = !!(latitude && longitude)
+      const hasDeposit = !!depositPhotoUrl
+      const hasSkipReason = !!skipReason
+      // Same predicate the future hard validator will apply (see ADR-clockout-audit).
+      const wouldReject = ((requireClockOutPhoto === true && !hasPhoto) || (requireDepositPhoto === true && !hasDeposit)) && !hasSkipReason
+
+      logger.info('[clockout-audit]', {
+        venueId,
+        staffId,
+        terminalSerialNumber,
+        appVersionCode,
+        hasPhoto,
+        hasGps,
+        hasDeposit,
+        hasSkipReason,
+        skipReason: skipReason || null,
+        requireClockOutPhoto,
+        requireDepositPhoto,
+        wouldReject,
+      })
+    } catch (auditErr) {
+      logger.warn('[clockout-audit] failed (non-blocking)', { error: (auditErr as Error)?.message })
+    }
 
     const timeEntry = await timeEntryService.clockOut({
       venueId,

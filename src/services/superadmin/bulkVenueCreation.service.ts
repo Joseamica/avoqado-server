@@ -68,6 +68,9 @@ interface VenueInput {
   merchantAccountId?: string
   pricing?: PricingInput
   settlement?: SettlementInput
+  /** Superadmin override: mark venue as KYC verified at creation so the
+   *  operational lock is skipped. Mirrors kycReview.service approval. */
+  kycApproved?: boolean
 }
 
 interface DefaultsInput {
@@ -89,6 +92,9 @@ export interface BulkCreateVenuesInput {
   defaultPricing?: PricingInput
   defaultSettlement?: SettlementInput
   venues: VenueInput[]
+  /** Staff id that gets stamped on kycVerifiedBy when a venue uses
+   *  the kycApproved override. Set by the controller from authContext. */
+  superadminStaffId?: string
 }
 
 interface TerminalResult {
@@ -220,6 +226,20 @@ export async function bulkCreateVenues(data: BulkCreateVenuesInput): Promise<Bul
       const feeValue = venueInput.feeValue ?? defaults?.feeValue ?? 0.025
       const entityType = venueInput.entityType || defaults?.entityType || null
 
+      // Optional KYC pre-approval (superadmin override). Mirrors the write-set
+      // used by kycReview.service.ts approveKyc so the venue is treated as
+      // fully-verified by the operational guards (canAccessOperationalFeatures).
+      const kycApproveFields =
+        venueInput.kycApproved && data.superadminStaffId
+          ? {
+              kycStatus: 'VERIFIED' as const,
+              kycCompletedAt: new Date(),
+              kycVerifiedBy: data.superadminStaffId,
+              statusChangedAt: new Date(),
+              statusChangedBy: data.superadminStaffId,
+            }
+          : {}
+
       // Create venue
       const venue = await tx.venue.create({
         data: {
@@ -245,6 +265,7 @@ export async function bulkCreateVenues(data: BulkCreateVenuesInput): Promise<Bul
           status: 'ACTIVE',
           feeType,
           feeValue: new Prisma.Decimal(feeValue),
+          ...kycApproveFields,
         },
       })
 

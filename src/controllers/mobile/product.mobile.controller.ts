@@ -122,7 +122,21 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
 export async function createProduct(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const { name, price, sku, gtin, categoryId, type, description, taxRate, trackInventory, durationMinutes } = req.body
+    const {
+      name,
+      price,
+      sku,
+      gtin,
+      categoryId,
+      type,
+      description,
+      taxRate,
+      trackInventory,
+      duration,
+      durationMinutes,
+      maxParticipants,
+      layoutConfig,
+    } = req.body
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'name es requerido' })
@@ -157,7 +171,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         price: price ? parseFloat(price) : 0,
         taxRate: taxRate ?? 0.16,
         trackInventory: trackInventory ?? false,
+        duration: duration ?? null,
         durationMinutes: durationMinutes || null,
+        maxParticipants: maxParticipants ?? null,
+        layoutConfig: layoutConfig ?? undefined,
       },
       include: productInclude,
     })

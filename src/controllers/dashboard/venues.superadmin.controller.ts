@@ -192,7 +192,10 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
  */
 export async function bulkCreateVenues(req: Request, res: Response, next: NextFunction) {
   try {
-    const result = await bulkCreateVenuesService(req.body)
+    // Superadmin staff id is needed to mark KYC as verified-by when the
+    // optional kycApproved override is set on any venue in the batch.
+    const superadminStaffId = (req as any).authContext?.userId
+    const result = await bulkCreateVenuesService({ ...req.body, superadminStaffId })
 
     logger.info(`[VENUES_SUPERADMIN] Bulk creation: ${result.summary.venuesCreated} venues created`, {
       venuesCreated: result.summary.venuesCreated,

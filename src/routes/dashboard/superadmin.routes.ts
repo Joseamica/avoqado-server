@@ -230,6 +230,10 @@ const venueItemSchema = z.object({
   merchantAccountId: z.string().cuid('ID de cuenta de comerciante inválido').optional(),
   pricing: pricingSchema.optional(),
   settlement: settlementSchema.optional(),
+  // Superadmin override: when true, the venue is marked as KYC-VERIFIED at
+  // creation so it skips the operational lock and the user can use TPV/orders/
+  // payments immediately. Mirrors the kycReview.service.ts approval write-set.
+  kycApproved: z.boolean().optional(),
 })
 
 const bulkCreateVenuesSchema = z.object({
