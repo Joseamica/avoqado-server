@@ -445,9 +445,11 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
       if (errors.length > 0) {
         throw new BadRequestError(`Credenciales inválidas para ${provider.name}: ${errors.join('; ')}`)
       }
-    } else if (provider.code !== 'BLUMON') {
+    } else if (provider.code !== 'BLUMON' && provider.code !== 'ANGELPAY') {
       // Legacy fallback for providers without a configSchema (Menta, Stripe, etc.)
       // — keep the historical merchantId + apiKey requirement.
+      // AngelPay is special-cased even without a configSchema because its
+      // credentials are email + PIN (simpleLogin), not merchantId + apiKey.
       if (!data.credentials.merchantId || !data.credentials.apiKey) {
         throw new BadRequestError('Credentials must include merchantId and apiKey')
       }
