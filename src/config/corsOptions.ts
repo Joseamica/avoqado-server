@@ -37,11 +37,18 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     production: [],
   }
 
-  // Public customer-facing sites (bills, payments, etc.)
+  // Public customer-facing sites (bills, payments, booking, etc.)
   const publicSiteOrigins = {
     development: ['http://localhost:3001', 'http://localhost:5174'], // Local bills dev + checkout dev
-    staging: ['https://pay.staging.avoqado.io'],
-    production: ['https://bills.avoqado.io', 'https://avoqado.io', 'https://pay.avoqado.io'],
+    staging: ['https://pay.staging.avoqado.io', 'https://book.staging.avoqado.io'],
+    production: [
+      'https://bills.avoqado.io',
+      'https://avoqado.io',
+      'https://pay.avoqado.io',
+      // Public booking subdomain — proxies to the dashboard SPA's /book/<slug> routes.
+      // Customers browse classes/appointments and submit reservations via /api/v1/public/* endpoints.
+      'https://book.avoqado.io',
+    ],
   }
 
   // SDK/Checkout origins (payment form iframe served from API domain needs to POST back to itself)
