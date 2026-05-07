@@ -1,4 +1,12 @@
-import { PrismaClient, SerializedItem, SerializedItemStatus, ItemCategory, Prisma, SimCustodyEnforcementMode, StaffRole } from '@prisma/client'
+import {
+  PrismaClient,
+  SerializedItem,
+  SerializedItemStatus,
+  ItemCategory,
+  Prisma,
+  SimCustodyEnforcementMode,
+  StaffRole,
+} from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { getMergedCategories } from '../dashboard/category-resolution.service'

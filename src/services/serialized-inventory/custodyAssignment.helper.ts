@@ -14,11 +14,7 @@ export type CustodyAssignmentData =
     }
   | Record<string, never>
 
-export function buildCustodyDataForScanner(
-  role: StaffRole | undefined,
-  staffId: string,
-  now: Date = new Date(),
-): CustodyAssignmentData {
+export function buildCustodyDataForScanner(role: StaffRole | undefined, staffId: string, now: Date = new Date()): CustodyAssignmentData {
   switch (role) {
     case 'WAITER':
       return {

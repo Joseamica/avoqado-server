@@ -80,12 +80,16 @@ function deriveResponsible(
     case 'PROMOTER_REJECTED':
       return promoter ? { kind: 'promoter', staffId: promoter.id, firstName: promoter.firstName, lastName: promoter.lastName } : null
     case 'SUPERVISOR_HELD':
-      return supervisor ? { kind: 'supervisor', staffId: supervisor.id, firstName: supervisor.firstName, lastName: supervisor.lastName } : null
+      return supervisor
+        ? { kind: 'supervisor', staffId: supervisor.id, firstName: supervisor.firstName, lastName: supervisor.lastName }
+        : null
     case 'ADMIN_HELD':
       return { kind: 'admin_held' }
     case 'SOLD':
-      if (promoter) return { kind: 'sold', via: 'promoter', staffId: promoter.id, firstName: promoter.firstName, lastName: promoter.lastName }
-      if (supervisor) return { kind: 'sold', via: 'supervisor', staffId: supervisor.id, firstName: supervisor.firstName, lastName: supervisor.lastName }
+      if (promoter)
+        return { kind: 'sold', via: 'promoter', staffId: promoter.id, firstName: promoter.firstName, lastName: promoter.lastName }
+      if (supervisor)
+        return { kind: 'sold', via: 'supervisor', staffId: supervisor.id, firstName: supervisor.firstName, lastName: supervisor.lastName }
       return null
     default:
       return null
