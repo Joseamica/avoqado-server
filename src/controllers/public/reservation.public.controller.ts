@@ -836,10 +836,7 @@ async function createClassReservation(
         ? await tx.customer.findFirst({
             where: {
               venueId,
-              OR: [
-                ...(body.guestEmail ? [{ email: body.guestEmail }] : []),
-                ...(body.guestPhone ? [{ phone: body.guestPhone }] : []),
-              ],
+              OR: [...(body.guestEmail ? [{ email: body.guestEmail }] : []), ...(body.guestPhone ? [{ phone: body.guestPhone }] : [])],
             },
             select: { id: true },
           })
