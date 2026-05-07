@@ -69,14 +69,33 @@ export const getReservationsQuerySchema = z.object({
   search: z.string().optional(),
 })
 
-export const getAvailabilityQuerySchema = z.object({
-  date: z.string({ required_error: 'La fecha es requerida' }).regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha invalido (YYYY-MM-DD)'),
-  duration: z.coerce.number().int().min(5).max(480).optional(),
-  partySize: z.coerce.number().int().min(1).max(100).optional(),
-  tableId: z.string().optional(),
-  staffId: z.string().optional(),
-  productId: z.string().optional(),
-})
+export const getAvailabilityQuerySchema = z
+  .object({
+    // Single-day mode: date is required.
+    // Range mode (used by /classes date-first listing): dateFrom + dateTo replace date.
+    date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha invalido (YYYY-MM-DD)')
+      .optional(),
+    dateFrom: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato dateFrom invalido (YYYY-MM-DD)')
+      .optional(),
+    dateTo: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato dateTo invalido (YYYY-MM-DD)')
+      .optional(),
+    duration: z.coerce.number().int().min(5).max(480).optional(),
+    partySize: z.coerce.number().int().min(1).max(100).optional(),
+    tableId: z.string().optional(),
+    staffId: z.string().optional(),
+    productId: z.string().optional(),
+    type: z.enum(['class', 'appointment']).optional(),
+  })
+  .refine(data => Boolean(data.date) || Boolean(data.dateFrom), {
+    message: 'La fecha es requerida (envía date o dateFrom)',
+    path: ['date'],
+  })
 
 export const getWaitlistQuerySchema = z.object({
   status: z.enum(['WAITING', 'NOTIFIED', 'PROMOTED', 'EXPIRED', 'CANCELLED']).optional(),

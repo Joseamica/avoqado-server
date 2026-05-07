@@ -197,6 +197,15 @@ export interface RecipeUsageSummary {
   limit: number
 }
 
+export interface NewCustomerTimingPattern {
+  count: number
+  periodLabel: RelativeDateRange | 'custom'
+  peakDay: { day: string; count: number } | null
+  peakHour: { hour: string; count: number } | null
+  byDayOfWeek: Array<{ day: string; count: number }>
+  byHour: Array<{ hour: string; count: number }>
+}
+
 /**
  * Pending orders statistics by status
  */
@@ -1494,6 +1503,95 @@ export class SharedQueryService {
       count,
       customers,
       periodLabel: periodName,
+    }
+  }
+
+  /**
+   * Get timing patterns for new customers.
+   *
+   * Uses firstVisitAt when available, then falls back to createdAt. This keeps the
+   * metric aligned with loyalty/customer behavior while still working for older
+   * records that do not have firstVisitAt populated.
+   */
+  static async getNewCustomerTimingPattern(venueId: string, period: DateRangeSpec, timezone?: string): Promise<NewCustomerTimingPattern> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true },
+    })
+
+    const venueTimezone = timezone || venue?.timezone || 'America/Mexico_City'
+    const { from, to, periodName } = this.getDateRange(period, venueTimezone)
+
+    const customers = await prisma.customer.findMany({
+      where: {
+        venueId,
+        active: true,
+        OR: [
+          { firstVisitAt: { gte: from, lte: to } },
+          {
+            firstVisitAt: null,
+            createdAt: { gte: from, lte: to },
+          },
+        ],
+      },
+      select: {
+        firstVisitAt: true,
+        createdAt: true,
+      },
+    })
+
+    const dayLabels = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado']
+    const dayCounts = new Map(dayLabels.map(day => [day, 0]))
+    const hourCounts = new Map(Array.from({ length: 24 }, (_, hour) => [`${hour.toString().padStart(2, '0')}:00`, 0]))
+
+    const datePartsFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: venueTimezone,
+      weekday: 'short',
+      hour: '2-digit',
+      hourCycle: 'h23',
+    })
+
+    const weekdayIndexByShortName: Record<string, number> = {
+      Sun: 0,
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+    }
+
+    for (const customer of customers) {
+      const visitDate = customer.firstVisitAt || customer.createdAt
+      const parts = datePartsFormatter.formatToParts(visitDate)
+      const weekdayShort = parts.find(part => part.type === 'weekday')?.value || 'Sun'
+      const hour = parts.find(part => part.type === 'hour')?.value || '00'
+      const day = dayLabels[weekdayIndexByShortName[weekdayShort] ?? 0]
+      const hourLabel = `${hour.padStart(2, '0')}:00`
+
+      dayCounts.set(day, (dayCounts.get(day) || 0) + 1)
+      hourCounts.set(hourLabel, (hourCounts.get(hourLabel) || 0) + 1)
+    }
+
+    const byDayOfWeek = Array.from(dayCounts.entries()).map(([day, count]) => ({ day, count }))
+    const byHour = Array.from(hourCounts.entries()).map(([hour, count]) => ({ hour, count }))
+
+    const peakDay = byDayOfWeek.reduce<{ day: string; count: number } | null>(
+      (peak, current) => (!peak || current.count > peak.count ? current : peak),
+      null,
+    )
+    const peakHour = byHour.reduce<{ hour: string; count: number } | null>(
+      (peak, current) => (!peak || current.count > peak.count ? current : peak),
+      null,
+    )
+
+    return {
+      count: customers.length,
+      periodLabel: periodName,
+      peakDay: peakDay && peakDay.count > 0 ? peakDay : null,
+      peakHour: peakHour && peakHour.count > 0 ? peakHour : null,
+      byDayOfWeek,
+      byHour,
     }
   }
 }

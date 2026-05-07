@@ -15,6 +15,7 @@ process.env.OPENAI_API_KEY = 'test-api-key-for-unit-tests'
 
 import { afterEach, describe, it, expect, jest } from '@jest/globals'
 import textToSqlService from '@/services/dashboard/text-to-sql-assistant.service'
+import { SemanticInjectionDetectorService } from '@/services/dashboard/semantic-injection-detector.service'
 
 describe('TextToSqlAssistantService - Unit Tests', () => {
   const service = textToSqlService
@@ -125,6 +126,16 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       const help = service.getOperationalHelpResponse(query)
 
       expect(help).toBeNull()
+    })
+
+    it('should route Avoqado contact questions to operational help instead of generic greeting', () => {
+      const query = '¿Cómo me comunico con Avoqado?'
+      // @ts-expect-error - accessing private method for testing
+      const help = service.getOperationalHelpResponse(query)
+
+      expect(help).not.toBeNull()
+      expect(help?.topic).toBe('general')
+      expect(help?.response).toContain('soporte')
     })
   })
 
@@ -239,6 +250,26 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.isSimpleQuery).toBe(false)
       expect(classification.intent).toBeUndefined()
     })
+
+    it('should classify new customer count queries as a registered SharedQuery intent', () => {
+      const query = 'cuántos clientes nuevos tengo'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('newCustomers')
+      expect(classification.dateRange).toBe('thisMonth')
+    })
+
+    it('should classify new customer timing questions as a registered SharedQuery intent', () => {
+      const query = '¿Cuándo recibo más clientes nuevos?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('newCustomerTiming')
+      expect(classification.dateRange).toBe('allTime')
+    })
   })
 
   describe('LLM Router Conversational Guard', () => {
@@ -279,8 +310,8 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       const routed = await serviceWithInternals.routeWithLLM('¿Cuándo recibo más clientes nuevos?')
 
       expect(routed.classification.isConversational).not.toBe(true)
-      expect(routed.classification.isSimpleQuery).toBe(false)
-      expect(routed.classification.reason).toContain('business data')
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('newCustomerTiming')
     })
 
     it('should not accept conversational routing for product topic messages', async () => {
@@ -299,6 +330,118 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       const routed = await serviceWithInternals.routeWithLLM('gracias')
 
       expect(routed.classification.isConversational).toBe(true)
+    })
+
+    it('should accept LLM routing to the registered newCustomerTiming tool', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: true,
+                intent: 'newCustomerTiming',
+                dateRange: 'allTime',
+                wasDateExplicit: false,
+                confidence: 0.92,
+                reason: 'pregunta por cuándo llegan más clientes nuevos',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('¿Cuándo recibo más clientes nuevos?')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('newCustomerTiming')
+      expect(routed.classification.dateRange).toBe('allTime')
+    })
+
+    it('should recover a registered deterministic intent when LLM returns unsupported', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: false,
+                intent: 'unsupported',
+                dateRange: null,
+                wasDateExplicit: false,
+                confidence: 0.6,
+                reason: 'no registered tool',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('¿Cuándo recibo más clientes nuevos?')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('newCustomerTiming')
+      expect(routed.classification.reason).toContain('deterministic registered intent override')
+    })
+  })
+
+  describe('Unsupported Query Guard', () => {
+    it('should not generate SQL when no registered data tool exists', async () => {
+      const serviceWithInternals = service as any
+      const originalRouteWithLLM = serviceWithInternals.routeWithLLM
+      const originalGenerateSqlFromText = serviceWithInternals.generateSqlFromText
+      const originalExecuteSafeQuery = serviceWithInternals.executeSafeQuery
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'safe test message',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+
+      serviceWithInternals.routeWithLLM = jest.fn(async () => ({
+        classification: {
+          isSimpleQuery: false,
+          intent: 'unsupported',
+          confidence: 0.8,
+          reason: 'no registered tool for requested breakdown',
+        },
+        tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      }))
+      serviceWithInternals.generateSqlFromText = jest.fn()
+      serviceWithInternals.executeSafeQuery = jest.fn()
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: 'ventas por categoría y producto',
+          venueId: 'venue-test',
+          userId: 'user-test',
+        })
+
+        expect(serviceWithInternals.generateSqlFromText).not.toHaveBeenCalled()
+        expect(serviceWithInternals.executeSafeQuery).not.toHaveBeenCalled()
+        expect(response.metadata?.queryGenerated).toBe(false)
+        expect(response.metadata?.reasonCode).toBe('no_registered_tool_no_sql_fallback')
+        expect(response.response).toContain('no genero SQL libre')
+      } finally {
+        serviceWithInternals.routeWithLLM = originalRouteWithLLM
+        serviceWithInternals.generateSqlFromText = originalGenerateSqlFromText
+        serviceWithInternals.executeSafeQuery = originalExecuteSafeQuery
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        semanticDetectSpy.mockRestore()
+      }
     })
   })
 

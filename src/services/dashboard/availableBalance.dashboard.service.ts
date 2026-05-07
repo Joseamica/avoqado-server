@@ -51,6 +51,7 @@ export interface CardTypeBreakdown {
 
 export interface TimelineEntry {
   date: Date
+  cardType: ExtendedCardType
   transactionCount: number
   grossAmount: number
   fees: number
@@ -268,6 +269,26 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     },
   })
 
+  // Look up active SettlementConfiguration per (merchantAccountId, cardType)
+  // so the UI can show the configured rule (e.g. "1 día háb.") instead of
+  // averaging calendar-day deltas across historical payments — which was
+  // misleading (mixed timezone shifts, weekend gaps, label said "días háb."
+  // but the math was on calendar days).
+  const merchantAccountIds = Array.from(new Set(cardPayments.map(p => p.transactionCost?.merchantAccountId).filter(Boolean) as string[]))
+  const activeConfigs = merchantAccountIds.length
+    ? await prisma.settlementConfiguration.findMany({
+        where: {
+          merchantAccountId: { in: merchantAccountIds },
+          effectiveTo: null,
+        },
+        select: { merchantAccountId: true, cardType: true, settlementDays: true },
+      })
+    : []
+  const configuredDays = new Map<string, number>() // key: `${merchantAccountId}::${cardType}`
+  for (const cfg of activeConfigs) {
+    configuredDays.set(`${cfg.merchantAccountId}::${cfg.cardType}`, cfg.settlementDays)
+  }
+
   // Group card payments by card type
   const byCardType = new Map<
     ExtendedCardType,
@@ -277,7 +298,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
       pendingAmount: number
       settledAmount: number
       transactionCount: number
-      settlementDays: number[]
+      settlementDays: number | null // configured business days from SettlementConfiguration
     }
   >()
 
@@ -297,7 +318,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
         pendingAmount: 0,
         settledAmount: 0,
         transactionCount: 0,
-        settlementDays: [],
+        settlementDays: configuredDays.get(`${payment.transactionCost.merchantAccountId}::${cardType}`) ?? null,
       })
     }
 
@@ -378,7 +399,10 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
   })
   const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
 
-  // Get payments within date range
+  // Get payments within date range. We pull `transactionCost.transactionType`
+  // so we can split a transaction-day into per-card-type rows: payments on the
+  // same day with different card types settle on different dates, and showing
+  // a single Fecha de Liquidación per day misled users.
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
@@ -393,6 +417,7 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
       transactionCost: {
         select: {
           venueChargeAmount: true,
+          transactionType: true,
         },
       },
     },
@@ -401,18 +426,22 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
     },
   })
 
-  // Group by transaction date
+  // Group by (transaction date, card type)
   const timelineMap = new Map<string, TimelineEntry>()
 
   for (const payment of payments) {
     const dateKey = formatInTimeZone(payment.createdAt, venueTimezone, 'yyyy-MM-dd')
+    const cardType: ExtendedCardType =
+      payment.method === PaymentMethod.CASH ? 'CASH' : (payment.transactionCost?.transactionType ?? TransactionCardType.OTHER)
+    const groupKey = `${dateKey}::${cardType}`
     const amount = Number(payment.amount)
     const fees = payment.transactionCost ? Number(payment.transactionCost.venueChargeAmount) : 0
     const netAmount = amount - fees
 
-    if (!timelineMap.has(dateKey)) {
-      timelineMap.set(dateKey, {
-        date: new Date(dateKey),
+    if (!timelineMap.has(groupKey)) {
+      timelineMap.set(groupKey, {
+        date: new Date(`${dateKey}T00:00:00.000Z`),
+        cardType,
         transactionCount: 0,
         grossAmount: 0,
         fees: 0,
@@ -422,24 +451,27 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
       })
     }
 
-    const entry = timelineMap.get(dateKey)!
+    const entry = timelineMap.get(groupKey)!
     entry.transactionCount += 1
     entry.grossAmount += amount
     entry.fees += fees
     entry.netAmount += netAmount
 
-    // Use first estimated settlement date as representative
+    // Use first estimated settlement date as representative for this card type
     if (payment.transaction?.estimatedSettlementDate && !entry.estimatedSettlementDate) {
       entry.estimatedSettlementDate = payment.transaction.estimatedSettlementDate
     }
 
-    // If any transaction is settled, mark day as settled
+    // If any transaction in the group is settled, mark group as settled
     if (payment.transaction?.status === SettlementStatus.SETTLED) {
       entry.status = SettlementStatus.SETTLED
     }
   }
 
-  const timeline = Array.from(timelineMap.values()).sort((a, b) => a.date.getTime() - b.date.getTime())
+  const timeline = Array.from(timelineMap.values()).sort((a, b) => {
+    const t = a.date.getTime() - b.date.getTime()
+    return t !== 0 ? t : a.cardType.localeCompare(b.cardType)
+  })
 
   logger.info('Settlement timeline calculated', { venueId, entryCount: timeline.length })
 

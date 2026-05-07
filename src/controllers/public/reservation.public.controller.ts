@@ -828,6 +828,23 @@ async function createClassReservation(
     })
     const finalCode = existing ? reservationService.generateConfirmationCode() : confirmationCode
 
+    // Auto-link to a registered Customer when the guest data matches one. This
+    // makes the booking show up in the customer portal "Mis Reservaciones" and
+    // anchors loyalty/credits to the same identity.
+    const matchedCustomer =
+      body.guestEmail || body.guestPhone
+        ? await tx.customer.findFirst({
+            where: {
+              venueId,
+              OR: [
+                ...(body.guestEmail ? [{ email: body.guestEmail }] : []),
+                ...(body.guestPhone ? [{ phone: body.guestPhone }] : []),
+              ],
+            },
+            select: { id: true },
+          })
+        : null
+
     const reservation = await tx.reservation.create({
       data: {
         venueId,
@@ -839,6 +856,7 @@ async function createClassReservation(
         duration: session.duration,
         status: initialStatus,
         channel: 'WEB',
+        customerId: matchedCustomer?.id ?? null,
         guestName: body.guestName,
         guestPhone: body.guestPhone,
         guestEmail: body.guestEmail ?? null,

@@ -96,6 +96,8 @@ const DATE_RANGE_EXAMPLES: Record<string, string> = {
   sales: 'ventas de la semana pasada',
   averageTicket: 'ticket promedio de ayer',
   topProducts: 'productos más vendidos ayer',
+  newCustomers: 'clientes nuevos de este mes',
+  newCustomerTiming: 'cuándo recibo más clientes nuevos',
   staffPerformance: 'meseros que más vendieron la semana pasada',
   reviews: 'reseñas de esta semana',
   businessOverview: 'resumen de mi negocio esta semana',
@@ -302,6 +304,8 @@ interface IntentClassificationResult {
     | 'staffPerformance'
     | 'reviews'
     | 'businessOverview'
+    | 'newCustomers'
+    | 'newCustomerTiming'
     // NEW: Operational intents (Phase 2 expansion)
     | 'inventoryAlerts'
     | 'recipeCount'
@@ -399,6 +403,8 @@ class TextToSqlAssistantService {
     staffPerformance: ['Staff', 'StaffVenue', 'Order', 'Payment', 'Shift'],
     reviews: ['Review'],
     businessOverview: ['Payment', 'Order', 'OrderItem', 'Product', 'MenuCategory', 'Review'],
+    newCustomers: ['Customer'],
+    newCustomerTiming: ['Customer'],
     inventoryAlerts: ['RawMaterial'],
     recipeCount: ['Recipe', 'Product'],
     recipeList: ['Recipe', 'Product'],
@@ -2406,6 +2412,40 @@ Ejemplos de respuestas CORRECTAS:
               break
             }
 
+            case 'newCustomers': {
+              const newCustomers = await SharedQueryService.getNewCustomers(query.venueId, dateRange)
+              const sampleNames = newCustomers.customers
+                .slice(0, 5)
+                .map(customer => [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim())
+                .filter(Boolean)
+
+              const sampleText =
+                sampleNames.length > 0
+                  ? ` Algunos recientes: ${sampleNames.join(', ')}.`
+                  : ' Todavía no hay nombres disponibles para mostrar.'
+              naturalResponse = `En ${this.formatDateRangeName(dateRange)} recibiste ${newCustomers.count} clientes nuevos.${sampleText}`
+              serviceResult = newCustomers
+              break
+            }
+
+            case 'newCustomerTiming': {
+              const timing = await SharedQueryService.getNewCustomerTimingPattern(query.venueId, dateRange)
+              if (timing.count === 0 || !timing.peakDay || !timing.peakHour) {
+                naturalResponse = `No encontré clientes nuevos en ${this.formatDateRangeName(dateRange)} para calcular un patrón de días u horarios.`
+              } else {
+                const topDays = [...timing.byDayOfWeek]
+                  .sort((a, b) => b.count - a.count)
+                  .filter(item => item.count > 0)
+                  .slice(0, 3)
+                  .map(item => `${item.day} (${item.count})`)
+                  .join(', ')
+
+                naturalResponse = `Recibes más clientes nuevos los ${timing.peakDay.day}, y el horario más fuerte es alrededor de las ${timing.peakHour.hour}. En ${this.formatDateRangeName(dateRange)} hubo ${timing.count} clientes nuevos. Top días: ${topDays}.`
+              }
+              serviceResult = timing
+              break
+            }
+
             case 'businessOverview': {
               const comparisonPeriod = this.getComparisonPeriod(dateRange)
 
@@ -2808,13 +2848,21 @@ Ejemplos de respuestas CORRECTAS:
             tokenUsage: responseTokenUsage,
           }
         } catch (sharedServiceError: any) {
-          logger.warn('⚠️  SharedQueryService failed, falling back to text-to-SQL pipeline', {
+          logger.warn('⚠️  SharedQueryService failed; not falling back to generated SQL', {
             error: sharedServiceError.message,
             intent: intentClassification.intent,
           })
-          // Fallthrough to text-to-SQL pipeline
+          return await this.buildRegisteredToolFailureResponse(
+            query,
+            intentClassification,
+            startTime,
+            sessionId,
+            intentClassificationTokenUsage,
+          )
         }
       }
+
+      return await this.buildUnsupportedQueryResponse(query, intentClassification, startTime, sessionId, intentClassificationTokenUsage)
 
       // Step 0.6: Complexity + Importance Detection → Route to Consensus Voting (LAYER 5)
       const isComplex = this.detectComplexity(query.message)
@@ -2886,7 +2934,7 @@ Ejemplos de respuestas CORRECTAS:
           })
 
           // Generate SQL (with error context on retry + conversation history for context)
-          sqlGeneration = await this.generateSqlFromText(
+          const generatedSql = await this.generateSqlFromText(
             query.message,
             query.venueId,
             learnedGuidance.suggestedSqlTemplate,
@@ -2894,18 +2942,19 @@ Ejemplos de respuestas CORRECTAS:
             query.includeVisualization,
             query.conversationHistory,
           )
+          sqlGeneration = generatedSql
 
-          if (sqlGeneration.confidence < 0.7 && attemptCount === MAX_ATTEMPTS) {
+          if (generatedSql.confidence < 0.7 && attemptCount === MAX_ATTEMPTS) {
             // Last attempt, low confidence - give up
             logger.warn('⚠️  Low confidence after max attempts', {
-              confidence: sqlGeneration.confidence,
+              confidence: generatedSql.confidence,
               attemptCount,
             })
             break
           }
 
           // Execute SQL (with 3-layer validation + security)
-          execution = await this.executeSafeQuery(sqlGeneration.sql, query.venueId, query.message, userRole)
+          execution = await this.executeSafeQuery(generatedSql.sql, query.venueId, query.message, userRole)
 
           // Success! Break out of retry loop
           logger.info(`✅ SQL generation & execution succeeded on attempt ${attemptCount}`, {
@@ -2938,7 +2987,7 @@ Ejemplos de respuestas CORRECTAS:
       if (!sqlGeneration || !execution) {
         const deterministicComparisonFallback = await this.tryDeterministicProductComparisonFallback(query, userRole, sessionId, startTime)
         if (deterministicComparisonFallback) {
-          return deterministicComparisonFallback
+          return deterministicComparisonFallback as TextToSqlResponse
         }
 
         // Still record the interaction for learning
@@ -2975,17 +3024,20 @@ Ejemplos de respuestas CORRECTAS:
         }
       }
 
+      const finalSqlGeneration = sqlGeneration as SqlGenerationResult
+      const finalExecution = execution as { result: any; metadata: any }
+
       // Log self-correction metrics
       if (selfCorrectionHappened) {
         logger.info('🎯 SELF-CORRECTION SUCCESS', {
           attemptCount,
-          finalConfidence: sqlGeneration.confidence,
+          finalConfidence: finalSqlGeneration.confidence,
           sessionId,
         })
       }
 
       // Step 3: BULLETPROOF VALIDATION SYSTEM (simplified for stability)
-      const originalConfidence = Math.max(sqlGeneration.confidence, 0.8) // Ensure reasonable base confidence
+      const originalConfidence = Math.max(finalSqlGeneration.confidence, 0.8) // Ensure reasonable base confidence
       let finalConfidence = originalConfidence
       const validationWarnings: string[] = []
       let bulletproofValidationPerformed = false
@@ -2995,7 +3047,7 @@ Ejemplos de respuestas CORRECTAS:
         query.message.toLowerCase().includes('porcentaje') ||
         query.message.toLowerCase().includes('promedio') ||
         query.message.toLowerCase().includes('total') ||
-        sqlGeneration.sql.toLowerCase().includes('/')
+        finalSqlGeneration.sql.toLowerCase().includes('/')
       ) {
         bulletproofValidationPerformed = true
         logger.info('🛡️ BULLETPROOF validation triggered for critical query', {
@@ -3009,7 +3061,7 @@ Ejemplos de respuestas CORRECTAS:
           validationWarnings.push('Percentage calculation - reduced confidence for safety')
         }
 
-        if (sqlGeneration.sql.toLowerCase().includes('/') && !sqlGeneration.sql.toLowerCase().includes('case')) {
+        if (finalSqlGeneration.sql.toLowerCase().includes('/') && !finalSqlGeneration.sql.toLowerCase().includes('case')) {
           finalConfidence = Math.min(finalConfidence, 0.8) // Reduce for division without zero check
           validationWarnings.push('Mathematical division detected - exercise caution')
         }
@@ -3039,7 +3091,7 @@ Ejemplos de respuestas CORRECTAS:
         return {
           response: `Tengo una respuesta para tu pregunta, pero mi nivel de confianza es bajo (${(finalConfidence * 100).toFixed(1)}%). 
           
-Los datos que encontré muestran: ${JSON.stringify(execution.result)}
+Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
 
 ⚠️ Te recomiendo verificar esta información manualmente, ya que podría contener imprecisiones.
 
@@ -3048,9 +3100,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           metadata: {
             queryGenerated: true,
             queryExecuted: true,
-            rowsReturned: execution.metadata.rowsReturned,
+            rowsReturned: finalExecution.metadata.rowsReturned,
             executionTime: totalTime,
-            dataSourcesUsed: sqlGeneration.tables,
+            dataSourcesUsed: finalSqlGeneration.tables,
             routedTo: 'TextToSqlPipeline',
             riskLevel: 'medium',
             reasonCode: 'low_confidence_fallback',
@@ -3065,13 +3117,13 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       // Step 4.5: CRITICAL SQL RESULT VALIDATION - Prevent false data generation
-      const resultValidation = await this.validateSqlResults(query.message, sqlGeneration.sql, execution.result, query.venueId)
+      const resultValidation = await this.validateSqlResults(query.message, finalSqlGeneration.sql, finalExecution.result, query.venueId)
 
       if (!resultValidation.isValid) {
         logger.error('🚨 SQL result validation FAILED - preventing false data generation', {
           query: query.message,
           validationErrors: resultValidation.errors,
-          resultPreview: JSON.stringify(execution.result).substring(0, 200),
+          resultPreview: JSON.stringify(finalExecution.result).substring(0, 200),
         })
 
         return {
@@ -3080,9 +3132,9 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           metadata: {
             queryGenerated: true,
             queryExecuted: true,
-            rowsReturned: execution.metadata.rowsReturned,
+            rowsReturned: finalExecution.metadata.rowsReturned,
             executionTime: totalTime,
-            dataSourcesUsed: sqlGeneration.tables,
+            dataSourcesUsed: finalSqlGeneration.tables,
             routedTo: 'TextToSqlPipeline',
             riskLevel: 'medium',
             reasonCode: 'result_validation_failed',
@@ -3106,13 +3158,14 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       }
 
       // Update confidence based on result validation
-      if (resultValidation.confidenceAdjustment) {
-        finalConfidence = Math.min(finalConfidence, resultValidation.confidenceAdjustment)
+      const confidenceAdjustment = resultValidation.confidenceAdjustment
+      if (typeof confidenceAdjustment === 'number') {
+        finalConfidence = Math.min(finalConfidence, Number(confidenceAdjustment))
         validationWarnings.push('Result validation applied confidence adjustment')
       }
 
       // Step 4.6: LAYER 6 - Statistical Sanity Checks (Non-blocking warnings)
-      const sanityChecks = await this.validateSanity(execution.result, query.message, query.venueId)
+      const sanityChecks = await this.validateSanity(finalExecution.result, query.message, query.venueId)
       const sanityErrors = sanityChecks.filter(c => c.type === 'error')
       const sanityWarnings = sanityChecks.filter(c => c.type === 'warning')
 
@@ -3140,15 +3193,15 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       // Step 5: Interpret the results naturally (only if validation passed)
       const interpretResult = await this.interpretQueryResult(
         query.message,
-        execution.result,
-        sqlGeneration.explanation,
+        finalExecution.result,
+        finalSqlGeneration.explanation,
         query.venueSlug,
         query.referencesContext,
       )
       const naturalResponse = interpretResult.response
 
       // Calculate total token usage for this query
-      const totalTokensUsed = (sqlGeneration.tokenUsage?.totalTokens || 0) + (interpretResult.tokenUsage?.totalTokens || 0)
+      const totalTokensUsed = (finalSqlGeneration.tokenUsage?.totalTokens || 0) + (interpretResult.tokenUsage?.totalTokens || 0)
 
       // Record token usage to budget
       if (totalTokensUsed > 0) {
@@ -3156,8 +3209,8 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           await tokenBudgetService.recordTokenUsage({
             venueId: query.venueId,
             userId: query.userId,
-            promptTokens: (sqlGeneration.tokenUsage?.promptTokens || 0) + (interpretResult.tokenUsage?.promptTokens || 0),
-            completionTokens: (sqlGeneration.tokenUsage?.completionTokens || 0) + (interpretResult.tokenUsage?.completionTokens || 0),
+            promptTokens: (finalSqlGeneration.tokenUsage?.promptTokens || 0) + (interpretResult.tokenUsage?.promptTokens || 0),
+            completionTokens: (finalSqlGeneration.tokenUsage?.completionTokens || 0) + (interpretResult.tokenUsage?.completionTokens || 0),
             queryType: TokenQueryType.COMPLEX_SINGLE,
             trainingDataId: undefined, // Will be set after recording
           })
@@ -3173,30 +3226,30 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         validationWarnings: validationWarnings.length,
         bulletproofValidationPerformed,
         totalTime,
-        rowsReturned: execution.metadata.rowsReturned,
+        rowsReturned: finalExecution.metadata.rowsReturned,
       })
 
       // Generate visualization if requested (returns skip reason if can't generate)
-      const visualization = this.generateVisualizationFromSqlResult(execution.result, query.message, query.includeVisualization)
+      const visualization = this.generateVisualizationFromSqlResult(finalExecution.result, query.message, query.includeVisualization)
 
       // 🧠 STEP: Record interaction for continuous learning
       const response = {
         response: naturalResponse,
-        sqlQuery: sqlGeneration.sql,
-        queryResult: execution.result,
+        sqlQuery: finalSqlGeneration.sql,
+        queryResult: finalExecution.result,
         confidence: finalConfidence, // Use validated confidence
         visualization,
         tokenUsage: {
-          promptTokens: (sqlGeneration.tokenUsage?.promptTokens || 0) + (interpretResult.tokenUsage?.promptTokens || 0),
-          completionTokens: (sqlGeneration.tokenUsage?.completionTokens || 0) + (interpretResult.tokenUsage?.completionTokens || 0),
+          promptTokens: (finalSqlGeneration.tokenUsage?.promptTokens || 0) + (interpretResult.tokenUsage?.promptTokens || 0),
+          completionTokens: (finalSqlGeneration.tokenUsage?.completionTokens || 0) + (interpretResult.tokenUsage?.completionTokens || 0),
           totalTokens: totalTokensUsed,
         },
         metadata: {
           queryGenerated: true,
           queryExecuted: true,
-          rowsReturned: execution.metadata.rowsReturned,
+          rowsReturned: finalExecution.metadata.rowsReturned,
           executionTime: totalTime,
-          dataSourcesUsed: sqlGeneration.tables,
+          dataSourcesUsed: finalSqlGeneration.tables,
           routedTo: 'TextToSqlPipeline',
           riskLevel: validationWarnings.length > 0 || sanityChecks.length > 0 ? 'medium' : 'low',
           reasonCode: selfCorrectionHappened ? 'sql_execution_success_self_corrected' : 'sql_execution_success',
@@ -3240,11 +3293,11 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
           userId: query.userId,
           userQuestion: query.message,
           aiResponse: naturalResponse,
-          sqlQuery: sqlGeneration.sql,
-          sqlResult: execution.result,
+          sqlQuery: finalSqlGeneration.sql,
+          sqlResult: finalExecution.result,
           confidence: finalConfidence + (learnedGuidance.confidenceBoost || 0),
           executionTime: totalTime,
-          rowsReturned: execution.metadata.rowsReturned,
+          rowsReturned: finalExecution.metadata.rowsReturned,
           sessionId,
         })
       } catch (learningError) {
@@ -3309,6 +3362,101 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         ],
         trainingDataId: errorTrainingDataId,
       }
+    }
+  }
+
+  private async buildRegisteredToolFailureResponse(
+    query: TextToSqlQuery,
+    classification: IntentClassificationResult,
+    startTime: number,
+    sessionId: string,
+    tokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number },
+  ): Promise<TextToSqlResponse> {
+    const response =
+      'Sí tengo una herramienta registrada para esa consulta, pero falló al obtener los datos en este momento. No voy a inventar la respuesta ni generar SQL alterno. Intenta de nuevo o especifica otro período.'
+
+    let trainingDataId: string | undefined
+    try {
+      trainingDataId = await this.learningService.recordChatInteraction({
+        venueId: query.venueId,
+        userId: query.userId,
+        userQuestion: query.message,
+        aiResponse: response,
+        confidence: 0.2,
+        executionTime: Date.now() - startTime,
+        rowsReturned: 0,
+        sessionId,
+      })
+    } catch (learningError) {
+      logger.warn('🧠 Failed to record registered tool failure interaction:', learningError)
+    }
+
+    return {
+      response,
+      confidence: 0.2,
+      metadata: {
+        queryGenerated: false,
+        queryExecuted: false,
+        dataSourcesUsed: classification.intent ? ['SharedQueryService'] : [],
+        routedTo: 'SharedQueryService',
+        intent: classification.intent,
+        riskLevel: 'medium',
+        reasonCode: 'registered_tool_failed_no_sql_fallback',
+      },
+      suggestions: this.generateSmartSuggestions(query.message),
+      trainingDataId,
+      tokenUsage,
+    }
+  }
+
+  private async buildUnsupportedQueryResponse(
+    query: TextToSqlQuery,
+    classification: IntentClassificationResult,
+    startTime: number,
+    sessionId: string,
+    tokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number },
+  ): Promise<TextToSqlResponse> {
+    const isBusinessQuery = this.hasBusinessDataSignal(query.message)
+    const response = isBusinessQuery
+      ? [
+          'Todavía no tengo una herramienta registrada para responder esa consulta con datos confiables.',
+          'Por seguridad no genero SQL libre ni consulto tablas fuera del catálogo aprobado.',
+          'Puedo ayudarte con ventas, ticket promedio, productos más vendidos, staff, reseñas, clientes nuevos, inventario bajo, recetas, órdenes activas, turnos, rentabilidad y métodos de pago.',
+        ].join(' ')
+      : 'Puedo ayudarte con analítica del restaurante o con pasos para usar Avoqado. ¿Qué quieres revisar?'
+
+    let trainingDataId: string | undefined
+    try {
+      trainingDataId = await this.learningService.recordChatInteraction({
+        venueId: query.venueId,
+        userId: query.userId,
+        userQuestion: query.message,
+        aiResponse: response,
+        confidence: isBusinessQuery ? 0.65 : 0.5,
+        executionTime: Date.now() - startTime,
+        rowsReturned: 0,
+        sessionId,
+      })
+    } catch (learningError) {
+      logger.warn('🧠 Failed to record unsupported query interaction:', learningError)
+    }
+
+    return {
+      response,
+      confidence: isBusinessQuery ? 0.65 : 0.5,
+      metadata: {
+        queryGenerated: false,
+        queryExecuted: false,
+        dataSourcesUsed: [],
+        routedTo: 'LLMRouter',
+        riskLevel: 'low',
+        reasonCode: isBusinessQuery ? 'no_registered_tool_no_sql_fallback' : 'non_business_clarification',
+      },
+      suggestions: isBusinessQuery
+        ? ['¿Cuánto vendí hoy?', '¿Qué productos son los más vendidos este mes?', '¿Cuándo recibo más clientes nuevos?']
+        : ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cuáles fueron mis ventas de ayer?'],
+      trainingDataId,
+      tokenUsage,
     }
   }
 
@@ -6064,6 +6212,19 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
       normalizedMessage,
     )
 
+    const contactSignal =
+      /\b(comunico|contacto|contactar|soporte|support|ayuda|whatsapp|telefono|correo|email|hablar con avoqado|equipo de avoqado)\b/.test(
+        normalizedMessage,
+      ) && /\b(avoqado|soporte|support|ustedes|equipo)\b/.test(normalizedMessage)
+    if (contactSignal) {
+      return {
+        topic: 'general',
+        response:
+          'Para comunicarte con Avoqado, usa los canales de soporte oficiales que aparecen en tu dashboard o contacta a tu Customer Success/soporte asignado. Si tu duda es operativa, también puedes preguntarme cómo hacer algo dentro del dashboard.',
+        suggestions: ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cómo agrego un usuario al dashboard?'],
+      }
+    }
+
     if (!hasHowToSignal) {
       return null
     }
@@ -6406,6 +6567,27 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
         confidence: 0.95,
         reason: 'Detected recipe list query (real-time, no date range needed)',
         requiresDateRange: false,
+      }
+    }
+
+    const mentionsNewCustomers = /\b(clientes?\s+nuev[oa]s?|nuev[oa]s?\s+clientes?|nuevos?\s+registros?|registros?\s+nuev[oa]s?)\b/.test(
+      normalizedMessage,
+    )
+    if (mentionsNewCustomers) {
+      const asksTimingPattern =
+        /\b(cuando|cuando|dia|dias|hora|horas|momento|momentos|recibo|llegan|llega|vienen|viene|mas|mayor|pico|frecuencia|frecuente)\b/.test(
+          normalizedMessage,
+        )
+      const effectiveDateRange = dateRange || (asksTimingPattern ? 'allTime' : 'thisMonth')
+
+      return {
+        isSimpleQuery: true,
+        intent: asksTimingPattern ? 'newCustomerTiming' : 'newCustomers',
+        dateRange: effectiveDateRange,
+        confidence: asksTimingPattern ? 0.92 : 0.9,
+        reason: `Detected new customer ${asksTimingPattern ? 'timing pattern' : 'count'} query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        requiresDateRange: true,
+        wasDateExplicit: wasExplicit,
       }
     }
 
@@ -6817,6 +6999,8 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - topProducts: productos más vendidos, best sellers, qué se vende más
 - staffPerformance: mejor mesero/empleado, quién vendió más, quién es el que más vende, rendimiento staff, propinas por persona. INCLUYE "quién" + verbo de venta/propina aunque no diga "empleado"
 - reviews: reseñas, calificaciones, estrellas, opiniones clientes
+- newCustomers: cuántos clientes nuevos, nuevos registros, altas de clientes
+- newCustomerTiming: cuándo/día/hora/momento recibo más clientes nuevos
 - inventoryAlerts: inventario bajo, stock faltante, qué me falta (dateRange=null)
 - recipeCount: cuántas recetas tengo, total de recetas en inventario (dateRange=null)
 - recipeList: cuáles/qué recetas tengo, lista de recetas, muéstrame recetas (dateRange=null)
@@ -6827,15 +7011,14 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - paymentMethodBreakdown: métodos de pago, efectivo vs tarjeta, desglose pagos
 - businessOverview: resumen general, cómo va el negocio
 
-COMPLEJO (isSimple=false, intent="complex") — necesita SQL generado:
+NO SOPORTADO (isSimple=false, intent="unsupported") — no hay herramienta registrada:
 - Comparaciones (A vs B), desglose POR dimensión (por categoría/hora/día/mesero)
 - Filtro por NOMBRE PROPIO de persona o producto específico ("ventas de Liz", "cuántas hamburguesas")
 - Fechas absolutas con día/mes ("el 3 de enero", "en febrero")
-- CONTEO de entidades: "cuántos meseros/empleados/productos/mesas tengo" → complex (necesita SQL COUNT)
+- CONTEO de entidades sin herramienta registrada: "cuántos meseros/empleados/productos/mesas tengo" → unsupported
 - Cross-reference entre tablas: "quién vende más pero tiene peores reseñas", "producto estrella y en qué mesa se pide más"
 - Órdenes canceladas y quién las canceló
 - Combinaciones de productos frecuentes
-- Análisis temporal de clientes nuevos: "cuándo recibo más clientes nuevos", "qué día llegan más clientes nuevos", "clientes nuevos por hora"
 
 CONVERSACIONAL (isSimple=false, intent="conversational"):
 SOLO saludos, agradecimientos, despedidas, mensajes que NO piden datos.
@@ -6845,7 +7028,7 @@ REGLAS CRÍTICAS:
 1. "cuánto vendí hoy/ayer/esta semana/este mes" → sales (SIMPLE). "hoy", "ayer", "esta semana", "este mes", "la semana pasada" son dateRanges relativos, NO fechas específicas
 2. "quién vende más" / "quién es el que más ha vendido" / "mejor empleado" → staffPerformance (SIMPLE)
 3. "productos más vendidos" / "best sellers" / "qué se vende más" → topProducts (SIMPLE)
-4. SOLO usa complejo si hay un NOMBRE PROPIO de persona/producto, un desglose dimensional (por X), o un CONTEO de entidades
+4. SOLO usa unsupported si no hay una herramienta simple registrada, si hay un NOMBRE PROPIO de persona/producto, un desglose dimensional no registrado (por X), o un CONTEO de entidades sin herramienta
 5. Si hay historial y el mensaje es ambiguo ("el que más vendió", "de esos"), usa el contexto
 6. FECHA POR DEFECTO:
    - Si el usuario dice "en total", "en general", "históricamente", "de todo el tiempo", "all time", "ever" → dateRange="allTime", wasDateExplicit=true
@@ -6854,9 +7037,10 @@ REGLAS CRÍTICAS:
    - La regla: preguntas de TOTALES/CONTEO sin periodo → allTime. Preguntas de RENDIMIENTO/VENTAS sin periodo → thisMonth
 7. Para inventoryAlerts/recipeCount/recipeList/recipeUsage/pendingOrders/activeShifts → dateRange=null
 8. "today"/"yesterday"/"this week" en inglés = today/yesterday/thisWeek (SIMPLE, no complejo)
-9. "cuántos meseros/empleados tengo" / "cuántos productos tengo" / "cuántas mesas tengo" → complex (es un conteo que necesita SQL). NO es activeShifts
+9. "cuántos meseros/empleados tengo" / "cuántos productos tengo" / "cuántas mesas tengo" → unsupported si no hay herramienta registrada. NO es activeShifts
 10. activeShifts es SOLO para "quién trabaja AHORA" / "turnos abiertos". NO para conteo de staff total
 11. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList. "qué receta se usa más" / "cuál es la que más se usa" con contexto de recetas → recipeUsage
+12. "cuántos clientes nuevos" → newCustomers. "cuándo recibo más clientes nuevos" / "qué día llegan más clientes nuevos" → newCustomerTiming
 
 dateRanges válidos: today, yesterday, thisWeek, lastWeek, thisMonth, lastMonth, last7days, last30days, allTime, null
 
@@ -6932,7 +7116,7 @@ Responde SOLO JSON (sin markdown):
               ...deterministicClassification,
               isSimpleQuery: false,
               confidence: Math.max(deterministicClassification.confidence, Math.min(0.8, Math.max(0, Number(parsed.confidence || 0.5)))),
-              reason: 'LLM classified as conversational, but business data signal detected → TextToSQL pipeline',
+              reason: 'LLM classified as conversational, but business data signal detected → no registered tool selected',
               isConversational: false,
             },
             tokenUsage,
@@ -6956,6 +7140,8 @@ Responde SOLO JSON (sin markdown):
         'topProducts',
         'staffPerformance',
         'reviews',
+        'newCustomers',
+        'newCustomerTiming',
         'businessOverview',
         'inventoryAlerts',
         'recipeCount',
@@ -6985,21 +7171,17 @@ Responde SOLO JSON (sin markdown):
 
       if (!isSimple) {
         const deterministicClassification = this.classifyIntent(message)
-        if (
-          deterministicClassification.isSimpleQuery &&
-          deterministicClassification.intent &&
-          this.isRealTimeSharedIntent(deterministicClassification.intent)
-        ) {
+        if (deterministicClassification.isSimpleQuery && deterministicClassification.intent) {
           return {
             classification: {
               ...deterministicClassification,
-              reason: `${deterministicClassification.reason}; deterministic real-time intent override`,
+              reason: `${deterministicClassification.reason}; deterministic registered intent override`,
             },
             tokenUsage,
           }
         }
 
-        // LLM says this is complex or unknown → route to TextToSQL pipeline
+        // LLM says this is unsupported or unknown → do not generate ad-hoc SQL.
         return {
           classification: {
             isSimpleQuery: false,
@@ -7007,7 +7189,7 @@ Responde SOLO JSON (sin markdown):
             reason:
               typeof parsed.reason === 'string'
                 ? this.sanitizePlannerText(parsed.reason, 160)
-                : 'LLM classified as complex query → TextToSQL pipeline',
+                : 'LLM classified as unsupported query → no registered data tool',
           },
           tokenUsage,
         }
@@ -7052,12 +7234,12 @@ Responde SOLO JSON (sin markdown):
     }
   }
 
-  /** Fallback classification when LLM router can't parse response → sends to TextToSQL */
+  /** Fallback classification when LLM router can't parse response. */
   private fallbackClassification(reason: string): IntentClassificationResult {
     return {
       isSimpleQuery: false,
       confidence: 0.0,
-      reason: `${reason} → falling back to TextToSQL pipeline`,
+      reason: `${reason} → no registered data tool selected`,
     }
   }
 
