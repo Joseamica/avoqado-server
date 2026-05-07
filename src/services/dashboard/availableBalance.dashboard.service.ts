@@ -5,7 +5,10 @@ import { NotFoundError } from '../../errors/AppError'
 import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { calculateSettlementDate, findActiveSettlementConfig } from '../payments/settlementCalculation.service'
 import { addDays } from 'date-fns'
+import { formatInTimeZone } from 'date-fns-tz'
 import { getLastCloseoutDate } from './cashCloseout.dashboard.service'
+
+const DEFAULT_VENUE_TIMEZONE = 'America/Mexico_City'
 
 // Extended card type that includes CASH (for frontend compatibility)
 // CASH is not in Prisma enum but we treat it as a synthetic type
@@ -370,6 +373,12 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
 export async function getSettlementTimeline(venueId: string, dateRange: { from: Date; to: Date }): Promise<TimelineEntry[]> {
   logger.info('Fetching settlement timeline', { venueId, dateRange })
 
+  const venueRecord = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true },
+  })
+  const venueTimezone = venueRecord?.timezone || DEFAULT_VENUE_TIMEZONE
+
   // Get payments within date range
   const payments = await prisma.payment.findMany({
     where: {
@@ -397,7 +406,7 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
   const timelineMap = new Map<string, TimelineEntry>()
 
   for (const payment of payments) {
-    const dateKey = payment.createdAt.toISOString().split('T')[0]
+    const dateKey = formatInTimeZone(payment.createdAt, venueTimezone, 'yyyy-MM-dd')
     const amount = Number(payment.amount)
     const fees = payment.transactionCost ? Number(payment.transactionCost.venueChargeAmount) : 0
     const netAmount = amount - fees
@@ -584,6 +593,15 @@ export async function getSettlementCalendar(
 > {
   logger.info('Fetching settlement calendar', { venueId, dateRange })
 
+  // Resolve venue timezone so we group by the user's local date, not UTC.
+  // Without this, settlements crossing midnight UTC end up in different UTC
+  // groups but render under the same local date in the frontend.
+  const venueRecord = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { timezone: true },
+  })
+  const venueTimezone = venueRecord?.timezone || DEFAULT_VENUE_TIMEZONE
+
   // Get card payments with transactions that have settlement dates in range
   const cardPayments = await prisma.payment.findMany({
     where: {
@@ -662,7 +680,10 @@ export async function getSettlementCalendar(
     if (!payment.transaction?.estimatedSettlementDate) continue
 
     const settlementDate = payment.transaction.estimatedSettlementDate
-    const dateKey = settlementDate.toISOString().split('T')[0]
+    // Group by venue-local date so the UI label matches the bucket. Using
+    // toISOString() splits at UTC midnight, which can put two different
+    // UTC days under the same local date in the frontend.
+    const dateKey = formatInTimeZone(settlementDate, venueTimezone, 'yyyy-MM-dd')
     const netAmount = Number(payment.transaction.netSettlementAmount || 0)
     const cardType = payment.transactionCost?.transactionType || TransactionCardType.OTHER
 
@@ -701,7 +722,7 @@ export async function getSettlementCalendar(
   // Process CASH payments (instant settlement - show on transaction date)
   for (const payment of cashPayments) {
     const settlementDate = payment.createdAt
-    const dateKey = settlementDate.toISOString().split('T')[0]
+    const dateKey = formatInTimeZone(settlementDate, venueTimezone, 'yyyy-MM-dd')
     const netAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0) // Cash has no fees; include tip portion
 
     if (!calendarMap.has(dateKey)) {
