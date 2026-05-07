@@ -327,20 +327,23 @@ export function buildAuthContextFromPayload(jwtPayload: AvoqadoJwtPayload): Auth
 
 // IV. JWT Token Generation Functions
 
+const TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30 // 30 days
+
 /**
  * Generate JWT access token for authentication
  * @param payload Token payload containing user information
  * @returns JWT access token string
  */
 export function generateAccessToken(payload: TokenPayload): string {
+  const nowSeconds = Math.floor(Date.now() / 1000)
   const jwtPayload: AvoqadoJwtPayload = {
     sub: payload.userId,
     orgId: payload.orgId,
     venueId: payload.venueId,
     role: payload.role,
     ...(payload.terminalSerialNumber && { terminalSerialNumber: payload.terminalSerialNumber }),
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 60 * 60, // 1 hour expiry
+    iat: nowSeconds,
+    exp: nowSeconds + TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS,
   }
 
   const secret = process.env.ACCESS_TOKEN_SECRET

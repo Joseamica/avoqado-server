@@ -8,6 +8,8 @@ import { logAction } from '../dashboard/activity-log.service'
 import { getRoleDisplayName, DEFAULT_ROLE_DISPLAY_NAMES } from '../dashboard/venueRoleConfig.dashboard.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 
+const TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30 // 30 days
+
 /**
  * Staff sign-in using PIN for TPV access
  * @param venueId Venue ID
@@ -197,7 +199,7 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     // JWT tokens for socket and API authentication
     accessToken,
     refreshToken,
-    expiresIn: 86400, // 24 hours (1 day) in seconds
+    expiresIn: TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS,
     tokenType: 'Bearer',
 
     // Metadata
@@ -295,7 +297,7 @@ export async function refreshAccessToken(refreshToken: string) {
 
   return {
     accessToken: newAccessToken,
-    expiresIn: 3600, // 1 hour in seconds
+    expiresIn: TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS,
     tokenType: 'Bearer',
     correlationId,
     issuedAt: new Date().toISOString(),
@@ -566,7 +568,7 @@ export async function masterSignIn(venueId: string, totpCode: string, serialNumb
     // JWT tokens
     accessToken,
     refreshToken,
-    expiresIn: 86400, // 24 hours
+    expiresIn: TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS,
     tokenType: 'Bearer',
 
     // Metadata
