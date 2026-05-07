@@ -335,13 +335,9 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
         entry.pendingAmount += Number(payment.transaction.netSettlementAmount || netAmount)
       }
 
-      // Track settlement days for average calculation
-      if (payment.transaction.estimatedSettlementDate) {
-        const daysDiff = Math.ceil(
-          (payment.transaction.estimatedSettlementDate.getTime() - payment.createdAt.getTime()) / (1000 * 60 * 60 * 24),
-        )
-        entry.settlementDays.push(daysDiff)
-      }
+      // settlementDays now comes from the active SettlementConfiguration
+      // (set when the entry was created above), not from a calendar-day average
+      // of historical estimatedSettlementDate values.
     } else {
       entry.pendingAmount += netAmount
     }
@@ -356,22 +352,19 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
       pendingAmount: 0, // Cash is never pending
       settledAmount: cashTotalSales, // Cash is always immediately settled
       transactionCount: cashPayments.length,
-      settlementDays: [0], // Instant settlement
+      settlementDays: 0, // Instant settlement
     })
   }
 
   // Convert map to array
   const breakdown: CardTypeBreakdown[] = []
   for (const [cardType, data] of byCardType) {
-    const avgSettlementDays =
-      data.settlementDays.length > 0 ? Math.round(data.settlementDays.reduce((a, b) => a + b, 0) / data.settlementDays.length) : null
-
     breakdown.push({
       cardType,
       totalSales: data.totalSales,
       fees: data.fees,
       netAmount: data.totalSales - data.fees,
-      settlementDays: avgSettlementDays,
+      settlementDays: data.settlementDays,
       pendingAmount: data.pendingAmount,
       settledAmount: data.settledAmount,
       transactionCount: data.transactionCount,

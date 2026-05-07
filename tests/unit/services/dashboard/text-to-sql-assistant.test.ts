@@ -394,6 +394,56 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
   })
 
   describe('Unsupported Query Guard', () => {
+    it('should ask a guided clarification for short product topic messages', async () => {
+      const serviceWithInternals = service as any
+      const originalRouteWithLLM = serviceWithInternals.routeWithLLM
+      const originalGenerateSqlFromText = serviceWithInternals.generateSqlFromText
+      const originalExecuteSafeQuery = serviceWithInternals.executeSafeQuery
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'safe test message',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+
+      serviceWithInternals.routeWithLLM = jest.fn(async () => ({
+        classification: {
+          isSimpleQuery: false,
+          intent: 'unsupported',
+          confidence: 0.8,
+          reason: 'ambiguous product topic',
+        },
+        tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      }))
+      serviceWithInternals.generateSqlFromText = jest.fn()
+      serviceWithInternals.executeSafeQuery = jest.fn()
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: 'productos',
+          venueId: 'venue-test',
+          userId: 'user-test',
+        })
+
+        expect(serviceWithInternals.generateSqlFromText).not.toHaveBeenCalled()
+        expect(serviceWithInternals.executeSafeQuery).not.toHaveBeenCalled()
+        expect(response.metadata?.reasonCode).toBe('business_topic_clarification')
+        expect(response.response).toContain('Qué quieres revisar de productos')
+        expect(response.suggestions).toContain('¿Qué productos son los más vendidos este mes?')
+      } finally {
+        serviceWithInternals.routeWithLLM = originalRouteWithLLM
+        serviceWithInternals.generateSqlFromText = originalGenerateSqlFromText
+        serviceWithInternals.executeSafeQuery = originalExecuteSafeQuery
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
     it('should not generate SQL when no registered data tool exists', async () => {
       const serviceWithInternals = service as any
       const originalRouteWithLLM = serviceWithInternals.routeWithLLM

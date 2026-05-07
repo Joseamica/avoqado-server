@@ -3416,14 +3416,17 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     sessionId: string,
     tokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number },
   ): Promise<TextToSqlResponse> {
+    const topicClarification = this.getBusinessTopicClarification(query.message)
     const isBusinessQuery = this.hasBusinessDataSignal(query.message)
-    const response = isBusinessQuery
-      ? [
-          'Todavía no tengo una herramienta registrada para responder esa consulta con datos confiables.',
-          'Por seguridad no genero SQL libre ni consulto tablas fuera del catálogo aprobado.',
-          'Puedo ayudarte con ventas, ticket promedio, productos más vendidos, staff, reseñas, clientes nuevos, inventario bajo, recetas, órdenes activas, turnos, rentabilidad y métodos de pago.',
-        ].join(' ')
-      : 'Puedo ayudarte con analítica del restaurante o con pasos para usar Avoqado. ¿Qué quieres revisar?'
+    const response = topicClarification
+      ? topicClarification.response
+      : isBusinessQuery
+        ? [
+            'Todavía no tengo una herramienta registrada para responder esa consulta con datos confiables.',
+            'Por seguridad no genero SQL libre ni consulto tablas fuera del catálogo aprobado.',
+            'Puedo ayudarte con ventas, ticket promedio, productos más vendidos, staff, reseñas, clientes nuevos, inventario bajo, recetas, órdenes activas, turnos, rentabilidad y métodos de pago.',
+          ].join(' ')
+        : 'Puedo ayudarte con analítica del restaurante o con pasos para usar Avoqado. ¿Qué quieres revisar?'
 
     let trainingDataId: string | undefined
     try {
@@ -3450,14 +3453,56 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
         dataSourcesUsed: [],
         routedTo: 'LLMRouter',
         riskLevel: 'low',
-        reasonCode: isBusinessQuery ? 'no_registered_tool_no_sql_fallback' : 'non_business_clarification',
+        reasonCode: topicClarification
+          ? 'business_topic_clarification'
+          : isBusinessQuery
+            ? 'no_registered_tool_no_sql_fallback'
+            : 'non_business_clarification',
       },
-      suggestions: isBusinessQuery
-        ? ['¿Cuánto vendí hoy?', '¿Qué productos son los más vendidos este mes?', '¿Cuándo recibo más clientes nuevos?']
-        : ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cuáles fueron mis ventas de ayer?'],
+      suggestions: topicClarification
+        ? topicClarification.suggestions
+        : isBusinessQuery
+          ? ['¿Cuánto vendí hoy?', '¿Qué productos son los más vendidos este mes?', '¿Cuándo recibo más clientes nuevos?']
+          : ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cuáles fueron mis ventas de ayer?'],
       trainingDataId,
       tokenUsage,
     }
+  }
+
+  private getBusinessTopicClarification(message: string): { response: string; suggestions: string[] } | null {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
+    const wordCount = normalizedMessage.split(' ').filter(Boolean).length
+    const isShortAmbiguousTopic = wordCount <= 4
+
+    if (isShortAmbiguousTopic && /\b(productos?|menu|platillos?|items?)\b/.test(normalizedMessage)) {
+      return {
+        response: 'Claro. ¿Qué quieres revisar de productos?',
+        suggestions: ['¿Qué productos son los más vendidos este mes?', '¿Qué productos tienen bajo stock?', '¿Qué receta se usa más?'],
+      }
+    }
+
+    if (isShortAmbiguousTopic && /\b(ventas?|ingresos?|revenue)\b/.test(normalizedMessage)) {
+      return {
+        response: 'Claro. ¿Qué quieres revisar de ventas?',
+        suggestions: ['¿Cuánto vendí hoy?', '¿Cuál fue mi ticket promedio este mes?', '¿Cómo va el negocio esta semana?'],
+      }
+    }
+
+    if (isShortAmbiguousTopic && /\b(clientes?|clientes nuevos|registros?)\b/.test(normalizedMessage)) {
+      return {
+        response: 'Claro. ¿Qué quieres revisar de clientes?',
+        suggestions: ['¿Cuántos clientes nuevos tengo este mes?', '¿Cuándo recibo más clientes nuevos?', '¿Cómo va el negocio este mes?'],
+      }
+    }
+
+    if (isShortAmbiguousTopic && /\b(resenas?|reviews?|opiniones?|calificaciones?)\b/.test(normalizedMessage)) {
+      return {
+        response: 'Claro. ¿Qué quieres revisar de reseñas?',
+        suggestions: ['¿Cuál es mi promedio de reseñas?', '¿Cuántas reseñas tuve esta semana?', '¿Cómo va el negocio este mes?'],
+      }
+    }
+
+    return null
   }
 
   private extractProductComparisonTerms(message: string): { leftTerm: string; rightTerm: string } | null {
