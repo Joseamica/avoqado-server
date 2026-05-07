@@ -5792,7 +5792,7 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       // userId from authContext IS the staffId (authenticated staff member)
-      const { venueId, userId: staffId } = (req as any).authContext
+      const { venueId, userId: staffId, role: scannerRole } = (req as any).authContext
       const { categoryId, serialNumbers } = req.body
 
       if (!categoryId || typeof categoryId !== 'string') {
@@ -5827,12 +5827,14 @@ router.post(
             serialNumbers,
             createdBy: staffId,
             registeredFromVenueId: venueId,
+            scannerRole,
           })
         : await serializedInventoryService.registerBatch({
             venueId,
             categoryId,
             serialNumbers,
             createdBy: staffId,
+            scannerRole,
           })
 
       logger.info(`✅ [SERIALIZED INV] Batch complete: ${result.created} created, ${result.duplicates.length} duplicates`, {

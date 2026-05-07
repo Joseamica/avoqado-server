@@ -1,9 +1,10 @@
-import { PrismaClient, SerializedItem, SerializedItemStatus, ItemCategory, Prisma, SimCustodyEnforcementMode } from '@prisma/client'
+import { PrismaClient, SerializedItem, SerializedItemStatus, ItemCategory, Prisma, SimCustodyEnforcementMode, StaffRole } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { getMergedCategories } from '../dashboard/category-resolution.service'
 import logger from '@/config/logger'
 import { SimCustodyError } from '../../lib/sim-custody-error-codes'
+import { buildCustodyDataForScanner } from './custodyAssignment.helper'
 
 // ==========================================
 // SCAN RESULT TYPES
@@ -21,6 +22,7 @@ export interface ScanResult {
 export interface RegisterBatchResult {
   created: number
   duplicates: string[]
+  assignedToYou: number
 }
 
 // ==========================================
@@ -161,9 +163,17 @@ export class SerializedInventoryService {
     categoryId: string
     serialNumbers: string[]
     createdBy: string
+    scannerRole?: StaffRole
   }): Promise<RegisterBatchResult> {
     const duplicates: string[] = []
-    let created = 0
+    const created: Array<{ id: string; serialNumber: string }> = []
+    const custodyData = buildCustodyDataForScanner(data.scannerRole, data.createdBy)
+    const eventType =
+      custodyData.custodyState === 'PROMOTER_HELD'
+        ? 'ASSIGNED_TO_PROMOTER'
+        : custodyData.custodyState === 'SUPERVISOR_HELD'
+          ? 'ASSIGNED_TO_SUPERVISOR'
+          : null
 
     await this.db.$transaction(async tx => {
       for (const serialNumber of data.serialNumbers) {
@@ -176,20 +186,36 @@ export class SerializedInventoryService {
           continue
         }
 
-        await tx.serializedItem.create({
+        const item = await tx.serializedItem.create({
           data: {
             venueId: data.venueId,
             categoryId: data.categoryId,
             serialNumber,
             createdBy: data.createdBy,
             status: 'AVAILABLE',
+            ...custodyData,
           },
         })
-        created++
+        created.push(item)
+
+        if (eventType && custodyData.custodyState) {
+          await tx.serializedItemCustodyEvent.create({
+            data: {
+              serializedItemId: item.id,
+              serialNumber: item.serialNumber,
+              eventType,
+              fromState: null,
+              toState: custodyData.custodyState,
+              fromStaffId: null,
+              toStaffId: data.createdBy,
+              actorStaffId: data.createdBy,
+            },
+          })
+        }
       }
     })
 
-    return { created, duplicates }
+    return { created: created.length, duplicates, assignedToYou: custodyData.custodyState ? created.length : 0 }
   }
 
   /**
@@ -603,9 +629,17 @@ export class SerializedInventoryService {
     serialNumbers: string[]
     createdBy: string
     registeredFromVenueId?: string
+    scannerRole?: StaffRole
   }): Promise<RegisterBatchResult> {
     const duplicates: string[] = []
-    let created = 0
+    const created: Array<{ id: string; serialNumber: string }> = []
+    const custodyData = buildCustodyDataForScanner(data.scannerRole, data.createdBy)
+    const eventType =
+      custodyData.custodyState === 'PROMOTER_HELD'
+        ? 'ASSIGNED_TO_PROMOTER'
+        : custodyData.custodyState === 'SUPERVISOR_HELD'
+          ? 'ASSIGNED_TO_SUPERVISOR'
+          : null
 
     await this.db.$transaction(async tx => {
       for (const serialNumber of data.serialNumbers) {
@@ -632,7 +666,7 @@ export class SerializedInventoryService {
           continue
         }
 
-        await tx.serializedItem.create({
+        const item = await tx.serializedItem.create({
           data: {
             organizationId: data.organizationId,
             venueId: null,
@@ -641,13 +675,29 @@ export class SerializedInventoryService {
             createdBy: data.createdBy,
             registeredFromVenueId: data.registeredFromVenueId || null,
             status: 'AVAILABLE',
+            ...custodyData,
           },
         })
-        created++
+        created.push(item)
+
+        if (eventType && custodyData.custodyState) {
+          await tx.serializedItemCustodyEvent.create({
+            data: {
+              serializedItemId: item.id,
+              serialNumber: item.serialNumber,
+              eventType,
+              fromState: null,
+              toState: custodyData.custodyState,
+              fromStaffId: null,
+              toStaffId: data.createdBy,
+              actorStaffId: data.createdBy,
+            },
+          })
+        }
       }
     })
 
-    return { created, duplicates }
+    return { created: created.length, duplicates, assignedToYou: custodyData.custodyState ? created.length : 0 }
   }
 
   /**

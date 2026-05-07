@@ -50,6 +50,48 @@ export interface BulkUploadResult {
   total: number
 }
 
+type ResponsibleStaff = {
+  id: string
+  firstName: string
+  lastName: string
+}
+
+export type StockMovementResponsible =
+  | { kind: 'promoter'; staffId: string; firstName: string; lastName: string }
+  | { kind: 'supervisor'; staffId: string; firstName: string; lastName: string }
+  | { kind: 'admin_held' }
+  | { kind: 'sold'; staffId: string; firstName: string; lastName: string; via: 'promoter' | 'supervisor' }
+  | null
+
+function deriveResponsible(
+  item: {
+    custodyState: string | null
+    assignedPromoterId: string | null
+    assignedSupervisorId: string | null
+  },
+  staffById: Map<string, ResponsibleStaff>,
+): StockMovementResponsible {
+  const promoter = item.assignedPromoterId ? staffById.get(item.assignedPromoterId) : undefined
+  const supervisor = item.assignedSupervisorId ? staffById.get(item.assignedSupervisorId) : undefined
+
+  switch (item.custodyState) {
+    case 'PROMOTER_HELD':
+    case 'PROMOTER_PENDING':
+    case 'PROMOTER_REJECTED':
+      return promoter ? { kind: 'promoter', staffId: promoter.id, firstName: promoter.firstName, lastName: promoter.lastName } : null
+    case 'SUPERVISOR_HELD':
+      return supervisor ? { kind: 'supervisor', staffId: supervisor.id, firstName: supervisor.firstName, lastName: supervisor.lastName } : null
+    case 'ADMIN_HELD':
+      return { kind: 'admin_held' }
+    case 'SOLD':
+      if (promoter) return { kind: 'sold', via: 'promoter', staffId: promoter.id, firstName: promoter.firstName, lastName: promoter.lastName }
+      if (supervisor) return { kind: 'sold', via: 'supervisor', staffId: supervisor.id, firstName: supervisor.firstName, lastName: supervisor.lastName }
+      return null
+    default:
+      return null
+  }
+}
+
 class StockDashboardService {
   /**
    * Build Prisma where clauses that cover both venue-specific items AND
@@ -421,7 +463,7 @@ class StockDashboardService {
   async getRecentMovements(
     venueId: string,
     limit: number = 20,
-    options: { dateFrom?: Date; dateTo?: Date } = {},
+    options: { dateFrom?: Date; dateTo?: Date; responsibleStaffId?: string } = {},
   ): Promise<
     Array<{
       id: string
@@ -436,10 +478,11 @@ class StockDashboardService {
       serialNumbers?: string[]
       soldByName?: string | null
       soldAtVenueName?: string | null
+      responsible: StockMovementResponsible
     }>
   > {
     const { itemWhere } = await this.getItemScope(venueId)
-    const { dateFrom, dateTo } = options
+    const { dateFrom, dateTo, responsibleStaffId } = options
 
     // When a date window is given, include rows whose registration OR sale
     // timestamp falls inside it. Without this OR, filtering by `createdAt`
@@ -454,7 +497,34 @@ class StockDashboardService {
           }
         : null
 
-    const where = dateFilter ? { AND: [itemWhere, dateFilter] } : { ...itemWhere }
+    let responsiblePredicate: Record<string, any> | null = null
+    if (responsibleStaffId === '__admin_held__') {
+      responsiblePredicate = { custodyState: 'ADMIN_HELD' }
+    } else if (responsibleStaffId) {
+      const staffVenue = await prisma.staffVenue.findFirst({
+        where: { staffId: responsibleStaffId, venueId },
+        select: { role: true },
+      })
+      if (!staffVenue) return []
+
+      switch (staffVenue.role) {
+        case 'WAITER':
+          responsiblePredicate = { assignedPromoterId: responsibleStaffId }
+          break
+        case 'MANAGER':
+          responsiblePredicate = { assignedSupervisorId: responsibleStaffId }
+          break
+        default:
+          responsiblePredicate = {
+            OR: [{ assignedPromoterId: responsibleStaffId }, { assignedSupervisorId: responsibleStaffId }],
+          }
+      }
+    }
+
+    const filters = [itemWhere]
+    if (dateFilter) filters.push(dateFilter)
+    if (responsiblePredicate) filters.push(responsiblePredicate)
+    const where = filters.length === 1 ? { ...itemWhere } : { AND: filters }
 
     // Get recent items — includes org-level items
     const recentItems = await prisma.serializedItem.findMany({
@@ -480,8 +550,15 @@ class StockDashboardService {
     })
 
     // Resolve staff names
-    const staffIds = Array.from(new Set(recentItems.map(i => i.createdBy).filter(Boolean)))
+    const staffIdSet = new Set<string>()
+    for (const item of recentItems) {
+      if (item.createdBy) staffIdSet.add(item.createdBy)
+      if (item.assignedPromoterId) staffIdSet.add(item.assignedPromoterId)
+      if (item.assignedSupervisorId) staffIdSet.add(item.assignedSupervisorId)
+    }
+    const staffIds = Array.from(staffIdSet)
     const staffMap = new Map<string, string>()
+    const staffById = new Map<string, ResponsibleStaff>()
     if (staffIds.length > 0) {
       const staffRecords = await prisma.staff.findMany({
         where: { id: { in: staffIds } },
@@ -489,6 +566,7 @@ class StockDashboardService {
       })
       for (const s of staffRecords) {
         staffMap.set(s.id, `${s.firstName} ${s.lastName}`.trim())
+        staffById.set(s.id, s)
       }
     }
 
@@ -505,6 +583,7 @@ class StockDashboardService {
       serialNumbers?: string[]
       soldByName?: string | null
       soldAtVenueName?: string | null
+      responsible: StockMovementResponsible
     }
 
     const movements: Movement[] = []
@@ -529,6 +608,7 @@ class StockDashboardService {
       const registeredByName = staffMap.get(first.createdBy) || null
       const itemVenueName = first.venueId ? first.venue?.name || null : 'Todas las tiendas'
       const regFromVenue = first.registeredFromVenue?.name || null
+      const responsible = deriveResponsible(first, staffById)
 
       if (group.length > 1) {
         // Bulk upload — single row with serial numbers for drill-down
@@ -543,6 +623,7 @@ class StockDashboardService {
           itemCount: group.length,
           registeredFromVenueName: regFromVenue,
           serialNumbers: group.map(i => i.serialNumber),
+          responsible,
         })
       } else {
         // Single registration
@@ -555,6 +636,7 @@ class StockDashboardService {
           venueName: itemVenueName,
           userName: registeredByName,
           registeredFromVenueName: regFromVenue,
+          responsible,
         })
       }
     })
@@ -578,6 +660,7 @@ class StockDashboardService {
           userName: registeredByName,
           soldByName,
           soldAtVenueName: soldAtVenue,
+          responsible: deriveResponsible(item, staffById),
         })
       }
 
@@ -590,6 +673,7 @@ class StockDashboardService {
           timestamp: item.soldAt || item.createdAt,
           venueName: item.sellingVenue?.name || itemVenueName,
           userName: registeredByName,
+          responsible: deriveResponsible(item, staffById),
         })
       }
     }
@@ -608,6 +692,90 @@ class StockDashboardService {
 
     // Sort by timestamp descending and limit
     return windowed.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()).slice(0, limit)
+  }
+
+  async getStockResponsibles(venueId: string): Promise<{
+    adminHeld: { simsCount: number }
+    supervisors: Array<{ staffId: string; firstName: string; lastName: string; ownSimsCount: number; teamSimsCount: number }>
+    promoters: Array<{ staffId: string; firstName: string; lastName: string; simsCount: number }>
+  }> {
+    const { itemWhere } = await this.getItemScope(venueId)
+
+    const [adminHeldCount, supervisorRows, promoterRows] = await Promise.all([
+      prisma.serializedItem.count({
+        where: { ...itemWhere, custodyState: 'ADMIN_HELD' },
+      }),
+      prisma.serializedItem.groupBy({
+        by: ['assignedSupervisorId', 'custodyState'],
+        where: {
+          ...itemWhere,
+          assignedSupervisorId: { not: null },
+          custodyState: { in: ['SUPERVISOR_HELD', 'PROMOTER_HELD', 'PROMOTER_PENDING', 'PROMOTER_REJECTED'] },
+        },
+        _count: { _all: true },
+      }),
+      prisma.serializedItem.groupBy({
+        by: ['assignedPromoterId', 'custodyState'],
+        where: {
+          ...itemWhere,
+          assignedPromoterId: { not: null },
+          custodyState: { in: ['PROMOTER_HELD', 'PROMOTER_PENDING', 'PROMOTER_REJECTED'] },
+        },
+        _count: { _all: true },
+      }),
+    ])
+
+    const staffIds = new Set<string>()
+    for (const row of supervisorRows) {
+      if (row.assignedSupervisorId) staffIds.add(row.assignedSupervisorId)
+    }
+    for (const row of promoterRows) {
+      if (row.assignedPromoterId) staffIds.add(row.assignedPromoterId)
+    }
+
+    const staffRecords =
+      staffIds.size > 0
+        ? await prisma.staff.findMany({
+            where: { id: { in: Array.from(staffIds) } },
+            select: { id: true, firstName: true, lastName: true },
+          })
+        : []
+    const staffById = new Map(staffRecords.map(staff => [staff.id, staff]))
+
+    const supervisorCounts = new Map<string, { ownSimsCount: number; teamSimsCount: number }>()
+    for (const row of supervisorRows) {
+      if (!row.assignedSupervisorId) continue
+      const counts = supervisorCounts.get(row.assignedSupervisorId) ?? { ownSimsCount: 0, teamSimsCount: 0 }
+      if (row.custodyState === 'SUPERVISOR_HELD') counts.ownSimsCount += row._count._all
+      else counts.teamSimsCount += row._count._all
+      supervisorCounts.set(row.assignedSupervisorId, counts)
+    }
+
+    const supervisors = Array.from(supervisorCounts.entries())
+      .flatMap(([staffId, counts]) => {
+        const staff = staffById.get(staffId)
+        return staff ? [{ staffId, firstName: staff.firstName, lastName: staff.lastName, ...counts }] : []
+      })
+      .sort((a, b) => b.ownSimsCount + b.teamSimsCount - (a.ownSimsCount + a.teamSimsCount))
+
+    const promoterCounts = new Map<string, number>()
+    for (const row of promoterRows) {
+      if (!row.assignedPromoterId) continue
+      promoterCounts.set(row.assignedPromoterId, (promoterCounts.get(row.assignedPromoterId) ?? 0) + row._count._all)
+    }
+
+    const promoters = Array.from(promoterCounts.entries())
+      .flatMap(([staffId, simsCount]) => {
+        const staff = staffById.get(staffId)
+        return staff ? [{ staffId, firstName: staff.firstName, lastName: staff.lastName, simsCount }] : []
+      })
+      .sort((a, b) => b.simsCount - a.simsCount)
+
+    return {
+      adminHeld: { simsCount: adminHeldCount },
+      supervisors,
+      promoters,
+    }
   }
 
   /**

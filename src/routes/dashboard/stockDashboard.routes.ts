@@ -208,7 +208,7 @@ router.get('/movements', whiteLabelStockAccess, async (req: Request, res: Respon
   try {
     // Use target venueId from URL params
     const venueId = req.params.venueId || (req as any).authContext?.venueId
-    const { limit = '20', dateFrom, dateTo } = req.query
+    const { limit = '20', dateFrom, dateTo, responsibleStaffId } = req.query
 
     // Parse optional ISO dates defensively — invalid strings fall back to
     // "no filter" rather than throwing, so a TPV sending garbage doesn't 500.
@@ -220,6 +220,7 @@ router.get('/movements', whiteLabelStockAccess, async (req: Request, res: Respon
     const movements = await stockDashboardService.getRecentMovements(venueId, parseInt(limit as string, 10), {
       dateFrom: safeFrom,
       dateTo: safeTo,
+      responsibleStaffId: typeof responsibleStaffId === 'string' ? responsibleStaffId : undefined,
     })
 
     res.json({
@@ -227,6 +228,24 @@ router.get('/movements', whiteLabelStockAccess, async (req: Request, res: Respon
       data: {
         movements,
       },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/stock/responsibles
+ * Returns hierarchical staff list with SIM counts for the responsible filter.
+ */
+router.get('/responsibles', whiteLabelStockAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const responsibles = await stockDashboardService.getStockResponsibles(venueId)
+
+    res.json({
+      success: true,
+      data: responsibles,
     })
   } catch (error) {
     next(error)
