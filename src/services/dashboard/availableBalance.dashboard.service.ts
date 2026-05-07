@@ -6,9 +6,8 @@ import { getEffectivePaymentConfig } from '@/services/organization-payment-confi
 import { calculateSettlementDate, findActiveSettlementConfig } from '../payments/settlementCalculation.service'
 import { addDays } from 'date-fns'
 import { formatInTimeZone } from 'date-fns-tz'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { getLastCloseoutDate } from './cashCloseout.dashboard.service'
-
-const DEFAULT_VENUE_TIMEZONE = 'America/Mexico_City'
 
 // Extended card type that includes CASH (for frontend compatibility)
 // CASH is not in Prisma enum but we treat it as a synthetic type
@@ -377,7 +376,7 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
     where: { id: venueId },
     select: { timezone: true },
   })
-  const venueTimezone = venueRecord?.timezone || DEFAULT_VENUE_TIMEZONE
+  const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
 
   // Get payments within date range
   const payments = await prisma.payment.findMany({
@@ -600,7 +599,7 @@ export async function getSettlementCalendar(
     where: { id: venueId },
     select: { timezone: true },
   })
-  const venueTimezone = venueRecord?.timezone || DEFAULT_VENUE_TIMEZONE
+  const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
 
   // Get card payments with transactions that have settlement dates in range
   const cardPayments = await prisma.payment.findMany({

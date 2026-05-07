@@ -14,6 +14,40 @@ import { getProvider } from '../../services/payments/provider-registry'
 // For booking widget + public booking page
 // ==========================================
 
+/**
+ * Whitelist of upfrontPolicy values stored on Product / ReservationSettings.
+ * Anything else (legacy NULLs, typos) collapses to 'inherit' so the resolver
+ * always falls back to the venue-wide type default.
+ */
+const UPFRONT_POLICY_VALUES = ['inherit', 'required', 'at_venue', 'optional'] as const
+type UpfrontPolicy = Exclude<(typeof UPFRONT_POLICY_VALUES)[number], 'inherit'>
+
+/**
+ * Resolve the effective upfront-payment policy for a product.
+ *
+ * Per-product override always wins (if not 'inherit'). Otherwise we use the
+ * venue-wide type default — Square's pattern: classes default to 'required',
+ * appointments to 'at_venue'. The legacy `depositMode` field stays untouched
+ * for the deposit calculator; this resolver is only for the new public
+ * booking UI's payment-method picker.
+ */
+export function resolveUpfrontPolicy(
+  product: { type?: string | null; upfrontPolicy?: string | null },
+  settings: { appointmentUpfrontDefault?: string | null; classUpfrontDefault?: string | null },
+): UpfrontPolicy {
+  const productPolicy = product.upfrontPolicy
+  if (productPolicy && productPolicy !== 'inherit' && (UPFRONT_POLICY_VALUES as readonly string[]).includes(productPolicy)) {
+    return productPolicy as UpfrontPolicy
+  }
+  const isClass = product.type === 'CLASS'
+  const fallback = isClass ? settings.classUpfrontDefault : settings.appointmentUpfrontDefault
+  if (fallback && (UPFRONT_POLICY_VALUES as readonly string[]).includes(fallback) && fallback !== 'inherit') {
+    return fallback as UpfrontPolicy
+  }
+  // Hard fallback so the resolver never returns 'inherit' to consumers.
+  return isClass ? 'required' : 'at_venue'
+}
+
 async function resolveVenueBySlug(venueSlug: string) {
   const venue = await prisma.venue.findFirst({
     where: { slug: venueSlug, active: true },
@@ -73,6 +107,15 @@ function getStripeChargeBounds() {
 
 /**
  * GET /public/venues/:venueSlug/info
+ *
+ * Each product returned includes:
+ * - `creditCost` (Phase 3) — null = follow legacy 1-credit-per-seat behavior;
+ *                            number = explicit credits-per-seat for this product.
+ * - `upfrontPolicy` (Phase 3) — RESOLVED policy ('required' | 'at_venue' | 'optional')
+ *                                that the widget uses to decide whether to show a card
+ *                                form before submitting the reservation. Already merged
+ *                                with venue defaults via resolveUpfrontPolicy() so the
+ *                                widget never has to reimplement the precedence logic.
  */
 export async function getVenueInfo(req: Request, res: Response, next: NextFunction) {
   try {
@@ -101,6 +144,9 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
             maxParticipants: true,
             layoutConfig: true,
             requireCreditForBooking: true,
+            // New Phase 3 fields — null/inherit by default for existing products.
+            creditCost: true,
+            upfrontPolicy: true,
           },
           orderBy: { name: 'asc' },
         },
@@ -109,11 +155,26 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
 
     const settings = await getReservationSettings(venue.id)
 
+    // Resolve upfrontPolicy per product server-side so the widget gets a
+    // ready-to-use string and doesn't reimplement the precedence rules.
+    const products = (venueInfo?.products ?? []).map(p => ({
+      ...p,
+      upfrontPolicy: resolveUpfrontPolicy(
+        { type: p.type, upfrontPolicy: p.upfrontPolicy },
+        {
+          appointmentUpfrontDefault: settings.payments.appointmentUpfrontDefault,
+          classUpfrontDefault: settings.payments.classUpfrontDefault,
+        },
+      ),
+    }))
+
     res.json({
       ...venueInfo,
+      products,
       timezone: venue.timezone || 'America/Mexico_City',
       publicBooking: settings.publicBooking,
       operatingHours: settings.operatingHours,
+      payments: settings.payments,
     })
   } catch (error) {
     next(error)
@@ -122,17 +183,131 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
 
 /**
  * GET /public/venues/:venueSlug/availability
+ *
+ * Query params (single-day mode — legacy):
+ * - date         YYYY-MM-DD in venue timezone (required if no dateFrom)
+ * - productId    optional: scope to one product
+ * - duration     optional: override slot duration in minutes
+ * - partySize    optional: party-size-aware filtering
+ * - type         optional: 'class' | 'appointment'
+ *
+ * Query params (range mode — used by /clases date-first listing):
+ * - dateFrom     YYYY-MM-DD inclusive
+ * - dateTo       YYYY-MM-DD inclusive (capped to dateFrom + 60d)
+ * - type         must be 'class' (range mode only supports class sessions today)
+ *
+ * Range-mode response: `{ dateFrom, dateTo, slots: [...] }` flat sorted by startsAt.
+ * Each slot includes `productId` + `productName` so the listing UI can label cards.
  */
 export async function getAvailability(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
-    const { date, duration, partySize, productId } = req.query as any
+    const { date, dateFrom, dateTo, duration, partySize, productId, type } = req.query as Record<string, string | undefined>
 
     const settings = await getReservationSettings(venue.id)
     const tz = venue.timezone || 'America/Mexico_City'
 
-    // Check if requesting availability for a CLASS product
+    // Whitelist the type filter so junk values don't trigger arbitrary code paths.
+    const flowType: 'class' | 'appointment' | null = type === 'class' || type === 'appointment' ? type : null
+
+    // ── Range mode (Phase 2 stretch — date-first class listing) ────────────
+    // Activated when caller passes dateFrom (and implicitly dateTo). Restricted
+    // to type=class so we don't accidentally fan out the operating-hours
+    // computation across 60 days, which would be expensive and almost never
+    // useful (appointments are picked one date at a time).
+    if (dateFrom) {
+      if (flowType !== 'class') {
+        throw new BadRequestError('Range mode requires type=class')
+      }
+      // YYYY-MM-DD validation — strict to keep the SQL query bounded.
+      const dateRe = /^\d{4}-\d{2}-\d{2}$/
+      if (!dateRe.test(dateFrom)) {
+        throw new BadRequestError('dateFrom must be YYYY-MM-DD')
+      }
+      const fromDate = new Date(`${dateFrom}T00:00:00Z`)
+      if (Number.isNaN(fromDate.getTime())) {
+        throw new BadRequestError('dateFrom is not a valid date')
+      }
+      // Default to +30 days when dateTo missing; cap at +60 days to avoid abuse.
+      let toDate: Date
+      if (dateTo) {
+        if (!dateRe.test(dateTo)) {
+          throw new BadRequestError('dateTo must be YYYY-MM-DD')
+        }
+        toDate = new Date(`${dateTo}T00:00:00Z`)
+        if (Number.isNaN(toDate.getTime())) {
+          throw new BadRequestError('dateTo is not a valid date')
+        }
+      } else {
+        toDate = new Date(fromDate)
+        toDate.setUTCDate(toDate.getUTCDate() + 30)
+      }
+      const maxTo = new Date(fromDate)
+      maxTo.setUTCDate(maxTo.getUTCDate() + 60)
+      if (toDate.getTime() > maxTo.getTime()) toDate = maxTo
+      if (toDate.getTime() < fromDate.getTime()) {
+        throw new BadRequestError('dateTo must be on or after dateFrom')
+      }
+
+      const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
+
+      // Single Prisma query across the whole window — no per-product fan-out.
+      // We then enrich with the same enrolled/capacity computation used by
+      // getClassSessionSlots() so response shape stays consistent.
+      const sessionsRaw = await prisma.classSession.findMany({
+        where: {
+          venueId: venue.id,
+          status: 'SCHEDULED',
+          ...(productId ? { productId } : { product: { type: 'CLASS', active: true } }),
+          startsAt: {
+            gte: new Date(`${dateFrom}T00:00:00`),
+            lte: new Date(`${toDate.toISOString().slice(0, 10)}T23:59:59.999`),
+          },
+        },
+        include: {
+          product: { select: { id: true, name: true } },
+          assignedStaff: { select: { firstName: true, lastName: true } },
+          reservations: {
+            where: { status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] } },
+            select: { partySize: true, spotIds: true },
+          },
+        },
+        orderBy: { startsAt: 'asc' },
+      })
+
+      const slots = sessionsRaw.map(session => {
+        const enrolled = session.reservations.reduce((sum, r) => sum + r.partySize, 0)
+        const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
+        const remaining = Math.max(0, effectiveCapacity - enrolled)
+        const takenSpotIds: string[] = []
+        for (const r of session.reservations) {
+          if (r.spotIds && r.spotIds.length > 0) takenSpotIds.push(...r.spotIds)
+        }
+        return {
+          startsAt: session.startsAt,
+          endsAt: session.endsAt,
+          available: remaining > 0,
+          classSessionId: session.id,
+          capacity: effectiveCapacity,
+          enrolled,
+          remaining,
+          takenSpotIds,
+          instructor: session.assignedStaff ?? null,
+          productId: session.product.id,
+          productName: session.product.name,
+        }
+      })
+
+      return res.json({
+        dateFrom,
+        dateTo: toDate.toISOString().slice(0, 10),
+        slots,
+      })
+    }
+
+    // ── Single-day mode (legacy + per-product flow) ────────────────────────
+    // Branch 1: product-scoped CLASS availability (existing behavior preserved).
     if (productId) {
       const product = await prisma.product.findFirst({
         where: { id: productId, venueId: venue.id, active: true },
@@ -141,7 +316,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
 
       if (product?.type === 'CLASS') {
         const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
-        const classSlots = await availabilityService.getClassSessionSlots(venue.id, productId, date, onlinePercent, tz)
+        const classSlots = await availabilityService.getClassSessionSlots(venue.id, productId, date!, onlinePercent, tz)
         return res.json({
           date,
           slots: classSlots.map(s => ({
@@ -159,16 +334,45 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       }
     }
 
-    // Default: operating-hours-based availability (APPOINTMENTS_SERVICE, EVENT)
+    // Branch 2: type=class without productId — aggregate sessions across all
+    // CLASS products of the venue for a SINGLE date.
+    if (flowType === 'class' && !productId) {
+      const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
+      const classProducts = await prisma.product.findMany({
+        where: { venueId: venue.id, active: true, type: 'CLASS' },
+        select: { id: true, name: true },
+      })
+      const perProduct = await Promise.all(
+        classProducts.map(async p => {
+          const slots = await availabilityService.getClassSessionSlots(venue.id, p.id, date!, onlinePercent, tz)
+          return slots.map(s => ({
+            startsAt: s.startsAt,
+            endsAt: s.endsAt,
+            available: s.available,
+            classSessionId: s.classSessionId,
+            capacity: s.capacity,
+            enrolled: s.enrolled,
+            remaining: s.remaining,
+            takenSpotIds: s.takenSpotIds ?? [],
+            instructor: s.instructor ?? null,
+            productId: p.id,
+            productName: p.name,
+          }))
+        }),
+      )
+      const merged = perProduct.flat().sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime())
+      return res.json({ date, slots: merged })
+    }
+
+    // Branch 3 (default): operating-hours availability for appointments / services.
     const slots = await availabilityService.getAvailableSlots(
       venue.id,
-      date,
+      date!,
       { duration: duration ? Number(duration) : undefined, partySize: partySize ? Number(partySize) : undefined, productId },
       settings,
       tz,
     )
 
-    // Public response: simplified (no internal table/staff IDs)
     res.json({
       date,
       slots: slots.map(s => ({

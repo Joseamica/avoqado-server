@@ -1127,6 +1127,24 @@ model Product {
   allowCreditRedemption   Boolean @default(true) // Whether this product accepts credit pack redemptions
   requireCreditForBooking Boolean @default(false) // Whether booking requires spending a credit (blocks free bookings)
 
+  // Hybrid pricing per product (Phase 3 of public booking redesign).
+  //
+  // `price` (above) acts as the cash price. `creditCost` and `upfrontPolicy`
+  // let venues offer the same product as cash-or-credits with type-aware
+  // payment defaults. None of these fields are required at create time —
+  // existing products keep working with NULL/default values.
+  //
+  // creditCost     null = legacy behavior (1 credit per seat when redeeming a pack)
+  //                0    = product never consumes credits even if customer has them
+  //                >0   = N credits per seat
+  // upfrontPolicy  'inherit' (default) → use ReservationSettings default for the
+  //                                       product type (class vs appointment).
+  //                'required'           → cash payment captured before booking confirms.
+  //                'at_venue'           → customer pays on arrival; reservation confirms instantly.
+  //                'optional'           → customer chooses at checkout.
+  creditCost    Int? // null = follow legacy 1-credit-per-seat behavior
+  upfrontPolicy String? @default("inherit")
+
   // General-purpose duration (any product type, e.g., haircut = 45 min)
   durationMinutes Int? // Duration in minutes (optional, for scheduling/display)
 
@@ -7959,12 +7977,23 @@ model ReservationSettings {
   pacingMaxPerSlot      Int? // null = no pacing limit
   onlineCapacityPercent Int  @default(100)
 
-  // Deposits
+  // Deposits (legacy venue-wide control — kept for backwards compatibility)
   depositMode          String   @default("none") // none | card_hold | deposit | prepaid
   depositFixedAmount   Decimal? @db.Decimal(10, 2)
   depositPercentage    Int? // percentage of service price
   depositPartySizeGte  Int? // require deposit for parties >= this size
   depositPaymentWindow Int? // minutes to complete payment
+
+  // Type-aware payment defaults (Phase 3 of public booking redesign).
+  //
+  // Override depositMode per product TYPE — Square's pattern where classes
+  // default to pay-now and appointments default to pay-at-venue. A product
+  // with upfrontPolicy='inherit' (the default) resolves against these.
+  // A product whose upfrontPolicy is set explicitly always wins.
+  //
+  // Values: 'required' | 'at_venue' | 'optional'
+  appointmentUpfrontDefault String @default("at_venue")
+  classUpfrontDefault       String @default("required")
 
   // Waitlist
   waitlistEnabled      Boolean @default(true)

@@ -1,5 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
+import prisma from '../../utils/prismaClient'
 import * as availableBalanceService from '../../services/dashboard/availableBalance.dashboard.service'
+import { DEFAULT_TIMEZONE, venueStartOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
 import { AuthenticationError } from '../../errors/AppError'
 
@@ -169,7 +171,12 @@ export async function getSettlementCalendar(
     const { venueId } = req.params
     const { from, to } = req.query
 
-    // Calculate default date range: next 30 days
+    // Calculate default date range: from start of today (venue-local) → next 30 days.
+    // Using `new Date()` as the lower bound excluded same-day settlements whose
+    // estimatedSettlementDate timestamp had already passed the current hour
+    // (e.g., a payment that settles "today at 10am" is dropped if it's now 3pm),
+    // which is wrong: users expect to see all of today's settlements regardless
+    // of the wall-clock hour.
     let dateRange: { from: Date; to: Date }
 
     if (from && to) {
@@ -178,10 +185,15 @@ export async function getSettlementCalendar(
         to: new Date(to),
       }
     } else {
-      const now = new Date()
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        select: { timezone: true },
+      })
+      const venueTimezone = venue?.timezone || DEFAULT_TIMEZONE
+      const startOfToday = venueStartOfDay(venueTimezone)
       dateRange = {
-        from: now,
-        to: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000), // Next 30 days
+        from: startOfToday,
+        to: new Date(startOfToday.getTime() + 30 * 24 * 60 * 60 * 1000),
       }
     }
 

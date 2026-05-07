@@ -6013,6 +6013,42 @@ Los datos que encontré muestran: ${JSON.stringify(execution.result)}
     return hasDataIndicators
   }
 
+  private isConversationalOnlyMessage(normalizedMessage: string): boolean {
+    const compact = normalizedMessage.replace(/[!?.]+$/g, '').trim()
+
+    return (
+      /^(hola|hello|hi|buenos dias|buenas tardes|buenas noches)$/.test(compact) ||
+      /^(gracias|thanks|ok|okay|perfecto|listo|sale|va|de acuerdo)(\s+(por|todo|la info|los datos|tu ayuda|ayuda|eso).*)?$/.test(compact) ||
+      /^(adios|bye|chau|hasta luego)(\s+.*)?$/.test(compact) ||
+      /^(si|no)$/.test(compact)
+    )
+  }
+
+  private hasBusinessDataSignal(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ')
+
+    if (!normalizedMessage || this.isConversationalOnlyMessage(normalizedMessage)) {
+      return false
+    }
+
+    const hasBusinessTerm =
+      /\b(ventas?|vendi|vendido|ingresos?|facturad[oa]|tickets?|orden(?:es)?|pedidos?|pagos?|propinas?|productos?|menus?|categorias?|clientes?|registros?|resenas?|reviews?|estrellas?|calificaciones?|meseros?|staff|personal|emplead[oa]s?|turnos?|shifts?|inventario|stock|recetas?|insumos?|materia prima|mesas?|reservaciones?|reservas?|clases?|comisiones?|ganancias?|margen(?:es)?|rentabilidad|metodos? de pago|formas? de pago)\b/.test(
+        normalizedMessage,
+      )
+
+    if (hasBusinessTerm) {
+      return true
+    }
+
+    const hasAnalyticsTerm =
+      /\b(cuant[oa]s?|que|cual(?:es)?|cuando|donde|como|muestr(?:a|ame)|dame|lista(?:r)?|top|ranking|mejor|peor|mas|menos|promedio|total|desglose|compar(?:a|ar)|vs|tendencia|historico|reporte|analisis)\b/.test(
+        normalizedMessage,
+      )
+    const hasBusinessContext = /\b(negocio|restaurante|sucursal|venue|dashboard)\b/.test(normalizedMessage)
+
+    return hasAnalyticsTerm && hasBusinessContext
+  }
+
   private getOperationalHelpResponse(message: string): OperationalHelpResponse | null {
     const normalizedMessage = this.normalizeTextForMatch(message)
     const isInventoryDataQuery =
@@ -6799,9 +6835,11 @@ COMPLEJO (isSimple=false, intent="complex") — necesita SQL generado:
 - Cross-reference entre tablas: "quién vende más pero tiene peores reseñas", "producto estrella y en qué mesa se pide más"
 - Órdenes canceladas y quién las canceló
 - Combinaciones de productos frecuentes
+- Análisis temporal de clientes nuevos: "cuándo recibo más clientes nuevos", "qué día llegan más clientes nuevos", "clientes nuevos por hora"
 
 CONVERSACIONAL (isSimple=false, intent="conversational"):
 SOLO saludos, agradecimientos, despedidas, mensajes que NO piden datos.
+NUNCA uses conversational si el mensaje menciona datos del negocio como ventas, productos, clientes, reseñas, pedidos, pagos, inventario, recetas, staff o turnos. Si es ambiguo, usa complex.
 
 REGLAS CRÍTICAS:
 1. "cuánto vendí hoy/ayer/esta semana/este mes" → sales (SIMPLE). "hoy", "ayer", "esta semana", "este mes", "la semana pasada" son dateRanges relativos, NO fechas específicas
@@ -6873,6 +6911,34 @@ Responde SOLO JSON (sin markdown):
 
       // Handle conversational intent
       if (parsed.intent === 'conversational') {
+        if (this.hasBusinessDataSignal(message)) {
+          logger.warn('LLM router classified business data message as conversational; overriding to data pipeline', {
+            message: message.slice(0, 160),
+          })
+
+          const deterministicClassification = this.classifyIntent(message)
+          if (deterministicClassification.isSimpleQuery && deterministicClassification.intent) {
+            return {
+              classification: {
+                ...deterministicClassification,
+                reason: `${deterministicClassification.reason}; LLM conversational override because business data signal was detected`,
+              },
+              tokenUsage,
+            }
+          }
+
+          return {
+            classification: {
+              ...deterministicClassification,
+              isSimpleQuery: false,
+              confidence: Math.max(deterministicClassification.confidence, Math.min(0.8, Math.max(0, Number(parsed.confidence || 0.5)))),
+              reason: 'LLM classified as conversational, but business data signal detected → TextToSQL pipeline',
+              isConversational: false,
+            },
+            tokenUsage,
+          }
+        }
+
         return {
           classification: {
             isSimpleQuery: false,

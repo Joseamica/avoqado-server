@@ -13,7 +13,7 @@
 // Mock OPENAI_API_KEY before importing service
 process.env.OPENAI_API_KEY = 'test-api-key-for-unit-tests'
 
-import { describe, it, expect } from '@jest/globals'
+import { afterEach, describe, it, expect, jest } from '@jest/globals'
 import textToSqlService from '@/services/dashboard/text-to-sql-assistant.service'
 
 describe('TextToSqlAssistantService - Unit Tests', () => {
@@ -238,6 +238,67 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
 
       expect(classification.isSimpleQuery).toBe(false)
       expect(classification.intent).toBeUndefined()
+    })
+  })
+
+  describe('LLM Router Conversational Guard', () => {
+    const serviceWithInternals = service as any
+    const originalCreate = serviceWithInternals.openai.chat.completions.create
+
+    afterEach(() => {
+      serviceWithInternals.openai.chat.completions.create = originalCreate
+    })
+
+    const mockConversationalRouter = () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: false,
+                intent: 'conversational',
+                dateRange: null,
+                wasDateExplicit: false,
+                confidence: 0.9,
+                reason: 'saludo o mensaje conversacional',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+    }
+
+    it('should not accept conversational routing for customer analytics questions', async () => {
+      mockConversationalRouter()
+
+      const routed = await serviceWithInternals.routeWithLLM('¿Cuándo recibo más clientes nuevos?')
+
+      expect(routed.classification.isConversational).not.toBe(true)
+      expect(routed.classification.isSimpleQuery).toBe(false)
+      expect(routed.classification.reason).toContain('business data')
+    })
+
+    it('should not accept conversational routing for product topic messages', async () => {
+      mockConversationalRouter()
+
+      const routed = await serviceWithInternals.routeWithLLM('algo de productos')
+
+      expect(routed.classification.isConversational).not.toBe(true)
+      expect(routed.classification.isSimpleQuery).toBe(false)
+      expect(routed.classification.reason).toContain('business data')
+    })
+
+    it('should keep real greetings conversational when the router classifies them that way', async () => {
+      mockConversationalRouter()
+
+      const routed = await serviceWithInternals.routeWithLLM('gracias')
+
+      expect(routed.classification.isConversational).toBe(true)
     })
   })
 

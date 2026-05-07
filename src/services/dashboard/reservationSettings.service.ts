@@ -55,6 +55,16 @@ export interface ReservationConfig {
     requiredForPartySizeGte: number | null
     paymentWindowHrs: number | null
   }
+  /**
+   * Type-aware upfront payment defaults (Phase 3 of public booking redesign).
+   * Square's pattern: classes default to 'required' (pay-now to hold the spot),
+   * appointments default to 'at_venue' (pay on arrival). Per-product Product.upfrontPolicy
+   * overrides these — see resolveUpfrontPolicy() in reservation.public.controller.ts.
+   */
+  payments: {
+    appointmentUpfrontDefault: 'required' | 'at_venue' | 'optional'
+    classUpfrontDefault: 'required' | 'at_venue' | 'optional'
+  }
   cancellation: {
     allowCustomerCancel: boolean
     minHoursBeforeStart: number | null
@@ -160,6 +170,11 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       fixedAmount: settings.depositFixedAmount ? Number(settings.depositFixedAmount) : null,
       requiredForPartySizeGte: settings.depositPartySizeGte,
       paymentWindowHrs: settings.depositPaymentWindow,
+    },
+    payments: {
+      appointmentUpfrontDefault:
+        (settings.appointmentUpfrontDefault as ReservationConfig['payments']['appointmentUpfrontDefault']) ?? 'at_venue',
+      classUpfrontDefault: (settings.classUpfrontDefault as ReservationConfig['payments']['classUpfrontDefault']) ?? 'required',
     },
     cancellation: {
       allowCustomerCancel: settings.allowCustomerCancel,
@@ -341,6 +356,10 @@ function getDefaultConfig(): ReservationConfig {
       fixedAmount: null,
       requiredForPartySizeGte: null,
       paymentWindowHrs: null,
+    },
+    payments: {
+      appointmentUpfrontDefault: 'at_venue',
+      classUpfrontDefault: 'required',
     },
     cancellation: {
       allowCustomerCancel: true,
