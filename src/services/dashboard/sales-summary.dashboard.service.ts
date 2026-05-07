@@ -191,16 +191,18 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     },
   })
 
-  // 6. Platform Fees (Avoqado fees) - From VenueTransaction
-  const platformFeesResult = await prisma.venueTransaction.aggregate({
-    where: {
-      venueId,
-      ...dateFilter,
-    },
-    _sum: {
-      feeAmount: true,
-    },
-  })
+  // 6. Platform Fees (Avoqado fees) - From TransactionCost.venueChargeAmount
+  // (joined via Payment because TransactionCost has no venueId column).
+  // VenueTransaction.feeAmount is currently not synced from TransactionCost,
+  // so reading the canonical value from TransactionCost avoids reporting $0.
+  const platformFeesRows = await prisma.$queryRaw<Array<{ sum_fee: number }>>`
+    SELECT COALESCE(SUM(tc."venueChargeAmount"), 0)::float AS sum_fee
+    FROM "TransactionCost" tc
+    JOIN "Payment" p ON p.id = tc."paymentId"
+    WHERE p."venueId" = ${venueId}
+      AND p."createdAt" >= ${parsedStartDate}
+      AND p."createdAt" <= ${parsedEndDate}
+  `
 
   // 7. Staff Commissions (paid to employees) - From CommissionCalculation
   const staffCommissionsResult = await prisma.commissionCalculation.aggregate({
@@ -239,7 +241,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   const refunds = Math.abs(Number(refundsResult._sum.amount || 0) + Number(refundsResult._sum.tipAmount || 0))
   const taxes = Number(grossSalesResult._sum.taxAmount || 0)
   const tips = Number(tipsResult._sum.tipAmount || 0)
-  const platformFees = Number(platformFeesResult._sum.feeAmount || 0)
+  const platformFees = Number(platformFeesRows[0]?.sum_fee || 0)
   const staffCommissions = Number(staffCommissionsResult._sum.netCommission || 0)
   const deferredSales = Number(deferredResult._sum.remainingBalance || 0)
   // Service costs = any revenue beyond item sales (delivery fees, service charges, etc.)
@@ -460,17 +462,22 @@ async function calculateTimePeriodMetrics(
     ORDER BY ${orderByExpression}
   `
 
-  // Query platform fees (Avoqado fees) grouped by period
+  // Query platform fees (Avoqado fees) grouped by period.
+  // Source: TransactionCost.venueChargeAmount joined to Payment for venueId/date.
+  // VenueTransaction.feeAmount is not currently synced from TransactionCost.
+  const platformFeesGroupBy = groupByExpression.replace(/"createdAt"/g, 'p."createdAt"')
+  const platformFeesOrderBy = orderByExpression.replace(/"createdAt"/g, 'p."createdAt"')
   const platformFeesQuery = `
     SELECT
-      ${groupByExpression} as period,
-      COALESCE(SUM("feeAmount"), 0) as platform_fees
-    FROM "VenueTransaction"
-    WHERE "venueId" = $1
-      AND "createdAt" >= $2
-      AND "createdAt" <= $3
-    GROUP BY ${groupByExpression}
-    ORDER BY ${orderByExpression}
+      ${platformFeesGroupBy} as period,
+      COALESCE(SUM(tc."venueChargeAmount"), 0) as platform_fees
+    FROM "TransactionCost" tc
+    JOIN "Payment" p ON p.id = tc."paymentId"
+    WHERE p."venueId" = $1
+      AND p."createdAt" >= $2
+      AND p."createdAt" <= $3
+    GROUP BY ${platformFeesGroupBy}
+    ORDER BY ${platformFeesOrderBy}
   `
 
   // Query staff commissions grouped by period

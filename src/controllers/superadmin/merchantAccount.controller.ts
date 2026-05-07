@@ -1250,17 +1250,21 @@ export async function batchAutoFetchBlumonCredentials(req: Request, res: Respons
               }
             }
 
-            // Create settlement configurations if enabled
+            // Create settlement configurations.
+            // Always create (using Blumon defaults if not explicitly disabled
+            // or omitted) so every Blumon merchant has a settlement schedule.
             let settlementConfigsCreated = 0
-            if (settlementConfig?.enabled) {
+            if (settlementConfig?.enabled !== false) {
               try {
+                const cfg = settlementConfig ?? {}
                 const cardTypes = ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL', 'OTHER'] as const
+                // Blumon defaults: DEBIT/CREDIT 1d, AMEX 3d, INTERNATIONAL 5d, OTHER 2d
                 const dayMapping = {
-                  DEBIT: settlementConfig.debitDays ?? 1,
-                  CREDIT: settlementConfig.creditDays ?? 2,
-                  AMEX: settlementConfig.amexDays ?? 3,
-                  INTERNATIONAL: settlementConfig.internationalDays ?? 3,
-                  OTHER: settlementConfig.otherDays ?? 2,
+                  DEBIT: cfg.debitDays ?? 1,
+                  CREDIT: cfg.creditDays ?? 1,
+                  AMEX: cfg.amexDays ?? 3,
+                  INTERNATIONAL: cfg.internationalDays ?? 5,
+                  OTHER: cfg.otherDays ?? 2,
                 }
 
                 await settlementConfigService.bulkCreateSettlementConfigurations(
@@ -1268,9 +1272,9 @@ export async function batchAutoFetchBlumonCredentials(req: Request, res: Respons
                   cardTypes.map(cardType => ({
                     cardType,
                     settlementDays: dayMapping[cardType],
-                    settlementDayType: settlementConfig.dayType || 'BUSINESS_DAYS',
-                    cutoffTime: settlementConfig.cutoffTime || '23:00',
-                    cutoffTimezone: settlementConfig.cutoffTimezone || 'America/Mexico_City',
+                    settlementDayType: cfg.dayType || 'BUSINESS_DAYS',
+                    cutoffTime: cfg.cutoffTime || '23:00',
+                    cutoffTimezone: cfg.cutoffTimezone || 'America/Mexico_City',
                   })),
                   new Date(),
                   (req as any).user?.uid,
@@ -1935,16 +1939,20 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       created: !!pricingStructure,
     })
 
-    // Step 7: Create settlement configurations
+    // Step 7: Create settlement configurations.
+    // Always create them (using Blumon defaults if the client didn't send any)
+    // so every venue with a merchant account has a valid settlement schedule.
     let settlementsCreated = 0
-    if (settlementConfig) {
+    {
+      const cfg = settlementConfig ?? {}
       const cardTypes = ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL', 'OTHER'] as const
+      // Blumon defaults: DEBIT/CREDIT 1d, AMEX 3d, INTERNATIONAL 5d, OTHER 2d
       const daysMap: Record<string, number> = {
-        DEBIT: settlementConfig.debitDays ?? 1,
-        CREDIT: settlementConfig.creditDays ?? 2,
-        AMEX: settlementConfig.amexDays ?? 3,
-        INTERNATIONAL: settlementConfig.internationalDays ?? 3,
-        OTHER: settlementConfig.otherDays ?? 2,
+        DEBIT: cfg.debitDays ?? 1,
+        CREDIT: cfg.creditDays ?? 1,
+        AMEX: cfg.amexDays ?? 3,
+        INTERNATIONAL: cfg.internationalDays ?? 5,
+        OTHER: cfg.otherDays ?? 2,
       }
 
       for (const cardType of cardTypes) {
@@ -1953,9 +1961,9 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
             merchantAccountId: merchantAccountId,
             cardType,
             settlementDays: daysMap[cardType],
-            settlementDayType: settlementConfig.dayType || 'BUSINESS_DAYS',
-            cutoffTime: settlementConfig.cutoffTime || '23:00',
-            cutoffTimezone: settlementConfig.cutoffTimezone || 'America/Mexico_City',
+            settlementDayType: cfg.dayType || 'BUSINESS_DAYS',
+            cutoffTime: cfg.cutoffTime || '23:00',
+            cutoffTimezone: cfg.cutoffTimezone || 'America/Mexico_City',
             effectiveFrom: new Date(),
           })
           settlementsCreated++
