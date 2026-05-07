@@ -130,7 +130,7 @@ describe('TPV Auth Service - Venue-Specific PIN', () => {
         // JWT tokens
         accessToken: 'mock-access-token',
         refreshToken: 'mock-refresh-token',
-        expiresIn: 86400,
+        expiresIn: 2592000,
         tokenType: 'Bearer',
 
         // Metadata
