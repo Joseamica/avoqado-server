@@ -138,6 +138,34 @@ function getRateForTransactionType(structure: any, transactionType: TransactionC
 }
 
 /**
+ * Calcula la tasa EFECTIVA aplicada al monto de la transacción, respetando
+ * el flag `includesTax` de la pricing/cost structure.
+ *
+ *   - structure.includesTax === false → tasa BASE; aplicar tax (default 16%).
+ *   - structure.includesTax === true  → tasa final; usar as-is.
+ *   - structure.includesTax === null  → legacy; tratar como `true` para
+ *     preservar el comportamiento histórico (no se sumaba tax).
+ *
+ * `taxRate` se persiste por estructura (default 0.16 = IVA México) — leerlo
+ * de la columna evita asumir 16% hardcoded por si en el futuro hay venues
+ * con jurisdicciones diferentes.
+ */
+function applyTaxIfNeeded(structure: any, baseRate: number): number {
+  if (structure?.includesTax === false) {
+    // Ojo: NO usar `structure.taxRate ? ... : 0.16` — un taxRate=0 (jurisdicción
+    // sin IVA) es válido y caería en el fallback. Chequeamos null/undefined
+    // explícitamente. NaN se cubre con isFinite para protegerse de strings.
+    let tax = 0.16
+    if (structure.taxRate !== null && structure.taxRate !== undefined) {
+      const parsed = parseFloat(structure.taxRate.toString())
+      if (Number.isFinite(parsed)) tax = parsed
+    }
+    return baseRate * (1 + tax)
+  }
+  return baseRate
+}
+
+/**
  * Main function: Create TransactionCost record for a payment
  *
  * This function:
@@ -286,13 +314,17 @@ export async function createTransactionCost(paymentId: string): Promise<{
   let venueFixedFee = 0
 
   if (payment.type !== 'TEST') {
-    // Get rates from cost/pricing structures
-    providerRate = getRateForTransactionType(providerCostStructure!, transactionType)
+    // Get rates from cost/pricing structures. La tasa efectiva considera
+    // el flag `includesTax`: si la estructura tiene includesTax=false, la
+    // tasa guardada es BASE y se le aplica IVA encima al calcular el fee.
+    const providerBaseRate = getRateForTransactionType(providerCostStructure!, transactionType)
+    providerRate = applyTaxIfNeeded(providerCostStructure!, providerBaseRate)
     providerFixedFee = providerCostStructure!.fixedCostPerTransaction
       ? parseFloat(providerCostStructure!.fixedCostPerTransaction.toString())
       : 0
 
-    venueRate = getRateForTransactionType(venuePricingStructure!, transactionType)
+    const venueBaseRate = getRateForTransactionType(venuePricingStructure!, transactionType)
+    venueRate = applyTaxIfNeeded(venuePricingStructure!, venueBaseRate)
     venueFixedFee = venuePricingStructure!.fixedFeePerTransaction ? parseFloat(venuePricingStructure!.fixedFeePerTransaction.toString()) : 0
   }
 

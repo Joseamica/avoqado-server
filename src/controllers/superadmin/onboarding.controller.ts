@@ -308,6 +308,8 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
             creditRate: new Prisma.Decimal(payload.pricing.creditRate),
             amexRate: new Prisma.Decimal(payload.pricing.amexRate),
             internationalRate: new Prisma.Decimal(payload.pricing.internationalRate),
+            includesTax: (payload.pricing as any).includesTax ?? null,
+            ...((payload.pricing as any).taxRate !== undefined ? { taxRate: new Prisma.Decimal((payload.pricing as any).taxRate) } : {}),
             fixedFeePerTransaction: payload.pricing.fixedFeePerTransaction
               ? new Prisma.Decimal(payload.pricing.fixedFeePerTransaction)
               : null,

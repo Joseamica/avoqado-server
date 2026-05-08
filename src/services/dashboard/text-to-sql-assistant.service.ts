@@ -376,7 +376,7 @@ interface BusinessOverviewPlannerOutput {
 interface OperationalHelpResponse {
   response: string
   suggestions: string[]
-  topic: 'permissions' | 'menu' | 'inventory' | 'commissions' | 'shifts' | 'general'
+  topic: 'permissions' | 'menu' | 'inventory' | 'commissions' | 'shifts' | 'team' | 'general'
 }
 
 class TextToSqlAssistantService {
@@ -1810,6 +1810,15 @@ Ejemplos de respuestas CORRECTAS:
         }
       }
 
+      // Step 0.1a: Deterministic operational help routes before semantic classifier.
+      // The semantic classifier can over-flag harmless how-to questions such as
+      // "¿Cómo agrego a alguien a mi equipo?". Explicit prompt-injection still
+      // wins above through the regex pre-validation.
+      const earlyOperationalHelp = createProductIntentRequested ? null : this.getOperationalHelpResponse(query.message)
+      if (earlyOperationalHelp) {
+        return await this.buildOperationalHelpResponse(query, earlyOperationalHelp, startTime, sessionId)
+      }
+
       // Step 0.1b: Semantic Injection Detection (language-agnostic, runs only when regex didn't block)
       // Uses gpt-4o-mini to classify intent in ANY language. ~$0.0001/call, 3s timeout, fails open.
       // Checks BOTH the message AND conversation history entries for injection attempts.
@@ -2100,47 +2109,6 @@ Ejemplos de respuestas CORRECTAS:
       // Step 0.2: CRUD intent bridge (MVP) - create product with guided fields
       if (CHATBOT_MUTATIONS_ENABLED && this.detectCreateProductIntent(query.message)) {
         return await this.handleCreateProductCollectAction(query, startTime, sessionId)
-      }
-
-      // Step 0.3: Operational help intent (how-to questions about dashboard configuration, not analytics).
-      const operationalHelp = this.getOperationalHelpResponse(query.message)
-      if (operationalHelp) {
-        logger.info('🧭 Processing operational help message (non-analytics)', {
-          message: query.message,
-          venueId: query.venueId,
-          topic: operationalHelp.topic,
-        })
-
-        let trainingDataId: string | undefined
-        try {
-          trainingDataId = await this.learningService.recordChatInteraction({
-            venueId: query.venueId,
-            userId: query.userId,
-            userQuestion: query.message,
-            aiResponse: operationalHelp.response,
-            confidence: 0.93,
-            executionTime: Date.now() - startTime,
-            rowsReturned: 0,
-            sessionId,
-          })
-        } catch (learningError) {
-          logger.warn('🧠 Failed to record operational help interaction:', learningError)
-        }
-
-        return {
-          response: operationalHelp.response,
-          confidence: 0.93,
-          metadata: {
-            queryGenerated: false,
-            queryExecuted: false,
-            dataSourcesUsed: ['dashboard.help'],
-            routedTo: 'SharedQueryService',
-            riskLevel: 'low',
-            reasonCode: 'operational_help_routed',
-          },
-          suggestions: operationalHelp.suggestions,
-          trainingDataId,
-        }
       }
 
       // ═══════════════════════════════════════════════════════════
@@ -3472,6 +3440,50 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     }
   }
 
+  private async buildOperationalHelpResponse(
+    query: TextToSqlQuery,
+    operationalHelp: OperationalHelpResponse,
+    startTime: number,
+    sessionId: string,
+  ): Promise<TextToSqlResponse> {
+    logger.info('🧭 Processing operational help message (non-analytics)', {
+      message: query.message,
+      venueId: query.venueId,
+      topic: operationalHelp.topic,
+    })
+
+    let trainingDataId: string | undefined
+    try {
+      trainingDataId = await this.learningService.recordChatInteraction({
+        venueId: query.venueId,
+        userId: query.userId,
+        userQuestion: query.message,
+        aiResponse: operationalHelp.response,
+        confidence: 0.93,
+        executionTime: Date.now() - startTime,
+        rowsReturned: 0,
+        sessionId,
+      })
+    } catch (learningError) {
+      logger.warn('🧠 Failed to record operational help interaction:', learningError)
+    }
+
+    return {
+      response: operationalHelp.response,
+      confidence: 0.93,
+      metadata: {
+        queryGenerated: false,
+        queryExecuted: false,
+        dataSourcesUsed: ['dashboard.help'],
+        routedTo: 'SharedQueryService',
+        riskLevel: 'low',
+        reasonCode: 'operational_help_routed',
+      },
+      suggestions: operationalHelp.suggestions,
+      trainingDataId,
+    }
+  }
+
   private detectUserLanguage(message: string): 'es' | 'en' {
     const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
     const englishSignals =
@@ -3535,6 +3547,25 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     }
 
     return null
+  }
+
+  private isStrategicGrowthQuestion(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
+    if (!normalizedMessage) return false
+
+    const hasBusinessMetric = /\b(ventas?|ingresos?|revenue|sales|ticket|ordenes?|pedidos?|clientes?|customers?|negocio|business)\b/.test(
+      normalizedMessage,
+    )
+    const hasGrowthGoal =
+      /\b(incrementar|aumentar|subir|mejorar|crecer|levantar|impulsar|optimizar|maximizar|vender mas|mas ventas|increase|grow|boost|improve|more sales)\b/.test(
+        normalizedMessage,
+      )
+    const asksForAction =
+      /\b(que tengo que hacer|que debo hacer|que hago|como puedo|recomiend|recomendacion|estrategia|plan|acciones?|oportunidades?|calculo dificil|analisis|ayudame|what should|how can|recommend|strategy|action plan)\b/.test(
+        normalizedMessage,
+      )
+
+    return hasBusinessMetric && hasGrowthGoal && asksForAction
   }
 
   private extractProductComparisonTerms(message: string): { leftTerm: string; rightTerm: string } | null {
@@ -6338,6 +6369,35 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       }
     }
 
+    const teamSignal =
+      /\b(equipo|staff|usuarios?|miembros?|colaboradores?|emplead[oa]s?|team|users?|members?|employees?)\b/.test(normalizedMessage) &&
+      /\b(agreg[oa]?r?|anadir|añadir|invitar|invita|alta|crear|creo|add|invite|create)\b/.test(normalizedMessage)
+    if (teamSignal) {
+      return {
+        topic: 'team',
+        response:
+          language === 'en'
+            ? [
+                'To add someone to your team, go to `Equipo` in the dashboard.',
+                '1. Click `Invitar usuario`.',
+                '2. Enter their email and choose their role.',
+                '3. Send the invitation. That person will receive the steps to create their access.',
+                'If you need custom access, first configure it in `Configuración -> Roles y permisos`.',
+              ].join('\n')
+            : [
+                'Para agregar a alguien a tu equipo, entra a `Equipo` en el dashboard.',
+                '1. Haz clic en `Invitar usuario`.',
+                '2. Escribe su correo y elige el rol que tendrá.',
+                '3. Envía la invitación. Esa persona recibirá los pasos para crear su acceso.',
+                'Si necesitas accesos personalizados, primero configúralos en `Configuración -> Roles y permisos`.',
+              ].join('\n'),
+        suggestions:
+          language === 'en'
+            ? ['How do I configure roles and permissions?', 'What role should I assign to a waiter?', 'How do I remove a team member?']
+            : ['¿Cómo configuro roles y permisos?', '¿Qué rol le asigno a un mesero?', '¿Cómo elimino a alguien de mi equipo?'],
+      }
+    }
+
     const menuSignal = /\b(menu|menú|productos?|categorias?|modificadores?)\b/.test(normalizedMessage)
     if (menuSignal) {
       return {
@@ -6611,6 +6671,18 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
 
     // Extract date range with explicit flag (for transparency in responses)
     const { dateRange, wasExplicit } = this.extractDateRangeWithExplicit(lowerMessage)
+
+    if (this.isStrategicGrowthQuestion(message)) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'businessOverview',
+        dateRange: effectiveDateRange,
+        confidence: 0.93,
+        reason: `Detected strategic growth question with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
+      }
+    }
 
     const asksRecipeUsage =
       /\b(recetas?|recipe)\b/.test(normalizedMessage) &&
@@ -7092,7 +7164,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - activeShifts: turnos activos, quién trabaja AHORA, quién está en turno (dateRange=null). SOLO para saber quién está trabajando en este momento
 - profitAnalysis: utilidad, márgenes, ganancias, costos
 - paymentMethodBreakdown: métodos de pago, efectivo vs tarjeta, desglose pagos
-- businessOverview: resumen general, cómo va el negocio
+- businessOverview: resumen general, cómo va el negocio, qué hacer para incrementar/aumentar/mejorar ventas, recomendaciones, estrategia, plan de acción
 
 NO SOPORTADO (isSimple=false, intent="unsupported") — no hay herramienta registrada:
 - Comparaciones (A vs B), desglose POR dimensión (por categoría/hora/día/mesero)
@@ -7289,6 +7361,21 @@ Responde SOLO JSON (sin markdown):
       const finalDateRange = requiresDateRange ? (parsedDateRange as RelativeDateRange) || 'thisMonth' : undefined
       const wasDateExplicit = Boolean(parsed.wasDateExplicit && parsedDateRange)
       const confidence = Math.max(0, Math.min(1, Number(parsed.confidence || 0.8)))
+
+      if (this.isStrategicGrowthQuestion(message)) {
+        return {
+          classification: {
+            isSimpleQuery: true,
+            intent: 'businessOverview',
+            dateRange: finalDateRange || 'thisMonth',
+            confidence: Math.max(confidence, 0.9),
+            reason: 'Detected strategic growth question; overriding plain metric routing to businessOverview',
+            requiresDateRange: true,
+            wasDateExplicit,
+          },
+          tokenUsage,
+        }
+      }
 
       return {
         classification: {

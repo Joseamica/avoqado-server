@@ -59,6 +59,9 @@ export const AssignProcessorSchema = z.object({
       creditRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
       amexRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
       internationalRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
+      // Mismo flag/taxRate del modelo. false = "tasa + IVA" en contrato.
+      includesTax: z.boolean().nullable().optional(),
+      taxRate: z.number().min(0).max(1).optional(),
       fixedCostPerTransaction: z.number().min(0, 'Fixed cost must be positive'),
     }),
 
@@ -68,6 +71,8 @@ export const AssignProcessorSchema = z.object({
       creditRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
       amexRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
       internationalRate: z.number().min(0).max(1, 'Rate must be between 0 and 1'),
+      includesTax: z.boolean().nullable().optional(),
+      taxRate: z.number().min(0).max(1).optional(),
       fixedFeePerTransaction: z.number().min(0, 'Fixed fee must be positive'),
     }),
   }),

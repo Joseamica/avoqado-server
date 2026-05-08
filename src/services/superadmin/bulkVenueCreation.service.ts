@@ -344,6 +344,10 @@ export async function bulkCreateVenues(data: BulkCreateVenuesInput): Promise<Bul
             creditRate: new Prisma.Decimal(mergedPricing.creditRate),
             amexRate: new Prisma.Decimal(mergedPricing.amexRate),
             internationalRate: new Prisma.Decimal(mergedPricing.internationalRate),
+            // Flag de IVA: lo guarda tal cual venga del payload bulk
+            // (puede ser true / false / null = legacy/desconocido).
+            includesTax: (mergedPricing as any).includesTax ?? null,
+            ...((mergedPricing as any).taxRate !== undefined ? { taxRate: new Prisma.Decimal((mergedPricing as any).taxRate) } : {}),
             fixedFeePerTransaction:
               mergedPricing.fixedFeePerTransaction != null ? new Prisma.Decimal(mergedPricing.fixedFeePerTransaction) : null,
             monthlyServiceFee: mergedPricing.monthlyServiceFee != null ? new Prisma.Decimal(mergedPricing.monthlyServiceFee) : null,

@@ -104,6 +104,10 @@ export const providerCostStructureSchema = z.object({
     creditRate: z.number().min(0).max(1, 'Credit rate must be between 0 and 1'),
     amexRate: z.number().min(0).max(1, 'Amex rate must be between 0 and 1'),
     internationalRate: z.number().min(0).max(1, 'International rate must be between 0 and 1'),
+    // includesTax: false → tasa base, calc agrega IVA. true → tasa final.
+    // null/undefined → legacy (no se aplica tax al calc).
+    includesTax: z.boolean().nullable().optional(),
+    taxRate: z.number().min(0).max(1).optional(),
     fixedCostPerTransaction: z.number().min(0).optional(),
     monthlyFee: z.number().min(0).optional(),
     minimumVolume: z.number().min(0).optional(),
@@ -126,6 +130,8 @@ export const venuePricingStructureSchema = z.object({
     creditRate: z.number().min(0).max(1, 'Credit rate must be between 0 and 1'),
     amexRate: z.number().min(0).max(1, 'Amex rate must be between 0 and 1'),
     internationalRate: z.number().min(0).max(1, 'International rate must be between 0 and 1'),
+    includesTax: z.boolean().nullable().optional(),
+    taxRate: z.number().min(0).max(1).optional(),
     fixedFeePerTransaction: z.number().min(0).optional(),
     monthlyServiceFee: z.number().min(0).optional(),
     minimumMonthlyVolume: z.number().min(0).optional(),
@@ -199,6 +205,8 @@ export const enhancedCreateVenueSchema = z.object({
     creditRate: z.number().min(0).max(1).optional(),
     amexRate: z.number().min(0).max(1).optional(),
     internationalRate: z.number().min(0).max(1).optional(),
+    includesTax: z.boolean().nullable().optional(),
+    taxRate: z.number().min(0).max(1).optional(),
     fixedFeePerTransaction: z.number().min(0).optional(),
     monthlyServiceFee: z.number().min(0).optional(),
     minimumMonthlyVolume: z.number().min(0).optional(),

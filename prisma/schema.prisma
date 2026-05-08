@@ -3435,6 +3435,12 @@ model OrganizationPricingStructure {
   amexRate          Decimal @db.Decimal(5, 4)
   internationalRate Decimal @db.Decimal(5, 4)
 
+  // ¿Las tasas YA incluyen IVA? Mismo flag que VenuePricingStructure /
+  // ProviderCostStructure. null = legacy, true = tasa final, false = base
+  // (calc multiplica por 1+taxRate).
+  includesTax Boolean?
+  taxRate     Decimal  @default(0.16) @db.Decimal(5, 4)
+
   // Fixed fees (with margin)
   fixedFeePerTransaction Decimal? @db.Decimal(8, 4)
   monthlyServiceFee      Decimal? @db.Decimal(10, 2)
@@ -3615,6 +3621,21 @@ model ProviderCostStructure {
   amexRate          Decimal @db.Decimal(5, 4) // e.g., 0.0350 (3.5%)
   internationalRate Decimal @db.Decimal(5, 4) // e.g., 0.0400 (4.0%)
 
+  // ¿Las tasas de arriba YA incluyen IVA/impuesto? Semántica:
+  //   - true  → la tasa final = lo guardado. NO se le agrega tax al calcular fees.
+  //   - false → la tasa guardada es BASE. El cálculo agrega tax encima
+  //             (multiplica por (1 + taxRate)). Se usa cuando el contrato
+  //             dice "X% + IVA".
+  //   - null  → legacy / desconocido. Tratado como `true` (preserva
+  //             comportamiento histórico). Auditar venue por venue y mover
+  //             a true/false explícito conforme se confirme cada contrato.
+  includesTax Boolean?
+  // Tasa de impuesto aplicable cuando includesTax = false. Default 16%
+  // (IVA México). Se persiste por estructura para soportar jurisdicciones
+  // distintas o cambios fiscales sin re-tocar código. Mismo patrón y
+  // default que `Product.taxRate` / `Order.taxRate`.
+  taxRate     Decimal @default(0.16) @db.Decimal(5, 4)
+
   // Fixed costs per transaction (if applicable)
   fixedCostPerTransaction Decimal? @db.Decimal(8, 4) // e.g., 0.50 MXN
 
@@ -3663,6 +3684,16 @@ model VenuePricingStructure {
   creditRate        Decimal @db.Decimal(5, 4) // e.g., 0.0300 (3.0% - includes margin)
   amexRate          Decimal @db.Decimal(5, 4) // e.g., 0.0400 (4.0% - includes margin)
   internationalRate Decimal @db.Decimal(5, 4) // e.g., 0.0450 (4.5% - includes margin)
+
+  // ¿Las tasas de arriba YA incluyen IVA/impuesto? Semántica:
+  //   - true  → la tasa final = lo guardado. NO se le agrega tax al calcular fees.
+  //   - false → la tasa guardada es BASE. El cálculo agrega tax encima.
+  //             Se usa cuando el contrato dice "X% + IVA".
+  //   - null  → legacy / desconocido. Tratado como `true` (preserva
+  //             comportamiento histórico). Auditar venue por venue.
+  // Mismo patrón que `Product.taxRate` / `Order.taxRate` (default 16%, IVA MX).
+  includesTax Boolean?
+  taxRate     Decimal  @default(0.16) @db.Decimal(5, 4)
 
   // Fixed fees (with margin)
   fixedFeePerTransaction Decimal? @db.Decimal(8, 4) // e.g., 0.75 MXN

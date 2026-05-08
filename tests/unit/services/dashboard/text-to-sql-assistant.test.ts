@@ -149,6 +149,82 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(help?.response).toContain('You can contact Avoqado support on WhatsApp')
       expect(help?.response).toContain('https://wa.me/525640070001')
     })
+
+    it('should route team member how-to questions to operational help', () => {
+      const query = '¿Cómo agrego a alguien a mi equipo?'
+      // @ts-expect-error - accessing private method for testing
+      const help = service.getOperationalHelpResponse(query)
+
+      expect(help).not.toBeNull()
+      expect(help?.topic).toBe('team')
+      expect(help?.response).toContain('Equipo')
+      expect(help?.response).toContain('Invitar usuario')
+    })
+
+    it('should answer operational help even when the semantic classifier falsely flags it', async () => {
+      const serviceWithInternals = service as any
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: true,
+        confidence: 95,
+        reason: 'false positive on operational help',
+        category: 'INJECTION',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: '¿Cómo agrego a alguien a mi equipo?',
+          venueId: 'venue-test',
+          userId: 'user-test',
+        })
+
+        expect(response.metadata?.reasonCode).toBe('operational_help_routed')
+        expect(response.response).toContain('Invitar usuario')
+        expect(response.metadata?.blocked).not.toBe(true)
+        expect(semanticDetectSpy).not.toHaveBeenCalled()
+      } finally {
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
+    it('should answer English contact help before semantic false positives', async () => {
+      const serviceWithInternals = service as any
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: true,
+        confidence: 95,
+        reason: 'false positive on contact help',
+        category: 'INJECTION',
+        detectedLanguage: 'en',
+        latencyMs: 0,
+        fromCache: false,
+      })
+
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: 'How do I contact Avoqado?',
+          venueId: 'venue-test',
+          userId: 'user-test',
+        })
+
+        expect(response.metadata?.reasonCode).toBe('operational_help_routed')
+        expect(response.response).toContain('You can contact Avoqado support on WhatsApp')
+        expect(response.response).toContain('https://wa.me/525640070001')
+        expect(response.metadata?.blocked).not.toBe(true)
+        expect(semanticDetectSpy).not.toHaveBeenCalled()
+      } finally {
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        semanticDetectSpy.mockRestore()
+      }
+    })
   })
 
   describe('Conversation History Injection Scan Guard', () => {
@@ -333,6 +409,16 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.intent).toBe('newCustomerTiming')
       expect(classification.dateRange).toBe('allTime')
     })
+
+    it('should classify strategic growth questions as business overview instead of plain sales', () => {
+      const query = 'hazme un calculo dificil de que tengo que hacer para incrementar mis ventas'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('businessOverview')
+      expect(classification.dateRange).toBe('thisMonth')
+    })
   })
 
   describe('LLM Router Conversational Guard', () => {
@@ -423,6 +509,37 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.isSimpleQuery).toBe(true)
       expect(routed.classification.intent).toBe('newCustomerTiming')
       expect(routed.classification.dateRange).toBe('allTime')
+    })
+
+    it('should override plain sales routing for strategic growth questions', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: true,
+                intent: 'sales',
+                dateRange: 'thisMonth',
+                wasDateExplicit: false,
+                confidence: 0.95,
+                reason: 'mentions ventas',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('hazme un calculo dificil de que tengo que hacer para incrementar mis ventas')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('businessOverview')
+      expect(routed.classification.dateRange).toBe('thisMonth')
+      expect(routed.classification.reason).toContain('strategic growth')
     })
 
     it('should recover a registered deterministic intent when LLM returns unsupported', async () => {

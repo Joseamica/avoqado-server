@@ -357,6 +357,8 @@ export async function assignProcessorAndApproveKyc(
       creditRate: number // e.g., 0.029 (2.9%)
       amexRate: number // e.g., 0.035 (3.5%)
       internationalRate: number // e.g., 0.04 (4%)
+      includesTax?: boolean | null
+      taxRate?: number
       fixedCostPerTransaction: number // e.g., 3.00 MXN
     }
 
@@ -366,6 +368,8 @@ export async function assignProcessorAndApproveKyc(
       creditRate: number // e.g., 0.035 (3.5%)
       amexRate: number // e.g., 0.04 (4%)
       internationalRate: number // e.g., 0.045 (4.5%)
+      includesTax?: boolean | null
+      taxRate?: number
       fixedFeePerTransaction: number // e.g., 4.00 MXN
     }
   },
@@ -431,6 +435,9 @@ export async function assignProcessorAndApproveKyc(
         creditRate: processorData.providerCosts.creditRate,
         amexRate: processorData.providerCosts.amexRate,
         internationalRate: processorData.providerCosts.internationalRate,
+        // Persistir flag tax/IVA si el front lo envió (default null = legacy).
+        includesTax: processorData.providerCosts.includesTax ?? null,
+        ...(processorData.providerCosts.taxRate !== undefined ? { taxRate: processorData.providerCosts.taxRate } : {}),
         fixedCostPerTransaction: processorData.providerCosts.fixedCostPerTransaction,
         effectiveFrom: new Date(),
       },
@@ -447,6 +454,8 @@ export async function assignProcessorAndApproveKyc(
         creditRate: processorData.venuePricing.creditRate,
         amexRate: processorData.venuePricing.amexRate,
         internationalRate: processorData.venuePricing.internationalRate,
+        includesTax: processorData.venuePricing.includesTax ?? null,
+        ...(processorData.venuePricing.taxRate !== undefined ? { taxRate: processorData.venuePricing.taxRate } : {}),
         fixedFeePerTransaction: processorData.venuePricing.fixedFeePerTransaction,
         effectiveFrom: new Date(),
       },

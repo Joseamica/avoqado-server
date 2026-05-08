@@ -803,6 +803,9 @@ async function setupPricingStructure(tx: any, venueId: string, venueData: Enhanc
       creditRate: tier.creditRate,
       amexRate: tier.amexRate,
       internationalRate: tier.internationalRate,
+      // Si el caller envió flag de IVA, persistirlo. Default null (legacy).
+      includesTax: (venueData as any).includesTax ?? null,
+      ...((venueData as any).taxRate !== undefined ? { taxRate: (venueData as any).taxRate } : {}),
       fixedFeePerTransaction: tier.fixedFeePerTransaction,
       monthlyServiceFee: tier.monthlyServiceFee,
       minimumMonthlyVolume: venueData.minimumMonthlyVolume || null,

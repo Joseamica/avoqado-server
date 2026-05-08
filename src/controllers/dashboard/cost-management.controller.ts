@@ -239,6 +239,9 @@ export async function upsertProviderCostStructure(req: Request, res: Response, n
         creditRate: costData.creditRate,
         amexRate: costData.amexRate,
         internationalRate: costData.internationalRate,
+        // Flag IVA: ya validado por el zod schema. Default null = legacy.
+        includesTax: costData.includesTax ?? null,
+        ...(costData.taxRate !== undefined ? { taxRate: costData.taxRate } : {}),
         fixedCostPerTransaction: costData.fixedCostPerTransaction,
         monthlyFee: costData.monthlyFee,
         minimumVolume: costData.minimumVolume,
@@ -352,6 +355,9 @@ export async function upsertVenuePricingStructure(req: Request, res: Response, n
         creditRate: pricingData.creditRate,
         amexRate: pricingData.amexRate,
         internationalRate: pricingData.internationalRate,
+        // Flag IVA. Default null = legacy.
+        includesTax: pricingData.includesTax ?? null,
+        ...(pricingData.taxRate !== undefined ? { taxRate: pricingData.taxRate } : {}),
         fixedFeePerTransaction: pricingData.fixedFeePerTransaction,
         monthlyServiceFee: pricingData.monthlyServiceFee,
         minimumMonthlyVolume: pricingData.minimumMonthlyVolume,

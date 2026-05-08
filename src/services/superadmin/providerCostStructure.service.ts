@@ -35,6 +35,11 @@ interface CreateProviderCostStructureData {
   creditRate: number
   amexRate: number
   internationalRate: number
+  /** ¿Las tasas YA incluyen IVA? null = legacy (no se aplica tax al calc).
+   *  false = tasa base (calc multiplica por 1+taxRate). Mismo patrón que
+   *  `Product.taxRate`. */
+  includesTax?: boolean | null
+  taxRate?: number
   fixedCostPerTransaction?: number
   monthlyFee?: number
   notes?: string
@@ -47,6 +52,8 @@ interface UpdateProviderCostStructureData {
   creditRate?: number
   amexRate?: number
   internationalRate?: number
+  includesTax?: boolean | null
+  taxRate?: number
   fixedCostPerTransaction?: number
   monthlyFee?: number
   notes?: string
@@ -246,6 +253,8 @@ export async function createProviderCostStructure(data: CreateProviderCostStruct
       creditRate: data.creditRate,
       amexRate: data.amexRate,
       internationalRate: data.internationalRate,
+      includesTax: data.includesTax ?? null,
+      ...(data.taxRate !== undefined ? { taxRate: data.taxRate } : {}),
       fixedCostPerTransaction: data.fixedCostPerTransaction || null,
       monthlyFee: data.monthlyFee || null,
       notes: data.notes || null,
@@ -319,6 +328,8 @@ export async function updateProviderCostStructure(id: string, data: UpdateProvid
       ...(data.creditRate !== undefined && { creditRate: data.creditRate }),
       ...(data.amexRate !== undefined && { amexRate: data.amexRate }),
       ...(data.internationalRate !== undefined && { internationalRate: data.internationalRate }),
+      ...(data.includesTax !== undefined && { includesTax: data.includesTax }),
+      ...(data.taxRate !== undefined && { taxRate: data.taxRate }),
       ...(data.fixedCostPerTransaction !== undefined && { fixedCostPerTransaction: data.fixedCostPerTransaction }),
       ...(data.monthlyFee !== undefined && { monthlyFee: data.monthlyFee }),
       ...(data.notes !== undefined && { notes: data.notes }),

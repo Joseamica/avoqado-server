@@ -252,6 +252,8 @@ export async function createVenuePricingStructure(req: Request, res: Response, n
       creditRate,
       amexRate,
       internationalRate,
+      includesTax,
+      taxRate,
       fixedFeePerTransaction,
       monthlyServiceFee,
       minimumMonthlyVolume,
@@ -285,6 +287,11 @@ export async function createVenuePricingStructure(req: Request, res: Response, n
       creditRate,
       amexRate,
       internationalRate,
+      // Propaga el flag de IVA + tasa explícita al service. Si el front no
+      // los envía (form viejo / cliente que aún no se actualizó), llegan
+      // como undefined y el service los persiste como null/default 0.16.
+      includesTax,
+      taxRate,
       fixedFeePerTransaction,
       monthlyServiceFee,
       minimumMonthlyVolume,
@@ -370,6 +377,8 @@ export async function updateVenuePricingStructure(req: Request, res: Response, n
       creditRate,
       amexRate,
       internationalRate,
+      includesTax,
+      taxRate,
       fixedFeePerTransaction,
       monthlyServiceFee,
       minimumMonthlyVolume,
@@ -386,6 +395,8 @@ export async function updateVenuePricingStructure(req: Request, res: Response, n
       creditRate,
       amexRate,
       internationalRate,
+      includesTax,
+      taxRate,
       fixedFeePerTransaction,
       monthlyServiceFee,
       minimumMonthlyVolume,

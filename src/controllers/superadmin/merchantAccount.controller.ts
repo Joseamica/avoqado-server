@@ -1831,6 +1831,10 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
             providerId: blumonProvider.id,
             merchantAccountId: merchantAccountId,
             ...rates,
+            // Flag de IVA: lo guarda tal cual venga del wizard (puede ser
+            // true / false / null = legacy/desconocido). Default null.
+            includesTax: (costStructureOverrides as any).includesTax ?? null,
+            ...((costStructureOverrides as any).taxRate !== undefined ? { taxRate: (costStructureOverrides as any).taxRate } : {}),
             fixedCostPerTransaction: costStructureOverrides.fixedCostPerTransaction || 0,
             monthlyFee: costStructureOverrides.monthlyFee || null,
             effectiveFrom: new Date(),
@@ -1917,6 +1921,9 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
         creditRate: venuePricing.creditRate / 100,
         amexRate: venuePricing.amexRate / 100,
         internationalRate: venuePricing.internationalRate / 100,
+        // Flag IVA del wizard. Default null = legacy.
+        includesTax: (venuePricing as any).includesTax ?? null,
+        ...((venuePricing as any).taxRate !== undefined ? { taxRate: (venuePricing as any).taxRate } : {}),
         fixedFeePerTransaction: venuePricing.fixedFeePerTransaction || null,
         monthlyServiceFee: venuePricing.monthlyServiceFee || null,
         effectiveFrom: new Date(),

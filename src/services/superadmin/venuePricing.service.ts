@@ -435,6 +435,11 @@ interface CreateVenuePricingStructureData {
   creditRate: number
   amexRate: number
   internationalRate: number
+  /** ¿Las tasas YA incluyen IVA? null = legacy/desconocido (no se aplica
+   *  tax al calcular). false = tasa base (calc multiplica por 1+taxRate). */
+  includesTax?: boolean | null
+  /** Tasa de impuesto cuando includesTax=false. Default 16% (IVA MX). */
+  taxRate?: number
   fixedFeePerTransaction?: number
   monthlyServiceFee?: number
   minimumMonthlyVolume?: number
@@ -450,6 +455,8 @@ interface UpdateVenuePricingStructureData {
   creditRate?: number
   amexRate?: number
   internationalRate?: number
+  includesTax?: boolean | null
+  taxRate?: number
   fixedFeePerTransaction?: number
   monthlyServiceFee?: number
   minimumMonthlyVolume?: number
@@ -646,6 +653,10 @@ export async function createVenuePricingStructure(data: CreateVenuePricingStruct
           creditRate: data.creditRate,
           amexRate: data.amexRate,
           internationalRate: data.internationalRate,
+          // includesTax: persistir explícitamente, incluyendo null (legacy).
+          // Si el caller no envía el campo, no lo tocamos (undefined → no cambio).
+          ...(data.includesTax !== undefined ? { includesTax: data.includesTax } : {}),
+          ...(data.taxRate !== undefined ? { taxRate: data.taxRate } : {}),
           fixedFeePerTransaction: data.fixedFeePerTransaction || null,
           monthlyServiceFee: data.monthlyServiceFee || null,
           minimumMonthlyVolume: data.minimumMonthlyVolume || null,
@@ -700,6 +711,10 @@ export async function createVenuePricingStructure(data: CreateVenuePricingStruct
         creditRate: data.creditRate,
         amexRate: data.amexRate,
         internationalRate: data.internationalRate,
+        // includesTax: undefined → null en BD (legacy/desconocido).
+        // false / true se persisten tal cual.
+        includesTax: data.includesTax ?? null,
+        ...(data.taxRate !== undefined ? { taxRate: data.taxRate } : {}),
         fixedFeePerTransaction: data.fixedFeePerTransaction || null,
         monthlyServiceFee: data.monthlyServiceFee || null,
         minimumMonthlyVolume: data.minimumMonthlyVolume || null,
@@ -787,6 +802,8 @@ export async function updateVenuePricingStructure(id: string, data: UpdateVenueP
       ...(data.creditRate !== undefined && { creditRate: data.creditRate }),
       ...(data.amexRate !== undefined && { amexRate: data.amexRate }),
       ...(data.internationalRate !== undefined && { internationalRate: data.internationalRate }),
+      ...(data.includesTax !== undefined && { includesTax: data.includesTax }),
+      ...(data.taxRate !== undefined && { taxRate: data.taxRate }),
       ...(data.fixedFeePerTransaction !== undefined && { fixedFeePerTransaction: data.fixedFeePerTransaction }),
       ...(data.monthlyServiceFee !== undefined && { monthlyServiceFee: data.monthlyServiceFee }),
       ...(data.minimumMonthlyVolume !== undefined && { minimumMonthlyVolume: data.minimumMonthlyVolume }),
