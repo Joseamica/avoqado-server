@@ -271,7 +271,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
         },
         include: {
           product: { select: { id: true, name: true, imageUrl: true } },
-          assignedStaff: { select: { firstName: true, lastName: true } },
+          assignedStaff: { select: { firstName: true, lastName: true, photoUrl: true } },
           reservations: {
             where: { status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] } },
             select: { partySize: true, spotIds: true },
