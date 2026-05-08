@@ -65,9 +65,14 @@ export async function calculateTransactionCost(input: CostCalculationInput): Pro
     throw new NotFoundError(`No venue pricing found for venue ${venueId} and account type ${accountType}`)
   }
 
-  // Get rates based on card type
-  const providerRate = getProviderRate(providerCost, cardType)
-  const venueRate = getVenueRate(venuePricing, cardType)
+  // Get base rates based on card type, then aplica tax si la estructura
+  // tiene `includesTax = false` (contrato "X% + IVA"). Mismo patrón que
+  // `transactionCost.service.ts` para que el cálculo sea coherente entre
+  // ambas funciones.
+  const providerBaseRate = getProviderRate(providerCost, cardType)
+  const providerRate = applyTaxIfNeeded(providerCost, providerBaseRate)
+  const venueBaseRate = getVenueRate(venuePricing, cardType)
+  const venueRate = applyTaxIfNeeded(venuePricing, venueBaseRate)
 
   // Calculate amounts
   const providerCostAmount = amount * providerRate
@@ -150,6 +155,24 @@ function getVenueRate(pricing: any, cardType: TransactionCardType): number {
     default:
       return Number(pricing.creditRate)
   }
+}
+
+/**
+ * Aplica IVA a la tasa base si la estructura tiene `includesTax = false`.
+ * Mantiene el comportamiento legacy (`includesTax === null/true` → tasa final).
+ * Duplicado deliberado del helper en `transactionCost.service.ts` para que
+ * este módulo (legacy/dead code) siga siendo coherente si alguien lo reactiva.
+ */
+function applyTaxIfNeeded(structure: any, baseRate: number): number {
+  if (structure?.includesTax === false) {
+    let tax = 0.16
+    if (structure.taxRate !== null && structure.taxRate !== undefined) {
+      const parsed = parseFloat(structure.taxRate.toString())
+      if (Number.isFinite(parsed)) tax = parsed
+    }
+    return baseRate * (1 + tax)
+  }
+  return baseRate
 }
 
 /**
