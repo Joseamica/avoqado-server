@@ -19,6 +19,7 @@ import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
+import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
@@ -106,6 +107,10 @@ const gracefulShutdown = async (signal: string) => {
       // Stop abandoned orders cleanup job
       logger.info('Stopping abandoned orders cleanup job...')
       abandonedOrdersCleanupJob.stop()
+
+      // Stop Blumon webhook reconciliation job
+      logger.info('Stopping Blumon webhook reconciliation job...')
+      blumonWebhookReconciliationJob.stop()
 
       logger.info('Stopping reservation deposit reconciliation job...')
       reservationDepositReconciliationJob.stop()
@@ -286,6 +291,10 @@ const startApplication = async (retries = 3) => {
 
       // Start auto clock-out job (every 15 minutes for HR automation)
       autoClockOutJob.start()
+
+      // Start Blumon webhook reconciliation job (every 30s — picks up PENDING
+      // ProviderEventLog rows when TPV records the Payment after the webhook arrived)
+      blumonWebhookReconciliationJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

@@ -17,7 +17,7 @@
  */
 
 import prisma from '../../utils/prismaClient'
-import { Prisma } from '@prisma/client'
+import { Prisma, ProviderType, EventStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { isVenueOperational } from '@/lib/venueStatus.constants'
 
@@ -25,6 +25,89 @@ import { isVenueOperational } from '@/lib/venueStatus.constants'
  * Helper function for async delay
  */
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Webhook reconciliation constants — canonical reasons for ProviderEventLog.errorReason
+// Kept as string literals so we can add cases without DB migrations. The set is
+// intentionally small and stable so dashboards can query by it.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export const BLUMON_WEBHOOK_ERROR_REASONS = {
+  /** Blumon's `serialNumber` is not registered as a Terminal in our DB */
+  UNKNOWN_TERMINAL: 'UNKNOWN_TERMINAL',
+  /** Webhook lacks any usable matching field (no reference / authCode / operationNumber) */
+  NO_MATCH_FIELDS: 'NO_MATCH_FIELDS',
+  /** Matched a Payment but `amount` differs by ≥ $0.01 */
+  AMOUNT_MISMATCH: 'AMOUNT_MISMATCH',
+  /** No Payment matched after async retries; > 24h since received */
+  ORPHANED: 'ORPHANED',
+  /** Transaction not approved (`codeResponse` ≠ "00") — informational, not a bug */
+  NOT_APPROVED: 'NOT_APPROVED',
+  /** Internal exception while processing; check logs for stack */
+  PROCESSING_ERROR: 'PROCESSING_ERROR',
+} as const
+
+/**
+ * How long an event can sit in `PENDING` before the worker promotes it to
+ * ERROR + errorReason=ORPHANED. 24h covers offline-queue replays from killed
+ * apps with no internet for a day.
+ */
+export const BLUMON_WEBHOOK_PENDING_TTL_MS = 24 * 60 * 60 * 1000
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SerialNumber bridge — Blumon → our Terminal table
+//
+// Blumon sends a raw serial like "2841548628" in the webhook. Our DB stores
+// the same serial prefixed as "AVQD-2841548628" (Avoqado convention). These
+// helpers do the canonicalization and the lookup once.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/** Convert Blumon's raw serial → our DB's `AVQD-` prefixed form (idempotent). */
+export function canonicalizeBlumonSerial(rawSerial: string): string {
+  const trimmed = rawSerial.trim()
+  if (trimmed.startsWith('AVQD-')) return trimmed
+  return `AVQD-${trimmed}`
+}
+
+/**
+ * Resolve a Blumon webhook's `serialNumber` to a Terminal+Venue in our DB.
+ *
+ * @returns the terminal (with venueId) if found, or `null` when the serial is
+ *          unknown to us. Callers should mark the event with errorReason =
+ *          `UNKNOWN_TERMINAL` in that case — it's the strongest signal that
+ *          the webhook is for another integrator, or that we forgot to
+ *          register a new device in our DB.
+ */
+export async function resolveTerminalFromBlumonSerial(
+  rawSerial: string | undefined | null,
+): Promise<{ id: string; venueId: string; serialNumber: string | null } | null> {
+  if (!rawSerial) return null
+  const canonical = canonicalizeBlumonSerial(rawSerial)
+  return prisma.terminal.findUnique({
+    where: { serialNumber: canonical },
+    select: { id: true, venueId: true, serialNumber: true },
+  })
+}
+
+/**
+ * Build a canonical, idempotent event id from a Blumon webhook payload.
+ *
+ * The pair `(operationNumber, reference)` is unique-per-transaction inside
+ * Blumon's system. The `provider+eventId` UNIQUE constraint on
+ * `ProviderEventLog` then prevents double-inserts when Blumon retries (e.g.
+ * if we returned 5xx once or our ngrok dropped a packet).
+ *
+ * @returns a stable string, or `null` when neither field is present (very
+ *          rare; row will be inserted with eventId=NULL — Postgres treats
+ *          multiple NULLs as distinct so it won't break the unique index).
+ */
+export function buildBlumonEventId(payload: BlumonWebhookPayload): string | null {
+  const op = payload.operationNumber
+  const ref = payload.reference
+  if (op != null && ref) return `blumon-tpv-${op}-${ref}`
+  if (op != null) return `blumon-tpv-${op}`
+  if (ref) return `blumon-tpv-${ref}`
+  return null
+}
 
 /**
  * Retry configuration for payment lookup
@@ -66,31 +149,54 @@ const RETRY_CONFIG = {
  */
 export interface BlumonWebhookPayload {
   // Merchant identification (ACTUAL fields from Blumon)
-  business?: string // Merchant name registered with Blumon (e.g., "AVOQADO")
-  businessRfc?: string // Tax ID (RFC) of the merchant
+  business?: string // Merchant name registered with Blumon (e.g., "MONEYGIVER")
+  businessRfc?: string // Tax ID (RFC) of the merchant (e.g., "MGI220204FA4")
 
   // Card information
   bin?: string // Card BIN (first 6 digits)
   lastFour: string // Card last 4 digits
-  cardType: 'DEBITO' | 'CREDITO' | string // DEBITO, CREDITO
-  brand: 'VISA' | 'MASTERCARD' | 'AMERICAN_EXPRESS' | string
-  bank: string // Issuing bank (e.g., "BANORTE", "GENERAL")
+  cardType: 'DEBITO' | 'CREDITO' | 'AMEX' | string // DEBITO, CREDITO, AMEX (AMEX no separa débito/crédito)
+  brand: 'VISA' | 'MASTERCARD' | 'AMEX' | 'AMERICAN_EXPRESS' | string
+  bank: string // Issuing bank (e.g., "BANORTE", "BANCOMER", "AMERICAN EXPRESS")
 
   // Transaction details
-  amount: string // Transaction amount (string format)
+  amount: string // Transaction amount (string with 2 decimals — e.g., "29150.00")
   reference?: string // Our transaction reference (may not be present in all webhooks)
   cardHolder?: string // Cardholder name (PCI - careful with logging)
   authorizationCode?: string // Bank authorization code
-  operationType?: 'VENTA' | 'DEVOLUCION' | string // VENTA = sale
-  operationNumber?: number // Blumon's operation ID
+  operationType?: 'VENTA' | 'DEVOLUCION' | 'CANCELACION' | string // VENTA = sale
+  operationNumber?: number // Blumon's operation ID (numeric in payload, not string)
   descriptionResponse?: string // Response description (e.g., "APROBADA")
   dateTransaction?: string // Format: "20/01/2021 18:24:38"
-  authentication?: string // 3DS status
+  authentication?: string // EMV cardholder verification — observed: "signature", "pin", "unknown"
   membership?: string // Blumon membership ID
-  provideResponse?: string // Provider response code (e.g., "SB" for sandbox)
+  provideResponse?: string // Provider response code — observed: "AMEX", "PR" (Prosa), "SB" (sandbox)
   codeResponse?: string // Response code ("00" = approved)
 
-  // Allow additional unknown fields from Blumon
+  // ━━━ Undocumented but observed in real production webhooks (2026-05-07) ━━━
+  // All optional because Blumon may stop sending them without notice (their docs
+  // are a minimum contract, not the exact shape).
+
+  /** EMV Application Identifier — different per card brand. AMEX: A000000025010801, VISA: A0000000031010 */
+  aid?: string
+
+  /** EMV Authorization Request Cryptogram — proof that the chip authenticated. 16 hex chars. */
+  arqc?: string
+
+  /**
+   * Physical PAX terminal serial number that processed the payment. RAW (no
+   * `AVQD-` prefix). Used to bridge webhook → Terminal → Venue without trusting
+   * the webhook URL or the `business` field, which can be misconfigured.
+   */
+  serialNumber?: string
+
+  /**
+   * Batch counter — only observed on VISA so far. Sometimes absent on AMEX.
+   * Possibly the provider's internal sequence number.
+   */
+  realCounter?: string
+
+  // Allow additional unknown fields from Blumon — defensive against future schema changes.
   [key: string]: unknown
 }
 
@@ -99,7 +205,18 @@ export interface BlumonWebhookPayload {
  */
 export interface WebhookProcessingResult {
   success: boolean
-  action: 'MATCHED' | 'RECONCILED' | 'DISCREPANCY' | 'NOT_FOUND' | 'ERROR'
+  action:
+    | 'MATCHED' // Payment found, amounts match — happy path
+    | 'RECONCILED' // Same as MATCHED but emphasized (legacy alias kept)
+    | 'DISCREPANCY' // Payment found, amounts differ — flagged for ops
+    | 'NOT_FOUND' // No matching Payment after retries — typically transient
+    | 'PENDING' // Event stored, will be reconciled async (Payment not yet recorded)
+    | 'DUPLICATE' // Webhook already received before (Blumon re-delivered) — idempotent no-op
+    | 'NOT_APPROVED' // codeResponse != "00" — informational
+    | 'UNKNOWN_TERMINAL' // serialNumber not registered in our DB
+    | 'ERROR' // Internal exception
+  /** ProviderEventLog row that was created/found for this webhook (always set when persisted). */
+  eventLogId?: string
   paymentId?: string
   message: string
   details?: {
@@ -112,62 +229,343 @@ export interface WebhookProcessingResult {
 /**
  * Process Blumon payment confirmation webhook
  *
- * Strategy:
- * 1. Parse and validate the webhook payload
- * 2. Find matching payment by transactionReference
- * 3. If found: verify amounts match, log confirmation
- * 4. If not found: create reconciliation record for investigation
+ * Orchestrates the immutable event log + reconciliation flow:
+ *
+ *   1. Build canonical eventId from `(operationNumber, reference)`.
+ *   2. Idempotency check via `ProviderEventLog @@unique(provider, eventId)` —
+ *      returns DUPLICATE if Blumon re-delivered the same event.
+ *   3. Resolve `serialNumber` → Terminal → Venue. If unknown, persist with
+ *      errorReason=UNKNOWN_TERMINAL and return — webhook acknowledged but
+ *      not actionable on our side.
+ *   4. Insert ProviderEventLog row (status=PENDING) before doing any
+ *      Payment lookup. This guarantees we never lose a webhook to a crash.
+ *   5. Inline reconcile (5s retry) scoped to the resolved venueId — if Blumon
+ *      arrives before TPV finishes recording the payment, the retries cover
+ *      common races (<5s). Anything slower is handled by the cron worker.
+ *   6. Update event row with final status + errorReason + paymentId.
+ *
+ * The webhook controller treats every case as 200 OK (Blumon must not retry —
+ * we own the retry semantics now).
  */
 export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload): Promise<WebhookProcessingResult> {
   const correlationId = `blumon-wh-${Date.now()}`
 
   try {
-    // Parse amount from string
     const blumonAmount = parseFloat(payload.amount)
+    const eventIdString = buildBlumonEventId(payload)
 
-    // Log ALL fields from Blumon for investigation (first time seeing real payload)
-    logger.info('📥 Blumon webhook received - FULL PAYLOAD', {
-      correlationId,
-      // Merchant identification (new fields discovered)
-      business: payload.business,
-      businessRfc: payload.businessRfc,
-      // Card info
-      lastFour: payload.lastFour,
-      cardBrand: payload.brand,
-      cardType: payload.cardType,
-      bank: payload.bank,
-      // Transaction info
-      amount: blumonAmount,
-      reference: payload.reference,
-      authorizationCode: payload.authorizationCode,
-      operationNumber: payload.operationNumber,
-      operationType: payload.operationType,
-      codeResponse: payload.codeResponse,
-      descriptionResponse: payload.descriptionResponse,
-      dateTransaction: payload.dateTransaction,
-      membership: payload.membership,
-      // Log ALL other fields we might have missed
-      allFields: Object.keys(payload),
-      // ⚠️ PCI: Do NOT log cardHolder or full card data
-    })
+    // ───────────── 1. Idempotency check (Blumon retries on 5xx) ─────────────
+    if (eventIdString) {
+      const existing = await prisma.providerEventLog.findFirst({
+        where: { provider: ProviderType.PAYMENT_PROCESSOR, eventId: eventIdString },
+        select: { id: true, status: true, paymentId: true, errorReason: true },
+      })
+      if (existing) {
+        logger.info('🔁 [Blumon webhook] Duplicate event ignored', {
+          correlationId,
+          eventId: eventIdString,
+          previousStatus: existing.status,
+          previousErrorReason: existing.errorReason,
+        })
+        return {
+          success: true,
+          action: 'DUPLICATE',
+          eventLogId: existing.id,
+          paymentId: existing.paymentId ?? undefined,
+          message: `Webhook already processed (status=${existing.status})`,
+          details: { blumonAmount },
+        }
+      }
+    }
 
-    // Only process approved transactions
-    // If codeResponse is missing, assume approved (lenient mode for discovery)
+    // ───────────── 2. Resolve serialNumber → Terminal → Venue ─────────────
+    const terminal = await resolveTerminalFromBlumonSerial(payload.serialNumber)
+    const scopeVenueId = terminal?.venueId ?? null
+
+    if (payload.serialNumber && !terminal) {
+      logger.warn('🚫 [Blumon webhook] Unknown terminal serial', {
+        correlationId,
+        rawSerial: payload.serialNumber,
+        canonical: canonicalizeBlumonSerial(payload.serialNumber),
+        hint: 'This terminal is not registered in our DB. Either it belongs to another integrator or we forgot to register it.',
+      })
+
+      // Still persist the event so ops can see it in the dashboard and decide
+      // whether to register the terminal retroactively.
+      const event = await prisma.providerEventLog.create({
+        data: {
+          provider: ProviderType.PAYMENT_PROCESSOR,
+          eventId: eventIdString,
+          type: payload.operationType ?? 'UNKNOWN',
+          payload: payload as unknown as Prisma.InputJsonValue,
+          status: EventStatus.ERROR,
+          errorReason: BLUMON_WEBHOOK_ERROR_REASONS.UNKNOWN_TERMINAL,
+          processedAt: new Date(),
+        },
+        select: { id: true },
+      })
+
+      return {
+        success: true,
+        action: 'UNKNOWN_TERMINAL',
+        eventLogId: event.id,
+        message: `Terminal serial ${payload.serialNumber} not registered`,
+        details: { blumonAmount },
+      }
+    }
+
+    // ───────────── 3. Non-approved transactions: log + persist + return ─────────────
     const isApproved = !payload.codeResponse || payload.codeResponse === '00'
     if (!isApproved) {
-      logger.warn('⚠️ Blumon webhook: Non-approved transaction received', {
+      logger.warn('⚠️ [Blumon webhook] Non-approved transaction', {
         correlationId,
         reference: payload.reference,
         codeResponse: payload.codeResponse,
         descriptionResponse: payload.descriptionResponse,
       })
 
+      const event = await prisma.providerEventLog.create({
+        data: {
+          provider: ProviderType.PAYMENT_PROCESSOR,
+          eventId: eventIdString,
+          type: payload.operationType ?? 'UNKNOWN',
+          payload: payload as unknown as Prisma.InputJsonValue,
+          venueId: scopeVenueId,
+          terminalId: terminal?.id ?? null,
+          status: EventStatus.ERROR,
+          errorReason: BLUMON_WEBHOOK_ERROR_REASONS.NOT_APPROVED,
+          processedAt: new Date(),
+        },
+        select: { id: true },
+      })
+
       return {
         success: true,
-        action: 'NOT_FOUND',
+        action: 'NOT_APPROVED',
+        eventLogId: event.id,
         message: `Transaction not approved: ${payload.descriptionResponse || 'Unknown'}`,
+        details: { blumonAmount },
       }
     }
+
+    // ───────────── 4. Insert PENDING event row before any Payment lookup ─────────────
+    let event
+    try {
+      event = await prisma.providerEventLog.create({
+        data: {
+          provider: ProviderType.PAYMENT_PROCESSOR,
+          eventId: eventIdString,
+          type: payload.operationType ?? 'VENTA',
+          payload: payload as unknown as Prisma.InputJsonValue,
+          venueId: scopeVenueId,
+          terminalId: terminal?.id ?? null,
+          status: EventStatus.PENDING,
+        },
+        select: { id: true },
+      })
+    } catch (err) {
+      // Race with idempotency check (someone else just inserted) — re-fetch and
+      // return DUPLICATE. P2002 = unique constraint violation in Prisma.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && eventIdString) {
+        const existing = await prisma.providerEventLog.findFirst({
+          where: { provider: ProviderType.PAYMENT_PROCESSOR, eventId: eventIdString },
+          select: { id: true, status: true, paymentId: true },
+        })
+        if (existing) {
+          return {
+            success: true,
+            action: 'DUPLICATE',
+            eventLogId: existing.id,
+            paymentId: existing.paymentId ?? undefined,
+            message: 'Webhook already processed (race with concurrent insert)',
+            details: { blumonAmount },
+          }
+        }
+      }
+      throw err
+    }
+
+    // ───────────── 5. Inline reconciliation (5s retry, scoped to venueId) ─────────────
+    const matchResult = await attemptPaymentMatch(payload, { scopeVenueId, correlationId })
+
+    // ───────────── 6. Persist final state into the event row ─────────────
+    await updateEventLogFromMatchResult(event.id, matchResult)
+
+    return { ...matchResult, eventLogId: event.id }
+  } catch (error) {
+    logger.error('❌ [Blumon webhook] Processing error', {
+      correlationId,
+      reference: payload.reference,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined,
+    })
+
+    return {
+      success: false,
+      action: 'ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error processing webhook',
+    }
+  }
+}
+
+/**
+ * Re-run the matching logic for a previously-stored ProviderEventLog row.
+ * Used by the cron worker (see `BlumonWebhookReconciliationJob`) to retry
+ * PENDING events without re-inserting or re-validating idempotency.
+ *
+ * @param eventLogId The ProviderEventLog row to update.
+ * @param payload The original webhook payload (taken from `event.payload` JSONB).
+ * @param ctx Optional context — `scopeVenueId` should be the venueId the row
+ *            was originally tagged with (we cache it on the row so we don't
+ *            re-resolve from `serialNumber` every pass).
+ */
+export async function reconcileBlumonEvent(
+  eventLogId: string,
+  payload: BlumonWebhookPayload,
+  ctx: { scopeVenueId?: string | null } = {},
+): Promise<WebhookProcessingResult> {
+  const correlationId = `blumon-recon-${eventLogId.slice(-8)}`
+  const result = await attemptPaymentMatch(payload, {
+    scopeVenueId: ctx.scopeVenueId ?? null,
+    correlationId,
+    skipRetries: true, // Cron is already on a 30s cadence, no need for inline retry
+  })
+
+  await updateEventLogFromMatchResult(eventLogId, result)
+  return { ...result, eventLogId }
+}
+
+/**
+ * Backfill reconciliation: when TPV records a Payment that arrived AFTER the
+ * webhook (race), the Payment-creation path calls this to find any pending
+ * webhook events for the same `(operationNumber, reference)` and reconcile
+ * them immediately — instead of waiting up to 30s for the cron worker.
+ *
+ * Safe to call on every Payment.create — it's a single indexed query and a
+ * no-op when no pending webhook exists.
+ */
+export async function reconcileWebhooksForPayment(payment: {
+  id: string
+  processorId: string | null
+  referenceNumber: string | null
+  venueId: string
+}): Promise<number> {
+  if (!payment.processorId && !payment.referenceNumber) return 0
+
+  // Build the same eventId variants the webhook orchestrator would have produced.
+  const candidateEventIds: string[] = []
+  if (payment.processorId && payment.referenceNumber) {
+    candidateEventIds.push(`blumon-tpv-${payment.processorId}-${payment.referenceNumber}`)
+  }
+  if (payment.processorId) candidateEventIds.push(`blumon-tpv-${payment.processorId}`)
+  if (payment.referenceNumber) candidateEventIds.push(`blumon-tpv-${payment.referenceNumber}`)
+
+  const pending = await prisma.providerEventLog.findMany({
+    where: {
+      provider: ProviderType.PAYMENT_PROCESSOR,
+      status: EventStatus.PENDING,
+      eventId: { in: candidateEventIds },
+      createdAt: { gte: new Date(Date.now() - BLUMON_WEBHOOK_PENDING_TTL_MS) },
+    },
+    select: { id: true, payload: true, venueId: true },
+  })
+
+  if (pending.length === 0) return 0
+
+  let reconciled = 0
+  for (const row of pending) {
+    try {
+      const payload = row.payload as unknown as BlumonWebhookPayload
+      const result = await reconcileBlumonEvent(row.id, payload, {
+        // Trust the Payment's venueId over the row's cached venueId — Payments
+        // are the source of truth and may correct an earlier UNKNOWN_TERMINAL.
+        scopeVenueId: payment.venueId,
+      })
+      if (result.action === 'MATCHED' || result.action === 'RECONCILED') reconciled++
+    } catch (err) {
+      logger.error('❌ [Blumon backfill] Failed to reconcile event for new payment', {
+        eventLogId: row.id,
+        paymentId: payment.id,
+        error: err instanceof Error ? err.message : err,
+      })
+    }
+  }
+
+  if (reconciled > 0) {
+    logger.info('✅ [Blumon backfill] Reconciled webhook(s) on Payment record', {
+      paymentId: payment.id,
+      reconciledCount: reconciled,
+      pendingCount: pending.length,
+    })
+  }
+
+  return reconciled
+}
+
+/**
+ * Update a ProviderEventLog row based on a match attempt result.
+ * Centralized so both the inline path and the cron worker behave identically.
+ */
+async function updateEventLogFromMatchResult(eventLogId: string, result: WebhookProcessingResult): Promise<void> {
+  const data: Prisma.ProviderEventLogUpdateInput = {}
+
+  switch (result.action) {
+    case 'MATCHED':
+    case 'RECONCILED':
+      data.status = EventStatus.PROCESSED
+      data.processedAt = new Date()
+      if (result.paymentId) data.payment = { connect: { id: result.paymentId } }
+      data.errorReason = null
+      break
+    case 'DISCREPANCY':
+      data.status = EventStatus.ERROR
+      data.errorReason = BLUMON_WEBHOOK_ERROR_REASONS.AMOUNT_MISMATCH
+      data.processedAt = new Date()
+      if (result.paymentId) data.payment = { connect: { id: result.paymentId } }
+      break
+    case 'NOT_FOUND':
+      // Stay PENDING — the cron worker will retry up to 24h.
+      data.status = EventStatus.PENDING
+      break
+    case 'ERROR':
+      data.status = EventStatus.ERROR
+      data.errorReason = BLUMON_WEBHOOK_ERROR_REASONS.PROCESSING_ERROR
+      data.processedAt = new Date()
+      break
+    default:
+      // PENDING / DUPLICATE / UNKNOWN_TERMINAL / NOT_APPROVED handled by caller already
+      return
+  }
+
+  await prisma.providerEventLog.update({ where: { id: eventLogId }, data }).catch(err => {
+    logger.error('❌ [Blumon webhook] Failed to update event log row', {
+      eventLogId,
+      action: result.action,
+      error: err instanceof Error ? err.message : err,
+    })
+  })
+}
+
+/**
+ * Inner matching logic — extracted from the legacy implementation so it can
+ * be re-used by the cron worker. NEVER inserts into ProviderEventLog (the
+ * caller owns the row); only reads + updates Payment.processorData.
+ *
+ * @param scopeVenueId If provided, matches are restricted to Payments in this
+ *                     venue. Reduces false-positives when references collide
+ *                     across venues. Resolved from the webhook's serialNumber
+ *                     in the orchestrator above.
+ */
+async function attemptPaymentMatch(
+  payload: BlumonWebhookPayload,
+  ctx: { scopeVenueId: string | null; correlationId: string; skipRetries?: boolean } = {
+    scopeVenueId: null,
+    correlationId: `blumon-wh-${Date.now()}`,
+  },
+): Promise<WebhookProcessingResult> {
+  const { scopeVenueId, correlationId, skipRetries } = ctx
+  try {
+    const blumonAmount = parseFloat(payload.amount)
 
     // Build matching conditions based on available fields
     const matchConditions: Prisma.PaymentWhereInput[] = []
@@ -219,28 +617,33 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
       }
     }
 
-    // Try to find the payment with retry logic
-    // WHY: Blumon webhook often arrives BEFORE Android records the payment
+    // Build the where clause once. When `scopeVenueId` is provided we restrict
+    // the search to Payments inside that venue — eliminates false positives
+    // from references that collide across venues. We resolve the venue from
+    // the webhook's `serialNumber`, so it's the strongest scope we have.
+    const baseWhere: Prisma.PaymentWhereInput = {
+      OR: matchConditions,
+      status: { in: ['COMPLETED', 'PENDING'] },
+      ...(scopeVenueId ? { order: { venueId: scopeVenueId } } : {}),
+    }
+
+    // Retry loop only when called inline from the webhook controller. The cron
+    // worker passes `skipRetries=true` because it's already running on a delay
+    // and just needs one shot per pass.
+    const maxAttempts = skipRetries ? 1 : RETRY_CONFIG.maxAttempts
     let payment = null
-    for (let attempt = 0; attempt < RETRY_CONFIG.maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       // Wait before retry (first attempt is immediate)
-      if (RETRY_CONFIG.delays[attempt] > 0) {
-        logger.debug(
-          `🔄 Blumon webhook: Retry attempt ${attempt + 1}/${RETRY_CONFIG.maxAttempts} after ${RETRY_CONFIG.delays[attempt]}ms`,
-          {
-            correlationId,
-            reference: payload.reference,
-          },
-        )
+      if (!skipRetries && RETRY_CONFIG.delays[attempt] > 0) {
+        logger.debug(`🔄 Blumon webhook: Retry attempt ${attempt + 1}/${maxAttempts} after ${RETRY_CONFIG.delays[attempt]}ms`, {
+          correlationId,
+          reference: payload.reference,
+        })
         await delay(RETRY_CONFIG.delays[attempt])
       }
 
       payment = await prisma.payment.findFirst({
-        where: {
-          OR: matchConditions,
-          // Only match approved/completed payments
-          status: { in: ['COMPLETED', 'PENDING'] },
-        },
+        where: baseWhere,
         include: {
           order: {
             select: {
@@ -372,48 +775,30 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
         }
       }
     } else {
-      // Payment not found after all retries - this could be:
-      // 1. Android failed to record the payment entirely
-      // 2. Reference format mismatch
-      // 3. Payment recording failed on Android side
-
-      const totalWaitTime = RETRY_CONFIG.delays.reduce((a, b) => a + b, 0)
-      logger.warn('⚠️ Blumon webhook: Payment NOT FOUND after all retries', {
+      // Payment not found inline. The orchestrator will keep the
+      // ProviderEventLog row in PENDING status; the cron worker
+      // (`reconcileBlumonPendingWebhooks`) will retry every 30s for up to 24h
+      // before marking it ORPHANED. No manual reconciliation needed in 99% of
+      // cases — TPV's offline queue eventually replays the Payment.
+      const totalWaitTime = skipRetries ? 0 : RETRY_CONFIG.delays.reduce((a, b) => a + b, 0)
+      logger.warn('⚠️ [Blumon webhook] Payment not yet found — staying PENDING', {
         correlationId,
         reference: payload.reference,
         operationNumber: payload.operationNumber,
         amount: blumonAmount,
-        retryAttempts: RETRY_CONFIG.maxAttempts,
+        retryAttempts: skipRetries ? 0 : RETRY_CONFIG.maxAttempts,
         totalWaitMs: totalWaitTime,
-        hint: 'Android may have failed to record this payment. Check for orphaned transactions.',
-      })
-
-      // Store the orphaned webhook for manual reconciliation
-      // We could create a separate table for this, or use a general audit log
-      // For now, we'll log it prominently
-      logger.error('🚨 RECONCILIATION REQUIRED: Blumon payment not found after retries', {
-        correlationId,
-        reference: payload.reference,
-        operationNumber: payload.operationNumber,
-        amount: blumonAmount,
-        cardBrand: payload.brand,
-        cardType: payload.cardType,
-        authorizationCode: payload.authorizationCode,
-        dateTransaction: payload.dateTransaction,
-        membership: payload.membership,
-        serialNumber: payload.serialNumber,
-        retryAttempts: RETRY_CONFIG.maxAttempts,
-        totalWaitMs: totalWaitTime,
-        // This should trigger an alert to operations team
+        scopeVenueId,
+        skipRetries,
       })
 
       return {
-        success: true, // Webhook processed successfully, but no matching payment
+        success: true, // Webhook processed successfully — async retry covers it
         action: 'NOT_FOUND',
-        message: `Payment not found after ${RETRY_CONFIG.maxAttempts} attempts (${totalWaitTime}ms) - requires manual reconciliation`,
-        details: {
-          blumonAmount,
-        },
+        message: skipRetries
+          ? 'Payment not found on this scan (cron will retry)'
+          : `Payment not found inline — queued for async reconciliation (worker retries every 30s for 24h)`,
+        details: { blumonAmount },
       }
     }
   } catch (error) {

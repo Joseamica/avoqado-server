@@ -2440,6 +2440,11 @@ model Payment {
   // Commission System
   commissionCalculations CommissionCalculation[]
 
+  // Webhook reconciliation: Blumon TPV (and other providers) post webhooks that
+  // we link back to Payments here. One Payment can have multiple events (initial
+  // VENTA + DEVOLUCION later, etc.).
+  providerEventLogs ProviderEventLog[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2891,6 +2896,10 @@ model Terminal {
   // TPV Messaging
   messageDeliveries TpvMessageDelivery[]
   messageResponses  TpvMessageResponse[]
+
+  // Webhook reconciliation (Blumon TPV + any other provider that posts webhooks
+  // tagged with this terminal's serial number)
+  providerEventLogs ProviderEventLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3469,6 +3478,12 @@ model WebhookSubscription {
 }
 
 // Generic provider event log
+//
+// Used by Blumon TPV webhooks (and any future provider's webhooks) to store an
+// immutable record of every webhook event received. Reconciliation against
+// Payments happens both inline (5s retry) and asynchronously (cron worker)
+// without ever holding the webhook HTTP connection or losing events when the
+// Payment hasn't been recorded yet (e.g. offline queue replay).
 model ProviderEventLog {
   id       String       @id @default(cuid())
   provider ProviderType @default(PAYMENT_PROCESSOR)
@@ -3479,18 +3494,47 @@ model ProviderEventLog {
   providerId      String?
   paymentProvider PaymentProvider? @relation(fields: [providerId], references: [id])
 
+  // Canonical event identifier for idempotency. For Blumon TPV we use
+  // `blumon-tpv-{operationNumber}-{reference}`. Nullable for legacy rows
+  // and providers that don't expose a stable ID.
   eventId String?
   type    String?
   payload Json
   status  EventStatus @default(PENDING)
 
+  // Reconciliation result (filled when status = ERROR or when we want to
+  // record a non-fatal observation). Free-form string so callers can use a
+  // small enum-like vocabulary: 'UNKNOWN_TERMINAL', 'AMOUNT_MISMATCH',
+  // 'ORPHANED', 'DUPLICATE_DETECTED', etc.
+  errorReason String? @db.Text
+
+  // Optional FK to the Terminal that produced the event. Resolved from the
+  // payload's serialNumber (Blumon sends `2841548628`, our DB stores
+  // `AVQD-2841548628`). Null when the serial isn't registered locally
+  // (status will typically be ERROR + errorReason = 'UNKNOWN_TERMINAL').
+  terminalId String?
+  terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: SetNull)
+
+  // Optional FK to the Payment we reconciled this webhook against.
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
   createdAt   DateTime  @default(now())
   processedAt DateTime?
+
+  // Idempotency guard. Postgres treats multiple NULLs as distinct, so legacy
+  // rows / providers without eventId can still coexist; once eventId is set
+  // it must be unique per provider.
+  @@unique([provider, eventId])
 
   @@index([provider])
   @@index([venueId])
   @@index([status])
   @@index([providerId])
+  @@index([terminalId])
+  @@index([paymentId])
+  @@index([status, createdAt]) // worker scans pending events ordered by age
+  @@index([type, createdAt])   // dashboard queries by event type
 }
 
 // Stripe webhook event tracking for idempotency

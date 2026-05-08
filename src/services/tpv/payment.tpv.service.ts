@@ -1949,6 +1949,23 @@ export async function recordOrderPayment(
 
   logger.info('Payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
+  // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
+  // Fire-and-forget — never block the API response on reconciliation. The cron
+  // worker (`BlumonWebhookReconciliationJob`) is the safety net if this fails.
+  void import('./blumon-webhook.service').then(({ reconcileWebhooksForPayment }) =>
+    reconcileWebhooksForPayment({
+      id: payment.id,
+      processorId: payment.processorId,
+      referenceNumber: payment.referenceNumber,
+      venueId,
+    }).catch(err => {
+      logger.error('🪝 [Blumon backfill] Failed to reconcile pending webhooks for order payment', {
+        paymentId: payment.id,
+        error: err instanceof Error ? err.message : err,
+      })
+    }),
+  )
+
   // Add digital receipt info to payment response
   return {
     ...payment,
@@ -2531,6 +2548,23 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   }
 
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
+
+  // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
+  // Fire-and-forget — never block the API response on reconciliation. The cron
+  // worker (`BlumonWebhookReconciliationJob`) is the safety net if this fails.
+  void import('./blumon-webhook.service').then(({ reconcileWebhooksForPayment }) =>
+    reconcileWebhooksForPayment({
+      id: payment.id,
+      processorId: payment.processorId,
+      referenceNumber: payment.referenceNumber,
+      venueId,
+    }).catch(err => {
+      logger.error('🪝 [Blumon backfill] Failed to reconcile pending webhooks for fast payment', {
+        paymentId: payment.id,
+        error: err instanceof Error ? err.message : err,
+      })
+    }),
+  )
 
   // Add digital receipt info to payment response
   return {
