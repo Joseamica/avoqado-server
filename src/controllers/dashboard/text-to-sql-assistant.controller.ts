@@ -62,7 +62,7 @@ const isCrossVenueRequest = (message: string, currentVenueSlug: string): boolean
 const classifySensitiveRisk = (message: string): SensitiveRiskLevel => {
   const normalized = normalizeForSecurityCheck(message)
   const criticalPatterns = [
-    /\b(password|contrasena|api[\s_-]*key|apikey|secret|secreto|credentials?|access[\s_-]*token|jwt)\b/,
+    /\b(passwords?|contrasenas?|api[\s_-]*keys?|apikeys?|secrets?|secretos?|credentials?|credenciales?|access[\s_-]*tokens?|jwts?)\b/,
     /\b(stripe.*secret|refresh[\s_-]*token|webhook[\s_-]*secret)\b/,
   ]
   const highPatterns = [
@@ -76,6 +76,20 @@ const classifySensitiveRisk = (message: string): SensitiveRiskLevel => {
   if (highPatterns.some(pattern => pattern.test(normalized))) return 'high'
   if (mediumPatterns.some(pattern => pattern.test(normalized))) return 'medium'
   return 'none'
+}
+
+const isCredentialExtractionRequest = (message: string): boolean => {
+  const normalized = normalizeForSecurityCheck(message)
+  const hasCredentialSignal =
+    /\b(passwords?|contrasenas?|api[\s_-]*keys?|apikeys?|secrets?|secretos?|credentials?|credenciales?|access[\s_-]*tokens?|jwts?)\b/.test(
+      normalized,
+    )
+  const hasExtractionIntent =
+    /\b(dame|muestrame|mostrar|lista|listar|obten|obtener|sacar|extraer|exporta|exportar|revela|revelar|dump|give|show|list|get|extract|export|reveal)\b/.test(
+      normalized,
+    )
+
+  return hasCredentialSignal && hasExtractionIntent
 }
 
 /**
@@ -288,6 +302,18 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
     }
 
     // Verificar permisos para consultas sensibles
+    if (sensitiveRiskLevel === 'critical' && isCredentialExtractionRequest(message)) {
+      logger.warn('🚨 Intento de extracción de credenciales bloqueado', {
+        userId: authContext.userId,
+        venueId: authContext.venueId,
+        role: authContext.role,
+        riskLevel: sensitiveRiskLevel,
+        query: message.substring(0, 100),
+      })
+
+      throw new ForbiddenError('No puedo proporcionar credenciales, secretos, tokens ni contraseñas por el chat.')
+    }
+
     if (sensitiveRiskLevel !== 'none' && !crudBridgeMessage && !hasPermissionForSensitiveRisk(authContext.role, sensitiveRiskLevel)) {
       logger.warn('🚨 Intento de acceso a datos sensibles bloqueado', {
         userId: authContext.userId,
