@@ -1,17 +1,15 @@
 # Manual Payment — Review v3 Follow-up
 
-> **Para el LLM revisor**: ya hiciste 2 rondas de review. Esta es la v3.
-> En v1 encontraste 4 issues (P1×2, P2×2). Aprobé y fixé los 4.
-> En v2 encontraste 1 regresión (multi-customer metrics solo a primary). Fixé.
-> En v3 encontraste 1 regresión adicional (partial payments inflate metrics).
-> Este documento muestra el fix de v3 + cambios resumidos.
+> **Para el LLM revisor**: ya hiciste 2 rondas de review. Esta es la v3. En v1 encontraste 4 issues (P1×2, P2×2). Aprobé y fixé los 4. En v2
+> encontraste 1 regresión (multi-customer metrics solo a primary). Fixé. En v3 encontraste 1 regresión adicional (partial payments inflate
+> metrics). Este documento muestra el fix de v3 + cambios resumidos.
 
 ---
 
 ## Tu hallazgo v3 (cerrado)
 
-> **P2 — Partial payments inflate customer metrics**
-> Manual now queues customer metrics before knowing whether the order is fully paid, so a multi-payment order increments totalVisits and totalSpent once per partial payment.
+> **P2 — Partial payments inflate customer metrics** Manual now queues customer metrics before knowing whether the order is fully paid, so a
+> multi-payment order increments totalVisits and totalSpent once per partial payment.
 > /Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/dashboard/manualPayment.service.ts:174-184
 
 ## Fix aplicado
@@ -144,12 +142,12 @@ Test Suites: 89 passed, 89 total
 
 ## Estado de tus 4 puntos del v3
 
-| Tu requerimiento | Status |
-|---|:---:|
-| Solo poblar/usar metricsCustomerIds cuando newTotalPaid deja la orden fully paid | ✅ |
-| Pasar anchorOrderTotal como metricsAmount (no amount + tipAmount en parciales) | ✅ |
-| Cambiar el test que esperaba metrics en partial → expect no llamado | ✅ |
-| Mantener test 1 primary + 2 secondary en pago final: 3 métricas + 1 loyalty | ✅ |
+| Tu requerimiento                                                                 | Status |
+| -------------------------------------------------------------------------------- | :----: |
+| Solo poblar/usar metricsCustomerIds cuando newTotalPaid deja la orden fully paid |   ✅   |
+| Pasar anchorOrderTotal como metricsAmount (no amount + tipAmount en parciales)   |   ✅   |
+| Cambiar el test que esperaba metrics en partial → expect no llamado              |   ✅   |
+| Mantener test 1 primary + 2 secondary en pago final: 3 métricas + 1 loyalty      |   ✅   |
 
 ## Service file completo
 
@@ -186,8 +184,10 @@ if (newTotalPaid.equals(anchorOrderTotal)) {
 ## ¿Algún issue residual?
 
 Por favor revisa:
+
 - ¿`anchorOrderTotal` es realmente el total final? (es: `subtotal + tax - discount + cumulative tips` actualizado en cada partial)
-- ¿Hay algún edge case con `newTotalPaid.equals` vs `>=` que pueda dejar una orden marcada PAID sin disparar metrics? (En mi código uso `.equals` para metrics/loyalty pero `>=` para `paymentStatus = PAID`)
+- ¿Hay algún edge case con `newTotalPaid.equals` vs `>=` que pueda dejar una orden marcada PAID sin disparar metrics? (En mi código uso
+  `.equals` para metrics/loyalty pero `>=` para `paymentStatus = PAID`)
 - ¿Algo más que TPV haga que yo no esté haciendo en pagos completos?
 
 Si todo OK → SHIP. Si hay algo más → otro round.

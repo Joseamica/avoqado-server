@@ -50,6 +50,7 @@ export const createVenueSchema = z.object({
 
     website: z.string().url({ message: 'Formato de URL de sitio web inválido.' }).optional().nullable(),
     logo: z.string().url({ message: 'URL de logo inválida.' }).optional().nullable(),
+    heroImageUrl: z.string().url({ message: 'URL de portada inválida.' }).optional().nullable(),
     primaryColor: z
       .string()
       .regex(/^#(?:[0-9a-fA-F]{3}){1,2}$/, { message: 'Color primario debe ser un código hexadecimal válido.' })

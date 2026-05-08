@@ -4,8 +4,7 @@ Use this when a venue stops using Avoqado online reservation payments.
 
 ## Immediate action
 
-1. Disable new online charges:
-   `POST /api/v1/dashboard/superadmin/stripe-connect/venues/:venueId/offboard-payments`
+1. Disable new online charges: `POST /api/v1/dashboard/superadmin/stripe-connect/venues/:venueId/offboard-payments`
 2. Confirm the response lists:
    - `openDisputes`
    - `refundsInFlight`
@@ -15,7 +14,8 @@ Use this when a venue stops using Avoqado online reservation payments.
 
 ## Retention window
 
-Keep the Stripe connected account id in Avoqado for at least 180 days after the final paid reservation or final payout, whichever is later. Disputes can arrive after the venue has stopped taking new bookings.
+Keep the Stripe connected account id in Avoqado for at least 180 days after the final paid reservation or final payout, whichever is later.
+Disputes can arrive after the venue has stopped taking new bookings.
 
 ## Pending money
 
