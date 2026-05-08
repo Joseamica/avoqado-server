@@ -60,6 +60,9 @@ import * as tpvMessageController from '../controllers/dashboard/tpv-message.dash
 import {
   assistantActionConfirmSchema,
   assistantActionPreviewSchema,
+  assistantConversationListSchema,
+  assistantConversationParamsSchema,
+  assistantCreateConversationSchema,
   assistantQuerySchema,
   feedbackSubmissionSchema,
 } from '../schemas/dashboard/assistant.schema'
@@ -7295,6 +7298,39 @@ router.post(
   requireJsonBodyMiddleware,
   validateRequest(assistantQuerySchema),
   assistantController.processAssistantQuery,
+)
+
+router.get(
+  '/assistant/conversations',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  validateRequest(assistantConversationListSchema),
+  assistantController.listConversations,
+)
+
+router.post(
+  '/assistant/conversations',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  requireJsonBodyMiddleware,
+  validateRequest(assistantCreateConversationSchema),
+  assistantController.createConversation,
+)
+
+router.get(
+  '/assistant/conversations/:conversationId',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  validateRequest(assistantConversationParamsSchema),
+  assistantController.getConversation,
+)
+
+router.delete(
+  '/assistant/conversations/:conversationId',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CHATBOT'),
+  validateRequest(assistantConversationParamsSchema),
+  assistantController.deleteConversation,
 )
 
 /**

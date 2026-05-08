@@ -1899,6 +1899,7 @@ Ejemplos de respuestas CORRECTAS:
         const currentMessageIsSafeCrud = (isCrudMessage || isActionFieldReply) && !crudMessageHasInjectionSignals
         if (!currentMessageIsSafeCrud && query.conversationHistory && query.conversationHistory.length > 0) {
           const historyToScan = query.conversationHistory.slice(-5)
+          const sanitizedHistory = [...query.conversationHistory]
           for (const entry of historyToScan) {
             if (!this.shouldScanHistoryEntryForInjection(entry)) {
               continue
@@ -1912,7 +1913,7 @@ Ejemplos de respuestas CORRECTAS:
             const historyCheck = await SemanticInjectionDetectorService.detect(content, this.openai)
             const shouldBypassHistorySemanticBlock = this.shouldBypassSemanticInjectionBlock(content)
             if (historyCheck.isInjection && historyCheck.confidence >= 70 && !shouldBypassHistorySemanticBlock) {
-              logger.warn('🛡️ Injection detected in conversation history', {
+              logger.warn('🛡️ Injection detected in conversation history; entry removed from LLM context', {
                 userId: query.userId,
                 venueId: query.venueId,
                 entryRole: entry.role,
@@ -1931,24 +1932,13 @@ Ejemplos de respuestas CORRECTAS:
                 ipAddress: query.ipAddress,
               })
 
-              const securityResponse = SecurityResponseService.generateSecurityResponse(SecurityViolationType.PROMPT_INJECTION, 'es')
-
-              return {
-                response: securityResponse.message,
-                confidence: 0,
-                metadata: {
-                  queryGenerated: false,
-                  queryExecuted: false,
-                  dataSourcesUsed: [],
-                  routedTo: 'Blocked',
-                  riskLevel: 'critical',
-                  reasonCode: 'conversation_history_injection_blocked',
-                  blocked: true,
-                  violationType: SecurityViolationType.PROMPT_INJECTION,
-                },
+              const entryIndex = sanitizedHistory.indexOf(entry)
+              if (entryIndex >= 0) {
+                sanitizedHistory.splice(entryIndex, 1)
               }
             }
           }
+          query.conversationHistory = sanitizedHistory
         }
       }
 
@@ -3416,17 +3406,26 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     sessionId: string,
     tokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number },
   ): Promise<TextToSqlResponse> {
-    const topicClarification = this.getBusinessTopicClarification(query.message)
+    const language = this.detectUserLanguage(query.message)
+    const topicClarification = this.getBusinessTopicClarification(query.message, language)
     const isBusinessQuery = this.hasBusinessDataSignal(query.message)
     const response = topicClarification
       ? topicClarification.response
       : isBusinessQuery
-        ? [
-            'Todavía no tengo una herramienta registrada para responder esa consulta con datos confiables.',
-            'Por seguridad no genero SQL libre ni consulto tablas fuera del catálogo aprobado.',
-            'Puedo ayudarte con ventas, ticket promedio, productos más vendidos, staff, reseñas, clientes nuevos, inventario bajo, recetas, órdenes activas, turnos, rentabilidad y métodos de pago.',
-          ].join(' ')
-        : 'Puedo ayudarte con analítica del restaurante o con pasos para usar Avoqado. ¿Qué quieres revisar?'
+        ? language === 'en'
+          ? [
+              "I don't have a registered tool to answer that data request reliably yet.",
+              "For security, I don't generate free-form SQL or query tables outside the approved catalog.",
+              'I can help with sales, average ticket, top products, staff, reviews, new customers, low inventory, recipes, active orders, shifts, profitability, and payment methods.',
+            ].join(' ')
+          : [
+              'Todavía no tengo una herramienta registrada para responder esa consulta con datos confiables.',
+              'Por seguridad no genero SQL libre ni consulto tablas fuera del catálogo aprobado.',
+              'Puedo ayudarte con ventas, ticket promedio, productos más vendidos, staff, reseñas, clientes nuevos, inventario bajo, recetas, órdenes activas, turnos, rentabilidad y métodos de pago.',
+            ].join(' ')
+        : language === 'en'
+          ? 'I can help with restaurant analytics or steps for using Avoqado. What would you like to review?'
+          : 'Puedo ayudarte con analítica del restaurante o con pasos para usar Avoqado. ¿Qué quieres revisar?'
 
     let trainingDataId: string | undefined
     try {
@@ -3462,43 +3461,76 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       suggestions: topicClarification
         ? topicClarification.suggestions
         : isBusinessQuery
-          ? ['¿Cuánto vendí hoy?', '¿Qué productos son los más vendidos este mes?', '¿Cuándo recibo más clientes nuevos?']
-          : ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cuáles fueron mis ventas de ayer?'],
+          ? language === 'en'
+            ? ['How much did I sell today?', 'What are my top products this month?', 'When do I get the most new customers?']
+            : ['¿Cuánto vendí hoy?', '¿Qué productos son los más vendidos este mes?', '¿Cuándo recibo más clientes nuevos?']
+          : language === 'en'
+            ? ['How do I configure my menu?', 'How do I review my payments?', 'What were yesterday’s sales?']
+            : ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cuáles fueron mis ventas de ayer?'],
       trainingDataId,
       tokenUsage,
     }
   }
 
-  private getBusinessTopicClarification(message: string): { response: string; suggestions: string[] } | null {
+  private detectUserLanguage(message: string): 'es' | 'en' {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
+    const englishSignals =
+      /\b(how|what|when|where|why|contact|support|help|sales|products?|customers?|reviews?|payments?|dashboard|menu)\b/.test(
+        normalizedMessage,
+      )
+    const spanishSignals = /\b(como|que|cuando|donde|por que|contacto|soporte|ayuda|ventas?|productos?|clientes?|resenas?|pagos?)\b/.test(
+      normalizedMessage,
+    )
+
+    return englishSignals && !spanishSignals ? 'en' : 'es'
+  }
+
+  private getBusinessTopicClarification(message: string, language: 'es' | 'en' = 'es'): { response: string; suggestions: string[] } | null {
     const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
     const wordCount = normalizedMessage.split(' ').filter(Boolean).length
     const isShortAmbiguousTopic = wordCount <= 4
 
-    if (isShortAmbiguousTopic && /\b(productos?|menu|platillos?|items?)\b/.test(normalizedMessage)) {
+    if (isShortAmbiguousTopic && /\b(productos?|products?|menu|platillos?|items?)\b/.test(normalizedMessage)) {
       return {
-        response: 'Claro. ¿Qué quieres revisar de productos?',
-        suggestions: ['¿Qué productos son los más vendidos este mes?', '¿Qué productos tienen bajo stock?', '¿Qué receta se usa más?'],
+        response: language === 'en' ? 'Sure. What would you like to review about products?' : 'Claro. ¿Qué quieres revisar de productos?',
+        suggestions:
+          language === 'en'
+            ? ['What are my top products this month?', 'Which products have low stock?', 'Which recipe is used the most?']
+            : ['¿Qué productos son los más vendidos este mes?', '¿Qué productos tienen bajo stock?', '¿Qué receta se usa más?'],
       }
     }
 
-    if (isShortAmbiguousTopic && /\b(ventas?|ingresos?|revenue)\b/.test(normalizedMessage)) {
+    if (isShortAmbiguousTopic && /\b(ventas?|sales?|ingresos?|revenue)\b/.test(normalizedMessage)) {
       return {
-        response: 'Claro. ¿Qué quieres revisar de ventas?',
-        suggestions: ['¿Cuánto vendí hoy?', '¿Cuál fue mi ticket promedio este mes?', '¿Cómo va el negocio esta semana?'],
+        response: language === 'en' ? 'Sure. What would you like to review about sales?' : 'Claro. ¿Qué quieres revisar de ventas?',
+        suggestions:
+          language === 'en'
+            ? ['How much did I sell today?', 'What was my average ticket this month?', 'How is the business doing this week?']
+            : ['¿Cuánto vendí hoy?', '¿Cuál fue mi ticket promedio este mes?', '¿Cómo va el negocio esta semana?'],
       }
     }
 
-    if (isShortAmbiguousTopic && /\b(clientes?|clientes nuevos|registros?)\b/.test(normalizedMessage)) {
+    if (isShortAmbiguousTopic && /\b(clientes?|customers?|clientes nuevos|new customers|registros?)\b/.test(normalizedMessage)) {
       return {
-        response: 'Claro. ¿Qué quieres revisar de clientes?',
-        suggestions: ['¿Cuántos clientes nuevos tengo este mes?', '¿Cuándo recibo más clientes nuevos?', '¿Cómo va el negocio este mes?'],
+        response: language === 'en' ? 'Sure. What would you like to review about customers?' : 'Claro. ¿Qué quieres revisar de clientes?',
+        suggestions:
+          language === 'en'
+            ? [
+                'How many new customers do I have this month?',
+                'When do I get the most new customers?',
+                'How is the business doing this month?',
+              ]
+            : ['¿Cuántos clientes nuevos tengo este mes?', '¿Cuándo recibo más clientes nuevos?', '¿Cómo va el negocio este mes?'],
       }
     }
 
     if (isShortAmbiguousTopic && /\b(resenas?|reviews?|opiniones?|calificaciones?)\b/.test(normalizedMessage)) {
       return {
-        response: 'Claro. ¿Qué quieres revisar de reseñas?',
-        suggestions: ['¿Cuál es mi promedio de reseñas?', '¿Cuántas reseñas tuve esta semana?', '¿Cómo va el negocio este mes?'],
+        response: language === 'en' ? 'Sure. What would you like to review about reviews?' : 'Claro. ¿Qué quieres revisar de reseñas?',
+        suggestions:
+          language === 'en'
+            ? ['What is my average review rating?', 'How many reviews did I get this week?', 'How is the business doing this month?']
+            : ['¿Cuál es mi promedio de reseñas?', '¿Cuántas reseñas tuve esta semana?', '¿Cómo va el negocio este mes?'],
       }
     }
 
@@ -6257,16 +6289,22 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       normalizedMessage,
     )
 
+    const language = this.detectUserLanguage(message)
     const contactSignal =
-      /\b(comunico|contacto|contactar|soporte|support|ayuda|whatsapp|telefono|correo|email|hablar con avoqado|equipo de avoqado)\b/.test(
+      /\b(comunico|contacto|contactar|contact|soporte|support|ayuda|help|whatsapp|telefono|phone|correo|email|hablar con avoqado|equipo de avoqado)\b/.test(
         normalizedMessage,
-      ) && /\b(avoqado|soporte|support|ustedes|equipo)\b/.test(normalizedMessage)
+      ) && /\b(avoqado|soporte|support|ustedes|equipo|team)\b/.test(normalizedMessage)
     if (contactSignal) {
       return {
         topic: 'general',
         response:
-          'Para comunicarte con Avoqado, usa los canales de soporte oficiales que aparecen en tu dashboard o contacta a tu Customer Success/soporte asignado. Si tu duda es operativa, también puedes preguntarme cómo hacer algo dentro del dashboard.',
-        suggestions: ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cómo agrego un usuario al dashboard?'],
+          language === 'en'
+            ? 'You can contact Avoqado support on WhatsApp here: https://wa.me/525640070001. If your question is operational, you can also ask me how to do something inside the dashboard.'
+            : 'Puedes comunicarte con soporte de Avoqado por WhatsApp aquí: https://wa.me/525640070001. Si tu duda es operativa, también puedes preguntarme cómo hacer algo dentro del dashboard.',
+        suggestions:
+          language === 'en'
+            ? ['How do I configure my menu?', 'How do I review my payments?', 'How do I add a dashboard user?']
+            : ['¿Cómo configuro mi menú?', '¿Cómo reviso mis pagos?', '¿Cómo agrego un usuario al dashboard?'],
       }
     }
 

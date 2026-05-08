@@ -28,10 +28,30 @@ export const assistantQuerySchema = z.object({
       .min(1, 'El mensaje no puede estar vacío.')
       .max(2000, 'El mensaje no puede exceder 2000 caracteres.'),
     conversationHistory: z.array(conversationEntrySchema).max(50, 'El historial no puede exceder 50 entradas.').optional(),
+    conversationId: z.string().trim().min(1, 'El ID de conversación no puede estar vacío.').optional(),
     venueSlug: z.string().trim().min(1, 'El identificador del venue no puede estar vacío.').optional(),
     userId: z.string().trim().min(1, 'El identificador del usuario no puede estar vacío.').optional(),
     includeVisualization: z.boolean().optional().default(false),
     referencesContext: z.string().max(4000, 'El contexto de referencias no puede exceder 4000 caracteres.').optional(),
+  }),
+})
+
+export const assistantConversationParamsSchema = z.object({
+  params: z.object({
+    conversationId: z.string().trim().min(1, 'El ID de conversación es requerido.'),
+  }),
+})
+
+export const assistantConversationListSchema = z.object({
+  query: z.object({
+    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+    cursor: z.string().trim().min(1).optional(),
+  }),
+})
+
+export const assistantCreateConversationSchema = z.object({
+  body: z.object({
+    title: z.string().trim().min(1).max(120).optional(),
   }),
 })
 
@@ -127,6 +147,9 @@ export const feedbackSubmissionSchema = z.object({
 // Inferimos los tipos para usarlos en el controlador y servicio
 export type ConversationEntryDto = z.infer<typeof conversationEntrySchema>
 export type AssistantQueryDto = z.infer<typeof assistantQuerySchema.shape.body>
+export type AssistantConversationParamsDto = z.infer<typeof assistantConversationParamsSchema.shape.params>
+export type AssistantConversationListDto = z.infer<typeof assistantConversationListSchema.shape.query>
+export type AssistantCreateConversationDto = z.infer<typeof assistantCreateConversationSchema.shape.body>
 export type AssistantActionPreviewDto = z.infer<typeof assistantActionPreviewSchema.shape.body>
 export type AssistantActionConfirmDto = z.infer<typeof assistantActionConfirmSchema.shape.body>
 export type AssistantResponseDto = z.infer<typeof assistantResponseSchema>

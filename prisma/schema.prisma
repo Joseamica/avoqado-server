@@ -251,6 +251,9 @@ model Venue {
 
   // AI Training
   chatTrainingData   ChatTrainingData[]  @relation("VenueChatTraining")
+  chatConversations  ChatConversation[]  @relation("VenueChatConversations")
+  chatMessages       ChatMessage[]       @relation("VenueChatMessages")
+  chatLearningEvents ChatLearningEvent[] @relation("VenueChatLearningEvents")
   chatbotTokenBudget ChatbotTokenBudget?
 
   // Payment Provider Integration
@@ -530,7 +533,10 @@ model Staff {
   deviceTokens            DeviceToken[]
 
   // AI Training
-  chatTrainingData ChatTrainingData[] @relation("UserChatTraining")
+  chatTrainingData   ChatTrainingData[]  @relation("UserChatTraining")
+  chatConversations  ChatConversation[]  @relation("UserChatConversations")
+  chatMessages       ChatMessage[]       @relation("UserChatMessages")
+  chatLearningEvents ChatLearningEvent[] @relation("UserChatLearningEvents")
 
   // Time tracking
   timeEntries TimeEntry[]
@@ -3526,7 +3532,6 @@ model ProviderEventLog {
   // rows / providers without eventId can still coexist; once eventId is set
   // it must be unique per provider.
   @@unique([provider, eventId])
-
   @@index([provider])
   @@index([venueId])
   @@index([status])
@@ -3534,7 +3539,7 @@ model ProviderEventLog {
   @@index([terminalId])
   @@index([paymentId])
   @@index([status, createdAt]) // worker scans pending events ordered by age
-  @@index([type, createdAt])   // dashboard queries by event type
+  @@index([type, createdAt]) // dashboard queries by event type
 }
 
 // Stripe webhook event tracking for idempotency
@@ -5359,12 +5364,92 @@ model ChatTrainingData {
 
   // Relations
   feedback ChatFeedback[]
+  messages ChatMessage[]  @relation("TrainingDataChatMessages")
 
   @@index([venueId])
   @@index([userId])
   @@index([responseCategory])
   @@index([confidence])
   @@index([createdAt])
+}
+
+enum ChatConversationStatus {
+  ACTIVE
+  ARCHIVED
+  DELETED
+}
+
+enum ChatMessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+model ChatConversation {
+  id           String                 @id @default(cuid())
+  venueId      String
+  venue        Venue                  @relation("VenueChatConversations", fields: [venueId], references: [id], onDelete: Cascade)
+  userId       String
+  user         Staff                  @relation("UserChatConversations", fields: [userId], references: [id], onDelete: Cascade)
+  title        String?
+  summary      String?                @db.Text
+  lastMessage  String?                @db.Text
+  messageCount Int                    @default(0)
+  status       ChatConversationStatus @default(ACTIVE)
+  metadata     Json?
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  deletedAt    DateTime?
+
+  messages ChatMessage[]
+
+  @@index([venueId, userId, updatedAt])
+  @@index([venueId, status, updatedAt])
+  @@index([userId, status, updatedAt])
+}
+
+model ChatMessage {
+  id             String            @id @default(cuid())
+  conversationId String
+  conversation   ChatConversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  venueId        String
+  venue          Venue             @relation("VenueChatMessages", fields: [venueId], references: [id], onDelete: Cascade)
+  userId         String
+  user           Staff             @relation("UserChatMessages", fields: [userId], references: [id], onDelete: Cascade)
+  role           ChatMessageRole
+  content        String            @db.Text
+  metadata       Json?
+  trainingDataId String?
+  trainingData   ChatTrainingData? @relation("TrainingDataChatMessages", fields: [trainingDataId], references: [id], onDelete: SetNull)
+  createdAt      DateTime          @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([venueId, userId, createdAt])
+  @@index([trainingDataId])
+}
+
+model ChatLearningEvent {
+  id             String   @id @default(cuid())
+  venueId        String
+  venue          Venue    @relation("VenueChatLearningEvents", fields: [venueId], references: [id], onDelete: Cascade)
+  userId         String
+  user           Staff    @relation("UserChatLearningEvents", fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  messageId      String?
+  trainingDataId String?
+  eventType      String
+  intent         String?
+  toolUsed       String?
+  wasAnswered    Boolean?
+  confidence     Float?
+  failureReason  String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  @@index([venueId, eventType, createdAt])
+  @@index([userId, createdAt])
+  @@index([conversationId])
+  @@index([trainingDataId])
 }
 
 model LearnedPatterns {
@@ -8049,7 +8134,7 @@ model ReservationSettings {
   publicBookingEnabled Boolean @default(false)
   requirePhone         Boolean @default(true)
   requireEmail         Boolean @default(false)
-  requireAccount       Boolean @default(false)  // when true, customer must log in or register before booking
+  requireAccount       Boolean @default(false) // when true, customer must log in or register before booking
 
   // Cancellation
   allowCustomerCancel         Boolean @default(true)

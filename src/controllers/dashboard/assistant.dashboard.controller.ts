@@ -1,7 +1,14 @@
 import { NextFunction, Request, Response } from 'express'
 import assistantService from '../../services/dashboard/assistant.dashboard.service'
 import { AILearningService } from '../../services/dashboard/ai-learning.service'
-import { AssistantQueryDto, FeedbackSubmissionDto } from '../../schemas/dashboard/assistant.schema'
+import {
+  AssistantConversationListDto,
+  AssistantConversationParamsDto,
+  AssistantCreateConversationDto,
+  AssistantQueryDto,
+  FeedbackSubmissionDto,
+} from '../../schemas/dashboard/assistant.schema'
+import chatConversationService from '../../services/dashboard/chat-conversation.service'
 import { UnauthorizedError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
@@ -133,6 +140,103 @@ export const getAssistantSuggestions = async (req: AuthenticatedRequest, res: Re
       venueId: req.authContext?.venueId,
     })
 
+    next(error)
+  }
+}
+
+export const listConversations = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.authContext?.userId || !req.authContext?.venueId) {
+      throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    const { limit, cursor } = req.query as unknown as AssistantConversationListDto
+    const result = await chatConversationService.listConversations(req.authContext.venueId, req.authContext.userId, limit, cursor)
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    logger.error('Error listing assistant conversations', {
+      error,
+      userId: req.authContext?.userId,
+      venueId: req.authContext?.venueId,
+    })
+    next(error)
+  }
+}
+
+export const createConversation = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.authContext?.userId || !req.authContext?.venueId) {
+      throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    const { title } = req.body as AssistantCreateConversationDto
+    const conversation = await chatConversationService.createConversation(req.authContext.venueId, req.authContext.userId, title)
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id: conversation.id,
+        title: conversation.title,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+      },
+    })
+  } catch (error) {
+    logger.error('Error creating assistant conversation', {
+      error,
+      userId: req.authContext?.userId,
+      venueId: req.authContext?.venueId,
+    })
+    next(error)
+  }
+}
+
+export const getConversation = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.authContext?.userId || !req.authContext?.venueId) {
+      throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    const { conversationId } = req.params as AssistantConversationParamsDto
+    const conversation = await chatConversationService.getConversation(conversationId, req.authContext.venueId, req.authContext.userId)
+
+    res.status(200).json({
+      success: true,
+      data: conversation,
+    })
+  } catch (error) {
+    logger.error('Error getting assistant conversation', {
+      error,
+      userId: req.authContext?.userId,
+      venueId: req.authContext?.venueId,
+    })
+    next(error)
+  }
+}
+
+export const deleteConversation = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!req.authContext?.userId || !req.authContext?.venueId) {
+      throw new UnauthorizedError('Usuario no autenticado')
+    }
+
+    const { conversationId } = req.params as AssistantConversationParamsDto
+    await chatConversationService.deleteConversation(conversationId, req.authContext.venueId, req.authContext.userId)
+
+    res.status(200).json({
+      success: true,
+      message: 'Conversación eliminada correctamente',
+    })
+  } catch (error) {
+    logger.error('Error deleting assistant conversation', {
+      error,
+      userId: req.authContext?.userId,
+      venueId: req.authContext?.venueId,
+    })
     next(error)
   }
 }

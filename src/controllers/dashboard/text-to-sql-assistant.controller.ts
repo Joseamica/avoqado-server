@@ -1,6 +1,8 @@
 import { NextFunction, Request, Response } from 'express'
+import { Prisma } from '@prisma/client'
 import textToSqlAssistantService from '../../services/dashboard/text-to-sql-assistant.service'
 import { AssistantActionConfirmDto, AssistantActionPreviewDto, AssistantQueryDto } from '../../schemas/dashboard/assistant.schema'
+import chatConversationService from '../../services/dashboard/chat-conversation.service'
 import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
@@ -9,6 +11,7 @@ import { getUserAccess, type ImpersonationAccessOverride } from '../../services/
 
 const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
 type SensitiveRiskLevel = 'none' | 'medium' | 'high' | 'critical'
+type MutableJsonObject = Record<string, Prisma.InputJsonValue>
 
 const normalizeForSecurityCheck = (message: string): string => {
   return message
@@ -187,47 +190,53 @@ const resolveAuthenticatedVenueContext = async (
   }
 }
 
-const buildSanitizedMetadata = (metadata: Record<string, any> | undefined, confidence: number): Record<string, unknown> => {
-  const sanitizedMetadata: Record<string, unknown> = {
-    confidence,
-    queryGenerated: metadata?.queryGenerated,
-    queryExecuted: metadata?.queryExecuted,
-    rowsReturned: metadata?.rowsReturned,
-    executionTime: metadata?.executionTime,
-    blocked: metadata?.blocked,
-    violationType: metadata?.violationType,
-    riskLevel: metadata?.riskLevel,
-    reasonCode: metadata?.reasonCode,
-    routedTo: metadata?.routedTo,
-    intent: metadata?.intent,
+const setJsonMetadata = (target: MutableJsonObject, key: string, value: unknown) => {
+  if (value !== undefined) {
+    target[key] = value as Prisma.InputJsonValue
   }
+}
+
+const buildSanitizedMetadata = (metadata: Record<string, any> | undefined, confidence: number): MutableJsonObject => {
+  const sanitizedMetadata: MutableJsonObject = {}
+
+  setJsonMetadata(sanitizedMetadata, 'confidence', confidence)
+  setJsonMetadata(sanitizedMetadata, 'queryGenerated', metadata?.queryGenerated)
+  setJsonMetadata(sanitizedMetadata, 'queryExecuted', metadata?.queryExecuted)
+  setJsonMetadata(sanitizedMetadata, 'rowsReturned', metadata?.rowsReturned)
+  setJsonMetadata(sanitizedMetadata, 'executionTime', metadata?.executionTime)
+  setJsonMetadata(sanitizedMetadata, 'blocked', metadata?.blocked)
+  setJsonMetadata(sanitizedMetadata, 'violationType', metadata?.violationType)
+  setJsonMetadata(sanitizedMetadata, 'riskLevel', metadata?.riskLevel)
+  setJsonMetadata(sanitizedMetadata, 'reasonCode', metadata?.reasonCode)
+  setJsonMetadata(sanitizedMetadata, 'routedTo', metadata?.routedTo)
+  setJsonMetadata(sanitizedMetadata, 'intent', metadata?.intent)
 
   if (metadata && 'warnings' in metadata) {
-    sanitizedMetadata.warnings = metadata.warnings
+    setJsonMetadata(sanitizedMetadata, 'warnings', metadata.warnings)
   }
 
   if (metadata && 'bulletproofValidation' in metadata) {
-    sanitizedMetadata.bulletproofValidation = metadata.bulletproofValidation
+    setJsonMetadata(sanitizedMetadata, 'bulletproofValidation', metadata.bulletproofValidation)
   }
 
   if (metadata && 'action' in metadata) {
-    sanitizedMetadata.action = metadata.action
+    setJsonMetadata(sanitizedMetadata, 'action', metadata.action)
   }
 
   if (metadata && 'idempotency' in metadata) {
-    sanitizedMetadata.idempotency = metadata.idempotency
+    setJsonMetadata(sanitizedMetadata, 'idempotency', metadata.idempotency)
   }
 
   if (metadata && 'planId' in metadata) {
-    sanitizedMetadata.planId = metadata.planId
+    setJsonMetadata(sanitizedMetadata, 'planId', metadata.planId)
   }
 
   if (metadata && 'planMode' in metadata) {
-    sanitizedMetadata.planMode = metadata.planMode
+    setJsonMetadata(sanitizedMetadata, 'planMode', metadata.planMode)
   }
 
   if (metadata && 'steps' in metadata) {
-    sanitizedMetadata.steps = metadata.steps
+    setJsonMetadata(sanitizedMetadata, 'steps', metadata.steps)
   }
 
   return sanitizedMetadata
@@ -238,7 +247,8 @@ const buildSanitizedMetadata = (metadata: Record<string, any> | undefined, confi
  */
 export const processTextToSqlQuery = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { message, conversationHistory, venueSlug, userId, includeVisualization, referencesContext }: AssistantQueryDto = req.body
+    const { message, conversationHistory, conversationId, venueSlug, userId, includeVisualization, referencesContext }: AssistantQueryDto =
+      req.body
     const sensitiveRiskLevel = classifySensitiveRisk(message)
     const crudBridgeMessage = isCrudBridgeMessage(message)
     const authContext = await resolveAuthenticatedVenueContext(req, {
@@ -329,10 +339,35 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       timestamp: new Date().toISOString(),
     })
 
+    const conversation = await chatConversationService.ensureConversation({
+      conversationId,
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      title: message.slice(0, 80),
+      metadata: { source: 'dashboard_chatbot' },
+    })
+
+    const persistedHistory =
+      conversationHistory && conversationHistory.length > 0
+        ? conversationHistory
+        : await chatConversationService.getRecentHistory(conversation.id, authContext.venueId, authContext.userId)
+
+    const userMessage = await chatConversationService.appendMessage({
+      conversationId: conversation.id,
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      role: 'user',
+      content: message,
+      metadata: {
+        includeVisualization: Boolean(includeVisualization),
+        hasReferencesContext: Boolean(referencesContext),
+      },
+    })
+
     // Procesar la consulta con el servicio Text-to-SQL
     const response = await textToSqlAssistantService.processQuery({
       message,
-      conversationHistory,
+      conversationHistory: persistedHistory,
       venueId: authContext.venueId,
       userId: authContext.userId,
       venueSlug: authContext.venueSlug,
@@ -361,6 +396,37 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
 
     const sanitizedMetadata = buildSanitizedMetadata(metadata as Record<string, any> | undefined, assistantPayload.confidence)
 
+    const assistantMessage = await chatConversationService.appendMessage({
+      conversationId: conversation.id,
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      role: 'assistant',
+      content: assistantPayload.response,
+      trainingDataId: assistantPayload.trainingDataId,
+      metadata: {
+        suggestions: assistantPayload.suggestions || [],
+        metadata: sanitizedMetadata,
+        tokenUsage: assistantPayload.tokenUsage,
+      },
+    })
+
+    await chatConversationService.recordLearningEvent({
+      venueId: authContext.venueId,
+      userId: authContext.userId,
+      conversationId: conversation.id,
+      messageId: assistantMessage.id,
+      trainingDataId: assistantPayload.trainingDataId,
+      eventType: 'assistant_response',
+      intent: typeof sanitizedMetadata.intent === 'string' ? sanitizedMetadata.intent : undefined,
+      toolUsed: typeof sanitizedMetadata.routedTo === 'string' ? sanitizedMetadata.routedTo : undefined,
+      wasAnswered: !sanitizedMetadata.blocked && sanitizedMetadata.reasonCode !== 'no_registered_tool_no_sql_fallback',
+      confidence: assistantPayload.confidence,
+      failureReason: typeof sanitizedMetadata.reasonCode === 'string' ? sanitizedMetadata.reasonCode : undefined,
+      metadata: {
+        userMessageId: userMessage.id,
+      },
+    })
+
     const includeDebugInfo = process.env.NODE_ENV !== 'production' && authContext.role === 'SUPERADMIN'
 
     if (includeDebugInfo) {
@@ -374,7 +440,7 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       sanitizedMetadata.debug = {
         sqlQuery,
         sample: Array.isArray(debugSample) ? debugSample.slice(0, 5) : debugSample,
-      }
+      } as Prisma.InputJsonObject
     }
 
     res.json({
@@ -382,6 +448,8 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       data: {
         response: assistantPayload.response,
         suggestions: assistantPayload.suggestions || [],
+        conversationId: conversation.id,
+        messageId: assistantMessage.id,
         trainingDataId: assistantPayload.trainingDataId, // Include for feedback functionality
         metadata: sanitizedMetadata,
         visualization: assistantPayload.visualization, // Include chart data when requested
