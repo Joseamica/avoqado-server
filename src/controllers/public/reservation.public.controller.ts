@@ -129,6 +129,8 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         name: true,
         slug: true,
         logo: true,
+        heroImageUrl: true, // Phase 7: hero photo for the public booking page
+        primaryColor: true, // Phase 7: brand accent the widget consumes as --avq-accent
         type: true,
         address: true,
         phone: true,
@@ -137,6 +139,8 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
           select: {
             id: true,
             name: true,
+            description: true, // Phase 7: surface short description on cards
+            imageUrl: true, // Phase 7: product thumbnail
             price: true,
             duration: true,
             eventCapacity: true,
@@ -266,7 +270,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
           },
         },
         include: {
-          product: { select: { id: true, name: true } },
+          product: { select: { id: true, name: true, imageUrl: true } },
           assignedStaff: { select: { firstName: true, lastName: true } },
           reservations: {
             where: { status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] } },
@@ -296,6 +300,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
           instructor: session.assignedStaff ?? null,
           productId: session.product.id,
           productName: session.product.name,
+          productImageUrl: session.product.imageUrl ?? null,
         }
       })
 

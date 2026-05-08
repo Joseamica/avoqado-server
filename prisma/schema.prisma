@@ -134,7 +134,8 @@ model Venue {
 
   // Branding
   logo           String?
-  primaryColor   String?
+  heroImageUrl   String?  // Wide cover photo for the public booking page hero
+  primaryColor   String?  // Brand accent (HEX) — used as --avq-accent in widget
   secondaryColor String?
 
   // Status
