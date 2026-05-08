@@ -8049,6 +8049,7 @@ model ReservationSettings {
   publicBookingEnabled Boolean @default(false)
   requirePhone         Boolean @default(true)
   requireEmail         Boolean @default(false)
+  requireAccount       Boolean @default(false)  // when true, customer must log in or register before booking
 
   // Cancellation
   allowCustomerCancel         Boolean @default(true)

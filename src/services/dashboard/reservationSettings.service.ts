@@ -91,6 +91,7 @@ export interface ReservationConfig {
     enabled: boolean
     requirePhone: boolean
     requireEmail: boolean
+    requireAccount: boolean
   }
   operatingHours: OperatingHours
 }
@@ -202,6 +203,7 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       enabled: settings.publicBookingEnabled,
       requirePhone: settings.requirePhone,
       requireEmail: settings.requireEmail,
+      requireAccount: (settings as any).requireAccount ?? false,
     },
     operatingHours: settings.operatingHours ? (settings.operatingHours as unknown as OperatingHours) : getDefaultOperatingHours(),
   }
@@ -387,6 +389,7 @@ function getDefaultConfig(): ReservationConfig {
       enabled: false,
       requirePhone: true,
       requireEmail: false,
+      requireAccount: false,
     },
     operatingHours: getDefaultOperatingHours(),
   }
