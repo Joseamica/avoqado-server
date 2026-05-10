@@ -484,9 +484,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // reservation row is written so a failed create doesn't strand the
     // customer with no recovery path.
     const incomingHoldId: string | undefined =
-      typeof req.body.holdId === 'string' && req.body.holdId.length > 0
-        ? req.body.holdId
-        : undefined
+      typeof req.body.holdId === 'string' && req.body.holdId.length > 0 ? req.body.holdId : undefined
     if (incomingHoldId) {
       await validateHoldForReservation({
         venueId: venue.id,
