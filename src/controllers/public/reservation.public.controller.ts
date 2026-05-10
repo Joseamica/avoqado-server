@@ -6,6 +6,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import { calculateApplicationFee, toStripeAmount } from '../../services/payments/providers/money'
 import { getProvider } from '../../services/payments/provider-registry'
 
@@ -425,19 +426,89 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
-    // CLASS bookings use a dedicated code path with ClassSession capacity checks
+    // CLASS bookings use a dedicated code path with ClassSession capacity checks.
+    // Pre-resolve whether the venue has a working Stripe merchant so the inner
+    // function can record the right semantic on the reservation: PENDING+Stripe
+    // checkout (will charge) vs CONFIRMED + amount-owed-at-venue (no Stripe yet).
     if (req.body.classSessionId) {
-      const reservation = await createClassReservation(venue.id, req.body, settings)
+      const stripeMerchantPreflight = await resolveActiveStripeMerchant(venue.id)
+      const reservation = await createClassReservation(venue.id, req.body, settings, !!stripeMerchantPreflight)
+
+      // When the class requires upfront cash AND the venue has Stripe configured,
+      // the reservation landed in PENDING + depositStatus PENDING. Mint a Stripe
+      // Checkout session so the customer can pay; the webhook flips the reservation
+      // to CONFIRMED+PAID on payment success.
+      //
+      // When the venue does NOT have Stripe (graceful fallback), the reservation
+      // already landed as CONFIRMED with depositAmount set + depositStatus null,
+      // meaning "spot is held, customer owes $X at the venue". No checkout to mint.
+      let checkoutUrl: string | null = null
+      if (reservation.requiresUpfrontCash && reservation.upfrontAmount && stripeMerchantPreflight) {
+        const stripeMerchant = stripeMerchantPreflight
+
+        const stripeAmount = toStripeAmount(new Prisma.Decimal(reservation.upfrontAmount))
+        const bounds = getStripeChargeBounds()
+        if (stripeAmount < bounds.min) {
+          throw new BadRequestError('El monto es menor al minimo permitido por Stripe')
+        }
+        if (stripeAmount > bounds.max) {
+          throw new BadRequestError('El monto excede el maximo permitido por transaccion')
+        }
+
+        const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
+        const provider = getProvider(stripeMerchant)
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
+        // Widget can override return URLs (book.avoqado.io vs embed iframe vs dashboard).
+        const reqSuccess = (req.body as any).successUrl as string | undefined
+        const reqCancel = (req.body as any).cancelUrl as string | undefined
+        const baseSuccess = reqSuccess || `${frontendUrl}/book/${venueSlug}`
+        const baseCancel = reqCancel || baseSuccess
+        const sep = (u: string) => (u.includes('?') ? '&' : '?')
+        const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`
+        const cancelUrl = `${baseCancel}${sep(baseCancel)}payment=cancelled&reservationId=${reservation.id}`
+
+        const session = await provider.createCheckoutSession(stripeMerchant, {
+          amount: stripeAmount,
+          currency: 'mxn',
+          applicationFeeAmount,
+          successUrl,
+          cancelUrl,
+          expiresAt: new Date(Date.now() + 30 * 60_000),
+          customerEmail: reservation.guestEmail ?? undefined,
+          metadata: {
+            type: 'class_reservation',
+            reservationId: reservation.id,
+            venueId: venue.id,
+            confirmationCode: reservation.confirmationCode,
+          },
+          description: `Reserva ${venue.name}`,
+          statementDescriptorSuffix: 'RESERVA',
+          idempotencyKey: `reservation:${reservation.id}:upfront:v1`,
+          paymentMethodTypes: ['card'],
+        })
+
+        await prisma.reservation.update({
+          where: { id: reservation.id },
+          data: { checkoutSessionId: session.id },
+        })
+        checkoutUrl = session.url
+      }
+
       return res.status(201).json({
         confirmationCode: reservation.confirmationCode,
         cancelSecret: reservation.cancelSecret,
         startsAt: reservation.startsAt,
         endsAt: reservation.endsAt,
         status: reservation.status,
-        depositRequired: false,
-        depositAmount: null,
+        depositRequired: !!reservation.requiresUpfrontCash,
+        depositAmount: reservation.upfrontAmount ?? null,
         creditRedeemed: reservation.creditRedeemed || false,
         creditsUsed: reservation.creditsUsed || 0,
+        checkoutUrl,
+        // owesAtVenue: true means policy was 'required' but the venue has no Stripe
+        // configured. The reservation is CONFIRMED, but the customer is expected
+        // to pay `depositAmount` upon arrival. Widget can show a banner.
+        owesAtVenue: !!reservation.owesAtVenue,
       })
     }
 
@@ -735,6 +806,7 @@ async function createClassReservation(
     creditItemBalanceId?: string
   },
   moduleConfig: any,
+  hasStripeMerchant: boolean,
 ) {
   const requestedSpotIds = body.spotIds ?? []
   // If spotIds provided, partySize = number of spots selected
@@ -766,7 +838,7 @@ async function createClassReservation(
     // Verify the product is CLASS and active
     const product = await tx.product.findFirst({
       where: { id: session.productId, venueId },
-      select: { type: true, active: true, layoutConfig: true, requireCreditForBooking: true },
+      select: { type: true, active: true, layoutConfig: true, requireCreditForBooking: true, price: true, upfrontPolicy: true },
     })
     if (!product || product.type !== 'CLASS') {
       throw new BadRequestError('El producto asociado no es una clase valida')
@@ -778,6 +850,35 @@ async function createClassReservation(
     // Block booking if product requires credit and none provided
     if (product.requireCreditForBooking && !body.creditItemBalanceId) {
       throw new BadRequestError('Este servicio requiere un credito para reservar. Compra un paquete de creditos primero.')
+    }
+
+    // Resolve effective upfront-payment policy (per-product override or venue default).
+    // When 'required' and the customer is paying cash (no creditItemBalanceId), we
+    // create the reservation in PENDING + depositStatus PENDING — the wrapper will
+    // then create a Stripe Checkout session and the webhook flips it to CONFIRMED
+    // when payment succeeds. Without this enforcement the widget could (and did)
+    // skip payment entirely and land a CONFIRMED reservation for free.
+    const effectiveUpfrontPolicy = resolveUpfrontPolicy(
+      { type: product.type, upfrontPolicy: product.upfrontPolicy },
+      {
+        appointmentUpfrontDefault: moduleConfig?.payments?.appointmentUpfrontDefault,
+        classUpfrontDefault: moduleConfig?.payments?.classUpfrontDefault,
+      },
+    )
+    const willUseCredits = !!body.creditItemBalanceId
+    const cashPrice = Number(product.price ?? 0)
+    const policyDemandsUpfrontCash = effectiveUpfrontPolicy === 'required' && !willUseCredits && cashPrice > 0
+    // Only mint a Stripe checkout when the venue actually has a working merchant.
+    // Otherwise fall back to "pay at venue" semantics (CONFIRMED + amount owed).
+    // This keeps venues that haven't onboarded Stripe yet from breaking when the
+    // policy resolves to 'required' — the most honest behavior is "your spot is
+    // held, you owe $X at the venue" rather than 400'ing the customer.
+    const requiresUpfrontCash = policyDemandsUpfrontCash && hasStripeMerchant
+    const owesAtVenue = policyDemandsUpfrontCash && !hasStripeMerchant
+    if (owesAtVenue) {
+      logger.warn(
+        `⚠️ [CLASS BOOKING] upfrontPolicy=required but venue ${venueId} has no Stripe merchant — falling back to pay-at-venue (owes ${cashPrice * requestedPartySize})`,
+      )
     }
 
     // Sum enrolled from active reservations
@@ -847,6 +948,22 @@ async function createClassReservation(
           })
         : null
 
+    // Three states for the reservation row:
+    // 1. requiresUpfrontCash (policy=required + venue has Stripe): PENDING +
+    //    depositStatus=PENDING + amount set. Webhook will flip to CONFIRMED+PAID
+    //    after Stripe checkout succeeds.
+    // 2. owesAtVenue (policy=required + venue lacks Stripe): CONFIRMED + amount
+    //    set + depositStatus stays NULL. Encodes "spot held, customer owes $X
+    //    at the venue" — staff/dashboard can read this combination to know the
+    //    customer needs to pay on arrival.
+    // 3. else (policy=at_venue/optional, or credits paid): standard CONFIRMED.
+    const effectiveStatus: ReservationStatus = requiresUpfrontCash ? 'PENDING' : initialStatus
+    const upfrontAmount = (requiresUpfrontCash || owesAtVenue) ? cashPrice * requestedPartySize : null
+    const ownerAtVenueNote = owesAtVenue
+      ? `[PAY-AT-VENUE] Cliente debe $${cashPrice * requestedPartySize} al llegar (venue sin Stripe configurado)`
+      : null
+    const mergedSpecialRequests = [body.specialRequests ?? null, ownerAtVenueNote].filter(Boolean).join(' • ') || null
+
     const reservation = await tx.reservation.create({
       data: {
         venueId,
@@ -856,7 +973,7 @@ async function createClassReservation(
         startsAt: session.startsAt,
         endsAt: session.endsAt,
         duration: session.duration,
-        status: initialStatus,
+        status: effectiveStatus,
         channel: 'WEB',
         customerId: matchedCustomer?.id ?? null,
         guestName: body.guestName,
@@ -864,9 +981,16 @@ async function createClassReservation(
         guestEmail: body.guestEmail ?? null,
         partySize: requestedPartySize,
         spotIds: requestedSpotIds,
-        specialRequests: body.specialRequests ?? null,
-        confirmedAt: autoConfirm ? new Date() : null,
-        statusLog: [{ status: initialStatus, at: new Date().toISOString(), by: null }],
+        specialRequests: mergedSpecialRequests,
+        depositAmount: upfrontAmount,
+        depositStatus: requiresUpfrontCash ? 'PENDING' : null,
+        confirmedAt: requiresUpfrontCash ? null : (autoConfirm ? new Date() : null),
+        statusLog: [{
+          status: effectiveStatus,
+          at: new Date().toISOString(),
+          by: null,
+          ...(owesAtVenue ? { note: 'pay-at-venue', amountOwed: cashPrice * requestedPartySize } : {}),
+        }],
       },
     })
 
@@ -975,6 +1099,6 @@ async function createClassReservation(
       `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}${creditRedeemed ? ` (${creditsUsed} credit${creditsUsed > 1 ? 's' : ''})` : ''}`,
     )
 
-    return { ...reservation, creditRedeemed, creditsUsed }
+    return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
   })
 }
