@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import { PaymentMethod, CardBrand, TransactionCardType, OriginSystem } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { getEffectivePaymentConfig, getEffectivePricing } from '../organization-payment-config.service'
+import { calculatePaymentSettlement } from './settlementCalculation.service'
 
 /**
  * TransactionCost Service
@@ -394,6 +395,45 @@ export async function createTransactionCost(paymentId: string): Promise<{
     feeAmount: totalFee,
     netAmount: netAmountCalculated,
   })
+
+  // ========================================
+  // Step 7: Populate VenueTransaction settlement metadata
+  // ========================================
+  // Without this, the dashboard's "saldo disponible" calendar can't show this
+  // payment until the manual backfill script runs. Locally wrapped so any
+  // failure (missing SettlementConfiguration, etc) is logged but never blocks
+  // the cobro — TransactionCost is already saved and the caller has its own
+  // try/catch around this whole function.
+  try {
+    const settlementInfo = await calculatePaymentSettlement(payment, merchantAccount.id, transactionType)
+
+    if (settlementInfo) {
+      await prisma.venueTransaction.update({
+        where: { paymentId: payment.id },
+        data: {
+          estimatedSettlementDate: settlementInfo.estimatedSettlementDate,
+          netSettlementAmount: settlementInfo.netSettlementAmount,
+          settlementConfigId: settlementInfo.settlementConfigId,
+        },
+      })
+      logger.info('Settlement metadata populated', {
+        paymentId,
+        estimatedSettlementDate: settlementInfo.estimatedSettlementDate,
+        netSettlementAmount: settlementInfo.netSettlementAmount,
+      })
+    } else {
+      logger.warn('No active SettlementConfiguration found; settlement metadata left null', {
+        paymentId,
+        merchantAccountId: merchantAccount.id,
+        transactionType,
+      })
+    }
+  } catch (settlementError) {
+    logger.error('Failed to populate settlement metadata; payment unaffected', {
+      paymentId,
+      error: settlementError instanceof Error ? settlementError.message : settlementError,
+    })
+  }
 
   return {
     transactionCost,
