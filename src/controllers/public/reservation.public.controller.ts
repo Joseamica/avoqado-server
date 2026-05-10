@@ -947,6 +947,10 @@ async function createClassReservation(
       throw new BadRequestError('Esta sesion de clase ya no acepta reservaciones')
     }
 
+    // Enforce admin booking-window policy (maxAdvanceDays / minNoticeMin).
+    // ValidationError -> 422.
+    reservationService.enforceBookingWindow(session.startsAt, moduleConfig?.scheduling)
+
     // Verify the product is CLASS and active
     const product = await tx.product.findFirst({
       where: { id: session.productId, venueId },
