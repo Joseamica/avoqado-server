@@ -15,6 +15,8 @@ import {
   publicVenueParamsSchema,
   publicReservationParamsSchema,
   publicCreateReservationBodySchema,
+  publicCreateHoldBodySchema,
+  publicHoldParamsSchema,
   getAvailabilityQuerySchema,
   cancelBodySchema,
   publicRescheduleBodySchema,
@@ -74,6 +76,23 @@ router.post(
   writeLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateReservationBodySchema })),
   reservationPublicController.createReservation,
+)
+
+// Slot hold (Square "Cita reservada durante 9:56" countdown). The widget
+// creates a hold when the customer reaches the payment step and consumes it
+// (deletion) on successful reservation. The cancel route lets the widget
+// release a hold if the customer navigates back.
+router.post(
+  '/venues/:venueSlug/reservations/hold',
+  writeLimit,
+  validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateHoldBodySchema })),
+  reservationPublicController.createHold,
+)
+router.delete(
+  '/venues/:venueSlug/reservations/hold/:holdId',
+  cancelLimit,
+  validateRequest(z.object({ params: publicHoldParamsSchema })),
+  reservationPublicController.cancelHold,
 )
 
 router.get(

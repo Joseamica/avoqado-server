@@ -2,7 +2,8 @@ import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings } from '../../services/dashboard/reservationSettings.service'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
+import { verifyCustomerToken } from '../../jwt.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
@@ -47,6 +48,23 @@ export function resolveUpfrontPolicy(
   }
   // Hard fallback so the resolver never returns 'inherit' to consumers.
   return isClass ? 'required' : 'at_venue'
+}
+
+/**
+ * Opportunistically extract an authenticated customer from a Bearer token on
+ * the public booking endpoint. Returns null when no token is present or the
+ * token is invalid/expired — the caller decides whether anonymous is allowed
+ * (e.g. `settings.publicBooking.requireAccount`).
+ */
+function tryReadAuthenticatedCustomer(req: Request): { customerId: string; venueId: string } | null {
+  const authHeader = req.headers.authorization
+  if (!authHeader?.startsWith('Bearer ')) return null
+  try {
+    const payload = verifyCustomerToken(authHeader.slice(7))
+    return { customerId: payload.sub, venueId: payload.venueId }
+  } catch {
+    return null
+  }
 }
 
 async function resolveVenueBySlug(venueSlug: string) {
@@ -130,6 +148,7 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         name: true,
         slug: true,
         logo: true,
+        logoFull: true, // Wide / horizontal full logo for marketing surfaces (booking page header)
         heroImageUrl: true, // Phase 7: hero photo for the public booking page
         primaryColor: true, // Phase 7: brand accent the widget consumes as --avq-accent
         type: true,
@@ -407,12 +426,74 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
     }
 
+    // Enforce `requireAccount`: when set, the customer must be authenticated
+    // via the customer JWT (Bearer token from /customer/login) OR pass a
+    // recognized customerId in the body. Anonymous bookings are rejected
+    // with 401 so the widget can route to the login screen.
+    if (settings.publicBooking.requireAccount) {
+      const authenticatedCustomer = tryReadAuthenticatedCustomer(req)
+      const bodyCustomerId = typeof req.body?.customerId === 'string' ? req.body.customerId : null
+      const hasCustomerContext = !!authenticatedCustomer || !!bodyCustomerId
+      if (!hasCustomerContext) {
+        throw new UnauthorizedError('Este negocio requiere iniciar sesion para reservar.')
+      }
+      // Bind the booking to the authenticated customer when available so the
+      // reservation row is anchored to the real identity (overrides any
+      // mismatched body.customerId from a stale form).
+      if (authenticatedCustomer && authenticatedCustomer.venueId === venue.id) {
+        req.body.customerId = authenticatedCustomer.customerId
+      }
+    }
+
     // Validate required fields based on config
     if (settings.publicBooking.requirePhone && !req.body.guestPhone) {
       throw new BadRequestError('El telefono es requerido')
     }
     if (settings.publicBooking.requireEmail && !req.body.guestEmail) {
       throw new BadRequestError('El email es requerido')
+    }
+
+    // ---- Multi-service appointments (Square pattern) -----------------------
+    // When the widget sends productIds, normalize to the legacy single-product
+    // fields (productId + duration) so the rest of this function and the
+    // downstream service don't need to know about arrays. The full ordered
+    // list is restored on the row right before we respond.
+    const incomingProductIds: string[] = Array.isArray(req.body.productIds)
+      ? req.body.productIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+      : []
+    if (incomingProductIds.length > 0) {
+      const products = await prisma.product.findMany({
+        where: { id: { in: incomingProductIds }, venueId: venue.id },
+        select: { id: true, type: true, duration: true, durationMinutes: true },
+      })
+      if (products.length !== incomingProductIds.length) {
+        throw new BadRequestError('Uno o mas productos no pertenecen a este venue')
+      }
+      if (products.some(p => p.type === 'CLASS')) {
+        throw new BadRequestError('Los productos de tipo clase usan classSessionId, no productIds')
+      }
+      // Lead service = first picked. Sum durations for the appointment window.
+      req.body.productId = req.body.productId ?? incomingProductIds[0]
+      const summed = products.reduce((acc, p) => acc + (p.duration ?? p.durationMinutes ?? 0), 0)
+      if (summed > 0) req.body.duration = summed
+    }
+
+    // ---- Slot hold validation (Square countdown UX) ------------------------
+    // If the widget passed a holdId, ensure it is still alive and matches the
+    // booked window. We do NOT delete the hold here — that happens AFTER the
+    // reservation row is written so a failed create doesn't strand the
+    // customer with no recovery path.
+    const incomingHoldId: string | undefined =
+      typeof req.body.holdId === 'string' && req.body.holdId.length > 0
+        ? req.body.holdId
+        : undefined
+    if (incomingHoldId) {
+      await validateHoldForReservation({
+        venueId: venue.id,
+        holdId: incomingHoldId,
+        startsAt: new Date(req.body.startsAt),
+        endsAt: new Date(req.body.endsAt),
+      })
     }
 
     // If productId points to a CLASS product, classSessionId is mandatory
@@ -423,6 +504,31 @@ export async function createReservation(req: Request, res: Response, next: NextF
       })
       if (product?.type === 'CLASS') {
         throw new BadRequestError('classSessionId es requerido para reservar una clase')
+      }
+    }
+
+    // After-create cleanup: stamps productIds[] on the reservation row and
+    // burns the hold (best-effort — failures are logged but don't poison the
+    // success response since the booking did go through).
+    async function finalizeReservationSideEffects(reservationId: string) {
+      if (incomingProductIds.length > 0) {
+        try {
+          await prisma.reservation.update({
+            where: { id: reservationId },
+            data: { productIds: incomingProductIds },
+          })
+        } catch (error) {
+          logger.warn(`[reservation] failed to stamp productIds (non-fatal): ${(error as Error).message}`)
+        }
+      }
+      if (incomingHoldId) {
+        try {
+          await prisma.slotHold.deleteMany({
+            where: { id: incomingHoldId, venueId: venue.id },
+          })
+        } catch (error) {
+          logger.warn(`[slot-hold] failed to delete hold ${incomingHoldId} (non-fatal): ${(error as Error).message}`)
+        }
       }
     }
 
@@ -493,6 +599,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
         })
         checkoutUrl = session.url
       }
+
+      // Burn the slot hold and stamp productIds[] now that the class
+      // reservation exists. Best-effort (see helper).
+      await finalizeReservationSideEffects(reservation.id)
 
       return res.status(201).json({
         confirmationCode: reservation.confirmationCode,
@@ -572,6 +682,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
       })
       checkoutUrl = session.url
     }
+
+    // Burn the slot hold and stamp productIds[] now that the reservation
+    // exists. Best-effort — failures logged but don't poison the response.
+    await finalizeReservationSideEffects(reservation.id)
 
     // Return only public-safe data + cancelSecret
     res.status(201).json({
@@ -834,6 +948,10 @@ async function createClassReservation(
     if (session.status !== 'SCHEDULED') {
       throw new BadRequestError('Esta sesion de clase ya no acepta reservaciones')
     }
+
+    // Enforce admin booking-window policy (maxAdvanceDays / minNoticeMin).
+    // ValidationError -> 422.
+    reservationService.enforceBookingWindow(session.startsAt, moduleConfig?.scheduling)
 
     // Verify the product is CLASS and active
     const product = await tx.product.findFirst({
@@ -1103,4 +1221,189 @@ async function createClassReservation(
 
     return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
   })
+}
+
+// ==========================================
+// SLOT HOLD ENDPOINTS (Square countdown UX)
+// ==========================================
+
+/** TTL for a fresh slot hold. Square uses 10 minutes; we mirror that so the
+ *  customer has enough time to fill the form without holding inventory hostage
+ *  if they abandon. The widget reads expiresAt from the response and renders
+ *  "Cita reservada durante 9:56" against it. */
+const SLOT_HOLD_TTL_MS = 10 * 60 * 1000
+
+/** Lazy cleanup threshold — sweep holds older than this past their expiry.
+ *  Cheap, runs from the same path as availability so we don't need a cron. */
+const SLOT_HOLD_GC_BUFFER_MS = 60 * 60 * 1000
+
+/** Best-effort sweep of long-expired holds. Called from any path that scans
+ *  holds anyway (createHold, getAvailability) so the table can't grow without
+ *  bound. We swallow errors — the actual hold-validation queries already
+ *  filter by expiresAt > NOW() so a backlog of dead rows just costs a bit
+ *  of disk, never breaks correctness. */
+async function pruneExpiredHolds(): Promise<void> {
+  try {
+    await prisma.slotHold.deleteMany({
+      where: { expiresAt: { lt: new Date(Date.now() - SLOT_HOLD_GC_BUFFER_MS) } },
+    })
+  } catch (error) {
+    logger.warn(`[slot-hold] cleanup failed (non-fatal): ${(error as Error).message}`)
+  }
+}
+
+/**
+ * POST /public/venues/:venueSlug/reservations/hold
+ *
+ * Body: { startsAt, endsAt, productIds?, classSessionId?, partySize? }
+ *
+ * Creates a SlotHold row with TTL=10min and returns its id+expiresAt so the
+ * widget can plumb both into its createReservation call. The hold is consumed
+ * (deleted) atomically when the reservation succeeds; otherwise it expires.
+ *
+ * Validations:
+ *   - venue exists + has public booking enabled
+ *   - startsAt < endsAt + endsAt within ~24h of startsAt (sanity)
+ *   - productIds (if present) all belong to venue + non-CLASS
+ *   - classSessionId (if present) belongs to venue
+ */
+export async function createHold(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug } = req.params
+    const venue = await resolveVenueBySlug(venueSlug)
+
+    const settings = await getReservationSettings(venue.id)
+    if (!settings.publicBooking.enabled) {
+      throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
+    }
+
+    const body = req.body as {
+      startsAt: string
+      endsAt: string
+      productIds?: string[]
+      classSessionId?: string
+      partySize?: number
+      fingerprint?: string
+    }
+
+    const startsAt = new Date(body.startsAt)
+    const endsAt = new Date(body.endsAt)
+    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
+      throw new BadRequestError('Fechas invalidas')
+    }
+    if (endsAt <= startsAt) {
+      throw new BadRequestError('endsAt debe ser posterior a startsAt')
+    }
+    if (endsAt.getTime() - startsAt.getTime() > 24 * 60 * 60 * 1000) {
+      throw new BadRequestError('Ventana de reserva excede 24 horas')
+    }
+    if (startsAt.getTime() < Date.now() - 5 * 60 * 1000) {
+      throw new BadRequestError('No se puede reservar un horario en el pasado')
+    }
+
+    const productIds = Array.isArray(body.productIds) ? body.productIds.filter(Boolean) : []
+    if (productIds.length > 0) {
+      const products = await prisma.product.findMany({
+        where: { id: { in: productIds }, venueId: venue.id },
+        select: { id: true, type: true },
+      })
+      if (products.length !== productIds.length) {
+        throw new BadRequestError('Uno o mas productos no pertenecen a este venue')
+      }
+      if (products.some(p => p.type === 'CLASS')) {
+        throw new BadRequestError('Los productos de tipo clase requieren classSessionId, no productIds')
+      }
+    }
+
+    if (body.classSessionId) {
+      const session = await prisma.classSession.findFirst({
+        where: { id: body.classSessionId, venueId: venue.id },
+        select: { id: true },
+      })
+      if (!session) {
+        throw new NotFoundError('La sesion de clase no existe en este venue')
+      }
+    }
+
+    // Lazy GC — cheap, runs once per hold creation.
+    void pruneExpiredHolds()
+
+    const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
+    const hold = await prisma.slotHold.create({
+      data: {
+        venueId: venue.id,
+        startsAt,
+        endsAt,
+        productIds,
+        classSessionId: body.classSessionId ?? null,
+        partySize: Math.max(1, body.partySize ?? 1),
+        expiresAt,
+        fingerprint: body.fingerprint ?? null,
+      },
+      select: { id: true, expiresAt: true },
+    })
+
+    res.status(201).json({
+      holdId: hold.id,
+      expiresAt: hold.expiresAt,
+      ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * DELETE /public/venues/:venueSlug/reservations/hold/:holdId
+ *
+ * Releases a hold the customer no longer needs (e.g. they navigated back from
+ * the form to pick a different slot). Idempotent — missing hold returns 204
+ * so the widget can call this on every back-nav without worrying about state.
+ */
+export async function cancelHold(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug, holdId } = req.params
+    const venue = await resolveVenueBySlug(venueSlug)
+
+    await prisma.slotHold.deleteMany({
+      where: { id: holdId, venueId: venue.id },
+    })
+    res.status(204).end()
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Validate + consume a hold passed on createReservation. Returns the hold row
+ * if it is valid and matches the booking, otherwise throws. The caller must
+ * delete the hold once the reservation has actually been written (so a failed
+ * create doesn't strand the customer with no fallback).
+ *
+ * Returns null when no holdId was passed — bookings without holds keep
+ * working exactly as they did pre-hold-mechanism.
+ */
+export async function validateHoldForReservation(args: {
+  venueId: string
+  holdId: string | undefined | null
+  startsAt: Date
+  endsAt: Date
+}): Promise<{ id: string } | null> {
+  if (!args.holdId) return null
+  const hold = await prisma.slotHold.findFirst({
+    where: {
+      id: args.holdId,
+      venueId: args.venueId,
+      expiresAt: { gt: new Date() },
+    },
+    select: { id: true, startsAt: true, endsAt: true },
+  })
+  if (!hold) {
+    throw new ConflictError('Tu reserva temporal expiro. Selecciona el horario de nuevo.')
+  }
+  // Sanity: the hold must cover the same slot the customer is now booking.
+  if (hold.startsAt.getTime() !== args.startsAt.getTime() || hold.endsAt.getTime() !== args.endsAt.getTime()) {
+    throw new BadRequestError('La reserva temporal no corresponde al horario seleccionado')
+  }
+  return { id: hold.id }
 }

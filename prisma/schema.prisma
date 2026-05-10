@@ -134,8 +134,9 @@ model Venue {
 
   // Branding
   logo           String?
-  heroImageUrl   String?  // Wide cover photo for the public booking page hero
-  primaryColor   String?  // Brand accent (HEX) — used as --avq-accent in widget
+  logoFull       String? // Wide / horizontal "full" logo for marketing surfaces (e.g. public booking page header). `logo` remains the small square logo used for receipts/avatars.
+  heroImageUrl   String? // Wide cover photo for the public booking page hero
+  primaryColor   String? // Brand accent (HEX) — used as --avq-accent in widget
   secondaryColor String?
 
   // Status
@@ -333,6 +334,7 @@ model Venue {
   // RESERVATION / BOOKING SYSTEM
   // ==========================================
   reservations        Reservation[]
+  slotHolds           SlotHold[]
   classSessions       ClassSession[]
   waitlistEntries     ReservationWaitlistEntry[]
   reservationSettings ReservationSettings?
@@ -2839,6 +2841,11 @@ model Terminal {
   status        TerminalStatus @default(INACTIVE)
   lastHeartbeat DateTime?
 
+  // Denormalized latest health score (synced atomically when TerminalHealth is written)
+  // Enables fast sortBy without joining the to-many healthMetrics relation.
+  latestHealthScore Int?
+  latestHealthAt    DateTime?
+
   // Health monitoring
   version    String? // AvoqadoPOS version
   systemInfo Json? // Platform, memory, uptime, etc.
@@ -2915,6 +2922,7 @@ model Terminal {
   @@index([status])
   @@index([activationCode]) // Fast lookup for activation code validation
   @@index([isLocked]) // Fast lookup for locked terminals
+  @@index([latestHealthScore]) // Sort by latestHealthScore (NULLS LAST handled in query)
 }
 
 // ==========================================
@@ -3634,7 +3642,7 @@ model ProviderCostStructure {
   // (IVA México). Se persiste por estructura para soportar jurisdicciones
   // distintas o cambios fiscales sin re-tocar código. Mismo patrón y
   // default que `Product.taxRate` / `Order.taxRate`.
-  taxRate     Decimal @default(0.16) @db.Decimal(5, 4)
+  taxRate     Decimal  @default(0.16) @db.Decimal(5, 4)
 
   // Fixed costs per transaction (if applicable)
   fixedCostPerTransaction Decimal? @db.Decimal(8, 4) // e.g., 0.50 MXN
@@ -7975,6 +7983,12 @@ model Reservation {
   table           Table?        @relation(fields: [tableId], references: [id], onDelete: SetNull)
   productId       String?
   product         Product?      @relation(fields: [productId], references: [id], onDelete: SetNull)
+  // Multi-service appointments (Square pattern). When the customer books
+  // multiple services in a single appointment we keep the lead service in
+  // `productId` for back-compat with all existing queries/joins, and store
+  // the full ordered list here. Order matters — services run sequentially.
+  // Empty array = single-service (legacy) booking.
+  productIds      String[]      @default([])
   classSessionId  String?
   classSession    ClassSession? @relation(fields: [classSessionId], references: [id], onDelete: SetNull)
   assignedStaffId String?
@@ -8027,6 +8041,17 @@ model Reservation {
   // (REDEEM at booking, REFUND on cancellation, etc.)
   creditTransactions CreditTransaction[]
 
+  // No-show fee bookkeeping. Set by the auto-no-show worker when a venue
+  // policy fee applies. `noShowFeeAmount` is the computed MXN amount (deposit
+  // * noShowFeePercent / 100). `noShowFeeCapturedAt` is stamped if/when the
+  // capture actually executes — for now the worker only records the intent
+  // and leaves capture to the Stripe webhook path.
+  noShowFeeAmount     Decimal?  @db.Decimal(10, 2)
+  noShowFeeCapturedAt DateTime?
+
+  // Idempotent log of reminder sends — one row per (reservation, offset, channel).
+  reminderRecords ReservationReminderSent[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -8042,6 +8067,83 @@ model Reservation {
   @@index([cancelSecret])
   @@index([depositStatus, depositExpiresAt])
   @@index([refundStatus, refundRequestedAt])
+}
+
+// Idempotent reminder ledger. The reservation-reminder worker writes one row
+// per (reservation, offsetMinutes, channel) BEFORE attempting the send so a
+// retried tick or a parallel worker can't double-send. Unique constraint is
+// the idempotency contract — never drop it.
+model ReservationReminderSent {
+  id            String      @id @default(cuid())
+  reservationId String
+  reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  offsetMinutes Int // e.g. 1440 = 24h before start, 120 = 2h before start
+  channel       String // 'EMAIL' | 'SMS' | 'WHATSAPP'
+
+  sentAt       DateTime @default(now())
+  success      Boolean
+  errorMessage String?  @db.Text
+
+  @@unique([reservationId, offsetMinutes, channel])
+  @@index([reservationId])
+  @@index([sentAt])
+}
+
+// Slot hold: temporarily reserves a time window while the customer fills out
+// the public booking form. Square's "Cita reservada durante 9:56" pattern.
+//
+// Lifecycle:
+//   1. Customer picks a slot → `POST /reservations/hold` creates a row with
+//      expiresAt = NOW() + 10 min and returns its id to the widget.
+//   2. Widget displays the countdown and stamps the id on its createReservation
+//      call. The endpoint deletes the hold transactionally on success.
+//   3. If the customer abandons the form, the row stays until lazy cleanup
+//      sweeps it (any availability query past the hold's expiresAt skips it,
+//      and a cheap `DELETE … WHERE expiresAt < now() - interval '1 hour'`
+//      runs from the same getAvailability handler).
+//
+// Why a separate model and not a Reservation in HOLDING status: holds shouldn't
+// pollute Reservation indexes / KPI dashboards / customer-facing "my bookings"
+// queries, and we don't want hold cleanup to ever cascade-touch real
+// reservations. Keeping them in their own table keeps the boundary clean.
+model SlotHold {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Time window the customer is trying to book. Same shape as Reservation
+  // so availability queries can union/exclude with a single overlap predicate.
+  startsAt DateTime
+  endsAt   DateTime
+
+  // Multi-service appointments — same shape as Reservation.productIds. Empty
+  // when the hold is for a single-service or class booking; the legacy
+  // single-product reservation path stamps a one-element array here.
+  productIds String[] @default([])
+
+  // Class booking holds — when set, the hold competes against ClassSession
+  // capacity, not table/staff availability.
+  classSessionId String?
+  classSession   ClassSession? @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
+
+  partySize Int @default(1)
+
+  // TTL — past expiresAt the hold is dead and availability ignores it.
+  expiresAt DateTime
+
+  // Anti-abuse: hash of (ip + user-agent). Lets us cap concurrent holds per
+  // fingerprint per venue without forcing customers to log in.
+  fingerprint String?
+
+  createdAt DateTime @default(now())
+
+  // Hot path: getAvailability filters by venueId + expiresAt > now() and
+  // overlap-tests against startsAt/endsAt for every queried slot.
+  @@index([venueId, startsAt, endsAt])
+  @@index([venueId, expiresAt])
+  @@index([expiresAt]) // for the lazy cleanup sweep
+  @@index([venueId, classSessionId])
 }
 
 enum ClassSessionStatus {
@@ -8077,6 +8179,7 @@ model ClassSession {
 
   // Relations
   reservations Reservation[]
+  slotHolds    SlotHold[]
 
   createdById String?
   createdBy   Staff?  @relation("ClassSessionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)

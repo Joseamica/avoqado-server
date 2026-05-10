@@ -39,6 +39,7 @@ export const ReservationStatusSchema = z.enum(['PENDING', 'CONFIRMED', 'CHECKED_
 export const ReservationChannelSchema = z.enum(['DASHBOARD', 'WEB', 'PHONE', 'WHATSAPP', 'APP', 'WALK_IN', 'THIRD_PARTY'])
 const depositModeSchema = z.enum(['none', 'card_hold', 'deposit', 'prepaid'])
 const waitlistPriorityModeSchema = z.enum(['fifo', 'party_size', 'broadcast'])
+const upfrontDefaultSchema = z.enum(['required', 'at_venue', 'optional'])
 
 // ---- Query Schemas ----
 
@@ -245,6 +246,7 @@ export const updateReservationSettingsBodySchema = z
     publicBookingEnabled: z.boolean().optional(),
     requirePhone: z.boolean().optional(),
     requireEmail: z.boolean().optional(),
+    requireAccount: z.boolean().optional(),
     allowCustomerCancel: z.boolean().optional(),
     minHoursBeforeCancel: z.number().int().min(0).max(720).nullable().optional(),
     minHoursBeforeStart: z.number().int().min(0).max(720).nullable().optional(),
@@ -253,6 +255,8 @@ export const updateReservationSettingsBodySchema = z
     remindersEnabled: z.boolean().optional(),
     reminderChannels: z.array(z.string().min(1).max(50)).max(10).optional(),
     reminderMinBefore: z.array(z.number().int().min(1).max(10080)).max(10).optional(),
+    appointmentUpfrontDefault: upfrontDefaultSchema.optional(),
+    classUpfrontDefault: upfrontDefaultSchema.optional(),
     operatingHours: operatingHoursSchema,
 
     // Nested payload support
@@ -310,6 +314,13 @@ export const updateReservationSettingsBodySchema = z
         enabled: z.boolean().optional(),
         requirePhone: z.boolean().optional(),
         requireEmail: z.boolean().optional(),
+        requireAccount: z.boolean().optional(),
+      })
+      .optional(),
+    payments: z
+      .object({
+        appointmentUpfrontDefault: upfrontDefaultSchema.optional(),
+        classUpfrontDefault: upfrontDefaultSchema.optional(),
       })
       .optional(),
   })
@@ -329,10 +340,17 @@ export const publicCreateReservationBodySchema = z
     guestEmail: z.string().email('Email invalido').max(200).optional(),
     partySize: z.number().int().min(1).max(100).optional(),
     productId: z.string().optional(),
+    // Multi-service appointments (Square pattern). When present, the controller
+    // sums durations + sets productId = productIds[0] for back-compat.
+    productIds: z.array(z.string().min(1)).max(20).optional(),
     classSessionId: z.string().optional(),
     spotIds: z.array(z.string().min(1)).max(100).optional(),
     specialRequests: z.string().max(2000).optional(),
     creditItemBalanceId: z.string().optional(), // Credit pack: redeems N credits on booking (N = partySize / spotIds.length)
+    // Slot hold consumption — when present and valid, the hold gets deleted
+    // transactionally on success. Missing/expired holds throw 409 so the
+    // widget falls back to the time-slot picker.
+    holdId: z.string().optional(),
   })
   .refine(
     data => {
@@ -393,4 +411,24 @@ export const publicVenueParamsSchema = z.object({
 export const publicReservationParamsSchema = z.object({
   venueSlug: z.string().min(1),
   cancelSecret: z.string().uuid('Token de reservacion invalido'),
+})
+
+// Slot hold (Square countdown UX) ------------------------------------------
+export const publicCreateHoldBodySchema = z
+  .object({
+    startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }),
+    endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
+    productIds: z.array(z.string().min(1)).max(20).optional(),
+    classSessionId: z.string().optional(),
+    partySize: z.number().int().min(1).max(100).optional(),
+    fingerprint: z.string().max(200).optional(),
+  })
+  .refine(data => data.endsAt > data.startsAt, {
+    message: 'endsAt debe ser posterior a startsAt',
+    path: ['endsAt'],
+  })
+
+export const publicHoldParamsSchema = z.object({
+  venueSlug: z.string().min(1),
+  holdId: z.string().min(1),
 })
