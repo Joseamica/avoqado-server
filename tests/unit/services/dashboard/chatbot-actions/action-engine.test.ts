@@ -546,6 +546,38 @@ describe('ActionEngine', () => {
       expect(continued?.message).toContain('2. tomate rojo')
       expect(mockPreview.generatePreview).not.toHaveBeenCalled()
     })
+
+    it('should release pending disambiguation when the next message is a new standalone request', async () => {
+      const definition = makeUpdateDefinition()
+      actionRegistry.register(definition)
+
+      const candidates: EntityMatch[] = [
+        { id: 'rm-1', name: 'Tomate Roma', score: 0.9 },
+        { id: 'rm-2', name: 'tomate rojo', score: 0.85 },
+      ]
+      mockResolver.resolve.mockResolvedValue({
+        matches: 2,
+        candidates,
+        exact: false,
+      } satisfies EntityResolutionResult)
+
+      const context = makeContext()
+      await engine.processAction(
+        makeClassification({
+          actionType: 'rawMaterial.update',
+          params: { costPerUnit: 100 },
+          entityName: 'tomate',
+        }),
+        context,
+      )
+
+      const continued = await engine.continueDisambiguation('reembolsa todos los pagos de hoy', context)
+      expect(continued).toBeNull()
+
+      const staleSelection = await engine.continueDisambiguation('2', context)
+      expect(staleSelection).toBeNull()
+      expect(mockPreview.generatePreview).not.toHaveBeenCalled()
+    })
   })
 
   // -------------------------------------------------------------------------

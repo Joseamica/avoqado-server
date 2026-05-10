@@ -107,6 +107,28 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
         }
       }
     }, 30000)
+
+    it('should return profitability results through the registered SharedQueryService tool', async () => {
+      const dashboardValue = await SharedQueryService.getProfitAnalysis(testData.venue.id, 'last7days', 5)
+
+      const chatbotResponse = await service.processQuery({
+        message: '¿Cuál fue mi rentabilidad esta semana?',
+        venueId: testData.venue.id,
+        userId: testData.staff[0].id,
+        venueSlug: testData.venue.slug,
+        userRole: UserRole.MANAGER,
+      })
+
+      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
+      expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('shared_intent_routed')
+      expect(chatbotResponse.response).toContain('Análisis de rentabilidad')
+
+      if (chatbotResponse.queryResult) {
+        expect(chatbotResponse.queryResult.totalRevenue).toBe(dashboardValue.totalRevenue)
+        expect(chatbotResponse.queryResult.totalCost).toBe(dashboardValue.totalCost)
+        expect(chatbotResponse.queryResult.grossProfit).toBe(dashboardValue.grossProfit)
+      }
+    }, 30000)
   })
 
   describe('Layer 4 Cross-Check Validation', () => {

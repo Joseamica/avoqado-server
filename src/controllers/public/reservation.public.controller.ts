@@ -958,7 +958,7 @@ async function createClassReservation(
     //    customer needs to pay on arrival.
     // 3. else (policy=at_venue/optional, or credits paid): standard CONFIRMED.
     const effectiveStatus: ReservationStatus = requiresUpfrontCash ? 'PENDING' : initialStatus
-    const upfrontAmount = (requiresUpfrontCash || owesAtVenue) ? cashPrice * requestedPartySize : null
+    const upfrontAmount = requiresUpfrontCash || owesAtVenue ? cashPrice * requestedPartySize : null
     const ownerAtVenueNote = owesAtVenue
       ? `[PAY-AT-VENUE] Cliente debe $${cashPrice * requestedPartySize} al llegar (venue sin Stripe configurado)`
       : null
@@ -984,13 +984,15 @@ async function createClassReservation(
         specialRequests: mergedSpecialRequests,
         depositAmount: upfrontAmount,
         depositStatus: requiresUpfrontCash ? 'PENDING' : null,
-        confirmedAt: requiresUpfrontCash ? null : (autoConfirm ? new Date() : null),
-        statusLog: [{
-          status: effectiveStatus,
-          at: new Date().toISOString(),
-          by: null,
-          ...(owesAtVenue ? { note: 'pay-at-venue', amountOwed: cashPrice * requestedPartySize } : {}),
-        }],
+        confirmedAt: requiresUpfrontCash ? null : autoConfirm ? new Date() : null,
+        statusLog: [
+          {
+            status: effectiveStatus,
+            at: new Date().toISOString(),
+            by: null,
+            ...(owesAtVenue ? { note: 'pay-at-venue', amountOwed: cashPrice * requestedPartySize } : {}),
+          },
+        ],
       },
     })
 

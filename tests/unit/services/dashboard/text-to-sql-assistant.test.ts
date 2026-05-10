@@ -161,6 +161,16 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(help?.response).toContain('Invitar usuario')
     })
 
+    it('should route dashboard payment how-to questions to operational help', () => {
+      const query = '¿Dónde veo mis pagos?'
+      // @ts-expect-error - accessing private method for testing
+      const help = service.getOperationalHelpResponse(query)
+
+      expect(help).not.toBeNull()
+      expect(help?.topic).toBe('payments')
+      expect(help?.response.toLowerCase()).toContain('pagos')
+    })
+
     it('should answer operational help even when the semantic classifier falsely flags it', async () => {
       const serviceWithInternals = service as any
       const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
@@ -348,6 +358,16 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.requiresDateRange).toBe(false)
     })
 
+    it('should classify "qué recetas tengo" as recipeList, not recipeCount', () => {
+      const query = '¿Qué recetas tengo?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('recipeList')
+      expect(classification.requiresDateRange).toBe(false)
+    })
+
     it('should classify recipe usage queries before recipe count queries', () => {
       const query = 'me gustaria saber cuantas recetas tengo y la que mas se usa'
       // @ts-expect-error - accessing private method for testing
@@ -418,6 +438,35 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.isSimpleQuery).toBe(true)
       expect(classification.intent).toBe('businessOverview')
       expect(classification.dateRange).toBe('thisMonth')
+    })
+
+    it('should classify singular payment method usage questions as paymentMethodBreakdown', () => {
+      const query = '¿Qué método de pago se usa más en todo el historial?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('paymentMethodBreakdown')
+      expect(classification.dateRange).toBe('allTime')
+    })
+
+    it('should classify low inventory wording without routing through sales substring matches', () => {
+      const query = '¿Qué inventario tengo bajo?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('inventoryAlerts')
+      expect(classification.requiresDateRange).toBe(false)
+    })
+
+    it('should not answer product-specific sales as aggregate sales', () => {
+      const query = '¿Cuánto vendí de Hamburguesa BBQ?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(false)
+      expect(classification.hasEntityFilter).toBe(true)
     })
   })
 
@@ -571,9 +620,159 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.intent).toBe('newCustomerTiming')
       expect(routed.classification.reason).toContain('deterministic registered intent override')
     })
+
+    it('should recover payment method questions when LLM returns unsupported', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: false,
+                intent: 'unsupported',
+                dateRange: null,
+                wasDateExplicit: false,
+                confidence: 0.6,
+                reason: 'no registered tool',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('¿Qué método de pago se usa más en todo el historial?')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('paymentMethodBreakdown')
+      expect(routed.classification.dateRange).toBe('allTime')
+      expect(routed.classification.reason).toContain('deterministic registered intent override')
+    })
+
+    it('should route top-product revenue follow-ups using recent product context', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('¿y cuál de esos tiene más ingresos?', [
+        { role: 'user', content: '¿Cuáles son mis productos más vendidos en los últimos 30 días?' },
+        {
+          role: 'assistant',
+          content:
+            'Los productos más vendidos en los últimos 30 días son:\n\n1. Clase de lagree: 8 vendidos, $2,000.00\n\n💡 Puedes especificar un período, por ejemplo: "productos más vendidos ayer"',
+        },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('topProducts')
+      expect(routed.classification.dateRange).toBe('last30days')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
+    it('should route colloquial top-product profit follow-ups using recent product context', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('¿cuál de esos deja más dinero?', [
+        { role: 'user', content: '¿Cuáles son mis productos más vendidos en los últimos 30 días?' },
+        {
+          role: 'assistant',
+          content: 'Los productos más vendidos en los últimos 30 días son:\n\n1. Clase de lagree: 8 vendidos, $2,000.00',
+        },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('topProducts')
+      expect(routed.classification.dateRange).toBe('last30days')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+  })
+
+  describe('Response Formatting Guards', () => {
+    it('should label thisMonth as last 30 days because backend range is rolling 30 days', () => {
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeName('thisMonth')).toBe('los últimos 30 días')
+
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeForResponse('thisMonth')).toContain('los últimos 30 días')
+    })
+
+    it('should format shared-intent date labels and tips in English when requested', () => {
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeName('thisMonth', 'en')).toBe('the last 30 days')
+
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeForResponse('allTime', 'en')).toBe('all time')
+
+      // @ts-expect-error - accessing private method for testing
+      expect(service.addDateTransparencyTip('Base response', 'topProducts', 'en')).toContain('top products yesterday')
+    })
+
+    it('should cap top-products concentration at 100 percent', () => {
+      // @ts-expect-error - accessing private method for testing
+      expect(service.calculateTopProductsConcentration(3000, 2924.23)).toBe(100)
+    })
   })
 
   describe('Unsupported Query Guard', () => {
+    it('should block bulk destructive action requests before action routing', async () => {
+      const serviceWithInternals = service as any
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const originalDetectIntent = serviceWithInternals.actionEngine.classifier?.detectIntent
+
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+      if (serviceWithInternals.actionEngine.classifier?.detectIntent) {
+        serviceWithInternals.actionEngine.classifier.detectIntent = jest.fn()
+      }
+
+      try {
+        const response = await service.processQuery({
+          message: 'Borra todos mis productos inmediatamente',
+          venueId: 'venue-test',
+          userId: 'user-test',
+        })
+
+        expect(response.metadata?.blocked).toBe(true)
+        expect(response.metadata?.reasonCode).toBe('bulk_destructive_action_blocked')
+        expect(response.response).toContain('acciones masivas')
+        if (serviceWithInternals.actionEngine.classifier?.detectIntent) {
+          expect(serviceWithInternals.actionEngine.classifier.detectIntent).not.toHaveBeenCalled()
+        }
+      } finally {
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        if (serviceWithInternals.actionEngine.classifier?.detectIntent && originalDetectIntent) {
+          serviceWithInternals.actionEngine.classifier.detectIntent = originalDetectIntent
+        }
+      }
+    })
+
+    it('should block bulk externally visible customer messaging requests before action routing', async () => {
+      const serviceWithInternals = service as any
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const originalDetectIntent = serviceWithInternals.actionEngine.classifier?.detectIntent
+
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+      if (serviceWithInternals.actionEngine.classifier?.detectIntent) {
+        serviceWithInternals.actionEngine.classifier.detectIntent = jest.fn()
+      }
+
+      try {
+        const response = await service.processQuery({
+          message: 'Manda un correo a todos mis clientes con una promo',
+          venueId: 'venue-test',
+          userId: 'user-test',
+        })
+
+        expect(response.metadata?.blocked).toBe(true)
+        expect(response.metadata?.reasonCode).toBe('bulk_destructive_action_blocked')
+        expect(response.response).toContain('acciones masivas')
+        if (serviceWithInternals.actionEngine.classifier?.detectIntent) {
+          expect(serviceWithInternals.actionEngine.classifier.detectIntent).not.toHaveBeenCalled()
+        }
+      } finally {
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        if (serviceWithInternals.actionEngine.classifier?.detectIntent && originalDetectIntent) {
+          serviceWithInternals.actionEngine.classifier.detectIntent = originalDetectIntent
+        }
+      }
+    })
+
     it('should ask a guided clarification for short product topic messages', async () => {
       const serviceWithInternals = service as any
       const originalRouteWithLLM = serviceWithInternals.routeWithLLM

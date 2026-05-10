@@ -1106,7 +1106,7 @@ export class SharedQueryService {
       FROM "OrderItem" oi
       INNER JOIN "Product" p ON oi."productId" = p."id"
       INNER JOIN "Order" o ON oi."orderId" = o."id"
-      LEFT JOIN "Recipe" r ON p."recipeId" = r."id"
+      LEFT JOIN "Recipe" r ON r."productId" = p."id"
       WHERE o."venueId"::text = ${venueId}
         AND o."createdAt" >= ${from}::timestamp
         AND o."createdAt" <= ${to}::timestamp

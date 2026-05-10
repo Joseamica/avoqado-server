@@ -106,6 +106,20 @@ const DATE_RANGE_EXAMPLES: Record<string, string> = {
   default: 'ventas de la semana pasada',
 }
 
+const DATE_RANGE_EXAMPLES_EN: Record<string, string> = {
+  sales: 'sales from last week',
+  averageTicket: 'average ticket yesterday',
+  topProducts: 'top products yesterday',
+  newCustomers: 'new customers this month',
+  newCustomerTiming: 'when do I get the most new customers',
+  staffPerformance: 'staff who sold the most last week',
+  reviews: 'reviews this week',
+  businessOverview: 'business overview this week',
+  profitAnalysis: 'profitability last month',
+  paymentMethodBreakdown: 'payment methods yesterday',
+  default: 'sales from last week',
+}
+
 // Result type for extractDateRangeWithExplicit()
 interface DateRangeExtractionResult {
   dateRange: RelativeDateRange | undefined
@@ -376,7 +390,7 @@ interface BusinessOverviewPlannerOutput {
 interface OperationalHelpResponse {
   response: string
   suggestions: string[]
-  topic: 'permissions' | 'menu' | 'inventory' | 'commissions' | 'shifts' | 'team' | 'general'
+  topic: 'permissions' | 'menu' | 'inventory' | 'commissions' | 'shifts' | 'team' | 'payments' | 'general'
 }
 
 class TextToSqlAssistantService {
@@ -1765,6 +1779,44 @@ Ejemplos de respuestas CORRECTAS:
         return await this.handleCreateProductExecutionAction(query, actionCommand.payload, startTime, sessionId)
       }
 
+      if (this.isBulkDestructiveActionRequest(query.message)) {
+        SecurityAuditLoggerService.logQueryBlocked({
+          userId: query.userId,
+          venueId: query.venueId,
+          userRole: userRole,
+          naturalLanguageQuery: query.message,
+          violationType: SecurityViolationType.DANGEROUS_OPERATION,
+          errorMessage: 'Bulk destructive action requested through chatbot',
+          ipAddress: query.ipAddress,
+        })
+
+        return {
+          response:
+            'Por seguridad, no puedo ejecutar acciones masivas o destructivas desde el chat. Usa el dashboard para revisar el alcance exacto y confirmar cambios críticos uno por uno.',
+          confidence: 1,
+          metadata: {
+            queryGenerated: false,
+            queryExecuted: false,
+            dataSourcesUsed: [],
+            routedTo: 'Blocked',
+            riskLevel: 'critical',
+            reasonCode: 'bulk_destructive_action_blocked',
+            blocked: true,
+            violationType: SecurityViolationType.DANGEROUS_OPERATION,
+          },
+          suggestions: [
+            'Revisa los registros en el dashboard',
+            'Haz cambios críticos de forma individual',
+            'Pide un reporte antes de modificar datos',
+          ],
+          tokenUsage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+          },
+        }
+      }
+
       // ═══════════════════════════════════════════════════════════
       // SECURITY LEVEL 1: PRE-VALIDATION (Fast Fail - Block Before OpenAI)
       // ═══════════════════════════════════════════════════════════
@@ -2290,33 +2342,47 @@ Ejemplos de respuestas CORRECTAS:
           // Note: dateRange is guaranteed to exist here because canRoute checks for it
           // (intentClassification.dateRange || intentClassification.requiresDateRange === false)
           const dateRange = intentClassification.dateRange!
+          const responseLanguage = this.detectUserLanguage(query.message)
+          const dateName = (range: RelativeDateRange) => this.formatDateRangeName(range, responseLanguage)
+          const formatMoney = (amount: number, currency: string = 'MXN') =>
+            new Intl.NumberFormat(responseLanguage === 'en' ? 'en-US' : 'es-MX', {
+              style: 'currency',
+              currency,
+            }).format(amount)
 
           switch (intentClassification.intent) {
             case 'sales': {
               // If visualization requested, use time series data for charting
               if (query.includeVisualization) {
                 const timeSeries = await SharedQueryService.getSalesTimeSeries(query.venueId, dateRange)
-                const formattedRevenue = new Intl.NumberFormat('es-MX', {
-                  style: 'currency',
-                  currency: timeSeries.currency,
-                }).format(timeSeries.totalRevenue)
+                const formattedRevenue = formatMoney(timeSeries.totalRevenue, timeSeries.currency)
 
-                const trend = await this.getSalesComparison(query.venueId, dateRange, timeSeries.totalRevenue)
-                const granularityText = timeSeries.granularity === 'hour' ? 'por hora' : 'por día'
+                const trend = await this.getSalesComparison(query.venueId, dateRange, timeSeries.totalRevenue, responseLanguage)
+                const granularityText =
+                  responseLanguage === 'en'
+                    ? timeSeries.granularity === 'hour'
+                      ? 'by hour'
+                      : 'by day'
+                    : timeSeries.granularity === 'hour'
+                      ? 'por hora'
+                      : 'por día'
 
-                naturalResponse = `En ${this.formatDateRangeName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${timeSeries.totalOrders} órdenes. Aquí tienes la gráfica de ventas ${granularityText}.`
+                naturalResponse =
+                  responseLanguage === 'en'
+                    ? `In ${dateName(dateRange)}, you sold ${formattedRevenue}${trend} in total across ${timeSeries.totalOrders} orders. Here is the sales chart ${granularityText}.`
+                    : `En ${dateName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${timeSeries.totalOrders} órdenes. Aquí tienes la gráfica de ventas ${granularityText}.`
                 serviceResult = timeSeries
               } else {
                 // Standard summary without visualization
                 const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, dateRange)
-                const formattedRevenue = new Intl.NumberFormat('es-MX', {
-                  style: 'currency',
-                  currency: salesData.currency,
-                }).format(salesData.totalRevenue)
+                const formattedRevenue = formatMoney(salesData.totalRevenue, salesData.currency)
 
-                const trend = await this.getSalesComparison(query.venueId, dateRange, salesData.totalRevenue)
+                const trend = await this.getSalesComparison(query.venueId, dateRange, salesData.totalRevenue, responseLanguage)
 
-                naturalResponse = `En ${this.formatDateRangeName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: salesData.currency }).format(salesData.averageTicket)}.`
+                naturalResponse =
+                  responseLanguage === 'en'
+                    ? `In ${dateName(dateRange)}, you sold ${formattedRevenue}${trend} in total across ${salesData.orderCount} orders, with an average ticket of ${formatMoney(salesData.averageTicket, salesData.currency)}.`
+                    : `En ${dateName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${formatMoney(salesData.averageTicket, salesData.currency)}.`
                 serviceResult = salesData
               }
               break
@@ -2324,15 +2390,15 @@ Ejemplos de respuestas CORRECTAS:
 
             case 'averageTicket': {
               const salesData = await SharedQueryService.getSalesForPeriod(query.venueId, dateRange)
-              const formattedAvg = new Intl.NumberFormat('es-MX', {
-                style: 'currency',
-                currency: salesData.currency,
-              }).format(salesData.averageTicket)
+              const formattedAvg = formatMoney(salesData.averageTicket, salesData.currency)
 
               // PHASE 3 UX: Add automatic comparison with previous period
-              const trend = await this.getAverageTicketComparison(query.venueId, dateRange, salesData.averageTicket)
+              const trend = await this.getAverageTicketComparison(query.venueId, dateRange, salesData.averageTicket, responseLanguage)
 
-              naturalResponse = `El ticket promedio en ${this.formatDateRangeName(dateRange)} es de ${formattedAvg}${trend}, basado en ${salesData.orderCount} órdenes.`
+              naturalResponse =
+                responseLanguage === 'en'
+                  ? `The average ticket in ${dateName(dateRange)} is ${formattedAvg}${trend}, based on ${salesData.orderCount} orders.`
+                  : `El ticket promedio en ${dateName(dateRange)} es de ${formattedAvg}${trend}, basado en ${salesData.orderCount} órdenes.`
               serviceResult = { averageTicket: salesData.averageTicket, orderCount: salesData.orderCount, currency: salesData.currency }
               break
             }
@@ -2340,12 +2406,16 @@ Ejemplos de respuestas CORRECTAS:
             case 'topProducts': {
               const topProducts = await SharedQueryService.getTopProducts(query.venueId, dateRange, 5)
               const productList = topProducts
-                .map(
-                  (p, i) =>
-                    `${i + 1}. ${p.productName} (${p.quantitySold} vendidos, ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(p.revenue)})`,
+                .map((p, i) =>
+                  responseLanguage === 'en'
+                    ? `${i + 1}. ${p.productName} (${p.quantitySold} sold, ${formatMoney(p.revenue)})`
+                    : `${i + 1}. ${p.productName} (${p.quantitySold} vendidos, ${formatMoney(p.revenue)})`,
                 )
                 .join('\n')
-              naturalResponse = `Los productos más vendidos en ${this.formatDateRangeName(dateRange)} son:\n\n${productList}`
+              naturalResponse =
+                responseLanguage === 'en'
+                  ? `The top-selling products in ${dateName(dateRange)} are:\n\n${productList}`
+                  : `Los productos más vendidos en ${dateName(dateRange)} son:\n\n${productList}`
               serviceResult = topProducts
               break
             }
@@ -2442,7 +2512,7 @@ Ejemplos de respuestas CORRECTAS:
               }).format(salesData.averageTicket)
 
               const topProductsRevenue = topProducts.reduce((sum, product) => sum + product.revenue, 0)
-              const topProductsConcentration = salesData.totalRevenue > 0 ? (topProductsRevenue / salesData.totalRevenue) * 100 : 0
+              const topProductsConcentration = this.calculateTopProductsConcentration(topProductsRevenue, salesData.totalRevenue)
 
               const topProductsSummary =
                 topProducts.length > 0
@@ -2733,12 +2803,12 @@ Ejemplos de respuestas CORRECTAS:
           // ══════════════════════════════════════════════════════════════════════════════
           if (!intentClassification.wasDateExplicit && intentClassification.intent && intentClassification.dateRange) {
             // Replace period name with full date range (e.g., "este mes" → "este mes (nov 1 - nov 25)")
-            const periodName = this.formatDateRangeName(dateRange)
-            const periodWithDates = this.formatDateRangeForResponse(dateRange)
+            const periodName = this.formatDateRangeName(dateRange, responseLanguage)
+            const periodWithDates = this.formatDateRangeForResponse(dateRange, responseLanguage)
             naturalResponse = naturalResponse.replace(periodName, periodWithDates)
 
             // Add helpful tip at the end
-            naturalResponse = this.addDateTransparencyTip(naturalResponse, intentClassification.intent)
+            naturalResponse = this.addDateTransparencyTip(naturalResponse, intentClassification.intent, responseLanguage)
           }
 
           // Record interaction for learning
@@ -6305,6 +6375,25 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     return hasAnalyticsTerm && hasBusinessContext
   }
 
+  private isBulkDestructiveActionRequest(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
+    if (!normalizedMessage) return false
+
+    const hasUnsafeBulkVerb =
+      /\b(borra|borrar|elimina|eliminar|quita|quitar|limpia|limpiar|purga|purgar|reembolsa|reembolsar|refund|cancela|cancelar|desactiva|desactivar|actualiza|actualizar|modifica|modificar|edita|editar|cambia|cambiar|manda|mandar|envia|enviar|notifica|notificar|avisa|avisar|exporta|exportar|descarga|descargar|delete|remove|wipe|purge|cancel|disable|update|edit|change|send|notify|message|email|mail|export|download)\b/.test(
+        normalizedMessage,
+      )
+    const hasBulkScope = /\b(todos?|todas?|cada|masivo|masiva|completo|completa|entero|entera|all|every|bulk|entire)\b/.test(
+      normalizedMessage,
+    )
+    const hasSensitiveObject =
+      /\b(productos?|precios?|ordenes?|pedidos?|pagos?|payments?|clientes?|customers?|usuarios?|staff|empleados?|meseros?|inventario|stock|recetas?|reservaciones?|reservas?|datos?|data|correos?|emails?|telefonos?|phones?|mensajes?|promos?|promociones?|venue|sucursal)\b/.test(
+        normalizedMessage,
+      )
+
+    return hasUnsafeBulkVerb && hasBulkScope && hasSensitiveObject
+  }
+
   private getOperationalHelpResponse(message: string): OperationalHelpResponse | null {
     const normalizedMessage = this.normalizeTextForMatch(message)
     const isInventoryDataQuery =
@@ -6341,6 +6430,23 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
 
     if (!hasHowToSignal) {
       return null
+    }
+
+    const paymentsHelpSignal =
+      /\b(pagos?|payments?|cobros?|transacciones?|liquidaciones?|settlements?)\b/.test(normalizedMessage) &&
+      /\b(donde|ver|veo|revis(?:a|ar|o)|consult(?:a|ar|o)|encuentro|mostrar|muestrame|how|where|review|see|find)\b/.test(normalizedMessage)
+    if (paymentsHelpSignal) {
+      return {
+        topic: 'payments',
+        response:
+          language === 'en'
+            ? 'To review payments, open `Pagos` in the dashboard. There you can filter by date, status, method and search specific transactions.'
+            : 'Para revisar pagos, entra a `Pagos` en el dashboard. Ahí puedes filtrar por fecha, estado, método de pago y buscar transacciones específicas.',
+        suggestions:
+          language === 'en'
+            ? ['How much did I sell today?', 'What payment method is used most?', 'How do I review settlements?']
+            : ['¿Cuánto vendí hoy?', '¿Qué método de pago se usa más?', '¿Cómo reviso mis liquidaciones?'],
+      }
     }
 
     const hasAnalyticsSignal =
@@ -6699,28 +6805,28 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       }
     }
 
-    // Special-case: "cuántas recetas tengo" should be treated as a simple real-time query.
-    const asksRecipeCount =
-      /\b(recetas?|recipe)\b/.test(lowerMessage) && /\b(cuant[ao]s?|cantidad|total|numero|n[úu]mero|tengo|hay)\b/.test(lowerMessage)
-    if (asksRecipeCount) {
-      return {
-        isSimpleQuery: true,
-        intent: 'recipeCount',
-        confidence: 0.95,
-        reason: 'Detected recipe count query (real-time, no date range needed)',
-        requiresDateRange: false,
-      }
-    }
-
     const asksRecipeList =
-      /\b(recetas?|recipe)\b/.test(lowerMessage) &&
-      /\b(cuales?|cu[aá]les?|que|qu[eé]|lista|listado|muestra|muestrame|mu[eé]strame|ver|dame)\b/.test(lowerMessage)
+      /\b(recetas?|recipe)\b/.test(normalizedMessage) &&
+      /\b(cuales?|que|lista|listado|muestra|muestrame|ver|dame)\b/.test(normalizedMessage)
     if (asksRecipeList) {
       return {
         isSimpleQuery: true,
         intent: 'recipeList',
         confidence: 0.95,
         reason: 'Detected recipe list query (real-time, no date range needed)',
+        requiresDateRange: false,
+      }
+    }
+
+    // Special-case: "cuántas recetas tengo" should be treated as a simple real-time query.
+    const asksRecipeCount =
+      /\b(recetas?|recipe)\b/.test(normalizedMessage) && /\b(cuant[ao]s?|cantidad|total|numero|hay)\b/.test(normalizedMessage)
+    if (asksRecipeCount) {
+      return {
+        isSimpleQuery: true,
+        intent: 'recipeCount',
+        confidence: 0.95,
+        reason: 'Detected recipe count query (real-time, no date range needed)',
         requiresDateRange: false,
       }
     }
@@ -6885,6 +6991,9 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     // Intent 4: Inventory Alerts (REAL-TIME) - BEFORE sales (prevents "inventario" matching "venta" substring)
     const inventoryKeywordsEarly = [
       'inventario bajo',
+      'inventario tengo bajo',
+      'inventario esta bajo',
+      'inventario está bajo',
       'stock bajo',
       'ingredientes faltantes',
       'falta de',
@@ -6900,7 +7009,11 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       'materiales bajos',
       'insumos bajos',
     ]
-    if (inventoryKeywordsEarly.some(kw => lowerMessage.includes(kw))) {
+    const asksLowInventory =
+      inventoryKeywordsEarly.some(kw => lowerMessage.includes(kw)) ||
+      (/\b(inventario|stock|insumos?|ingredientes?|materiales?)\b/.test(normalizedMessage) &&
+        /\b(bajo|bajos|baja|bajas|agotad[oa]s?|faltantes?|falta|minimo|mínimo)\b/.test(normalizedMessage))
+    if (asksLowInventory) {
       return {
         isSimpleQuery: true,
         intent: 'inventoryAlerts',
@@ -6911,8 +7024,8 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     }
 
     // Intent 5: Sales queries - default to thisMonth if no date specified
-    const salesKeywords = ['vendí', 'vendi', 'ventas', 'venta', 'vendido', 'ingresos', 'revenue', 'sales', 'facturado']
-    if (salesKeywords.some(kw => lowerMessage.includes(kw))) {
+    const salesKeywordPattern = /\b(vend[ií]|ventas?|vendido|ingresos?|revenue|sales|facturad[oa])\b/
+    if (salesKeywordPattern.test(normalizedMessage)) {
       const effectiveDateRange = dateRange || 'thisMonth'
       return {
         isSimpleQuery: true,
@@ -7047,10 +7160,16 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     const paymentMethodKeywords = [
       'métodos de pago',
       'metodos de pago',
+      'método de pago',
+      'metodo de pago',
       'formas de pago',
+      'forma de pago',
       'cómo pagaron',
       'como pagaron',
+      'cómo pagan',
+      'como pagan',
       'payment methods',
+      'payment method',
       'tarjeta o efectivo',
       'efectivo o tarjeta',
       'cuánto en tarjeta',
@@ -7060,6 +7179,10 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       'desglose de pagos',
       'distribución de pagos',
       'distribucion de pagos',
+      'pago se usa más',
+      'pago se usa mas',
+      'pago más usado',
+      'pago mas usado',
     ]
     if (paymentMethodKeywords.some(kw => lowerMessage.includes(kw))) {
       const effectiveDateRange = dateRange || 'thisMonth'
@@ -7130,6 +7253,36 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
           confidence: 0.9,
           reason: 'Detected recipe usage follow-up from recent recipe context',
           requiresDateRange: false,
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }
+    }
+
+    const asksTopProductFollowUp =
+      /\b(cual|cu[aá]l|de\s+es[oa]s|es[oa]s|ellos|ellas)\b/.test(normalizedMessage) &&
+      /\b(mas\s+(ingresos?|ventas?|vendid[oa]s?|dinero)|mayor\s+(ingreso|venta)|genera\s+mas|produce\s+mas|deja\s+mas\s+dinero|ganancia|utilidad|revenue|profit)\b/.test(
+        normalizedMessage,
+      )
+    const recentHistoryMentionsTopProducts =
+      conversationHistory?.slice(-4).some(turn => {
+        const normalizedContent = this.normalizeTextForMatch(turn.content)
+        return (
+          /\b(productos?|products?)\b/.test(normalizedContent) &&
+          /\b(top|mas vendidos|vendidos|best sellers|ingresos?)\b/.test(normalizedContent)
+        )
+      }) ?? false
+
+    if (asksTopProductFollowUp && recentHistoryMentionsTopProducts) {
+      const recentDateRange = this.extractRecentDateRangeFromHistory(conversationHistory)
+      return {
+        classification: {
+          isSimpleQuery: true,
+          intent: 'topProducts',
+          dateRange: recentDateRange || 'thisMonth',
+          confidence: 0.9,
+          reason: 'Detected top-products revenue follow-up from recent product context',
+          requiresDateRange: true,
+          wasDateExplicit: recentDateRange !== undefined,
         },
         tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       }
@@ -7511,6 +7664,8 @@ Responde SOLO JSON (sin markdown):
       lowerMessage.includes('historicamente') ||
       lowerMessage.includes('all time') ||
       lowerMessage.includes('todo el tiempo') ||
+      lowerMessage.includes('todo el historial') ||
+      lowerMessage.includes('historial completo') ||
       lowerMessage.includes('de siempre') ||
       lowerMessage.includes('desde siempre')
     ) {
@@ -7539,21 +7694,53 @@ Responde SOLO JSON (sin markdown):
     }
   }
 
+  private extractRecentDateRangeFromHistory(conversationHistory?: Array<{ role: string; content: string }>): RelativeDateRange | undefined {
+    if (!conversationHistory || conversationHistory.length === 0) return undefined
+
+    const recentTurns = [...conversationHistory].reverse().slice(0, 4)
+    const userTurns = recentTurns.filter(turn => turn.role === 'user')
+
+    for (const turn of userTurns) {
+      const dateRange = this.extractDateRange(turn.content)
+      if (dateRange) return dateRange
+    }
+
+    for (const turn of recentTurns) {
+      const assistantAnswerWithoutTip = turn.content.split('💡')[0] || turn.content
+      const dateRange = this.extractDateRange(assistantAnswerWithoutTip)
+      if (dateRange) return dateRange
+    }
+
+    return undefined
+  }
+
   /**
    * Format date range name for natural language responses
    */
-  private formatDateRangeName(dateRange: RelativeDateRange): string {
-    const names: Record<RelativeDateRange, string> = {
+  private formatDateRangeName(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+    const namesEs: Record<RelativeDateRange, string> = {
       today: 'hoy',
       yesterday: 'ayer',
       last7days: 'los últimos 7 días',
       last30days: 'los últimos 30 días',
-      thisWeek: 'esta semana',
-      thisMonth: 'este mes',
-      lastWeek: 'la semana pasada',
-      lastMonth: 'el mes pasado',
+      thisWeek: 'los últimos 7 días',
+      thisMonth: 'los últimos 30 días',
+      lastWeek: 'los 7 días anteriores',
+      lastMonth: 'los 30 días anteriores',
       allTime: 'todo el historial',
     }
+    const namesEn: Record<RelativeDateRange, string> = {
+      today: 'today',
+      yesterday: 'yesterday',
+      last7days: 'the last 7 days',
+      last30days: 'the last 30 days',
+      thisWeek: 'the last 7 days',
+      thisMonth: 'the last 30 days',
+      lastWeek: 'the previous 7 days',
+      lastMonth: 'the previous 30 days',
+      allTime: 'all time',
+    }
+    const names = language === 'en' ? namesEn : namesEs
     return names[dateRange] || dateRange
   }
 
@@ -7562,8 +7749,8 @@ Responde SOLO JSON (sin markdown):
    *
    * Example: "En este mes (nov 1 - nov 25)"
    */
-  private formatDateRangeForResponse(dateRange: RelativeDateRange): string {
-    const periodName = this.formatDateRangeName(dateRange)
+  private formatDateRangeForResponse(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+    const periodName = this.formatDateRangeName(dateRange, language)
 
     // Calculate actual dates for the period
     const now = new Date()
@@ -7580,38 +7767,30 @@ Responde SOLO JSON (sin markdown):
         endDate = startDate
         break
       case 'thisWeek':
-        const dayOfWeek = now.getDay()
-        const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1
-        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToMonday)
-        break
-      case 'lastWeek':
-        const lastWeekDayOfWeek = now.getDay()
-        const diffToLastMonday = (lastWeekDayOfWeek === 0 ? 6 : lastWeekDayOfWeek - 1) + 7
-        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToLastMonday)
-        endDate = new Date(startDate.getTime() + 6 * 24 * 60 * 60 * 1000)
-        break
-      case 'thisMonth':
-        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
-        break
-      case 'lastMonth':
-        startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-        endDate = new Date(now.getFullYear(), now.getMonth(), 0)
-        break
       case 'last7days':
         startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
         break
+      case 'lastWeek':
+        startDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000)
+        endDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+        break
+      case 'thisMonth':
       case 'last30days':
         startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
         break
+      case 'lastMonth':
+        startDate = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
+        endDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+        break
       case 'allTime':
-        return 'todo el historial'
+        return this.formatDateRangeName(dateRange, language)
       default:
         return periodName
     }
 
-    // Format dates in Spanish
+    // Format dates in the response language
     const formatDate = (d: Date) =>
-      d.toLocaleDateString('es-MX', {
+      d.toLocaleDateString(language === 'en' ? 'en-US' : 'es-MX', {
         month: 'short',
         day: 'numeric',
       })
@@ -7627,9 +7806,11 @@ Responde SOLO JSON (sin markdown):
   /**
    * Add date transparency tip to response when date wasn't explicit
    */
-  private addDateTransparencyTip(response: string, intent: string): string {
-    const example = DATE_RANGE_EXAMPLES[intent] || DATE_RANGE_EXAMPLES.default
-    const tip = DATE_RANGE_TIP.es.replace('{example}', example)
+  private addDateTransparencyTip(response: string, intent: string, language: 'es' | 'en' = 'es'): string {
+    const examples = language === 'en' ? DATE_RANGE_EXAMPLES_EN : DATE_RANGE_EXAMPLES
+    const example = examples[intent] || examples.default
+    const tipTemplate = language === 'en' ? DATE_RANGE_TIP.en : DATE_RANGE_TIP.es
+    const tip = tipTemplate.replace('{example}', example)
     return `${response}\n\n${tip}`
   }
 
@@ -7886,6 +8067,11 @@ Responde SOLO JSON (sin markdown):
     return ((current - previous) / previous) * 100
   }
 
+  private calculateTopProductsConcentration(topProductsRevenue: number, totalRevenue: number): number {
+    if (totalRevenue <= 0 || topProductsRevenue <= 0) return 0
+    return Math.min(100, (topProductsRevenue / totalRevenue) * 100)
+  }
+
   /**
    * Format trend indicator with arrow and percentage
    *
@@ -7893,12 +8079,12 @@ Responde SOLO JSON (sin markdown):
    * @param comparisonPeriod - Period being compared to
    * @returns Formatted string like "↑ 15.2% vs ayer" or "↓ 5.3% vs semana pasada"
    */
-  private formatTrendIndicator(percentChange: number | null, comparisonPeriod: RelativeDateRange): string {
+  private formatTrendIndicator(percentChange: number | null, comparisonPeriod: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
     if (percentChange === null) return ''
 
     const arrow = percentChange >= 0 ? '↑' : '↓'
     const absChange = Math.abs(percentChange).toFixed(1)
-    const periodName = this.formatDateRangeName(comparisonPeriod)
+    const periodName = this.formatDateRangeName(comparisonPeriod, language)
 
     return ` (${arrow} ${absChange}% vs ${periodName})`
   }
@@ -7911,14 +8097,19 @@ Responde SOLO JSON (sin markdown):
    * @param currentValue - Current value to compare
    * @returns Formatted trend string or empty string if no comparison
    */
-  private async getSalesComparison(venueId: string, currentPeriod: RelativeDateRange, currentValue: number): Promise<string> {
+  private async getSalesComparison(
+    venueId: string,
+    currentPeriod: RelativeDateRange,
+    currentValue: number,
+    language: 'es' | 'en' = 'es',
+  ): Promise<string> {
     const comparisonPeriod = this.getComparisonPeriod(currentPeriod)
     if (!comparisonPeriod) return ''
 
     try {
       const previousData = await SharedQueryService.getSalesForPeriod(venueId, comparisonPeriod)
       const percentChange = this.calculatePercentageChange(currentValue, previousData.totalRevenue)
-      return this.formatTrendIndicator(percentChange, comparisonPeriod)
+      return this.formatTrendIndicator(percentChange, comparisonPeriod, language)
     } catch (error) {
       logger.warn('⚠️ Failed to fetch comparison data for sales', { error, venueId, currentPeriod })
       return ''
@@ -7928,14 +8119,19 @@ Responde SOLO JSON (sin markdown):
   /**
    * Fetch comparison data for average ticket and return formatted trend
    */
-  private async getAverageTicketComparison(venueId: string, currentPeriod: RelativeDateRange, currentValue: number): Promise<string> {
+  private async getAverageTicketComparison(
+    venueId: string,
+    currentPeriod: RelativeDateRange,
+    currentValue: number,
+    language: 'es' | 'en' = 'es',
+  ): Promise<string> {
     const comparisonPeriod = this.getComparisonPeriod(currentPeriod)
     if (!comparisonPeriod) return ''
 
     try {
       const previousData = await SharedQueryService.getSalesForPeriod(venueId, comparisonPeriod)
       const percentChange = this.calculatePercentageChange(currentValue, previousData.averageTicket)
-      return this.formatTrendIndicator(percentChange, comparisonPeriod)
+      return this.formatTrendIndicator(percentChange, comparisonPeriod, language)
     } catch (error) {
       logger.warn('⚠️ Failed to fetch comparison data for average ticket', { error, venueId, currentPeriod })
       return ''
@@ -8321,7 +8517,18 @@ ${JSON.stringify(input, null, 2)}
       }
     }
 
-    // Pattern 4: "cuántas/cuántos [specific-product] se vendieron/hay/quedan"
+    // Pattern 4: "vendí/ingresos de [specific-product]"
+    const salesOfProductPattern =
+      /(?:vend[ií]|vendi|vendido|ingresos?|facturad[oa])\s+de\s+([a-z0-9ñ][a-z0-9ñ\s-]{1,80}?)(?=(?:\s+hoy|\s+ayer|\s+esta\s+semana|\s+los\s+ultimos|\s+en\s+los|[?.,!]|$))/
+    const salesProductMatch = lowerMessage.match(salesOfProductPattern)
+    if (salesProductMatch) {
+      const potentialProduct = salesProductMatch[1]?.trim().split(/\s+/)[0]
+      if (potentialProduct && !nonEntityWords.has(potentialProduct)) {
+        return true
+      }
+    }
+
+    // Pattern 5: "cuántas/cuántos [specific-product] se vendieron/hay/quedan"
     const quantityProductPattern =
       /(?:cuántas|cuantas|cuántos|cuantos)\s+(\w+)\s+(?:se\s+)?(?:vendieron|vendió|vendio|hay|tengo|quedan|salieron)/
     const qtyMatch = lowerMessage.match(quantityProductPattern)

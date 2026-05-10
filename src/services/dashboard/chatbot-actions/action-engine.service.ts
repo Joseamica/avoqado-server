@@ -291,6 +291,12 @@ export class ActionEngine {
 
     const selected = this.resolveDisambiguationSelection(message, session.candidates)
     if (!selected) {
+      const normalized = this.normalizeForSelection(message)
+      if (this.looksLikeStandaloneAssistantRequest(normalized)) {
+        this.pendingDisambiguations.delete(key)
+        return null
+      }
+
       return {
         type: 'disambiguate',
         message: this.buildDisambiguationMessage(session.candidates),
@@ -1025,9 +1031,12 @@ export class ActionEngine {
     const mentionsOutOfDomain = /\b(clima|tiempo|noticias?|web|internet|google|correo|email)\b/.test(normalizedMessage)
 
     const startsNewMutation =
-      /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|ajusta|ajustar|modifica|modificar|cambia|cambiar)\b/.test(
+      /\b(crea|crear|agrega|agregar|elimina|eliminar|borra|borrar|actualiza|actualizar|ajusta|ajustar|modifica|modificar|cambia|cambiar|reembolsa|reembolsar|refund|manda|mandar|envia|enviar)\b/.test(
         normalizedMessage,
-      ) && /\b(producto|productos|receta|recetas|inventario|stock|insumo|insumos|proveedor|proveedores)\b/.test(normalizedMessage)
+      ) &&
+      /\b(producto|productos|receta|recetas|inventario|stock|insumo|insumos|proveedor|proveedores|pagos?|ordenes?|pedidos?|clientes?|correo|email|promos?|promociones?)\b/.test(
+        normalizedMessage,
+      )
 
     return (startsLikeQuery && mentionsBusinessQueryObject) || mentionsOutOfDomain || startsNewMutation
   }
