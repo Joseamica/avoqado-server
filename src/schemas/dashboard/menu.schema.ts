@@ -217,8 +217,27 @@ const nonInventoriableMessage = {
   path: ['trackInventory'],
 }
 
+// APPOINTMENTS_SERVICE products need duration to compute slot windows. Until
+// April 2026 the dashboard form let admins save without it, producing legacy
+// rows with duration=null that crash the booking widget at submit time. New
+// products created via this CREATE path now MUST include a positive duration.
+// UpdateProductSchema intentionally skips this refine so a partial PATCH for
+// non-duration fields (e.g. just renaming a service) on a legacy broken row
+// still works — the dashboard form is the layer that forces a fix at edit time.
+const appointmentDurationRefine = <T extends { type?: string; duration?: number | null }>(data: T) => {
+  if (data.type !== 'APPOINTMENTS_SERVICE') return true
+  return typeof data.duration === 'number' && data.duration >= 5
+}
+const appointmentDurationMessage = {
+  message: 'La duración es obligatoria para citas (mínimo 5 minutos). Sin ella el widget no puede ofrecer horarios.',
+  path: ['duration'],
+}
+
 export const CreateProductSchema = z.object({
-  body: ProductBodyBase.refine(nonInventoriableRefine, nonInventoriableMessage),
+  body: ProductBodyBase.refine(nonInventoriableRefine, nonInventoriableMessage).refine(
+    appointmentDurationRefine,
+    appointmentDurationMessage,
+  ),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
   }),

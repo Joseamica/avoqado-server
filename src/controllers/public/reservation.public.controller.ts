@@ -478,7 +478,18 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // Lead service = first picked. Sum durations for the appointment window.
       req.body.productId = req.body.productId ?? incomingProductIds[0]
       const summed = products.reduce((acc, p) => acc + (p.duration ?? p.durationMinutes ?? 0), 0)
-      if (summed > 0) req.body.duration = summed
+      if (summed > 0) {
+        req.body.duration = summed
+      } else if (req.body.startsAt && req.body.endsAt) {
+        // Legacy products with NULL duration (admin saved them before the
+        // dashboard form required it). /availability already used the venue
+        // defaultDurationMin fallback to offer slots, so the picked
+        // startsAt/endsAt window is the authoritative duration. Derive it
+        // so the request keeps moving instead of dying on a stale Zod check.
+        const diffMs = new Date(req.body.endsAt).getTime() - new Date(req.body.startsAt).getTime()
+        const diffMin = Math.round(diffMs / 60000)
+        if (diffMin >= 5) req.body.duration = diffMin
+      }
     }
 
     // ---- Slot hold validation (Square countdown UX) ------------------------
