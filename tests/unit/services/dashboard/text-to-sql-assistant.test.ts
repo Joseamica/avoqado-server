@@ -483,6 +483,17 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.entityName).toBe('hamburguesa bbq')
       expect(classification.wasDateExplicit).toBe(true)
     })
+
+    it('should classify English requests to show reviews as the registered reviews tool', () => {
+      const query = 'Show me reviews from the last 30 days'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('reviews')
+      expect(classification.dateRange).toBe('last30days')
+      expect(classification.wasDateExplicit).toBe(true)
+    })
   })
 
   describe('LLM Router Conversational Guard', () => {
@@ -664,6 +675,37 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.isSimpleQuery).toBe(true)
       expect(routed.classification.intent).toBe('paymentMethodBreakdown')
       expect(routed.classification.dateRange).toBe('allTime')
+      expect(routed.classification.reason).toContain('deterministic registered intent override')
+    })
+
+    it('should recover English review requests when LLM returns unsupported', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: false,
+                intent: 'unsupported',
+                dateRange: null,
+                wasDateExplicit: false,
+                confidence: 0.6,
+                reason: 'no registered tool',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('Show me reviews from the last 30 days')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('reviews')
+      expect(routed.classification.dateRange).toBe('last30days')
       expect(routed.classification.reason).toContain('deterministic registered intent override')
     })
 

@@ -7095,8 +7095,24 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     }
 
     // Intent 6: Reviews queries - default to thisMonth if no date specified
-    const reviewKeywords = ['reseñas', 'resenas', 'reviews', 'calificaciones', 'rating', 'estrellas', 'stars']
-    const reviewMetrics = ['promedio', 'average', 'cuántas', 'cuantas', 'total']
+    const reviewKeywords = ['reseñas', 'resenas', 'reviews', 'review', 'calificaciones', 'rating', 'estrellas', 'stars']
+    const reviewMetrics = [
+      'promedio',
+      'average',
+      'cuántas',
+      'cuantas',
+      'total',
+      'show',
+      'give',
+      'get',
+      'see',
+      'list',
+      'muestra',
+      'muéstrame',
+      'dame',
+      'ver',
+      'revisar',
+    ]
     if (reviewKeywords.some(kw => lowerMessage.includes(kw)) && reviewMetrics.some(kw => lowerMessage.includes(kw))) {
       const effectiveDateRange = dateRange || 'thisMonth'
       return {
