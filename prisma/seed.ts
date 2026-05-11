@@ -825,7 +825,7 @@ async function main() {
     { cardType: TransactionCardType.DEBIT, settlementDays: 1, notes: 'Tarjetas de débito - 1 día hábil' },
     { cardType: TransactionCardType.CREDIT, settlementDays: 2, notes: 'Tarjetas de crédito - 2 días hábiles' },
     { cardType: TransactionCardType.AMEX, settlementDays: 3, notes: 'American Express - 3 días hábiles' },
-    { cardType: TransactionCardType.INTERNATIONAL, settlementDays: 5, notes: 'Tarjetas internacionales - 5 días hábiles' },
+    { cardType: TransactionCardType.INTERNATIONAL, settlementDays: 3, notes: 'Tarjetas internacionales - 3 días hábiles' },
     { cardType: TransactionCardType.OTHER, settlementDays: 2, notes: 'Otras tarjetas - 2 días hábiles' },
   ]
 

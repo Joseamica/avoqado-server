@@ -1,4 +1,12 @@
-import { PurchaseOrder, PurchaseOrderStatus, PurchaseOrderItemStatus, RawMaterialMovementType, Prisma, Unit } from '@prisma/client'
+import {
+  BatchStatus,
+  PurchaseOrder,
+  PurchaseOrderStatus,
+  PurchaseOrderItemStatus,
+  RawMaterialMovementType,
+  Prisma,
+  Unit,
+} from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import AppError from '../../errors/AppError'
 import {
@@ -921,42 +929,291 @@ export async function updatePurchaseOrderFees(
 }
 
 /**
- * Update the receive status of an individual purchase order item
+ * Generate a unique batch number scoped to (venue, rawMaterial, day) within a
+ * transaction. Mirrors fifoBatch.service.generateBatchNumber but uses the
+ * transaction client so reads stay consistent with concurrent writes.
+ */
+async function generateBatchNumberInTx(tx: Prisma.TransactionClient, venueId: string, rawMaterialId: string): Promise<string> {
+  const today = new Date()
+  const datePrefix = `BATCH-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
+
+  const lastBatch = await tx.stockBatch.findFirst({
+    where: {
+      venueId,
+      rawMaterialId,
+      batchNumber: { startsWith: datePrefix },
+    },
+    orderBy: { batchNumber: 'desc' },
+  })
+
+  if (!lastBatch) return `${datePrefix}-001`
+  const lastSequence = parseInt(lastBatch.batchNumber.split('-')[3])
+  return `${datePrefix}-${String(lastSequence + 1).padStart(3, '0')}`
+}
+
+/**
+ * Update the receive status of an individual purchase order item — and keep
+ * inventory perfectly in sync with the transition.
+ *
+ * Robust state-machine semantics:
+ *   - Forward (→ RECEIVED): create a StockBatch for the delta, increment
+ *     RawMaterial.currentStock, log a PURCHASE RawMaterialMovement.
+ *   - Reverse (RECEIVED →  DAMAGED | NOT_PROCESSED | PENDING): reduce existing
+ *     batches (newest first), decrement currentStock, log a SPOILAGE / RETURN
+ *     / ADJUSTMENT movement.
+ *   - Idempotent: if the effective received quantity does not change, no stock
+ *     side-effects are produced (only metadata fields are updated).
+ *
+ * Hard guards (throw AppError):
+ *   - quantityReceived must not exceed quantityOrdered
+ *   - PO unit must be dimensionally compatible with RawMaterial unit
+ *   - Cannot reverse below the amount already consumed by sales (the
+ *     existing batches' "consumed" portion is locked-in history)
+ *
+ * Everything runs inside a single prisma.$transaction so partial failures
+ * cannot leave currentStock, batches and movements out of sync.
  */
 export async function updatePurchaseOrderItemStatus(
   venueId: string,
   purchaseOrderId: string,
   itemId: string,
   data: UpdatePurchaseOrderItemStatusDto,
+  staffId?: string,
 ): Promise<void> {
-  // Verify purchase order exists and belongs to venue
-  const purchaseOrder = await prisma.purchaseOrder.findUnique({
-    where: { id: purchaseOrderId, venueId },
-    include: { items: true },
+  await prisma.$transaction(async tx => {
+    // Load item scoped to PO + venue, with raw material and batches
+    const item = await tx.purchaseOrderItem.findFirst({
+      where: {
+        id: itemId,
+        purchaseOrderId,
+        purchaseOrder: { venueId },
+      },
+      include: {
+        rawMaterial: true,
+        batches: true,
+        purchaseOrder: { select: { orderNumber: true, id: true } },
+      },
+    })
+
+    if (!item) {
+      throw new AppError('Item de orden de compra no encontrado', 404)
+    }
+
+    // ── Compute effective received quantity in PO unit ───────────────────────
+    // Only RECEIVED contributes positive stock; DAMAGED / NOT_PROCESSED /
+    // PENDING all reduce the inventory footprint to zero (the goods are not
+    // considered on-hand for any of those statuses).
+    const newReceiveStatus = data.receiveStatus
+    const newQtyReceivedInPoUnit =
+      newReceiveStatus === PurchaseOrderItemStatus.RECEIVED
+        ? new Decimal(data.quantityReceived !== undefined ? data.quantityReceived : item.quantityReceived.toNumber())
+        : new Decimal(0)
+
+    if (newQtyReceivedInPoUnit.greaterThan(item.quantityOrdered)) {
+      throw new AppError(
+        `No se puede recibir ${newQtyReceivedInPoUnit.toString()} ${item.unit} de ${item.rawMaterial.name}: excede la cantidad ordenada (${item.quantityOrdered.toString()} ${item.unit}).`,
+        400,
+      )
+    }
+
+    // ── Unit compatibility (PO unit ↔ RawMaterial unit) ──────────────────────
+    if (item.unit !== item.rawMaterial.unit && !areUnitsCompatible(item.unit, item.rawMaterial.unit)) {
+      throw new AppError(
+        `La unidad ${item.unit} de la orden es incompatible con la unidad ${item.rawMaterial.unit} del insumo "${item.rawMaterial.name}".`,
+        400,
+      )
+    }
+
+    const toRmUnit = (qInPoUnit: Decimal): Decimal =>
+      item.unit === item.rawMaterial.unit ? qInPoUnit : new Decimal(convertUnit(qInPoUnit.toNumber(), item.unit, item.rawMaterial.unit))
+
+    const newQtyInRmUnit = toRmUnit(newQtyReceivedInPoUnit)
+
+    // ── Aggregate existing batches for this item ─────────────────────────────
+    // ACTIVE batches still have remaining stock; QUARANTINED and EXPIRED
+    // batches are out of circulation and should NOT count toward the
+    // "currently received" total — otherwise reversing them would deduct
+    // currentStock that isn't there anymore.
+    const liveBatches = item.batches.filter(b => b.status === BatchStatus.ACTIVE || b.status === BatchStatus.DEPLETED)
+    const liveInitialTotal = liveBatches.reduce((acc, b) => acc.add(b.initialQuantity), new Decimal(0))
+    const liveRemainingTotal = liveBatches.reduce((acc, b) => acc.add(b.remainingQuantity), new Decimal(0))
+    const consumedTotal = liveInitialTotal.minus(liveRemainingTotal)
+
+    // Cannot end up with less effective stock than what's already been consumed
+    // by recipes/sales — that history is locked in.
+    if (newQtyInRmUnit.lessThan(consumedTotal)) {
+      throw new AppError(
+        `No se puede ajustar a ${newQtyReceivedInPoUnit.toString()} ${item.unit}: ya se consumieron ${consumedTotal.toString()} ${item.rawMaterial.unit} de este lote en ventas u otros movimientos. Haz un ajuste manual de inventario si es necesario.`,
+        400,
+      )
+    }
+
+    const deltaInRmUnit = newQtyInRmUnit.minus(liveInitialTotal)
+
+    // ── 1. Update the PurchaseOrderItem metadata always ──────────────────────
+    await tx.purchaseOrderItem.update({
+      where: { id: itemId },
+      data: {
+        receiveStatus: newReceiveStatus,
+        quantityReceived:
+          data.receiveStatus === PurchaseOrderItemStatus.RECEIVED
+            ? data.quantityReceived !== undefined
+              ? new Decimal(data.quantityReceived)
+              : item.quantityReceived
+            : new Decimal(0),
+        notes: data.notes !== undefined ? data.notes : item.notes,
+      },
+    })
+
+    // ── 2. Apply inventory side-effects only when there's an actual delta ────
+    if (deltaInRmUnit.isZero()) {
+      return
+    }
+
+    const previousStock = item.rawMaterial.currentStock
+    const newStock = previousStock.add(deltaInRmUnit)
+    const receivedDate = data.receivedDate ? new Date(data.receivedDate) : new Date()
+
+    if (deltaInRmUnit.greaterThan(0)) {
+      // Forward: create new batch for the increment
+      const deltaInPoUnit = newQtyReceivedInPoUnit.minus(toPoUnitInverse(liveInitialTotal, item.unit, item.rawMaterial.unit))
+
+      // Cost normalization: PO unitPrice is per PO unit. If RM unit differs,
+      // costPerUnit on the batch must be expressed per RM unit so FIFO costing
+      // stays consistent with deductStockFIFO.
+      const costPerUnitInRmUnit =
+        item.unit === item.rawMaterial.unit ? item.unitPrice : item.unitPrice.mul(deltaInPoUnit).div(deltaInRmUnit)
+
+      const batchNumber = await generateBatchNumberInTx(tx, venueId, item.rawMaterialId)
+
+      // Calculate expiration if perishable
+      let expirationDate: Date | undefined
+      if (item.rawMaterial.perishable && item.rawMaterial.shelfLifeDays) {
+        expirationDate = new Date(receivedDate)
+        expirationDate.setDate(expirationDate.getDate() + item.rawMaterial.shelfLifeDays)
+      }
+
+      const newBatch = await tx.stockBatch.create({
+        data: {
+          venueId,
+          rawMaterialId: item.rawMaterialId,
+          purchaseOrderItemId: item.id,
+          batchNumber,
+          initialQuantity: deltaInRmUnit,
+          remainingQuantity: deltaInRmUnit,
+          unit: item.rawMaterial.unit,
+          costPerUnit: costPerUnitInRmUnit,
+          receivedDate,
+          expirationDate,
+          status: BatchStatus.ACTIVE,
+        },
+      })
+
+      await tx.rawMaterialMovement.create({
+        data: {
+          venueId,
+          rawMaterialId: item.rawMaterialId,
+          batchId: newBatch.id,
+          type: RawMaterialMovementType.PURCHASE,
+          quantity: deltaInRmUnit,
+          unit: item.rawMaterial.unit,
+          previousStock,
+          newStock,
+          costImpact: costPerUnitInRmUnit.mul(deltaInRmUnit),
+          reason: `Orden de compra ${item.purchaseOrder.orderNumber} recibida (${item.rawMaterial.name})`,
+          reference: item.purchaseOrder.id,
+          createdBy: staffId,
+        },
+      })
+    } else {
+      // Reverse: drain existing live batches newest-first by abs(delta)
+      const absDelta = deltaInRmUnit.abs()
+      let remaining = absDelta
+      // Sort newest first — last receives are reversed before older ones
+      const sortedBatches = [...liveBatches].sort((a, b) => b.receivedDate.getTime() - a.receivedDate.getTime())
+
+      for (const batch of sortedBatches) {
+        if (remaining.lessThanOrEqualTo(0)) break
+        // We can only safely drain what's still remaining; consumed portion is locked
+        const drainable = batch.remainingQuantity
+        if (drainable.lessThanOrEqualTo(0)) continue
+        const reduceBy = Decimal.min(drainable, remaining)
+        const newRemainingInBatch = batch.remainingQuantity.minus(reduceBy)
+        const newInitialInBatch = batch.initialQuantity.minus(reduceBy)
+        const fullyReversed = newInitialInBatch.lessThanOrEqualTo(0)
+        await tx.stockBatch.update({
+          where: { id: batch.id },
+          data: {
+            initialQuantity: newInitialInBatch,
+            remainingQuantity: newRemainingInBatch,
+            status: fullyReversed ? BatchStatus.QUARANTINED : batch.status,
+            depletedAt: fullyReversed ? receivedDate : batch.depletedAt,
+          },
+        })
+        remaining = remaining.minus(reduceBy)
+      }
+
+      if (remaining.greaterThan(0)) {
+        // Defensive: should be impossible given the consumedTotal guard above
+        throw new AppError(
+          `No se pudo revertir ${absDelta.toString()} ${item.rawMaterial.unit}: lotes activos insuficientes. Revisa el estado de inventario.`,
+          500,
+        )
+      }
+
+      const movementType =
+        newReceiveStatus === PurchaseOrderItemStatus.DAMAGED
+          ? RawMaterialMovementType.SPOILAGE
+          : newReceiveStatus === PurchaseOrderItemStatus.NOT_PROCESSED
+            ? RawMaterialMovementType.RETURN
+            : RawMaterialMovementType.ADJUSTMENT // back to PENDING
+      const reasonByStatus: Record<string, string> = {
+        DAMAGED: 'Marcado como dañado en la entrega',
+        NOT_PROCESSED: 'Marcado como no tramitado',
+        PENDING: 'Reversión a pendiente',
+      }
+
+      await tx.rawMaterialMovement.create({
+        data: {
+          venueId,
+          rawMaterialId: item.rawMaterialId,
+          type: movementType,
+          quantity: deltaInRmUnit, // negative
+          unit: item.rawMaterial.unit,
+          previousStock,
+          newStock,
+          // Approximate cost impact using PO unitPrice converted to RM unit
+          costImpact: item.unitPrice.mul(
+            item.unit === item.rawMaterial.unit
+              ? deltaInRmUnit
+              : new Decimal(convertUnit(deltaInRmUnit.toNumber(), item.rawMaterial.unit, item.unit)),
+          ),
+          reason: `${reasonByStatus[newReceiveStatus] ?? 'Ajuste de recepción'} — Orden ${item.purchaseOrder.orderNumber} (${item.rawMaterial.name})`,
+          reference: item.purchaseOrder.id,
+          createdBy: staffId,
+        },
+      })
+    }
+
+    // ── 3. Sync RawMaterial.currentStock ─────────────────────────────────────
+    await tx.rawMaterial.update({
+      where: { id: item.rawMaterialId },
+      data: { currentStock: newStock },
+    })
   })
 
-  if (!purchaseOrder) {
-    throw new AppError('Purchase order not found', 404)
-  }
-
-  // Verify item belongs to this purchase order
-  const item = purchaseOrder.items.find(i => i.id === itemId)
-  if (!item) {
-    throw new AppError('Purchase order item not found', 404)
-  }
-
-  // Update item status
-  await prisma.purchaseOrderItem.update({
-    where: { id: itemId },
-    data: {
-      receiveStatus: data.receiveStatus,
-      quantityReceived: data.quantityReceived !== undefined ? data.quantityReceived : item.quantityReceived,
-      notes: data.notes,
-    },
-  })
-
-  // After updating item status, check if we need to update the overall PO status
+  // After the transaction commits, recompute the parent PO status (uses its
+  // own connection — safe to run after).
   await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId)
+}
+
+/**
+ * Helper: convert RM-unit quantity back to PO unit. Used to express the delta
+ * in PO unit for cost normalization. Falls back to identity when units match.
+ */
+function toPoUnitInverse(qInRmUnit: Decimal, poUnit: Unit, rmUnit: Unit): Decimal {
+  if (poUnit === rmUnit) return qInRmUnit
+  return new Decimal(convertUnit(qInRmUnit.toNumber(), rmUnit, poUnit))
 }
 
 /**

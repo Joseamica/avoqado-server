@@ -1258,12 +1258,12 @@ export async function batchAutoFetchBlumonCredentials(req: Request, res: Respons
               try {
                 const cfg = settlementConfig ?? {}
                 const cardTypes = ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL', 'OTHER'] as const
-                // Blumon defaults: DEBIT/CREDIT 1d, AMEX 3d, INTERNATIONAL 5d, OTHER 2d
+                // Blumon defaults: DEBIT/CREDIT 1d, AMEX 3d, INTERNATIONAL 3d, OTHER 2d
                 const dayMapping = {
                   DEBIT: cfg.debitDays ?? 1,
                   CREDIT: cfg.creditDays ?? 1,
                   AMEX: cfg.amexDays ?? 3,
-                  INTERNATIONAL: cfg.internationalDays ?? 5,
+                  INTERNATIONAL: cfg.internationalDays ?? 3,
                   OTHER: cfg.otherDays ?? 2,
                 }
 
@@ -1953,12 +1953,12 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
     {
       const cfg = settlementConfig ?? {}
       const cardTypes = ['DEBIT', 'CREDIT', 'AMEX', 'INTERNATIONAL', 'OTHER'] as const
-      // Blumon defaults: DEBIT/CREDIT 1d, AMEX 3d, INTERNATIONAL 5d, OTHER 2d
+      // Blumon defaults: DEBIT/CREDIT 1d, AMEX 3d, INTERNATIONAL 3d, OTHER 2d
       const daysMap: Record<string, number> = {
         DEBIT: cfg.debitDays ?? 1,
         CREDIT: cfg.creditDays ?? 1,
         AMEX: cfg.amexDays ?? 3,
-        INTERNATIONAL: cfg.internationalDays ?? 5,
+        INTERNATIONAL: cfg.internationalDays ?? 3,
         OTHER: cfg.otherDays ?? 2,
       }
 

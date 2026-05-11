@@ -386,7 +386,7 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
             DEBIT: payload.settlement.debitDays ?? 1,
             CREDIT: payload.settlement.creditDays ?? 3,
             AMEX: payload.settlement.amexDays ?? 5,
-            INTERNATIONAL: payload.settlement.internationalDays ?? 5,
+            INTERNATIONAL: payload.settlement.internationalDays ?? 3,
             OTHER: payload.settlement.otherDays ?? 3,
           }
 

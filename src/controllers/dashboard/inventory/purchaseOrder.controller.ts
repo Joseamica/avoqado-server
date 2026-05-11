@@ -227,8 +227,9 @@ export async function updatePurchaseOrderItemStatus(req: Request, res: Response,
   try {
     const { venueId, purchaseOrderId, itemId } = req.params
     const data = req.body
+    const staffId = (req as any).authContext?.userId as string | undefined
 
-    await purchaseOrderService.updatePurchaseOrderItemStatus(venueId, purchaseOrderId, itemId, data)
+    await purchaseOrderService.updatePurchaseOrderItemStatus(venueId, purchaseOrderId, itemId, data, staffId)
 
     res.json({
       success: true,

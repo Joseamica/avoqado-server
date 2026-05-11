@@ -493,6 +493,9 @@ export const UpdatePurchaseOrderItemStatusSchema = z.object({
     receiveStatus: z.nativeEnum(PurchaseOrderItemStatus),
     quantityReceived: z.number().min(0).optional(), // For RECEIVED status
     notes: z.string().optional(),
+    // Fecha en que se recibió la mercancía (opcional). Si no viene, se usa la fecha actual.
+    // Sólo aplica cuando la transición resulta en stock entrante (→ RECEIVED).
+    receivedDate: z.string().datetime({ message: 'receivedDate debe ser una fecha ISO válida' }).optional(),
   }),
 })
 
