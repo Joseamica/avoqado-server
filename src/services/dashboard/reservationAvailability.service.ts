@@ -1,4 +1,4 @@
-import { ReservationStatus } from '@prisma/client'
+import { Prisma, ReservationStatus } from '@prisma/client'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 import prisma from '../../utils/prismaClient'
 import { getDefaultOperatingHours, type OperatingHours } from './reservationSettings.service'
@@ -8,7 +8,62 @@ import { BadRequestError } from '../../errors/AppError'
 // AVAILABILITY ENGINE — Slot calculation + conflict detection
 // ==========================================
 
-const ACTIVE_STATUSES: ReservationStatus[] = ['PENDING', 'CONFIRMED', 'CHECKED_IN']
+export const ACTIVE_RESERVATION_STATUSES: ReservationStatus[] = ['PENDING', 'CONFIRMED', 'CHECKED_IN']
+// Kept for internal back-compat with code in this file.
+const ACTIVE_STATUSES = ACTIVE_RESERVATION_STATUSES
+
+/**
+ * Pacing floor for APPOINTMENTS_SERVICE. Tableless studios default pacingMax
+ * to null in DB ("unlimited"), which is correct semantics for restaurants
+ * (gated by table assignment) but wrong for 1:1 service venues. Floor to 1
+ * unless the operator explicitly overrode it (e.g. 3 cabins → 3).
+ *
+ * `Math.max(1, ...)` clamps the explicit 0 / negative case defensively: a
+ * value of 0 would otherwise make every slot unbookable forever.
+ */
+export function effectiveAppointmentPacing(pacingMaxFromSettings: number | null | undefined): number {
+  const fromSettings = pacingMaxFromSettings ?? 1
+  return Math.max(1, fromSettings)
+}
+
+/**
+ * Counts active reservations + active slot-holds overlapping the given
+ * [startsAt, endsAt) window for the appointment product space (i.e. excludes
+ * class sessions; those have their own per-session capacity check).
+ *
+ * Used by `createHold` and `createReservation` to enforce per-slot pacing
+ * without duplicating the where-clause across files. Pass a transaction
+ * client when running inside `prisma.$transaction(...)` so the count is
+ * consistent with the surrounding lock.
+ */
+export async function countAppointmentOccupancy(
+  client: Prisma.TransactionClient | typeof prisma,
+  args: { venueId: string; startsAt: Date; endsAt: Date; excludeHoldId?: string },
+): Promise<{ reservations: number; holds: number }> {
+  const now = new Date()
+  const [reservations, holds] = await Promise.all([
+    client.reservation.count({
+      where: {
+        venueId: args.venueId,
+        status: { in: ACTIVE_RESERVATION_STATUSES },
+        classSessionId: null,
+        startsAt: { lt: args.endsAt },
+        endsAt: { gt: args.startsAt },
+      },
+    }),
+    client.slotHold.count({
+      where: {
+        venueId: args.venueId,
+        classSessionId: null,
+        expiresAt: { gt: now },
+        startsAt: { lt: args.endsAt },
+        endsAt: { gt: args.startsAt },
+        ...(args.excludeHoldId ? { id: { not: args.excludeHoldId } } : {}),
+      },
+    }),
+  ])
+  return { reservations, holds }
+}
 
 export interface SlotOptions {
   duration?: number // minutes
@@ -113,15 +168,47 @@ export async function getAvailableSlots(
 
   // Get product capacity if productId specified
   let productCapacity: number | null = null
+  let productType: string | null = null
   if (options.productId) {
     const product = await prisma.product.findFirst({
       where: { id: options.productId, venueId },
-      select: { eventCapacity: true },
+      select: { eventCapacity: true, type: true },
     })
+    productType = product?.type ?? null
     if (product?.eventCapacity) {
       productCapacity = Math.floor((product.eventCapacity * onlineCapacityPercent) / 100)
     }
   }
+
+  // Active slot holds for APPOINTMENTS_SERVICE — counted as soft-reservations
+  // so a customer holding a slot via the Square countdown doesn't have it
+  // offered to someone else mid-checkout. Classes already gate via
+  // ClassSession.capacity, so we skip the lookup for them (and explicitly
+  // filter classSessionId:null in case a future feature adds class-side
+  // holds — those should not bleed into appointment availability).
+  const isAppointment = productType === 'APPOINTMENTS_SERVICE'
+  const activeHolds = isAppointment
+    ? await prisma.slotHold.findMany({
+        where: {
+          venueId,
+          classSessionId: null,
+          expiresAt: { gt: new Date() },
+          startsAt: { lt: dayEnd },
+          endsAt: { gt: dayStart },
+        },
+        select: { startsAt: true, endsAt: true },
+      })
+    : []
+
+  // Tableless studios (Mindform pattern) have NO resource model gating
+  // concurrent appointments — the table-collision logic below is a no-op
+  // when tables.length === 0, and pacingMax defaults to null. Without this
+  // floor of 1, /availability happily offered the SAME slot to N customers
+  // and the controller happily wrote N CONFIRMED reservations for it.
+  // Restaurants with tables keep null = unlimited; table assignment is
+  // their gate. Venues can opt back to overbooking by setting an explicit
+  // pacingMaxPerSlot (e.g. 3 for a studio with 3 cabins).
+  const effectivePacing = isAppointment ? effectiveAppointmentPacing(pacingMax) : pacingMax
 
   // Evaluate each slot
   const availableSlots: AvailableSlot[] = []
@@ -131,9 +218,10 @@ export async function getAvailableSlots(
 
     // Find reservations overlapping this slot
     const overlapping = existingReservations.filter(r => r.startsAt < slotEnd && r.endsAt > slotStart)
+    const overlappingHolds = activeHolds.filter(h => h.startsAt < slotEnd && h.endsAt > slotStart)
 
-    // Pacing check: total bookings in this slot
-    if (pacingMax !== null && overlapping.length >= pacingMax) {
+    // Pacing check: total bookings + active holds in this slot
+    if (effectivePacing !== null && overlapping.length + overlappingHolds.length >= effectivePacing) {
       continue
     }
 

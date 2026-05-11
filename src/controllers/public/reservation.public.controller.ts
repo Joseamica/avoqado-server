@@ -1,6 +1,10 @@
 import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
+import {
+  countAppointmentOccupancy,
+  effectiveAppointmentPacing,
+} from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings } from '../../services/dashboard/reservationSettings.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { verifyCustomerToken } from '../../jwt.service'
@@ -426,22 +430,24 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
     }
 
-    // Enforce `requireAccount`: when set, the customer must be authenticated
-    // via the customer JWT (Bearer token from /customer/login) OR pass a
-    // recognized customerId in the body. Anonymous bookings are rejected
-    // with 401 so the widget can route to the login screen.
+    // Always bind a valid Bearer JWT to the booking, independent of
+    // `requireAccount`. When the customer is logged in, their bookings need
+    // to surface in "Mis Reservaciones" and anchor any credit redemption to
+    // the same identity — even at venues that allow anonymous guest bookings.
+    // We trust the JWT (signed server-side) but verify the embedded venueId
+    // matches the URL slug so a token minted for venue A can't be replayed
+    // against venue B. Public unauthenticated body.customerId is NEVER
+    // trusted to set customerId here — that path is only honored under
+    // requireAccount, where the operator has opted in to that contract.
+    const authenticatedCustomer = tryReadAuthenticatedCustomer(req)
+    if (authenticatedCustomer && authenticatedCustomer.venueId === venue.id) {
+      req.body.customerId = authenticatedCustomer.customerId
+    }
+
     if (settings.publicBooking.requireAccount) {
-      const authenticatedCustomer = tryReadAuthenticatedCustomer(req)
       const bodyCustomerId = typeof req.body?.customerId === 'string' ? req.body.customerId : null
-      const hasCustomerContext = !!authenticatedCustomer || !!bodyCustomerId
-      if (!hasCustomerContext) {
+      if (!authenticatedCustomer && !bodyCustomerId) {
         throw new UnauthorizedError('Este negocio requiere iniciar sesion para reservar.')
-      }
-      // Bind the booking to the authenticated customer when available so the
-      // reservation row is anchored to the real identity (overrides any
-      // mismatched body.customerId from a stale form).
-      if (authenticatedCustomer && authenticatedCustomer.venueId === venue.id) {
-        req.body.customerId = authenticatedCustomer.customerId
       }
     }
 
@@ -526,6 +532,37 @@ export async function createReservation(req: Request, res: Response, next: NextF
           })
         } catch (error) {
           logger.warn(`[slot-hold] failed to delete hold ${incomingHoldId} (non-fatal): ${(error as Error).message}`)
+        }
+      }
+    }
+
+    // ---- Slot collision guard for APPOINTMENTS_SERVICE -------------------
+    // Tableless studios (Mindform pattern) have no resource model to gate
+    // concurrent reservations. The slot-hold endpoint (createHold) wraps its
+    // own check in a per-venue advisory lock + transaction, which is the
+    // strong serialization layer. This controller guard is the fallback for
+    // callers that bypass the hold flow (direct API, expired hold cleared,
+    // legacy embed). A small race window between count and insert remains
+    // here; for Mindform-scale concurrency it's acceptable, and the hold
+    // endpoint closes it for the standard widget path.
+    //
+    // Classes don't pass through here (handled by the classSessionId branch
+    // below) and their per-session capacity guard already prevents overlap.
+    if (!req.body.classSessionId && req.body.productId) {
+      const product = await prisma.product.findFirst({
+        where: { id: req.body.productId, venueId: venue.id },
+        select: { type: true },
+      })
+      if (product?.type === 'APPOINTMENTS_SERVICE') {
+        const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
+        const { reservations, holds } = await countAppointmentOccupancy(prisma, {
+          venueId: venue.id,
+          startsAt: new Date(req.body.startsAt),
+          endsAt: new Date(req.body.endsAt),
+          excludeHoldId: incomingHoldId,
+        })
+        if (reservations + holds >= pacingMax) {
+          throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
         }
       }
     }
@@ -1367,20 +1404,61 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     // Lazy GC — cheap, runs once per hold creation.
     void pruneExpiredHolds()
 
+    const isAppointmentHold = !body.classSessionId && productIds.length > 0
     const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
-    const hold = await prisma.slotHold.create({
-      data: {
-        venueId: venue.id,
-        startsAt,
-        endsAt,
-        productIds,
-        classSessionId: body.classSessionId ?? null,
-        partySize: Math.max(1, body.partySize ?? 1),
-        expiresAt,
-        fingerprint: body.fingerprint ?? null,
-      },
-      select: { id: true, expiresAt: true },
-    })
+
+    // For APPOINTMENTS_SERVICE holds we MUST serialize concurrent creates
+    // for the same venue — otherwise two tabs both pass an unguarded count
+    // and both succeed, leaving two phantom holds that block every later
+    // reservation until they expire (~10 min). pg_advisory_xact_lock is
+    // a cheap session-scoped lock released at transaction commit; collisions
+    // wait microseconds. The lock key is venue-wide rather than per-slot
+    // because Mindform-scale concurrency is low and per-slot keys complicate
+    // overlap reasoning (two distinct slots can still overlap). Bumping
+    // contention later is a one-line change.
+    let hold: { id: string; expiresAt: Date }
+    if (isAppointmentHold) {
+      const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
+      hold = await prisma.$transaction(async (tx) => {
+        const lockKey = `apt-hold:${venue.id}`
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
+        const { reservations, holds } = await countAppointmentOccupancy(tx, {
+          venueId: venue.id,
+          startsAt,
+          endsAt,
+        })
+        if (reservations + holds >= pacingMax) {
+          throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+        }
+        return tx.slotHold.create({
+          data: {
+            venueId: venue.id,
+            startsAt,
+            endsAt,
+            productIds,
+            classSessionId: null,
+            partySize: Math.max(1, body.partySize ?? 1),
+            expiresAt,
+            fingerprint: body.fingerprint ?? null,
+          },
+          select: { id: true, expiresAt: true },
+        })
+      })
+    } else {
+      hold = await prisma.slotHold.create({
+        data: {
+          venueId: venue.id,
+          startsAt,
+          endsAt,
+          productIds,
+          classSessionId: body.classSessionId ?? null,
+          partySize: Math.max(1, body.partySize ?? 1),
+          expiresAt,
+          fingerprint: body.fingerprint ?? null,
+        },
+        select: { id: true, expiresAt: true },
+      })
+    }
 
     res.status(201).json({
       holdId: hold.id,
