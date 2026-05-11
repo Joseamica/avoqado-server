@@ -43,7 +43,32 @@ const extractReferencedVenueSlug = (message: string): string | null => {
   return match?.[1] || null
 }
 
-const isCrossVenueRequest = (message: string, currentVenueSlug: string): boolean => {
+const extractSlugLikeTokens = (message: string, currentVenueSlug: string): string[] => {
+  const normalized = normalizeForSecurityCheck(message)
+  const normalizedCurrentVenueSlug = normalizeForSecurityCheck(currentVenueSlug)
+  const tokens = normalized.match(/\b[a-z0-9]+(?:-[a-z0-9]+)+\b/g) ?? []
+
+  return [...new Set(tokens.filter(token => token !== normalizedCurrentVenueSlug))]
+}
+
+const referencesKnownOtherVenueSlug = async (message: string, currentVenueSlug: string): Promise<boolean> => {
+  const candidates = extractSlugLikeTokens(message, currentVenueSlug)
+
+  if (candidates.length === 0) {
+    return false
+  }
+
+  const referencedVenue = await prisma.venue.findFirst({
+    where: {
+      slug: { in: candidates },
+    },
+    select: { id: true },
+  })
+
+  return Boolean(referencedVenue)
+}
+
+const isCrossVenueRequest = async (message: string, currentVenueSlug: string): Promise<boolean> => {
   const normalized = normalizeForSecurityCheck(message)
   const normalizedCurrentVenueSlug = normalizeForSecurityCheck(currentVenueSlug)
   const referencedVenueSlug = extractReferencedVenueSlug(message)
@@ -53,7 +78,11 @@ const isCrossVenueRequest = (message: string, currentVenueSlug: string): boolean
   }
 
   // Explicit intent to access another branch/venue
-  return /\b(otra|otro)\s+(sucursal|venue|branch)\b/.test(normalized)
+  if (/\b(otra|otro)\s+(sucursal|venue|branch)\b/.test(normalized)) {
+    return true
+  }
+
+  return referencesKnownOtherVenueSlug(message, currentVenueSlug)
 }
 
 /**
@@ -270,7 +299,7 @@ export const processTextToSqlQuery = async (req: Request, res: Response, next: N
       expectedUserId: userId,
     })
 
-    if (isCrossVenueRequest(message, authContext.venueSlug)) {
+    if (await isCrossVenueRequest(message, authContext.venueSlug)) {
       logger.warn('🚨 Cross-venue query attempt blocked in assistant', {
         userId: authContext.userId,
         venueId: authContext.venueId,

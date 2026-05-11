@@ -3584,7 +3584,7 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
   private detectUserLanguage(message: string): 'es' | 'en' {
     const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
     const englishSignals =
-      /\b(how|what|when|where|why|contact|support|help|sales|products?|customers?|reviews?|payments?|dashboard|menu)\b/.test(
+      /\b(how|what|when|where|why|which|contact|support|help|sales|sold|revenue|generated|highest|products?|customers?|reviews?|payments?|dashboard|menu)\b/.test(
         normalizedMessage,
       )
     const spanishSignals = /\b(como|que|cuando|donde|por que|contacto|soporte|ayuda|ventas?|productos?|clientes?|resenas?|pagos?)\b/.test(
@@ -7318,8 +7318,8 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     }
 
     const asksTopProductFollowUp =
-      /\b(cual|cu[aá]l|de\s+es[oa]s|es[oa]s|ellos|ellas)\b/.test(normalizedMessage) &&
-      /\b(mas\s+(ingresos?|ventas?|vendid[oa]s?|dinero)|mayor\s+(ingreso|venta)|genera\s+mas|produce\s+mas|deja\s+mas\s+dinero|ganancia|utilidad|revenue|profit)\b/.test(
+      /\b(cual|cu[aá]l|de\s+es[oa]s|es[oa]s|ellos|ellas|which|what|one|those|them)\b/.test(normalizedMessage) &&
+      /\b(mas\s+(ingresos?|ventas?|vendid[oa]s?|dinero)|mayor\s+(ingreso|venta)|genera\s+mas|produce\s+mas|deja\s+mas\s+dinero|ganancia|utilidad|revenue|profit|generated?\s+(the\s+)?most|made\s+(the\s+)?most|highest\s+revenue|brings?\s+in\s+(the\s+)?most)\b/.test(
         normalizedMessage,
       )
     const recentHistoryMentionsTopProducts =

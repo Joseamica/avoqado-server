@@ -725,6 +725,22 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.tokenUsage.totalTokens).toBe(0)
     })
 
+    it('should route English top-product revenue follow-ups using recent product context', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('Which one generated the most revenue?', [
+        { role: 'user', content: 'What were my top products in the last 30 days?' },
+        {
+          role: 'assistant',
+          content:
+            'The top-selling products in the last 30 days are:\n\n1. Clase de lagree (8 sold, MX$2,000.00)\n2. Hamburguesa BBQ (5 sold, MX$745.00)',
+        },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('topProducts')
+      expect(routed.classification.dateRange).toBe('last30days')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
     it('should route colloquial top-product profit follow-ups using recent product context', async () => {
       const routed = await serviceWithInternals.routeWithLLM('¿cuál de esos deja más dinero?', [
         { role: 'user', content: '¿Cuáles son mis productos más vendidos en los últimos 30 días?' },
@@ -767,6 +783,11 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
 
       // @ts-expect-error - accessing private method for testing
       expect(service.formatDateRangeName('allTime', 'en')).toBe('all time')
+    })
+
+    it('should detect English revenue follow-ups as English', () => {
+      // @ts-expect-error - accessing private method for testing
+      expect(service.detectUserLanguage('Which one generated the most revenue?')).toBe('en')
     })
 
     it('should cap top-products concentration at 100 percent', () => {

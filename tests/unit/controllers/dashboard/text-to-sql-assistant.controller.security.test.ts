@@ -15,6 +15,7 @@ jest.mock('@/config/logger', () => ({
 jest.mock('@/utils/prismaClient', () => ({
   venue: {
     findUnique: jest.fn(),
+    findFirst: jest.fn(),
   },
 }))
 
@@ -65,6 +66,7 @@ describe('Text-to-SQL assistant controller security boundaries', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ slug: 'current-venue' })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue(null)
   })
 
   it('blocks requests for another venue before creating a conversation or calling the LLM', async () => {
@@ -81,6 +83,36 @@ describe('Text-to-SQL assistant controller security boundaries', () => {
             blocked: true,
             reasonCode: 'cross_venue_request_blocked',
             routedTo: 'Blocked',
+          }),
+        }),
+      }),
+    )
+    expect(chatConversationService.ensureConversation).not.toHaveBeenCalled()
+    expect(textToSqlAssistantService.processQuery).not.toHaveBeenCalled()
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('blocks known venue slug mentions even without the word venue', async () => {
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue({ id: 'venue-other' })
+    const req = buildRequest('¿Cuánto vendí en avoqado-trial este mes?')
+    const res = buildResponse()
+
+    await processTextToSqlQuery(req as Request, res as Response, next)
+
+    expect(prisma.venue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          slug: { in: ['avoqado-trial'] },
+        }),
+      }),
+    )
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            blocked: true,
+            reasonCode: 'cross_venue_request_blocked',
           }),
         }),
       }),

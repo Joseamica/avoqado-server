@@ -22,6 +22,7 @@ import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
+import { isJsonBodyParseError } from './utils/httpErrors'
 
 // Types (could be moved to a central types file)
 import { AvoqadoJwtPayload } from './security' // Assuming this is where the type is defined
@@ -272,6 +273,25 @@ if (NODE_ENV === 'development') {
 // This must be the last middleware added to the app.
 app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunction) => {
   const correlationId = (req as any).correlationId || 'N/A'
+  const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }
+
+  if (isJsonBodyParseError(bodyParseError)) {
+    logger.warn(`Invalid JSON body: ${bodyParseError.message}, CorrelationID: ${correlationId}`, {
+      name: bodyParseError.name,
+      statusCode: 400,
+      correlationId,
+      request: {
+        method: req.method,
+        url: req.originalUrl,
+        ip: req.ip,
+      },
+    })
+
+    return res.status(400).json({
+      message: 'JSON inválido en el cuerpo de la solicitud.',
+      ...(NODE_ENV === 'development' && { errorName: bodyParseError.name }),
+    })
+  }
 
   if (err instanceof AppError) {
     logger.error(`AppError: ${err.message}, StatusCode: ${err.statusCode}, CorrelationID: ${correlationId}`, {
