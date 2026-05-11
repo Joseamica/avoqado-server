@@ -1,10 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
-import {
-  countAppointmentOccupancy,
-  effectiveAppointmentPacing,
-} from '../../services/dashboard/reservationAvailability.service'
+import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings } from '../../services/dashboard/reservationSettings.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { verifyCustomerToken } from '../../jwt.service'
@@ -1419,7 +1416,7 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     let hold: { id: string; expiresAt: Date }
     if (isAppointmentHold) {
       const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-      hold = await prisma.$transaction(async (tx) => {
+      hold = await prisma.$transaction(async tx => {
         const lockKey = `apt-hold:${venue.id}`
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
         const { reservations, holds } = await countAppointmentOccupancy(tx, {
