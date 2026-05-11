@@ -16,6 +16,7 @@ process.env.OPENAI_API_KEY = 'test-api-key-for-unit-tests'
 import { afterEach, describe, it, expect, jest } from '@jest/globals'
 import textToSqlService from '@/services/dashboard/text-to-sql-assistant.service'
 import { SemanticInjectionDetectorService } from '@/services/dashboard/semantic-injection-detector.service'
+import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 
 describe('TextToSqlAssistantService - Unit Tests', () => {
   const service = textToSqlService
@@ -460,13 +461,27 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.requiresDateRange).toBe(false)
     })
 
-    it('should not answer product-specific sales as aggregate sales', () => {
+    it('should classify product-specific sales through the registered productSales tool', () => {
       const query = '¿Cuánto vendí de Hamburguesa BBQ?'
       // @ts-expect-error - accessing private method for testing
       const classification = service.classifyIntent(query)
 
-      expect(classification.isSimpleQuery).toBe(false)
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('productSales')
+      expect(classification.entityName).toBe('hamburguesa bbq')
+      expect(classification.dateRange).toBe('thisMonth')
       expect(classification.hasEntityFilter).toBe(true)
+    })
+
+    it('should classify product-specific sales with filler words and explicit date', () => {
+      const query = '¿Cuánto vendí exactamente de Hamburguesa BBQ este mes?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('productSales')
+      expect(classification.entityName).toBe('hamburguesa bbq')
+      expect(classification.wasDateExplicit).toBe(true)
     })
   })
 
@@ -704,6 +719,14 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(service.addDateTransparencyTip('Base response', 'topProducts', 'en')).toContain('top products yesterday')
     })
 
+    it('should classify English review topic as reviews with English response labels available', () => {
+      // @ts-expect-error - accessing private method for testing
+      expect(service.detectUserLanguage('reviews')).toBe('en')
+
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeName('allTime', 'en')).toBe('all time')
+    })
+
     it('should cap top-products concentration at 100 percent', () => {
       // @ts-expect-error - accessing private method for testing
       expect(service.calculateTopProductsConcentration(3000, 2924.23)).toBe(100)
@@ -711,6 +734,73 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
   })
 
   describe('Unsupported Query Guard', () => {
+    it('should answer product-specific sales with the registered productSales tool, not aggregate sales', async () => {
+      const serviceWithInternals = service as any
+      const originalRouteWithLLM = serviceWithInternals.routeWithLLM
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'safe product sales question',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+      const productSalesSpy = jest.spyOn(SharedQueryService, 'getProductSalesByName').mockResolvedValue({
+        searchTerm: 'hamburguesa bbq',
+        productName: 'Hamburguesa BBQ',
+        quantitySold: 5,
+        revenue: 745,
+        orderCount: 5,
+        matchedProducts: [
+          {
+            productName: 'Hamburguesa BBQ',
+            quantitySold: 5,
+            revenue: 745,
+            orderCount: 5,
+          },
+        ],
+        currency: 'MXN',
+      })
+
+      serviceWithInternals.routeWithLLM = jest.fn(async () => ({
+        classification: {
+          isSimpleQuery: true,
+          intent: 'productSales',
+          dateRange: 'thisMonth',
+          confidence: 0.92,
+          reason: 'registered product sales test route',
+          requiresDateRange: true,
+          wasDateExplicit: true,
+          hasEntityFilter: true,
+          entityName: 'hamburguesa bbq',
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }))
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: '¿Cuánto vendí exactamente de Hamburguesa BBQ este mes?',
+          venueId: 'venue-test',
+          userId: 'user-test',
+          userRole: 'ADMIN' as any,
+        })
+
+        expect(productSalesSpy).toHaveBeenCalledWith('venue-test', 'hamburguesa bbq', 'thisMonth')
+        expect(response.metadata?.intent).toBe('productSales')
+        expect(response.response).toContain('Hamburguesa BBQ')
+        expect(response.response).toContain('$745.00')
+        expect(response.response).not.toContain('$2,924.23')
+      } finally {
+        serviceWithInternals.routeWithLLM = originalRouteWithLLM
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        productSalesSpy.mockRestore()
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
     it('should block bulk destructive action requests before action routing', async () => {
       const serviceWithInternals = service as any
       const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction

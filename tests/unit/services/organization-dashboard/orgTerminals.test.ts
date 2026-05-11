@@ -6,6 +6,9 @@ const orgId = 'org-1'
 describe('OrganizationDashboardService - getOrgTerminals', () => {
   const venues = [{ id: 'v1' }, { id: 'v2' }]
 
+  // healthScore is now read from the denormalized Terminal.latestHealthScore
+  // column (synced atomically when TerminalHealth is written). The service no
+  // longer joins healthMetrics for the org dashboard list.
   const terminals = [
     {
       id: 't1',
@@ -20,7 +23,8 @@ describe('OrganizationDashboardService - getOrgTerminals', () => {
       ipAddress: '192.168.1.10',
       venueId: 'v1',
       venue: { id: 'v1', name: 'Store A', slug: 'store-a' },
-      healthMetrics: [{ healthScore: 92 }],
+      latestHealthScore: 92,
+      latestHealthAt: new Date(),
       createdAt: new Date(),
     },
     {
@@ -36,7 +40,8 @@ describe('OrganizationDashboardService - getOrgTerminals', () => {
       ipAddress: '192.168.1.11',
       venueId: 'v2',
       venue: { id: 'v2', name: 'Store B', slug: 'store-b' },
-      healthMetrics: [{ healthScore: 45 }],
+      latestHealthScore: 45,
+      latestHealthAt: new Date(),
       createdAt: new Date(),
     },
     {
@@ -52,7 +57,8 @@ describe('OrganizationDashboardService - getOrgTerminals', () => {
       ipAddress: null,
       venueId: 'v1',
       venue: { id: 'v1', name: 'Store A', slug: 'store-a' },
-      healthMetrics: [],
+      latestHealthScore: null,
+      latestHealthAt: null,
       createdAt: new Date(),
     },
   ]
@@ -155,7 +161,7 @@ describe('OrganizationDashboardService - getOrgTerminals', () => {
       .mockResolvedValueOnce([[terminals[0]], 1])
       .mockResolvedValueOnce([[{ status: 'ACTIVE', type: 'TPV_ANDROID', _count: 2 }], 1])
 
-    await organizationDashboardService.getOrgTerminals(orgId, { venueId: 'v1' })
+    await organizationDashboardService.getOrgTerminals(orgId, { venueIds: ['v1'] })
 
     // Verify $transaction was called (first call = findMany + count)
     expect(prismaMock.$transaction).toHaveBeenCalled()

@@ -144,6 +144,11 @@ export const publicBalanceQuerySchema = z.object({
     phone: z.string().optional(),
     seats: z.string().regex(/^\d+$/).optional(),
     productId: z.string().optional(),
+    // Comma-separated product IDs for the multi-service /appointments wizard.
+    // Service treats this as "show balances for any of these products" so the
+    // PaymentChoiceInline picker can verify coverage across every selected
+    // service in a single round trip.
+    productIds: z.string().optional(),
   }),
 })
 

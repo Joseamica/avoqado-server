@@ -685,6 +685,45 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // exists. Best-effort — failures logged but don't poison the response.
     await finalizeReservationSideEffects(reservation.id)
 
+    // Credit redemption for non-class appointments. Lives outside the
+    // reservation transaction (reservationService.createReservation owns its
+    // own tx and doesn't expose it), so on the rare failure case the
+    // reservation stands but credits are NOT consumed — the customer's
+    // unaffected, ops can reconcile from the [CREDIT REDEEM FAILED] log.
+    let creditRedeemed = false
+    let creditsUsed = 0
+    const balanceIds: string[] = Array.isArray(req.body.creditItemBalanceIds)
+      ? req.body.creditItemBalanceIds.filter((id: unknown): id is string => typeof id === 'string')
+      : req.body.creditItemBalanceId
+        ? [req.body.creditItemBalanceId]
+        : []
+    if (balanceIds.length > 0) {
+      try {
+        const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
+        const result = await prisma.$transaction(async tx =>
+          redeemCreditsForReservation(tx, {
+            venueId: venue.id,
+            reservationId: reservation.id,
+            confirmationCode: reservation.confirmationCode,
+            balanceIds,
+            creditsPerBalance: seats,
+            customerEmail: req.body.guestEmail,
+            customerPhone: req.body.guestPhone,
+            expectedProductIds: incomingProductIds.length > 0 ? incomingProductIds : req.body.productId ? [req.body.productId] : undefined,
+          }),
+        )
+        creditRedeemed = result.redeemed
+        creditsUsed = result.creditsUsed
+      } catch (error) {
+        logger.error(
+          `[CREDIT REDEEM FAILED] reservation=${reservation.confirmationCode} balances=${balanceIds.join(',')} err=${(error as Error).message}`,
+        )
+        // Surface the error to the customer so they can fix the input rather
+        // than think they paid with credits when they didn't.
+        throw error
+      }
+    }
+
     // Return only public-safe data + cancelSecret
     res.status(201).json({
       confirmationCode: reservation.confirmationCode,
@@ -694,6 +733,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
       status: reservation.status,
       depositRequired: !!reservation.depositAmount,
       depositAmount: reservation.depositAmount,
+      creditRedeemed,
+      creditsUsed,
       checkoutUrl,
     })
   } catch (error) {
@@ -1404,4 +1445,136 @@ export async function validateHoldForReservation(args: {
     throw new BadRequestError('La reserva temporal no corresponde al horario seleccionado')
   }
   return { id: hold.id }
+}
+
+// ==========================================
+// CREDIT REDEMPTION (shared helper)
+// ==========================================
+
+/**
+ * Redeems credits from one or more CreditItemBalance rows against a reservation.
+ * Mirrors the inline class-path logic but works for any reservation type and
+ * accepts an array of balance IDs so multi-service appointments can redeem
+ * across products in a single transaction.
+ *
+ * Each balance is:
+ *   1. Locked with FOR UPDATE
+ *   2. Validated: belongs to customer, expected productId (when provided),
+ *      sufficient quantity, parent purchase ACTIVE + not expired
+ *   3. Decremented by `creditsPerBalance`
+ *   4. Stamped with a REDEEM CreditTransaction
+ *   5. Parent purchase flipped to EXHAUSTED if all balances drained
+ *
+ * Caller MUST pass a Prisma transaction client. We don't open one ourselves
+ * because the class path already wraps everything in a tx and we want
+ * everything-or-nothing semantics with the reservation insert.
+ */
+export async function redeemCreditsForReservation(
+  tx: Prisma.TransactionClient,
+  args: {
+    venueId: string
+    reservationId: string
+    confirmationCode: string
+    /** One balance ID per redemption (length 1 = legacy single-product). */
+    balanceIds: string[]
+    creditsPerBalance: number
+    customerEmail?: string
+    customerPhone?: string
+    /** When provided, every balance.productId MUST match one of these (no
+     *  random balance ID swapping for a different product). For multi-service
+     *  redemption pass every selected service's productId. */
+    expectedProductIds?: string[]
+  },
+): Promise<{ creditsUsed: number; redeemed: boolean }> {
+  if (args.balanceIds.length === 0) {
+    return { creditsUsed: 0, redeemed: false }
+  }
+
+  // Find customer by email/phone (same logic as class path).
+  const customer = await tx.customer.findFirst({
+    where: {
+      venueId: args.venueId,
+      OR: [...(args.customerEmail ? [{ email: args.customerEmail }] : []), ...(args.customerPhone ? [{ phone: args.customerPhone }] : [])],
+    },
+  })
+  if (!customer) {
+    throw new BadRequestError('No se encontro el cliente para canjear creditos')
+  }
+
+  let totalCreditsUsed = 0
+  for (const balanceId of args.balanceIds) {
+    const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
+      SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
+      FROM "CreditItemBalance"
+      WHERE id = ${balanceId}
+      FOR UPDATE
+    `
+
+    if (balances.length === 0) {
+      throw new BadRequestError(`Balance de credito no encontrado: ${balanceId}`)
+    }
+    const balance = balances[0]
+
+    if (args.expectedProductIds && !args.expectedProductIds.includes(balance.productId)) {
+      throw new BadRequestError('El credito no corresponde a los servicios reservados')
+    }
+
+    if (balance.remainingQuantity < args.creditsPerBalance) {
+      throw new BadRequestError(
+        `No tienes suficientes creditos. Disponibles: ${balance.remainingQuantity}, necesarios: ${args.creditsPerBalance}.`,
+      )
+    }
+
+    const purchase = await tx.creditPackPurchase.findUnique({
+      where: { id: balance.creditPackPurchaseId },
+      select: { status: true, expiresAt: true, customerId: true },
+    })
+    if (!purchase || purchase.customerId !== customer.id) {
+      throw new BadRequestError('Credito no valido para este cliente')
+    }
+    if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
+      throw new BadRequestError('Los creditos ya no estan activos')
+    }
+    if (purchase.expiresAt && purchase.expiresAt < new Date()) {
+      throw new BadRequestError('Los creditos han expirado')
+    }
+
+    await tx.creditItemBalance.update({
+      where: { id: balanceId },
+      data: { remainingQuantity: { decrement: args.creditsPerBalance } },
+    })
+
+    await tx.creditTransaction.create({
+      data: {
+        venueId: args.venueId,
+        customerId: customer.id,
+        creditPackPurchaseId: balance.creditPackPurchaseId,
+        creditItemBalanceId: balanceId,
+        type: 'REDEEM',
+        quantity: -args.creditsPerBalance,
+        reservationId: args.reservationId,
+        reason: args.creditsPerBalance > 1 ? `Reserva de ${args.creditsPerBalance} creditos` : null,
+      },
+    })
+
+    totalCreditsUsed += args.creditsPerBalance
+
+    // Check if purchase is fully drained
+    const remaining = await tx.creditItemBalance.findFirst({
+      where: { creditPackPurchaseId: balance.creditPackPurchaseId, remainingQuantity: { gt: 0 } },
+      select: { id: true },
+    })
+    if (!remaining) {
+      await tx.creditPackPurchase.update({
+        where: { id: balance.creditPackPurchaseId },
+        data: { status: CreditPurchaseStatus.EXHAUSTED },
+      })
+    }
+  }
+
+  logger.info(
+    `[CREDIT REDEEM] ${totalCreditsUsed} credit(s) redeemed across ${args.balanceIds.length} balance(s) for reservation ${args.confirmationCode}`,
+  )
+
+  return { creditsUsed: totalCreditsUsed, redeemed: true }
 }

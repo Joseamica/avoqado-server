@@ -1,6 +1,6 @@
 import crypto from 'crypto'
 import { Prisma, ReservationStatus, ReservationChannel } from '@prisma/client'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
@@ -202,11 +202,47 @@ export interface CreateReservationInput {
   tags?: string[]
 }
 
+/**
+ * Enforce booking-window settings (`maxAdvanceDays`, `minNoticeMin`) from
+ * ReservationSettings. Throws ValidationError (422) when the requested start
+ * falls outside the allowed window. Null/undefined values short-circuit so
+ * unconfigured policies stay permissive.
+ *
+ * Math is timezone-agnostic: both `now` and `startsAt` are UTC instants, and
+ * "X days from now" / "X minutes from now" are absolute offsets, so we don't
+ * need the venue timezone here — only date-of-day comparisons would.
+ */
+export function enforceBookingWindow(startsAt: Date, scheduling?: { maxAdvanceDays?: number | null; minNoticeMin?: number | null }): void {
+  if (!scheduling) return
+  const now = Date.now()
+  const startMs = startsAt.getTime()
+
+  const maxAdvanceDays = scheduling.maxAdvanceDays
+  if (maxAdvanceDays !== null && maxAdvanceDays !== undefined && maxAdvanceDays > 0) {
+    const latestAllowed = now + maxAdvanceDays * 24 * 60 * 60 * 1000
+    if (startMs > latestAllowed) {
+      throw new ValidationError(`No puedes reservar con tanta anticipacion. Maximo ${maxAdvanceDays} dias.`)
+    }
+  }
+
+  const minNoticeMin = scheduling.minNoticeMin
+  if (minNoticeMin !== null && minNoticeMin !== undefined && minNoticeMin > 0) {
+    const earliestAllowed = now + minNoticeMin * 60 * 1000
+    if (startMs < earliestAllowed) {
+      throw new ValidationError(`Esta reservacion requiere al menos ${minNoticeMin} minutos de anticipacion.`)
+    }
+  }
+}
+
 export async function createReservation(venueId: string, data: CreateReservationInput, createdById?: string, moduleConfig?: any) {
   // Defense-in-depth: validate time invariants at service level
   if (data.endsAt <= data.startsAt) {
     throw new BadRequestError('La fecha de fin debe ser posterior a la fecha de inicio')
   }
+
+  // Booking window enforcement (admin-configured policy from ReservationSettings).
+  // Skipped when settings are not supplied (back-compat with callers that don't pass moduleConfig).
+  enforceBookingWindow(data.startsAt, moduleConfig?.scheduling)
 
   const confirmationCode = generateConfirmationCode()
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true

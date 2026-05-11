@@ -234,56 +234,63 @@ export class ObservabilityController {
       logger.info(`📡 [Heartbeat] Registering terminal ${payload.terminalId} (socket: ${socket.id}, venue: ${payload.venueId})`)
       terminalRegistry.register(payload.terminalId, socket.id, payload.venueId)
 
-      // Store health metrics in database
-      const terminalHealth = await prisma.terminalHealth.create({
-        data: {
-          venueId: payload.venueId,
-          terminalId: resolvedTerminalId,
-          healthScore: payload.healthScore,
+      // Store health metrics + sync denormalized columns on Terminal in ONE
+      // transaction. The org dashboard sorts by Terminal.latestHealthScore;
+      // these MUST stay in sync with the latest TerminalHealth row.
+      const now = new Date()
+      const [terminalHealth] = await prisma.$transaction([
+        prisma.terminalHealth.create({
+          data: {
+            venueId: payload.venueId,
+            terminalId: resolvedTerminalId,
+            healthScore: payload.healthScore,
 
-          // Memory
-          memoryTotalMB: health.memory.totalMB,
-          memoryAvailableMB: health.memory.availableMB,
-          memoryUsagePercent: health.memory.usagePercent,
-          lowMemory: health.memory.lowMemory,
+            // Memory
+            memoryTotalMB: health.memory.totalMB,
+            memoryAvailableMB: health.memory.availableMB,
+            memoryUsagePercent: health.memory.usagePercent,
+            lowMemory: health.memory.lowMemory,
 
-          // Storage
-          storageTotalMB: health.storage.totalMB,
-          storageAvailableMB: health.storage.availableMB,
-          storageUsagePercent: health.storage.usagePercent,
-          lowStorage: health.storage.lowStorage,
+            // Storage
+            storageTotalMB: health.storage.totalMB,
+            storageAvailableMB: health.storage.availableMB,
+            storageUsagePercent: health.storage.usagePercent,
+            lowStorage: health.storage.lowStorage,
 
-          // Battery
-          batteryLevel: health.battery.level,
-          batteryCharging: health.battery.isCharging,
-          batteryTemperature: health.battery.temperatureCelsius,
-          lowBattery: health.battery.lowBattery,
+            // Battery
+            batteryLevel: health.battery.level,
+            batteryCharging: health.battery.isCharging,
+            batteryTemperature: health.battery.temperatureCelsius,
+            lowBattery: health.battery.lowBattery,
 
-          // Connectivity
-          socketConnected: health.connectivity.socketConnected,
-          online: health.connectivity.online,
+            // Connectivity
+            socketConnected: health.connectivity.socketConnected,
+            online: health.connectivity.online,
 
-          // Device
-          manufacturer: health.device.manufacturer,
-          model: health.device.model,
-          osVersion: health.device.osVersion,
-          appVersion: health.device.appVersion,
-          appVersionCode: health.device.appVersionCode,
-          blumonEnv: health.device.blumonEnv,
+            // Device
+            manufacturer: health.device.manufacturer,
+            model: health.device.model,
+            osVersion: health.device.osVersion,
+            appVersion: health.device.appVersion,
+            appVersionCode: health.device.appVersionCode,
+            blumonEnv: health.device.blumonEnv,
 
-          // Uptime
-          uptimeMinutes: health.uptime.uptimeMinutes,
+            // Uptime
+            uptimeMinutes: health.uptime.uptimeMinutes,
 
-          // Timestamps
-          timestamp: new Date(payload.timestamp),
-        },
-      })
-
-      // Update terminal lastHeartbeat
-      await prisma.terminal.update({
-        where: { id: resolvedTerminalId },
-        data: { lastHeartbeat: new Date() },
-      })
+            // Timestamps
+            timestamp: new Date(payload.timestamp),
+          },
+        }),
+        prisma.terminal.update({
+          where: { id: resolvedTerminalId },
+          data: {
+            lastHeartbeat: now,
+            latestHealthScore: payload.healthScore,
+            latestHealthAt: now,
+          },
+        }),
+      ])
 
       // Broadcast health status to dashboard
       if (this.broadcastingService) {

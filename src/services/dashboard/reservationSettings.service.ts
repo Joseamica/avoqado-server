@@ -117,6 +117,7 @@ type ReservationSettingsUpdateInput = Partial<{
   publicBookingEnabled: boolean
   requirePhone: boolean
   requireEmail: boolean
+  requireAccount: boolean
   allowCustomerCancel: boolean
   minHoursBeforeCancel: number | null
   minHoursBeforeStart: number | null
@@ -130,6 +131,8 @@ type ReservationSettingsUpdateInput = Partial<{
   remindersEnabled: boolean
   reminderChannels: string[]
   reminderMinBefore: number[]
+  appointmentUpfrontDefault: 'required' | 'at_venue' | 'optional'
+  classUpfrontDefault: 'required' | 'at_venue' | 'optional'
   operatingHours: Prisma.InputJsonValue | typeof Prisma.DbNull
   scheduling: Partial<ReservationConfig['scheduling']>
   deposits: Partial<ReservationConfig['deposits']>
@@ -137,6 +140,7 @@ type ReservationSettingsUpdateInput = Partial<{
   waitlist: Partial<ReservationConfig['waitlist']>
   reminders: Partial<ReservationConfig['reminders']>
   publicBooking: Partial<ReservationConfig['publicBooking']>
+  payments: Partial<ReservationConfig['payments']>
 }>
 
 /**
@@ -203,7 +207,7 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       enabled: settings.publicBookingEnabled,
       requirePhone: settings.requirePhone,
       requireEmail: settings.requireEmail,
-      requireAccount: (settings as any).requireAccount ?? false,
+      requireAccount: settings.requireAccount ?? false,
     },
     operatingHours: settings.operatingHours ? (settings.operatingHours as unknown as OperatingHours) : getDefaultOperatingHours(),
   }
@@ -267,6 +271,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.publicBookingEnabled !== undefined) normalized.publicBookingEnabled = data.publicBookingEnabled
   if (data.requirePhone !== undefined) normalized.requirePhone = data.requirePhone
   if (data.requireEmail !== undefined) normalized.requireEmail = data.requireEmail
+  if (data.requireAccount !== undefined) normalized.requireAccount = data.requireAccount
   if (data.allowCustomerCancel !== undefined) normalized.allowCustomerCancel = data.allowCustomerCancel
   if (data.minHoursBeforeCancel !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeCancel
   if (data.minHoursBeforeStart !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeStart
@@ -280,6 +285,8 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.remindersEnabled !== undefined) normalized.remindersEnabled = data.remindersEnabled
   if (data.reminderChannels !== undefined) normalized.reminderChannels = data.reminderChannels
   if (data.reminderMinBefore !== undefined) normalized.reminderMinBefore = data.reminderMinBefore
+  if (data.appointmentUpfrontDefault !== undefined) normalized.appointmentUpfrontDefault = data.appointmentUpfrontDefault
+  if (data.classUpfrontDefault !== undefined) normalized.classUpfrontDefault = data.classUpfrontDefault
   if (data.operatingHours !== undefined) normalized.operatingHours = data.operatingHours
 
   // Nested payload support (dashboard UI)
@@ -306,6 +313,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.publicBooking.enabled !== undefined) normalized.publicBookingEnabled = data.publicBooking.enabled
     if (data.publicBooking.requirePhone !== undefined) normalized.requirePhone = data.publicBooking.requirePhone
     if (data.publicBooking.requireEmail !== undefined) normalized.requireEmail = data.publicBooking.requireEmail
+    if (data.publicBooking.requireAccount !== undefined) normalized.requireAccount = data.publicBooking.requireAccount
   }
 
   if (data.cancellation) {
@@ -334,6 +342,12 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.reminders.enabled !== undefined) normalized.remindersEnabled = data.reminders.enabled
     if (data.reminders.channels !== undefined) normalized.reminderChannels = data.reminders.channels
     if (data.reminders.minutesBefore !== undefined) normalized.reminderMinBefore = data.reminders.minutesBefore
+  }
+
+  if (data.payments) {
+    if (data.payments.appointmentUpfrontDefault !== undefined)
+      normalized.appointmentUpfrontDefault = data.payments.appointmentUpfrontDefault
+    if (data.payments.classUpfrontDefault !== undefined) normalized.classUpfrontDefault = data.payments.classUpfrontDefault
   }
 
   return normalized

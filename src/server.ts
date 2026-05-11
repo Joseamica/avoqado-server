@@ -21,6 +21,8 @@ import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
+import { reservationReminderJob } from './jobs/reservation-reminder.job'
+import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
@@ -114,6 +116,12 @@ const gracefulShutdown = async (signal: string) => {
 
       logger.info('Stopping reservation deposit reconciliation job...')
       reservationDepositReconciliationJob.stop()
+
+      logger.info('Stopping reservation reminder job...')
+      reservationReminderJob.stop()
+
+      logger.info('Stopping reservation auto no-show job...')
+      reservationAutoNoShowJob.stop()
 
       // Stop commission aggregation job
       logger.info('Stopping commission aggregation job...')
@@ -279,6 +287,10 @@ const startApplication = async (retries = 3) => {
 
       // Start Stripe reservation deposit reconciliation job
       reservationDepositReconciliationJob.start()
+
+      // Start reservation reminder + auto-no-show workers
+      reservationReminderJob.start()
+      reservationAutoNoShowJob.start()
 
       // Start commission aggregation job (daily at 3:00 AM Mexico City)
       commissionAggregationJob.start()

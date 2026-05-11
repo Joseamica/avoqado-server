@@ -214,6 +214,29 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     }
   }
 
+  // 🗑️ AUTO-CLEANUP: Delete old full logo from Firebase Storage if it's being changed/removed
+  if (safeUpdateData.logoFull !== undefined) {
+    const oldLogoFull = existingVenue.logoFull
+    const newLogoFull = safeUpdateData.logoFull || null // Treat empty string as null
+
+    if (oldLogoFull && oldLogoFull !== newLogoFull) {
+      logger.info(`🗑️  Auto-cleanup: Deleting old full logo from Firebase Storage`, {
+        venueId,
+        oldLogoFull,
+        newLogoFull: newLogoFull || '(removed)',
+      })
+
+      await deleteFileFromStorage(oldLogoFull).catch(error => {
+        logger.error(`❌ Failed to auto-delete old full logo from storage (non-blocking)`, {
+          venueId,
+          oldLogoFull,
+          error: error.message,
+        })
+        // Don't throw - continue with update even if storage cleanup fails
+      })
+    }
+  }
+
   // Prepare the update data
   const venueUpdateData: any = {
     name: safeUpdateData.name,
@@ -230,6 +253,7 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     instagram: safeUpdateData.instagram,
     image: safeUpdateData.image,
     logo: safeUpdateData.logo,
+    logoFull: safeUpdateData.logoFull,
     heroImageUrl: safeUpdateData.heroImageUrl,
     primaryColor: safeUpdateData.primaryColor,
     secondaryColor: safeUpdateData.secondaryColor,

@@ -347,6 +347,10 @@ export const publicCreateReservationBodySchema = z
     spotIds: z.array(z.string().min(1)).max(100).optional(),
     specialRequests: z.string().max(2000).optional(),
     creditItemBalanceId: z.string().optional(), // Credit pack: redeems N credits on booking (N = partySize / spotIds.length)
+    // Multi-service /appointments — one balance per selected service. Server
+    // iterates and redeems creditsPerBalance from each. When both fields are
+    // present, the array wins.
+    creditItemBalanceIds: z.array(z.string().min(1)).max(20).optional(),
     // Slot hold consumption — when present and valid, the hold gets deleted
     // transactionally on success. Missing/expired holds throw 409 so the
     // widget falls back to the time-slot picker.

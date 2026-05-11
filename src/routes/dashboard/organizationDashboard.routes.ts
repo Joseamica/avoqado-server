@@ -18,6 +18,7 @@ import {
   GenerateActivationCodeSchema,
   RemoteActivateSchema,
   SendOrgCommandSchema,
+  BulkCommandSchema,
   AssignMerchantsSchema,
   GetOrgMerchantAccountsSchema,
 } from '../../schemas/dashboard/orgTerminals.schema'
@@ -597,21 +598,45 @@ router.delete(
 
 /**
  * GET /dashboard/organizations/:orgId/terminals
- * Returns: All terminals across org venues with filters and pagination
- * Query: page, pageSize, venueId, status, type, search
+ * Returns: All terminals across org venues with filters, sort, and pagination.
+ *
+ * Query:
+ *   page, pageSize
+ *   venueId    comma-separated list of venue ids
+ *   status     comma-separated list of TerminalStatus values
+ *   type       comma-separated list of TerminalType values
+ *   search     case-insensitive contains on name, serial, brand, model, venue.name
+ *   sortBy     one of: name | lastHeartbeat | status | type | brand | createdAt | latestHealthScore | venue.name
+ *   sortOrder  asc | desc
  */
+const SORT_BY_WHITELIST = new Set(['name', 'lastHeartbeat', 'status', 'type', 'brand', 'createdAt', 'latestHealthScore', 'venue.name'])
+
+function parseListParam(value: unknown): string[] | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  const items = value
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+  return items.length > 0 ? items : undefined
+}
+
 router.get('/:orgId/terminals', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId } = req.params
-    const { page, pageSize, venueId, status, type, search } = req.query
+    const { page, pageSize, venueId, status, type, search, sortBy, sortOrder } = req.query
+
+    const sortByValue = typeof sortBy === 'string' && SORT_BY_WHITELIST.has(sortBy) ? sortBy : undefined
+    const sortOrderValue = sortOrder === 'asc' || sortOrder === 'desc' ? sortOrder : undefined
 
     const result = await organizationDashboardService.getOrgTerminals(orgId, {
       page: page ? parseInt(page as string, 10) : undefined,
       pageSize: pageSize ? parseInt(pageSize as string, 10) : undefined,
-      venueId: venueId as string | undefined,
-      status: status as string | undefined,
-      type: type as string | undefined,
-      search: search as string | undefined,
+      venueIds: parseListParam(venueId),
+      statuses: parseListParam(status),
+      types: parseListParam(type),
+      search: typeof search === 'string' ? search : undefined,
+      sortBy: sortByValue,
+      sortOrder: sortOrderValue,
     })
 
     res.json({
@@ -810,6 +835,44 @@ router.post(
 
       res.json({
         success: true,
+        data: result,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/bulk-command
+ * Run one safe command across many terminals in a single request.
+ * Response: 207 Multi-Status when any row failed, 200 otherwise.
+ * Body: { terminalIds: string[] (1..100), command: SafeBulkCommand }
+ */
+router.post(
+  '/:orgId/terminals/bulk-command',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  validateRequest(BulkCommandSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { userId } = (req as any).authContext
+      const { terminalIds, command } = req.body as { terminalIds: string[]; command: orgTerminalsService.SafeBulkCommand }
+
+      const staff = await (
+        await import('../../utils/prismaClient')
+      ).default.staff.findUnique({
+        where: { id: userId },
+        select: { firstName: true, lastName: true },
+      })
+      const staffName = staff ? `${staff.firstName} ${staff.lastName}`.trim() : undefined
+
+      const result = await orgTerminalsService.bulkCommandForOrg(orgId, terminalIds, command, userId, staffName)
+
+      const status = result.failed > 0 ? 207 : 200
+      res.status(status).json({
+        success: result.failed === 0,
         data: result,
       })
     } catch (error) {

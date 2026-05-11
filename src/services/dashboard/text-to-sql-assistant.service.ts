@@ -96,6 +96,7 @@ const DATE_RANGE_EXAMPLES: Record<string, string> = {
   sales: 'ventas de la semana pasada',
   averageTicket: 'ticket promedio de ayer',
   topProducts: 'productos más vendidos ayer',
+  productSales: 'ventas de Hamburguesa BBQ este mes',
   newCustomers: 'clientes nuevos de este mes',
   newCustomerTiming: 'cuándo recibo más clientes nuevos',
   staffPerformance: 'meseros que más vendieron la semana pasada',
@@ -110,6 +111,7 @@ const DATE_RANGE_EXAMPLES_EN: Record<string, string> = {
   sales: 'sales from last week',
   averageTicket: 'average ticket yesterday',
   topProducts: 'top products yesterday',
+  productSales: 'sales for Hamburguesa BBQ this month',
   newCustomers: 'new customers this month',
   newCustomerTiming: 'when do I get the most new customers',
   staffPerformance: 'staff who sold the most last week',
@@ -315,6 +317,7 @@ interface IntentClassificationResult {
     | 'sales'
     | 'averageTicket'
     | 'topProducts'
+    | 'productSales'
     | 'staffPerformance'
     | 'reviews'
     | 'businessOverview'
@@ -340,6 +343,7 @@ interface IntentClassificationResult {
   // and MUST go through the text-to-SQL pipeline for dynamic WHERE filtering.
   // This flag prevents the LLM intent fallback from re-classifying it as "simple".
   hasEntityFilter?: boolean
+  entityName?: string
   // When true, query has GROUP BY / breakdown / comparison patterns that need text-to-SQL.
   // This flag prevents the LLM intent fallback from re-classifying it as "simple".
   isComplex?: boolean
@@ -414,6 +418,7 @@ class TextToSqlAssistantService {
     sales: ['Payment', 'Order'],
     averageTicket: ['Payment', 'Order'],
     topProducts: ['OrderItem', 'Order', 'Product', 'MenuCategory'],
+    productSales: ['OrderItem', 'Order', 'Product'],
     staffPerformance: ['Staff', 'StaffVenue', 'Order', 'Payment', 'Shift'],
     reviews: ['Review'],
     businessOverview: ['Payment', 'Order', 'OrderItem', 'Product', 'MenuCategory', 'Review'],
@@ -2420,6 +2425,25 @@ Ejemplos de respuestas CORRECTAS:
               break
             }
 
+            case 'productSales': {
+              const productName = intentClassification.entityName || this.extractProductSalesTerm(query.message) || ''
+              const productSales = await SharedQueryService.getProductSalesByName(query.venueId, productName, dateRange)
+              if (productSales.revenue === 0 || productSales.quantitySold === 0) {
+                naturalResponse =
+                  responseLanguage === 'en'
+                    ? `I did not find sales for "${productSales.searchTerm || productName}" in ${dateName(dateRange)}.`
+                    : `No encontré ventas de "${productSales.searchTerm || productName}" en ${dateName(dateRange)}.`
+              } else {
+                const matchedName = productSales.productName || productSales.searchTerm
+                naturalResponse =
+                  responseLanguage === 'en'
+                    ? `In ${dateName(dateRange)}, ${matchedName} sold ${productSales.quantitySold} units for ${formatMoney(productSales.revenue, productSales.currency)} across ${productSales.orderCount} orders.`
+                    : `En ${dateName(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${formatMoney(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
+              }
+              serviceResult = productSales
+              break
+            }
+
             case 'staffPerformance': {
               const staffPerf = await SharedQueryService.getStaffPerformance(query.venueId, dateRange, 5)
               const staffList = staffPerf
@@ -2435,7 +2459,10 @@ Ejemplos de respuestas CORRECTAS:
 
             case 'reviews': {
               const reviewStats = await SharedQueryService.getReviewStats(query.venueId, dateRange)
-              naturalResponse = `En ${this.formatDateRangeName(dateRange)} tienes ${reviewStats.totalReviews} reseñas con un promedio de ${reviewStats.averageRating.toFixed(1)} estrellas. Distribución: ⭐⭐⭐⭐⭐ ${reviewStats.distribution.fiveStar}, ⭐⭐⭐⭐ ${reviewStats.distribution.fourStar}, ⭐⭐⭐ ${reviewStats.distribution.threeStar}.`
+              naturalResponse =
+                responseLanguage === 'en'
+                  ? `In ${dateName(dateRange)}, you have ${reviewStats.totalReviews} reviews with an average rating of ${reviewStats.averageRating.toFixed(1)} stars. Distribution: ⭐⭐⭐⭐⭐ ${reviewStats.distribution.fiveStar}, ⭐⭐⭐⭐ ${reviewStats.distribution.fourStar}, ⭐⭐⭐ ${reviewStats.distribution.threeStar}.`
+                  : `En ${dateName(dateRange)} tienes ${reviewStats.totalReviews} reseñas con un promedio de ${reviewStats.averageRating.toFixed(1)} estrellas. Distribución: ⭐⭐⭐⭐⭐ ${reviewStats.distribution.fiveStar}, ⭐⭐⭐⭐ ${reviewStats.distribution.fourStar}, ⭐⭐⭐ ${reviewStats.distribution.threeStar}.`
               serviceResult = reviewStats
               break
             }
@@ -6852,6 +6879,22 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       }
     }
 
+    const productSalesTerm = this.extractProductSalesTerm(message)
+    if (productSalesTerm) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'productSales',
+        dateRange: effectiveDateRange,
+        confidence: 0.92,
+        reason: `Detected product-specific sales query for "${productSalesTerm}" with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        requiresDateRange: true,
+        wasDateExplicit: wasExplicit,
+        hasEntityFilter: true,
+        entityName: productSalesTerm,
+      }
+    }
+
     // CRITICAL: Check if query is complex (has comparisons, filters, etc.)
     // Complex queries should NOT be classified as "simple" even if they match intent patterns
     const isComplex = this.detectComplexity(message)
@@ -7305,6 +7348,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - sales: ventas totales, ingresos, facturación, cuánto vendí
 - averageTicket: ticket promedio, orden promedio, consumo promedio
 - topProducts: productos más vendidos, best sellers, qué se vende más
+- productSales: cuánto vendí de un producto específico por nombre, ventas de Hamburguesa BBQ
 - staffPerformance: mejor mesero/empleado, quién vendió más, quién es el que más vende, rendimiento staff, propinas por persona. INCLUYE "quién" + verbo de venta/propina aunque no diga "empleado"
 - reviews: reseñas, calificaciones, estrellas, opiniones clientes
 - newCustomers: cuántos clientes nuevos, nuevos registros, altas de clientes
@@ -7321,7 +7365,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 
 NO SOPORTADO (isSimple=false, intent="unsupported") — no hay herramienta registrada:
 - Comparaciones (A vs B), desglose POR dimensión (por categoría/hora/día/mesero)
-- Filtro por NOMBRE PROPIO de persona o producto específico ("ventas de Liz", "cuántas hamburguesas")
+- Filtro por NOMBRE PROPIO de persona ("ventas de Liz") o filtros de producto no cubiertos por productSales
 - Fechas absolutas con día/mes ("el 3 de enero", "en febrero")
 - CONTEO de entidades sin herramienta registrada: "cuántos meseros/empleados/productos/mesas tengo" → unsupported
 - Cross-reference entre tablas: "quién vende más pero tiene peores reseñas", "producto estrella y en qué mesa se pide más"
@@ -7336,19 +7380,20 @@ REGLAS CRÍTICAS:
 1. "cuánto vendí hoy/ayer/esta semana/este mes" → sales (SIMPLE). "hoy", "ayer", "esta semana", "este mes", "la semana pasada" son dateRanges relativos, NO fechas específicas
 2. "quién vende más" / "quién es el que más ha vendido" / "mejor empleado" → staffPerformance (SIMPLE)
 3. "productos más vendidos" / "best sellers" / "qué se vende más" → topProducts (SIMPLE)
-4. SOLO usa unsupported si no hay una herramienta simple registrada, si hay un NOMBRE PROPIO de persona/producto, un desglose dimensional no registrado (por X), o un CONTEO de entidades sin herramienta
-5. Si hay historial y el mensaje es ambiguo ("el que más vendió", "de esos"), usa el contexto
-6. FECHA POR DEFECTO:
+4. "cuánto vendí de Hamburguesa BBQ" / "sales for Latte" → productSales (SIMPLE)
+5. SOLO usa unsupported si no hay una herramienta simple registrada, si hay un NOMBRE PROPIO de persona, un desglose dimensional no registrado (por X), o un CONTEO de entidades sin herramienta
+6. Si hay historial y el mensaje es ambiguo ("el que más vendió", "de esos"), usa el contexto
+7. FECHA POR DEFECTO:
    - Si el usuario dice "en total", "en general", "históricamente", "de todo el tiempo", "all time", "ever" → dateRange="allTime", wasDateExplicit=true
    - Si pregunta "cuántas órdenes hay", "qué método de pago se usa más", "cuántas reseñas" SIN periodo → dateRange="allTime", wasDateExplicit=false (quiere el total, no solo este mes)
    - Si pregunta "cuánto vendí", "ventas", "ticket promedio" SIN periodo → dateRange="thisMonth", wasDateExplicit=false
    - La regla: preguntas de TOTALES/CONTEO sin periodo → allTime. Preguntas de RENDIMIENTO/VENTAS sin periodo → thisMonth
-7. Para inventoryAlerts/recipeCount/recipeList/recipeUsage/pendingOrders/activeShifts → dateRange=null
-8. "today"/"yesterday"/"this week" en inglés = today/yesterday/thisWeek (SIMPLE, no complejo)
-9. "cuántos meseros/empleados tengo" / "cuántos productos tengo" / "cuántas mesas tengo" → unsupported si no hay herramienta registrada. NO es activeShifts
-10. activeShifts es SOLO para "quién trabaja AHORA" / "turnos abiertos". NO para conteo de staff total
-11. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList. "qué receta se usa más" / "cuál es la que más se usa" con contexto de recetas → recipeUsage
-12. "cuántos clientes nuevos" → newCustomers. "cuándo recibo más clientes nuevos" / "qué día llegan más clientes nuevos" → newCustomerTiming
+8. Para inventoryAlerts/recipeCount/recipeList/recipeUsage/pendingOrders/activeShifts → dateRange=null
+9. "today"/"yesterday"/"this week" en inglés = today/yesterday/thisWeek (SIMPLE, no complejo)
+10. "cuántos meseros/empleados tengo" / "cuántos productos tengo" / "cuántas mesas tengo" → unsupported si no hay herramienta registrada. NO es activeShifts
+11. activeShifts es SOLO para "quién trabaja AHORA" / "turnos abiertos". NO para conteo de staff total
+12. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList. "qué receta se usa más" / "cuál es la que más se usa" con contexto de recetas → recipeUsage
+13. "cuántos clientes nuevos" → newCustomers. "cuándo recibo más clientes nuevos" / "qué día llegan más clientes nuevos" → newCustomerTiming
 
 dateRanges válidos: today, yesterday, thisWeek, lastWeek, thisMonth, lastMonth, last7days, last30days, allTime, null
 
@@ -7446,6 +7491,7 @@ Responde SOLO JSON (sin markdown):
         'sales',
         'averageTicket',
         'topProducts',
+        'productSales',
         'staffPerformance',
         'reviews',
         'newCustomers',
@@ -8518,11 +8564,9 @@ ${JSON.stringify(input, null, 2)}
     }
 
     // Pattern 4: "vendí/ingresos de [specific-product]"
-    const salesOfProductPattern =
-      /(?:vend[ií]|vendi|vendido|ingresos?|facturad[oa])\s+de\s+([a-z0-9ñ][a-z0-9ñ\s-]{1,80}?)(?=(?:\s+hoy|\s+ayer|\s+esta\s+semana|\s+los\s+ultimos|\s+en\s+los|[?.,!]|$))/
-    const salesProductMatch = lowerMessage.match(salesOfProductPattern)
-    if (salesProductMatch) {
-      const potentialProduct = salesProductMatch[1]?.trim().split(/\s+/)[0]
+    const productSalesTerm = this.extractProductSalesTerm(message)
+    if (productSalesTerm) {
+      const potentialProduct = productSalesTerm.split(/\s+/)[0]
       if (potentialProduct && !nonEntityWords.has(potentialProduct)) {
         return true
       }
@@ -8540,6 +8584,51 @@ ${JSON.stringify(input, null, 2)}
     }
 
     return false
+  }
+
+  private extractProductSalesTerm(message: string): string | null {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
+    if (!normalizedMessage) {
+      return null
+    }
+
+    const patterns = [
+      /\b(?:cu[aá]nt[oa]s?\s+)?(?:vend[ií]|vendi|vendimos|vendieron|vendido|ventas?|ingresos?|facturad[oa]|sales|revenue)(?:\s+[a-z0-9ñ]+){0,5}?\s+(?:de|del|from|for)\s+(.+?)(?=(?:\s+(?:hoy|ayer|esta|este|estos|estas|los|las|en|durante|last|this|today|yesterday|week|month|days?)\b|[?.,!]|$))/,
+      /\b(?:sales|revenue)\s+(?:for|from)\s+(.+?)(?=(?:\s+(?:today|yesterday|last|this|week|month|days?)\b|[?.,!]|$))/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = normalizedMessage.match(pattern)
+      const rawTerm = match?.[1]?.trim()
+      if (!rawTerm) {
+        continue
+      }
+
+      const cleaned = rawTerm
+        .replace(/\b(producto|product|item|platillo|articulo|artículo)\b/g, ' ')
+        .replace(/[^a-z0-9ñ\s-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+      if (!cleaned || cleaned.length < 2) {
+        continue
+      }
+
+      const isDateOnly =
+        /\b(hoy|ayer|semana|mes|año|ano|dia|dias|ultimos|últimos|pasad[oa]s?|today|yesterday|week|month|year|days?|last|this)\b/.test(
+          cleaned,
+        )
+      const isGenericDimension = /\b(categoria|categorias|category|categories|mesero|staff|cliente|clientes|customer|customers)\b/.test(
+        cleaned,
+      )
+      const isComparison = /\b(vs|versus|contra)\b/.test(cleaned)
+
+      if (!isDateOnly && !isGenericDimension && !isComparison) {
+        return cleaned
+      }
+    }
+
+    return null
   }
 
   private detectComplexity(message: string): boolean {

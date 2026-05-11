@@ -281,6 +281,117 @@ export async function sendCommandForOrg(
   return result
 }
 
+// Commands safe to run across many terminals in one click. Excludes
+// FACTORY_RESET, MAINTENANCE_MODE/EXIT_MAINTENANCE, UPDATE_CONFIG,
+// UPDATE_MERCHANT, EXPORT_LOGS, REMOTE_ACTIVATE — those stay per-terminal.
+export const SAFE_BULK_COMMANDS = ['RESTART', 'SYNC_DATA', 'REFRESH_MENU', 'FORCE_UPDATE', 'LOCK', 'UNLOCK'] as const
+export type SafeBulkCommand = (typeof SAFE_BULK_COMMANDS)[number]
+
+export const BULK_COMMAND_MAX = 100
+
+export interface BulkCommandRowResult {
+  terminalId: string
+  success: boolean
+  error?: string
+}
+
+export interface BulkCommandResponse {
+  command: SafeBulkCommand
+  total: number
+  succeeded: number
+  failed: number
+  results: BulkCommandRowResult[]
+}
+
+/**
+ * Run one command across many terminals in a single request.
+ *
+ * - Single batched validation query (all terminalIds must belong to the org).
+ * - Hard cap BULK_COMMAND_MAX terminals per request.
+ * - Per-terminal queueing; one queue failure does not abort the loop.
+ * - Returns per-row { success, error? } so the caller can surface partial failures.
+ *
+ * Intended HTTP status at the route layer: 207 Multi-Status when any row
+ * failed, 200 otherwise.
+ */
+export async function bulkCommandForOrg(
+  orgId: string,
+  terminalIds: string[],
+  command: SafeBulkCommand,
+  staffId: string,
+  staffName?: string,
+): Promise<BulkCommandResponse> {
+  if (!SAFE_BULK_COMMANDS.includes(command)) {
+    throw new BadRequestError(`Comando no permitido para ejecución masiva: ${command}`)
+  }
+  if (!Array.isArray(terminalIds) || terminalIds.length === 0) {
+    throw new BadRequestError('Selecciona al menos una terminal')
+  }
+  if (terminalIds.length > BULK_COMMAND_MAX) {
+    throw new BadRequestError(`Máximo ${BULK_COMMAND_MAX} terminales por solicitud`)
+  }
+
+  // Deduplicate while preserving order so the response array matches user intent.
+  const uniqueIds = Array.from(new Set(terminalIds))
+
+  // Batched validation: one query for all terminals + their org check.
+  const valid = await prisma.terminal.findMany({
+    where: { id: { in: uniqueIds }, venue: { organizationId: orgId } },
+    select: { id: true, venueId: true, name: true },
+  })
+  const validMap = new Map(valid.map(t => [t.id, t]))
+
+  logger.info('[OrgTerminals] Bulk command', {
+    orgId,
+    command,
+    requested: uniqueIds.length,
+    valid: valid.length,
+    staffId,
+  })
+
+  const results: BulkCommandRowResult[] = []
+  for (const terminalId of uniqueIds) {
+    const terminal = validMap.get(terminalId)
+    if (!terminal) {
+      results.push({ terminalId, success: false, error: 'Terminal no encontrada en esta organización' })
+      continue
+    }
+    try {
+      await tpvCommandQueueService.queueCommand({
+        terminalId,
+        venueId: terminal.venueId,
+        commandType: command as any,
+        payload: { source: 'ORG_DASHBOARD_BULK', orgId },
+        priority: 'NORMAL',
+        requestedBy: staffId,
+        requestedByName: staffName,
+        source: 'DASHBOARD',
+      })
+      results.push({ terminalId, success: true })
+      logAction({
+        staffId,
+        venueId: terminal.venueId,
+        action: 'COMMAND_SENT',
+        entity: 'Terminal',
+        entityId: terminalId,
+        data: { command, bulk: true },
+      })
+    } catch (err: any) {
+      logger.error('[OrgTerminals] Bulk command queue failed', { terminalId, error: err?.message })
+      results.push({ terminalId, success: false, error: err?.message ?? 'Error al encolar comando' })
+    }
+  }
+
+  const succeeded = results.filter(r => r.success).length
+  return {
+    command,
+    total: results.length,
+    succeeded,
+    failed: results.length - succeeded,
+    results,
+  }
+}
+
 /**
  * Assign merchant accounts to a terminal within the organization
  * Validates all merchants belong to the org's venues

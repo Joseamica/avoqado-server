@@ -129,6 +129,32 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
         expect(chatbotResponse.queryResult.grossProfit).toBe(dashboardValue.grossProfit)
       }
     }, 30000)
+
+    it('should return product-specific sales through the registered SharedQueryService tool', async () => {
+      const topProducts = await SharedQueryService.getTopProducts(testData.venue.id, 'last7days', 1)
+      if (topProducts.length === 0) {
+        return
+      }
+
+      const productName = topProducts[0].productName
+      const dashboardValue = await SharedQueryService.getProductSalesByName(testData.venue.id, productName, 'last7days')
+
+      const chatbotResponse = await service.processQuery({
+        message: `¿Cuánto vendí de ${productName} esta semana?`,
+        venueId: testData.venue.id,
+        userId: testData.staff[0].id,
+        venueSlug: testData.venue.slug,
+        userRole: UserRole.MANAGER,
+      })
+
+      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
+      expect(((chatbotResponse.metadata || {}) as any).intent).toBe('productSales')
+      expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('shared_intent_routed')
+
+      expect(chatbotResponse.queryResult?.productName).toBe(dashboardValue.productName)
+      expect(chatbotResponse.queryResult?.quantitySold).toBe(dashboardValue.quantitySold)
+      expect(chatbotResponse.queryResult?.revenue).toBe(dashboardValue.revenue)
+    }, 30000)
   })
 
   describe('Layer 4 Cross-Check Validation', () => {

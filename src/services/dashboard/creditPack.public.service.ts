@@ -57,19 +57,23 @@ export async function getAvailablePacks(venueId: string, productId?: string) {
  * Optional `opts.seats`: annotates each itemBalance with `sufficient: remainingQuantity >= seats`
  *   so the widget can disable balances that can't cover the booking.
  * Optional `opts.productId`: filters balances to only those that match the productId.
+ * Optional `opts.productIds`: filters balances to those matching ANY of the listed
+ *   productIds (multi-service /appointments). Wins over `productId` when both
+ *   are provided; the widget never sends both.
  */
 export async function lookupCustomerCredits(
   venueId: string,
   email?: string,
   phone?: string,
-  opts?: { seats?: number; productId?: string },
+  opts?: { seats?: number; productId?: string; productIds?: string[] },
 ) {
   if (!email && !phone) {
     throw new BadRequestError('Se requiere email o telefono para consultar creditos')
   }
 
   const seats = opts?.seats
-  const productId = opts?.productId
+  const productIds = opts?.productIds && opts.productIds.length > 0 ? opts.productIds : undefined
+  const productId = productIds ? undefined : opts?.productId
 
   // Find customer (strict by both when both are present, then fallback by either)
   let customer = null
@@ -107,7 +111,7 @@ export async function lookupCustomerCredits(
         where: {
           remainingQuantity: { gt: 0 },
           product: { allowCreditRedemption: true },
-          ...(productId ? { productId } : {}),
+          ...(productIds ? { productId: { in: productIds } } : productId ? { productId } : {}),
         },
         include: {
           product: {
@@ -134,7 +138,7 @@ export async function lookupCustomerCredits(
         sufficient: seats != null ? b.remainingQuantity >= seats : true,
       })),
     }))
-    .filter(p => (productId ? p.itemBalances.length > 0 : true))
+    .filter(p => (productId || productIds ? p.itemBalances.length > 0 : true))
 
   return {
     customer: {

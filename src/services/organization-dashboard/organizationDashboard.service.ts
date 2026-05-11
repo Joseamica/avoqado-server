@@ -3434,10 +3434,12 @@ class OrganizationDashboardService {
     filters?: {
       page?: number
       pageSize?: number
-      venueId?: string
-      status?: string
-      type?: string
+      venueIds?: string[]
+      statuses?: string[]
+      types?: string[]
       search?: string
+      sortBy?: string
+      sortOrder?: 'asc' | 'desc'
     },
   ) {
     const page = filters?.page || 1
@@ -3459,24 +3461,49 @@ class OrganizationDashboardService {
       }
     }
 
-    // Build where clause
+    // Build where clause. Venue filter is intersected with org venue scope.
+    const requestedVenueIds = (filters?.venueIds ?? []).filter(id => venueIds.includes(id))
     const where: Prisma.TerminalWhereInput = {
-      venueId: filters?.venueId ? { equals: filters.venueId, in: venueIds } : { in: venueIds },
+      venueId: requestedVenueIds.length > 0 ? { in: requestedVenueIds } : { in: venueIds },
     }
 
-    if (filters?.status) {
-      where.status = filters.status as any
+    if (filters?.statuses && filters.statuses.length > 0) {
+      where.status = { in: filters.statuses as any }
     }
 
-    if (filters?.type) {
-      where.type = filters.type as any
+    if (filters?.types && filters.types.length > 0) {
+      where.type = { in: filters.types as any }
     }
 
     if (filters?.search) {
+      const q = filters.search
       where.OR = [
-        { name: { contains: filters.search, mode: 'insensitive' } },
-        { serialNumber: { contains: filters.search, mode: 'insensitive' } },
+        { name: { contains: q, mode: 'insensitive' } },
+        { serialNumber: { contains: q, mode: 'insensitive' } },
+        { brand: { contains: q, mode: 'insensitive' } },
+        { model: { contains: q, mode: 'insensitive' } },
+        { venue: { name: { contains: q, mode: 'insensitive' } } },
       ]
+    }
+
+    // Sort: whitelist accepted columns. Default = lastHeartbeat desc.
+    // venue.name uses Prisma's nested relation orderBy. Nullable scalar fields
+    // accept the { sort, nulls } object form; NON-nullable fields (enums and
+    // required scalars) must use the plain 'asc' | 'desc' string — Prisma
+    // rejects the object form on them with "Expected SortOrder, provided Object".
+    const sortOrder: 'asc' | 'desc' = filters?.sortOrder === 'asc' ? 'asc' : 'desc'
+    const sortByRaw = filters?.sortBy ?? 'lastHeartbeat'
+    const NULLABLE_SORTS = new Set(['lastHeartbeat', 'brand', 'latestHealthScore'])
+    const NON_NULLABLE_SORTS = new Set(['name', 'status', 'type', 'createdAt'])
+    let orderBy: Prisma.TerminalOrderByWithRelationInput
+    if (sortByRaw === 'venue.name') {
+      orderBy = { venue: { name: sortOrder } }
+    } else if (NULLABLE_SORTS.has(sortByRaw)) {
+      orderBy = { [sortByRaw]: { sort: sortOrder, nulls: 'last' } } as Prisma.TerminalOrderByWithRelationInput
+    } else if (NON_NULLABLE_SORTS.has(sortByRaw)) {
+      orderBy = { [sortByRaw]: sortOrder } as Prisma.TerminalOrderByWithRelationInput
+    } else {
+      orderBy = { lastHeartbeat: { sort: 'desc', nulls: 'last' } }
     }
 
     // Fetch terminals + count in parallel
@@ -3485,9 +3512,8 @@ class OrganizationDashboardService {
         where,
         include: {
           venue: { select: { id: true, name: true, slug: true } },
-          healthMetrics: { take: 1, orderBy: { createdAt: 'desc' }, select: { healthScore: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy,
         skip,
         take: pageSize,
       }),
@@ -3532,7 +3558,7 @@ class OrganizationDashboardService {
         version: t.version,
         lastHeartbeat: t.lastHeartbeat,
         ipAddress: t.ipAddress,
-        healthScore: t.healthMetrics[0]?.healthScore ?? null,
+        healthScore: (t as any).latestHealthScore ?? null,
         isLocked: (t as any).isLocked ?? false,
         assignedMerchantIds: (t as any).assignedMerchantIds ?? [],
         activatedAt: (t as any).activatedAt ?? null,

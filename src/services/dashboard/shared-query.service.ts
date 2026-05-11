@@ -103,6 +103,24 @@ export interface TopProduct {
 }
 
 /**
+ * Product-specific sales metrics resolved by product name.
+ */
+export interface ProductSales {
+  searchTerm: string
+  productName: string | null
+  quantitySold: number
+  revenue: number
+  orderCount: number
+  matchedProducts: Array<{
+    productName: string
+    quantitySold: number
+    revenue: number
+    orderCount: number
+  }>
+  currency: string
+}
+
+/**
  * Staff performance metrics
  */
 export interface StaffPerformance {
@@ -521,6 +539,86 @@ export class SharedQueryService {
       revenue: product.revenue.toNumber(),
       orderCount: Number(product.orderCount),
     }))
+  }
+
+  /**
+   * Get sales for a specific product name using the same approved order-item
+   * aggregation as top products. This keeps product-specific questions out of
+   * free-form SQL generation while still answering from real backend data.
+   */
+  static async getProductSalesByName(
+    venueId: string,
+    productName: string,
+    period: DateRangeSpec,
+    timezone?: string,
+  ): Promise<ProductSales> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const searchTerm = productName.trim().replace(/\s+/g, ' ')
+    if (!searchTerm) {
+      return {
+        searchTerm,
+        productName: null,
+        quantitySold: 0,
+        revenue: 0,
+        orderCount: 0,
+        matchedProducts: [],
+        currency: 'MXN',
+      }
+    }
+
+    const venueTimezone = timezone || venue.timezone
+    const { from, to } = this.getDateRange(period, venueTimezone)
+    const searchPattern = `%${searchTerm}%`
+
+    const rows = await prisma.$queryRaw<
+      Array<{
+        productName: string
+        quantitySold: bigint
+        revenue: Prisma.Decimal
+        orderCount: bigint
+      }>
+    >`
+      SELECT
+        COALESCE(oi."productName", p."name", 'Producto sin nombre') as "productName",
+        SUM(oi."quantity")::bigint as "quantitySold",
+        SUM(oi."quantity" * oi."unitPrice") as "revenue",
+        COUNT(DISTINCT o."id")::bigint as "orderCount"
+      FROM "OrderItem" oi
+      INNER JOIN "Order" o ON oi."orderId" = o."id"
+      LEFT JOIN "Product" p ON oi."productId" = p."id"
+      WHERE o."venueId"::text = ${venueId}
+        AND o."createdAt" >= ${from}::timestamp
+        AND o."createdAt" <= ${to}::timestamp
+        AND COALESCE(oi."productName", p."name", '') ILIKE ${searchPattern}
+      GROUP BY COALESCE(oi."productName", p."name", 'Producto sin nombre')
+      ORDER BY "revenue" DESC
+      LIMIT 5
+    `
+
+    const matchedProducts = rows.map(row => ({
+      productName: row.productName,
+      quantitySold: Number(row.quantitySold),
+      revenue: row.revenue.toNumber(),
+      orderCount: Number(row.orderCount),
+    }))
+
+    return {
+      searchTerm,
+      productName: matchedProducts[0]?.productName || null,
+      quantitySold: matchedProducts.reduce((sum, row) => sum + row.quantitySold, 0),
+      revenue: matchedProducts.reduce((sum, row) => sum + row.revenue, 0),
+      orderCount: matchedProducts.reduce((sum, row) => sum + row.orderCount, 0),
+      matchedProducts,
+      currency: 'MXN',
+    }
   }
 
   /**
