@@ -633,15 +633,22 @@ export class SimCustodyService {
     organizationId: string,
     serialNumber: string,
   ): Promise<SerializedItem | null> {
-    const orgItem = await tx.serializedItem.findUnique({
-      where: { organizationId_serialNumber: { organizationId, serialNumber } },
+    // ICCIDs/barcodes are case-insensitive by spec — the dashboard search
+    // (itemCategory.dashboard.service.ts:451) already uses `mode: 'insensitive'`,
+    // so a SIM stored as `...082F` must match input `...082f` here too, otherwise
+    // the user sees a SIM in the search and gets NOT_FOUND on assign.
+    const orgItem = await tx.serializedItem.findFirst({
+      where: {
+        organizationId,
+        serialNumber: { equals: serialNumber, mode: 'insensitive' },
+      },
     })
     if (orgItem) return orgItem
 
     // Legacy venue-scoped items: find by org via venue relation.
     const venueItem = await tx.serializedItem.findFirst({
       where: {
-        serialNumber,
+        serialNumber: { equals: serialNumber, mode: 'insensitive' },
         venue: { organizationId },
       },
     })
