@@ -8,7 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { deductStockFIFO } from '@/services/dashboard/fifoBatch.service'
+import { createStockBatch, deductStockFIFO } from '@/services/dashboard/fifoBatch.service'
 import AppError from '@/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 
@@ -18,9 +18,12 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     rawMaterial: {
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       update: jest.fn(),
     },
     stockBatch: {
+      findFirst: jest.fn(),
+      create: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
@@ -49,6 +52,42 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+  })
+
+  describe('createStockBatch - batch numbering', () => {
+    it('increments BATCH-YYYYMMDD-XXX numbers using the final segment', async () => {
+      const today = new Date()
+      const prefix = `BATCH-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
+      ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue({
+        id: mockRawMaterialId,
+        venueId: mockVenueId,
+        name: 'Carne',
+        unit: 'KILOGRAM',
+      })
+      ;(prisma.stockBatch.findFirst as jest.Mock).mockResolvedValue({
+        id: 'batch-existing',
+        batchNumber: `${prefix}-001`,
+      })
+      ;(prisma.stockBatch.create as jest.Mock).mockResolvedValue({
+        id: 'batch-new',
+        batchNumber: `${prefix}-002`,
+      })
+
+      await createStockBatch(mockVenueId, mockRawMaterialId, {
+        quantity: 3,
+        unit: 'KILOGRAM' as any,
+        costPerUnit: 10,
+        receivedDate: new Date(),
+      })
+
+      expect(prisma.stockBatch.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            batchNumber: `${prefix}-002`,
+          }),
+        }),
+      )
+    })
   })
 
   describe('deductStockFIFO - Priority 1A', () => {

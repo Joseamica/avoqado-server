@@ -214,6 +214,25 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
       const stockUpdate = mockedPrisma.rawMaterial.update.mock.calls[0][0]
       expect(stockUpdate.data.currentStock.toString()).toBe('1000')
     })
+
+    it('increments the existing daily batch sequence instead of producing NaN', async () => {
+      const today = new Date()
+      const prefix = `BATCH-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
+      mockedPrisma.stockBatch.findFirst.mockResolvedValue({
+        id: 'batch-existing',
+        batchNumber: `${prefix}-001`,
+      })
+      mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(makeItem())
+
+      await updatePurchaseOrderItemStatus(VENUE_ID, PO_ID, ITEM_ID, {
+        receiveStatus: PurchaseOrderItemStatus.RECEIVED,
+        quantityReceived: 4,
+      } as any)
+
+      const batchData = mockedPrisma.stockBatch.create.mock.calls[0][0].data
+      expect(batchData.batchNumber).toBe(`${prefix}-002`)
+      expect(batchData.batchNumber).not.toContain('NaN')
+    })
   })
 
   // ────────────────────────────────────────────────────────────────────────

@@ -30,7 +30,8 @@ async function generateBatchNumber(venueId: string, rawMaterialId: string): Prom
     return `${datePrefix}-001`
   }
 
-  const lastSequence = parseInt(lastBatch.batchNumber.split('-')[3])
+  const batchNumberParts = lastBatch.batchNumber.split('-')
+  const lastSequence = Number.parseInt(batchNumberParts[batchNumberParts.length - 1] ?? '0', 10)
   const nextSequence = String(lastSequence + 1).padStart(3, '0')
   return `${datePrefix}-${nextSequence}`
 }
