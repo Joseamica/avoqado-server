@@ -160,6 +160,35 @@ export const chargeBodySchema = z.object({
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BRANDING SCHEMAS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Per-venue branding for the public payment-link checkout. All fields
+ * optional — the service merges with sane defaults. `buttonColor` must be
+ * a 7-char hex (#RRGGBB) so it can flow safely into inline `style` props
+ * on pay.avoqado.io without XSS risk.
+ */
+export const paymentLinkBrandingBodySchema = z.object({
+  showLogo: z.boolean().optional(),
+  buttonColor: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/, 'El color debe ser un código HEX de 6 dígitos (ej. #006aff)')
+    .optional(),
+  buttonShape: z.enum(['rounded', 'square', 'pill']).optional(),
+  showImage: z.boolean().optional(),
+  showTitle: z.boolean().optional(),
+  showPrice: z.boolean().optional(),
+})
+
+export const updatePaymentLinkBrandingSchema = z.object({
+  params: z.object({
+    venueId: z.string().min(1, 'Venue ID es requerido'),
+  }),
+  body: paymentLinkBrandingBodySchema,
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
 // COMBINED SCHEMAS (for validateRequest middleware)
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -139,6 +139,17 @@ model Venue {
   primaryColor   String? // Brand accent (HEX) — used as --avq-accent in widget
   secondaryColor String?
 
+  /// Per-venue branding overrides applied to the public payment-link
+  /// checkout (pay.avoqado.io). JSON shape:
+  ///   { showLogo: bool, buttonColor: '#hex',
+  ///     buttonShape: 'rounded'|'square'|'pill',
+  ///     showImage: bool, showTitle: bool, showPrice: bool }
+  /// NULL = use sane defaults. Keeping this as JSON (vs a dedicated table)
+  /// because the config is a small singleton per venue, doesn't need history,
+  /// and the shape is stable enough that strong typing in the service layer
+  /// is sufficient.
+  paymentLinkBranding Json?
+
   // Status
   active           Boolean   @default(true)
   operationalSince DateTime?

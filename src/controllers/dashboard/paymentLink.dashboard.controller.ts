@@ -144,3 +144,36 @@ export async function archivePaymentLink(req: Request, res: Response) {
     })
   }
 }
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/payment-links/branding/config
+ */
+export async function getPaymentLinkBranding(req: Request, res: Response) {
+  try {
+    const { venueId } = req.params
+    const branding = await paymentLinkService.getPaymentLinkBranding(venueId)
+    res.json({ success: true, data: branding })
+  } catch (error: any) {
+    logger.error('Error fetching payment link branding:', error)
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || 'Error al obtener branding' })
+  }
+}
+
+/**
+ * PUT /api/v1/dashboard/venues/:venueId/payment-links/branding/config
+ */
+export async function updatePaymentLinkBranding(req: Request, res: Response) {
+  try {
+    const { venueId } = req.params
+    const staffId = req.authContext?.userId
+    if (!staffId) {
+      res.status(401).json({ success: false, error: 'Autenticación requerida' })
+      return
+    }
+    const branding = await paymentLinkService.updatePaymentLinkBranding(venueId, req.body, staffId)
+    res.json({ success: true, data: branding })
+  } catch (error: any) {
+    logger.error('Error updating payment link branding:', error)
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || 'Error al actualizar branding' })
+  }
+}

@@ -705,6 +705,94 @@ export async function archivePaymentLink(venueId: string, linkId: string) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BRANDING (PUBLIC CHECKOUT APPEARANCE)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Default branding applied when a venue has never customised it. Mirrored
+ * in the frontend (PaymentLinkBranding.tsx) — keep both copies in sync.
+ */
+export const DEFAULT_PAYMENT_LINK_BRANDING = {
+  showLogo: true,
+  buttonColor: '#006aff',
+  buttonShape: 'rounded' as 'rounded' | 'square' | 'pill',
+  showImage: true,
+  showTitle: true,
+  showPrice: true,
+}
+
+export type PaymentLinkBranding = typeof DEFAULT_PAYMENT_LINK_BRANDING
+
+/**
+ * Merge stored branding with the defaults. Used by both the dashboard
+ * (preview) and the public checkout reader so missing keys never leak
+ * through as `undefined` to the UI.
+ */
+function mergeBranding(raw: unknown): PaymentLinkBranding {
+  if (!raw || typeof raw !== 'object') return DEFAULT_PAYMENT_LINK_BRANDING
+  const stored = raw as Partial<PaymentLinkBranding>
+  return {
+    showLogo: stored.showLogo ?? DEFAULT_PAYMENT_LINK_BRANDING.showLogo,
+    buttonColor: stored.buttonColor ?? DEFAULT_PAYMENT_LINK_BRANDING.buttonColor,
+    buttonShape: stored.buttonShape ?? DEFAULT_PAYMENT_LINK_BRANDING.buttonShape,
+    showImage: stored.showImage ?? DEFAULT_PAYMENT_LINK_BRANDING.showImage,
+    showTitle: stored.showTitle ?? DEFAULT_PAYMENT_LINK_BRANDING.showTitle,
+    showPrice: stored.showPrice ?? DEFAULT_PAYMENT_LINK_BRANDING.showPrice,
+  }
+}
+
+export async function getPaymentLinkBranding(venueId: string): Promise<PaymentLinkBranding> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { paymentLinkBranding: true },
+  })
+  if (!venue) throw new NotFoundError('Venue no encontrado')
+  return mergeBranding(venue.paymentLinkBranding)
+}
+
+export async function updatePaymentLinkBranding(
+  venueId: string,
+  data: Partial<PaymentLinkBranding>,
+  staffId: string,
+): Promise<PaymentLinkBranding> {
+  // Read-modify-write so the caller can send only the fields they want to
+  // change. The frontend currently sends the full object, but the merge
+  // pattern keeps the API forgiving and lets us add new fields without
+  // breaking older clients.
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { paymentLinkBranding: true },
+  })
+  if (!venue) throw new NotFoundError('Venue no encontrado')
+
+  const current = mergeBranding(venue.paymentLinkBranding)
+  const next: PaymentLinkBranding = {
+    showLogo: data.showLogo ?? current.showLogo,
+    buttonColor: data.buttonColor ?? current.buttonColor,
+    buttonShape: data.buttonShape ?? current.buttonShape,
+    showImage: data.showImage ?? current.showImage,
+    showTitle: data.showTitle ?? current.showTitle,
+    showPrice: data.showPrice ?? current.showPrice,
+  }
+
+  await prisma.venue.update({
+    where: { id: venueId },
+    data: { paymentLinkBranding: next as unknown as Prisma.InputJsonValue },
+  })
+
+  logAction({
+    venueId,
+    staffId,
+    action: 'PAYMENT_LINK_BRANDING_UPDATED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { from: current, to: next },
+  })
+
+  return next
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PUBLIC (CHECKOUT FLOW)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -724,6 +812,10 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
           logo: true,
           primaryColor: true,
           secondaryColor: true,
+          // Per-venue payment-link branding (button color/shape + toggle
+          // visibility of logo/image/title/price). Public checkout reads this
+          // to skin its Pay button and hide fields per the admin's choices.
+          paymentLinkBranding: true,
         },
       },
       ...BUNDLE_ITEMS_INCLUDE,
@@ -781,7 +873,17 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     amountType: paymentLink.amountType,
     amount: paymentLink.amount,
     currency: paymentLink.currency,
-    venue: paymentLink.venue,
+    venue: {
+      id: paymentLink.venue.id,
+      name: paymentLink.venue.name,
+      slug: paymentLink.venue.slug,
+      logo: paymentLink.venue.logo,
+      primaryColor: paymentLink.venue.primaryColor,
+      secondaryColor: paymentLink.venue.secondaryColor,
+    },
+    // Branding overrides for this checkout. Always merged with defaults so
+    // the customer-facing page never has to handle null/undefined fields.
+    branding: mergeBranding(paymentLink.venue.paymentLinkBranding),
     // Line items for ITEM-purpose links. Empty array for PAYMENT/DONATION.
     // Each line includes its pre-selected modifiers so the customer-facing
     // checkout page can render the full configuration. Total =

@@ -16,6 +16,7 @@ import {
   createPaymentLinkSchema,
   getPaymentLinkSchema,
   updatePaymentLinkSchema,
+  updatePaymentLinkBrandingSchema,
 } from '@/schemas/dashboard/paymentLink.schema'
 
 const router = Router({ mergeParams: true })
@@ -49,5 +50,17 @@ router.put('/:linkId', validateRequest(updatePaymentLinkSchema), paymentLinkCont
  * Archives a payment link (soft delete)
  */
 router.delete('/:linkId', validateRequest(getPaymentLinkSchema), paymentLinkController.archivePaymentLink)
+
+/**
+ * GET  /api/v1/dashboard/venues/:venueId/payment-links/branding/config
+ * PUT  /api/v1/dashboard/venues/:venueId/payment-links/branding/config
+ *
+ * Per-venue branding for the public payment-link checkout
+ * (pay.avoqado.io). GET returns merged config with defaults; PUT replaces
+ * the whole config. Path is intentionally a sub-segment of /payment-links
+ * so the permission guard at the parent (`payment-link:read`) gates it.
+ */
+router.get('/branding/config', paymentLinkController.getPaymentLinkBranding)
+router.put('/branding/config', validateRequest(updatePaymentLinkBrandingSchema), paymentLinkController.updatePaymentLinkBranding)
 
 export default router
