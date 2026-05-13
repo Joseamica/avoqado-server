@@ -1138,9 +1138,7 @@ export async function createStripePaymentIntentForPaymentLink(
       shortCode,
       env: process.env.NODE_ENV,
     })
-    throw new BadRequestError(
-      'El procesador de pagos está mal configurado (falta clave publicable). Contacta a soporte de Avoqado.',
-    )
+    throw new BadRequestError('El procesador de pagos está mal configurado (falta clave publicable). Contacta a soporte de Avoqado.')
   }
 
   return {
