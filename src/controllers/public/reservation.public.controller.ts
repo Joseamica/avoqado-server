@@ -424,7 +424,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
 
-    const settings = await getReservationSettings(venue.id)
+    let settings = await getReservationSettings(venue.id)
 
     // Check public booking is enabled
     if (!settings.publicBooking.enabled) {
@@ -670,6 +670,72 @@ export async function createReservation(req: Request, res: Response, next: NextF
       })
     }
 
+    // Phase 4: enforce ReservationSettings.payments.appointmentUpfrontDefault
+    // (and per-product Product.upfrontPolicy override) for APPOINTMENT bookings.
+    // The legacy settings.deposits path only covers % / fixed deposits — the
+    // upfront-payment policy is a separate axis. Without this block, setting
+    // "Cobro por adelantado en citas: Prepago obligatorio" was silently ignored
+    // and the customer could land a CONFIRMED booking with no charge.
+    //
+    // When the policy resolves to 'required':
+    //   • venue has Stripe → inject a synthetic settings.deposits override so
+    //     the existing downstream flow creates the reservation as PENDING +
+    //     mints a Checkout session for the full service price.
+    //   • venue lacks Stripe → mirror the class-booking fallback: confirm the
+    //     booking but stamp depositAmount + a "[PAY-AT-VENUE]" note so the
+    //     widget shows "Debes $X al llegar" and ops can reconcile.
+    let appointmentOwesAtVenue = false
+    let appointmentOwesAmount = 0
+    if (req.body.productId && !req.body.classSessionId) {
+      const upfrontProduct = await prisma.product.findFirst({
+        where: { id: req.body.productId, venueId: venue.id },
+        select: { type: true, price: true, upfrontPolicy: true },
+      })
+      if (upfrontProduct && upfrontProduct.type !== 'CLASS') {
+        const effectivePolicy = resolveUpfrontPolicy(
+          { type: upfrontProduct.type, upfrontPolicy: upfrontProduct.upfrontPolicy },
+          {
+            appointmentUpfrontDefault: settings.payments?.appointmentUpfrontDefault,
+            classUpfrontDefault: settings.payments?.classUpfrontDefault,
+          },
+        )
+        const cashPrice = Number(upfrontProduct.price ?? 0)
+        const willUseCredits =
+          (typeof req.body.creditItemBalanceId === 'string' && req.body.creditItemBalanceId.length > 0) ||
+          (Array.isArray(req.body.creditItemBalanceIds) && req.body.creditItemBalanceIds.length > 0)
+        const requestedPartySize = Number(req.body.partySize ?? 1)
+        const policyDemandsUpfrontCash = effectivePolicy === 'required' && !willUseCredits && cashPrice > 0
+        if (policyDemandsUpfrontCash) {
+          const total = cashPrice * requestedPartySize
+          const stripePreflight = await resolveActiveStripeMerchant(venue.id)
+          if (stripePreflight) {
+            // Synthesize a `prepaid` deposit so calculateDepositAmount returns
+            // the full price and reservationService.createReservation stamps
+            // depositAmount + status=PENDING. The Stripe checkout block below
+            // then mints the session unchanged.
+            settings = {
+              ...settings,
+              deposits: {
+                ...(settings.deposits ?? {}),
+                enabled: true,
+                mode: 'prepaid',
+                fixedAmount: total,
+                percentageOfTotal: null,
+                requiredForPartySizeGte: null,
+                paymentWindowHrs: settings.deposits?.paymentWindowHrs ?? 24,
+              },
+            }
+          } else {
+            appointmentOwesAtVenue = true
+            appointmentOwesAmount = total
+            logger.warn(
+              `⚠️ [APPOINTMENT BOOKING] upfrontPolicy=required but venue ${venue.id} has no Stripe merchant — falling back to pay-at-venue (owes ${total})`,
+            )
+          }
+        }
+      }
+    }
+
     const depositPreview = await previewDepositRequirement(venue.id, req.body, settings)
     const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
@@ -688,7 +754,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
-    const reservation = await reservationService.createReservation(
+    let reservation = await reservationService.createReservation(
       venue.id,
       {
         ...req.body,
@@ -698,6 +764,29 @@ export async function createReservation(req: Request, res: Response, next: NextF
       settings,
     )
 
+    // Owes-at-venue fallback (policy=required + no Stripe merchant): the
+    // reservation was just created CONFIRMED with no deposit. Stamp the
+    // expected amount + a "[PAY-AT-VENUE]" note so the widget and email
+    // surface "Debes $X al llegar" and ops can reconcile on arrival.
+    if (appointmentOwesAtVenue && appointmentOwesAmount > 0) {
+      const ownerNote = `[PAY-AT-VENUE] Cliente debe $${appointmentOwesAmount} al llegar (venue sin Stripe configurado)`
+      const mergedSpecialRequests =
+        [reservation.specialRequests ?? null, ownerNote].filter(Boolean).join(' • ') || null
+      reservation = await prisma.reservation.update({
+        where: { id: reservation.id },
+        data: {
+          depositAmount: new Prisma.Decimal(appointmentOwesAmount),
+          specialRequests: mergedSpecialRequests,
+        },
+        include: {
+          customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
+          table: { select: { id: true, number: true, capacity: true } },
+          product: { select: { id: true, name: true, price: true } },
+          assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+        },
+      })
+    }
+
     let checkoutUrl: string | null = null
     if (reservation.depositAmount && stripeMerchant) {
       const stripeAmount = toStripeAmount(reservation.depositAmount)
@@ -705,12 +794,22 @@ export async function createReservation(req: Request, res: Response, next: NextF
       const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, stripeMerchant.platformFeeBps, _vatRateBps)
       const provider = getProvider(stripeMerchant)
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
+      // Widget can override return URLs (book.avoqado.io vs embed iframe vs
+      // dashboard) — mirror the class-booking pattern so the customer lands
+      // back where they started instead of forcing FRONTEND_URL.
+      const reqSuccess = (req.body as any).successUrl as string | undefined
+      const reqCancel = (req.body as any).cancelUrl as string | undefined
+      const baseSuccess = reqSuccess || `${frontendUrl}/book/${venueSlug}`
+      const baseCancel = reqCancel || baseSuccess
+      const sep = (u: string) => (u.includes('?') ? '&' : '?')
+      const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`
+      const cancelUrl = `${baseCancel}${sep(baseCancel)}payment=cancelled&reservationId=${reservation.id}`
       const session = await provider.createCheckoutSession(stripeMerchant, {
         amount: stripeAmount,
         currency: 'mxn',
         applicationFeeAmount,
-        successUrl: `${frontendUrl}/book/${venueSlug}?payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`,
-        cancelUrl: `${frontendUrl}/book/${venueSlug}?payment=cancelled&reservationId=${reservation.id}`,
+        successUrl,
+        cancelUrl,
         expiresAt: reservation.depositExpiresAt ?? new Date(Date.now() + 30 * 60_000),
         customerEmail: reservation.guestEmail ?? undefined,
         metadata: {
@@ -823,11 +922,15 @@ export async function createReservation(req: Request, res: Response, next: NextF
       startsAt: reservation.startsAt,
       endsAt: reservation.endsAt,
       status: reservation.status,
-      depositRequired: !!reservation.depositAmount,
+      // depositRequired: true means Stripe checkout was minted and the widget
+      // must redirect. owesAtVenue carries depositAmount but no checkout —
+      // the widget shows a "Debes $X al llegar" pill instead.
+      depositRequired: !!reservation.depositAmount && !appointmentOwesAtVenue,
       depositAmount: reservation.depositAmount,
       creditRedeemed,
       creditsUsed,
       checkoutUrl,
+      owesAtVenue: appointmentOwesAtVenue,
     })
   } catch (error) {
     next(error)

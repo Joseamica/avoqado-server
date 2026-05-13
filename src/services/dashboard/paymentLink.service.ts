@@ -2500,6 +2500,20 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
           currency: true,
         },
       },
+      // Pull the order and its line items so the email template can render
+      // a real product breakdown instead of an empty "Recibo #XXXX" header.
+      // For OPEN-amount links there's still an Order, just usually with a
+      // single placeholder "Otro importe" line item.
+      order: {
+        include: {
+          items: {
+            include: {
+              modifiers: { include: { modifier: true } },
+            },
+            orderBy: { sequence: 'asc' },
+          },
+        },
+      },
     },
     orderBy: { createdAt: 'desc' },
   })
@@ -2512,6 +2526,27 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
   const total = new Prisma.Decimal(payment.amount).add(payment.tipAmount ?? 0).toNumber()
   const receiptNumber = payment.id.slice(-4).toUpperCase()
 
+  // Build the "Method of payment" label from the captured card details.
+  // Stripe sometimes resolves OXXO/SPEI which have no card brand — for those
+  // we surface the PaymentMethod enum value as a localized label.
+  const last4 = payment.maskedPan ? payment.maskedPan.replace(/^[*]+/, '').slice(-4) : null
+  const paymentMethod = formatPaymentMethodLabel(payment.cardBrand, last4, payment.method)
+
+  // Map order items to the email template's shape. Modifiers come back as
+  // joined rows so we flatten them per-item with a localized name.
+  const items = payment.order?.items.map(item => ({
+    name: item.productName ?? 'Producto',
+    quantity: item.quantity,
+    price: Number(item.unitPrice),
+    totalPrice: Number(item.total),
+    modifiers: item.modifiers.length
+      ? item.modifiers.map(m => ({
+          name: m.modifier?.name ?? m.name ?? 'Modificador',
+          price: Number(m.price ?? 0),
+        }))
+      : undefined,
+  }))
+
   await emailService.sendReceiptEmail(email, {
     venueName: payment.venue.name,
     receiptUrl: payment.receiptUrl,
@@ -2523,10 +2558,41 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
     venuePhone: payment.venue.phone ?? undefined,
     venueEmail: payment.venue.email ?? undefined,
     currency: payment.venue.currency ?? 'MXN',
-    totalAmount: total,
+    items,
+    subtotal: Number(payment.amount),
     tipAmount: payment.tipAmount ? Number(payment.tipAmount) : undefined,
+    totalAmount: total,
+    paymentMethod,
     paymentDate: payment.createdAt.toISOString(),
   })
 
   return { sent: true }
+}
+
+/** Render the customer-facing payment-method label. Prefers the card brand
+ *  + last 4 ("Visa •••• 4242") when present, otherwise localizes the
+ *  PaymentMethod enum (OXXO, SPEI, etc.). */
+function formatPaymentMethodLabel(cardBrand: string | null, last4: string | null, method: string): string {
+  const brandLabels: Record<string, string> = {
+    VISA: 'Visa',
+    MASTERCARD: 'Mastercard',
+    AMERICAN_EXPRESS: 'Amex',
+    DISCOVER: 'Discover',
+    DINERS_CLUB: 'Diners',
+    JCB: 'JCB',
+    UNIONPAY: 'UnionPay',
+  }
+  if (cardBrand && last4) {
+    return `${brandLabels[cardBrand] ?? 'Tarjeta'} •••• ${last4}`
+  }
+  if (last4) return `Tarjeta •••• ${last4}`
+  const methodLabels: Record<string, string> = {
+    CREDIT_CARD: 'Tarjeta de crédito',
+    DEBIT_CARD: 'Tarjeta de débito',
+    CASH: 'Efectivo',
+    BANK_TRANSFER: 'Transferencia bancaria',
+    OXXO: 'OXXO',
+    SPEI: 'SPEI',
+  }
+  return methodLabels[method] ?? 'Tarjeta'
 }
