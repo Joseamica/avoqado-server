@@ -1128,10 +1128,25 @@ export async function createStripePaymentIntentForPaymentLink(
     applicationFeeCents: applicationFeeAmount,
   })
 
+  // Fail loudly if the deploy is missing the publishable key — without it
+  // Stripe.js initialises with `undefined` on the client and throws
+  // "Expected publishable key to be of type string, got type undefined",
+  // which gives the customer a broken checkout with no actionable error.
+  const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY
+  if (!publishableKey) {
+    logger.error('STRIPE_PUBLISHABLE_KEY env var is not set — payment-link checkout cannot render Stripe Elements', {
+      shortCode,
+      env: process.env.NODE_ENV,
+    })
+    throw new BadRequestError(
+      'El procesador de pagos está mal configurado (falta clave publicable). Contacta a soporte de Avoqado.',
+    )
+  }
+
   return {
     paymentIntentId: paymentIntent.id,
     clientSecret: paymentIntent.client_secret,
-    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
+    publishableKey,
     // We expose connectAccountId because Stripe.js needs `stripeAccount` set
     // when initializing for connected accounts (so direct-charge PaymentIntents
     // resolve correctly).
