@@ -115,8 +115,21 @@ export class ToolCatalogService {
         defaultDateRange: 'today',
       },
       {
+        name: 'payments.detail',
+        description: 'Show one payment detail by safe payment identifier.',
+        tables: ['Payment', 'Order', 'OrderItem', 'Table'],
+        requiresDateRange: false,
+      },
+      {
         name: 'settlementCalendar',
         description: 'Settlement, liquidation, dispersion, or payout amount by settlement date for a period.',
+        tables: ['Payment'],
+        requiresDateRange: true,
+        defaultDateRange: 'today',
+      },
+      {
+        name: 'settlements.detail',
+        description: 'Detailed settlement entries and card-type breakdown for a period.',
         tables: ['Payment'],
         requiresDateRange: true,
         defaultDateRange: 'today',
@@ -130,6 +143,12 @@ export class ToolCatalogService {
       {
         name: 'paymentLinks.summary',
         description: 'Summarize payment link count, activity, sessions, and collected amount.',
+        tables: ['PaymentLink'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'paymentLinks.detail',
+        description: 'Show one payment link detail by safe link identifier.',
         tables: ['PaymentLink'],
         requiresDateRange: false,
       },
@@ -154,6 +173,18 @@ export class ToolCatalogService {
         requiresDateRange: false,
       },
       {
+        name: 'customers.detail',
+        description: 'Show one customer detail summary by safe customer identifier without contact fields.',
+        tables: ['Customer', 'CustomerGroup', 'Order', 'LoyaltyTransaction'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'creditPacks.balance',
+        description: 'Show remaining credit-pack credits for one customer by safe customer identifier.',
+        tables: ['CreditPackPurchase', 'CreditItemBalance', 'CreditPack', 'Product', 'Customer'],
+        requiresDateRange: false,
+      },
+      {
         name: 'team.members',
         description: 'List dashboard team members for the current venue.',
         tables: ['Staff', 'StaffVenue'],
@@ -163,6 +194,12 @@ export class ToolCatalogService {
         name: 'commissions.summary',
         description: 'Venue commission totals, pending/approved/paid amounts, and top earners.',
         tables: ['CommissionSummary', 'CommissionCalculation', 'Staff'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'commissions.payouts',
+        description: 'Commission payout totals and recent payout states.',
+        tables: ['CommissionPayout', 'CommissionSummary', 'Staff'],
         requiresDateRange: false,
       },
       {

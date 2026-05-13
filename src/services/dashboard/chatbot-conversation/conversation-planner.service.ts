@@ -204,6 +204,15 @@ export class ConversationPlannerService {
       steps.push({ id: this.nextStepId('query', steps), kind: 'query', tool: 'pendingOrders', args: {} })
     }
 
+    if (this.hasSettlementDetailIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'settlements.detail',
+        args: { dateRange: this.extractDateRange(normalized) || 'today' },
+      })
+    }
+
     if (this.hasSettlementCalendarIntent(normalized)) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -211,6 +220,25 @@ export class ConversationPlannerService {
         tool: 'settlementCalendar',
         args: { dateRange: this.extractDateRange(normalized) || 'today' },
       })
+    }
+
+    if (this.hasPaymentDetailIntent(normalized)) {
+      const paymentId = this.extractBusinessIdentifier(normalized, ['pago', 'payment'])
+      if (paymentId) {
+        steps.push({
+          id: this.nextStepId('query', steps),
+          kind: 'query',
+          tool: 'payments.detail',
+          args: { paymentId },
+        })
+      } else {
+        steps.push({
+          id: this.nextStepId('clarify', steps),
+          kind: 'clarify',
+          question: '¿Cuál pago quieres revisar? Puedes compartir el identificador o abrir primero la lista de pagos.',
+          missing: ['paymentId'],
+        })
+      }
     }
 
     if (this.hasPaymentsSummaryIntent(normalized)) {
@@ -229,6 +257,25 @@ export class ConversationPlannerService {
         tool: 'payments.list',
         args: { dateRange: this.extractDateRange(normalized) || 'today', limit: 10 },
       })
+    }
+
+    if (this.hasPaymentLinksDetailIntent(normalized)) {
+      const linkId = this.extractBusinessIdentifier(normalized, ['link', 'liga', 'enlace'])
+      if (linkId) {
+        steps.push({
+          id: this.nextStepId('query', steps),
+          kind: 'query',
+          tool: 'paymentLinks.detail',
+          args: { linkId },
+        })
+      } else {
+        steps.push({
+          id: this.nextStepId('clarify', steps),
+          kind: 'clarify',
+          question: '¿Cuál link de pago quieres revisar? Puedes compartir el identificador o pedirme primero la lista de links.',
+          missing: ['linkId'],
+        })
+      }
     }
 
     if (this.hasPaymentLinksSummaryIntent(normalized)) {
@@ -267,6 +314,45 @@ export class ConversationPlannerService {
       })
     }
 
+    if (this.hasCustomerDetailIntent(normalized)) {
+      const customerId = this.extractBusinessIdentifier(normalized, ['cliente', 'customer'])
+      if (customerId) {
+        steps.push({
+          id: this.nextStepId('query', steps),
+          kind: 'query',
+          tool: 'customers.detail',
+          args: { customerId },
+        })
+      } else {
+        steps.push({
+          id: this.nextStepId('clarify', steps),
+          kind: 'clarify',
+          question:
+            '¿Cuál cliente quieres revisar? Puedes compartir el identificador del cliente o pedirme primero el resumen de clientes.',
+          missing: ['customerId'],
+        })
+      }
+    }
+
+    if (this.hasCreditPackBalanceIntent(normalized)) {
+      const customerId = this.extractBusinessIdentifier(normalized, ['cliente', 'customer'])
+      if (customerId) {
+        steps.push({
+          id: this.nextStepId('query', steps),
+          kind: 'query',
+          tool: 'creditPacks.balance',
+          args: { customerId },
+        })
+      } else {
+        steps.push({
+          id: this.nextStepId('clarify', steps),
+          kind: 'clarify',
+          question: '¿De cuál cliente quieres revisar créditos? Necesito el identificador del cliente.',
+          missing: ['customerId'],
+        })
+      }
+    }
+
     if (this.hasCustomersSummaryIntent(normalized)) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -291,6 +377,15 @@ export class ConversationPlannerService {
         kind: 'query',
         tool: 'commissions.summary',
         args: {},
+      })
+    }
+
+    if (this.hasCommissionPayoutsIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'commissions.payouts',
+        args: { limit: 10 },
       })
     }
 
@@ -610,7 +705,13 @@ export class ConversationPlannerService {
     const asksAmount = /\b(cuanto|cuanta|cuantos|cuantas|monto|total|amount|how much)\b/.test(normalized)
     const settlementTerm =
       /\b(liquidacion|liquidaciones|liquid\w*|dispers\w*|deposit\w*|pagan|pago|pagaran|payout|settlement|settle|deposit)\b/.test(normalized)
-    return asksAmount && settlementTerm
+    return asksAmount && settlementTerm && !this.hasSettlementDetailIntent(normalized)
+  }
+
+  private hasSettlementDetailIntent(normalized: string): boolean {
+    const settlementTerm = /\b(liquidacion|liquidaciones|liquid\w*|dispers\w*|settlement|settlements)\b/.test(normalized)
+    const detailIntent = /\b(detalle|detallado|desglose|breakdown|por tarjeta|card type|tarjeta)\b/.test(normalized)
+    return settlementTerm && detailIntent
   }
 
   private hasPaymentLinksListIntent(normalized: string): boolean {
@@ -619,6 +720,13 @@ export class ConversationPlannerService {
     const summaryIntent = /\b(resumen|summary|total|cuantos|cuantas|metricas|estadisticas)\b/.test(normalized)
     const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|archiva|pausa|pausar)\b/.test(normalized)
     return paymentLinkTerm && readIntent && !summaryIntent && !mutationIntent
+  }
+
+  private hasPaymentLinksDetailIntent(normalized: string): boolean {
+    const paymentLinkTerm = /\b(link|links|liga|ligas|enlace|enlaces)\s+(de\s+)?pago|payment\s+links?\b/.test(normalized)
+    const detailIntent = /\b(detalle|detallado|estatus|estado|como va|checkout|sesiones)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|archiva|pausa|pausar)\b/.test(normalized)
+    return paymentLinkTerm && detailIntent && !mutationIntent
   }
 
   private hasPaymentLinksSummaryIntent(normalized: string): boolean {
@@ -636,12 +744,24 @@ export class ConversationPlannerService {
     const summaryIntent = /\b(cuantos|cuantas|cuanto|cuanta|total|monto|recibi|recibidos|recibidas|amount|how many|how much)\b/.test(
       normalized,
     )
-    return this.hasPaymentTerms(normalized) && summaryIntent
+    return this.hasPaymentTerms(normalized) && summaryIntent && !this.hasPaymentDetailIntent(normalized)
   }
 
   private hasPaymentsListIntent(normalized: string): boolean {
     const listIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|show|list|see)\b/.test(normalized)
-    return this.hasPaymentTerms(normalized) && listIntent && !this.hasPaymentsSummaryIntent(normalized)
+    return (
+      this.hasPaymentTerms(normalized) &&
+      listIntent &&
+      !this.hasPaymentsSummaryIntent(normalized) &&
+      !this.hasPaymentDetailIntent(normalized)
+    )
+  }
+
+  private hasPaymentDetailIntent(normalized: string): boolean {
+    const paymentTerm = /\b(pago|payment)\b/.test(normalized)
+    const detailIntent = /\b(detalle|detallado|recibo|receipt|estatus|estado|info|informacion)\b/.test(normalized)
+    const mutationIntent = /\b(borra|borrar|elimina|eliminar|reembolsa|reembolsar|manda|enviar|envia)\b/.test(normalized)
+    return paymentTerm && detailIntent && !this.hasPaymentLinksDetailIntent(normalized) && !mutationIntent
   }
 
   private hasReservationTerms(normalized: string): boolean {
@@ -670,7 +790,28 @@ export class ConversationPlannerService {
     const summaryIntent =
       /\b(resumen|summary|total|cuantos|cuantas|metricas|estadisticas|nuevos|activos|vip|frecuentes|top|spenders?)\b/.test(normalized)
     const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|elimina|liquida|settle)\b/.test(normalized)
-    return customerTerm && summaryIntent && !mutationIntent
+    return (
+      customerTerm &&
+      summaryIntent &&
+      !this.hasCustomerDetailIntent(normalized) &&
+      !this.hasCreditPackBalanceIntent(normalized) &&
+      !mutationIntent
+    )
+  }
+
+  private hasCustomerDetailIntent(normalized: string): boolean {
+    const customerTerm = /\b(cliente|clientes|customer|customers)\b/.test(normalized)
+    const detailIntent = /\b(detalle|detallado|perfil|historial|info|informacion|datos)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|elimina)\b/.test(normalized)
+    return customerTerm && detailIntent && !mutationIntent
+  }
+
+  private hasCreditPackBalanceIntent(normalized: string): boolean {
+    const creditTerm = /\b(credito|creditos|credit pack|credit packs|paquete de credito|paquetes de credito)\b/.test(normalized)
+    const balanceIntent = /\b(quedan|queda|saldo|disponible|disponibles|tiene|balance|restante|restantes)\b/.test(normalized)
+    const customerTerm = /\b(cliente|customer)\b/.test(normalized)
+    const mutationIntent = /\b(agrega|agregar|ajusta|ajustar|redime|redimir|descuenta|descontar|borra|borrar|elimina)\b/.test(normalized)
+    return creditTerm && balanceIntent && customerTerm && !mutationIntent
   }
 
   private hasTeamMembersIntent(normalized: string): boolean {
@@ -689,7 +830,25 @@ export class ConversationPlannerService {
     const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|aprueba|aprobar|paga|pagar|recalcula)\b/.test(
       normalized,
     )
-    return commissionTerm && summaryIntent && !mutationIntent
+    return commissionTerm && summaryIntent && !this.hasCommissionPayoutsIntent(normalized) && !mutationIntent
+  }
+
+  private hasCommissionPayoutsIntent(normalized: string): boolean {
+    const commissionTerm = /\b(comision|comisiones|commission|commissions)\b/.test(normalized)
+    const payoutTerm = /\b(payout|payouts|pago de comision|pagos de comision|pagos|dispersiones)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|aprueba|aprobar|paga|pagar|cancela)\b/.test(
+      normalized,
+    )
+    return commissionTerm && payoutTerm && !mutationIntent
+  }
+
+  private extractBusinessIdentifier(normalized: string, nouns: string[]): string | null {
+    const nounPattern = nouns.join('|')
+    const match = normalized.match(new RegExp(`(?:${nounPattern})(?:\\s+de\\s+pago)?\\s+([a-z0-9][a-z0-9_-]{2,79})`))
+    const candidate = match?.[1]
+    if (!candidate) return null
+    if (/^(de|del|la|el|hoy|ayer|detalle|detallado|pago|link|liga|enlace)$/.test(candidate)) return null
+    return candidate
   }
 
   private extractDateRange(normalized: string): RelativeDateRange | undefined {

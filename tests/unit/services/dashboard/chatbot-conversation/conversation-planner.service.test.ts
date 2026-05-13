@@ -119,6 +119,39 @@ describe('ConversationPlannerService', () => {
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
+  it('plans customer detail and credit-pack balance only when customer id is present', async () => {
+    const customer = await planner.plan({
+      message: 'detalle del cliente cust_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const credits = await planner.plan({
+      message: 'cuantos creditos le quedan al cliente cust_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const missingCustomer = await planner.plan({
+      message: 'detalle del cliente',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const missingCredits = await planner.plan({
+      message: 'cuantos creditos le quedan al cliente',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(customer.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.detail', args: { customerId: 'cust_123' } })])
+    expect(credits.steps).toEqual([
+      expect.objectContaining({ kind: 'query', tool: 'creditPacks.balance', args: { customerId: 'cust_123' } }),
+    ])
+    expect(missingCustomer.mode).toBe('clarification')
+    expect(missingCustomer.steps[0]).toEqual(expect.objectContaining({ kind: 'clarify', missing: ['customerId'] }))
+    expect(missingCredits.mode).toBe('clarification')
+    expect(missingCredits.steps[0]).toEqual(expect.objectContaining({ kind: 'clarify', missing: ['customerId'] }))
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
   it('plans reservation summary and list questions deterministically', async () => {
     const summary = await planner.plan({
       message: 'cuantas reservaciones tengo hoy',
@@ -152,6 +185,47 @@ describe('ConversationPlannerService', () => {
 
     expect(summary.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'payments.summary', args: { dateRange: 'today' } })])
     expect(list.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'payments.list', args: { dateRange: 'today', limit: 10 } })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('plans settlement detail and commission payout questions deterministically', async () => {
+    const settlement = await planner.plan({
+      message: 'dame el detalle de liquidacion de hoy por tarjeta',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const payouts = await planner.plan({
+      message: 'resumen de payouts de comisiones',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(settlement.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'settlements.detail', args: { dateRange: 'today' } })])
+    expect(payouts.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.payouts', args: { limit: 10 } })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('plans payment and payment-link detail only when an identifier is present', async () => {
+    const payment = await planner.plan({
+      message: 'detalle del pago pay_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const link = await planner.plan({
+      message: 'detalle del link de pago pl_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const missingPayment = await planner.plan({
+      message: 'detalle del pago',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(payment.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'payments.detail', args: { paymentId: 'pay_123' } })])
+    expect(link.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.detail', args: { linkId: 'pl_123' } })])
+    expect(missingPayment.mode).toBe('clarification')
+    expect(missingPayment.steps[0]).toEqual(expect.objectContaining({ kind: 'clarify', missing: ['paymentId'] }))
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 

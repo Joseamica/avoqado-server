@@ -611,11 +611,15 @@ export async function createReservation(req: Request, res: Response, next: NextF
         const _vatRateBps = await getVatRateBps()
         const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, stripeMerchant.platformFeeBps, _vatRateBps)
         const provider = getProvider(stripeMerchant)
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
+        // Default return target: the public booking site (book.avoqado.io/{slug}).
+        // FRONTEND_URL points at the dashboard (dashboardv2.avoqado.io) which has
+        // a legacy /book/{slug} route — landing the customer there after a Stripe
+        // cancel surfaces an unfamiliar UI and was the source of reported confusion.
+        const bookingPublicUrl = process.env.BOOKING_PUBLIC_URL || 'http://localhost:5174'
         // Widget can override return URLs (book.avoqado.io vs embed iframe vs dashboard).
         const reqSuccess = (req.body as any).successUrl as string | undefined
         const reqCancel = (req.body as any).cancelUrl as string | undefined
-        const baseSuccess = reqSuccess || `${frontendUrl}/book/${venueSlug}`
+        const baseSuccess = reqSuccess || `${bookingPublicUrl}/${venueSlug}`
         const baseCancel = reqCancel || baseSuccess
         const sep = (u: string) => (u.includes('?') ? '&' : '?')
         const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`
@@ -794,13 +798,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
       const _vatRateBps = await getVatRateBps()
       const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, stripeMerchant.platformFeeBps, _vatRateBps)
       const provider = getProvider(stripeMerchant)
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
-      // Widget can override return URLs (book.avoqado.io vs embed iframe vs
-      // dashboard) — mirror the class-booking pattern so the customer lands
-      // back where they started instead of forcing FRONTEND_URL.
+      // Default return target: the public booking site (book.avoqado.io/{slug}).
+      // FRONTEND_URL points at the dashboard which has only a legacy /book/{slug}
+      // route — landing the customer there after a Stripe cancel surfaces an
+      // unfamiliar UI. Widget can still override via req.body.{success,cancel}Url.
+      const bookingPublicUrl = process.env.BOOKING_PUBLIC_URL || 'http://localhost:5174'
       const reqSuccess = (req.body as any).successUrl as string | undefined
       const reqCancel = (req.body as any).cancelUrl as string | undefined
-      const baseSuccess = reqSuccess || `${frontendUrl}/book/${venueSlug}`
+      const baseSuccess = reqSuccess || `${bookingPublicUrl}/${venueSlug}`
       const baseCancel = reqCancel || baseSuccess
       const sep = (u: string) => (u.includes('?') ? '&' : '?')
       const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`

@@ -37,11 +37,14 @@ describe('ConversationOrchestratorService', () => {
         'inventory:update',
         'inventory:read',
         'payment-link:read',
+        'settlements:read',
         'reservations:read',
         'payments:read',
         'customers:read',
+        'credit-packs:read',
         'teams:read',
         'commissions:read',
+        'commissions:payout',
       ],
     })
   })
@@ -244,6 +247,69 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.summary', status: 'executed' })])
   })
 
+  it('answers customer detail questions without exposing contact fields or internal IDs', async () => {
+    jest.spyOn(SharedQueryService, 'getCustomerDetail').mockResolvedValue({
+      name: 'Ana Perez',
+      active: true,
+      loyaltyPoints: 120,
+      totalVisits: 6,
+      totalSpent: 1500,
+      averageOrderValue: 250,
+      lastVisitAt: new Date('2026-05-12T00:00:00.000Z'),
+      customerGroupName: 'VIP',
+      tags: ['frecuente'],
+      recentOrders: [{ orderNumber: 'ORD-7', total: 500, status: 'COMPLETED', createdAt: new Date('2026-05-12T20:00:00.000Z') }],
+      recentLoyaltyTransactions: [{ type: 'EARN', points: 50, createdAt: new Date('2026-05-12T20:00:00.000Z') }],
+    })
+
+    const response = await orchestrator.process({
+      message: 'detalle del cliente cust_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getCustomerDetail).toHaveBeenCalledWith('venue-1', 'cust_123')
+    expect(response?.response).toContain('Detalle de cliente Ana Perez')
+    expect(response?.response).toContain('VIP')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.detail', status: 'executed' })])
+  })
+
+  it('answers credit-pack balance questions without exposing balance IDs or customer contact', async () => {
+    jest.spyOn(SharedQueryService, 'getCreditPackBalance').mockResolvedValue({
+      customerName: 'Ana Perez',
+      totalPurchases: 1,
+      activePurchases: 1,
+      totalRemainingCredits: 7,
+      balances: [
+        {
+          packName: 'Clases 10',
+          productName: 'Yoga',
+          productType: 'CLASS',
+          initialQuantity: 10,
+          remainingQuantity: 7,
+          expiresAt: new Date('2026-06-01T00:00:00.000Z'),
+          status: 'ACTIVE',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'cuantos creditos le quedan al cliente cust_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getCreditPackBalance).toHaveBeenCalledWith('venue-1', 'cust_123')
+    expect(response?.response).toContain('Ana Perez tiene 7 créditos disponibles')
+    expect(response?.response).toContain('Clases 10')
+    expect(response?.response).not.toContain('balance')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'creditPacks.balance', status: 'executed' })])
+  })
+
   it('answers team member questions without exposing emails or PINs', async () => {
     jest.spyOn(SharedQueryService, 'getTeamMembers').mockResolvedValue({
       total: 1,
@@ -299,6 +365,144 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).toContain('$1,000.00 pagado')
     expect(response?.response).toContain('Ana Admin')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.summary', status: 'executed' })])
+  })
+
+  it('answers settlement detail questions with card breakdown', async () => {
+    jest.spyOn(SharedQueryService, 'getSettlementDetailForPeriod').mockResolvedValue({
+      totalNetAmount: 1250,
+      transactionCount: 3,
+      currency: 'MXN',
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+      entries: [
+        {
+          settlementDate: new Date('2026-05-12T12:00:00.000Z'),
+          totalNetAmount: 1250,
+          transactionCount: 3,
+          status: 'PENDING',
+          byCardType: [
+            { cardType: 'DEBIT', netAmount: 750, transactionCount: 2 },
+            { cardType: 'CREDIT', netAmount: 500, transactionCount: 1 },
+          ],
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'detalle de liquidacion de hoy por tarjeta',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getSettlementDetailForPeriod).toHaveBeenCalledWith('venue-1', 'today')
+    expect(response?.response).toContain('Detalle de liquidaciones')
+    expect(response?.response).toContain('DEBIT: $750.00')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'settlements.detail', status: 'executed' })])
+  })
+
+  it('answers payment detail questions without exposing processor secrets', async () => {
+    jest.spyOn(SharedQueryService, 'getPaymentDetail').mockResolvedValue({
+      amount: 500,
+      tipAmount: 50,
+      netAmount: 550,
+      currency: 'MXN',
+      status: 'COMPLETED',
+      method: 'CARD',
+      source: 'TPV',
+      cardBrand: 'VISA',
+      last4: '4242',
+      createdAt: new Date('2026-05-12T20:00:00.000Z'),
+      processedByName: 'Ana Admin',
+      orderNumber: 'ORD-7',
+      tableNumber: '12',
+      merchantName: 'Stripe MXN',
+      items: [{ name: 'Taco', quantity: 2, total: 200 }],
+    })
+
+    const response = await orchestrator.process({
+      message: 'detalle del pago pay_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPaymentDetail).toHaveBeenCalledWith('venue-1', 'pay_123')
+    expect(response?.response).toContain('Detalle del pago')
+    expect(response?.response).toContain('terminación 4242')
+    expect(response?.response).not.toContain('authorization')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'payments.detail', status: 'executed' })])
+  })
+
+  it('answers payment link detail questions without exposing checkout customer emails', async () => {
+    jest.spyOn(SharedQueryService, 'getPaymentLinkDetail').mockResolvedValue({
+      title: 'Cena privada',
+      shortCode: 'abc12345',
+      url: 'https://pay.avoqado.io/abc12345',
+      status: 'ACTIVE',
+      purpose: 'PAYMENT',
+      amountType: 'FIXED',
+      amount: 500,
+      currency: 'MXN',
+      isReusable: true,
+      totalCollected: 1000,
+      paymentCount: 2,
+      checkoutSessionCount: 1,
+      createdAt: new Date('2026-05-12T12:00:00.000Z'),
+      expiresAt: null,
+      createdByName: 'Ana Admin',
+      recentSessions: [{ amount: 500, status: 'COMPLETED', createdAt: new Date('2026-05-12T13:00:00.000Z'), completedAt: null }],
+    })
+
+    const response = await orchestrator.process({
+      message: 'detalle del link de pago pl_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPaymentLinkDetail).toHaveBeenCalledWith('venue-1', 'pl_123')
+    expect(response?.response).toContain('Detalle del link Cena privada')
+    expect(response?.response).toContain('https://pay.avoqado.io/abc12345')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.detail', status: 'executed' })])
+  })
+
+  it('answers commission payout questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'getCommissionPayoutsSummary').mockResolvedValue({
+      totalPaid: 1000,
+      totalPending: 300,
+      payoutCount: 2,
+      averagePayout: 500,
+      recentPayouts: [
+        {
+          amount: 700,
+          status: 'PAID',
+          paymentMethod: 'BANK_TRANSFER',
+          staffName: 'Ana Admin',
+          createdAt: new Date('2026-05-12T12:00:00.000Z'),
+          paidAt: new Date('2026-05-12T18:00:00.000Z'),
+          periodStart: new Date('2026-05-01T00:00:00.000Z'),
+          periodEnd: new Date('2026-05-12T23:59:59.999Z'),
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'resumen de payouts de comisiones',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getCommissionPayoutsSummary).toHaveBeenCalledWith('venue-1', { limit: 10 })
+    expect(response?.response).toContain('Payouts de comisiones')
+    expect(response?.response).toContain('$1,000.00 pagado')
+    expect(response?.response).toContain('Ana Admin')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.payouts', status: 'executed' })])
   })
 
   it('blocks payment link list questions when the user lacks payment-link read permission', async () => {

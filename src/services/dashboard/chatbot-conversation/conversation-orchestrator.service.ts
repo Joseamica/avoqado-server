@@ -502,6 +502,20 @@ export class ConversationOrchestratorService {
           payments.payments.length,
         )
       }
+      case 'payments.detail': {
+        const paymentId = this.requiredStringArg(step, 'paymentId')
+        const payment = await SharedQueryService.getPaymentDetail(venueId, paymentId)
+        const card = payment.last4 ? `, terminación ${payment.last4}` : ''
+        const order = payment.orderNumber ? `, orden ${payment.orderNumber}` : ''
+        const table = payment.tableNumber ? `, mesa ${payment.tableNumber}` : ''
+        const staff = payment.processedByName ? `, procesó ${payment.processedByName}` : ''
+        const items = payment.items.map(item => `- ${item.name}: ${item.quantity} x ${this.money(item.total, payment.currency)}`).join('\n')
+        return this.queryResult(
+          step.tool,
+          payment,
+          `Detalle del pago: ${this.money(payment.amount, payment.currency)} + ${this.money(payment.tipAmount, payment.currency)} propina, ${payment.method}, ${payment.status}${card}${order}${table}${staff}.${items ? `\nItems:\n${items}` : ''}`,
+        )
+      }
       case 'settlementCalendar': {
         const settlement = await SharedQueryService.getSettlementCalendarForPeriod(venueId, dateRange)
         const list = settlement.entries
@@ -517,6 +531,26 @@ export class ConversationOrchestratorService {
           settlement.transactionCount > 0
             ? `Para ${this.formatDateRangeName(dateRange)}, te liquidan ${this.money(settlement.totalNetAmount, settlement.currency)} netos en ${settlement.transactionCount} transacciones.${list ? `\n${list}` : ''}`
             : `No hay liquidaciones programadas para ${this.formatDateRangeName(dateRange)}.`,
+          settlement.entries.length,
+        )
+      }
+      case 'settlements.detail': {
+        const settlement = await SharedQueryService.getSettlementDetailForPeriod(venueId, dateRange)
+        const list = settlement.entries
+          .slice(0, this.limit(step, 8))
+          .map(entry => {
+            const byCard = entry.byCardType
+              .map(card => `${card.cardType}: ${this.money(card.netAmount, settlement.currency)} (${card.transactionCount})`)
+              .join(', ')
+            return `- ${this.formatDate(entry.settlementDate)}: ${this.money(entry.totalNetAmount, settlement.currency)} netos, ${entry.transactionCount} transacciones, ${entry.status}${byCard ? `; ${byCard}` : ''}.`
+          })
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          settlement,
+          settlement.transactionCount > 0
+            ? `Detalle de liquidaciones de ${this.formatDateRangeName(dateRange)}: ${this.money(settlement.totalNetAmount, settlement.currency)} netos en ${settlement.transactionCount} transacciones.\n${list}`
+            : `No hay liquidaciones para ${this.formatDateRangeName(dateRange)}.`,
           settlement.entries.length,
         )
       }
@@ -539,6 +573,20 @@ export class ConversationOrchestratorService {
           links,
           links.links.length > 0 ? `Tienes ${links.total} links de pago:\n${list}${more}` : 'No encontré links de pago para este venue.',
           links.links.length,
+        )
+      }
+      case 'paymentLinks.detail': {
+        const linkId = this.requiredStringArg(step, 'linkId')
+        const link = await SharedQueryService.getPaymentLinkDetail(venueId, linkId)
+        const amount = link.amountType === 'OPEN' || link.amount == null ? 'monto abierto' : this.money(link.amount, link.currency)
+        const sessions = link.recentSessions
+          .map(session => `- ${this.formatDateTime(session.createdAt)}: ${this.money(session.amount, link.currency)}, ${session.status}.`)
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          link,
+          `Detalle del link ${link.title}: ${link.status}, ${amount}, ${link.paymentCount} pagos, ${this.money(link.totalCollected, link.currency)} cobrado. ${link.url}${sessions ? `\nSesiones recientes:\n${sessions}` : ''}`,
+          link.recentSessions.length,
         )
       }
       case 'paymentLinks.summary': {
@@ -603,6 +651,48 @@ export class ConversationOrchestratorService {
           customers.topSpenders.length,
         )
       }
+      case 'customers.detail': {
+        const customerId = this.requiredStringArg(step, 'customerId')
+        const customer = await SharedQueryService.getCustomerDetail(venueId, customerId)
+        const group = customer.customerGroupName ? ` Grupo: ${customer.customerGroupName}.` : ''
+        const lastVisit = customer.lastVisitAt ? ` Última visita: ${this.formatDate(customer.lastVisitAt)}.` : ''
+        const orders = customer.recentOrders
+          .slice(0, 3)
+          .map(
+            order =>
+              `- ${order.orderNumber || 'Orden'}: ${this.money(order.total)}, ${order.status}, ${this.formatDateTime(order.createdAt)}.`,
+          )
+          .join('\n')
+        const loyalty = customer.recentLoyaltyTransactions
+          .slice(0, 3)
+          .map(transaction => `- ${transaction.type}: ${transaction.points} puntos, ${this.formatDateTime(transaction.createdAt)}.`)
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          customer,
+          `Detalle de cliente ${customer.name}: ${customer.active ? 'activo' : 'inactivo'}, ${customer.loyaltyPoints} puntos, ${customer.totalVisits} visitas, ${this.money(customer.totalSpent)} gastado, ticket promedio ${this.money(customer.averageOrderValue)}.${group}${lastVisit}${orders ? `\nÓrdenes recientes:\n${orders}` : ''}${loyalty ? `\nMovimientos de lealtad:\n${loyalty}` : ''}`,
+          customer.recentOrders.length,
+        )
+      }
+      case 'creditPacks.balance': {
+        const customerId = this.requiredStringArg(step, 'customerId')
+        const credits = await SharedQueryService.getCreditPackBalance(venueId, customerId)
+        const list = credits.balances
+          .slice(0, this.limit(step, 10))
+          .map(item => {
+            const expiration = item.expiresAt ? `, vence ${this.formatDate(item.expiresAt)}` : ''
+            return `- ${item.productName} (${item.packName}): ${item.remainingQuantity}/${item.initialQuantity} créditos, ${item.status}${expiration}.`
+          })
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          credits,
+          credits.balances.length > 0
+            ? `${credits.customerName} tiene ${credits.totalRemainingCredits} créditos disponibles en ${credits.activePurchases} compras activas.${list ? `\nCréditos por producto:\n${list}` : ''}`
+            : `${credits.customerName} no tiene créditos disponibles.`,
+          credits.balances.length,
+        )
+      }
       case 'team.members': {
         const team = await SharedQueryService.getTeamMembers(venueId, {
           limit: this.limit(step, 10),
@@ -636,6 +726,18 @@ export class ConversationOrchestratorService {
           commissions,
           `Comisiones: ${this.money(commissions.totalPaid)} pagado, ${this.money(commissions.totalApproved)} aprobado y ${this.money(commissions.totalPending)} pendiente. ${commissions.staffWithCommissions} miembros tienen comisiones; promedio ${this.money(commissions.averageCommission)}.${topEarners ? `\nTop comisiones:\n${topEarners}` : ''}`,
           commissions.topEarners.length,
+        )
+      }
+      case 'commissions.payouts': {
+        const payouts = await SharedQueryService.getCommissionPayoutsSummary(venueId, { limit: this.limit(step, 10) })
+        const list = payouts.recentPayouts
+          .map(payout => `- ${payout.staffName}: ${this.money(payout.amount)}, ${payout.status}, ${payout.paymentMethod || 'sin método'}.`)
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          payouts,
+          `Payouts de comisiones: ${this.money(payouts.totalPaid)} pagado, ${this.money(payouts.totalPending)} pendiente, ${payouts.payoutCount} payouts pagados, promedio ${this.money(payouts.averagePayout)}.${list ? `\nRecientes:\n${list}` : ''}`,
+          payouts.recentPayouts.length,
         )
       }
       default:
@@ -675,6 +777,14 @@ export class ConversationOrchestratorService {
     const raw = Number(step.args.limit)
     if (!Number.isFinite(raw)) return fallback
     return Math.min(Math.max(Math.trunc(raw), 1), 25)
+  }
+
+  private requiredStringArg(step: PlannerQueryStep, key: string): string {
+    const value = step.args[key]
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      throw new Error(`Missing required arg for ${step.tool}: ${key}`)
+    }
+    return value.trim()
   }
 
   private formatSales(

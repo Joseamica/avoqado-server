@@ -43,6 +43,8 @@ import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { PaymentMethod, Prisma, ReservationStatus } from '@prisma/client'
 import * as availableBalanceService from './availableBalance.dashboard.service'
 import * as commissionCalculationService from './commission/commission-calculation.service'
+import * as commissionPayoutService from './commission/commission-payout.service'
+import * as creditPackDashboardService from './creditPack.dashboard.service'
 import * as customerDashboardService from './customer.dashboard.service'
 import * as paymentDashboardService from './payment.dashboard.service'
 import * as paymentLinkService from './paymentLink.service'
@@ -318,6 +320,8 @@ export interface SettlementCalendarSummary {
   }>
 }
 
+export type SettlementDetailSummary = SettlementCalendarSummary
+
 export interface PaymentLinksSummary {
   total: number
   limit: number
@@ -339,6 +343,30 @@ export interface PaymentLinksSummary {
     createdAt: Date
     expiresAt: Date | null
     createdByName: string | null
+  }>
+}
+
+export interface PaymentLinkDetailSummary {
+  title: string
+  shortCode: string
+  url: string
+  status: string
+  purpose: string
+  amountType: string
+  amount: number | null
+  currency: string
+  isReusable: boolean
+  totalCollected: number
+  paymentCount: number
+  checkoutSessionCount: number
+  createdAt: Date
+  expiresAt: Date | null
+  createdByName: string | null
+  recentSessions: Array<{
+    amount: number
+    status: string
+    createdAt: Date
+    completedAt: Date | null
   }>
 }
 
@@ -365,6 +393,45 @@ export interface CustomerSummary {
     name: string
     totalSpent: number
     totalVisits: number
+  }>
+}
+
+export interface CustomerDetailSummary {
+  name: string
+  active: boolean
+  loyaltyPoints: number
+  totalVisits: number
+  totalSpent: number
+  averageOrderValue: number
+  lastVisitAt: Date | null
+  customerGroupName: string | null
+  tags: string[]
+  recentOrders: Array<{
+    orderNumber: string | null
+    total: number
+    status: string
+    createdAt: Date
+  }>
+  recentLoyaltyTransactions: Array<{
+    type: string
+    points: number
+    createdAt: Date
+  }>
+}
+
+export interface CreditPackBalanceSummary {
+  customerName: string
+  totalPurchases: number
+  activePurchases: number
+  totalRemainingCredits: number
+  balances: Array<{
+    packName: string
+    productName: string
+    productType: string | null
+    initialQuantity: number
+    remainingQuantity: number
+    expiresAt: Date | null
+    status: string
   }>
 }
 
@@ -397,6 +464,23 @@ export interface CommissionsSummary {
   }>
 }
 
+export interface CommissionPayoutsSummary {
+  totalPaid: number
+  totalPending: number
+  payoutCount: number
+  averagePayout: number
+  recentPayouts: Array<{
+    amount: number
+    status: string
+    paymentMethod: string | null
+    staffName: string
+    createdAt: Date
+    paidAt: Date | null
+    periodStart: Date | null
+    periodEnd: Date | null
+  }>
+}
+
 export interface PaymentsSummary {
   totalPayments: number
   completedPayments: number
@@ -409,6 +493,28 @@ export interface PaymentsSummary {
     from: Date
     to: Date
   }
+}
+
+export interface PaymentDetailSummary {
+  amount: number
+  tipAmount: number
+  netAmount: number
+  currency: string
+  status: string
+  method: string
+  source: string | null
+  cardBrand: string | null
+  last4: string | null
+  createdAt: Date
+  processedByName: string | null
+  orderNumber: string | null
+  tableNumber: string | null
+  merchantName: string | null
+  items: Array<{
+    name: string
+    quantity: number
+    total: number
+  }>
 }
 
 export interface PaymentsListSummary {
@@ -1544,6 +1650,16 @@ export class SharedQueryService {
   }
 
   /**
+   * Settlement detail for the current venue and period.
+   *
+   * Uses the same available-balance calendar as settlement summaries; this
+   * method exists so the chatbot capability can have a distinct contract.
+   */
+  static async getSettlementDetailForPeriod(venueId: string, period: DateRangeSpec, timezone?: string): Promise<SettlementDetailSummary> {
+    return this.getSettlementCalendarForPeriod(venueId, period, timezone)
+  }
+
+  /**
    * List payment links for the current venue.
    *
    * Used by:
@@ -1611,6 +1727,37 @@ export class SharedQueryService {
   }
 
   /**
+   * Get one payment link with customer/session secrets removed.
+   */
+  static async getPaymentLinkDetail(venueId: string, linkId: string): Promise<PaymentLinkDetailSummary> {
+    const link = await paymentLinkService.getPaymentLinkById(venueId, linkId)
+
+    return {
+      title: link.title,
+      shortCode: link.shortCode,
+      url: `https://pay.avoqado.io/${link.shortCode}`,
+      status: link.status,
+      purpose: link.purpose,
+      amountType: link.amountType,
+      amount: link.amount == null ? null : this.numberValue(link.amount),
+      currency: link.currency,
+      isReusable: link.isReusable,
+      totalCollected: this.numberValue(link.totalCollected),
+      paymentCount: Number(link.paymentCount || 0),
+      checkoutSessionCount: link._count?.checkoutSessions ?? 0,
+      createdAt: link.createdAt,
+      expiresAt: link.expiresAt,
+      createdByName: link.createdBy ? `${link.createdBy.firstName || ''} ${link.createdBy.lastName || ''}`.trim() || null : null,
+      recentSessions: (link.checkoutSessions || []).map(session => ({
+        amount: this.numberValue(session.amount),
+        status: session.status,
+        createdAt: session.createdAt,
+        completedAt: session.completedAt,
+      })),
+    }
+  }
+
+  /**
    * Summarize customers for the current venue without exposing PII.
    *
    * Used by:
@@ -1632,6 +1779,71 @@ export class SharedQueryService {
         totalSpent: customer.totalSpent,
         totalVisits: customer.totalVisits,
       })),
+    }
+  }
+
+  /**
+   * Get one customer summary with PII/internal fields removed.
+   *
+   * Used by:
+   * - AI Chatbot for "detalle del cliente ..." queries
+   */
+  static async getCustomerDetail(venueId: string, customerId: string): Promise<CustomerDetailSummary> {
+    const customer = await customerDashboardService.getCustomerById(venueId, customerId)
+    const name = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Sin nombre'
+
+    return {
+      name,
+      active: Boolean(customer.active),
+      loyaltyPoints: Number(customer.loyaltyPoints || 0),
+      totalVisits: Number(customer.totalVisits || customer.visitCount || 0),
+      totalSpent: this.numberValue(customer.totalSpent),
+      averageOrderValue: this.numberValue(customer.averageOrderValue),
+      lastVisitAt: customer.lastVisitAt || customer.lastVisit || null,
+      customerGroupName: customer.customerGroup?.name || null,
+      tags: Array.isArray(customer.tags) ? customer.tags.map(tag => String(tag)).slice(0, 10) : [],
+      recentOrders: (customer.orders || []).slice(0, 5).map(order => ({
+        orderNumber: order.orderNumber || null,
+        total: this.numberValue(order.total),
+        status: order.status,
+        createdAt: order.createdAt,
+      })),
+      recentLoyaltyTransactions: (customer.loyaltyTransactions || []).slice(0, 5).map(transaction => ({
+        type: transaction.type,
+        points: Number(transaction.points || 0),
+        createdAt: transaction.createdAt,
+      })),
+    }
+  }
+
+  /**
+   * Get a customer's credit-pack availability with contact/internal fields removed.
+   */
+  static async getCreditPackBalance(venueId: string, customerId: string): Promise<CreditPackBalanceSummary> {
+    const result = await creditPackDashboardService.getCustomerPurchases(venueId, { customerId, limit: 20 })
+    const firstCustomer = result.purchases[0]?.customer
+    const customerName = firstCustomer
+      ? `${firstCustomer.firstName || ''} ${firstCustomer.lastName || ''}`.trim() || 'Sin nombre'
+      : 'Cliente'
+
+    const balances = result.purchases.flatMap(purchase =>
+      (purchase.itemBalances || []).map(balance => ({
+        packName: purchase.creditPack?.name || 'Paquete',
+        productName: balance.product?.name || 'Producto',
+        productType: balance.product?.type || null,
+        initialQuantity: Number((balance as any).initialQuantity ?? balance.originalQuantity ?? 0),
+        remainingQuantity: Number(balance.remainingQuantity || 0),
+        expiresAt: purchase.expiresAt || null,
+        status: purchase.status,
+      })),
+    )
+
+    return {
+      customerName,
+      totalPurchases: result.total,
+      activePurchases: result.purchases.filter(purchase => purchase.status === 'ACTIVE').length,
+      totalRemainingCredits: balances.reduce((sum, balance) => sum + balance.remainingQuantity, 0),
+      balances,
     }
   }
 
@@ -1687,6 +1899,35 @@ export class SharedQueryService {
         staffName: earner.staffName,
         totalEarned: earner.totalEarned,
         calculationCount: earner.calculationCount,
+      })),
+    }
+  }
+
+  /**
+   * Summarize commission payouts for the current venue with staff contact and
+   * payment reference fields removed.
+   */
+  static async getCommissionPayoutsSummary(venueId: string, filters: { limit?: number } = {}): Promise<CommissionPayoutsSummary> {
+    const limit = Math.min(Math.max(Math.trunc(Number(filters.limit) || 10), 1), 25)
+    const [stats, payouts] = await Promise.all([
+      commissionPayoutService.getPayoutStats(venueId),
+      commissionPayoutService.getPayouts(venueId, {}),
+    ])
+
+    return {
+      totalPaid: stats.totalPaid,
+      totalPending: stats.totalPending,
+      payoutCount: stats.payoutCount,
+      averagePayout: stats.averagePayout,
+      recentPayouts: payouts.slice(0, limit).map(payout => ({
+        amount: this.numberValue(payout.amount),
+        status: payout.status,
+        paymentMethod: payout.paymentMethod || null,
+        staffName: payout.staff ? `${payout.staff.firstName || ''} ${payout.staff.lastName || ''}`.trim() || 'Sin nombre' : 'Sin nombre',
+        createdAt: payout.createdAt,
+        paidAt: payout.paidAt || null,
+        periodStart: payout.summary?.periodStart || null,
+        periodEnd: payout.summary?.periodEnd || null,
       })),
     }
   }
@@ -1748,6 +1989,38 @@ export class SharedQueryService {
         orderNumber: payment.order?.orderNumber || null,
         tableNumber: (payment.order as any)?.table?.number || null,
         merchantName: payment.merchantAccount?.displayName || payment.merchantAccount?.alias || null,
+      })),
+    }
+  }
+
+  /**
+   * Get one payment with processor secrets, PAN data, and customer contact data removed.
+   */
+  static async getPaymentDetail(venueId: string, paymentId: string): Promise<PaymentDetailSummary> {
+    const payment = await paymentDashboardService.getPaymentById(venueId, paymentId)
+
+    return {
+      amount: this.numberValue(payment.amount),
+      tipAmount: this.numberValue(payment.tipAmount),
+      netAmount: this.numberValue((payment as any).netAmount ?? this.numberValue(payment.amount) + this.numberValue(payment.tipAmount)),
+      currency: (payment as any).currency || 'MXN',
+      status: payment.status,
+      method: payment.method,
+      source: payment.source,
+      cardBrand: payment.cardBrand,
+      last4: (payment as any).last4 || null,
+      createdAt: payment.createdAt,
+      processedByName: payment.processedBy
+        ? `${payment.processedBy.firstName || ''} ${payment.processedBy.lastName || ''}`.trim() || null
+        : null,
+      orderNumber: payment.order?.orderNumber || null,
+      tableNumber: (payment.order as any)?.table?.number || null,
+      merchantName:
+        payment.merchantAccount?.displayName || payment.merchantAccount?.alias || payment.ecommerceMerchant?.channelName || null,
+      items: ((payment.order as any)?.items || []).slice(0, 10).map((item: any) => ({
+        name: item.name || item.product?.name || item.description || 'Item',
+        quantity: Number(item.quantity || 0),
+        total: this.numberValue(item.total ?? item.totalPrice ?? item.subtotal ?? 0),
       })),
     }
   }

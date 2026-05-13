@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T13:29:41.283Z",
+  "generatedAt": "2026-05-13T19:04:48.224Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -13,6 +13,7 @@
     "commissions.payouts",
     "commissions.summary",
     "creditPacks.balance",
+    "customers.detail",
     "customers.summary",
     "howTo.contactSupport",
     "howTo.paymentLinks",
@@ -50,6 +51,7 @@
     "paymentLinks.list",
     "paymentLinks.summary",
     "paymentMethodBreakdown",
+    "payments.detail",
     "payments.list",
     "payments.summary",
     "pendingOrders",
@@ -65,6 +67,7 @@
     "reviews",
     "sales",
     "settlementCalendar",
+    "settlements.detail",
     "staffPerformance",
     "supplier.create",
     "supplier.createPricing",
@@ -151,13 +154,13 @@
       "schemas": [],
       "classification": "read",
       "scope": "unknown",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -181,13 +184,13 @@
       ],
       "classification": "action",
       "scope": "unknown",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -350,13 +353,13 @@
       ],
       "classification": "action",
       "scope": "unknown",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -2355,7 +2358,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -2386,7 +2390,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10198,7 +10203,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10712,7 +10718,8 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10743,7 +10750,8 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10774,7 +10782,8 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10805,7 +10814,8 @@
       "scope": "public",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10836,7 +10846,8 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10867,7 +10878,8 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -11901,13 +11913,13 @@
       "schemas": [],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -11933,13 +11945,13 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -11965,13 +11977,13 @@
       ],
       "classification": "dangerousMutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -11997,13 +12009,13 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -12029,13 +12041,13 @@
       ],
       "classification": "mutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -12061,13 +12073,13 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -12093,13 +12105,13 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -12125,13 +12137,13 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -12157,13 +12169,13 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -12189,13 +12201,13 @@
       ],
       "classification": "dangerousMutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -12221,13 +12233,13 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "creditPacks.balance",
         "creditPacks.list"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19600,7 +19612,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19631,7 +19644,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19662,7 +19676,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19693,7 +19708,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19725,7 +19741,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19753,7 +19770,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19781,7 +19799,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19809,7 +19828,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19837,7 +19857,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19868,7 +19889,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19899,7 +19921,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19927,7 +19950,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19960,7 +19984,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19993,7 +20018,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -20024,7 +20050,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -21978,7 +22005,8 @@
       "scope": "public",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -22009,7 +22037,8 @@
       "scope": "public",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -22040,7 +22069,8 @@
       "scope": "public",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "settlementCalendar"
+        "settlementCalendar",
+        "settlements.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -26363,7 +26393,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -26394,7 +26425,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -26426,7 +26458,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -28535,6 +28568,56 @@
       "auth": [],
       "schemas": [
         "publicStripePaymentIntentSchema"
+      ],
+      "classification": "public",
+      "scope": "public",
+      "assistantCoverage": "blocked",
+      "assistantTools": [],
+      "notes": [
+        "public endpoint should not be exposed to venue assistant by default."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/public/payment-links/:shortCode/send-receipt-email",
+      "localPath": "/payment-links/:shortCode/send-receipt-email",
+      "mountPrefix": "/api/v1/public",
+      "routeFile": "src/routes/public.routes.ts",
+      "controller": "paymentLinkPublicController.sendReceiptEmail",
+      "controllerFile": "src/controllers/public/paymentLink.public.controller.ts",
+      "services": [
+        "src/services/dashboard/paymentLink.service.ts"
+      ],
+      "permissions": [],
+      "inheritedPermissions": [],
+      "auth": [],
+      "schemas": [
+        "publicSendReceiptEmailSchema"
+      ],
+      "classification": "public",
+      "scope": "public",
+      "assistantCoverage": "blocked",
+      "assistantTools": [],
+      "notes": [
+        "public endpoint should not be exposed to venue assistant by default."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/public/payment-links/:shortCode/send-receipt-whatsapp",
+      "localPath": "/payment-links/:shortCode/send-receipt-whatsapp",
+      "mountPrefix": "/api/v1/public",
+      "routeFile": "src/routes/public.routes.ts",
+      "controller": "paymentLinkPublicController.sendReceiptWhatsapp",
+      "controllerFile": "src/controllers/public/paymentLink.public.controller.ts",
+      "services": [
+        "src/services/dashboard/paymentLink.service.ts"
+      ],
+      "permissions": [],
+      "inheritedPermissions": [],
+      "auth": [],
+      "schemas": [
+        "publicSendReceiptWhatsappSchema"
       ],
       "classification": "public",
       "scope": "public",
@@ -34774,7 +34857,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -34809,7 +34893,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -34844,7 +34929,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -34875,7 +34961,8 @@
       "assistantTools": [
         "paymentMethodBreakdown",
         "payments.summary",
-        "payments.list"
+        "payments.list",
+        "payments.detail"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."

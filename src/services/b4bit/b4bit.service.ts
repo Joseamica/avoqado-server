@@ -119,11 +119,10 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: 
     logger.debug('🔗 B4Bit: Calling API', { url, hasDeviceId: !!venueConfig.deviceId })
 
     // Build form data (B4Bit API expects multipart/form-data)
-    // B4Bit field names: expected_output_amount, fiat_currency (or output_currency)
+    // Per https://docs.b4bit.com/pay/api/endpoints/orders-create/ the field is `fiat` (not fiat_currency/output_currency).
     const formData = new FormData()
     formData.append('expected_output_amount', request.fiat_amount.toString())
-    formData.append('fiat_currency', request.fiat_currency || 'MXN')
-    formData.append('output_currency', request.fiat_currency || 'MXN') // Try both field names
+    formData.append('fiat', request.fiat_currency || 'MXN')
     if (request.identifier) {
       formData.append('reference', request.identifier)
     }

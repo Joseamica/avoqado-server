@@ -169,6 +169,42 @@ export class TableAccessControlService {
       reason: 'Customer data contains personally identifiable information (PII)',
     },
     {
+      table: 'CustomerGroup',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Customer groups reveal customer segmentation for the venue',
+    },
+    {
+      table: 'LoyaltyTransaction',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Loyalty transactions contain customer activity and value history',
+    },
+    {
+      table: 'CreditPack',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Credit packs expose prepaid product and pricing configuration',
+    },
+    {
+      table: 'CreditPackPurchase',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Credit pack purchases contain customer purchase history',
+    },
+    {
+      table: 'CreditItemBalance',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Credit item balances contain customer entitlement balances',
+    },
+    {
+      table: 'CreditTransaction',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Credit transactions contain customer redemption and adjustment history',
+    },
+    {
       table: 'Venue',
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
@@ -211,6 +247,12 @@ export class TableAccessControlService {
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
       reason: 'Commission calculations contain staff compensation data',
+    },
+    {
+      table: 'CommissionPayout',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Commission payouts contain staff compensation data',
     },
     {
       table: 'ClassSession',

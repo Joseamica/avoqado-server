@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T13:29:41.283Z",
+  "generatedAt": "2026-05-13T19:04:48.224Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -259,8 +259,8 @@
     {
       "id": "commissions.payouts",
       "kind": "query",
-      "status": "backlog",
-      "description": "Read commission payout state.",
+      "status": "registered",
+      "description": "Commission payout totals and recent payout states.",
       "scope": "venue",
       "requiresVenueScope": true,
       "permissions": [
@@ -269,16 +269,19 @@
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.commissions.payouts",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
       },
       "examples": [
-        "payouts pendientes de comisiones"
+        "resumen de payouts de comisiones",
+        "commission payouts"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only payout summary; chatbot response omits staff emails, notes, and payment references."
       ]
     },
     {
@@ -312,8 +315,8 @@
     {
       "id": "creditPacks.balance",
       "kind": "query",
-      "status": "backlog",
-      "description": "Read customer credit pack balance after safe customer lookup.",
+      "status": "registered",
+      "description": "Show remaining credit-pack credits for one customer by safe customer identifier.",
       "scope": "venue",
       "requiresVenueScope": true,
       "permissions": [
@@ -322,16 +325,47 @@
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.creditPacks.balance",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
       },
       "examples": [
-        "cuantos creditos le quedan a este cliente"
+        "cuantos creditos le quedan al cliente cust_123",
+        "credit balance for customer cust_123"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only credit-pack availability; chatbot response omits customer contact fields and internal balance IDs."
+      ]
+    },
+    {
+      "id": "customers.detail",
+      "kind": "query",
+      "status": "registered",
+      "description": "Show one customer detail summary by safe customer identifier without contact fields.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "customers:read"
+      ],
+      "riskLevel": "medium",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.customers.detail",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
+      },
+      "examples": [
+        "detalle del cliente cust_123",
+        "customer detail cust_123"
+      ],
+      "notes": [
+        "Read-only customer detail; chatbot response omits email, phone, notes, and internal customer IDs."
       ]
     },
     {
@@ -1396,26 +1430,29 @@
     {
       "id": "paymentLinks.detail",
       "kind": "query",
-      "status": "backlog",
-      "description": "Show a single payment link by safe identifier.",
+      "status": "registered",
+      "description": "Show one payment link detail by safe link identifier.",
       "scope": "venue",
       "requiresVenueScope": true,
       "permissions": [
         "payment-link:read"
       ],
-      "riskLevel": "low",
+      "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.paymentLinks.detail",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
       },
       "examples": [
-        "como va este link de pago"
+        "detalle del link de pago pl_123",
+        "payment link detail"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only payment link detail; chatbot response omits customer emails and processor session IDs."
       ]
     },
     {
@@ -1501,6 +1538,34 @@
       ],
       "notes": [
         "Aggregate payment method totals."
+      ]
+    },
+    {
+      "id": "payments.detail",
+      "kind": "query",
+      "status": "registered",
+      "description": "Show one payment detail by safe payment identifier.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "payments:read"
+      ],
+      "riskLevel": "medium",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.payments.detail",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
+      },
+      "examples": [
+        "detalle del pago pay_123",
+        "payment detail"
+      ],
+      "notes": [
+        "Read-only payment detail; chatbot response omits masked PAN, authorization number, reference number, and customer contact data."
       ]
     },
     {
@@ -1930,6 +1995,35 @@
       ],
       "notes": [
         "Uses available balance settlement calendar as source of truth."
+      ]
+    },
+    {
+      "id": "settlements.detail",
+      "kind": "query",
+      "status": "registered",
+      "description": "Detailed settlement entries and card-type breakdown for a period.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "settlements:read"
+      ],
+      "riskLevel": "low",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.settlements.detail",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
+      },
+      "examples": [
+        "detalle de liquidacion de hoy por tarjeta",
+        "settlement detail today"
+      ],
+      "notes": [
+        "Uses available balance settlement calendar with card-type breakdown."
       ]
     },
     {

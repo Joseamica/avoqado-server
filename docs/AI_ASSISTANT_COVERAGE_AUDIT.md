@@ -36,9 +36,9 @@ Salidas generadas:
 
 Ultima corrida local:
 
-- Endpoints detectados: 1,337
+- Endpoints detectados: 1,339
 - Sin capacidad mapeada: 507
-- Bloqueados por default: 382
+- Bloqueados por default: 384
 - Parcialmente cubiertos: 443
 - Cubiertos por heuristica exacta: 5
 
@@ -72,14 +72,20 @@ archivo es la fuente de verdad para distinguir:
 - `paymentMethodBreakdown`
 - `payments.summary`
 - `payments.list`
+- `payments.detail`
 - `settlementCalendar`
+- `settlements.detail`
 - `paymentLinks.list`
 - `paymentLinks.summary`
+- `paymentLinks.detail`
 - `reservations.summary`
 - `reservations.list`
 - `customers.summary`
+- `customers.detail`
+- `creditPacks.balance`
 - `team.members`
 - `commissions.summary`
+- `commissions.payouts`
 - `adHocAnalytics`
 
 `adHocAnalytics` existe como fallback, pero no debe ser la estrategia de cobertura principal en produccion. Para estabilidad y seguridad,
@@ -171,12 +177,8 @@ Esto no entrena automaticamente el modelo base; alimenta RAG/evaluaciones para q
 
 Prioridad alta:
 
-- `settlements.detail`
-- `payments.detail`
-- `paymentLinks.detail`
-- `commissions.payouts`
-- `customers.detail`
-- `creditPacks.balance`
+- Busqueda segura de clientes por nombre/email/telefono antes de ejecutar `customers.detail`.
+- Listado/resumen de credit packs sin contacto de clientes.
 
 ### Fase 2: ayuda operativa
 

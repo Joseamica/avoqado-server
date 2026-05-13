@@ -1,14 +1,14 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-05-13T13:29:41.291Z
+Generated: 2026-05-13T19:04:48.233Z
 
 ## Summary
 
-- Total endpoints: 1337
-- Assistant tools registered: 72
-- Coverage: missing 507, partial 443, blocked 382, covered 5
-- Classifications: read 425, adminOnly 344, action 283, dangerousMutation 127, mutation 120, public 38
-- Scopes: venue 703, superadmin 307, unknown 167, organization 95, public 65
+- Total endpoints: 1339
+- Assistant tools registered: 75
+- Coverage: missing 493, partial 457, blocked 384, covered 5
+- Classifications: read 425, adminOnly 344, action 283, dangerousMutation 127, mutation 120, public 40
+- Scopes: venue 703, superadmin 307, unknown 167, organization 95, public 67
 
 ## Top Missing Domains
 
@@ -21,17 +21,17 @@ Generated: 2026-05-13T13:29:41.291Z
 - mobile: 14
 - ecommerce-merchants: 12
 - modifier-groups: 12
-- credit-packs: 11
 - discounts: 11
 - sdk: 11
 - class-sessions: 8
 - customer-groups: 8
-- consumer: 7
 - crypto: 7
 - features: 7
 - item-categories: 7
 - cash-drawer: 7
 - tables: 7
+- loyalty: 5
+- messages: 5
 
 ## High-Risk Or Admin-Only Endpoints
 
@@ -162,14 +162,14 @@ Generated: 2026-05-13T13:29:41.291Z
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | GET | `/api/v1/analytics/overview` | read | unknown | partial | analytics:read | analyticsOverviewQuerySchema | getAnalyticsOverview |
 | POST | `/api/v1/consumer/auth/oauth` | action | unknown | missing | - | consumerOAuthSchema | authController.oauthLogin |
-| GET | `/api/v1/consumer/credits` | read | unknown | missing | - | - | creditController.mine |
-| POST | `/api/v1/consumer/credits/checkout/finalize` | action | unknown | missing | - | consumerFinalizeCreditCheckoutSchema | creditController.finalizeCheckout |
+| GET | `/api/v1/consumer/credits` | read | unknown | partial | - | - | creditController.mine |
+| POST | `/api/v1/consumer/credits/checkout/finalize` | action | unknown | partial | - | consumerFinalizeCreditCheckoutSchema | creditController.finalizeCheckout |
 | GET | `/api/v1/consumer/me` | read | unknown | missing | - | - | authController.me |
 | GET | `/api/v1/consumer/reservations` | read | unknown | partial | - | - | reservationController.mine |
 | POST | `/api/v1/consumer/reservations/deposit/finalize` | action | unknown | partial | - | consumerFinalizeReservationDepositCheckoutSchema | reservationController.finalizeDepositCheckout |
 | GET | `/api/v1/consumer/venues` | read | unknown | missing | - | searchConsumerVenuesSchema | venueController.search |
 | GET | `/api/v1/consumer/venues/:venueSlug` | read | unknown | missing | - | consumerVenueParamsSchema | venueController.detail |
-| POST | `/api/v1/consumer/venues/:venueSlug/credit-packs/:packId/checkout` | action | unknown | missing | - | consumerCreateCreditCheckoutSchema | creditController.createCheckout |
+| POST | `/api/v1/consumer/venues/:venueSlug/credit-packs/:packId/checkout` | action | unknown | partial | - | consumerCreateCreditCheckoutSchema | creditController.createCheckout |
 | POST | `/api/v1/consumer/venues/:venueSlug/reservations` | action | unknown | partial | - | consumerCreateReservationSchema | reservationController.create |
 | POST | `/api/v1/consumer/venues/:venueSlug/reservations/:cancelSecret/payment` | dangerousMutation | unknown | partial | - | consumerReservationDepositCheckoutSchema | reservationController.createDepositCheckout |
 | PATCH | `/api/v1/dashboard/:venueId/account` | mutation | unknown | missing | - | updateAccountSchema | authDashboardController.updateAccountController |
@@ -625,17 +625,17 @@ Generated: 2026-05-13T13:29:41.291Z
 | GET | `/api/v1/dashboard/venues/:venueId/credit-offer` | read | venue | missing | settlements:read | - | creditOfferController.getPendingOffer |
 | POST | `/api/v1/dashboard/venues/:venueId/credit-offer/:offerId/decline` | action | venue | missing | settlements:write | - | creditOfferController.declineOffer |
 | POST | `/api/v1/dashboard/venues/:venueId/credit-offer/:offerId/interest` | action | venue | missing | settlements:write | - | creditOfferController.expressInterest |
-| GET | `/api/v1/dashboard/venues/:venueId/credit-packs` | read | venue | missing | creditPacks:read | - | controller.getCreditPacks |
-| POST | `/api/v1/dashboard/venues/:venueId/credit-packs` | action | venue | missing | creditPacks:create | createCreditPackSchema | controller.createCreditPack |
-| DELETE | `/api/v1/dashboard/venues/:venueId/credit-packs/:packId` | dangerousMutation | venue | missing | creditPacks:delete | packIdParamsSchema | controller.deactivateCreditPack |
-| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/:packId` | read | venue | missing | creditPacks:read | packIdParamsSchema | controller.getCreditPackById |
-| PATCH | `/api/v1/dashboard/venues/:venueId/credit-packs/:packId` | mutation | venue | missing | creditPacks:update | updateCreditPackSchema | controller.updateCreditPack |
-| POST | `/api/v1/dashboard/venues/:venueId/credit-packs/balances/:balanceId/adjust` | action | venue | missing | creditPacks:update | adjustBodySchema | controller.adjustBalance |
-| POST | `/api/v1/dashboard/venues/:venueId/credit-packs/balances/:balanceId/redeem` | action | venue | missing | creditPacks:update | redeemBodySchema | controller.redeemItem |
-| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/purchases` | read | venue | missing | creditPacks:read | purchasesQuerySchema | controller.getPurchases |
-| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/purchases/:customerId` | read | venue | missing | creditPacks:read | customerIdParamsSchema | controller.getCustomerPurchases |
-| POST | `/api/v1/dashboard/venues/:venueId/credit-packs/purchases/:purchaseId/refund` | dangerousMutation | venue | missing | creditPacks:delete | refundBodySchema | controller.refundPurchase |
-| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/transactions` | read | venue | missing | creditPacks:read | transactionsQuerySchema | controller.getTransactions |
+| GET | `/api/v1/dashboard/venues/:venueId/credit-packs` | read | venue | partial | creditPacks:read | - | controller.getCreditPacks |
+| POST | `/api/v1/dashboard/venues/:venueId/credit-packs` | action | venue | partial | creditPacks:create | createCreditPackSchema | controller.createCreditPack |
+| DELETE | `/api/v1/dashboard/venues/:venueId/credit-packs/:packId` | dangerousMutation | venue | partial | creditPacks:delete | packIdParamsSchema | controller.deactivateCreditPack |
+| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/:packId` | read | venue | partial | creditPacks:read | packIdParamsSchema | controller.getCreditPackById |
+| PATCH | `/api/v1/dashboard/venues/:venueId/credit-packs/:packId` | mutation | venue | partial | creditPacks:update | updateCreditPackSchema | controller.updateCreditPack |
+| POST | `/api/v1/dashboard/venues/:venueId/credit-packs/balances/:balanceId/adjust` | action | venue | partial | creditPacks:update | adjustBodySchema | controller.adjustBalance |
+| POST | `/api/v1/dashboard/venues/:venueId/credit-packs/balances/:balanceId/redeem` | action | venue | partial | creditPacks:update | redeemBodySchema | controller.redeemItem |
+| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/purchases` | read | venue | partial | creditPacks:read | purchasesQuerySchema | controller.getPurchases |
+| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/purchases/:customerId` | read | venue | partial | creditPacks:read | customerIdParamsSchema | controller.getCustomerPurchases |
+| POST | `/api/v1/dashboard/venues/:venueId/credit-packs/purchases/:purchaseId/refund` | dangerousMutation | venue | partial | creditPacks:delete | refundBodySchema | controller.refundPurchase |
+| GET | `/api/v1/dashboard/venues/:venueId/credit-packs/transactions` | read | venue | partial | creditPacks:read | transactionsQuerySchema | controller.getTransactions |
 | GET | `/api/v1/dashboard/venues/:venueId/crypto/config` | read | venue | missing | system:manage | - | cryptoConfigController.getConfig as any |
 | PUT | `/api/v1/dashboard/venues/:venueId/crypto/disable` | mutation | venue | missing | system:manage | - | cryptoConfigController.disableCryptoHandler as any |
 | POST | `/api/v1/dashboard/venues/:venueId/crypto/enable` | action | venue | missing | system:manage | - | cryptoConfigController.enableCrypto as any |
@@ -1206,6 +1206,8 @@ Generated: 2026-05-13T13:29:41.291Z
 | POST | `/api/v1/public/payment-links/:shortCode/charge` | public | public | blocked | - | publicChargeSchema | paymentLinkPublicController.completeCharge |
 | POST | `/api/v1/public/payment-links/:shortCode/checkout` | public | public | blocked | - | plCheckoutSchema | paymentLinkPublicController.createCheckout |
 | POST | `/api/v1/public/payment-links/:shortCode/payment-intent` | public | public | blocked | - | publicStripePaymentIntentSchema | paymentLinkPublicController.createStripePaymentIntent |
+| POST | `/api/v1/public/payment-links/:shortCode/send-receipt-email` | public | public | blocked | - | publicSendReceiptEmailSchema | paymentLinkPublicController.sendReceiptEmail |
+| POST | `/api/v1/public/payment-links/:shortCode/send-receipt-whatsapp` | public | public | blocked | - | publicSendReceiptWhatsappSchema | paymentLinkPublicController.sendReceiptWhatsapp |
 | GET | `/api/v1/public/payment-links/:shortCode/session/:sessionId` | public | public | blocked | - | publicSessionSchema | paymentLinkPublicController.getSessionStatus |
 | POST | `/api/v1/public/payment-links/:shortCode/stripe-checkout` | public | public | blocked | - | publicStripeCheckoutSchema | paymentLinkPublicController.createStripeCheckout |
 | GET | `/api/v1/public/receipt/:accessKey` | public | public | blocked | - | - | getPublicReceipt |

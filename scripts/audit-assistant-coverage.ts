@@ -47,8 +47,12 @@ const ROUTER_USE_RE = /router\.use\s*\(/g
 
 const ASSISTANT_TOOL_HINTS: Array<{ pattern: RegExp; tools: string[]; coverage: EndpointInventoryRow['assistantCoverage'] }> = [
   { pattern: /sales|general-stats|stats|analytics|overview|summary/i, tools: ['sales', 'businessOverview'], coverage: 'partial' },
-  { pattern: /available-balance|settlement|liquid/i, tools: ['settlementCalendar'], coverage: 'partial' },
-  { pattern: /payment-method|payments/i, tools: ['paymentMethodBreakdown', 'payments.summary', 'payments.list'], coverage: 'partial' },
+  { pattern: /available-balance|settlement|liquid/i, tools: ['settlementCalendar', 'settlements.detail'], coverage: 'partial' },
+  {
+    pattern: /payment-method|payments/i,
+    tools: ['paymentMethodBreakdown', 'payments.summary', 'payments.list', 'payments.detail'],
+    coverage: 'partial',
+  },
   { pattern: /reviews/i, tools: ['reviews'], coverage: 'covered' },
   {
     pattern: /inventory|stock|raw-material|recipe|purchase-order|supplier/i,
@@ -66,7 +70,7 @@ const ASSISTANT_TOOL_HINTS: Array<{ pattern: RegExp; tools: string[]; coverage: 
   { pattern: /reservations/i, tools: ['reservations.summary', 'reservations.list', 'reservations.create'], coverage: 'partial' },
   { pattern: /commissions/i, tools: ['commissions.summary', 'commissions.payouts'], coverage: 'partial' },
   { pattern: /customers/i, tools: ['customers.summary', 'customers.detail', 'creditPacks.balance'], coverage: 'partial' },
-  { pattern: /credit-packs|credits/i, tools: ['creditPacks.balance', 'creditPacks.list'], coverage: 'missing' },
+  { pattern: /credit-packs|credits/i, tools: ['creditPacks.balance', 'creditPacks.list'], coverage: 'partial' },
   { pattern: /team|permission|role/i, tools: ['team.members', 'team.invite', 'permissions.howTo'], coverage: 'partial' },
 ]
 

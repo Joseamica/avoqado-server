@@ -1,14 +1,14 @@
 # Assistant Capabilities
 
-Generated: 2026-05-13T13:29:41.294Z
+Generated: 2026-05-13T19:04:48.236Z
 
 ## Summary
 
-- Total capabilities: 72
-- Status: registered 62, backlog 7, blocked 3
-- Kind: action 37, query 28, howTo 5, blocked 2
-- Risk: low 36, medium 24, high 9, critical 3
-- Scope: venue 71, superadmin 1
+- Total capabilities: 75
+- Status: registered 68, backlog 4, blocked 3
+- Kind: action 37, query 31, howTo 5, blocked 2
+- Risk: low 36, medium 27, high 9, critical 3
+- Scope: venue 74, superadmin 1
 
 ## Registered Executable Capabilities
 
@@ -18,7 +18,10 @@ Generated: 2026-05-13T13:29:41.294Z
 - `alert.resolve` (action, low) — permissions: inventory:update; source: alertService.resolveAlert
 - `averageTicket` (query, low) — permissions: payments:read, orders:read; source: shared_query.averageTicket
 - `businessOverview` (query, low) — permissions: payments:read, orders:read, reviews:read; source: shared_query.businessOverview
+- `commissions.payouts` (query, medium) — permissions: commissions:payout; source: shared_query.commissions.payouts
 - `commissions.summary` (query, medium) — permissions: commissions:read; source: shared_query.commissions.summary
+- `creditPacks.balance` (query, medium) — permissions: credit-packs:read; source: shared_query.creditPacks.balance
+- `customers.detail` (query, medium) — permissions: customers:read; source: shared_query.customers.detail
 - `customers.summary` (query, medium) — permissions: customers:read; source: shared_query.customers.summary
 - `howTo.contactSupport` (howTo, low) — permissions: none; source: dashboard_knowledge_base
 - `howTo.paymentLinks` (howTo, low) — permissions: none; source: dashboard_knowledge_base
@@ -51,9 +54,11 @@ Generated: 2026-05-13T13:29:41.294Z
 - `menu.product.create` (action, low) — permissions: menu:create; source: productService.createProduct
 - `menu.product.delete` (action, high) — permissions: menu:delete; source: productService.deleteProduct
 - `menu.product.update` (action, medium) — permissions: menu:update; source: productService.updateProduct
+- `paymentLinks.detail` (query, medium) — permissions: payment-link:read; source: shared_query.paymentLinks.detail
 - `paymentLinks.list` (query, low) — permissions: payment-link:read; source: shared_query.paymentLinks.list
 - `paymentLinks.summary` (query, low) — permissions: payment-link:read; source: shared_query.paymentLinks.summary
 - `paymentMethodBreakdown` (query, low) — permissions: payments:read; source: shared_query.paymentMethodBreakdown
+- `payments.detail` (query, medium) — permissions: payments:read; source: shared_query.payments.detail
 - `payments.list` (query, medium) — permissions: payments:read; source: shared_query.payments.list
 - `payments.summary` (query, low) — permissions: payments:read; source: shared_query.payments.summary
 - `pendingOrders` (query, low) — permissions: orders:read; source: shared_query.pendingOrders
@@ -67,6 +72,7 @@ Generated: 2026-05-13T13:29:41.294Z
 - `reviews` (query, low) — permissions: reviews:read; source: shared_query.reviews
 - `sales` (query, low) — permissions: payments:read, orders:read; source: shared_query.sales
 - `settlementCalendar` (query, low) — permissions: settlements:read; source: shared_query.settlementCalendar
+- `settlements.detail` (query, low) — permissions: settlements:read; source: shared_query.settlements.detail
 - `staffPerformance` (query, medium) — permissions: orders:read, staff:read; source: shared_query.staffPerformance
 - `supplier.create` (action, low) — permissions: inventory:create; source: supplierService.createSupplier
 - `supplier.createPricing` (action, low) — permissions: inventory:create; source: supplierService.createSupplierPricing
@@ -77,10 +83,7 @@ Generated: 2026-05-13T13:29:41.294Z
 
 ## Backlog Contracts
 
-- `commissions.payouts` (query, medium) — permissions: commissions:payout; examples: payouts pendientes de comisiones
-- `creditPacks.balance` (query, medium) — permissions: credit-packs:read; examples: cuantos creditos le quedan a este cliente
 - `paymentLinks.create` (action, medium) — permissions: payment-link:create; examples: crea un link de pago por 500 pesos
-- `paymentLinks.detail` (query, low) — permissions: payment-link:read; examples: como va este link de pago
 - `reservations.cancel` (action, high) — permissions: reservations:update; examples: cancela esta reservacion
 - `reservations.create` (action, medium) — permissions: reservations:create; examples: crea una reservacion para hoy a las 8
 - `team.invite` (action, high) — permissions: team:invite; examples: invita a alguien a mi equipo
@@ -104,9 +107,10 @@ Generated: 2026-05-13T13:29:41.294Z
 | `blocked.crossVenueData` | blocked | blocked | venue | critical | - | - | security.blocklist |
 | `blocked.superadminSecrets` | blocked | blocked | superadmin | critical | - | - | security.blocklist |
 | `businessOverview` | query | registered | venue | low | payments:read, orders:read, reviews:read | - | shared_query.businessOverview |
-| `commissions.payouts` | query | backlog | venue | medium | commissions:payout | - | backlog |
+| `commissions.payouts` | query | registered | venue | medium | commissions:payout | - | shared_query.commissions.payouts |
 | `commissions.summary` | query | registered | venue | medium | commissions:read | - | shared_query.commissions.summary |
-| `creditPacks.balance` | query | backlog | venue | medium | credit-packs:read | - | backlog |
+| `creditPacks.balance` | query | registered | venue | medium | credit-packs:read | - | shared_query.creditPacks.balance |
+| `customers.detail` | query | registered | venue | medium | customers:read | - | shared_query.customers.detail |
 | `customers.summary` | query | registered | venue | medium | customers:read | - | shared_query.customers.summary |
 | `howTo.contactSupport` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
 | `howTo.paymentLinks` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
@@ -140,10 +144,11 @@ Generated: 2026-05-13T13:29:41.294Z
 | `menu.product.delete` | action | registered | venue | high | menu:delete | double | productService.deleteProduct |
 | `menu.product.update` | action | registered | venue | medium | menu:update | single | productService.updateProduct |
 | `paymentLinks.create` | action | backlog | venue | medium | payment-link:create | single | backlog |
-| `paymentLinks.detail` | query | backlog | venue | low | payment-link:read | - | backlog |
+| `paymentLinks.detail` | query | registered | venue | medium | payment-link:read | - | shared_query.paymentLinks.detail |
 | `paymentLinks.list` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.list |
 | `paymentLinks.summary` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.summary |
 | `paymentMethodBreakdown` | query | registered | venue | low | payments:read | - | shared_query.paymentMethodBreakdown |
+| `payments.detail` | query | registered | venue | medium | payments:read | - | shared_query.payments.detail |
 | `payments.list` | query | registered | venue | medium | payments:read | - | shared_query.payments.list |
 | `payments.summary` | query | registered | venue | low | payments:read | - | shared_query.payments.summary |
 | `pendingOrders` | query | registered | venue | low | orders:read | - | shared_query.pendingOrders |
@@ -159,6 +164,7 @@ Generated: 2026-05-13T13:29:41.294Z
 | `reviews` | query | registered | venue | low | reviews:read | - | shared_query.reviews |
 | `sales` | query | registered | venue | low | payments:read, orders:read | - | shared_query.sales |
 | `settlementCalendar` | query | registered | venue | low | settlements:read | - | shared_query.settlementCalendar |
+| `settlements.detail` | query | registered | venue | low | settlements:read | - | shared_query.settlements.detail |
 | `staffPerformance` | query | registered | venue | medium | orders:read, staff:read | - | shared_query.staffPerformance |
 | `supplier.create` | action | registered | venue | low | inventory:create | single | supplierService.createSupplier |
 | `supplier.createPricing` | action | registered | venue | low | inventory:create | single | supplierService.createSupplierPricing |

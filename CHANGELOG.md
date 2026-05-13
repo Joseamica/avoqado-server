@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **B4Bit currency field name**: `createPaymentOrder` was sending `fiat_currency` + `output_currency` (both undocumented), causing B4Bit to ignore the currency and fall back to its default — orders charged in $25 MXN were rendered as $25 USD on the QR. Per https://docs.b4bit.com/pay/api/endpoints/orders-create/, the documented field is `fiat`. Now sends `fiat: "MXN"` only.
+
 ### Changed
 
 - **B4Bit crypto auth simplified — fully login-less**: Removed the B4Bit username/password login flow entirely. Per B4Bit docs (https://docs.b4bit.com/pay/api/autenticacion/), the only required header is `X-Device-Id: <api-key-uuid4>` — no `Authorization` header, no signIn endpoint. Changes across three layers:

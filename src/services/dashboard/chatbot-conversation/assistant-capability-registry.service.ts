@@ -126,11 +126,25 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['muestrame los pagos de hoy', 'show payments today'],
     notes: ['Read-only payment list; chatbot response omits masked PAN and authorization numbers.'],
   },
+  'payments.detail': {
+    permissions: ['payments:read'],
+    riskLevel: 'medium',
+    examples: ['detalle del pago pay_123', 'payment detail'],
+    notes: [
+      'Read-only payment detail; chatbot response omits masked PAN, authorization number, reference number, and customer contact data.',
+    ],
+  },
   settlementCalendar: {
     permissions: ['settlements:read'],
     riskLevel: 'low',
     examples: ['cuanto me liquidan hoy', 'how much is my payout today'],
     notes: ['Uses available balance settlement calendar as source of truth.'],
+  },
+  'settlements.detail': {
+    permissions: ['settlements:read'],
+    riskLevel: 'low',
+    examples: ['detalle de liquidacion de hoy por tarjeta', 'settlement detail today'],
+    notes: ['Uses available balance settlement calendar with card-type breakdown.'],
   },
   'paymentLinks.list': {
     permissions: ['payment-link:read'],
@@ -143,6 +157,12 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     riskLevel: 'low',
     examples: ['resumen de links de pago', 'payment link summary'],
     notes: ['Read-only aggregate payment link totals for the current venue.'],
+  },
+  'paymentLinks.detail': {
+    permissions: ['payment-link:read'],
+    riskLevel: 'medium',
+    examples: ['detalle del link de pago pl_123', 'payment link detail'],
+    notes: ['Read-only payment link detail; chatbot response omits customer emails and processor session IDs.'],
   },
   'reservations.summary': {
     permissions: ['reservations:read'],
@@ -162,6 +182,18 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['resumen de clientes', 'customer summary'],
     notes: ['Read-only customer aggregate; chatbot response omits email, phone, and customer IDs.'],
   },
+  'customers.detail': {
+    permissions: ['customers:read'],
+    riskLevel: 'medium',
+    examples: ['detalle del cliente cust_123', 'customer detail cust_123'],
+    notes: ['Read-only customer detail; chatbot response omits email, phone, notes, and internal customer IDs.'],
+  },
+  'creditPacks.balance': {
+    permissions: ['credit-packs:read'],
+    riskLevel: 'medium',
+    examples: ['cuantos creditos le quedan al cliente cust_123', 'credit balance for customer cust_123'],
+    notes: ['Read-only credit-pack availability; chatbot response omits customer contact fields and internal balance IDs.'],
+  },
   'team.members': {
     permissions: ['teams:read'],
     riskLevel: 'medium',
@@ -174,6 +206,12 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['como van mis comisiones', 'commission summary'],
     notes: ['Read-only commission aggregate for the active venue.'],
   },
+  'commissions.payouts': {
+    permissions: ['commissions:payout'],
+    riskLevel: 'medium',
+    examples: ['resumen de payouts de comisiones', 'commission payouts'],
+    notes: ['Read-only payout summary; chatbot response omits staff emails, notes, and payment references.'],
+  },
   adHocAnalytics: {
     permissions: [],
     riskLevel: 'critical',
@@ -183,7 +221,6 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
 }
 
 const BACKLOG_CAPABILITIES: AssistantCapability[] = [
-  backlog('paymentLinks.detail', 'Show a single payment link by safe identifier.', 'payment-link:read', ['como va este link de pago']),
   backlog(
     'paymentLinks.create',
     'Create a payment link after preview and confirmation.',
@@ -207,14 +244,6 @@ const BACKLOG_CAPABILITIES: AssistantCapability[] = [
     ['cancela esta reservacion'],
     'high',
     true,
-  ),
-  backlog('commissions.payouts', 'Read commission payout state.', 'commissions:payout', ['payouts pendientes de comisiones'], 'medium'),
-  backlog(
-    'creditPacks.balance',
-    'Read customer credit pack balance after safe customer lookup.',
-    'credit-packs:read',
-    ['cuantos creditos le quedan a este cliente'],
-    'medium',
   ),
   backlog(
     'team.invite',

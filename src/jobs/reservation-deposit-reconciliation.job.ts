@@ -143,12 +143,16 @@ export class ReservationDepositReconciliationJob {
         const provider = getProvider(merchant)
         const stripeAmount = toStripeAmount(reservation.depositAmount)
         const vatRateBps = await getVatRateBps()
+        // Land the customer back on the public booking site (book.avoqado.io/{slug}),
+        // not the dashboard's legacy /book/{slug} route. Orphan recovery has no
+        // access to the original widget's successUrl, so this is the best default.
+        const bookingPublicUrl = process.env.BOOKING_PUBLIC_URL || 'http://localhost:5174'
         const session = await provider.createCheckoutSession(merchant, {
           amount: stripeAmount,
           currency: 'mxn',
           applicationFeeAmount: calculateApplicationFeeWithVAT(stripeAmount, merchant.platformFeeBps, vatRateBps),
-          successUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/book/${reservation.venue.slug}?payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`,
-          cancelUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/book/${reservation.venue.slug}?payment=cancelled&reservationId=${reservation.id}`,
+          successUrl: `${bookingPublicUrl}/${reservation.venue.slug}?payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`,
+          cancelUrl: `${bookingPublicUrl}/${reservation.venue.slug}?payment=cancelled&reservationId=${reservation.id}`,
           expiresAt: reservation.depositExpiresAt,
           customerEmail: reservation.guestEmail ?? undefined,
           metadata: {

@@ -2,6 +2,8 @@ import prisma from '@/utils/prismaClient'
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import * as availableBalanceService from '@/services/dashboard/availableBalance.dashboard.service'
 import * as commissionCalculationService from '@/services/dashboard/commission/commission-calculation.service'
+import * as commissionPayoutService from '@/services/dashboard/commission/commission-payout.service'
+import * as creditPackDashboardService from '@/services/dashboard/creditPack.dashboard.service'
 import * as customerDashboardService from '@/services/dashboard/customer.dashboard.service'
 import * as paymentLinkService from '@/services/dashboard/paymentLink.service'
 import * as paymentDashboardService from '@/services/dashboard/payment.dashboard.service'
@@ -28,16 +30,28 @@ jest.mock('@/services/dashboard/commission/commission-calculation.service', () =
   getVenueCommissionStats: jest.fn(),
 }))
 
+jest.mock('@/services/dashboard/commission/commission-payout.service', () => ({
+  getPayoutStats: jest.fn(),
+  getPayouts: jest.fn(),
+}))
+
 jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
   getCustomerStats: jest.fn(),
+  getCustomerById: jest.fn(),
+}))
+
+jest.mock('@/services/dashboard/creditPack.dashboard.service', () => ({
+  getCustomerPurchases: jest.fn(),
 }))
 
 jest.mock('@/services/dashboard/paymentLink.service', () => ({
   getPaymentLinks: jest.fn(),
+  getPaymentLinkById: jest.fn(),
 }))
 
 jest.mock('@/services/dashboard/payment.dashboard.service', () => ({
   getPaymentsData: jest.fn(),
+  getPaymentById: jest.fn(),
 }))
 
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
@@ -117,6 +131,32 @@ describe('SharedQueryService', () => {
       expect(result.transactionCount).toBe(3)
       expect(result.currency).toBe('MXN')
       expect(result.entries).toHaveLength(2)
+    })
+  })
+
+  describe('getSettlementDetailForPeriod', () => {
+    it('returns settlement entries with card breakdown from the available-balance service', async () => {
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'UTC', currency: 'MXN' })
+      ;(availableBalanceService.getSettlementCalendar as jest.Mock).mockResolvedValue([
+        {
+          settlementDate: new Date('2026-05-12T12:00:00.000Z'),
+          totalNetAmount: 1000,
+          transactionCount: 2,
+          status: 'PENDING',
+          byCardType: [
+            { cardType: 'DEBIT', netAmount: 700, transactionCount: 1 },
+            { cardType: 'CREDIT', netAmount: 300, transactionCount: 1 },
+          ],
+        },
+      ])
+
+      const result = await SharedQueryService.getSettlementDetailForPeriod('venue-test', 'today')
+
+      expect(result.entries[0].byCardType).toEqual([
+        { cardType: 'DEBIT', netAmount: 700, transactionCount: 1 },
+        { cardType: 'CREDIT', netAmount: 300, transactionCount: 1 },
+      ])
+      expect(result.totalNetAmount).toBe(1000)
     })
   })
 
@@ -215,6 +255,53 @@ describe('SharedQueryService', () => {
     })
   })
 
+  describe('getPaymentLinkDetail', () => {
+    it('uses the dashboard payment link detail service and removes customer emails/session IDs', async () => {
+      ;(paymentLinkService.getPaymentLinkById as jest.Mock).mockResolvedValue({
+        id: 'pl-1',
+        title: 'Cena privada',
+        shortCode: 'abc12345',
+        status: 'ACTIVE',
+        purpose: 'PAYMENT',
+        amountType: 'FIXED',
+        amount: 500,
+        currency: 'MXN',
+        isReusable: true,
+        totalCollected: 1000,
+        paymentCount: 2,
+        createdAt: new Date('2026-05-12T12:00:00.000Z'),
+        expiresAt: null,
+        createdBy: { firstName: 'Ana', lastName: 'Admin' },
+        checkoutSessions: [
+          {
+            id: 'session-row-1',
+            sessionId: 'provider-secret-session',
+            amount: 500,
+            status: 'COMPLETED',
+            customerEmail: 'customer@example.com',
+            createdAt: new Date('2026-05-12T13:00:00.000Z'),
+            completedAt: new Date('2026-05-12T13:05:00.000Z'),
+          },
+        ],
+        _count: { checkoutSessions: 1 },
+      })
+
+      const result = await SharedQueryService.getPaymentLinkDetail('venue-test', 'pl-1')
+
+      expect(paymentLinkService.getPaymentLinkById).toHaveBeenCalledWith('venue-test', 'pl-1')
+      expect(result).toEqual(
+        expect.objectContaining({
+          title: 'Cena privada',
+          url: 'https://pay.avoqado.io/abc12345',
+          totalCollected: 1000,
+          checkoutSessionCount: 1,
+        }),
+      )
+      expect(JSON.stringify(result)).not.toContain('customer@example.com')
+      expect(JSON.stringify(result)).not.toContain('provider-secret-session')
+    })
+  })
+
   describe('getCustomerSummary', () => {
     it('uses the dashboard customer stats service and returns aggregate customer data only', async () => {
       ;(customerDashboardService.getCustomerStats as jest.Mock).mockResolvedValue({
@@ -232,6 +319,112 @@ describe('SharedQueryService', () => {
       expect(customerDashboardService.getCustomerStats).toHaveBeenCalledWith('venue-test')
       expect(result.topSpenders).toEqual([{ name: 'Ana Perez', totalSpent: 1000, totalVisits: 12 }])
       expect(JSON.stringify(result)).not.toContain('cust-1')
+    })
+  })
+
+  describe('getCustomerDetail', () => {
+    it('uses the dashboard customer detail service and omits contact/notes fields', async () => {
+      ;(customerDashboardService.getCustomerById as jest.Mock).mockResolvedValue({
+        id: 'cust-1',
+        firstName: 'Ana',
+        lastName: 'Perez',
+        email: 'ana@example.com',
+        phone: '+525500000000',
+        notes: 'private note',
+        loyaltyPoints: 120,
+        totalVisits: 6,
+        totalSpent: { toNumber: () => 1500 },
+        averageOrderValue: { toNumber: () => 250 },
+        active: true,
+        customerGroup: { id: 'group-1', name: 'VIP', color: '#fff' },
+        tags: ['frecuente'],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        lastVisitAt: new Date('2026-05-12T00:00:00.000Z'),
+        orders: [
+          {
+            id: 'order-1',
+            orderNumber: 'ORD-7',
+            total: { toNumber: () => 500 },
+            status: 'COMPLETED',
+            createdAt: new Date('2026-05-12T20:00:00.000Z'),
+          },
+        ],
+        loyaltyTransactions: [
+          {
+            id: 'tx-1',
+            type: 'EARN',
+            points: 50,
+            createdAt: new Date('2026-05-12T20:00:00.000Z'),
+          },
+        ],
+      })
+
+      const result = await SharedQueryService.getCustomerDetail('venue-test', 'cust-1')
+
+      expect(customerDashboardService.getCustomerById).toHaveBeenCalledWith('venue-test', 'cust-1')
+      expect(result).toEqual(
+        expect.objectContaining({
+          name: 'Ana Perez',
+          loyaltyPoints: 120,
+          totalSpent: 1500,
+          customerGroupName: 'VIP',
+        }),
+      )
+      expect(JSON.stringify(result)).not.toContain('ana@example.com')
+      expect(JSON.stringify(result)).not.toContain('+525500000000')
+      expect(JSON.stringify(result)).not.toContain('private note')
+      expect(JSON.stringify(result)).not.toContain('cust-1')
+    })
+  })
+
+  describe('getCreditPackBalance', () => {
+    it('uses dashboard credit-pack purchases and returns balances without internal IDs or customer contact', async () => {
+      ;(creditPackDashboardService.getCustomerPurchases as jest.Mock).mockResolvedValue({
+        purchases: [
+          {
+            id: 'purchase-1',
+            status: 'ACTIVE',
+            purchasedAt: new Date('2026-05-01T00:00:00.000Z'),
+            expiresAt: new Date('2026-06-01T00:00:00.000Z'),
+            customer: { id: 'cust-1', firstName: 'Ana', lastName: 'Perez', email: 'ana@example.com', phone: '+525500000000' },
+            creditPack: { name: 'Clases 10' },
+            itemBalances: [
+              {
+                id: 'balance-1',
+                initialQuantity: 10,
+                remainingQuantity: 7,
+                product: { id: 'prod-1', name: 'Yoga', type: 'CLASS' },
+              },
+            ],
+          },
+        ],
+        total: 1,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      })
+
+      const result = await SharedQueryService.getCreditPackBalance('venue-test', 'cust-1')
+
+      expect(creditPackDashboardService.getCustomerPurchases).toHaveBeenCalledWith('venue-test', { customerId: 'cust-1', limit: 20 })
+      expect(result).toEqual(
+        expect.objectContaining({
+          customerName: 'Ana Perez',
+          activePurchases: 1,
+          totalRemainingCredits: 7,
+        }),
+      )
+      expect(result.balances).toEqual([
+        expect.objectContaining({
+          packName: 'Clases 10',
+          productName: 'Yoga',
+          remainingQuantity: 7,
+          initialQuantity: 10,
+        }),
+      ])
+      expect(JSON.stringify(result)).not.toContain('balance-1')
+      expect(JSON.stringify(result)).not.toContain('purchase-1')
+      expect(JSON.stringify(result)).not.toContain('ana@example.com')
     })
   })
 
@@ -305,6 +498,104 @@ describe('SharedQueryService', () => {
       expect(commissionCalculationService.getVenueCommissionStats).toHaveBeenCalledWith('venue-test')
       expect(result.topEarners).toEqual([{ staffName: 'Ana Admin', totalEarned: 750, calculationCount: 6 }])
       expect(JSON.stringify(result)).not.toContain('staff-1')
+    })
+  })
+
+  describe('getCommissionPayoutsSummary', () => {
+    it('uses commission payout dashboard services and removes staff email/payment references', async () => {
+      ;(commissionPayoutService.getPayoutStats as jest.Mock).mockResolvedValue({
+        totalPaid: 1000,
+        totalPending: 300,
+        payoutCount: 2,
+        averagePayout: 500,
+      })
+      ;(commissionPayoutService.getPayouts as jest.Mock).mockResolvedValue([
+        {
+          id: 'payout-1',
+          amount: { toNumber: () => 700 },
+          status: 'PAID',
+          paymentMethod: 'BANK_TRANSFER',
+          paymentReference: 'secret-bank-ref',
+          notes: 'private note',
+          createdAt: new Date('2026-05-12T12:00:00.000Z'),
+          paidAt: new Date('2026-05-12T18:00:00.000Z'),
+          staff: { id: 'staff-1', firstName: 'Ana', lastName: 'Admin', email: 'ana@example.com' },
+          summary: {
+            periodStart: new Date('2026-05-01T00:00:00.000Z'),
+            periodEnd: new Date('2026-05-12T23:59:59.999Z'),
+            netAmount: { toNumber: () => 700 },
+          },
+        },
+      ])
+
+      const result = await SharedQueryService.getCommissionPayoutsSummary('venue-test', { limit: 5 })
+
+      expect(commissionPayoutService.getPayoutStats).toHaveBeenCalledWith('venue-test')
+      expect(commissionPayoutService.getPayouts).toHaveBeenCalledWith('venue-test', {})
+      expect(result.recentPayouts).toEqual([
+        expect.objectContaining({
+          amount: 700,
+          status: 'PAID',
+          staffName: 'Ana Admin',
+        }),
+      ])
+      expect(JSON.stringify(result)).not.toContain('ana@example.com')
+      expect(JSON.stringify(result)).not.toContain('secret-bank-ref')
+      expect(JSON.stringify(result)).not.toContain('private note')
+    })
+  })
+
+  describe('getPaymentDetail', () => {
+    it('uses the dashboard payment detail service and strips processor-sensitive fields', async () => {
+      ;(paymentDashboardService.getPaymentById as jest.Mock).mockResolvedValue({
+        id: 'payment-1',
+        amount: 500,
+        tipAmount: 50,
+        netAmount: 550,
+        currency: 'MXN',
+        status: 'COMPLETED',
+        method: 'CARD',
+        source: 'TPV',
+        cardBrand: 'VISA',
+        last4: '4242',
+        maskedPan: '411111******4242',
+        authorizationNumber: 'secret-auth',
+        referenceNumber: 'secret-ref',
+        createdAt: new Date('2026-05-12T20:00:00.000Z'),
+        processedBy: { firstName: 'Ana', lastName: 'Admin', email: 'ana@example.com' },
+        order: {
+          orderNumber: 'ORD-7',
+          table: { number: '12' },
+          customer: { email: 'customer@example.com', phone: '+525500000000' },
+          items: [
+            {
+              name: 'Taco',
+              quantity: 2,
+              unitPrice: 100,
+              total: 200,
+            },
+          ],
+        },
+        merchantAccount: { displayName: 'Stripe MXN', provider: { name: 'Stripe' } },
+      })
+
+      const result = await SharedQueryService.getPaymentDetail('venue-test', 'payment-1')
+
+      expect(paymentDashboardService.getPaymentById).toHaveBeenCalledWith('venue-test', 'payment-1')
+      expect(result).toEqual(
+        expect.objectContaining({
+          amount: 500,
+          tipAmount: 50,
+          method: 'CARD',
+          last4: '4242',
+          processedByName: 'Ana Admin',
+          orderNumber: 'ORD-7',
+        }),
+      )
+      expect(JSON.stringify(result)).not.toContain('411111')
+      expect(JSON.stringify(result)).not.toContain('secret-auth')
+      expect(JSON.stringify(result)).not.toContain('secret-ref')
+      expect(JSON.stringify(result)).not.toContain('customer@example.com')
     })
   })
 

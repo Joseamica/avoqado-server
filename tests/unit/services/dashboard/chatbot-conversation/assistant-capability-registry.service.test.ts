@@ -154,6 +154,70 @@ describe('AssistantCapabilityRegistryService', () => {
     )
   })
 
+  it('registers detail and payout read tools with explicit permissions', () => {
+    const executableIds = registry.listExecutableCapabilities().map(capability => capability.id)
+
+    expect(registry.getCapability('settlements.detail')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['settlements:read'],
+        riskLevel: 'low',
+      }),
+    )
+    expect(registry.getCapability('payments.detail')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['payments:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('paymentLinks.detail')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['payment-link:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('commissions.payouts')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['commissions:payout'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(executableIds).toEqual(
+      expect.arrayContaining(['settlements.detail', 'payments.detail', 'paymentLinks.detail', 'commissions.payouts']),
+    )
+  })
+
+  it('registers customer detail and credit-pack balance read tools with PII notes', () => {
+    const executableIds = registry.listExecutableCapabilities().map(capability => capability.id)
+
+    expect(registry.getCapability('customers.detail')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['customers:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('creditPacks.balance')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['credit-packs:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('customers.detail')?.notes.join(' ')).toContain('omits email, phone')
+    expect(registry.getCapability('creditPacks.balance')?.notes.join(' ')).toContain('omits customer contact')
+    expect(executableIds).toEqual(expect.arrayContaining(['customers.detail', 'creditPacks.balance']))
+  })
+
   it('registers product how-to capabilities without business-data access', () => {
     const capability = registry.getCapability('howTo.teamInvite')
 
