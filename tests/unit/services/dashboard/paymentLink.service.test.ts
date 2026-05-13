@@ -55,7 +55,6 @@ const createMockPaymentLink = (overrides: Record<string, any> = {}) => ({
   ecommerceMerchantId: 'merchant-123',
   createdById: STAFF_ID,
   purpose: 'PAYMENT',
-  productId: null,
   title: 'Test Payment',
   description: 'Test description',
   imageUrl: null,
@@ -71,6 +70,11 @@ const createMockPaymentLink = (overrides: Record<string, any> = {}) => ({
   createdAt: new Date('2026-03-01'),
   updatedAt: new Date('2026-03-01'),
   createdBy: { id: STAFF_ID, firstName: 'Test', lastName: 'User' },
+  // Default fixtures for the new multi-item / multi-staff schema. Tests can
+  // override per-case via the `overrides` arg.
+  items: [],
+  attributions: [],
+  ecommerceMerchant: { provider: { code: 'BLUMON' } },
   _count: { checkoutSessions: 0 },
   ...overrides,
 })
@@ -78,15 +82,23 @@ const createMockPaymentLink = (overrides: Record<string, any> = {}) => ({
 const createMockItemPaymentLink = (overrides: Record<string, any> = {}) =>
   createMockPaymentLink({
     purpose: 'ITEM',
-    productId: PRODUCT_ID,
     title: 'Test Product',
     amount: new Decimal(250),
-    product: {
-      id: PRODUCT_ID,
-      name: 'Test Product',
-      price: new Decimal(250),
-      taxRate: new Decimal(0.16),
-    },
+    items: [
+      {
+        id: 'pli-1',
+        quantity: 1,
+        product: {
+          id: PRODUCT_ID,
+          name: 'Test Product',
+          description: null,
+          price: new Decimal(250),
+          imageUrl: null,
+          taxRate: new Decimal(0.16),
+        },
+        modifiers: [],
+      },
+    ],
     ...overrides,
   })
 
@@ -119,8 +131,11 @@ const createMockCheckoutSession = (overrides: Record<string, any> = {}) => ({
     shortCode: 'abc12345',
     venueId: VENUE_ID,
     purpose: 'PAYMENT',
-    productId: null,
     createdById: STAFF_ID,
+    // attributions[] is read by completeCharge to drive commission split.
+    // Default empty = no commission row created (which is fine for most
+    // tests; cases that exercise the split branch override this).
+    attributions: [],
   },
   ecommerceMerchant: {
     id: 'merchant-123',
@@ -160,7 +175,6 @@ describe('PaymentLink Service', () => {
         expect.objectContaining({
           data: expect.objectContaining({
             purpose: 'PAYMENT',
-            productId: undefined,
             title: 'Test Payment',
             amountType: 'FIXED',
           }),
@@ -168,9 +182,11 @@ describe('PaymentLink Service', () => {
       )
     })
 
-    it('should create an ITEM link with productId', async () => {
+    it('should create an ITEM link with items[]', async () => {
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
-      prismaMock.product.findFirst.mockResolvedValueOnce({ id: PRODUCT_ID })
+      // validateBundleItems uses product.findMany (plural) to look up all
+      // distinct product IDs with their modifier groups for validation.
+      prismaMock.product.findMany.mockResolvedValueOnce([{ id: PRODUCT_ID, modifierGroups: [] }])
       prismaMock.paymentLink.create.mockResolvedValueOnce(createMockItemPaymentLink())
 
       const result = await createPaymentLink(
@@ -186,12 +202,9 @@ describe('PaymentLink Service', () => {
       )
 
       expect(result).toBeDefined()
-      // (assertion details for the new line-items API are covered by smoke
-      // tests + manual QA — narrow unit checks here would re-mock half the
-      // service. See scripts/temp-smoke-payment-link-attribution.ts pattern.)
     })
 
-    it('should reject ITEM link without productId', async () => {
+    it('should reject ITEM link without items[]', async () => {
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
 
       await expect(
@@ -202,7 +215,7 @@ describe('PaymentLink Service', () => {
             amountType: 'FIXED',
             amount: 100,
             purpose: 'ITEM',
-            // No productId
+            // No items
           },
           STAFF_ID,
         ),
@@ -211,7 +224,8 @@ describe('PaymentLink Service', () => {
 
     it('should reject ITEM link with product from another venue', async () => {
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
-      prismaMock.product.findFirst.mockResolvedValueOnce(null) // Product not found in venue
+      // Empty product list = the requested productId doesn't belong to this venue
+      prismaMock.product.findMany.mockResolvedValueOnce([])
 
       await expect(
         createPaymentLink(
@@ -440,8 +454,8 @@ describe('PaymentLink Service', () => {
           shortCode: 'abc12345',
           venueId: VENUE_ID,
           purpose: 'ITEM',
-          productId: PRODUCT_ID,
           createdById: STAFF_ID,
+          attributions: [],
         },
         metadata: {
           cardToken: 'tok_test_123',
@@ -449,21 +463,22 @@ describe('PaymentLink Service', () => {
           cardBrand: 'VISA',
           cvv: '123',
           purpose: 'ITEM',
-          productId: PRODUCT_ID,
-          productName: 'Test Product',
-          productPrice: 250,
-          quantity: 2,
+          // Bundle snapshot — new shape after multi-product migration.
+          // Each line has its product info + pre-selected modifiers (empty here).
+          items: [{ productId: PRODUCT_ID, productName: 'Test Product', quantity: 2, unitPrice: 250, modifiers: [] }],
         },
         amount: new Decimal(500),
       })
 
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(itemSession)
 
-      // $transaction mock calls callback with prismaMock
-      // The callback creates checkout update, payment link update, and order create
+      // $transaction mock calls callback with prismaMock — the callback
+      // creates checkout update, payment link update, order create, and now
+      // a Payment row too (post-Blumon-parity refactor).
       prismaMock.checkoutSession.update.mockResolvedValueOnce({})
       prismaMock.paymentLink.update.mockResolvedValueOnce({})
       prismaMock.order.create.mockResolvedValueOnce({ id: 'order-123', orderNumber: 'PL-123' })
+      prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-123' })
 
       const result = await completeCharge('abc12345', 'cs_pl_test123')
 
@@ -478,42 +493,47 @@ describe('PaymentLink Service', () => {
         }),
       )
 
-      // Verify order was created inside transaction
+      // Order created — TAKEOUT for ITEM links, source=PAYMENT_LINK, with the
+      // bundle's line items nested under items.create (array now, not a single
+      // object — multi-product post-migration).
       expect(prismaMock.order.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             venueId: VENUE_ID,
+            type: 'TAKEOUT',
             source: 'PAYMENT_LINK',
             status: 'COMPLETED',
             paymentStatus: 'PAID',
-            items: expect.objectContaining({
-              create: expect.objectContaining({
-                productId: PRODUCT_ID,
-                productName: 'Test Product',
-                quantity: 2,
-              }),
-            }),
           }),
         }),
       )
 
-      // Verify inventory was deducted
+      // Inventory deducted per-line (loop matches the service's new behavior).
       expect(mockDeductInventory).toHaveBeenCalledWith(VENUE_ID, PRODUCT_ID, 2, 'cs_pl_test123')
     })
 
-    it('should charge WITHOUT creating Order for PAYMENT link', async () => {
+    it('should charge and create MANUAL_ENTRY Order for PAYMENT link', async () => {
+      // Post-Blumon-parity refactor: PAYMENT/DONATION links now also get an
+      // Order (MANUAL_ENTRY type) so the unified Payment row can attach to it
+      // and the transaction shows up in /payments. Inventory is NOT deducted.
       const paymentSession = createMockCheckoutSession()
 
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(paymentSession)
       prismaMock.checkoutSession.update.mockResolvedValueOnce({})
       prismaMock.paymentLink.update.mockResolvedValueOnce({})
+      prismaMock.order.create.mockResolvedValueOnce({ id: 'order-123', orderNumber: 'PL-123' })
+      prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-123' })
 
       const result = await completeCharge('abc12345', 'cs_pl_test123')
 
       expect(result.status).toBe('COMPLETED')
-      // Should NOT create order for PAYMENT links
-      expect(prismaMock.order.create).not.toHaveBeenCalled()
-      // Should NOT deduct inventory
+      // Order IS created (MANUAL_ENTRY) so revenue reports include it.
+      expect(prismaMock.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ type: 'MANUAL_ENTRY', source: 'PAYMENT_LINK' }),
+        }),
+      )
+      // Inventory still skipped — PAYMENT links have no products.
       expect(mockDeductInventory).not.toHaveBeenCalled()
     })
 
@@ -542,8 +562,8 @@ describe('PaymentLink Service', () => {
           shortCode: 'abc12345',
           venueId: VENUE_ID,
           purpose: 'ITEM',
-          productId: PRODUCT_ID,
           createdById: STAFF_ID,
+          attributions: [],
         },
         metadata: {
           cardToken: 'tok_test_123',
@@ -551,10 +571,7 @@ describe('PaymentLink Service', () => {
           cardBrand: 'VISA',
           cvv: '123',
           purpose: 'ITEM',
-          productId: PRODUCT_ID,
-          productName: 'Test Product',
-          productPrice: 250,
-          quantity: 1,
+          items: [{ productId: PRODUCT_ID, productName: 'Test Product', quantity: 1, unitPrice: 250, modifiers: [] }],
         },
         amount: new Decimal(250),
       })
@@ -563,6 +580,7 @@ describe('PaymentLink Service', () => {
       prismaMock.checkoutSession.update.mockResolvedValueOnce({})
       prismaMock.paymentLink.update.mockResolvedValueOnce({})
       prismaMock.order.create.mockResolvedValueOnce({ id: 'order-123' })
+      prismaMock.payment.create.mockResolvedValueOnce({ id: 'payment-123' })
 
       // Should NOT throw — inventory failure is non-blocking
       const result = await completeCharge('abc12345', 'cs_pl_test123')
@@ -625,7 +643,6 @@ describe('PaymentLink Service', () => {
         expect.objectContaining({
           data: expect.objectContaining({
             purpose: 'DONATION',
-            productId: undefined,
             isReusable: true,
           }),
         }),
