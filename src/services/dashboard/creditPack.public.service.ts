@@ -15,6 +15,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { withSerializableRetry } from './reservation.dashboard.service'
+import emailService from '@/services/email.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -365,6 +366,47 @@ export async function fulfillPurchase(checkoutSessionId: string) {
     packId: pack.id,
     items: pack.items.length,
   })
+
+  // Send purchase receipt by email best-effort. The on-screen Stripe success
+  // page and customer.totalSpent update are the source of truth; email is a
+  // convenience so customers have a record outside of Stripe's own receipt.
+  if (email) {
+    try {
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        select: { name: true, slug: true },
+      })
+      // Hydrate product names so the email shows "5 sesiones de Iyashi"
+      // instead of opaque IDs. Done post-tx to keep the critical path lean.
+      const itemProductIds = pack.items.map(i => i.productId).filter((v): v is string => !!v)
+      const itemProducts =
+        itemProductIds.length > 0
+          ? await prisma.product.findMany({
+              where: { id: { in: itemProductIds } },
+              select: { id: true, name: true },
+            })
+          : []
+      const itemNameById = new Map(itemProducts.map(p => [p.id, p.name]))
+      const itemLines = pack.items.map(it => {
+        const name = it.productId ? (itemNameById.get(it.productId) ?? 'Servicio') : 'Servicio'
+        return `${it.quantity} ${it.quantity === 1 ? 'sesión' : 'sesiones'} de ${name}`
+      })
+      const customerName = (customer as { firstName?: string | null }).firstName || (customer as { name?: string | null }).name || 'Cliente'
+      await emailService.sendCreditPackPurchaseEmail(email, {
+        customerName,
+        venueName: venue?.name ?? 'tu negocio',
+        venueSlug: venue?.slug ?? '',
+        packName: pack.name,
+        itemLines,
+        amountPaid: Number(amountPaid),
+        currency: pack.currency || 'MXN',
+        validUntilIso: expiresAt ? expiresAt.toISOString() : null,
+        purchaseRef: purchase.id.slice(-8).toUpperCase(),
+      })
+    } catch (mailError) {
+      logger.warn(`[CREDIT PACK EMAIL] failed for purchase ${purchase.id}: ${(mailError as Error).message}`)
+    }
+  }
 
   return purchase
 }

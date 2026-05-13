@@ -2441,6 +2441,536 @@ Equipo de Avoqado
     })
   }
 
+  async sendReservationConfirmedEmail(
+    email: string,
+    data: {
+      customerName: string
+      venueName: string
+      venueSlug: string
+      confirmationCode: string
+      cancelSecret: string | null
+      /** "Martes, 13 de mayo de 2026" */
+      dateLong: string
+      /** "12:45" */
+      time: string
+      /** Service names to show in the summary card (max 5). */
+      serviceNames?: string[]
+      /** Charged via Stripe at booking time. */
+      depositPaidMxn?: number | null
+      /** Owed by the customer when they arrive (pay-at-venue policy). */
+      owedAtVenueMxn?: number | null
+      /** Currency code, defaults to MXN. */
+      currency?: string
+    },
+  ): Promise<boolean> {
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const bookingHost = process.env.BOOKING_PUBLIC_URL || 'https://book.avoqado.io'
+    const manageUrl = data.cancelSecret
+      ? `${bookingHost}/${data.venueSlug}?manage=${encodeURIComponent(data.cancelSecret)}`
+      : `${bookingHost}/${data.venueSlug}`
+    const currency = data.currency || 'MXN'
+    const fmt = (n: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(n)
+    const subject = `Reservación confirmada: ${data.venueName} – ${data.dateLong} ${data.time}`
+
+    const servicesBlock =
+      data.serviceNames && data.serviceNames.length > 0
+        ? `
+    <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">${data.serviceNames.length === 1 ? 'Servicio' : 'Servicios'}</p>
+      ${data.serviceNames
+        .slice(0, 5)
+        .map(s => `<p style="font-size: 15px; color: #000; margin: 0 0 4px 0;">${s}</p>`)
+        .join('')}
+    </div>`
+        : ''
+
+    const depositRow =
+      data.depositPaidMxn != null && data.depositPaidMxn > 0
+        ? `<tr><td style="padding: 6px 0; font-size: 14px; color: #666;">Pagado hoy</td><td style="padding: 6px 0; font-size: 14px; color: #1f9d55; text-align: right; font-weight: 600;">${fmt(data.depositPaidMxn)}</td></tr>`
+        : ''
+    const owedRow =
+      data.owedAtVenueMxn != null && data.owedAtVenueMxn > 0
+        ? `<tr><td style="padding: 6px 0; font-size: 14px; color: #666;">A pagar en el lugar</td><td style="padding: 6px 0; font-size: 14px; color: #000; text-align: right; font-weight: 600;">${fmt(data.owedAtVenueMxn)}</td></tr>`
+        : ''
+    const paymentBlock =
+      depositRow || owedRow
+        ? `
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
+      ${depositRow}
+      ${owedRow}
+    </table>`
+        : ''
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">¡Tu reservación está confirmada!</h1>
+      <p style="font-size: 15px; color: #666; margin: 0;">${data.venueName} · ${data.confirmationCode}</p>
+    </div>
+
+    <div style="padding-bottom: 16px;">
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola ${data.customerName},</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Tu cita en <strong>${data.venueName}</strong> quedó agendada. Te esperamos.</p>
+    </div>
+
+    <div style="padding: 20px 24px; background-color: #ecfdf5; border-radius: 8px; border-left: 4px solid #1f9d55; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #1f9d55; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Tu cita</p>
+      <p style="font-size: 20px; font-weight: 600; color: #000; margin: 0 0 4px 0;">${data.dateLong}</p>
+      <p style="font-size: 20px; font-weight: 600; color: #000; margin: 0;">${data.time} hrs</p>
+    </div>
+
+    ${servicesBlock}
+
+    <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px;">Código de confirmación</p>
+      <p style="font-size: 18px; font-weight: 600; color: #000; margin: 0; font-family: 'SFMono-Regular', Menlo, Monaco, monospace;">${data.confirmationCode}</p>
+    </div>
+
+    ${paymentBlock}
+
+    <div style="margin: 0 0 32px 0;">
+      <a href="${manageUrl}" style="display: inline-block; background-color: #000; color: #fff; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Ver mi reservación
+      </a>
+    </div>
+
+    <p style="font-size: 14px; color: #666; margin: 0 0 24px 0;">
+      Te enviaremos un recordatorio antes de tu cita. Si necesitas cancelar o reagendar, hazlo desde el enlace de arriba o contacta directamente con ${data.venueName}.
+    </p>
+
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        Recibiste este correo porque hiciste una reservación en ${data.venueName}.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `¡Tu reservación está confirmada!
+${data.venueName} · ${data.confirmationCode}
+
+Hola ${data.customerName},
+
+Tu cita en ${data.venueName} quedó agendada:
+${data.dateLong} a las ${data.time} hrs
+${data.serviceNames && data.serviceNames.length ? `\n${data.serviceNames.length === 1 ? 'Servicio' : 'Servicios'}: ${data.serviceNames.join(', ')}\n` : ''}
+Código de confirmación: ${data.confirmationCode}
+${data.depositPaidMxn ? `\nPagado hoy: ${fmt(data.depositPaidMxn)}` : ''}${data.owedAtVenueMxn ? `\nA pagar en el lugar: ${fmt(data.owedAtVenueMxn)}` : ''}
+
+Ver mi reservación: ${manageUrl}
+
+Te enviaremos un recordatorio antes de tu cita.
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.`
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  async sendReservationCancelledEmail(
+    email: string,
+    data: {
+      customerName: string
+      venueName: string
+      venueSlug: string
+      confirmationCode: string
+      /** "Martes, 13 de mayo de 2026" */
+      dateLong: string
+      /** "12:45" */
+      time: string
+      /** Optional reason from the cancel request body. */
+      reason?: string | null
+      /** Who triggered the cancellation — used to soften the copy. */
+      cancelledBy?: 'CUSTOMER' | 'STAFF' | 'SYSTEM'
+    },
+  ): Promise<boolean> {
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const bookingHost = process.env.BOOKING_PUBLIC_URL || 'https://book.avoqado.io'
+    const bookAgainUrl = `${bookingHost}/${data.venueSlug}/appointments`
+    const subject = `Reservación cancelada: ${data.venueName} – ${data.confirmationCode}`
+
+    const intro =
+      data.cancelledBy === 'STAFF'
+        ? `${data.venueName} canceló tu reservación.`
+        : data.cancelledBy === 'SYSTEM'
+          ? 'Tu reservación fue cancelada automáticamente.'
+          : 'Tu reservación fue cancelada exitosamente.'
+
+    const reasonBlock = data.reason
+      ? `
+    <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Motivo</p>
+      <p style="font-size: 15px; color: #000; margin: 0; white-space: pre-wrap;">${data.reason}</p>
+    </div>`
+      : ''
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">Reservación cancelada</h1>
+      <p style="font-size: 15px; color: #666; margin: 0;">${data.venueName} · ${data.confirmationCode}</p>
+    </div>
+
+    <div style="padding-bottom: 16px;">
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola ${data.customerName},</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${intro}</p>
+    </div>
+
+    <div style="padding: 20px 24px; background-color: #fef2f2; border-radius: 8px; border-left: 4px solid #dc2626; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #dc2626; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Horario cancelado</p>
+      <p style="font-size: 18px; font-weight: 600; color: #000; margin: 0 0 4px 0; text-decoration: line-through;">${data.dateLong}</p>
+      <p style="font-size: 18px; font-weight: 600; color: #000; margin: 0; text-decoration: line-through;">${data.time} hrs</p>
+    </div>
+
+    ${reasonBlock}
+
+    <div style="margin: 0 0 32px 0;">
+      <a href="${bookAgainUrl}" style="display: inline-block; background-color: #000; color: #fff; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Reservar nuevo horario
+      </a>
+    </div>
+
+    <p style="font-size: 14px; color: #666; margin: 0 0 24px 0;">
+      Si esto fue un error o tienes preguntas, contacta directamente con ${data.venueName}.
+    </p>
+
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        Recibiste este correo porque tenías una reservación en ${data.venueName}.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `Reservación cancelada
+${data.venueName} · ${data.confirmationCode}
+
+Hola ${data.customerName},
+
+${intro}
+
+Horario cancelado: ${data.dateLong} a las ${data.time} hrs
+${data.reason ? `\nMotivo: ${data.reason}\n` : ''}
+Reservar nuevo horario: ${bookAgainUrl}
+
+Si esto fue un error o tienes preguntas, contacta directamente con ${data.venueName}.
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.`
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  async sendCreditPackPurchaseEmail(
+    email: string,
+    data: {
+      customerName: string
+      venueName: string
+      venueSlug: string
+      packName: string
+      /** Pack items breakdown: ["5 sesiones de Iyashi", "5 clases de Lagree"]. */
+      itemLines: string[]
+      amountPaid: number
+      currency?: string
+      /** ISO date string for "Válido hasta DD/MM/YYYY". Null = no expiry. */
+      validUntilIso: string | null
+      /** Confirmation code for the purchase (CreditPackPurchase.id or similar). */
+      purchaseRef: string
+    },
+  ): Promise<boolean> {
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const bookingHost = process.env.BOOKING_PUBLIC_URL || 'https://book.avoqado.io'
+    const portalUrl = `${bookingHost}/${data.venueSlug}`
+    const currency = data.currency || 'MXN'
+    const fmt = (n: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(n)
+    const subject = `Compra exitosa: ${data.packName} – ${data.venueName}`
+
+    const validityText = data.validUntilIso
+      ? (() => {
+          const d = new Date(data.validUntilIso)
+          return `Válido hasta ${d.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric' })}`
+        })()
+      : 'Sin fecha de vencimiento'
+
+    const itemsHtml = data.itemLines.map(line => `<li style="font-size: 15px; color: #000; margin: 0 0 6px 0;">${line}</li>`).join('')
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">¡Compra exitosa!</h1>
+      <p style="font-size: 15px; color: #666; margin: 0;">${data.venueName} · ${data.purchaseRef}</p>
+    </div>
+
+    <div style="padding-bottom: 16px;">
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola ${data.customerName},</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Gracias por tu compra en <strong>${data.venueName}</strong>. Tus créditos ya están disponibles para reservar.</p>
+    </div>
+
+    <div style="padding: 20px 24px; background-color: #ecfdf5; border-radius: 8px; border-left: 4px solid #1f9d55; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #1f9d55; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Paquete adquirido</p>
+      <p style="font-size: 20px; font-weight: 600; color: #000; margin: 0 0 12px 0;">${data.packName}</p>
+      ${itemsHtml ? `<ul style="margin: 0 0 8px 0; padding: 0 0 0 20px;">${itemsHtml}</ul>` : ''}
+      <p style="font-size: 13px; color: #666; margin: 8px 0 0 0;">${validityText}</p>
+    </div>
+
+    <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 24px;">
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="font-size: 14px; color: #666;">Total pagado</td>
+          <td style="font-size: 18px; font-weight: 700; color: #000; text-align: right;">${fmt(data.amountPaid)}</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="margin: 0 0 32px 0;">
+      <a href="${portalUrl}" style="display: inline-block; background-color: #000; color: #fff; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Reservar mi primera sesión
+      </a>
+    </div>
+
+    <p style="font-size: 14px; color: #666; margin: 0 0 24px 0;">
+      Puedes ver el saldo de tus créditos y reservar sesiones en cualquier momento desde tu cuenta en ${data.venueName}.
+    </p>
+
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        Este correo confirma tu compra de un paquete de créditos en ${data.venueName}.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `¡Compra exitosa!
+${data.venueName} · ${data.purchaseRef}
+
+Hola ${data.customerName},
+
+Gracias por tu compra en ${data.venueName}. Tus créditos ya están disponibles para reservar.
+
+Paquete: ${data.packName}
+${data.itemLines.map(l => `- ${l}`).join('\n')}
+${validityText}
+
+Total pagado: ${fmt(data.amountPaid)}
+
+Reservar mi primera sesión: ${portalUrl}
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.`
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  async sendReservationReminderEmail(
+    email: string,
+    data: {
+      customerName: string
+      venueName: string
+      venueSlug: string
+      confirmationCode: string
+      cancelSecret: string | null
+      /** Already-formatted in venue timezone, e.g. "Martes, 13 de mayo de 2026" */
+      dateLong: string
+      /** Already-formatted in venue timezone, e.g. "12:45" */
+      time: string
+      /** Minutes-before-start the reminder fires at (1440 = 24h, 120 = 2h). */
+      offsetMinutes: number
+    },
+  ): Promise<boolean> {
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const bookingHost = process.env.BOOKING_PUBLIC_URL || 'https://book.avoqado.io'
+    // Link straight into the widget's Manage Booking flow if we have a cancel
+    // secret. The host page reads ?manage=<secret> and opens the widget there.
+    const manageUrl = data.cancelSecret
+      ? `${bookingHost}/${data.venueSlug}?manage=${encodeURIComponent(data.cancelSecret)}`
+      : `${bookingHost}/${data.venueSlug}`
+
+    // Subject mirrors the WhatsApp template — short and scannable.
+    const subject = `Recordatorio: ${data.venueName} – ${data.dateLong} ${data.time}`
+
+    // Human leadline: "tu cita es mañana" vs "tu cita es en 2 horas". Default
+    // to "próxima" if we get something off-grid.
+    let leadline = 'Te recordamos tu próxima cita.'
+    if (data.offsetMinutes >= 60 * 20 && data.offsetMinutes <= 60 * 28) {
+      leadline = 'Tu cita es mañana.'
+    } else if (data.offsetMinutes <= 60 * 3 && data.offsetMinutes >= 60) {
+      leadline = `Tu cita es en ${Math.round(data.offsetMinutes / 60)} horas.`
+    } else if (data.offsetMinutes < 60) {
+      leadline = `Tu cita es en ${data.offsetMinutes} minutos.`
+    }
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <!-- Header with Logo -->
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <!-- Title -->
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">Recordatorio de tu cita</h1>
+      <p style="font-size: 15px; color: #666; margin: 0;">${data.venueName} · ${data.confirmationCode}</p>
+    </div>
+
+    <!-- Greeting -->
+    <div style="padding-bottom: 16px;">
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola ${data.customerName},</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${leadline}</p>
+    </div>
+
+    <!-- Highlight card with date/time -->
+    <div style="padding: 20px 24px; background-color: #ecfdf5; border-radius: 8px; border-left: 4px solid #1f9d55; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #1f9d55; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Tu cita</p>
+      <p style="font-size: 20px; font-weight: 600; color: #000; margin: 0 0 4px 0;">${data.dateLong}</p>
+      <p style="font-size: 20px; font-weight: 600; color: #000; margin: 0;">${data.time} hrs</p>
+    </div>
+
+    <!-- Confirmation code block -->
+    <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 32px;">
+      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px;">Código de confirmación</p>
+      <p style="font-size: 18px; font-weight: 600; color: #000; margin: 0; font-family: 'SFMono-Regular', Menlo, Monaco, monospace;">${data.confirmationCode}</p>
+    </div>
+
+    <!-- CTA Button -->
+    <div style="margin: 0 0 32px 0;">
+      <a href="${manageUrl}" style="display: inline-block; background-color: #000; color: #fff; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Ver mi reservación
+      </a>
+    </div>
+
+    <p style="font-size: 14px; color: #666; margin: 0 0 24px 0;">
+      ¿Necesitas cancelar o reagendar? Puedes hacerlo desde el enlace de arriba o contactando directamente con ${data.venueName}.
+    </p>
+
+    <!-- Divider -->
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+
+    <!-- Footer -->
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        Recibiste este correo porque tienes una reservación activa en ${data.venueName}.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `Hola ${data.customerName},
+
+${leadline}
+
+Tu cita en ${data.venueName}:
+${data.dateLong} a las ${data.time} hrs
+Código de confirmación: ${data.confirmationCode}
+
+Ver mi reservación: ${manageUrl}
+
+¿Necesitas cancelar o reagendar? Puedes hacerlo desde el enlace de arriba o contactando directamente con ${data.venueName}.
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.`
+
+    return this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+    })
+  }
+
   async verifyConnection(): Promise<boolean> {
     if (!resend || !this.isAvailable) {
       return false

@@ -1,5 +1,6 @@
 import { CronJob } from 'cron'
 import { formatInTimeZone } from 'date-fns-tz'
+import { es as esLocale } from 'date-fns/locale'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import emailService from '../services/email.service'
@@ -66,6 +67,7 @@ export class ReservationReminderJob {
             select: {
               id: true,
               name: true,
+              slug: true,
               timezone: true,
               reservationSettings: {
                 select: { reminderChannels: true, reminderMinBefore: true },
@@ -111,7 +113,7 @@ export class ReservationReminderJob {
               continue
             }
 
-            const result = await this.dispatch(channel, reservation)
+            const result = await this.dispatch(channel, reservation, offset)
 
             // upsert — defends against a race where another worker created the
             // row between our findUnique and the create.
@@ -153,18 +155,24 @@ export class ReservationReminderJob {
     reservation: {
       id: string
       confirmationCode: string
+      cancelSecret: string | null
       guestName: string | null
       guestEmail: string | null
       guestPhone: string | null
       startsAt: Date
-      venue: { name: string; timezone: string }
+      venue: { name: string; slug: string; timezone: string }
     },
+    offsetMinutes: number,
   ): Promise<{ success: boolean; errorMessage?: string }> {
     const customerName = reservation.guestName ?? 'Cliente'
     const venueName = reservation.venue.name
     const tz = reservation.venue.timezone || 'America/Mexico_City'
+    // Short format for WhatsApp (limited characters), long format for email
+    // body (renders nicely in the highlight card).
     const date = formatInTimeZone(reservation.startsAt, tz, 'dd/MM/yyyy')
     const time = formatInTimeZone(reservation.startsAt, tz, 'HH:mm')
+    const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+    const dateLong = dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1)
 
     try {
       switch (channel) {
@@ -179,22 +187,15 @@ export class ReservationReminderJob {
           if (!reservation.guestEmail) {
             return { success: false, errorMessage: 'No guest email on reservation' }
           }
-          // emailService doesn't have a dedicated reservation-reminder method yet —
-          // send a plain text email via the generic sendEmail() wrapper. This avoids
-          // bloating the email service for a worker that mirrors the WhatsApp template.
-          const subject = `Recordatorio: ${venueName} – ${date} ${time}`
-          const text = [
-            `Hola ${customerName},`,
-            '',
-            `Te recordamos tu reservación en ${venueName} para el ${date} a las ${time}.`,
-            `Código de confirmación: ${reservation.confirmationCode}.`,
-            '',
-            'Te esperamos.',
-          ].join('\n')
-          const ok = await emailService.sendEmail({
-            to: reservation.guestEmail,
-            subject,
-            text,
+          const ok = await emailService.sendReservationReminderEmail(reservation.guestEmail, {
+            customerName,
+            venueName,
+            venueSlug: reservation.venue.slug,
+            confirmationCode: reservation.confirmationCode,
+            cancelSecret: reservation.cancelSecret,
+            dateLong,
+            time,
+            offsetMinutes,
           })
           return ok ? { success: true } : { success: false, errorMessage: 'Email send returned false' }
         }

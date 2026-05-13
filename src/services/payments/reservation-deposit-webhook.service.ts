@@ -3,6 +3,9 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { VerifiedWebhookEvent } from './providers/provider.interface'
 import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
+import emailService from '@/services/email.service'
+import { formatInTimeZone } from 'date-fns-tz'
+import { es as esLocale } from 'date-fns/locale'
 
 type CheckoutSessionLike = {
   id: string
@@ -91,6 +94,7 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
     return
   }
 
+  let justConfirmedReservationId: string | null = null
   try {
     await prisma.$transaction(async tx => {
       await tx.processedStripeEvent.create({
@@ -103,21 +107,35 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
         },
       })
 
-      const updated = await tx.reservation.updateMany({
+      // Capture the row id BEFORE updating so we can fire the confirmation
+      // email after the tx commits. updateMany doesn't return rows; the
+      // findFirst+update pair keeps the original idempotency semantics
+      // (no-op when depositStatus has already advanced past PENDING).
+      const target = await tx.reservation.findFirst({
         where: {
           checkoutSessionId: session.id,
           depositStatus: 'PENDING',
         },
-        data: {
-          status: ReservationStatus.CONFIRMED,
-          confirmedAt: new Date(),
-          depositStatus: 'PAID',
-          depositPaidAt: new Date(),
-          depositProcessorRef: paymentIntentId,
-        },
+        select: { id: true },
       })
 
-      if (updated.count === 1) return
+      const updated = target
+        ? await tx.reservation.updateMany({
+            where: { id: target.id, depositStatus: 'PENDING' },
+            data: {
+              status: ReservationStatus.CONFIRMED,
+              confirmedAt: new Date(),
+              depositStatus: 'PAID',
+              depositPaidAt: new Date(),
+              depositProcessorRef: paymentIntentId,
+            },
+          })
+        : { count: 0 }
+
+      if (updated.count === 1) {
+        justConfirmedReservationId = target!.id
+        return
+      }
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },
@@ -149,6 +167,64 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
       return
     }
     throw error
+  }
+
+  // After the status flip commits, fire the booking confirmation email. We
+  // do this OUTSIDE the transaction so a slow Resend round-trip doesn't hold
+  // the row lock, and email failures NEVER roll back a paid booking.
+  if (justConfirmedReservationId) {
+    try {
+      const reservation = await prisma.reservation.findUnique({
+        where: { id: justConfirmedReservationId },
+        select: {
+          confirmationCode: true,
+          cancelSecret: true,
+          guestName: true,
+          guestEmail: true,
+          startsAt: true,
+          productId: true,
+          productIds: true,
+          depositAmount: true,
+          venue: { select: { name: true, slug: true, timezone: true } },
+        },
+      })
+      if (reservation?.guestEmail) {
+        const productIds =
+          reservation.productIds && reservation.productIds.length > 0
+            ? reservation.productIds
+            : reservation.productId
+              ? [reservation.productId]
+              : []
+        const products =
+          productIds.length > 0
+            ? await prisma.product.findMany({
+                where: { id: { in: productIds } },
+                select: { id: true, name: true },
+              })
+            : []
+        const nameById = new Map(products.map(p => [p.id, p.name]))
+        const serviceNames = productIds.map(id => nameById.get(id)).filter((n): n is string => !!n)
+        const tz = reservation.venue.timezone || 'America/Mexico_City'
+        const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+        await emailService.sendReservationConfirmedEmail(reservation.guestEmail, {
+          customerName: reservation.guestName ?? 'Cliente',
+          venueName: reservation.venue.name,
+          venueSlug: reservation.venue.slug,
+          confirmationCode: reservation.confirmationCode,
+          cancelSecret: reservation.cancelSecret,
+          dateLong: dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1),
+          time: formatInTimeZone(reservation.startsAt, tz, 'HH:mm'),
+          serviceNames,
+          // Deposit path: payment cleared this very webhook tick.
+          depositPaidMxn: reservation.depositAmount ? Number(reservation.depositAmount) : null,
+          owedAtVenueMxn: null,
+        })
+      }
+    } catch (mailError) {
+      logger.warn(
+        `[STRIPE CONNECT] confirmation email failed for reservation ${justConfirmedReservationId}: ${(mailError as Error).message}`,
+      )
+    }
   }
 }
 

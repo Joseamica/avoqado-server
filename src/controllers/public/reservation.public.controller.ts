@@ -12,6 +12,9 @@ import { Prisma } from '@prisma/client'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '../../services/payments/providers/money'
 import { getVatRateBps } from '../../services/superadmin/platformSettings.service'
 import { getProvider } from '../../services/payments/provider-registry'
+import { formatInTimeZone } from 'date-fns-tz'
+import { es as esLocale } from 'date-fns/locale'
+import emailService from '../../services/email.service'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -772,6 +775,47 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
+    // Booking confirmation email — only fires when the reservation is already
+    // CONFIRMED at this point (no-deposit flow OR pay-at-venue). For the
+    // Stripe deposit path the reservation is PENDING here and the email is
+    // fired by the deposit webhook after payment succeeds, to avoid sending
+    // "confirmed" mail for a booking that may still be abandoned at checkout.
+    if (reservation.status === 'CONFIRMED' && reservation.guestEmail) {
+      try {
+        const allProductIds = incomingProductIds.length > 0 ? incomingProductIds : reservation.productId ? [reservation.productId] : []
+        const products =
+          allProductIds.length > 0
+            ? await prisma.product.findMany({
+                where: { id: { in: allProductIds }, venueId: venue.id },
+                select: { id: true, name: true },
+              })
+            : []
+        // Preserve customer's pick order: products[] comes back unordered.
+        const nameById = new Map(products.map(p => [p.id, p.name]))
+        const serviceNames = allProductIds.map(id => nameById.get(id)).filter((n): n is string => !!n)
+        const tz = venue.timezone || 'America/Mexico_City'
+        const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+        const owedAtVenueMxn = reservation.depositAmount ? Number(reservation.depositAmount) : null
+        await emailService.sendReservationConfirmedEmail(reservation.guestEmail, {
+          customerName: reservation.guestName ?? 'Cliente',
+          venueName: venue.name,
+          venueSlug: venue.slug,
+          confirmationCode: reservation.confirmationCode,
+          cancelSecret: reservation.cancelSecret,
+          dateLong: dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1),
+          time: formatInTimeZone(reservation.startsAt, tz, 'HH:mm'),
+          serviceNames,
+          // Pay-at-venue case stamps depositAmount + leaves status=CONFIRMED;
+          // no charge has cleared today, so it shows as "owed at venue".
+          owedAtVenueMxn,
+        })
+      } catch (error) {
+        // Email failures must NEVER fail a successful booking. The customer
+        // already has cancelSecret on screen — we log and move on.
+        logger.warn(`[BOOKING CONFIRM EMAIL] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
+      }
+    }
+
     // Return only public-safe data + cancelSecret
     res.status(201).json({
       confirmationCode: reservation.confirmationCode,
@@ -976,6 +1020,28 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
     }
 
     const cancelled = await reservationService.cancelReservation(reservation.venueId, reservation.id, 'CUSTOMER', req.body?.reason)
+
+    // Fire the cancellation email best-effort. Customer already has the API
+    // response confirming the cancel succeeded — a mail failure shouldn't
+    // change that contract.
+    if (reservation.guestEmail) {
+      try {
+        const tz = reservation.venue.timezone || 'America/Mexico_City'
+        const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+        await emailService.sendReservationCancelledEmail(reservation.guestEmail, {
+          customerName: reservation.guestName ?? 'Cliente',
+          venueName: reservation.venue.name,
+          venueSlug: reservation.venue.slug,
+          confirmationCode: reservation.confirmationCode,
+          dateLong: dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1),
+          time: formatInTimeZone(reservation.startsAt, tz, 'HH:mm'),
+          reason: typeof req.body?.reason === 'string' ? req.body.reason : null,
+          cancelledBy: 'CUSTOMER',
+        })
+      } catch (mailError) {
+        logger.warn(`[CANCEL EMAIL] failed for ${reservation.confirmationCode}: ${(mailError as Error).message}`)
+      }
+    }
 
     res.json({
       confirmationCode: cancelled.confirmationCode,
