@@ -17,6 +17,9 @@ import { deductInventoryForProduct } from '@/services/dashboard/productInventory
 import { getProvider } from '@/services/payments/provider-registry'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
+import emailService from '@/services/email.service'
+import { formatInTimeZone } from 'date-fns-tz'
+import { es as esLocale } from 'date-fns/locale'
 import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
@@ -716,6 +719,10 @@ export const DEFAULT_PAYMENT_LINK_BRANDING = {
   showLogo: true,
   buttonColor: '#006aff',
   buttonShape: 'rounded' as 'rounded' | 'square' | 'pill',
+  /** CSS font-family applied to the public checkout. Whitelist enforced
+   *  by the Zod schema (`PAYMENT_LINK_FONT_IDS`). Default matches the
+   *  legacy DM Sans the customer-facing app shipped with. */
+  fontFamily: 'DM Sans',
   showImage: true,
   showTitle: true,
   showPrice: true,
@@ -735,6 +742,7 @@ function mergeBranding(raw: unknown): PaymentLinkBranding {
     showLogo: stored.showLogo ?? DEFAULT_PAYMENT_LINK_BRANDING.showLogo,
     buttonColor: stored.buttonColor ?? DEFAULT_PAYMENT_LINK_BRANDING.buttonColor,
     buttonShape: stored.buttonShape ?? DEFAULT_PAYMENT_LINK_BRANDING.buttonShape,
+    fontFamily: stored.fontFamily ?? DEFAULT_PAYMENT_LINK_BRANDING.fontFamily,
     showImage: stored.showImage ?? DEFAULT_PAYMENT_LINK_BRANDING.showImage,
     showTitle: stored.showTitle ?? DEFAULT_PAYMENT_LINK_BRANDING.showTitle,
     showPrice: stored.showPrice ?? DEFAULT_PAYMENT_LINK_BRANDING.showPrice,
@@ -770,6 +778,7 @@ export async function updatePaymentLinkBranding(
     showLogo: data.showLogo ?? current.showLogo,
     buttonColor: data.buttonColor ?? current.buttonColor,
     buttonShape: data.buttonShape ?? current.buttonShape,
+    fontFamily: data.fontFamily ?? current.fontFamily,
     showImage: data.showImage ?? current.showImage,
     showTitle: data.showTitle ?? current.showTitle,
     showPrice: data.showPrice ?? current.showPrice,
@@ -1422,6 +1431,114 @@ export async function finalizePaymentLinkCheckout(args: {
     shortCode: session.paymentLink.shortCode,
     amount: session.amount.toString(),
   })
+
+  // Best-effort venue admin notification. Fires outside the critical path
+  // so a slow email round-trip doesn't delay the webhook response. Any
+  // error here only logs — the payment finalization stands.
+  void notifyVenueOnLinkPaid({
+    paymentLinkId: session.paymentLink.id,
+    venueId: session.paymentLink.venueId,
+    stripeSessionId: args.stripeSessionId,
+  }).catch(err => {
+    logger.warn(`[PAYMENT-LINK NOTIFY] failed for session ${args.stripeSessionId}: ${(err as Error).message}`)
+  })
+}
+
+/**
+ * Fan out the "payment received" email to venue admins (OWNER/ADMIN role)
+ * when VenuePaymentLinkSettings.notifyOnPaid is on. Looks up the freshly
+ * paid session + link + customer info, then iterates eligible staff one
+ * at a time so a single bad address doesn't block the rest.
+ */
+async function notifyVenueOnLinkPaid(args: {
+  paymentLinkId: string
+  venueId: string
+  stripeSessionId: string
+}): Promise<void> {
+  const settings = await prisma.venuePaymentLinkSettings.findUnique({
+    where: { venueId: args.venueId },
+    select: { notifyOnPaid: true },
+  })
+  if (!settings?.notifyOnPaid) return
+
+  const [link, venue, recipients, paidSession] = await Promise.all([
+    prisma.paymentLink.findUnique({
+      where: { id: args.paymentLinkId },
+      select: { title: true, shortCode: true, currency: true },
+    }),
+    prisma.venue.findUnique({
+      where: { id: args.venueId },
+      select: { name: true, timezone: true },
+    }),
+    // Eligible recipients: active OWNER/ADMIN staff assigned to this venue.
+    // Staff.email is non-nullable in schema so we don't filter for it.
+    prisma.staffVenue.findMany({
+      where: {
+        venueId: args.venueId,
+        active: true,
+        role: { in: ['OWNER', 'ADMIN'] },
+        staff: { active: true },
+      },
+      include: { staff: { select: { id: true, email: true, firstName: true } } },
+    }),
+    prisma.checkoutSession.findUnique({
+      where: { sessionId: args.stripeSessionId },
+      select: {
+        amount: true,
+        customerEmail: true,
+        customerName: true,
+        completedAt: true,
+        metadata: true,
+      },
+    }),
+  ])
+
+  if (!link || !venue || !paidSession || recipients.length === 0) return
+
+  const tz = venue.timezone || 'America/Mexico_City'
+  const paidAtRaw = formatInTimeZone(
+    paidSession.completedAt ?? new Date(),
+    tz,
+    "EEEE d 'de' MMMM 'de' yyyy HH:mm",
+    { locale: esLocale },
+  )
+  const paidAtLong = paidAtRaw.charAt(0).toUpperCase() + paidAtRaw.slice(1)
+  const dashboardOrigin = process.env.DASHBOARD_URL || 'https://app.avoqado.io'
+  const dashboardUrl = `${dashboardOrigin}/venues/${args.venueId}/payment-links/${args.paymentLinkId}`
+
+  // Tip lives on the Stripe session metadata (set when the checkout was
+  // created, line ~1033 in this file). String-typed because Stripe's
+  // metadata is always strings.
+  const metadata = (paidSession.metadata ?? {}) as Record<string, unknown>
+  const tipStr = typeof metadata.tipAmount === 'string' ? metadata.tipAmount : null
+  const tipAmount = tipStr ? Number(tipStr) : null
+
+  for (const r of recipients) {
+    const email = r.staff.email
+    try {
+      await emailService.sendPaymentLinkPaidEmail(email, {
+        recipientName: r.staff.firstName,
+        venueName: venue.name,
+        linkTitle: link.title,
+        linkShortCode: link.shortCode,
+        customerEmail: paidSession.customerEmail,
+        customerName: paidSession.customerName,
+        amountPaid: Number(paidSession.amount),
+        tipAmount,
+        currency: link.currency || 'MXN',
+        // Card last-4 lives on processorData (JSON blob) and varies per
+        // provider. Skipped for now to keep this lean; can be re-added
+        // once we standardize a getter.
+        cardLast4: null,
+        paidAtLong,
+        dashboardUrl,
+      })
+    } catch (mailError) {
+      logger.warn(
+        `[PAYMENT-LINK NOTIFY] failed for ${email} (link=${args.paymentLinkId}): ${(mailError as Error).message}`,
+      )
+    }
+  }
 }
 
 /**

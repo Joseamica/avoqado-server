@@ -26,6 +26,20 @@ const tippingConfigSchema = z
   .nullable()
 
 // ═══════════════════════════════════════════════════════════════════════════
+// VENUE-WIDE SETTINGS — backs PaymentLinkSettings.tsx in the dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const updateVenuePaymentLinkSettingsSchema = z.object({
+  notifyOnPaid: z.boolean().optional(),
+  customerNotesEnabled: z.boolean().optional(),
+  defaultTippingConfig: tippingConfigSchema,
+  defaultCustomFields: customFieldsSchema,
+  merchantPolicies: z.string().max(10_000, 'Las políticas no pueden exceder 10,000 caracteres').optional().nullable(),
+})
+
+export type UpdateVenuePaymentLinkSettingsDto = z.infer<typeof updateVenuePaymentLinkSettingsSchema>
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BODY SCHEMAS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -169,6 +183,66 @@ export const chargeBodySchema = z.object({
  * a 7-char hex (#RRGGBB) so it can flow safely into inline `style` props
  * on pay.avoqado.io without XSS risk.
  */
+/**
+ * Whitelist of CSS font-family names admin can pick for payment-link
+ * branding. Mirrors the catalog in
+ * `avoqado-web-dashboard/.../payment-link-fonts.ts` and the bundled
+ * @fontsource packages in avoqado-checkout. Keep all three in sync — the
+ * customer checkout app will only have the matching .woff2 files for these
+ * exact strings.
+ *
+ * Validating server-side prevents XSS via `style="font-family: <attacker>"`
+ * since the value is interpolated into inline `style` props on the
+ * customer-facing page.
+ */
+export const PAYMENT_LINK_FONT_IDS = [
+  // Sans-serif
+  'Inter',
+  'DM Sans',
+  'Poppins',
+  'Manrope',
+  'Plus Jakarta Sans',
+  'Roboto',
+  'Open Sans',
+  'Lato',
+  'Montserrat',
+  'Work Sans',
+  'Nunito',
+  'Outfit',
+  'Karla',
+  'Mulish',
+  'Figtree',
+  // Serif
+  'Playfair Display',
+  'Lora',
+  'Merriweather',
+  'EB Garamond',
+  'Crimson Pro',
+  'Source Serif 4',
+  'Libre Baskerville',
+  'Cormorant Garamond',
+  // Display
+  'Bebas Neue',
+  'Oswald',
+  'Anton',
+  'Archivo Black',
+  'Abril Fatface',
+  'Righteous',
+  'Staatliches',
+  'Alfa Slab One',
+  'Fjalla One',
+  'Russo One',
+  // Handwriting
+  'Caveat',
+  'Pacifico',
+  'Dancing Script',
+  'Sacramento',
+  // Mono
+  'Fira Code',
+  'JetBrains Mono',
+  'Roboto Mono',
+] as const
+
 export const paymentLinkBrandingBodySchema = z.object({
   showLogo: z.boolean().optional(),
   buttonColor: z
@@ -176,6 +250,7 @@ export const paymentLinkBrandingBodySchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/, 'El color debe ser un código HEX de 6 dígitos (ej. #006aff)')
     .optional(),
   buttonShape: z.enum(['rounded', 'square', 'pill']).optional(),
+  fontFamily: z.enum(PAYMENT_LINK_FONT_IDS as unknown as [string, ...string[]]).optional(),
   showImage: z.boolean().optional(),
   showTitle: z.boolean().optional(),
   showPrice: z.boolean().optional(),
@@ -186,6 +261,13 @@ export const updatePaymentLinkBrandingSchema = z.object({
     venueId: z.string().min(1, 'Venue ID es requerido'),
   }),
   body: paymentLinkBrandingBodySchema,
+})
+
+export const updatePaymentLinkSettingsSchema = z.object({
+  params: z.object({
+    venueId: z.string().min(1, 'Venue ID es requerido'),
+  }),
+  body: updateVenuePaymentLinkSettingsSchema,
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
