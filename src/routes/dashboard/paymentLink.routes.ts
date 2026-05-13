@@ -34,6 +34,36 @@ router.get('/', validateRequest(listPaymentLinksSchema), paymentLinkController.l
  */
 router.post('/', validateRequest(createPaymentLinkSchema), paymentLinkController.createPaymentLink)
 
+// ───────────────────────────────────────────────────────────────────────────
+// Static-prefix routes — MUST be declared BEFORE `/:linkId` because Express
+// matches in order. With `/:linkId` first, `GET /settings` would be routed
+// to getPaymentLink with linkId='settings' and 404 ("Liga de pago no
+// encontrada"). Same caveat applies to any future static sub-paths.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET  /api/v1/dashboard/venues/:venueId/payment-links/branding/config
+ * PUT  /api/v1/dashboard/venues/:venueId/payment-links/branding/config
+ */
+router.get('/branding/config', paymentLinkController.getPaymentLinkBranding)
+router.put('/branding/config', validateRequest(updatePaymentLinkBrandingSchema), paymentLinkController.updatePaymentLinkBranding)
+
+/**
+ * GET   /api/v1/dashboard/venues/:venueId/payment-links/settings
+ * PATCH /api/v1/dashboard/venues/:venueId/payment-links/settings
+ *
+ * Venue-wide defaults applied to new payment links + notification toggles.
+ * Pre-existing per-link tippingConfig / customFields on PaymentLink rows
+ * are untouched; this controls the dashboard "Ajustes generales" form and
+ * the on-paid notification email.
+ */
+router.get('/settings', paymentLinkController.getPaymentLinkSettingsHandler)
+router.patch('/settings', validateRequest(updatePaymentLinkSettingsSchema), paymentLinkController.updatePaymentLinkSettingsHandler)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Dynamic-id routes
+// ───────────────────────────────────────────────────────────────────────────
+
 /**
  * GET /api/v1/dashboard/venues/:venueId/payment-links/:linkId
  * Gets a single payment link by ID
@@ -51,30 +81,5 @@ router.put('/:linkId', validateRequest(updatePaymentLinkSchema), paymentLinkCont
  * Archives a payment link (soft delete)
  */
 router.delete('/:linkId', validateRequest(getPaymentLinkSchema), paymentLinkController.archivePaymentLink)
-
-/**
- * GET  /api/v1/dashboard/venues/:venueId/payment-links/branding/config
- * PUT  /api/v1/dashboard/venues/:venueId/payment-links/branding/config
- *
- * Per-venue branding for the public payment-link checkout
- * (pay.avoqado.io). GET returns merged config with defaults; PUT replaces
- * the whole config. Path is intentionally a sub-segment of /payment-links
- * so the permission guard at the parent (`payment-link:read`) gates it.
- */
-router.get('/branding/config', paymentLinkController.getPaymentLinkBranding)
-router.put('/branding/config', validateRequest(updatePaymentLinkBrandingSchema), paymentLinkController.updatePaymentLinkBranding)
-
-/**
- * GET   /api/v1/dashboard/venues/:venueId/payment-links/settings
- * PATCH /api/v1/dashboard/venues/:venueId/payment-links/settings
- *
- * Venue-wide defaults applied to new payment links + notification toggles.
- * Sibling of /branding/config so the same `payment-link:read` guard at the
- * parent gates both. Pre-existing per-link tippingConfig / customFields on
- * PaymentLink rows are untouched; this just controls the dashboard's
- * "Ajustes generales" form and the on-paid notification email.
- */
-router.get('/settings', paymentLinkController.getPaymentLinkSettingsHandler)
-router.patch('/settings', validateRequest(updatePaymentLinkSettingsSchema), paymentLinkController.updatePaymentLinkSettingsHandler)
 
 export default router
