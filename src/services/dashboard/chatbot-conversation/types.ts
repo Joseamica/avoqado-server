@@ -90,6 +90,7 @@ export type QueryToolName =
   | 'sales'
   | 'averageTicket'
   | 'topProducts'
+  | 'productSales.compare'
   | 'staffPerformance'
   | 'reviews'
   | 'businessOverview'

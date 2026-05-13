@@ -19,6 +19,7 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: {
       findUnique: jest.fn(),
     },
+    $queryRaw: jest.fn(),
   },
 }))
 
@@ -252,6 +253,64 @@ describe('SharedQueryService', () => {
         totalCollected: 1250,
         paymentCount: 3,
         checkoutSessionCount: 4,
+        currency: 'MXN',
+      })
+    })
+  })
+
+  describe('compareProductSales', () => {
+    it('compares two product terms with weekend and night filters scoped to the venue', async () => {
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'UTC', currency: 'MXN' })
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        {
+          productName: 'Hamburguesa BBQ',
+          quantitySold: BigInt(6),
+          revenue: { toNumber: () => 900 },
+          orderCount: BigInt(4),
+        },
+        {
+          productName: 'Pizza Pepperoni',
+          quantitySold: BigInt(3),
+          revenue: { toNumber: () => 450 },
+          orderCount: BigInt(3),
+        },
+      ])
+
+      const result = await SharedQueryService.compareProductSales('venue-test', {
+        leftTerm: 'hamburguesa',
+        rightTerm: 'pizza',
+        period: 'thisMonth',
+        weekendOnly: true,
+        nightOnly: true,
+      })
+
+      expect(prisma.venue.findUnique).toHaveBeenCalledWith({
+        where: { id: 'venue-test' },
+        select: { timezone: true, currency: true },
+      })
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1)
+      expect(result).toEqual({
+        leftTerm: 'hamburguesa',
+        rightTerm: 'pizza',
+        filters: {
+          period: 'thisMonth',
+          weekendOnly: true,
+          nightOnly: true,
+          timezone: 'UTC',
+        },
+        left: {
+          revenue: 900,
+          quantitySold: 6,
+          orderCount: 4,
+          products: ['Hamburguesa BBQ'],
+        },
+        right: {
+          revenue: 450,
+          quantitySold: 3,
+          orderCount: 3,
+          products: ['Pizza Pepperoni'],
+        },
+        totalRevenue: 1350,
         currency: 'MXN',
       })
     })

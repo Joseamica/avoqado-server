@@ -35,6 +35,7 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
 
     // Create test payments for consistency testing
     await createTestPayments(testData.venue.id, testData.staff[0].id)
+    await createProductComparisonOrders(testData.venue.id, testData.staff[0].id, testData.products)
   })
 
   afterAll(async () => {
@@ -154,6 +155,35 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
       expect(chatbotResponse.queryResult?.productName).toBe(dashboardValue.productName)
       expect(chatbotResponse.queryResult?.quantitySold).toBe(dashboardValue.quantitySold)
       expect(chatbotResponse.queryResult?.revenue).toBe(dashboardValue.revenue)
+    }, 30000)
+
+    it('should return 100% consistent results for product comparisons with weekend and night filters', async () => {
+      const dashboardValue = await SharedQueryService.compareProductSales(testData.venue.id, {
+        leftTerm: 'hamburguesas',
+        rightTerm: 'pizzas',
+        period: 'thisMonth',
+        weekendOnly: true,
+        nightOnly: true,
+      })
+
+      const chatbotResponse = await service.processQuery({
+        message: '¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?',
+        venueId: testData.venue.id,
+        userId: testData.staff[0].id,
+        venueSlug: testData.venue.slug,
+        userRole: UserRole.MANAGER,
+      })
+
+      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
+      expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('registered_product_comparison_tool')
+      expect(chatbotResponse.response).toContain('Comparativo hamburguesas vs pizzas')
+
+      const comparison = chatbotResponse.queryResult?.comparison
+      expect(comparison?.left.revenue).toBe(dashboardValue.left.revenue)
+      expect(comparison?.left.quantitySold).toBe(dashboardValue.left.quantitySold)
+      expect(comparison?.right.revenue).toBe(dashboardValue.right.revenue)
+      expect(comparison?.right.quantitySold).toBe(dashboardValue.right.quantitySold)
+      expect(comparison?.totalRevenue).toBe(dashboardValue.totalRevenue)
     }, 30000)
   })
 
@@ -351,4 +381,76 @@ async function createTestPayments(venueId: string, staffId: string) {
       },
     })
   }
+}
+
+async function createProductComparisonOrders(
+  venueId: string,
+  staffId: string,
+  products: Array<{ id: string; name: string }>,
+): Promise<void> {
+  const burger = products.find(product => product.name.toLowerCase().includes('hamburguesa'))
+  const pizza = products.find(product => product.name.toLowerCase().includes('pizza'))
+
+  if (!burger || !pizza) {
+    throw new Error('Product comparison consistency test requires hamburger and pizza products')
+  }
+
+  const createdAt = lastSaturdayNightInVenueTimezone()
+  const subtotal = 2 * 120 + 3 * 180
+
+  const order = await prisma.order.create({
+    data: {
+      venueId,
+      orderNumber: `PRODUCT-CMP-${Date.now()}`,
+      subtotal: new Prisma.Decimal(subtotal),
+      taxAmount: new Prisma.Decimal(0),
+      total: new Prisma.Decimal(subtotal),
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+      source: 'TPV',
+      createdById: staffId,
+      createdAt,
+      updatedAt: createdAt,
+    },
+  })
+
+  await prisma.orderItem.createMany({
+    data: [
+      {
+        orderId: order.id,
+        productId: burger.id,
+        productName: burger.name,
+        quantity: 2,
+        unitPrice: new Prisma.Decimal(120),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(240),
+      },
+      {
+        orderId: order.id,
+        productId: pizza.id,
+        productName: pizza.name,
+        quantity: 3,
+        unitPrice: new Prisma.Decimal(180),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(540),
+      },
+    ],
+  })
+}
+
+function lastSaturdayNightInVenueTimezone(): Date {
+  const date = new Date()
+
+  // America/Mexico_City is UTC-6 in the test environment. Sunday 03:00 UTC is
+  // Saturday 21:00 local time, which satisfies weekend + night filters.
+  while (date.getUTCDay() !== 0) {
+    date.setUTCDate(date.getUTCDate() - 1)
+  }
+  date.setUTCHours(3, 0, 0, 0)
+
+  if (date.getTime() > Date.now()) {
+    date.setUTCDate(date.getUTCDate() - 7)
+  }
+
+  return date
 }

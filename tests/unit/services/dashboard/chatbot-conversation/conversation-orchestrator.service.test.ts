@@ -36,6 +36,8 @@ describe('ConversationOrchestratorService', () => {
       corePermissions: [
         'inventory:update',
         'inventory:read',
+        'orders:read',
+        'menu:read',
         'payment-link:read',
         'settlements:read',
         'reservations:read',
@@ -147,6 +149,54 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).toContain('te liquidan $1,250.75')
     expect(response?.metadata.dataSourcesUsed).toContain('shared_query.settlementCalendar')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'settlementCalendar', status: 'executed' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('answers product comparison questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'compareProductSales').mockResolvedValue({
+      leftTerm: 'hamburguesas',
+      rightTerm: 'pizzas',
+      filters: {
+        period: 'thisMonth',
+        weekendOnly: true,
+        nightOnly: true,
+        timezone: 'America/Mexico_City',
+      },
+      left: {
+        revenue: 900,
+        quantitySold: 6,
+        orderCount: 4,
+        products: ['Hamburguesa BBQ'],
+      },
+      right: {
+        revenue: 450,
+        quantitySold: 3,
+        orderCount: 3,
+        products: ['Pizza Pepperoni'],
+      },
+      totalRevenue: 1350,
+      currency: 'MXN',
+    })
+
+    const response = await orchestrator.process({
+      message: '¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.compareProductSales).toHaveBeenCalledWith('venue-1', {
+      leftTerm: 'hamburguesas',
+      rightTerm: 'pizzas',
+      period: 'thisMonth',
+      weekendOnly: true,
+      nightOnly: true,
+    })
+    expect(response?.response).toContain('Comparativo hamburguesas vs pizzas')
+    expect(response?.response).toContain('horario nocturno')
+    expect(response?.response).toContain('fines de semana')
+    expect(response?.metadata.dataSourcesUsed).toContain('shared_query.productSales.compare')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'productSales.compare', status: 'executed' })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 

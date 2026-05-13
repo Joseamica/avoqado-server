@@ -969,6 +969,90 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       }
     })
 
+    it('should answer product comparison questions with a registered deterministic tool even when the router marks comparisons unsupported', async () => {
+      const serviceWithInternals = service as any
+      const originalRouteWithLLM = serviceWithInternals.routeWithLLM
+      const originalGenerateSqlFromText = serviceWithInternals.generateSqlFromText
+      const originalExecuteSafeQuery = serviceWithInternals.executeSafeQuery
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'safe product comparison question',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+      const compareProductSalesSpy = jest.spyOn(SharedQueryService, 'compareProductSales').mockResolvedValue({
+        leftTerm: 'hamburguesas',
+        rightTerm: 'pizzas',
+        filters: {
+          period: 'thisMonth',
+          weekendOnly: true,
+          nightOnly: true,
+          timezone: 'America/Mexico_City',
+        },
+        left: {
+          revenue: 900,
+          quantitySold: 6,
+          orderCount: 4,
+          products: ['Hamburguesa BBQ'],
+        },
+        right: {
+          revenue: 450,
+          quantitySold: 3,
+          orderCount: 3,
+          products: ['Pizza Pepperoni'],
+        },
+        totalRevenue: 1350,
+        currency: 'MXN',
+      })
+
+      serviceWithInternals.routeWithLLM = jest.fn(async () => ({
+        classification: {
+          isSimpleQuery: false,
+          intent: 'unsupported',
+          confidence: 0.8,
+          reason: 'router still considers A vs B unsupported',
+        },
+        tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      }))
+      serviceWithInternals.generateSqlFromText = jest.fn()
+      serviceWithInternals.executeSafeQuery = jest.fn()
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: '¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?',
+          venueId: 'venue-test',
+          userId: 'user-test',
+          userRole: 'ADMIN' as any,
+        })
+
+        expect(compareProductSalesSpy).toHaveBeenCalledWith('venue-test', {
+          leftTerm: 'hamburguesas',
+          rightTerm: 'pizzas',
+          period: 'thisMonth',
+          weekendOnly: true,
+          nightOnly: true,
+        })
+        expect(serviceWithInternals.generateSqlFromText).not.toHaveBeenCalled()
+        expect(serviceWithInternals.executeSafeQuery).not.toHaveBeenCalled()
+        expect(response.metadata?.reasonCode).toBe('registered_product_comparison_tool')
+        expect(response.response).toContain('Comparativo hamburguesas vs pizzas')
+        expect(response.response).toContain('horario nocturno')
+        expect(response.response).toContain('fines de semana')
+      } finally {
+        serviceWithInternals.routeWithLLM = originalRouteWithLLM
+        serviceWithInternals.generateSqlFromText = originalGenerateSqlFromText
+        serviceWithInternals.executeSafeQuery = originalExecuteSafeQuery
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        compareProductSalesSpy.mockRestore()
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
     it('should answer settlement amount questions with the registered settlement calendar tool', async () => {
       const serviceWithInternals = service as any
       const originalRouteWithLLM = serviceWithInternals.routeWithLLM

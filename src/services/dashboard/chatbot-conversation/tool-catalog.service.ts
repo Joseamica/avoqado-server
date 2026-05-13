@@ -30,6 +30,13 @@ export class ToolCatalogService {
         defaultDateRange: 'thisMonth',
       },
       {
+        name: 'productSales.compare',
+        description: 'Compare sales for two product search terms with optional weekend/night filters.',
+        tables: ['OrderItem', 'Order', 'Product'],
+        requiresDateRange: true,
+        defaultDateRange: 'thisMonth',
+      },
+      {
         name: 'staffPerformance',
         description: 'Staff performance and tips for a period.',
         tables: ['Staff', 'StaffVenue', 'Order', 'Payment', 'Shift'],

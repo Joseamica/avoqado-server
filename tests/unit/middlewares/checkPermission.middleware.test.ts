@@ -240,6 +240,93 @@ describe('checkPermission Middleware', () => {
         }),
       )
     })
+
+    describe('x-venue-id header (org-scoped endpoints)', () => {
+      it('uses x-venue-id header when no URL param is present', async () => {
+        // Org-scoped endpoint: URL has no :venueId. Client passes header so the
+        // backend evaluates the user's role in THAT venue, not the stale JWT venue.
+        mockReq.params = {}
+        ;(mockReq as any).headers = { 'x-venue-id': 'venue_from_header' }
+        ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({
+          role: StaffRole.MANAGER,
+          active: true,
+          permissionSetId: null,
+          permissionSet: null,
+        })
+        ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)
+
+        const middleware = checkPermission('sim-custody:collect-from-promoter')
+        await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+        expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith({
+          where: { staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_header' } },
+          select: { role: true, active: true, permissionSetId: true, permissionSet: true },
+        })
+        expect(mockNext).toHaveBeenCalledWith()
+      })
+
+      it('URL param wins over x-venue-id header (URL is the most explicit)', async () => {
+        mockReq.params = { venueId: 'venue_from_url' }
+        ;(mockReq as any).headers = { 'x-venue-id': 'venue_from_header' }
+        ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({
+          role: StaffRole.MANAGER,
+          active: true,
+          permissionSetId: null,
+          permissionSet: null,
+        })
+        ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)
+
+        const middleware = checkPermission('menu:read')
+        await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+        expect(prisma.staffVenue.findUnique).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { staffId_venueId: { staffId: 'user_123', venueId: 'venue_from_url' } },
+          }),
+        )
+      })
+
+      it('falls back to JWT venueId when neither URL param nor header is present', async () => {
+        mockReq.params = {}
+        ;(mockReq as any).headers = {}
+        ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)
+
+        const middleware = checkPermission('menu:read')
+        await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+        // venue_123 comes from authContext.venueId in beforeEach
+        expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read')
+      })
+
+      it('SECURITY: client cannot grant itself a role by sending an arbitrary x-venue-id', async () => {
+        // User claims a venue where they have NO StaffVenue row and are not org owner.
+        // The DB lookup is the source of truth, so role resolves to null → 403.
+        mockReq.params = {}
+        ;(mockReq as any).headers = { 'x-venue-id': 'venue_user_cannot_access' }
+        ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org_other' })
+        ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
+
+        const middleware = checkPermission('sim-custody:collect-from-promoter')
+        await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+        expect(statusMock).toHaveBeenCalledWith(403)
+        expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({ message: 'No access to this venue' }))
+        expect(mockNext).not.toHaveBeenCalled()
+      })
+
+      it('empty x-venue-id header is ignored (falls back to JWT)', async () => {
+        mockReq.params = {}
+        ;(mockReq as any).headers = { 'x-venue-id': '' }
+        ;(permissionsLib.hasPermission as jest.Mock).mockReturnValue(true)
+
+        const middleware = checkPermission('menu:read')
+        await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+        // Falls back to JWT venue_123 → uses token role MANAGER directly
+        expect(permissionsLib.hasPermission).toHaveBeenCalledWith(StaffRole.MANAGER, null, 'menu:read')
+      })
+    })
   })
 
   describe('Error Handling', () => {

@@ -48,6 +48,12 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['productos mas vendidos', 'top products this month'],
     notes: ['Only aggregate product performance for the active venue.'],
   },
+  'productSales.compare': {
+    permissions: ['orders:read', 'menu:read'],
+    riskLevel: 'low',
+    examples: ['hamburguesas vs pizzas en horario nocturno los fines de semana', 'compare tacos versus pastas this month'],
+    notes: ['Compares aggregate product sales using SharedQueryService.compareProductSales. Venue scope always comes from auth context.'],
+  },
   staffPerformance: {
     permissions: ['orders:read', 'staff:read'],
     riskLevel: 'medium',

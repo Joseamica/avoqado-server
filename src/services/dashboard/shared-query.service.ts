@@ -129,6 +129,37 @@ export interface ProductSales {
   currency: string
 }
 
+export interface ProductSalesComparisonSide {
+  revenue: number
+  quantitySold: number
+  orderCount: number
+  products: string[]
+}
+
+export interface ProductSalesComparison {
+  leftTerm: string
+  rightTerm: string
+  filters: {
+    period: RelativeDateRange | 'custom'
+    weekendOnly: boolean
+    nightOnly: boolean
+    timezone: string
+  }
+  left: ProductSalesComparisonSide
+  right: ProductSalesComparisonSide
+  totalRevenue: number
+  currency: string
+}
+
+export interface ProductSalesComparisonInput {
+  leftTerm: string
+  rightTerm: string
+  period: DateRangeSpec
+  weekendOnly?: boolean
+  nightOnly?: boolean
+  timezone?: string
+}
+
 /**
  * Staff performance metrics
  */
@@ -634,6 +665,42 @@ export interface ReservationListSummary {
  * All dashboard metrics MUST use this service to ensure consistency.
  */
 export class SharedQueryService {
+  private static normalizeProductSearchTerm(term: string): string {
+    return term
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9ñ\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  private static productSearchVariants(term: string): string[] {
+    const normalized = this.normalizeProductSearchTerm(term)
+    if (!normalized) return []
+
+    const variants = new Set<string>([normalized])
+    const words = normalized.split(' ')
+    const last = words[words.length - 1]
+
+    if (last.endsWith('es') && last.length > 4) {
+      variants.add([...words.slice(0, -1), last.slice(0, -2)].join(' '))
+    }
+
+    if (last.endsWith('s') && last.length > 3) {
+      variants.add([...words.slice(0, -1), last.slice(0, -1)].join(' '))
+    } else if (last.length > 2) {
+      variants.add([...words.slice(0, -1), `${last}s`].join(' '))
+    }
+
+    return Array.from(variants).filter(Boolean)
+  }
+
+  private static productNameMatchesTerm(productName: string, variants: string[]): boolean {
+    const normalizedProductName = this.normalizeProductSearchTerm(productName)
+    return variants.some(variant => normalizedProductName.includes(variant))
+  }
+
   /**
    * Helper: Normalize date range specification to actual dates
    */
@@ -957,6 +1024,138 @@ export class SharedQueryService {
       orderCount: matchedProducts.reduce((sum, row) => sum + row.orderCount, 0),
       matchedProducts,
       currency: 'MXN',
+    }
+  }
+
+  /**
+   * Compare sales for two product search terms using an approved aggregate query.
+   * Product names are matched fuzzily enough for singular/plural Spanish variants
+   * while keeping the venue scope and time filters backend-controlled.
+   */
+  static async compareProductSales(venueId: string, input: ProductSalesComparisonInput): Promise<ProductSalesComparison> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true, currency: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const leftTerm = this.normalizeProductSearchTerm(input.leftTerm)
+    const rightTerm = this.normalizeProductSearchTerm(input.rightTerm)
+    const leftVariants = this.productSearchVariants(leftTerm)
+    const rightVariants = this.productSearchVariants(rightTerm)
+
+    if (!leftVariants.length || !rightVariants.length) {
+      return {
+        leftTerm,
+        rightTerm,
+        filters: {
+          period: typeof input.period === 'string' ? input.period : 'custom',
+          weekendOnly: Boolean(input.weekendOnly),
+          nightOnly: Boolean(input.nightOnly),
+          timezone: input.timezone || venue.timezone,
+        },
+        left: { revenue: 0, quantitySold: 0, orderCount: 0, products: [] },
+        right: { revenue: 0, quantitySold: 0, orderCount: 0, products: [] },
+        totalRevenue: 0,
+        currency: venue.currency || 'MXN',
+      }
+    }
+
+    const venueTimezone = input.timezone || venue.timezone
+    const currency = venue.currency || 'MXN'
+    const { from, to, periodName } = this.getDateRange(input.period, venueTimezone)
+    const weekendOnly = Boolean(input.weekendOnly)
+    const nightOnly = Boolean(input.nightOnly)
+
+    const patterns = [...new Set([...leftVariants, ...rightVariants])].map(variant => `%${variant}%`)
+    const productNameFilters = patterns.map(pattern => Prisma.sql`COALESCE(oi."productName", p."name", '') ILIKE ${pattern}`)
+
+    const venueCreatedAt = Prisma.sql`((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone})`
+
+    const weekendFilter = weekendOnly ? Prisma.sql`AND EXTRACT(DOW FROM ${venueCreatedAt}) IN (0, 6)` : Prisma.empty
+
+    const nightFilter = nightOnly ? Prisma.sql`AND EXTRACT(HOUR FROM ${venueCreatedAt}) BETWEEN 18 AND 23` : Prisma.empty
+
+    const rows = await prisma.$queryRaw<
+      Array<{
+        productName: string
+        quantitySold: bigint
+        revenue: Prisma.Decimal
+        orderCount: bigint
+      }>
+    >`
+      SELECT
+        COALESCE(oi."productName", p."name", 'Producto sin nombre') as "productName",
+        SUM(oi."quantity")::bigint as "quantitySold",
+        SUM(oi."quantity" * oi."unitPrice") as "revenue",
+        COUNT(DISTINCT o."id")::bigint as "orderCount"
+      FROM "OrderItem" oi
+      INNER JOIN "Order" o ON oi."orderId" = o."id"
+      LEFT JOIN "Product" p ON oi."productId" = p."id"
+      WHERE o."venueId"::text = ${venueId}
+        AND o."createdAt" >= ${from}::timestamp
+        AND o."createdAt" <= ${to}::timestamp
+        AND (${Prisma.join(productNameFilters, ' OR ')})
+        ${weekendFilter}
+        ${nightFilter}
+      GROUP BY COALESCE(oi."productName", p."name", 'Producto sin nombre')
+    `
+
+    const aggregate = {
+      left: { quantitySold: 0, revenue: 0, orderCount: 0, products: new Set<string>() },
+      right: { quantitySold: 0, revenue: 0, orderCount: 0, products: new Set<string>() },
+    }
+
+    for (const row of rows) {
+      const matchesLeft = this.productNameMatchesTerm(row.productName, leftVariants)
+      const matchesRight = this.productNameMatchesTerm(row.productName, rightVariants)
+
+      let bucket: 'left' | 'right' | null = null
+      if (matchesLeft && !matchesRight) {
+        bucket = 'left'
+      } else if (!matchesLeft && matchesRight) {
+        bucket = 'right'
+      } else if (matchesLeft && matchesRight) {
+        bucket = leftTerm.length >= rightTerm.length ? 'left' : 'right'
+      }
+
+      if (!bucket) continue
+
+      aggregate[bucket].quantitySold += Number(row.quantitySold || 0)
+      aggregate[bucket].revenue += row.revenue?.toNumber?.() || Number(row.revenue || 0)
+      aggregate[bucket].orderCount += Number(row.orderCount || 0)
+      aggregate[bucket].products.add(row.productName)
+    }
+
+    const left: ProductSalesComparisonSide = {
+      revenue: aggregate.left.revenue,
+      quantitySold: aggregate.left.quantitySold,
+      orderCount: aggregate.left.orderCount,
+      products: Array.from(aggregate.left.products),
+    }
+    const right: ProductSalesComparisonSide = {
+      revenue: aggregate.right.revenue,
+      quantitySold: aggregate.right.quantitySold,
+      orderCount: aggregate.right.orderCount,
+      products: Array.from(aggregate.right.products),
+    }
+
+    return {
+      leftTerm,
+      rightTerm,
+      filters: {
+        period: periodName,
+        weekendOnly,
+        nightOnly,
+        timezone: venueTimezone,
+      },
+      left,
+      right,
+      totalRevenue: left.revenue + right.revenue,
+      currency,
     }
   }
 

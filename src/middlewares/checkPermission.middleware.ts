@@ -20,6 +20,29 @@ interface ResolvedUserRole {
  * 2) Active StaffVenue role in target venue
  * 3) Active Org OWNER membership for target venue's organization
  */
+/**
+ * Resolve the active venueId for a permission check.
+ *
+ * Priority:
+ * 1) `:venueId` path param (venue-scoped routes like /venues/:venueId/...)
+ * 2) `x-venue-id` request header (sent by the dashboard for org-scoped routes
+ *    so the user's active venue context follows their navigation, not the
+ *    stale JWT venue from their last switchVenue call)
+ * 3) `authContext.venueId` from the JWT (fallback for legacy clients)
+ *
+ * Security note: this only picks which venue to evaluate the role *in*. The
+ * actual role lookup goes against the StaffVenue table (`resolveUserRoleForVenue`),
+ * so a client that lies about the header still gets denied if they don't hold
+ * the role in that venue.
+ */
+function resolveRequestVenueId(req: Request, authContext: { venueId?: string }): string | undefined {
+  const fromParams = req.params?.venueId
+  if (fromParams) return fromParams
+  const fromHeader = req.headers?.['x-venue-id']
+  if (typeof fromHeader === 'string' && fromHeader.length > 0) return fromHeader
+  return authContext.venueId
+}
+
 async function resolveUserRoleForVenue(params: {
   userId: string
   targetVenueId: string
@@ -135,13 +158,10 @@ export const checkPermission = (requiredPermission: string) => {
         })
       }
 
-      // MULTI-VENUE FIX: Use venueId from URL params if available, fallback to authContext
-      // This allows users to navigate between venues without calling switchVenue
-      const urlVenueId = req.params.venueId
-      const venueId = urlVenueId || authContext.venueId
+      const venueId = resolveRequestVenueId(req, authContext)
 
       if (!venueId) {
-        logger.warn('checkPermission: No venueId found in request params or authContext')
+        logger.warn('checkPermission: No venueId found in request params, x-venue-id header, or authContext')
         return res.status(400).json({
           error: 'Bad Request',
           message: 'Venue ID required',
@@ -268,9 +288,7 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
         })
       }
 
-      // MULTI-VENUE FIX: Use venueId from URL params if available
-      const urlVenueId = req.params.venueId
-      const venueId = urlVenueId || authContext.venueId
+      const venueId = resolveRequestVenueId(req, authContext)
 
       if (!venueId) {
         return res.status(400).json({
@@ -362,9 +380,7 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
         })
       }
 
-      // MULTI-VENUE FIX: Use venueId from URL params if available
-      const urlVenueId = req.params.venueId
-      const venueId = urlVenueId || authContext.venueId
+      const venueId = resolveRequestVenueId(req, authContext)
 
       if (!venueId) {
         return res.status(400).json({

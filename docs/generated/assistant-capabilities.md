@@ -1,14 +1,14 @@
 # Assistant Capabilities
 
-Generated: 2026-05-13T19:29:36.247Z
+Generated: 2026-05-13T20:45:53.731Z
 
 ## Summary
 
-- Total capabilities: 78
-- Status: registered 71, backlog 4, blocked 3
-- Kind: action 37, query 34, howTo 5, blocked 2
-- Risk: low 37, medium 29, high 9, critical 3
-- Scope: venue 77, superadmin 1
+- Total capabilities: 79
+- Status: registered 72, backlog 4, blocked 3
+- Kind: action 37, query 35, howTo 5, blocked 2
+- Risk: low 38, medium 29, high 9, critical 3
+- Scope: venue 78, superadmin 1
 
 ## Registered Executable Capabilities
 
@@ -66,6 +66,7 @@ Generated: 2026-05-13T19:29:36.247Z
 - `payments.summary` (query, low) — permissions: payments:read; source: shared_query.payments.summary
 - `pendingOrders` (query, low) — permissions: orders:read; source: shared_query.pendingOrders
 - `pricing.applySuggestedPrice` (action, medium) — permissions: menu:update; source: pricingService.applySuggestedPrice
+- `productSales.compare` (query, low) — permissions: orders:read, menu:read; source: shared_query.productSales.compare
 - `profitAnalysis` (query, medium) — permissions: payments:read, orders:read, inventory:read; source: shared_query.profitAnalysis
 - `recipeCount` (query, low) — permissions: inventory:read; source: shared_query.recipeCount
 - `recipeList` (query, low) — permissions: inventory:read; source: shared_query.recipeList
@@ -159,6 +160,7 @@ Generated: 2026-05-13T19:29:36.247Z
 | `payments.summary` | query | registered | venue | low | payments:read | - | shared_query.payments.summary |
 | `pendingOrders` | query | registered | venue | low | orders:read | - | shared_query.pendingOrders |
 | `pricing.applySuggestedPrice` | action | registered | venue | medium | menu:update | single | pricingService.applySuggestedPrice |
+| `productSales.compare` | query | registered | venue | low | orders:read, menu:read | - | shared_query.productSales.compare |
 | `profitAnalysis` | query | registered | venue | medium | payments:read, orders:read, inventory:read | - | shared_query.profitAnalysis |
 | `recipeCount` | query | registered | venue | low | inventory:read | - | shared_query.recipeCount |
 | `recipeList` | query | registered | venue | low | inventory:read | - | shared_query.recipeList |

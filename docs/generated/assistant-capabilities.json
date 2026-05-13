@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T19:29:36.234Z",
+  "generatedAt": "2026-05-13T20:45:53.720Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -1767,6 +1767,36 @@
       ],
       "notes": [
         "Entity: Product. Operation: custom."
+      ]
+    },
+    {
+      "id": "productSales.compare",
+      "kind": "query",
+      "status": "registered",
+      "description": "Compare sales for two product search terms with optional weekend/night filters.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "orders:read",
+        "menu:read"
+      ],
+      "riskLevel": "low",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.productSales.compare",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
+      },
+      "examples": [
+        "hamburguesas vs pizzas en horario nocturno los fines de semana",
+        "compare tacos versus pastas this month"
+      ],
+      "notes": [
+        "Compares aggregate product sales using SharedQueryService.compareProductSales. Venue scope always comes from auth context."
       ]
     },
     {

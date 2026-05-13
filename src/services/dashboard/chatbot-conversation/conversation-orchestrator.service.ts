@@ -336,6 +336,23 @@ export class ConversationOrchestratorService {
           products.length,
         )
       }
+      case 'productSales.compare': {
+        const leftTerm = this.requiredStringArg(step, 'leftTerm')
+        const rightTerm = this.requiredStringArg(step, 'rightTerm')
+        const comparison = await SharedQueryService.compareProductSales(venueId, {
+          leftTerm,
+          rightTerm,
+          period: dateRange,
+          weekendOnly: step.args.weekendOnly === true,
+          nightOnly: step.args.nightOnly === true,
+        })
+        return this.queryResult(
+          step.tool,
+          comparison,
+          this.formatProductSalesComparison(comparison, dateRange),
+          comparison.left.products.length + comparison.right.products.length,
+        )
+      }
       case 'staffPerformance': {
         const staff = await SharedQueryService.getStaffPerformance(venueId, dateRange, this.limit(step, 5))
         const list = staff
@@ -837,6 +854,44 @@ export class ConversationOrchestratorService {
     dateRange: RelativeDateRange,
   ): string {
     return `En ${this.formatDateRangeName(dateRange)} vendiste ${this.money(sales.totalRevenue, sales.currency)} en total, con ${sales.orderCount} órdenes y ticket promedio de ${this.money(sales.averageTicket, sales.currency)}.`
+  }
+
+  private formatProductSalesComparison(
+    comparison: {
+      leftTerm: string
+      rightTerm: string
+      left: { revenue: number; quantitySold: number }
+      right: { revenue: number; quantitySold: number }
+      totalRevenue: number
+      currency: string
+      filters: { weekendOnly: boolean; nightOnly: boolean }
+    },
+    dateRange: RelativeDateRange,
+  ): string {
+    const filtersUsed = [
+      this.formatDateRangeName(dateRange),
+      comparison.filters.weekendOnly ? 'fines de semana' : null,
+      comparison.filters.nightOnly ? 'horario nocturno (18:00-23:59)' : null,
+    ]
+      .filter(Boolean)
+      .join(', ')
+    const leftShare = comparison.totalRevenue > 0 ? (comparison.left.revenue / comparison.totalRevenue) * 100 : 0
+    const rightShare = comparison.totalRevenue > 0 ? (comparison.right.revenue / comparison.totalRevenue) * 100 : 0
+
+    if (comparison.totalRevenue === 0) {
+      return `No encontré ventas para comparar "${comparison.leftTerm}" vs "${comparison.rightTerm}" en ${filtersUsed}.`
+    }
+
+    const leftWins = comparison.left.revenue >= comparison.right.revenue
+    const winner = leftWins ? comparison.leftTerm : comparison.rightTerm
+    const delta = Math.abs(comparison.left.revenue - comparison.right.revenue)
+
+    return [
+      `Comparativo ${comparison.leftTerm} vs ${comparison.rightTerm} en ${filtersUsed}:`,
+      `• ${comparison.leftTerm}: ${this.money(comparison.left.revenue, comparison.currency)} (${comparison.left.quantitySold} unidades, ${leftShare.toFixed(1)}%)`,
+      `• ${comparison.rightTerm}: ${this.money(comparison.right.revenue, comparison.currency)} (${comparison.right.quantitySold} unidades, ${rightShare.toFixed(1)}%)`,
+      `• Ganador: ${winner} por ${this.money(delta, comparison.currency)}.`,
+    ].join('\n')
   }
 
   private formatUnsupported(topic: string, reason: string): string {

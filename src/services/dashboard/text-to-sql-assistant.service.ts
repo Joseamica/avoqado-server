@@ -7,7 +7,7 @@ import { AILearningService } from './ai-learning.service'
 import { SqlValidationService } from './sql-validation.service'
 import { SharedQueryService } from './shared-query.service'
 import { randomUUID } from 'crypto'
-import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
+import { type RelativeDateRange } from '@/utils/datetime'
 // Note: Date filter examples are defined in buildSchemaContext() below.
 // The getSqlDateFilter utility from @/utils/datetime can be used for manual SQL generation if needed.
 
@@ -318,6 +318,7 @@ interface IntentClassificationResult {
     | 'averageTicket'
     | 'topProducts'
     | 'productSales'
+    | 'productSales.compare'
     | 'staffPerformance'
     | 'reviews'
     | 'businessOverview'
@@ -420,6 +421,7 @@ class TextToSqlAssistantService {
     averageTicket: ['Payment', 'Order'],
     topProducts: ['OrderItem', 'Order', 'Product', 'MenuCategory'],
     productSales: ['OrderItem', 'Order', 'Product'],
+    'productSales.compare': ['OrderItem', 'Order', 'Product'],
     staffPerformance: ['Staff', 'StaffVenue', 'Order', 'Payment', 'Shift'],
     reviews: ['Review'],
     businessOverview: ['Payment', 'Order', 'OrderItem', 'Product', 'MenuCategory', 'Review'],
@@ -2953,6 +2955,11 @@ Ejemplos de respuestas CORRECTAS:
         }
       }
 
+      const deterministicComparisonFallback = await this.tryDeterministicProductComparisonFallback(query, userRole, sessionId, startTime)
+      if (deterministicComparisonFallback) {
+        return deterministicComparisonFallback as TextToSqlResponse
+      }
+
       return await this.buildUnsupportedQueryResponse(query, intentClassification, startTime, sessionId, intentClassificationTokenUsage)
 
       // Step 0.6: Complexity + Importance Detection → Route to Consensus Voting (LAYER 5)
@@ -3770,83 +3777,21 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       const weekendOnly = this.hasWeekendConstraint(query.message)
       const nightOnly = this.hasNightConstraint(query.message)
 
-      const venue = await prisma.venue.findUnique({
-        where: { id: query.venueId },
-        select: { timezone: true, currency: true },
+      const comparison = await SharedQueryService.compareProductSales(query.venueId, {
+        leftTerm: comparisonTerms.leftTerm,
+        rightTerm: comparisonTerms.rightTerm,
+        period: effectiveDateRange,
+        weekendOnly,
+        nightOnly,
       })
 
-      const venueTimezone = venue?.timezone || 'America/Mexico_City'
-      const currency = venue?.currency || 'MXN'
-      const { from, to } = getVenueDateRange(effectiveDateRange, venueTimezone)
-
-      const leftLike = `%${comparisonTerms.leftTerm}%`
-      const rightLike = `%${comparisonTerms.rightTerm}%`
-
-      const weekendFilter = weekendOnly
-        ? Prisma.sql`AND EXTRACT(DOW FROM (o."createdAt" AT TIME ZONE ${venueTimezone})) IN (0, 6)`
-        : Prisma.empty
-
-      const nightFilter = nightOnly
-        ? Prisma.sql`AND EXTRACT(HOUR FROM (o."createdAt" AT TIME ZONE ${venueTimezone})) BETWEEN 18 AND 23`
-        : Prisma.empty
-
-      const rows = await prisma.$queryRaw<
-        Array<{
-          productName: string
-          quantitySold: bigint
-          revenue: Prisma.Decimal
-          orderCount: bigint
-        }>
-      >`
-        SELECT
-          p."name" as "productName",
-          SUM(oi."quantity")::bigint as "quantitySold",
-          SUM(oi."quantity" * oi."unitPrice") as "revenue",
-          COUNT(DISTINCT o."id")::bigint as "orderCount"
-        FROM "OrderItem" oi
-        INNER JOIN "Product" p ON oi."productId" = p."id"
-        INNER JOIN "Order" o ON oi."orderId" = o."id"
-        WHERE o."venueId"::text = ${query.venueId}
-          AND o."createdAt" >= ${from}::timestamp
-          AND o."createdAt" <= ${to}::timestamp
-          AND (LOWER(p."name") LIKE LOWER(${leftLike}) OR LOWER(p."name") LIKE LOWER(${rightLike}))
-          ${weekendFilter}
-          ${nightFilter}
-        GROUP BY p."id", p."name"
-      `
-
-      const aggregate = {
-        left: { quantitySold: 0, revenue: 0, orderCount: 0, products: new Set<string>() },
-        right: { quantitySold: 0, revenue: 0, orderCount: 0, products: new Set<string>() },
-      }
-
-      for (const row of rows) {
-        const normalizedProductName = this.normalizeTextForMatch(row.productName)
-        const matchesLeft = normalizedProductName.includes(comparisonTerms.leftTerm)
-        const matchesRight = normalizedProductName.includes(comparisonTerms.rightTerm)
-
-        let bucket: 'left' | 'right' | null = null
-        if (matchesLeft && !matchesRight) {
-          bucket = 'left'
-        } else if (!matchesLeft && matchesRight) {
-          bucket = 'right'
-        } else if (matchesLeft && matchesRight) {
-          bucket = comparisonTerms.leftTerm.length >= comparisonTerms.rightTerm.length ? 'left' : 'right'
-        }
-
-        if (!bucket) continue
-
-        aggregate[bucket].quantitySold += Number(row.quantitySold || 0)
-        aggregate[bucket].revenue += row.revenue?.toNumber?.() || Number(row.revenue || 0)
-        aggregate[bucket].orderCount += Number(row.orderCount || 0)
-        aggregate[bucket].products.add(row.productName)
-      }
+      const currency = comparison.currency
 
       const formatCurrency = (value: number): string =>
         new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(Number.isFinite(value) ? value : 0)
 
-      const leftRevenue = aggregate.left.revenue
-      const rightRevenue = aggregate.right.revenue
+      const leftRevenue = comparison.left.revenue
+      const rightRevenue = comparison.right.revenue
       const totalRevenue = leftRevenue + rightRevenue
       const leftShare = totalRevenue > 0 ? (leftRevenue / totalRevenue) * 100 : 0
       const rightShare = totalRevenue > 0 ? (rightRevenue / totalRevenue) * 100 : 0
@@ -3870,8 +3815,8 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
         ? `No encontré ventas para comparar "${leftLabel}" vs "${rightLabel}" en ${filtersUsed}. Revisa si los nombres de producto en menú usan otra variante (ej. singular/plural o marca).`
         : [
             `Comparativo ${leftLabel} vs ${rightLabel} en ${filtersUsed}:`,
-            `• ${leftLabel}: ${formatCurrency(leftRevenue)} (${aggregate.left.quantitySold} unidades, ${leftShare.toFixed(1)}%)`,
-            `• ${rightLabel}: ${formatCurrency(rightRevenue)} (${aggregate.right.quantitySold} unidades, ${rightShare.toFixed(1)}%)`,
+            `• ${leftLabel}: ${formatCurrency(leftRevenue)} (${comparison.left.quantitySold} unidades, ${leftShare.toFixed(1)}%)`,
+            `• ${rightLabel}: ${formatCurrency(rightRevenue)} (${comparison.right.quantitySold} unidades, ${rightShare.toFixed(1)}%)`,
             `• Ganador: ${winnerLabel} por ${formatCurrency(deltaRevenue)}.`,
           ].join('\n')
 
@@ -3884,7 +3829,7 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
           aiResponse: response,
           confidence: noData ? 0.72 : 0.86,
           executionTime: Date.now() - startTime,
-          rowsReturned: rows.length,
+          rowsReturned: comparison.left.products.length + comparison.right.products.length,
           sessionId,
         })
       } catch (learningError) {
@@ -3894,35 +3839,17 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       return {
         response,
         confidence: noData ? 0.72 : 0.86,
-        queryResult: {
-          comparison: {
-            leftTerm: leftLabel,
-            rightTerm: rightLabel,
-            filtersUsed,
-            left: {
-              revenue: leftRevenue,
-              quantitySold: aggregate.left.quantitySold,
-              orderCount: aggregate.left.orderCount,
-              products: Array.from(aggregate.left.products),
-            },
-            right: {
-              revenue: rightRevenue,
-              quantitySold: aggregate.right.quantitySold,
-              orderCount: aggregate.right.orderCount,
-              products: Array.from(aggregate.right.products),
-            },
-          },
-        },
+        queryResult: { comparison: { ...comparison, filtersUsed } },
         metadata: {
           queryGenerated: false,
           queryExecuted: true,
-          rowsReturned: rows.length,
+          rowsReturned: comparison.left.products.length + comparison.right.products.length,
           executionTime: Date.now() - startTime,
           dataSourcesUsed: ['SharedQueryService', 'OrderItem', 'Order', 'Product'],
           routedTo: 'SharedQueryService',
-          intent: 'topProducts',
+          intent: 'productSales.compare',
           riskLevel: 'low',
-          reasonCode: 'deterministic_product_comparison_fallback',
+          reasonCode: 'registered_product_comparison_tool',
         },
         suggestions: [
           'Prueba con rango explícito: "últimos 30 días"',

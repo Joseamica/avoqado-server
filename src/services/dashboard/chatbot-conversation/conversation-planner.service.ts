@@ -174,6 +174,22 @@ export class ConversationPlannerService {
     const steps: PlannerStep[] = []
     const containsCrud = this.hasCrudIntent(normalized)
     const containsWeather = this.hasUnsupportedTopic(normalized)
+    const productComparison = this.extractProductComparisonTerms(normalized)
+
+    if (productComparison) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'productSales.compare',
+        args: {
+          leftTerm: productComparison.leftTerm,
+          rightTerm: productComparison.rightTerm,
+          dateRange: this.extractDateRange(normalized) || 'thisMonth',
+          weekendOnly: this.hasWeekendConstraint(normalized),
+          nightOnly: this.hasNightConstraint(normalized),
+        },
+      })
+    }
 
     if (containsCrud) {
       steps.push({
@@ -198,6 +214,15 @@ export class ConversationPlannerService {
 
     if (this.hasInventoryAlertsIntent(normalized)) {
       steps.push({ id: this.nextStepId('query', steps), kind: 'query', tool: 'inventoryAlerts', args: {} })
+    }
+
+    if (this.hasSalesSummaryIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'sales',
+        args: { dateRange: this.extractDateRange(normalized) || 'thisMonth' },
+      })
     }
 
     if (this.hasPendingOrdersIntent(normalized)) {
@@ -677,7 +702,7 @@ export class ConversationPlannerService {
   }
 
   private hasCriticalInjection(normalized: string): boolean {
-    return /\b(ignore|ignora|olvida|forget|disregard|override|sobrescribe|system prompt|prompt del sistema|developer message|revela|muestra instrucciones|ejecuta codigo|execute code|sql schema|tablas internas|bypass|saltate|sin permisos)\b/.test(
+    return /\b(ignore|ignora|olvida|forget|disregard|override|sobrescribe|system prompt|prompt del sistema|developer message|revela|muestra instrucciones|ejecuta codigo|execute code|sql schema|tablas internas|bypass|saltate|sin permisos|contrasenas?|contraseñas?|passwords?|secrets?|secretos?|api keys?|superadmin)\b/.test(
       normalized,
     )
   }
@@ -735,8 +760,54 @@ export class ConversationPlannerService {
     return /\b(alertas|bajo inventario|stock bajo|minimo|reorden)\b/.test(normalized)
   }
 
+  private hasSalesSummaryIntent(normalized: string): boolean {
+    const asksAmount = /\b(cuanto|cuanta|cuantos|cuantas|total|monto|how much)\b/.test(normalized)
+    const salesTerm = /\b(vendi|vendimos|ventas?|ingresos?|facturacion|revenue|sales)\b/.test(normalized)
+    const excludedDetail =
+      /\b(vs|versus|contra|producto|productos|categoria|categorias|mesero|staff|empleado|empleados|metodo|pago|pagos)\b/.test(normalized)
+    return asksAmount && salesTerm && !excludedDetail
+  }
+
   private hasPendingOrdersIntent(normalized: string): boolean {
     return /\b(ordenes pendientes|pedidos pendientes|comandas pendientes|ordenes abiertas|pedidos abiertos)\b/.test(normalized)
+  }
+
+  private extractProductComparisonTerms(normalized: string): { leftTerm: string; rightTerm: string } | null {
+    const patterns = [
+      /(?:\bde\b\s+)?([a-z0-9ñ\s]{2,40}?)\s+(?:vs|versus|contra)\s+([a-z0-9ñ\s]{2,40}?)(?=(?:\s+en\s+horario|\s+durante|\s+los?\s+fines|\s+el\s+fin|\s+hoy|\s+ayer|\s+esta\s+semana|\s+este\s+mes|\s+last\s+\d+\s+days|$))/i,
+      /([a-z0-9ñ]{2,30})\s+(?:vs|versus|contra)\s+([a-z0-9ñ]{2,30})/i,
+    ]
+
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern)
+      if (!match) continue
+
+      const leftTerm = this.cleanProductComparisonTerm(match[1] || '')
+      const rightTerm = this.cleanProductComparisonTerm(match[2] || '')
+
+      if (leftTerm.length >= 2 && rightTerm.length >= 2) {
+        return { leftTerm, rightTerm }
+      }
+    }
+
+    return null
+  }
+
+  private cleanProductComparisonTerm(rawTerm: string): string {
+    return rawTerm
+      .replace(/\b(cuanto|cuanta|cuantos|cuantas|how much|how many|vendi|vendimos|ventas?|ingresos?)\b/g, ' ')
+      .replace(/\b(de|la|el|los|las|del|al|en|por|para|con|y)\b/g, ' ')
+      .replace(/[^a-z0-9ñ\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  private hasWeekendConstraint(normalized: string): boolean {
+    return /\b(fines? de semana|weekend|sabado|domingo)\b/i.test(normalized)
+  }
+
+  private hasNightConstraint(normalized: string): boolean {
+    return /\b(horario nocturno|nocturn[oa]s?|noche|night)\b/i.test(normalized)
   }
 
   private hasSettlementCalendarIntent(normalized: string): boolean {
@@ -944,6 +1015,13 @@ export class ConversationPlannerService {
   }
 
   private extractDateRange(normalized: string): RelativeDateRange | undefined {
+    if (
+      /\bfines? de semana\b/.test(normalized) &&
+      !/\b(esta semana|semana pasada|ultima semana|ultimos|ultimas|this week|last week)\b/.test(normalized)
+    ) {
+      return undefined
+    }
+
     if (/\b(hoy|today)\b/.test(normalized)) return 'today'
     if (/\b(ayer|yesterday)\b/.test(normalized)) return 'yesterday'
     if (/\b(ultimos 7 dias|ultimos siete dias|last 7 days)\b/.test(normalized)) return 'last7days'
