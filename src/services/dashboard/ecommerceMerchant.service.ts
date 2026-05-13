@@ -96,19 +96,8 @@ export async function createEcommerceMerchant(data: CreateEcommerceMerchantData)
     throw new NotFoundError(`Venue with ID ${data.venueId} not found`)
   }
 
-  // 2. Check if channel name already exists for this venue
-  const existingChannel = await prisma.ecommerceMerchant.findFirst({
-    where: {
-      venueId: data.venueId,
-      channelName: data.channelName,
-    },
-  })
-
-  if (existingChannel) {
-    throw new BadRequestError(`Channel "${data.channelName}" already exists for this venue. Use a different channel name.`)
-  }
-
-  // 3. Validate provider exists
+  // 2. Resolve the provider early so we can branch on it for the duplicate
+  //    check (Stripe Connect needs idempotent behavior — see below).
   const provider = await prisma.paymentProvider.findUnique({
     where: { id: data.providerId },
     select: { id: true, code: true, name: true },
@@ -116,6 +105,44 @@ export async function createEcommerceMerchant(data: CreateEcommerceMerchantData)
 
   if (!provider) {
     throw new NotFoundError(`Provider with ID ${data.providerId} not found`)
+  }
+
+  // 3. Duplicate check — provider-aware.
+  //
+  // For STRIPE_CONNECT we keep the "one merchant per provider per venue"
+  // invariant (Stripe expects a 1:1 connected account, and the wizard
+  // resumes the existing row via onboardingStatus). If one already exists,
+  // return it instead of erroring so clicking "Activate Stripe" repeatedly
+  // is idempotent and lands the wizard back on the resume view.
+  //
+  // For other providers (Blumon, Mercado Pago, etc.) the venue MAY want
+  // multiple channels with different names (different storefronts), so
+  // we enforce unique channelName per venue.
+  if (provider.code === 'STRIPE_CONNECT') {
+    const existingStripe = await prisma.ecommerceMerchant.findFirst({
+      where: { venueId: data.venueId, providerId: data.providerId },
+      include: {
+        venue: { select: { id: true, name: true, slug: true } },
+        provider: { select: { id: true, code: true, name: true } },
+        costStructure: { select: { id: true, debitRate: true, creditRate: true } },
+        pricingStructure: { select: { id: true } },
+      },
+    })
+    if (existingStripe) {
+      logger.info('Stripe Connect merchant already exists, returning existing row (idempotent create)', {
+        merchantId: existingStripe.id,
+        venueId: data.venueId,
+        onboardingStatus: existingStripe.onboardingStatus,
+      })
+      return existingStripe
+    }
+  } else {
+    const existingChannel = await prisma.ecommerceMerchant.findFirst({
+      where: { venueId: data.venueId, channelName: data.channelName },
+    })
+    if (existingChannel) {
+      throw new BadRequestError(`Channel "${data.channelName}" already exists for this venue. Use a different channel name.`)
+    }
   }
 
   // 4. Resolve sandbox mode.
