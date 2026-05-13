@@ -46,6 +46,7 @@
     "check:dead-code": "knip",
     "check:all": "npm run check:unused && npm run check:dead-code",
     "update:unused-ignore": "node scripts/update-unused-ignore.js",
+    "assistant:audit": "npx ts-node -r tsconfig-paths/register scripts/audit-assistant-coverage.ts",
     "pre-deploy": "bash scripts/pre-deploy-check.sh",
     "pre-migrate": "npx ts-node -r tsconfig-paths/register scripts/pre-migration-check.ts",
     "blumon:help": "npx ts-node scripts/blumon-help.ts",

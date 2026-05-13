@@ -101,6 +101,13 @@ export class ToolCatalogService {
         defaultDateRange: 'thisMonth',
       },
       {
+        name: 'settlementCalendar',
+        description: 'Settlement, liquidation, dispersion, or payout amount by settlement date for a period.',
+        tables: ['Payment'],
+        requiresDateRange: true,
+        defaultDateRange: 'today',
+      },
+      {
         name: 'adHocAnalytics',
         description: 'Fallback for analytics questions not covered by known tools.',
         tables: [],

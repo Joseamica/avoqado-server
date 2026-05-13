@@ -2858,12 +2858,14 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     const fmt = (n: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(n)
     const subject = `Pago recibido: ${fmt(data.amountPaid)} en ${data.linkTitle}`
 
-    const customerLine = data.customerName || data.customerEmail
-      ? `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Pagado por <strong>${data.customerName ?? data.customerEmail}</strong>${data.customerName && data.customerEmail ? ` (${data.customerEmail})` : ''}.</p>`
-      : ''
-    const tipRow = data.tipAmount && data.tipAmount > 0
-      ? `<tr><td style="padding: 6px 0; font-size: 14px; color: #666;">Propina</td><td style="padding: 6px 0; font-size: 14px; color: #1f9d55; text-align: right; font-weight: 600;">${fmt(data.tipAmount)}</td></tr>`
-      : ''
+    const customerLine =
+      data.customerName || data.customerEmail
+        ? `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Pagado por <strong>${data.customerName ?? data.customerEmail}</strong>${data.customerName && data.customerEmail ? ` (${data.customerEmail})` : ''}.</p>`
+        : ''
+    const tipRow =
+      data.tipAmount && data.tipAmount > 0
+        ? `<tr><td style="padding: 6px 0; font-size: 14px; color: #666;">Propina</td><td style="padding: 6px 0; font-size: 14px; color: #1f9d55; text-align: right; font-weight: 600;">${fmt(data.tipAmount)}</td></tr>`
+        : ''
     const cardRow = data.cardLast4
       ? `<tr><td style="padding: 6px 0; font-size: 14px; color: #666;">Tarjeta</td><td style="padding: 6px 0; font-size: 14px; color: #000; text-align: right;">···· ${data.cardLast4}</td></tr>`
       : ''

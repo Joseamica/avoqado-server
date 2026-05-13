@@ -7370,12 +7370,12 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     if (
       deterministicClassification.isSimpleQuery &&
       deterministicClassification.intent &&
-      this.isRealTimeSharedIntent(deterministicClassification.intent)
+      (this.isRealTimeSharedIntent(deterministicClassification.intent) || deterministicClassification.intent === 'settlementCalendar')
     ) {
       return {
         classification: {
           ...deterministicClassification,
-          reason: `${deterministicClassification.reason}; deterministic real-time intent pre-route`,
+          reason: `${deterministicClassification.reason}; deterministic registered intent pre-route`,
         },
         tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       }
@@ -7761,9 +7761,9 @@ Responde SOLO JSON (sin markdown):
         normalizedMessage,
       )
 
-    const asksHowTo = /\b(como|how|donde|where|reviso|revisar|ver|veo|encuentro|configuro|configurar|pasos|guia|ayuda)\b/.test(
-      normalizedMessage,
-    )
+    const asksHowTo =
+      !/\bhow\s+much\b/.test(normalizedMessage) &&
+      /\b(como|how|donde|where|reviso|revisar|ver|veo|encuentro|configuro|configurar|pasos|guia|ayuda)\b/.test(normalizedMessage)
 
     return asksData && !asksHowTo
   }

@@ -103,6 +103,41 @@ describe('ConversationOrchestratorService', () => {
     ])
   })
 
+  it('answers settlement amount questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'getSettlementCalendarForPeriod').mockResolvedValue({
+      totalNetAmount: 1250.75,
+      transactionCount: 3,
+      currency: 'MXN',
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+      entries: [
+        {
+          settlementDate: new Date('2026-05-12T12:00:00.000Z'),
+          totalNetAmount: 1250.75,
+          transactionCount: 3,
+          status: 'pending',
+          byCardType: [],
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'cuanto me liquidan hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.SUPERADMIN,
+    })
+
+    expect(SharedQueryService.getSettlementCalendarForPeriod).toHaveBeenCalledWith('venue-1', 'today')
+    expect(response?.response).toContain('te liquidan $1,250.75')
+    expect(response?.metadata.dataSourcesUsed).toContain('shared_query.settlementCalendar')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'settlementCalendar', status: 'executed' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
   it('previews CRUD and skips dependent reads until confirmation', async () => {
     actionEngine.continueDisambiguation.mockResolvedValue(null)
     actionEngine.detectAction.mockResolvedValue({

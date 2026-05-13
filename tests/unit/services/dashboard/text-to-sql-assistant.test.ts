@@ -719,7 +719,7 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.reason).toContain('deterministic registered intent override')
     })
 
-    it('should recover settlement questions when LLM returns unsupported', async () => {
+    it('should pre-route settlement questions before calling the LLM router', async () => {
       serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
         choices: [
           {
@@ -747,7 +747,9 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.isSimpleQuery).toBe(true)
       expect(routed.classification.intent).toBe('settlementCalendar')
       expect(routed.classification.dateRange).toBe('today')
-      expect(routed.classification.reason).toContain('deterministic registered intent override')
+      expect(routed.classification.reason).toContain('deterministic registered intent pre-route')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+      expect(serviceWithInternals.openai.chat.completions.create).not.toHaveBeenCalled()
     })
 
     it('should recover English review requests when LLM returns unsupported', async () => {

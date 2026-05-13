@@ -17,7 +17,15 @@ const customFieldsSchema = z.array(customFieldSchema).max(5, 'Máximo 5 campos p
 const tippingConfigSchema = z
   .object({
     presets: z
-      .array(z.number().min(1, 'El porcentaje debe ser mayor a 0').max(100, 'El porcentaje no puede exceder 100'))
+      // 0 is intentionally allowed — it lets merchants offer a "No tip"
+      // preset alongside 15/20/25 (Square pattern). Negative still rejected.
+      .array(
+        z
+          .number()
+          .int('Debe ser un número entero')
+          .min(0, 'El porcentaje no puede ser negativo')
+          .max(100, 'El porcentaje no puede exceder 100'),
+      )
       .min(1, 'Se requiere al menos un porcentaje')
       .max(4, 'Máximo 4 opciones de porcentaje'),
     allowCustom: z.boolean().default(true),

@@ -438,6 +438,24 @@ export class ConversationOrchestratorService {
           breakdown.methods.length,
         )
       }
+      case 'settlementCalendar': {
+        const settlement = await SharedQueryService.getSettlementCalendarForPeriod(venueId, dateRange)
+        const list = settlement.entries
+          .slice(0, this.limit(step, 5))
+          .map(
+            entry =>
+              `${this.formatDate(entry.settlementDate)}: ${this.money(entry.totalNetAmount, settlement.currency)} netos (${entry.transactionCount} transacciones).`,
+          )
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          settlement,
+          settlement.transactionCount > 0
+            ? `Para ${this.formatDateRangeName(dateRange)}, te liquidan ${this.money(settlement.totalNetAmount, settlement.currency)} netos en ${settlement.transactionCount} transacciones.${list ? `\n${list}` : ''}`
+            : `No hay liquidaciones programadas para ${this.formatDateRangeName(dateRange)}.`,
+          settlement.entries.length,
+        )
+      }
       default:
         throw new Error(`Unsupported query tool: ${step.tool}`)
     }
@@ -505,6 +523,10 @@ export class ConversationOrchestratorService {
 
   private money(value: number, currency = 'MXN'): string {
     return new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(value)
+  }
+
+  private formatDate(value: Date): string {
+    return new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }).format(value)
   }
 
   private toActionStepStatus(result: ActionResponse): PlanStepMetadata['status'] {

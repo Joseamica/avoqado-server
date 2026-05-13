@@ -1450,11 +1450,7 @@ export async function finalizePaymentLinkCheckout(args: {
  * paid session + link + customer info, then iterates eligible staff one
  * at a time so a single bad address doesn't block the rest.
  */
-async function notifyVenueOnLinkPaid(args: {
-  paymentLinkId: string
-  venueId: string
-  stripeSessionId: string
-}): Promise<void> {
+async function notifyVenueOnLinkPaid(args: { paymentLinkId: string; venueId: string; stripeSessionId: string }): Promise<void> {
   const settings = await prisma.venuePaymentLinkSettings.findUnique({
     where: { venueId: args.venueId },
     select: { notifyOnPaid: true },
@@ -1496,12 +1492,7 @@ async function notifyVenueOnLinkPaid(args: {
   if (!link || !venue || !paidSession || recipients.length === 0) return
 
   const tz = venue.timezone || 'America/Mexico_City'
-  const paidAtRaw = formatInTimeZone(
-    paidSession.completedAt ?? new Date(),
-    tz,
-    "EEEE d 'de' MMMM 'de' yyyy HH:mm",
-    { locale: esLocale },
-  )
+  const paidAtRaw = formatInTimeZone(paidSession.completedAt ?? new Date(), tz, "EEEE d 'de' MMMM 'de' yyyy HH:mm", { locale: esLocale })
   const paidAtLong = paidAtRaw.charAt(0).toUpperCase() + paidAtRaw.slice(1)
   const dashboardOrigin = process.env.DASHBOARD_URL || 'https://app.avoqado.io'
   const dashboardUrl = `${dashboardOrigin}/venues/${args.venueId}/payment-links/${args.paymentLinkId}`
@@ -1534,9 +1525,7 @@ async function notifyVenueOnLinkPaid(args: {
         dashboardUrl,
       })
     } catch (mailError) {
-      logger.warn(
-        `[PAYMENT-LINK NOTIFY] failed for ${email} (link=${args.paymentLinkId}): ${(mailError as Error).message}`,
-      )
+      logger.warn(`[PAYMENT-LINK NOTIFY] failed for ${email} (link=${args.paymentLinkId}): ${(mailError as Error).message}`)
     }
   }
 }

@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
 import logger from '@/config/logger'
+import { RelativeDateRange } from '@/utils/datetime'
 import { ToolCatalogService } from './tool-catalog.service'
 import { AssistantConversationState, ConversationPlan, PlannerRequest, PlannerStep } from './types'
 
@@ -201,6 +202,15 @@ export class ConversationPlannerService {
 
     if (this.hasPendingOrdersIntent(normalized)) {
       steps.push({ id: this.nextStepId('query', steps), kind: 'query', tool: 'pendingOrders', args: {} })
+    }
+
+    if (this.hasSettlementCalendarIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'settlementCalendar',
+        args: { dateRange: this.extractDateRange(normalized) || 'today' },
+      })
     }
 
     if (containsCrud && this.hasPostMutationReadIntent(normalized)) {
@@ -513,6 +523,25 @@ export class ConversationPlannerService {
 
   private hasPendingOrdersIntent(normalized: string): boolean {
     return /\b(ordenes pendientes|pedidos pendientes|comandas pendientes|ordenes abiertas|pedidos abiertos)\b/.test(normalized)
+  }
+
+  private hasSettlementCalendarIntent(normalized: string): boolean {
+    const asksAmount = /\b(cuanto|cuanta|cuantos|cuantas|monto|total|amount|how much)\b/.test(normalized)
+    const settlementTerm =
+      /\b(liquidacion|liquidaciones|liquid\w*|dispers\w*|deposit\w*|pagan|pago|pagaran|payout|settlement|settle|deposit)\b/.test(normalized)
+    return asksAmount && settlementTerm
+  }
+
+  private extractDateRange(normalized: string): RelativeDateRange | undefined {
+    if (/\b(hoy|today)\b/.test(normalized)) return 'today'
+    if (/\b(ayer|yesterday)\b/.test(normalized)) return 'yesterday'
+    if (/\b(ultimos 7 dias|ultimos siete dias|last 7 days)\b/.test(normalized)) return 'last7days'
+    if (/\b(ultimos 30 dias|ultimos treinta dias|last 30 days)\b/.test(normalized)) return 'last30days'
+    if (/\b(semana pasada|last week)\b/.test(normalized)) return 'lastWeek'
+    if (/\b(mes pasado|last month)\b/.test(normalized)) return 'lastMonth'
+    if (/\b(esta semana|this week|semana)\b/.test(normalized)) return 'thisWeek'
+    if (/\b(este mes|this month|mes)\b/.test(normalized)) return 'thisMonth'
+    return undefined
   }
 
   private isAmbiguousDestructiveFollowUp(normalized: string, state: AssistantConversationState): boolean {

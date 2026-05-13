@@ -101,6 +101,7 @@ export type QueryToolName =
   | 'activeShifts'
   | 'profitAnalysis'
   | 'paymentMethodBreakdown'
+  | 'settlementCalendar'
   | 'adHocAnalytics'
 
 export interface QueryToolDefinition {
