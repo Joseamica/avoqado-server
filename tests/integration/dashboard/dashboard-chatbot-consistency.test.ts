@@ -23,8 +23,9 @@ import { SqlValidationService } from '@/services/dashboard/sql-validation.servic
 import { Prisma } from '@prisma/client'
 import { UserRole } from '@/services/dashboard/table-access-control.service'
 
-// Increase timeout for integration tests (Neon cold start can be slow)
-jest.setTimeout(60000)
+// Increase timeout for integration tests (Neon cold start and full pre-deploy load can be slow)
+const ASSISTANT_CONSISTENCY_TIMEOUT_MS = 90000
+jest.setTimeout(ASSISTANT_CONSISTENCY_TIMEOUT_MS)
 
 describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
   let testData: Awaited<ReturnType<typeof setupTestData>>
@@ -43,148 +44,172 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
   })
 
   describe('Simple Query Consistency (SharedQueryService)', () => {
-    it('should return 100% consistent results for "¿Cuánto vendí hoy?"', async () => {
-      // Get dashboard value
-      const dashboardValue = await SharedQueryService.getSalesForPeriod(testData.venue.id, 'today')
+    it(
+      'should return 100% consistent results for "¿Cuánto vendí hoy?"',
+      async () => {
+        // Get dashboard value
+        const dashboardValue = await SharedQueryService.getSalesForPeriod(testData.venue.id, 'today')
 
-      // Get chatbot value
-      const chatbotResponse = await service.processQuery({
-        message: '¿Cuánto vendí hoy?',
-        venueId: testData.venue.id,
-        userId: testData.staff[0].id,
-        venueSlug: testData.venue.slug,
-        userRole: UserRole.MANAGER,
-      })
+        // Get chatbot value
+        const chatbotResponse = await service.processQuery({
+          message: '¿Cuánto vendí hoy?',
+          venueId: testData.venue.id,
+          userId: testData.staff[0].id,
+          venueSlug: testData.venue.slug,
+          userRole: UserRole.MANAGER,
+        })
 
-      // Both should use SharedQueryService → 100% identical
-      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
+        // Both should use SharedQueryService → 100% identical
+        expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
 
-      // Verify values match (if chatbot has queryResult)
-      if (chatbotResponse.queryResult) {
-        expect(chatbotResponse.queryResult.totalRevenue).toBe(dashboardValue.totalRevenue)
-        expect(chatbotResponse.queryResult.orderCount).toBe(dashboardValue.orderCount)
-        expect(chatbotResponse.queryResult.averageTicket).toBe(dashboardValue.averageTicket)
-      }
-    }, 30000)
-
-    it('should return 100% consistent results for "¿Cuál es mi ticket promedio?"', async () => {
-      const dashboardValue = await SharedQueryService.getAverageTicket(testData.venue.id, 'last7days')
-
-      const chatbotResponse = await service.processQuery({
-        message: '¿Cuál es mi ticket promedio esta semana?',
-        venueId: testData.venue.id,
-        userId: testData.staff[0].id,
-        venueSlug: testData.venue.slug,
-        userRole: UserRole.MANAGER,
-      })
-
-      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
-
-      if (chatbotResponse.queryResult?.averageTicket !== undefined) {
-        expect(chatbotResponse.queryResult.averageTicket).toBe(dashboardValue)
-      }
-    }, 30000)
-
-    it('should return 100% consistent results for "¿Qué productos vendí más?"', async () => {
-      const dashboardValue = await SharedQueryService.getTopProducts(testData.venue.id, 'last7days', 5)
-
-      const chatbotResponse = await service.processQuery({
-        message: '¿Qué productos vendí más esta semana?',
-        venueId: testData.venue.id,
-        userId: testData.staff[0].id,
-        venueSlug: testData.venue.slug,
-        userRole: UserRole.MANAGER,
-      })
-
-      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
-
-      if (Array.isArray(chatbotResponse.queryResult)) {
-        expect(chatbotResponse.queryResult.length).toBe(dashboardValue.length)
-
-        // Verify top product matches
-        if (dashboardValue.length > 0 && chatbotResponse.queryResult.length > 0) {
-          expect(chatbotResponse.queryResult[0].productName).toBe(dashboardValue[0].productName)
-          expect(chatbotResponse.queryResult[0].quantitySold).toBe(dashboardValue[0].quantitySold)
+        // Verify values match (if chatbot has queryResult)
+        if (chatbotResponse.queryResult) {
+          expect(chatbotResponse.queryResult.totalRevenue).toBe(dashboardValue.totalRevenue)
+          expect(chatbotResponse.queryResult.orderCount).toBe(dashboardValue.orderCount)
+          expect(chatbotResponse.queryResult.averageTicket).toBe(dashboardValue.averageTicket)
         }
-      }
-    }, 30000)
+      },
+      ASSISTANT_CONSISTENCY_TIMEOUT_MS,
+    )
 
-    it('should return profitability results through the registered SharedQueryService tool', async () => {
-      const dashboardValue = await SharedQueryService.getProfitAnalysis(testData.venue.id, 'last7days', 5)
+    it(
+      'should return 100% consistent results for "¿Cuál es mi ticket promedio?"',
+      async () => {
+        const dashboardValue = await SharedQueryService.getAverageTicket(testData.venue.id, 'last7days')
 
-      const chatbotResponse = await service.processQuery({
-        message: '¿Cuál fue mi rentabilidad esta semana?',
-        venueId: testData.venue.id,
-        userId: testData.staff[0].id,
-        venueSlug: testData.venue.slug,
-        userRole: UserRole.MANAGER,
-      })
+        const chatbotResponse = await service.processQuery({
+          message: '¿Cuál es mi ticket promedio esta semana?',
+          venueId: testData.venue.id,
+          userId: testData.staff[0].id,
+          venueSlug: testData.venue.slug,
+          userRole: UserRole.MANAGER,
+        })
 
-      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
-      expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('shared_intent_routed')
-      expect(chatbotResponse.response).toContain('Análisis de rentabilidad')
+        expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
 
-      if (chatbotResponse.queryResult) {
-        expect(chatbotResponse.queryResult.totalRevenue).toBe(dashboardValue.totalRevenue)
-        expect(chatbotResponse.queryResult.totalCost).toBe(dashboardValue.totalCost)
-        expect(chatbotResponse.queryResult.grossProfit).toBe(dashboardValue.grossProfit)
-      }
-    }, 30000)
+        if (chatbotResponse.queryResult?.averageTicket !== undefined) {
+          expect(chatbotResponse.queryResult.averageTicket).toBe(dashboardValue)
+        }
+      },
+      ASSISTANT_CONSISTENCY_TIMEOUT_MS,
+    )
 
-    it('should return product-specific sales through the registered SharedQueryService tool', async () => {
-      const topProducts = await SharedQueryService.getTopProducts(testData.venue.id, 'last7days', 1)
-      if (topProducts.length === 0) {
-        return
-      }
+    it(
+      'should return 100% consistent results for "¿Qué productos vendí más?"',
+      async () => {
+        const dashboardValue = await SharedQueryService.getTopProducts(testData.venue.id, 'last7days', 5)
 
-      const productName = topProducts[0].productName
-      const dashboardValue = await SharedQueryService.getProductSalesByName(testData.venue.id, productName, 'last7days')
+        const chatbotResponse = await service.processQuery({
+          message: '¿Qué productos vendí más esta semana?',
+          venueId: testData.venue.id,
+          userId: testData.staff[0].id,
+          venueSlug: testData.venue.slug,
+          userRole: UserRole.MANAGER,
+        })
 
-      const chatbotResponse = await service.processQuery({
-        message: `¿Cuánto vendí de ${productName} esta semana?`,
-        venueId: testData.venue.id,
-        userId: testData.staff[0].id,
-        venueSlug: testData.venue.slug,
-        userRole: UserRole.MANAGER,
-      })
+        expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
 
-      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
-      expect(((chatbotResponse.metadata || {}) as any).intent).toBe('productSales')
-      expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('shared_intent_routed')
+        if (Array.isArray(chatbotResponse.queryResult)) {
+          expect(chatbotResponse.queryResult.length).toBe(dashboardValue.length)
 
-      expect(chatbotResponse.queryResult?.productName).toBe(dashboardValue.productName)
-      expect(chatbotResponse.queryResult?.quantitySold).toBe(dashboardValue.quantitySold)
-      expect(chatbotResponse.queryResult?.revenue).toBe(dashboardValue.revenue)
-    }, 30000)
+          // Verify top product matches
+          if (dashboardValue.length > 0 && chatbotResponse.queryResult.length > 0) {
+            expect(chatbotResponse.queryResult[0].productName).toBe(dashboardValue[0].productName)
+            expect(chatbotResponse.queryResult[0].quantitySold).toBe(dashboardValue[0].quantitySold)
+          }
+        }
+      },
+      ASSISTANT_CONSISTENCY_TIMEOUT_MS,
+    )
 
-    it('should return 100% consistent results for product comparisons with weekend and night filters', async () => {
-      const dashboardValue = await SharedQueryService.compareProductSales(testData.venue.id, {
-        leftTerm: 'hamburguesas',
-        rightTerm: 'pizzas',
-        period: 'thisMonth',
-        weekendOnly: true,
-        nightOnly: true,
-      })
+    it(
+      'should return profitability results through the registered SharedQueryService tool',
+      async () => {
+        const dashboardValue = await SharedQueryService.getProfitAnalysis(testData.venue.id, 'last7days', 5)
 
-      const chatbotResponse = await service.processQuery({
-        message: '¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?',
-        venueId: testData.venue.id,
-        userId: testData.staff[0].id,
-        venueSlug: testData.venue.slug,
-        userRole: UserRole.MANAGER,
-      })
+        const chatbotResponse = await service.processQuery({
+          message: '¿Cuál fue mi rentabilidad esta semana?',
+          venueId: testData.venue.id,
+          userId: testData.staff[0].id,
+          venueSlug: testData.venue.slug,
+          userRole: UserRole.MANAGER,
+        })
 
-      expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
-      expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('registered_product_comparison_tool')
-      expect(chatbotResponse.response).toContain('Comparativo hamburguesas vs pizzas')
+        expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
+        expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('shared_intent_routed')
+        expect(chatbotResponse.response).toContain('Análisis de rentabilidad')
 
-      const comparison = chatbotResponse.queryResult?.comparison
-      expect(comparison?.left.revenue).toBe(dashboardValue.left.revenue)
-      expect(comparison?.left.quantitySold).toBe(dashboardValue.left.quantitySold)
-      expect(comparison?.right.revenue).toBe(dashboardValue.right.revenue)
-      expect(comparison?.right.quantitySold).toBe(dashboardValue.right.quantitySold)
-      expect(comparison?.totalRevenue).toBe(dashboardValue.totalRevenue)
-    }, 30000)
+        if (chatbotResponse.queryResult) {
+          expect(chatbotResponse.queryResult.totalRevenue).toBe(dashboardValue.totalRevenue)
+          expect(chatbotResponse.queryResult.totalCost).toBe(dashboardValue.totalCost)
+          expect(chatbotResponse.queryResult.grossProfit).toBe(dashboardValue.grossProfit)
+        }
+      },
+      ASSISTANT_CONSISTENCY_TIMEOUT_MS,
+    )
+
+    it(
+      'should return product-specific sales through the registered SharedQueryService tool',
+      async () => {
+        const topProducts = await SharedQueryService.getTopProducts(testData.venue.id, 'last7days', 1)
+        if (topProducts.length === 0) {
+          return
+        }
+
+        const productName = topProducts[0].productName
+        const dashboardValue = await SharedQueryService.getProductSalesByName(testData.venue.id, productName, 'last7days')
+
+        const chatbotResponse = await service.processQuery({
+          message: `¿Cuánto vendí de ${productName} esta semana?`,
+          venueId: testData.venue.id,
+          userId: testData.staff[0].id,
+          venueSlug: testData.venue.slug,
+          userRole: UserRole.MANAGER,
+        })
+
+        expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
+        expect(((chatbotResponse.metadata || {}) as any).intent).toBe('productSales')
+        expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('shared_intent_routed')
+
+        expect(chatbotResponse.queryResult?.productName).toBe(dashboardValue.productName)
+        expect(chatbotResponse.queryResult?.quantitySold).toBe(dashboardValue.quantitySold)
+        expect(chatbotResponse.queryResult?.revenue).toBe(dashboardValue.revenue)
+      },
+      ASSISTANT_CONSISTENCY_TIMEOUT_MS,
+    )
+
+    it(
+      'should return 100% consistent results for product comparisons with weekend and night filters',
+      async () => {
+        const dashboardValue = await SharedQueryService.compareProductSales(testData.venue.id, {
+          leftTerm: 'hamburguesas',
+          rightTerm: 'pizzas',
+          period: 'thisMonth',
+          weekendOnly: true,
+          nightOnly: true,
+        })
+
+        const chatbotResponse = await service.processQuery({
+          message: '¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?',
+          venueId: testData.venue.id,
+          userId: testData.staff[0].id,
+          venueSlug: testData.venue.slug,
+          userRole: UserRole.MANAGER,
+        })
+
+        expect(((chatbotResponse.metadata || {}) as any).routedTo).toBe('SharedQueryService')
+        expect(((chatbotResponse.metadata || {}) as any).reasonCode).toBe('registered_product_comparison_tool')
+        expect(chatbotResponse.response).toContain('Comparativo hamburguesas vs pizzas')
+
+        const comparison = chatbotResponse.queryResult?.comparison
+        expect(comparison?.left.revenue).toBe(dashboardValue.left.revenue)
+        expect(comparison?.left.quantitySold).toBe(dashboardValue.left.quantitySold)
+        expect(comparison?.right.revenue).toBe(dashboardValue.right.revenue)
+        expect(comparison?.right.quantitySold).toBe(dashboardValue.right.quantitySold)
+        expect(comparison?.totalRevenue).toBe(dashboardValue.totalRevenue)
+      },
+      ASSISTANT_CONSISTENCY_TIMEOUT_MS,
+    )
   })
 
   describe('Layer 4 Cross-Check Validation', () => {
