@@ -125,6 +125,16 @@ describe('ConversationPlannerService', () => {
       venueId: 'venue-1',
       userId: 'user-1',
     })
+    const customerByName = await planner.plan({
+      message: 'detalle del cliente Ana Perez',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const customerSearch = await planner.plan({
+      message: 'busca cliente Ana',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
     const credits = await planner.plan({
       message: 'cuantos creditos le quedan al cliente cust_123',
       venueId: 'venue-1',
@@ -142,6 +152,12 @@ describe('ConversationPlannerService', () => {
     })
 
     expect(customer.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.detail', args: { customerId: 'cust_123' } })])
+    expect(customerByName.steps).toEqual([
+      expect.objectContaining({ kind: 'query', tool: 'customers.search', args: { search: 'ana perez', limit: 5 } }),
+    ])
+    expect(customerSearch.steps).toEqual([
+      expect.objectContaining({ kind: 'query', tool: 'customers.search', args: { search: 'ana', limit: 5 } }),
+    ])
     expect(credits.steps).toEqual([
       expect.objectContaining({ kind: 'query', tool: 'creditPacks.balance', args: { customerId: 'cust_123' } }),
     ])
@@ -149,6 +165,23 @@ describe('ConversationPlannerService', () => {
     expect(missingCustomer.steps[0]).toEqual(expect.objectContaining({ kind: 'clarify', missing: ['customerId'] }))
     expect(missingCredits.mode).toBe('clarification')
     expect(missingCredits.steps[0]).toEqual(expect.objectContaining({ kind: 'clarify', missing: ['customerId'] }))
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('plans credit-pack list and summary questions deterministically', async () => {
+    const list = await planner.plan({
+      message: 'que paquetes de credito tengo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const summary = await planner.plan({
+      message: 'resumen de credit packs',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(list.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'creditPacks.list', args: { limit: 10 } })])
+    expect(summary.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'creditPacks.summary', args: {} })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 

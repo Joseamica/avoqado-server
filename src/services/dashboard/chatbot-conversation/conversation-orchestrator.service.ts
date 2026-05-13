@@ -674,6 +674,51 @@ export class ConversationOrchestratorService {
           customer.recentOrders.length,
         )
       }
+      case 'customers.search': {
+        const search = typeof step.args.search === 'string' ? step.args.search : undefined
+        const customers = await SharedQueryService.searchCustomers(venueId, { search, limit: this.limit(step, 5) })
+        const list = customers.customers
+          .map(customer => {
+            const group = customer.customerGroupName ? `, grupo ${customer.customerGroupName}` : ''
+            const pending = customer.pendingBalance > 0 ? `, saldo pendiente ${this.money(customer.pendingBalance)}` : ''
+            return `- ${customer.name}: ${customer.active ? 'activo' : 'inactivo'}, ${customer.totalVisits} visitas, ${this.money(customer.totalSpent)} gastado, ${customer.loyaltyPoints} puntos${group}${pending}.`
+          })
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          customers,
+          customers.customers.length > 0
+            ? `Encontré ${customers.total} cliente${customers.total === 1 ? '' : 's'}${search ? ` para "${search}"` : ''}:\n${list}`
+            : `No encontré clientes${search ? ` para "${search}"` : ''}.`,
+          customers.customers.length,
+        )
+      }
+      case 'creditPacks.list': {
+        const packs = await SharedQueryService.getCreditPacks(venueId, { limit: this.limit(step, 10) })
+        const list = packs.packs
+          .map(pack => {
+            const items = pack.items.map(item => `${item.quantity} ${item.productName}`).join(', ')
+            const validity = pack.validityDays ? `, vigencia ${pack.validityDays} días` : ''
+            return `- ${pack.name}: ${pack.active ? 'activo' : 'inactivo'}, ${this.money(pack.price, pack.currency)}, ${pack.purchaseCount} compras${validity}${items ? `; incluye ${items}` : ''}.`
+          })
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          packs,
+          packs.packs.length > 0 ? `Tienes ${packs.total} paquetes de crédito:\n${list}` : 'No encontré paquetes de crédito.',
+          packs.packs.length,
+        )
+      }
+      case 'creditPacks.summary': {
+        const summary = await SharedQueryService.getCreditPacksSummary(venueId)
+        return this.queryResult(
+          step.tool,
+          summary,
+          summary.totalPacks > 0
+            ? `Tienes ${summary.totalPacks} paquetes de crédito: ${summary.activePacks} activos y ${summary.inactivePacks} inactivos, con ${summary.totalPurchases} compras registradas. Precio promedio: ${this.money(summary.averagePrice, summary.currency)}.`
+            : 'No encontré paquetes de crédito configurados.',
+        )
+      }
       case 'creditPacks.balance': {
         const customerId = this.requiredStringArg(step, 'customerId')
         const credits = await SharedQueryService.getCreditPackBalance(venueId, customerId)

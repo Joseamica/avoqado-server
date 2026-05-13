@@ -316,7 +316,7 @@ export class ConversationPlannerService {
 
     if (this.hasCustomerDetailIntent(normalized)) {
       const customerId = this.extractBusinessIdentifier(normalized, ['cliente', 'customer'])
-      if (customerId) {
+      if (customerId && this.isLikelyBusinessIdentifier(customerId)) {
         steps.push({
           id: this.nextStepId('query', steps),
           kind: 'query',
@@ -324,14 +324,34 @@ export class ConversationPlannerService {
           args: { customerId },
         })
       } else {
-        steps.push({
-          id: this.nextStepId('clarify', steps),
-          kind: 'clarify',
-          question:
-            '¿Cuál cliente quieres revisar? Puedes compartir el identificador del cliente o pedirme primero el resumen de clientes.',
-          missing: ['customerId'],
-        })
+        const search = this.extractCustomerSearchTerm(normalized)
+        if (search) {
+          steps.push({
+            id: this.nextStepId('query', steps),
+            kind: 'query',
+            tool: 'customers.search',
+            args: { search, limit: 5 },
+          })
+        } else {
+          steps.push({
+            id: this.nextStepId('clarify', steps),
+            kind: 'clarify',
+            question:
+              '¿Cuál cliente quieres revisar? Puedes compartir el identificador del cliente o pedirme primero el resumen de clientes.',
+            missing: ['customerId'],
+          })
+        }
       }
+    }
+
+    if (this.hasCustomerSearchIntent(normalized)) {
+      const search = this.extractCustomerSearchTerm(normalized)
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'customers.search',
+        args: { ...(search ? { search } : {}), limit: 5 },
+      })
     }
 
     if (this.hasCreditPackBalanceIntent(normalized)) {
@@ -351,6 +371,24 @@ export class ConversationPlannerService {
           missing: ['customerId'],
         })
       }
+    }
+
+    if (this.hasCreditPackSummaryIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'creditPacks.summary',
+        args: {},
+      })
+    }
+
+    if (this.hasCreditPackListIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'creditPacks.list',
+        args: { limit: 10 },
+      })
     }
 
     if (this.hasCustomersSummaryIntent(normalized)) {
@@ -806,12 +844,40 @@ export class ConversationPlannerService {
     return customerTerm && detailIntent && !mutationIntent
   }
 
+  private hasCustomerSearchIntent(normalized: string): boolean {
+    const customerTerm = /\b(cliente|clientes|customer|customers)\b/.test(normalized)
+    const searchIntent = /\b(busca|buscar|buscame|encuentra|encontrar|encuentrame|search|find)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|elimina)\b/.test(normalized)
+    return customerTerm && searchIntent && !this.hasCustomerDetailIntent(normalized) && !mutationIntent
+  }
+
+  private hasCreditPackTerms(normalized: string): boolean {
+    return /\b(credito|creditos|credit pack|credit packs|paquete de credito|paquetes de credito)\b/.test(normalized)
+  }
+
+  private hasCreditPackSummaryIntent(normalized: string): boolean {
+    const summaryIntent = /\b(resumen|summary|total|cuantos|cuantas|metricas|estadisticas)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|elimina|ajusta|redime)\b/.test(normalized)
+    return this.hasCreditPackTerms(normalized) && summaryIntent && !this.hasCreditPackBalanceIntent(normalized) && !mutationIntent
+  }
+
+  private hasCreditPackListIntent(normalized: string): boolean {
+    const listIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|show|list|see)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|elimina|ajusta|redime)\b/.test(normalized)
+    return (
+      this.hasCreditPackTerms(normalized) &&
+      listIntent &&
+      !this.hasCreditPackSummaryIntent(normalized) &&
+      !this.hasCreditPackBalanceIntent(normalized) &&
+      !mutationIntent
+    )
+  }
+
   private hasCreditPackBalanceIntent(normalized: string): boolean {
-    const creditTerm = /\b(credito|creditos|credit pack|credit packs|paquete de credito|paquetes de credito)\b/.test(normalized)
     const balanceIntent = /\b(quedan|queda|saldo|disponible|disponibles|tiene|balance|restante|restantes)\b/.test(normalized)
     const customerTerm = /\b(cliente|customer)\b/.test(normalized)
     const mutationIntent = /\b(agrega|agregar|ajusta|ajustar|redime|redimir|descuenta|descontar|borra|borrar|elimina)\b/.test(normalized)
-    return creditTerm && balanceIntent && customerTerm && !mutationIntent
+    return this.hasCreditPackTerms(normalized) && balanceIntent && customerTerm && !mutationIntent
   }
 
   private hasTeamMembersIntent(normalized: string): boolean {
@@ -849,6 +915,32 @@ export class ConversationPlannerService {
     if (!candidate) return null
     if (/^(de|del|la|el|hoy|ayer|detalle|detallado|pago|link|liga|enlace)$/.test(candidate)) return null
     return candidate
+  }
+
+  private isLikelyBusinessIdentifier(value: string): boolean {
+    return /^(cust|customer|cus)[_-]?[a-z0-9_-]{3,}$/i.test(value) || (/[0-9]/.test(value) && /[_-]/.test(value))
+  }
+
+  private extractCustomerSearchTerm(normalized: string): string | null {
+    const patterns = [
+      /\b(?:detalle|detallado|perfil|historial|info|informacion|datos)\s+(?:del|de|al|el|la)?\s*cliente\s+(.+)$/,
+      /\b(?:busca|buscar|buscame|encuentra|encontrar|encuentrame|search|find)\s+(?:al|el|la)?\s*cliente\s+(.+)$/,
+      /\bcliente\s+(.+)$/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern)
+      const raw = match?.[1]?.trim()
+      if (!raw) continue
+      const cleaned = raw
+        .replace(/[?!.,;:]+$/g, '')
+        .replace(/\b(por favor|please)\b/g, '')
+        .trim()
+        .slice(0, 80)
+      if (cleaned && !this.isLikelyBusinessIdentifier(cleaned)) return cleaned
+    }
+
+    return null
   }
 
   private extractDateRange(normalized: string): RelativeDateRange | undefined {

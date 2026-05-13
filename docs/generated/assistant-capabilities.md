@@ -1,14 +1,14 @@
 # Assistant Capabilities
 
-Generated: 2026-05-13T19:04:48.236Z
+Generated: 2026-05-13T19:29:36.247Z
 
 ## Summary
 
-- Total capabilities: 75
-- Status: registered 68, backlog 4, blocked 3
-- Kind: action 37, query 31, howTo 5, blocked 2
-- Risk: low 36, medium 27, high 9, critical 3
-- Scope: venue 74, superadmin 1
+- Total capabilities: 78
+- Status: registered 71, backlog 4, blocked 3
+- Kind: action 37, query 34, howTo 5, blocked 2
+- Risk: low 37, medium 29, high 9, critical 3
+- Scope: venue 77, superadmin 1
 
 ## Registered Executable Capabilities
 
@@ -21,7 +21,10 @@ Generated: 2026-05-13T19:04:48.236Z
 - `commissions.payouts` (query, medium) — permissions: commissions:payout; source: shared_query.commissions.payouts
 - `commissions.summary` (query, medium) — permissions: commissions:read; source: shared_query.commissions.summary
 - `creditPacks.balance` (query, medium) — permissions: credit-packs:read; source: shared_query.creditPacks.balance
+- `creditPacks.list` (query, medium) — permissions: credit-packs:read; source: shared_query.creditPacks.list
+- `creditPacks.summary` (query, low) — permissions: credit-packs:read; source: shared_query.creditPacks.summary
 - `customers.detail` (query, medium) — permissions: customers:read; source: shared_query.customers.detail
+- `customers.search` (query, medium) — permissions: customers:read; source: shared_query.customers.search
 - `customers.summary` (query, medium) — permissions: customers:read; source: shared_query.customers.summary
 - `howTo.contactSupport` (howTo, low) — permissions: none; source: dashboard_knowledge_base
 - `howTo.paymentLinks` (howTo, low) — permissions: none; source: dashboard_knowledge_base
@@ -110,7 +113,10 @@ Generated: 2026-05-13T19:04:48.236Z
 | `commissions.payouts` | query | registered | venue | medium | commissions:payout | - | shared_query.commissions.payouts |
 | `commissions.summary` | query | registered | venue | medium | commissions:read | - | shared_query.commissions.summary |
 | `creditPacks.balance` | query | registered | venue | medium | credit-packs:read | - | shared_query.creditPacks.balance |
+| `creditPacks.list` | query | registered | venue | medium | credit-packs:read | - | shared_query.creditPacks.list |
+| `creditPacks.summary` | query | registered | venue | low | credit-packs:read | - | shared_query.creditPacks.summary |
 | `customers.detail` | query | registered | venue | medium | customers:read | - | shared_query.customers.detail |
+| `customers.search` | query | registered | venue | medium | customers:read | - | shared_query.customers.search |
 | `customers.summary` | query | registered | venue | medium | customers:read | - | shared_query.customers.summary |
 | `howTo.contactSupport` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
 | `howTo.paymentLinks` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |

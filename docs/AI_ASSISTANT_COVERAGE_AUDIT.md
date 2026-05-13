@@ -81,7 +81,10 @@ archivo es la fuente de verdad para distinguir:
 - `reservations.summary`
 - `reservations.list`
 - `customers.summary`
+- `customers.search`
 - `customers.detail`
+- `creditPacks.list`
+- `creditPacks.summary`
 - `creditPacks.balance`
 - `team.members`
 - `commissions.summary`
@@ -177,8 +180,8 @@ Esto no entrena automaticamente el modelo base; alimenta RAG/evaluaciones para q
 
 Prioridad alta:
 
-- Busqueda segura de clientes por nombre/email/telefono antes de ejecutar `customers.detail`.
-- Listado/resumen de credit packs sin contacto de clientes.
+- Busqueda conversacional con seleccion/follow-up estable para clientes encontrados por `customers.search`.
+- Detalle de credit packs por paquete especifico.
 
 ### Fase 2: ayuda operativa
 

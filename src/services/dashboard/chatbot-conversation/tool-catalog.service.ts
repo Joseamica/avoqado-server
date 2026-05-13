@@ -173,9 +173,27 @@ export class ToolCatalogService {
         requiresDateRange: false,
       },
       {
+        name: 'customers.search',
+        description: 'Search customers in the current venue by name or contact text without returning contact fields.',
+        tables: ['Customer', 'CustomerGroup', 'Order'],
+        requiresDateRange: false,
+      },
+      {
         name: 'customers.detail',
         description: 'Show one customer detail summary by safe customer identifier without contact fields.',
         tables: ['Customer', 'CustomerGroup', 'Order', 'LoyaltyTransaction'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'creditPacks.list',
+        description: 'List configured credit packs for the current venue.',
+        tables: ['CreditPack', 'CreditPackItem', 'Product'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'creditPacks.summary',
+        description: 'Summarize configured credit packs for the current venue.',
+        tables: ['CreditPack'],
         requiresDateRange: false,
       },
       {

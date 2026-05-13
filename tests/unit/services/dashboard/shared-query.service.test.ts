@@ -38,10 +38,12 @@ jest.mock('@/services/dashboard/commission/commission-payout.service', () => ({
 jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
   getCustomerStats: jest.fn(),
   getCustomerById: jest.fn(),
+  getCustomers: jest.fn(),
 }))
 
 jest.mock('@/services/dashboard/creditPack.dashboard.service', () => ({
   getCustomerPurchases: jest.fn(),
+  getCreditPacks: jest.fn(),
 }))
 
 jest.mock('@/services/dashboard/paymentLink.service', () => ({
@@ -377,6 +379,67 @@ describe('SharedQueryService', () => {
     })
   })
 
+  describe('searchCustomers', () => {
+    it('uses dashboard customer search and omits contact fields and internal IDs', async () => {
+      ;(customerDashboardService.getCustomers as jest.Mock).mockResolvedValue({
+        data: [
+          {
+            id: 'cust-1',
+            firstName: 'Ana',
+            lastName: 'Perez',
+            email: 'ana@example.com',
+            phone: '+525500000000',
+            loyaltyPoints: 120,
+            totalVisits: 6,
+            totalSpent: 1500,
+            averageOrderValue: 250,
+            active: true,
+            customerGroup: { id: 'group-1', name: 'VIP', color: '#fff' },
+            tags: ['frecuente'],
+            lastVisitAt: new Date('2026-05-12T00:00:00.000Z'),
+            pendingOrderCount: 1,
+            pendingBalance: 300,
+          },
+        ],
+        meta: {
+          totalCount: 1,
+          pageSize: 5,
+          currentPage: 1,
+          totalPages: 1,
+          hasNextPage: false,
+          hasPrevPage: false,
+        },
+      })
+
+      const result = await SharedQueryService.searchCustomers('venue-test', { search: 'Ana', limit: 5 })
+
+      expect(customerDashboardService.getCustomers).toHaveBeenCalledWith(
+        'venue-test',
+        1,
+        5,
+        'Ana',
+        undefined,
+        undefined,
+        undefined,
+        'lastVisit',
+        'desc',
+        undefined,
+      )
+      expect(result.customers).toEqual([
+        expect.objectContaining({
+          name: 'Ana Perez',
+          customerGroupName: 'VIP',
+          totalSpent: 1500,
+          pendingBalance: 300,
+        }),
+      ])
+      expect(JSON.stringify(result)).not.toContain('cust-1')
+      expect(JSON.stringify(result)).not.toContain('ana@example.com')
+      expect(JSON.stringify(result)).not.toContain('+525500000000')
+      expect(JSON.stringify(result)).not.toContain('group-1')
+    })
+  })
+
   describe('getCreditPackBalance', () => {
     it('uses dashboard credit-pack purchases and returns balances without internal IDs or customer contact', async () => {
       ;(creditPackDashboardService.getCustomerPurchases as jest.Mock).mockResolvedValue({
@@ -425,6 +488,101 @@ describe('SharedQueryService', () => {
       expect(JSON.stringify(result)).not.toContain('balance-1')
       expect(JSON.stringify(result)).not.toContain('purchase-1')
       expect(JSON.stringify(result)).not.toContain('ana@example.com')
+    })
+  })
+
+  describe('getCreditPacksSummary', () => {
+    it('summarizes credit packs without Stripe/product IDs', async () => {
+      ;(creditPackDashboardService.getCreditPacks as jest.Mock).mockResolvedValue([
+        {
+          id: 'pack-1',
+          name: 'Clases 10',
+          description: 'Paquete privado',
+          active: true,
+          price: { toNumber: () => 1000 },
+          currency: 'MXN',
+          validityDays: 30,
+          maxPerCustomer: 2,
+          stripeProductId: 'prod_secret',
+          stripePriceId: 'price_secret',
+          _count: { purchases: 4 },
+          items: [
+            {
+              id: 'item-1',
+              quantity: 10,
+              product: { id: 'prod-1', name: 'Yoga', type: 'CLASS', price: { toNumber: () => 150 } },
+            },
+          ],
+        },
+        {
+          id: 'pack-2',
+          name: 'Masajes 5',
+          active: false,
+          price: 750,
+          currency: 'MXN',
+          validityDays: null,
+          maxPerCustomer: null,
+          _count: { purchases: 1 },
+          items: [],
+        },
+      ])
+
+      const result = await SharedQueryService.getCreditPacksSummary('venue-test')
+
+      expect(creditPackDashboardService.getCreditPacks).toHaveBeenCalledWith('venue-test')
+      expect(result).toEqual(
+        expect.objectContaining({
+          totalPacks: 2,
+          activePacks: 1,
+          inactivePacks: 1,
+          totalPurchases: 5,
+          currency: 'MXN',
+        }),
+      )
+      expect(JSON.stringify(result)).not.toContain('pack-1')
+      expect(JSON.stringify(result)).not.toContain('prod_secret')
+      expect(JSON.stringify(result)).not.toContain('prod-1')
+    })
+  })
+
+  describe('getCreditPacks', () => {
+    it('lists credit packs with product names and without internal IDs', async () => {
+      ;(creditPackDashboardService.getCreditPacks as jest.Mock).mockResolvedValue([
+        {
+          id: 'pack-1',
+          name: 'Clases 10',
+          active: true,
+          price: { toNumber: () => 1000 },
+          currency: 'MXN',
+          validityDays: 30,
+          maxPerCustomer: 2,
+          stripeProductId: 'prod_secret',
+          _count: { purchases: 4 },
+          items: [
+            {
+              id: 'item-1',
+              quantity: 10,
+              product: { id: 'prod-1', name: 'Yoga', type: 'CLASS', price: { toNumber: () => 150 } },
+            },
+          ],
+        },
+      ])
+
+      const result = await SharedQueryService.getCreditPacks('venue-test', { limit: 10 })
+
+      expect(creditPackDashboardService.getCreditPacks).toHaveBeenCalledWith('venue-test')
+      expect(result.packs).toEqual([
+        expect.objectContaining({
+          name: 'Clases 10',
+          active: true,
+          price: 1000,
+          purchaseCount: 4,
+          items: [{ productName: 'Yoga', productType: 'CLASS', quantity: 10 }],
+        }),
+      ])
+      expect(JSON.stringify(result)).not.toContain('pack-1')
+      expect(JSON.stringify(result)).not.toContain('prod_secret')
+      expect(JSON.stringify(result)).not.toContain('prod-1')
     })
   })
 

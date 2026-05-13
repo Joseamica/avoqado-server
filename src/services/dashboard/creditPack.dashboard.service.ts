@@ -14,7 +14,27 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
+/**
+ * Lazy Stripe singleton. We used to do `new Stripe(process.env.STRIPE_SECRET_KEY || '')`
+ * at module top level, but the Stripe SDK now rejects empty/missing API keys
+ * synchronously in the constructor — that broke every test suite that
+ * transitively imports this file (chatbot tools, text-to-sql, etc.) because
+ * resolving the module threw before any test could start.
+ *
+ * Keep instantiation inside a getter so tests that never call a Stripe
+ * method don't trip the assertion, while real callers still fail loudly
+ * with a useful error when the key is actually missing in dev/prod.
+ */
+let stripeInstance: Stripe | null = null
+function getStripe(): Stripe {
+  if (stripeInstance) return stripeInstance
+  const key = process.env.STRIPE_SECRET_KEY
+  if (!key) {
+    throw new BadRequestError('STRIPE_SECRET_KEY no está configurado en este entorno')
+  }
+  stripeInstance = new Stripe(key)
+  return stripeInstance
+}
 
 // ==========================================
 // CREDIT PACK CRUD
@@ -91,6 +111,7 @@ export async function createCreditPack(
   let stripePriceId: string | undefined
 
   try {
+    const stripe = getStripe()
     const stripeProduct = await stripe.products.create({
       name: data.name,
       metadata: { type: 'credit_pack', venueId },
@@ -171,6 +192,7 @@ export async function updateCreditPack(
   let stripePriceId = existing.stripePriceId
   if (data.price !== undefined && Number(existing.price) !== data.price && existing.stripeProductId) {
     try {
+      const stripe = getStripe()
       const newPrice = await stripe.prices.create({
         product: existing.stripeProductId,
         unit_amount: Math.round(data.price * 100),

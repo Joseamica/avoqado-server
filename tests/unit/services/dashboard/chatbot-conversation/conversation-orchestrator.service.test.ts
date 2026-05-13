@@ -276,6 +276,43 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.detail', status: 'executed' })])
   })
 
+  it('answers customer search questions without exposing contact fields or internal IDs', async () => {
+    jest.spyOn(SharedQueryService, 'searchCustomers').mockResolvedValue({
+      total: 1,
+      limit: 5,
+      customers: [
+        {
+          name: 'Ana Perez',
+          active: true,
+          loyaltyPoints: 120,
+          totalVisits: 6,
+          totalSpent: 1500,
+          averageOrderValue: 250,
+          lastVisitAt: new Date('2026-05-12T00:00:00.000Z'),
+          customerGroupName: 'VIP',
+          tags: ['frecuente'],
+          pendingOrderCount: 1,
+          pendingBalance: 300,
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'detalle del cliente Ana Perez',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.searchCustomers).toHaveBeenCalledWith('venue-1', { search: 'ana perez', limit: 5 })
+    expect(response?.response).toContain('Encontré 1 cliente')
+    expect(response?.response).toContain('Ana Perez')
+    expect(response?.response).toContain('VIP')
+    expect(response?.response).not.toContain('@')
+    expect(response?.response).not.toContain('cust_')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.search', status: 'executed' })])
+  })
+
   it('answers credit-pack balance questions without exposing balance IDs or customer contact', async () => {
     jest.spyOn(SharedQueryService, 'getCreditPackBalance').mockResolvedValue({
       customerName: 'Ana Perez',
@@ -308,6 +345,55 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).not.toContain('balance')
     expect(response?.response).not.toContain('@')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'creditPacks.balance', status: 'executed' })])
+  })
+
+  it('answers credit-pack list and summary questions with registered shared query tools', async () => {
+    jest.spyOn(SharedQueryService, 'getCreditPacks').mockResolvedValue({
+      total: 1,
+      limit: 10,
+      packs: [
+        {
+          name: 'Clases 10',
+          active: true,
+          price: 1000,
+          currency: 'MXN',
+          validityDays: 30,
+          maxPerCustomer: 2,
+          purchaseCount: 4,
+          items: [{ productName: 'Yoga', productType: 'CLASS', quantity: 10 }],
+        },
+      ],
+    })
+    jest.spyOn(SharedQueryService, 'getCreditPacksSummary').mockResolvedValue({
+      totalPacks: 1,
+      activePacks: 1,
+      inactivePacks: 0,
+      totalPurchases: 4,
+      averagePrice: 1000,
+      currency: 'MXN',
+    })
+
+    const list = await orchestrator.process({
+      message: 'que paquetes de credito tengo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+    const summary = await orchestrator.process({
+      message: 'resumen de credit packs',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getCreditPacks).toHaveBeenCalledWith('venue-1', { limit: 10 })
+    expect(SharedQueryService.getCreditPacksSummary).toHaveBeenCalledWith('venue-1')
+    expect(list?.response).toContain('Tienes 1 paquetes de crédito')
+    expect(list?.response).toContain('Clases 10')
+    expect(summary?.response).toContain('Tienes 1 paquetes de crédito')
+    expect(summary?.response).toContain('4 compras')
+    expect(list?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'creditPacks.list', status: 'executed' })])
+    expect(summary?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'creditPacks.summary', status: 'executed' })])
   })
 
   it('answers team member questions without exposing emails or PINs', async () => {

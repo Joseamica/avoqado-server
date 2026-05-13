@@ -187,6 +187,12 @@ export class TableAccessControlService {
       reason: 'Credit packs expose prepaid product and pricing configuration',
     },
     {
+      table: 'CreditPackItem',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Credit pack items expose prepaid product entitlements',
+    },
+    {
       table: 'CreditPackPurchase',
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,

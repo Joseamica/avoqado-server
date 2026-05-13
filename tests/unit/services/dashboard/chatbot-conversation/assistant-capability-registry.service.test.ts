@@ -194,9 +194,17 @@ describe('AssistantCapabilityRegistryService', () => {
     )
   })
 
-  it('registers customer detail and credit-pack balance read tools with PII notes', () => {
+  it('registers customer search/detail and credit-pack read tools with PII notes', () => {
     const executableIds = registry.listExecutableCapabilities().map(capability => capability.id)
 
+    expect(registry.getCapability('customers.search')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['customers:read'],
+        riskLevel: 'medium',
+      }),
+    )
     expect(registry.getCapability('customers.detail')).toEqual(
       expect.objectContaining({
         status: 'registered',
@@ -213,9 +221,29 @@ describe('AssistantCapabilityRegistryService', () => {
         riskLevel: 'medium',
       }),
     )
+    expect(registry.getCapability('creditPacks.list')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['credit-packs:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('creditPacks.summary')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['credit-packs:read'],
+        riskLevel: 'low',
+      }),
+    )
+    expect(registry.getCapability('customers.search')?.notes.join(' ')).toContain('omits email, phone')
     expect(registry.getCapability('customers.detail')?.notes.join(' ')).toContain('omits email, phone')
     expect(registry.getCapability('creditPacks.balance')?.notes.join(' ')).toContain('omits customer contact')
-    expect(executableIds).toEqual(expect.arrayContaining(['customers.detail', 'creditPacks.balance']))
+    expect(registry.getCapability('creditPacks.list')?.notes.join(' ')).toContain('omits Stripe')
+    expect(executableIds).toEqual(
+      expect.arrayContaining(['customers.search', 'customers.detail', 'creditPacks.balance', 'creditPacks.list', 'creditPacks.summary']),
+    )
   })
 
   it('registers product how-to capabilities without business-data access', () => {

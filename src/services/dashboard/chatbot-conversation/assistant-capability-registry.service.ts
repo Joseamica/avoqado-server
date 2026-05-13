@@ -182,11 +182,29 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['resumen de clientes', 'customer summary'],
     notes: ['Read-only customer aggregate; chatbot response omits email, phone, and customer IDs.'],
   },
+  'customers.search': {
+    permissions: ['customers:read'],
+    riskLevel: 'medium',
+    examples: ['busca cliente Ana', 'find customer Ana'],
+    notes: ['Read-only customer search; chatbot response omits email, phone, customer IDs, and group IDs.'],
+  },
   'customers.detail': {
     permissions: ['customers:read'],
     riskLevel: 'medium',
     examples: ['detalle del cliente cust_123', 'customer detail cust_123'],
     notes: ['Read-only customer detail; chatbot response omits email, phone, notes, and internal customer IDs.'],
+  },
+  'creditPacks.list': {
+    permissions: ['credit-packs:read'],
+    riskLevel: 'medium',
+    examples: ['que paquetes de credito tengo', 'show credit packs'],
+    notes: ['Read-only credit-pack list; chatbot response omits Stripe product/price IDs and product IDs.'],
+  },
+  'creditPacks.summary': {
+    permissions: ['credit-packs:read'],
+    riskLevel: 'low',
+    examples: ['resumen de credit packs', 'credit pack summary'],
+    notes: ['Read-only aggregate of configured credit packs for the active venue.'],
   },
   'creditPacks.balance': {
     permissions: ['credit-packs:read'],

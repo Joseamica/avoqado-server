@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T19:04:48.224Z",
+  "generatedAt": "2026-05-13T19:29:36.234Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -13,7 +13,10 @@
     "commissions.payouts",
     "commissions.summary",
     "creditPacks.balance",
+    "creditPacks.list",
+    "creditPacks.summary",
     "customers.detail",
+    "customers.search",
     "customers.summary",
     "howTo.contactSupport",
     "howTo.paymentLinks",

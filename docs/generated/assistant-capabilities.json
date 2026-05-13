@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T19:04:48.224Z",
+  "generatedAt": "2026-05-13T19:29:36.234Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -341,6 +341,62 @@
       ]
     },
     {
+      "id": "creditPacks.list",
+      "kind": "query",
+      "status": "registered",
+      "description": "List configured credit packs for the current venue.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "credit-packs:read"
+      ],
+      "riskLevel": "medium",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.creditPacks.list",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
+      },
+      "examples": [
+        "que paquetes de credito tengo",
+        "show credit packs"
+      ],
+      "notes": [
+        "Read-only credit-pack list; chatbot response omits Stripe product/price IDs and product IDs."
+      ]
+    },
+    {
+      "id": "creditPacks.summary",
+      "kind": "query",
+      "status": "registered",
+      "description": "Summarize configured credit packs for the current venue.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "credit-packs:read"
+      ],
+      "riskLevel": "low",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.creditPacks.summary",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
+      },
+      "examples": [
+        "resumen de credit packs",
+        "credit pack summary"
+      ],
+      "notes": [
+        "Read-only aggregate of configured credit packs for the active venue."
+      ]
+    },
+    {
       "id": "customers.detail",
       "kind": "query",
       "status": "registered",
@@ -366,6 +422,34 @@
       ],
       "notes": [
         "Read-only customer detail; chatbot response omits email, phone, notes, and internal customer IDs."
+      ]
+    },
+    {
+      "id": "customers.search",
+      "kind": "query",
+      "status": "registered",
+      "description": "Search customers in the current venue by name or contact text without returning contact fields.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "customers:read"
+      ],
+      "riskLevel": "medium",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.customers.search",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
+      },
+      "examples": [
+        "busca cliente Ana",
+        "find customer Ana"
+      ],
+      "notes": [
+        "Read-only customer search; chatbot response omits email, phone, customer IDs, and group IDs."
       ]
     },
     {

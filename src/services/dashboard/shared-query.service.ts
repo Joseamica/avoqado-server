@@ -419,6 +419,52 @@ export interface CustomerDetailSummary {
   }>
 }
 
+export interface CustomerSearchSummary {
+  total: number
+  limit: number
+  customers: Array<{
+    name: string
+    active: boolean
+    loyaltyPoints: number
+    totalVisits: number
+    totalSpent: number
+    averageOrderValue: number
+    lastVisitAt: Date | null
+    customerGroupName: string | null
+    tags: string[]
+    pendingOrderCount: number
+    pendingBalance: number
+  }>
+}
+
+export interface CreditPackListSummary {
+  total: number
+  limit: number
+  packs: Array<{
+    name: string
+    active: boolean
+    price: number
+    currency: string
+    validityDays: number | null
+    maxPerCustomer: number | null
+    purchaseCount: number
+    items: Array<{
+      productName: string
+      productType: string | null
+      quantity: number
+    }>
+  }>
+}
+
+export interface CreditPackAggregateSummary {
+  totalPacks: number
+  activePacks: number
+  inactivePacks: number
+  totalPurchases: number
+  averagePrice: number
+  currency: string
+}
+
 export interface CreditPackBalanceSummary {
   customerName: string
   totalPurchases: number
@@ -1812,6 +1858,92 @@ export class SharedQueryService {
         type: transaction.type,
         points: Number(transaction.points || 0),
         createdAt: transaction.createdAt,
+      })),
+    }
+  }
+
+  /**
+   * Search customers using the dashboard service while removing contact fields
+   * and internal IDs from the chatbot contract.
+   */
+  static async searchCustomers(
+    venueId: string,
+    filters: { search?: string; limit?: number; hasPendingBalance?: boolean } = {},
+  ): Promise<CustomerSearchSummary> {
+    const limit = Math.min(Math.max(Math.trunc(Number(filters.limit) || 5), 1), 10)
+    const search = typeof filters.search === 'string' && filters.search.trim() ? filters.search.trim() : undefined
+    const result = await customerDashboardService.getCustomers(
+      venueId,
+      1,
+      limit,
+      search,
+      undefined,
+      undefined,
+      undefined,
+      'lastVisit',
+      'desc',
+      filters.hasPendingBalance,
+    )
+
+    return {
+      total: result.meta.totalCount,
+      limit: result.meta.pageSize,
+      customers: result.data.map(customer => ({
+        name: `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Sin nombre',
+        active: Boolean(customer.active),
+        loyaltyPoints: Number(customer.loyaltyPoints || 0),
+        totalVisits: Number(customer.totalVisits || (customer as any).visitCount || 0),
+        totalSpent: this.numberValue(customer.totalSpent),
+        averageOrderValue: this.numberValue(customer.averageOrderValue),
+        lastVisitAt: customer.lastVisitAt || (customer as any).lastVisit || null,
+        customerGroupName: customer.customerGroup?.name || null,
+        tags: Array.isArray(customer.tags) ? customer.tags.map(tag => String(tag)).slice(0, 10) : [],
+        pendingOrderCount: Number(customer.pendingOrderCount || 0),
+        pendingBalance: this.numberValue(customer.pendingBalance),
+      })),
+    }
+  }
+
+  /**
+   * Summarize configured credit packs for the current venue without processor IDs.
+   */
+  static async getCreditPacksSummary(venueId: string): Promise<CreditPackAggregateSummary> {
+    const packs = await creditPackDashboardService.getCreditPacks(venueId)
+    const totalPrice = packs.reduce((sum, pack) => sum + this.numberValue(pack.price), 0)
+
+    return {
+      totalPacks: packs.length,
+      activePacks: packs.filter(pack => Boolean(pack.active)).length,
+      inactivePacks: packs.filter(pack => !pack.active).length,
+      totalPurchases: packs.reduce((sum, pack) => sum + Number(pack._count?.purchases || 0), 0),
+      averagePrice: packs.length > 0 ? totalPrice / packs.length : 0,
+      currency: packs[0]?.currency || 'MXN',
+    }
+  }
+
+  /**
+   * List configured credit packs for the current venue without Stripe/product IDs.
+   */
+  static async getCreditPacks(venueId: string, filters: { limit?: number } = {}): Promise<CreditPackListSummary> {
+    const limit = Math.min(Math.max(Math.trunc(Number(filters.limit) || 10), 1), 25)
+    const packs = await creditPackDashboardService.getCreditPacks(venueId)
+
+    return {
+      total: packs.length,
+      limit,
+      packs: packs.slice(0, limit).map(pack => ({
+        name: pack.name,
+        active: Boolean(pack.active),
+        price: this.numberValue(pack.price),
+        currency: pack.currency || 'MXN',
+        validityDays: pack.validityDays ?? null,
+        maxPerCustomer: pack.maxPerCustomer ?? null,
+        purchaseCount: Number(pack._count?.purchases || 0),
+        items: (pack.items || []).map(item => ({
+          productName: item.product?.name || 'Producto',
+          productType: item.product?.type || null,
+          quantity: Number(item.quantity || 0),
+        })),
       })),
     }
   }
