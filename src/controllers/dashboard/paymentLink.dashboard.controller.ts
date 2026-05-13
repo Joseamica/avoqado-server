@@ -9,6 +9,7 @@
 
 import { Request, Response } from 'express'
 import * as paymentLinkService from '@/services/dashboard/paymentLink.service'
+import * as paymentLinkSettingsService from '@/services/dashboard/paymentLinkSettings.service'
 import logger from '@/config/logger'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -175,5 +176,37 @@ export async function updatePaymentLinkBranding(req: Request, res: Response) {
   } catch (error: any) {
     logger.error('Error updating payment link branding:', error)
     res.status(error.statusCode || 500).json({ success: false, error: error.message || 'Error al actualizar branding' })
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SETTINGS — venue-wide defaults + notification preferences
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/payment-links/settings
+ */
+export async function getPaymentLinkSettingsHandler(req: Request, res: Response) {
+  try {
+    const { venueId } = req.params
+    const settings = await paymentLinkSettingsService.getPaymentLinkSettings(venueId)
+    res.json({ success: true, data: settings })
+  } catch (error: any) {
+    logger.error('Error fetching payment link settings:', error)
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || 'Error al obtener ajustes' })
+  }
+}
+
+/**
+ * PATCH /api/v1/dashboard/venues/:venueId/payment-links/settings
+ */
+export async function updatePaymentLinkSettingsHandler(req: Request, res: Response) {
+  try {
+    const { venueId } = req.params
+    const settings = await paymentLinkSettingsService.upsertPaymentLinkSettings(venueId, req.body)
+    res.json({ success: true, data: settings })
+  } catch (error: any) {
+    logger.error('Error updating payment link settings:', error)
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || 'Error al actualizar ajustes' })
   }
 }

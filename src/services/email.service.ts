@@ -2836,6 +2836,105 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     return this.sendEmail({ to: email, subject, html, text })
   }
 
+  async sendPaymentLinkPaidEmail(
+    email: string,
+    data: {
+      recipientName: string
+      venueName: string
+      linkTitle: string
+      linkShortCode: string
+      customerEmail?: string | null
+      customerName?: string | null
+      amountPaid: number
+      tipAmount?: number | null
+      currency?: string
+      cardLast4?: string | null
+      paidAtLong: string
+      dashboardUrl: string
+    },
+  ): Promise<boolean> {
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const currency = data.currency || 'MXN'
+    const fmt = (n: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(n)
+    const subject = `Pago recibido: ${fmt(data.amountPaid)} en ${data.linkTitle}`
+
+    const customerLine = data.customerName || data.customerEmail
+      ? `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Pagado por <strong>${data.customerName ?? data.customerEmail}</strong>${data.customerName && data.customerEmail ? ` (${data.customerEmail})` : ''}.</p>`
+      : ''
+    const tipRow = data.tipAmount && data.tipAmount > 0
+      ? `<tr><td style="padding: 6px 0; font-size: 14px; color: #666;">Propina</td><td style="padding: 6px 0; font-size: 14px; color: #1f9d55; text-align: right; font-weight: 600;">${fmt(data.tipAmount)}</td></tr>`
+      : ''
+    const cardRow = data.cardLast4
+      ? `<tr><td style="padding: 6px 0; font-size: 14px; color: #666;">Tarjeta</td><td style="padding: 6px 0; font-size: 14px; color: #000; text-align: right;">···· ${data.cardLast4}</td></tr>`
+      : ''
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000; line-height: 1.2;">Pago recibido</h1>
+      <p style="font-size: 15px; color: #666; margin: 0;">${data.venueName} · ${data.linkShortCode}</p>
+    </div>
+    <div style="padding-bottom: 16px;">
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola ${data.recipientName},</p>
+      ${customerLine}
+    </div>
+    <div style="padding: 20px 24px; background-color: #ecfdf5; border-radius: 8px; border-left: 4px solid #1f9d55; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #1f9d55; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Monto cobrado</p>
+      <p style="font-size: 28px; font-weight: 700; color: #000; margin: 0;">${fmt(data.amountPaid)}</p>
+      <p style="font-size: 13px; color: #666; margin: 4px 0 0 0;">${data.paidAtLong}</p>
+    </div>
+    <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 24px;">
+      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">Liga de pago</p>
+      <p style="font-size: 16px; color: #000; margin: 0;">${data.linkTitle}</p>
+    </div>
+    ${tipRow || cardRow ? `<table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">${tipRow}${cardRow}</table>` : ''}
+    <div style="margin: 0 0 32px 0;">
+      <a href="${data.dashboardUrl}" style="display: inline-block; background-color: #000; color: #fff; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Ver detalles en el dashboard
+      </a>
+    </div>
+    <p style="font-size: 14px; color: #666; margin: 0 0 24px 0;">
+      Recibes este correo porque tu negocio tiene activadas las notificaciones de pagos por liga. Puedes desactivarlas en Ligas de Pago → Ajustes.
+    </p>
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;"><img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;"><span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span></div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">Servicios Tecnologicos Avo S.A. de C.V.</p>
+    </div>
+  </div>
+</body>
+</html>`
+
+    const text = `Pago recibido
+${data.venueName} · ${data.linkShortCode}
+
+Hola ${data.recipientName},
+${data.customerName ? `Pagado por ${data.customerName}${data.customerEmail ? ` (${data.customerEmail})` : ''}.\n` : ''}
+Monto cobrado: ${fmt(data.amountPaid)}
+${data.paidAtLong}
+
+Liga: ${data.linkTitle}
+${data.tipAmount && data.tipAmount > 0 ? `Propina: ${fmt(data.tipAmount)}\n` : ''}${data.cardLast4 ? `Tarjeta: ···· ${data.cardLast4}\n` : ''}
+Ver detalles: ${data.dashboardUrl}
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.`
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
   async sendReservationReminderEmail(
     email: string,
     data: {

@@ -350,6 +350,10 @@ model Venue {
   waitlistEntries     ReservationWaitlistEntry[]
   reservationSettings ReservationSettings?
 
+  // Per-venue defaults applied to NEW payment links + admin notification
+  // preferences when a link is paid. See VenuePaymentLinkSettings for fields.
+  paymentLinkSettings VenuePaymentLinkSettings?
+
   // ==========================================
   // CREDIT PACKS / BUNDLES
   // ==========================================
@@ -8393,6 +8397,46 @@ model ReservationSettings {
 
   // Operating hours (per-day weekly schedule, venue local time)
   operatingHours Json? // null = use defaults (Mon-Sat 09:00-22:00, Sunday closed)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// PAYMENT LINK SETTINGS — per-venue defaults + notifications
+// ==========================================
+//
+// Backs the "Ajustes generales" page under "Ligas de Pago" in the dashboard.
+// Per-link config (tippingConfig, customFields) still lives on PaymentLink
+// for cases where a venue overrides defaults at creation time. This table
+// stores the venue-wide defaults the dashboard pre-fills the form with, plus
+// notification preferences and the public merchant policies text.
+model VenuePaymentLinkSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Notifications — fire emails to venue admin (OWNER/ADMIN role staff) when
+  // a payment link is paid. TODO: split into per-source toggles once we add
+  // PaymentLink.source (DASHBOARD/TPV/EMBED/API). Currently any paid link
+  // triggers the email if this flag is on.
+  notifyOnPaid Boolean @default(false)
+
+  // Defaults applied to NEW payment links when the creator doesn't override.
+  // Shape mirrors PaymentLink fields: { presets: number[], allowCustom: boolean }
+  // for tipping, and CustomFieldDefinition[] for custom fields.
+  defaultTippingConfig Json?
+  defaultCustomFields  Json?
+
+  // Quick toggle: when ON and no defaultCustomFields are set, the create
+  // dialog seeds a single optional TEXT field labeled "Nota" so customers
+  // can leave a comment. Lets admin enable the UX without configuring a
+  // full custom fields array.
+  customerNotesEnabled Boolean @default(false)
+
+  // Merchant policies — markdown text shown on the public payment page.
+  // Customer-facing legal disclaimers (refund policy, terms, etc.).
+  merchantPolicies String? @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

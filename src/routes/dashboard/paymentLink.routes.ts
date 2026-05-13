@@ -17,6 +17,7 @@ import {
   getPaymentLinkSchema,
   updatePaymentLinkSchema,
   updatePaymentLinkBrandingSchema,
+  updatePaymentLinkSettingsSchema,
 } from '@/schemas/dashboard/paymentLink.schema'
 
 const router = Router({ mergeParams: true })
@@ -62,5 +63,18 @@ router.delete('/:linkId', validateRequest(getPaymentLinkSchema), paymentLinkCont
  */
 router.get('/branding/config', paymentLinkController.getPaymentLinkBranding)
 router.put('/branding/config', validateRequest(updatePaymentLinkBrandingSchema), paymentLinkController.updatePaymentLinkBranding)
+
+/**
+ * GET   /api/v1/dashboard/venues/:venueId/payment-links/settings
+ * PATCH /api/v1/dashboard/venues/:venueId/payment-links/settings
+ *
+ * Venue-wide defaults applied to new payment links + notification toggles.
+ * Sibling of /branding/config so the same `payment-link:read` guard at the
+ * parent gates both. Pre-existing per-link tippingConfig / customFields on
+ * PaymentLink rows are untouched; this just controls the dashboard's
+ * "Ajustes generales" form and the on-paid notification email.
+ */
+router.get('/settings', paymentLinkController.getPaymentLinkSettingsHandler)
+router.patch('/settings', validateRequest(updatePaymentLinkSettingsSchema), paymentLinkController.updatePaymentLinkSettingsHandler)
 
 export default router
