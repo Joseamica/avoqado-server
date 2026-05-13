@@ -41,6 +41,7 @@ import prisma from '@/utils/prismaClient'
 import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { Prisma } from '@prisma/client'
+import * as availableBalanceService from './availableBalance.dashboard.service'
 
 /**
  * Date range specification - supports both predefined periods and custom ranges
@@ -287,6 +288,28 @@ export interface PaymentMethodBreakdown {
     tipAmount: number
   }>
   currency: string
+}
+
+export interface SettlementCalendarSummary {
+  totalNetAmount: number
+  transactionCount: number
+  currency: string
+  period: RelativeDateRange | 'custom'
+  dateRange: {
+    from: Date
+    to: Date
+  }
+  entries: Array<{
+    settlementDate: Date
+    totalNetAmount: number
+    transactionCount: number
+    status: string
+    byCardType: Array<{
+      cardType: string
+      netAmount: number
+      transactionCount: number
+    }>
+  }>
 }
 
 /**
@@ -1017,12 +1040,16 @@ export class SharedQueryService {
   static async getPendingOrders(venueId: string): Promise<PendingOrdersStats> {
     // Use typed enum values for Prisma query
     const openStatuses: Prisma.Enumerable<'PENDING' | 'CONFIRMED' | 'PREPARING' | 'READY'> = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY']
+    const now = new Date()
+    const activeOrderCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000)
 
-    // Get orders with open status
+    // Get recently-created orders with open status. Historical seed/demo orders
+    // can remain open forever, but they should not appear as "active right now".
     const orders = await prisma.order.findMany({
       where: {
         venueId,
         status: { in: openStatuses },
+        createdAt: { gte: activeOrderCutoff },
       },
       select: {
         id: true,
@@ -1030,8 +1057,6 @@ export class SharedQueryService {
         createdAt: true,
       },
     })
-
-    const now = new Date()
 
     // Calculate wait times
     const waitTimes = orders.map(o => Math.floor((now.getTime() - o.createdAt.getTime()) / (1000 * 60)))
@@ -1306,6 +1331,51 @@ export class SharedQueryService {
       total,
       methods,
       currency: venue.currency,
+    }
+  }
+
+  /**
+   * Get settlement calendar totals for a venue and period.
+   *
+   * Used by:
+   * - Dashboard available-balance settlement calendar
+   * - AI Chatbot for "¿cuánto me liquidan/dispersan hoy?" queries
+   */
+  static async getSettlementCalendarForPeriod(
+    venueId: string,
+    period: DateRangeSpec,
+    timezone?: string,
+  ): Promise<SettlementCalendarSummary> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true, currency: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const venueTimezone = timezone || venue.timezone
+    const { from, to, periodName } = this.getDateRange(period, venueTimezone)
+    const entries = await availableBalanceService.getSettlementCalendar(venueId, { from, to })
+
+    return {
+      totalNetAmount: entries.reduce((sum, entry) => sum + entry.totalNetAmount, 0),
+      transactionCount: entries.reduce((sum, entry) => sum + entry.transactionCount, 0),
+      currency: venue.currency,
+      period: periodName,
+      dateRange: { from, to },
+      entries: entries.map(entry => ({
+        settlementDate: entry.settlementDate,
+        totalNetAmount: entry.totalNetAmount,
+        transactionCount: entry.transactionCount,
+        status: entry.status,
+        byCardType: entry.byCardType.map(card => ({
+          cardType: card.cardType,
+          netAmount: card.netAmount,
+          transactionCount: card.transactionCount,
+        })),
+      })),
     }
   }
 

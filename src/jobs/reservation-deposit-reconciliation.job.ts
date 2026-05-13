@@ -2,7 +2,8 @@ import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { getProvider } from '../services/payments/provider-registry'
-import { calculateApplicationFee, toStripeAmount } from '../services/payments/providers/money'
+import { calculateApplicationFeeWithVAT, toStripeAmount } from '../services/payments/providers/money'
+import { getVatRateBps } from '../services/superadmin/platformSettings.service'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
 
 export class ReservationDepositReconciliationJob {
@@ -133,10 +134,11 @@ export class ReservationDepositReconciliationJob {
       try {
         const provider = getProvider(merchant)
         const stripeAmount = toStripeAmount(reservation.depositAmount)
+        const vatRateBps = await getVatRateBps()
         const session = await provider.createCheckoutSession(merchant, {
           amount: stripeAmount,
           currency: 'mxn',
-          applicationFeeAmount: calculateApplicationFee(stripeAmount, merchant.platformFeeBps),
+          applicationFeeAmount: calculateApplicationFeeWithVAT(stripeAmount, merchant.platformFeeBps, vatRateBps),
           successUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/book/${reservation.venue.slug}?payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`,
           cancelUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/book/${reservation.venue.slug}?payment=cancelled&reservationId=${reservation.id}`,
           expiresAt: reservation.depositExpiresAt,

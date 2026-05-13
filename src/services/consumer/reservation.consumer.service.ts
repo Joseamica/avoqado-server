@@ -3,7 +3,8 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
-import { calculateApplicationFee, toStripeAmount } from '@/services/payments/providers/money'
+import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
+import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import logger from '@/config/logger'
 
@@ -118,7 +119,8 @@ async function createReservationDepositCheckout(
     throw new BadRequestError('El deposito excede el maximo permitido por transaccion')
   }
 
-  const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
+  const vatRateBps = await getVatRateBps()
+  const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, stripeMerchant.platformFeeBps, vatRateBps)
   const provider = getProvider(stripeMerchant)
   const expiresAt =
     reservation.depositExpiresAt && reservation.depositExpiresAt > new Date()

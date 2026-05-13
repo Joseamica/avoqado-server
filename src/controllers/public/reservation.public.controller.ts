@@ -9,7 +9,8 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
 import { Prisma } from '@prisma/client'
-import { calculateApplicationFee, toStripeAmount } from '../../services/payments/providers/money'
+import { calculateApplicationFeeWithVAT, toStripeAmount } from '../../services/payments/providers/money'
+import { getVatRateBps } from '../../services/superadmin/platformSettings.service'
 import { getProvider } from '../../services/payments/provider-registry'
 
 // ==========================================
@@ -604,7 +605,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
           throw new BadRequestError('El monto excede el maximo permitido por transaccion')
         }
 
-        const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
+        const _vatRateBps = await getVatRateBps()
+        const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, stripeMerchant.platformFeeBps, _vatRateBps)
         const provider = getProvider(stripeMerchant)
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
         // Widget can override return URLs (book.avoqado.io vs embed iframe vs dashboard).
@@ -696,7 +698,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
     let checkoutUrl: string | null = null
     if (reservation.depositAmount && stripeMerchant) {
       const stripeAmount = toStripeAmount(reservation.depositAmount)
-      const applicationFeeAmount = calculateApplicationFee(stripeAmount, stripeMerchant.platformFeeBps)
+      const _vatRateBps = await getVatRateBps()
+      const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, stripeMerchant.platformFeeBps, _vatRateBps)
       const provider = getProvider(stripeMerchant)
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
       const session = await provider.createCheckoutSession(stripeMerchant, {

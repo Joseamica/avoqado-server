@@ -441,6 +441,26 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.dateRange).toBe('thisMonth')
     })
 
+    it('should classify sales questions that also ask for order count as the sales summary tool', () => {
+      const query = '¿Cuánto vendí este mes y cuántas órdenes fueron?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('sales')
+      expect(classification.dateRange).toBe('thisMonth')
+    })
+
+    it('should classify top-product revenue questions as topProducts, not productSales', () => {
+      const query = 'Which product made the most money this month?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('topProducts')
+      expect(classification.dateRange).toBe('thisMonth')
+    })
+
     it('should classify singular payment method usage questions as paymentMethodBreakdown', () => {
       const query = '¿Qué método de pago se usa más en todo el historial?'
       // @ts-expect-error - accessing private method for testing
@@ -449,6 +469,27 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.isSimpleQuery).toBe(true)
       expect(classification.intent).toBe('paymentMethodBreakdown')
       expect(classification.dateRange).toBe('allTime')
+    })
+
+    it('should classify settlement amount questions as settlementCalendar', () => {
+      const queries = ['cuanto me dispersaran hoy', '¿cuánto me liquidan hoy?', 'how much is my payout today?']
+
+      for (const query of queries) {
+        // @ts-expect-error - accessing private method for testing
+        const classification = service.classifyIntent(query)
+
+        expect(classification.isSimpleQuery).toBe(true)
+        expect(classification.intent).toBe('settlementCalendar')
+        expect(classification.dateRange).toBe('today')
+      }
+    })
+
+    it('should keep how-to settlement questions out of settlementCalendar', () => {
+      const query = '¿Cómo reviso mis liquidaciones?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.intent).not.toBe('settlementCalendar')
     })
 
     it('should classify low inventory wording without routing through sales substring matches', () => {
@@ -678,6 +719,37 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.reason).toContain('deterministic registered intent override')
     })
 
+    it('should recover settlement questions when LLM returns unsupported', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: false,
+                intent: 'unsupported',
+                dateRange: null,
+                wasDateExplicit: false,
+                confidence: 0.6,
+                reason: 'no registered tool',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('cuanto me liquidan hoy')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('settlementCalendar')
+      expect(routed.classification.dateRange).toBe('today')
+      expect(routed.classification.reason).toContain('deterministic registered intent override')
+    })
+
     it('should recover English review requests when LLM returns unsupported', async () => {
       serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
         choices: [
@@ -707,6 +779,37 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.intent).toBe('reviews')
       expect(routed.classification.dateRange).toBe('last30days')
       expect(routed.classification.reason).toContain('deterministic registered intent override')
+    })
+
+    it('should correct LLM productSales routing when English top-product revenue has no product entity', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: true,
+                intent: 'productSales',
+                dateRange: 'thisMonth',
+                wasDateExplicit: true,
+                confidence: 0.82,
+                reason: 'sales for a product',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('Which product made the most money this month?')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('topProducts')
+      expect(routed.classification.dateRange).toBe('thisMonth')
+      expect(routed.classification.reason).toContain('Corrected productSales without product entity')
     })
 
     it('should route top-product revenue follow-ups using recent product context', async () => {
@@ -860,6 +963,73 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
         serviceWithInternals.routeWithLLM = originalRouteWithLLM
         serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
         productSalesSpy.mockRestore()
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
+    it('should answer settlement amount questions with the registered settlement calendar tool', async () => {
+      const serviceWithInternals = service as any
+      const originalRouteWithLLM = serviceWithInternals.routeWithLLM
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'safe settlement question',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+      const settlementSpy = jest.spyOn(SharedQueryService, 'getSettlementCalendarForPeriod').mockResolvedValue({
+        totalNetAmount: 1250.5,
+        transactionCount: 3,
+        currency: 'MXN',
+        period: 'today',
+        dateRange: {
+          from: new Date('2026-05-12T06:00:00.000Z'),
+          to: new Date('2026-05-13T05:59:59.999Z'),
+        },
+        entries: [
+          {
+            settlementDate: new Date('2026-05-12T16:00:00.000Z'),
+            totalNetAmount: 1250.5,
+            transactionCount: 3,
+            status: 'PENDING',
+            byCardType: [{ cardType: 'DEBIT', netAmount: 1250.5, transactionCount: 3 }],
+          },
+        ],
+      })
+
+      serviceWithInternals.routeWithLLM = jest.fn(async () => ({
+        classification: {
+          isSimpleQuery: true,
+          intent: 'settlementCalendar',
+          dateRange: 'today',
+          confidence: 0.95,
+          reason: 'registered settlement calendar test route',
+          requiresDateRange: true,
+          wasDateExplicit: true,
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }))
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: 'cuanto me liquidan hoy',
+          venueId: 'venue-test',
+          userId: 'user-test',
+          userRole: 'ADMIN' as any,
+        })
+
+        expect(settlementSpy).toHaveBeenCalledWith('venue-test', 'today')
+        expect(response.metadata?.intent).toBe('settlementCalendar')
+        expect(response.response).toContain('te liquidan')
+        expect(response.response).toContain('$1,250.50')
+      } finally {
+        serviceWithInternals.routeWithLLM = originalRouteWithLLM
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        settlementSpy.mockRestore()
         semanticDetectSpy.mockRestore()
       }
     })

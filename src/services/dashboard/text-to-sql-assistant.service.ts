@@ -332,6 +332,7 @@ interface IntentClassificationResult {
     | 'activeShifts'
     | 'profitAnalysis'
     | 'paymentMethodBreakdown'
+    | 'settlementCalendar'
   dateRange?: RelativeDateRange
   confidence: number
   reason: string
@@ -432,6 +433,7 @@ class TextToSqlAssistantService {
     activeShifts: ['Shift', 'Staff', 'Order'],
     profitAnalysis: ['Payment', 'OrderItem', 'Order', 'Product', 'Recipe'],
     paymentMethodBreakdown: ['Payment'],
+    settlementCalendar: ['Payment'],
   }
 
   constructor() {
@@ -2797,6 +2799,40 @@ Ejemplos de respuestas CORRECTAS:
               break
             }
 
+            case 'settlementCalendar': {
+              const settlementData = await SharedQueryService.getSettlementCalendarForPeriod(query.venueId, dateRange)
+              const formattedTotal = formatMoney(settlementData.totalNetAmount, settlementData.currency)
+              const periodLabel = dateName(dateRange)
+
+              if (settlementData.totalNetAmount === 0 || settlementData.transactionCount === 0) {
+                naturalResponse =
+                  responseLanguage === 'en'
+                    ? `There are no scheduled settlements for ${periodLabel}.`
+                    : `No hay liquidaciones programadas para ${periodLabel}.`
+              } else {
+                const entryLines = settlementData.entries
+                  .slice(0, 5)
+                  .map(entry => {
+                    const cardBreakdown = entry.byCardType
+                      .slice(0, 3)
+                      .map(card => `${card.cardType}: ${formatMoney(card.netAmount, settlementData.currency)}`)
+                      .join(', ')
+                    return responseLanguage === 'en'
+                      ? `${formatMoney(entry.totalNetAmount, settlementData.currency)} from ${entry.transactionCount} transactions${cardBreakdown ? ` (${cardBreakdown})` : ''}`
+                      : `${formatMoney(entry.totalNetAmount, settlementData.currency)} de ${entry.transactionCount} transacciones${cardBreakdown ? ` (${cardBreakdown})` : ''}`
+                  })
+                  .join('\n')
+
+                naturalResponse =
+                  responseLanguage === 'en'
+                    ? `For ${periodLabel}, your scheduled settlement is ${formattedTotal} net across ${settlementData.transactionCount} transactions.\n\n${entryLines}`
+                    : `Para ${periodLabel}, te liquidan ${formattedTotal} netos en ${settlementData.transactionCount} transacciones.\n\n${entryLines}`
+              }
+
+              serviceResult = settlementData
+              break
+            }
+
             case 'paymentMethodBreakdown': {
               // Requires date range for period analysis
               const paymentData = await SharedQueryService.getPaymentMethodBreakdown(query.venueId, intentClassification.dateRange!)
@@ -3936,6 +3972,10 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       paymentMethodBreakdown: {
         type: 'pie',
         title: 'Métodos de Pago',
+      },
+      settlementCalendar: {
+        type: 'bar',
+        title: 'Liquidaciones',
       },
       reviews: {
         type: 'bar',
@@ -6879,6 +6919,43 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       }
     }
 
+    if (this.isSalesWithOrderCountQuestion(normalizedMessage)) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'sales',
+        dateRange: effectiveDateRange,
+        confidence: 0.94,
+        reason: `Detected sales summary with order count query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
+    if (this.isTopProductRevenueQuestion(normalizedMessage)) {
+      const effectiveDateRange = dateRange || 'thisMonth'
+      return {
+        isSimpleQuery: true,
+        intent: 'topProducts',
+        dateRange: effectiveDateRange,
+        confidence: 0.94,
+        reason: `Detected top product revenue query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
+    if (this.isSettlementCalendarQuestion(normalizedMessage)) {
+      const effectiveDateRange = dateRange || 'today'
+      return {
+        isSimpleQuery: true,
+        intent: 'settlementCalendar',
+        dateRange: effectiveDateRange,
+        confidence: 0.95,
+        reason: `Detected settlement/liquidation calendar query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        requiresDateRange: true,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
     const productSalesTerm = this.extractProductSalesTerm(message)
     if (productSalesTerm) {
       const effectiveDateRange = dateRange || 'thisMonth'
@@ -7018,6 +7095,14 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       'top products',
       'producto más vendido',
       'producto mas vendido',
+      'producto con más ingresos',
+      'producto con mas ingresos',
+      'producto que más dinero',
+      'producto que mas dinero',
+      'product made the most money',
+      'product generated the most revenue',
+      'which product made the most money',
+      'which product generated the most revenue',
     ]
     if (topProductsKeywords.some(kw => lowerMessage.includes(kw))) {
       const effectiveDateRange = dateRange || 'thisMonth'
@@ -7377,6 +7462,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - activeShifts: turnos activos, quién trabaja AHORA, quién está en turno (dateRange=null). SOLO para saber quién está trabajando en este momento
 - profitAnalysis: utilidad, márgenes, ganancias, costos
 - paymentMethodBreakdown: métodos de pago, efectivo vs tarjeta, desglose pagos
+- settlementCalendar: cuánto me liquidan/dispersan/depositan, liquidación de hoy, payout/settlement amount. Por defecto dateRange="today" si no hay fecha
 - businessOverview: resumen general, cómo va el negocio, qué hacer para incrementar/aumentar/mejorar ventas, recomendaciones, estrategia, plan de acción
 
 NO SOPORTADO (isSimple=false, intent="unsupported") — no hay herramienta registrada:
@@ -7390,7 +7476,7 @@ NO SOPORTADO (isSimple=false, intent="unsupported") — no hay herramienta regis
 
 CONVERSACIONAL (isSimple=false, intent="conversational"):
 SOLO saludos, agradecimientos, despedidas, mensajes que NO piden datos.
-NUNCA uses conversational si el mensaje menciona datos del negocio como ventas, productos, clientes, reseñas, pedidos, pagos, inventario, recetas, staff o turnos. Si es ambiguo, usa complex.
+NUNCA uses conversational si el mensaje menciona datos del negocio como ventas, productos, clientes, reseñas, pedidos, pagos, liquidaciones/dispersión, inventario, recetas, staff o turnos. Si es ambiguo, usa complex.
 
 REGLAS CRÍTICAS:
 1. "cuánto vendí hoy/ayer/esta semana/este mes" → sales (SIMPLE). "hoy", "ayer", "esta semana", "este mes", "la semana pasada" son dateRanges relativos, NO fechas específicas
@@ -7410,6 +7496,7 @@ REGLAS CRÍTICAS:
 11. activeShifts es SOLO para "quién trabaja AHORA" / "turnos abiertos". NO para conteo de staff total
 12. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList. "qué receta se usa más" / "cuál es la que más se usa" con contexto de recetas → recipeUsage
 13. "cuántos clientes nuevos" → newCustomers. "cuándo recibo más clientes nuevos" / "qué día llegan más clientes nuevos" → newCustomerTiming
+14. "cuánto me liquidan hoy" / "cuánto me dispersan hoy" / "cuánto me depositan hoy" → settlementCalendar. NO lo clasifiques como conversational ni paymentMethodBreakdown
 
 dateRanges válidos: today, yesterday, thisWeek, lastWeek, thisMonth, lastMonth, last7days, last30days, allTime, null
 
@@ -7521,6 +7608,7 @@ Responde SOLO JSON (sin markdown):
         'activeShifts',
         'profitAnalysis',
         'paymentMethodBreakdown',
+        'settlementCalendar',
       ])
 
       const validDateRanges = new Set<RelativeDateRange | null>([
@@ -7592,6 +7680,21 @@ Responde SOLO JSON (sin markdown):
         }
       }
 
+      if (intent === 'productSales' && this.isTopProductRevenueQuestion(normalizedMessage) && !this.extractProductSalesTerm(message)) {
+        return {
+          classification: {
+            isSimpleQuery: true,
+            intent: 'topProducts',
+            dateRange: finalDateRange || 'thisMonth',
+            confidence: Math.max(confidence, 0.9),
+            reason: 'Corrected productSales without product entity to topProducts revenue ranking',
+            requiresDateRange: true,
+            wasDateExplicit,
+          },
+          tokenUsage,
+        }
+      }
+
       return {
         classification: {
           isSimpleQuery: true,
@@ -7626,6 +7729,43 @@ Responde SOLO JSON (sin markdown):
       confidence: 0.0,
       reason: `${reason} → no registered data tool selected`,
     }
+  }
+
+  private isSalesWithOrderCountQuestion(normalizedMessage: string): boolean {
+    const asksSales = /\b(vend[ií]|vendi|vendimos|vendieron|ventas?|sales|revenue|ingresos?|facturad[oa])\b/.test(normalizedMessage)
+    const asksOrders = /\b(ordenes|órdenes|orders?)\b/.test(normalizedMessage)
+    const asksUnsupportedBreakdown = /\b(por|by|desglose|breakdown|agrupad[oa]|grouped)\b/.test(normalizedMessage)
+
+    return asksSales && asksOrders && !asksUnsupportedBreakdown
+  }
+
+  private isTopProductRevenueQuestion(normalizedMessage: string): boolean {
+    const mentionsProduct = /\b(producto|productos|product|products)\b/.test(normalizedMessage)
+    const asksRevenueRanking =
+      /\b(mas\s+(dinero|ingresos?|revenue|money)|mayor(?:es)?\s+(ingresos?|revenue|venta)|top\s+revenue|made\s+the\s+most\s+money|generated\s+the\s+most\s+revenue|highest\s+revenue)\b/.test(
+        normalizedMessage,
+      )
+
+    return mentionsProduct && asksRevenueRanking
+  }
+
+  private isSettlementCalendarQuestion(normalizedMessage: string): boolean {
+    const hasSettlementTerm =
+      /\b(liquid(?:an|aran|ar|ado|ada|acion(?:es)?)|dispers(?:an|aran|ar|ado|ada|ion(?:es)?)|deposit(?:an|aran|ar|o|os|ado|ada)|payouts?|settlements?)\b/.test(
+        normalizedMessage,
+      )
+    if (!hasSettlementTerm) return false
+
+    const asksData =
+      /\b(cuant[oa]|monto|total|neto|recib(?:o|ire|iria|ir|ir[eé])|llega|cae|cuando|fecha|hoy|ayer|semana|mes|today|yesterday|week|month|how\s+much|when)\b/.test(
+        normalizedMessage,
+      )
+
+    const asksHowTo = /\b(como|how|donde|where|reviso|revisar|ver|veo|encuentro|configuro|configurar|pasos|guia|ayuda)\b/.test(
+      normalizedMessage,
+    )
+
+    return asksData && !asksHowTo
   }
 
   private isRealTimeSharedIntent(intent: string): boolean {
