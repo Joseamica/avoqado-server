@@ -3284,6 +3284,7 @@ model EcommerceMerchant {
   checkoutSessions CheckoutSession[]
   paymentLinks     PaymentLink[]
   payments         Payment[]
+  reservations     Reservation[]      @relation("ReservationEcommerceMerchant")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -8119,6 +8120,15 @@ model Reservation {
   depositExpiresAt    DateTime?
   idempotencyKey      String?        @unique
 
+  // Stripe Connect routing — pinned at checkout-mint time so refunds and
+  // reconciliation always go through the SAME connected account that
+  // processed the original charge. Required by Stripe (refunds must
+  // originate from the merchant that charged). Nullable for legacy rows
+  // that predate this column + for bookings that never minted a charge
+  // (pay-at-venue / credit redemption).
+  ecommerceMerchantId String?
+  ecommerceMerchant   EcommerceMerchant? @relation("ReservationEcommerceMerchant", fields: [ecommerceMerchantId], references: [id], onDelete: SetNull)
+
   // Refund lifecycle (orthogonal to depositStatus)
   refundStatus       RefundStatus?
   refundRequestedAt  DateTime?
@@ -8182,6 +8192,7 @@ model Reservation {
   @@index([cancelSecret])
   @@index([depositStatus, depositExpiresAt])
   @@index([refundStatus, refundRequestedAt])
+  @@index([ecommerceMerchantId])
 }
 
 // Idempotent reminder ledger. The reservation-reminder worker writes one row

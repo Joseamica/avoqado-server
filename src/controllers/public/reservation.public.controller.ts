@@ -641,9 +641,11 @@ export async function createReservation(req: Request, res: Response, next: NextF
           paymentMethodTypes: ['card'],
         })
 
+        // Pin the EcommerceMerchant alongside the session id so refunds and
+        // reconciliation always route through the same connected account.
         await prisma.reservation.update({
           where: { id: reservation.id },
-          data: { checkoutSessionId: session.id },
+          data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
         })
         checkoutUrl = session.url
       }
@@ -770,8 +772,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // surface "Debes $X al llegar" and ops can reconcile on arrival.
     if (appointmentOwesAtVenue && appointmentOwesAmount > 0) {
       const ownerNote = `[PAY-AT-VENUE] Cliente debe $${appointmentOwesAmount} al llegar (venue sin Stripe configurado)`
-      const mergedSpecialRequests =
-        [reservation.specialRequests ?? null, ownerNote].filter(Boolean).join(' • ') || null
+      const mergedSpecialRequests = [reservation.specialRequests ?? null, ownerNote].filter(Boolean).join(' • ') || null
       reservation = await prisma.reservation.update({
         where: { id: reservation.id },
         data: {
@@ -824,9 +825,17 @@ export async function createReservation(req: Request, res: Response, next: NextF
         paymentMethodTypes: ['card'],
       })
 
-      await prisma.reservation.update({
+      // Pin the EcommerceMerchant alongside the session id so refunds and
+      // reconciliation always route through the same connected account.
+      reservation = await prisma.reservation.update({
         where: { id: reservation.id },
-        data: { checkoutSessionId: session.id },
+        data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
+        include: {
+          customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
+          table: { select: { id: true, number: true, capacity: true } },
+          product: { select: { id: true, name: true, price: true } },
+          assignedStaff: { select: { id: true, firstName: true, lastName: true } },
+        },
       })
       checkoutUrl = session.url
     }

@@ -72,7 +72,11 @@ export class ReservationDepositReconciliationJob {
     })
 
     for (const reservation of pending) {
-      const merchant = await this.findStripeMerchant(reservation.venueId)
+      // Poll Stripe through the SAME connected account that minted the
+      // session — falling back to "latest active" here would query a
+      // different account and return PENDING forever for venues that
+      // swapped Stripe accounts.
+      const merchant = await this.resolveMerchantForReservation(reservation.venueId, reservation.ecommerceMerchantId)
       if (!merchant || !reservation.checkoutSessionId) continue
 
       try {
@@ -128,7 +132,11 @@ export class ReservationDepositReconciliationJob {
     })
 
     for (const reservation of orphans) {
-      const merchant = await this.findStripeMerchant(reservation.venueId)
+      // Orphan recovery may not have a pinned merchant yet (the original
+      // mint failed before stamping). Use the pinned one when present;
+      // otherwise fall back to "latest active" — and the stamp below will
+      // pin it going forward.
+      const merchant = await this.resolveMerchantForReservation(reservation.venueId, reservation.ecommerceMerchantId)
       if (!merchant || !reservation.depositAmount || !reservation.depositExpiresAt || !reservation.idempotencyKey) continue
 
       try {
@@ -157,7 +165,7 @@ export class ReservationDepositReconciliationJob {
 
         await prisma.reservation.updateMany({
           where: { id: reservation.id, checkoutSessionId: null },
-          data: { checkoutSessionId: session.id },
+          data: { checkoutSessionId: session.id, ecommerceMerchantId: merchant.id },
         })
       } catch (error) {
         logger.error('❌ [RESERVATION DEPOSIT RECONCILIATION] Failed to recover orphan checkout session', {
@@ -168,7 +176,24 @@ export class ReservationDepositReconciliationJob {
     }
   }
 
-  private findStripeMerchant(venueId: string) {
+  /**
+   * Pick the EcommerceMerchant that should process this reservation's charge
+   * operations. When the reservation has a pinned merchant from checkout-mint
+   * time we use it — refunds and status polls MUST hit the same connected
+   * account. Falls back to "newest active" only for legacy/orphan rows that
+   * predate the pin.
+   */
+  private async resolveMerchantForReservation(venueId: string, pinnedMerchantId: string | null) {
+    if (pinnedMerchantId) {
+      const pinned = await prisma.ecommerceMerchant.findFirst({
+        where: { id: pinnedMerchantId, provider: { code: 'STRIPE_CONNECT' } },
+        include: { provider: true },
+      })
+      if (pinned) return pinned
+      logger.warn(
+        `⚠️ [RESERVATION DEPOSIT RECONCILIATION] Pinned merchant ${pinnedMerchantId} not found; falling back to latest active for venue ${venueId}`,
+      )
+    }
     return prisma.ecommerceMerchant.findFirst({
       where: {
         venueId,

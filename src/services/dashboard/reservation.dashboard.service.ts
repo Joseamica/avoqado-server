@@ -677,6 +677,7 @@ async function handleReservationDepositCancellation(reservationId: string, venue
       depositStatus: true,
       depositProcessorRef: true,
       refundStatus: true,
+      ecommerceMerchantId: true,
     },
   })
   if (
@@ -702,15 +703,38 @@ async function handleReservationDepositCancellation(reservationId: string, venue
     return
   }
 
-  const merchant = await prisma.ecommerceMerchant.findFirst({
-    where: {
-      venueId,
-      active: true,
-      provider: { code: 'STRIPE_CONNECT', active: true },
-    },
-    include: { provider: true },
-    orderBy: { createdAt: 'desc' },
-  })
+  // Refunds MUST originate from the SAME connected account that captured the
+  // charge — Stripe rejects refunds routed through a different account with
+  // "the source has already been charged" errors. Use the merchant pinned on
+  // the reservation row at checkout-mint time. Legacy rows (pre-migration)
+  // lack the pin, so fall back to the "newest active" merchant + log so ops
+  // can spot venues that need backfilling.
+  let merchant = reservation.ecommerceMerchantId
+    ? await prisma.ecommerceMerchant.findFirst({
+        where: { id: reservation.ecommerceMerchantId, provider: { code: 'STRIPE_CONNECT' } },
+        include: { provider: true },
+      })
+    : null
+  if (!merchant) {
+    if (reservation.ecommerceMerchantId) {
+      logger.warn(
+        `⚠️ [RESERVATION DEPOSIT] Pinned merchant ${reservation.ecommerceMerchantId} not found for ${reservation.confirmationCode}; falling back to latest active`,
+      )
+    } else {
+      logger.warn(
+        `⚠️ [RESERVATION DEPOSIT] No pinned merchant on ${reservation.confirmationCode} (legacy row); falling back to latest active`,
+      )
+    }
+    merchant = await prisma.ecommerceMerchant.findFirst({
+      where: {
+        venueId,
+        active: true,
+        provider: { code: 'STRIPE_CONNECT', active: true },
+      },
+      include: { provider: true },
+      orderBy: { createdAt: 'desc' },
+    })
+  }
 
   if (!merchant) {
     await prisma.reservation.update({

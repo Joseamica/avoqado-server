@@ -153,6 +153,10 @@ async function createReservationDepositCheckout(
       checkoutSessionId: session.id,
       depositStatus: 'PENDING',
       depositExpiresAt: session.expiresAt,
+      // Pin the connected account that processed this charge so refunds
+      // and reconciliation route through the same merchant later. Required
+      // by Stripe (refunds must originate from the capturing account).
+      ecommerceMerchantId: stripeMerchant.id,
     },
   })
 
@@ -436,6 +440,7 @@ export async function finalizeDepositCheckoutForConsumer(consumerId: string, ses
       status: true,
       depositStatus: true,
       checkoutSessionId: true,
+      ecommerceMerchantId: true,
       venue: { select: { slug: true } },
     },
   })
@@ -444,7 +449,15 @@ export async function finalizeDepositCheckoutForConsumer(consumerId: string, ses
     throw new NotFoundError('Reserva no encontrada')
   }
 
-  const stripeMerchant = await resolveActiveStripeMerchant(reservation.venueId)
+  // Resolve the SAME connected account that minted the checkout. Falling
+  // back to "latest active" here would break refunds + status polls for
+  // venues that swapped Stripe accounts between checkout-mint and return.
+  const stripeMerchant = reservation.ecommerceMerchantId
+    ? await prisma.ecommerceMerchant.findFirst({
+        where: { id: reservation.ecommerceMerchantId, active: true, provider: { code: 'STRIPE_CONNECT', active: true } },
+        include: { provider: true },
+      })
+    : await resolveActiveStripeMerchant(reservation.venueId)
   if (!stripeMerchant) {
     throw new BadRequestError('Este negocio aun no tiene pagos en linea configurados')
   }
