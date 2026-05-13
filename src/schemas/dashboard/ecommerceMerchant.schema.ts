@@ -57,7 +57,10 @@ export const createEcommerceMerchantSchema = z.object({
     channelName: z.string().min(1, 'Channel name is required').default('Web Principal'),
 
     // Basic info
-    businessName: z.string().min(1, 'Business name is required'),
+    // businessName is optional in the API: for Stripe Connect, Stripe collects
+    // the legal business name during hosted onboarding. Service defaults it to
+    // channelName when missing so the DB column (NOT NULL) stays satisfied.
+    businessName: z.string().min(1).optional(),
     rfc: z.string().optional(),
     contactEmail: z.string().email('Invalid email format'),
     contactPhone: z.string().optional(),
@@ -68,6 +71,8 @@ export const createEcommerceMerchantSchema = z.object({
 
     // Provider-specific credentials (JSON)
     // For Blumon: { blumonMerchantId, blumonApiKey, blumonPosId, webhookSecret }
+    // For Stripe Connect: { businessType } at create — connectAccountId is added
+    // by the onboarding endpoint after the Stripe Connect account is created.
     providerCredentials: z.record(z.any()).refine(val => typeof val === 'object', {
       message: 'Provider credentials must be a valid JSON object',
     }),

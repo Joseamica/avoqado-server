@@ -5,9 +5,9 @@ import * as stripeConnectService from '@/services/dashboard/stripeConnect.servic
 export async function createOnboardingLink(req: Request, res: Response) {
   try {
     const { venueId, id } = req.params
-    const { businessType } = req.body
+    const { businessType, returnPath } = req.body
 
-    const link = await stripeConnectService.createStripeOnboardingLink(venueId, id, businessType)
+    const link = await stripeConnectService.createStripeOnboardingLink(venueId, id, businessType, returnPath)
 
     res.json({
       success: true,

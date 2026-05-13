@@ -14,10 +14,16 @@ export interface OnboardingLink {
 }
 
 export interface OnboardingStatus {
-  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'RESTRICTED'
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'PENDING_VERIFICATION' | 'COMPLETED' | 'RESTRICTED' | 'REJECTED'
   chargesEnabled: boolean
   payoutsEnabled: boolean
   requirementsDue: string[]
+  /**
+   * Raw `requirements.disabled_reason` from Stripe (or null). Lets the UI
+   * surface the specific reason (e.g. `rejected.fraud`, `under_review`)
+   * without re-querying Stripe.
+   */
+  disabledReason?: string | null
 }
 
 export interface CreateCheckoutParams {
@@ -106,7 +112,7 @@ export interface AuthorizeCardPaymentResult {
 }
 
 export interface IEcommerceProvider {
-  createOnboardingLink(merchant: EcommerceMerchantWithProvider): Promise<OnboardingLink>
+  createOnboardingLink(merchant: EcommerceMerchantWithProvider, returnPath?: string): Promise<OnboardingLink>
   getOnboardingStatus(merchant: EcommerceMerchantWithProvider): Promise<OnboardingStatus>
   createCheckoutSession(merchant: EcommerceMerchantWithProvider, params: CreateCheckoutParams): Promise<CheckoutSession>
   getPaymentStatus(merchant: EcommerceMerchantWithProvider, sessionId: string): Promise<PaymentStatus>

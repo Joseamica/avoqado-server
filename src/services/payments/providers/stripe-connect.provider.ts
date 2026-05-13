@@ -27,6 +27,43 @@ const PROVIDER_CODE = 'STRIPE_CONNECT'
 export const STRIPE_API_VERSION = '2026-02-25.clover'
 const STRIPE_ACCOUNTS_V2_VERSION = process.env.STRIPE_ACCOUNTS_V2_VERSION || '2026-04-22.preview'
 
+// Stripe error codes that mean "this account isn't reachable via the v2 Accounts
+// API — use the v1 (Express) endpoints instead". Either the platform doesn't have
+// v2 access enabled, or the specific account was created on v1 (legacy Express)
+// and v2 endpoints reject it.
+const V1_FALLBACK_ERROR_CODES = new Set(['non_connect_platform_accounts_v2_access_blocked', 'v1_account_instead_of_v2_account'])
+
+// Stripe `requirements.disabled_reason` values that mean "we (Stripe) are
+// reviewing — the merchant can't act, they just have to wait". Mapping these
+// to a distinct status (PENDING_VERIFICATION) keeps users from poking the
+// "Continue onboarding" button uselessly while Stripe processes their docs.
+const PENDING_VERIFICATION_REASONS = new Set(['requirements.pending_verification', 'under_review', 'listed'])
+
+/**
+ * Resolve onboarding status from a normalized Stripe account snapshot.
+ * Order of checks matters: rejection beats verification beats restriction
+ * beats progress. Exported so the provider stays the single source of truth.
+ */
+function resolveOnboardingStatus(args: {
+  chargesEnabled: boolean
+  payoutsEnabled: boolean
+  requirementsDue: string[]
+  disabledReason: string | null | undefined
+}): 'IN_PROGRESS' | 'PENDING_VERIFICATION' | 'COMPLETED' | 'RESTRICTED' | 'REJECTED' {
+  const { chargesEnabled, payoutsEnabled, requirementsDue, disabledReason } = args
+  // Stripe prefixes terminal rejections with `rejected.` (e.g. `rejected.fraud`,
+  // `rejected.terms_of_service`, `rejected.listed`). Terminal — needs support.
+  if (disabledReason?.startsWith('rejected.')) return 'REJECTED'
+  // Fully active: card_payments capability enabled AND no outstanding requirements.
+  if (chargesEnabled && payoutsEnabled) return 'COMPLETED'
+  // Things the user owes Stripe → user must act → "RESTRICTED".
+  if (requirementsDue.length > 0) return 'RESTRICTED'
+  // No outstanding requirements but Stripe is reviewing manually → wait.
+  if (disabledReason && PENDING_VERIFICATION_REASONS.has(disabledReason)) return 'PENDING_VERIFICATION'
+  // Default: still moving through the flow.
+  return 'IN_PROGRESS'
+}
+
 type StripeConnectCredentials = {
   connectAccountId?: string
   businessType?: 'company' | 'individual'
@@ -84,10 +121,14 @@ export class StripeConnectProvider implements IEcommerceProvider {
         'Stripe-Version': STRIPE_ACCOUNTS_V2_VERSION,
         'Content-Type': 'application/json',
       },
+      // Stripe v2 rejects bracket-array query syntax (`include[]=x`). It requires
+      // indexed form: `include[0]=x&include[1]=y`. Axios defaults to bracket
+      // syntax, so we opt into indexed serialization here.
+      paramsSerializer: { indexes: true },
     })
   }
 
-  async createOnboardingLink(merchant: EcommerceMerchantWithProvider): Promise<OnboardingLink> {
+  async createOnboardingLink(merchant: EcommerceMerchantWithProvider, returnPath?: string): Promise<OnboardingLink> {
     let connectAccountId = this.getCredentials(merchant).connectAccountId
 
     if (!connectAccountId) {
@@ -101,7 +142,13 @@ export class StripeConnectProvider implements IEcommerceProvider {
       throw new BadRequestError('PUBLIC_DASHBOARD_URL no está configurado')
     }
 
-    const dashboardReturnUrl = await this.getOnboardingDashboardUrl(merchant)
+    // `returnPath` is the page the user came from on the dashboard (e.g.
+    // `/venues/avoqado-full/edit/integrations`). When provided, Stripe will
+    // redirect back to that exact page after onboarding — so the user lands
+    // where they started instead of the legacy ecommerce-merchants admin page.
+    const dashboardReturnUrl = returnPath
+      ? `${publicDashboardUrl}${returnPath.startsWith('/') ? '' : '/'}${returnPath}`
+      : await this.getOnboardingDashboardUrl(merchant)
     const link = await this.stripe.accountLinks.create({
       account: connectAccountId,
       return_url: `${dashboardReturnUrl}?status=success&merchantId=${merchant.id}`,
@@ -129,6 +176,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
         chargesEnabled: false,
         payoutsEnabled: false,
         requirementsDue: [],
+        disabledReason: null,
       }
     }
 
@@ -137,8 +185,8 @@ export class StripeConnectProvider implements IEcommerceProvider {
     const cardPaymentsStatus = account.configuration?.merchant?.capabilities?.card_payments?.status
     const chargesEnabled = cardPaymentsStatus === 'active'
     const payoutsEnabled = chargesEnabled && requirementsDue.length === 0
-    const status: OnboardingStatus['status'] =
-      chargesEnabled && payoutsEnabled ? 'COMPLETED' : requirementsDue.length > 0 ? 'RESTRICTED' : 'IN_PROGRESS'
+    const disabledReason = account.requirements?.disabled_reason ?? null
+    const status = resolveOnboardingStatus({ chargesEnabled, payoutsEnabled, requirementsDue, disabledReason })
 
     await prisma.ecommerceMerchant.update({
       where: { id: merchant.id },
@@ -146,11 +194,12 @@ export class StripeConnectProvider implements IEcommerceProvider {
         chargesEnabled,
         payoutsEnabled,
         requirementsDue,
+        disabledReason,
         onboardingStatus: status,
       },
     })
 
-    return { status, chargesEnabled, payoutsEnabled, requirementsDue }
+    return { status, chargesEnabled, payoutsEnabled, requirementsDue, disabledReason }
   }
 
   async createCheckoutSession(merchant: EcommerceMerchantWithProvider, params: CreateCheckoutParams): Promise<CheckoutSession> {
@@ -356,7 +405,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
 
       return response.data
     } catch (error: any) {
-      if (error?.response?.data?.error?.code !== 'non_connect_platform_accounts_v2_access_blocked') {
+      if (!V1_FALLBACK_ERROR_CODES.has(error?.response?.data?.error?.code)) {
         throw error
       }
 
@@ -407,7 +456,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
 
       return response.data
     } catch (error: any) {
-      if (error?.response?.data?.error?.code !== 'non_connect_platform_accounts_v2_access_blocked') {
+      if (!V1_FALLBACK_ERROR_CODES.has(error?.response?.data?.error?.code)) {
         throw error
       }
 

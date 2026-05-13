@@ -11,6 +11,7 @@
 
 import { Router } from 'express'
 import { validateRequest } from '@/middlewares/validation'
+import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as ecommerceMerchantController from '@/controllers/dashboard/ecommerceMerchant.controller'
 import * as stripeConnectController from '@/controllers/dashboard/stripeConnect.controller'
 import {
@@ -24,6 +25,17 @@ import {
 import { createStripeOnboardingLinkSchema, getStripeOnboardingStatusSchema } from '@/schemas/dashboard/stripeConnect.schema'
 
 const router = Router({ mergeParams: true }) // mergeParams: true to access :venueId from parent
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AVAILABLE PROVIDERS (for wizard provider picker)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/ecommerce-merchants/available-providers
+ * Lists payment providers available for ecommerce setup. Accessible to any
+ * authenticated user with venue access (does not require system:manage).
+ */
+router.get('/available-providers', ecommerceMerchantController.listAvailableProviders)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LIST & GET
@@ -132,6 +144,22 @@ router.post('/:id/stripe-onboard', validateRequest(createStripeOnboardingLinkSch
  * Retrieves and syncs Stripe Connect onboarding status.
  */
 router.get('/:id/onboarding-status', validateRequest(getStripeOnboardingStatusSchema), stripeConnectController.getOnboardingStatus)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLATFORM FEE (SUPERADMIN only)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * PATCH /api/v1/dashboard/venues/:venueId/ecommerce-merchants/:id/platform-fee
+ *
+ * Update Avoqado's `platformFeeBps` on the merchant. This is the
+ * application_fee Stripe takes on every Connect transaction in favor of the
+ * platform. Locked behind `system:manage` because OWNERs should not be able
+ * to discount their own fee.
+ *
+ * Body: { platformFeeBps: number (0-3000, i.e. 0–30%) }
+ */
+router.patch('/:id/platform-fee', checkPermission('system:manage'), ecommerceMerchantController.updatePlatformFee)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DELETE

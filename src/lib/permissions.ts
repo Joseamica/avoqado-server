@@ -561,6 +561,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    'payment-link:read', // Can view and share existing payment links
+    'payment-link:create', // Can create new payment links for collections
+    'payment-link:update', // Can edit (pause / resume) payment links
     'shifts:read',
     'shifts:create',
     'shifts:update',
@@ -648,6 +651,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:*',
     'payments:*',
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
+    'payment-link:*', // Create / manage shareable payment links (Stripe Connect + Blumon)
     'shifts:*',
     'reviews:*',
     'teams:*',
@@ -722,6 +726,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:*',
     'payments:*',
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
+    'payment-link:*', // Create / manage shareable payment links (Stripe Connect + Blumon)
     'shifts:*',
     'reviews:*',
     'teams:*',

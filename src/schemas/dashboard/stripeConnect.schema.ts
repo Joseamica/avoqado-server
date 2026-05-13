@@ -11,6 +11,13 @@ export const createStripeOnboardingLinkSchema = z.object({
     businessType: z.enum(['company', 'individual'], {
       errorMap: () => ({ message: 'Selecciona persona moral o persona física' }),
     }),
+    // Optional: dashboard path Stripe should redirect back to after onboarding.
+    // Lets the same flow land on /edit/integrations OR /ecommerce-merchants
+    // depending on where the user kicked it off.
+    returnPath: z
+      .string()
+      .regex(/^\/[A-Za-z0-9/_-]*$/, 'returnPath debe ser una ruta relativa válida')
+      .optional(),
   }),
 })
 

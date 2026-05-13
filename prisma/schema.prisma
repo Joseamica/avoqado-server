@@ -631,7 +631,10 @@ model Staff {
   marketingCampaignsCreated MarketingCampaign[] @relation("MarketingCampaignCreator")
 
   // Payment Links
-  paymentLinksCreated PaymentLink[]
+  paymentLinksCreated PaymentLink[] @relation("PaymentLinkCreatedBy")
+  /// Payment links where THIS staff is one of the commission recipients
+  /// (via PaymentLinkAttribution join). Distinct from createdById.
+  paymentLinkAttributions PaymentLinkAttribution[]
 
   // Per-venue onboarding/tour progress (checklists, banner dismissals, auto-launch flags)
   onboardingStates StaffOnboardingState[]
@@ -1180,10 +1183,10 @@ model Product {
   lastSyncAt   DateTime?
 
   // Relations
-  inventory      Inventory?
-  orderItems     OrderItem[]
-  paymentLinks   PaymentLink[]
-  modifierGroups ProductModifierGroup[]
+  inventory         Inventory?
+  orderItems        OrderItem[]
+  paymentLinkItems  PaymentLinkItem[]
+  modifierGroups    ProductModifierGroup[]
   recipe         Recipe? // ✅ NEW: Recipe composition
   pricingPolicy  PricingPolicy? // ✅ NEW: Pricing strategy
 
@@ -2196,6 +2199,26 @@ model OrderItem {
   taxAmount      Decimal @db.Decimal(10, 2)
   total          Decimal @db.Decimal(10, 2)
 
+  // Structured discount/cortesía metadata for the NEW TPV "Cobrar" flow.
+  //
+  // IMPORTANT SCOPE RULE:
+  // These fields are additive and default-safe. Existing TPV legacy orders,
+  // /mobile endpoints, dashboard flows, payment links, and other frontends
+  // are NOT required to send or read them. Do not migrate existing endpoints
+  // to these fields unless the product owner explicitly asks for that work.
+  //
+  // Legacy flows can keep using Order.discountAmount, OrderItem.discountAmount,
+  // OrderDiscount, and OrderAction as they do today. New Cobrar writes these
+  // fields in addition to the legacy money fields so receipts/dashboard can
+  // explain item-level cortesía/discounts without JSON metadata inference.
+  //
+  // See docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md before changing behavior or
+  // adopting these fields in another endpoint.
+  isCortesia        Boolean   @default(false)
+  cortesiaReason    String?
+  appliedDiscountId String?
+  appliedDiscount   Discount? @relation("OrderItemAppliedDiscount", fields: [appliedDiscountId], references: [id], onDelete: SetNull)
+
   notes String?
 
   modifiers          OrderItemModifier[]
@@ -2228,6 +2251,7 @@ model OrderItem {
   @@unique([orderId, externalId]) // Para evitar duplicados por externalId
   @@index([orderId])
   @@index([productId])
+  @@index([appliedDiscountId])
   @@index([externalId]) // ✅ NUEVO
   @@index([syncStatus]) // ✅ NUEVO
 }
@@ -2297,7 +2321,8 @@ model Modifier {
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
-  orderItems OrderItemModifier[]
+  orderItems       OrderItemModifier[]
+  paymentLinkItems PaymentLinkItemModifier[]
 
   @@index([rawMaterialId])
 }
@@ -3213,6 +3238,11 @@ model EcommerceMerchant {
   chargesEnabled         Boolean          @default(false)
   payoutsEnabled         Boolean          @default(false)
   requirementsDue        String[]         @default([])
+  /// Verbatim `requirements.disabled_reason` from Stripe (or null). Stored so
+  /// we can render distinct UI for `requirements.pending_verification`,
+  /// `under_review`, `listed`, `rejected.*`, etc. — without calling Stripe on
+  /// every list render. Refreshed whenever getOnboardingStatus runs.
+  disabledReason         String?
   onboardingLinkUrl      String?
   onboardingLinkExpiry   DateTime?
   platformFeeBps         Int              @default(100)
@@ -3243,8 +3273,44 @@ model EcommerceMerchant {
 enum OnboardingStatus {
   NOT_STARTED
   IN_PROGRESS
+  /// Stripe is manually reviewing the submitted documents. The merchant
+  /// can't act — must wait (typically 1-5 business days). Distinct from
+  /// IN_PROGRESS so the UI shows "Stripe está revisando" instead of an
+  /// unhelpful "Continuar onboarding" CTA the user can't actually advance.
+  PENDING_VERIFICATION
   COMPLETED
   RESTRICTED
+  /// Stripe rejected the connected account (fraud, prohibited business,
+  /// etc.). Terminal failure state — needs support intervention.
+  REJECTED
+}
+
+// ============================================================
+// PLATFORM SETTINGS (Global Avoqado config — single row)
+// ============================================================
+//
+// Singleton row pattern: enforced by always querying / upserting on the
+// fixed id `"default"`. Holds platform-wide knobs that don't belong on a
+// per-venue or per-merchant table.
+//
+// Today it only holds Avoqado's default ecommerce platform fee. The value
+// is read by `createEcommerceMerchant` so new merchants inherit the current
+// default; existing merchants keep whatever `platformFeeBps` they had.
+model PlatformSettings {
+  id String @id @default("default")
+
+  /// Default `platformFeeBps` applied to newly-created EcommerceMerchant
+  /// rows. Existing merchants are NOT retroactively changed. 100 bps = 1.00%.
+  ecommercePlatformFeeBpsDefault Int @default(100)
+
+  /// VAT (IVA) rate applied on top of the platform fee when Avoqado charges
+  /// it to merchants. 1600 bps = 16% (MX standard). The `application_fee`
+  /// passed to Stripe is `gross × platformFeeBps/10000 × (10000+vatRateBps)/10000`.
+  /// Set to 0 to charge no VAT (e.g. for testing or non-MX deployments).
+  vatRateBps Int @default(1600)
+
+  updatedAt   DateTime @updatedAt
+  updatedById String?
 }
 
 // ============================================================
@@ -3324,6 +3390,13 @@ model CheckoutSession {
   // Blumon checkout
   blumonCheckoutId  String? // ID returned by Blumon
   blumonCheckoutUrl String? // URL where we redirect the customer
+
+  /// Avoqado's platform fee taken on this checkout, in centavos. For Stripe
+  /// Connect sessions this is the `application_fee_amount` passed at session
+  /// creation. Promoted from `metadata.applicationFeeCents` to a real column
+  /// so `SUM(applicationFeeCents)` runs as a fast indexed aggregate instead
+  /// of a JSON parse over every row.
+  applicationFeeCents Int?
 
   // Payment result
   paymentId String?  @unique
@@ -4363,6 +4436,9 @@ model Discount {
   couponCodes       CouponCode[]
   customerDiscounts CustomerDiscount[]
   orderDiscounts    OrderDiscount[]
+  // Back-reference for the optional item-level discount link used by the
+  // new TPV Cobrar flow. Not a requirement for legacy endpoints.
+  orderItems        OrderItem[] @relation("OrderItemAppliedDiscount")
 
   @@index([venueId])
   @@index([isAutomatic])
@@ -4473,6 +4549,10 @@ model OrderDiscount {
   // Calculated amounts
   amount       Decimal @db.Decimal(10, 2) // Actual discount amount applied
   taxReduction Decimal @default(0) @db.Decimal(10, 2) // Tax saved due to discount
+  // New TPV Cobrar uses this to preserve which OrderItem ids an order-level
+  // discount/cortesía affected. Existing endpoints may leave it empty.
+  // See docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md before adopting elsewhere.
+  appliedToItemIds String[] @default([])
 
   // Flags
   isComp      Boolean @default(false) // Was this a comp?
@@ -4916,10 +4996,16 @@ enum OrderType {
   TAKEOUT
   DELIVERY
   PICKUP
-  /// Bookkeeping entry for money received outside of Avoqado (e.g. admin
-  /// records a BUQ / Clip payment after the fact). These orders have no
-  /// items, no inventory impact, and should be filtered out of operational
-  /// reports like "kitchen prep queue" — but kept in revenue totals.
+  /// Orders with no items / no fulfillment, kept in revenue totals but
+  /// excluded from operational reports like "kitchen prep queue". Covers:
+  ///   1. Admin-recorded external payments (BUQ / Clip / cash recorded
+  ///      after the fact in the dashboard) — original use case.
+  ///   2. Avoqado-originated link payments without products (PaymentLink
+  ///      purpose=PAYMENT or purpose=DONATION) — real-time Stripe Connect
+  ///      ad-hoc charges via pay.avoqado.io.
+  /// Industry pattern: Square's Virtual Terminal + Invoices generate Orders
+  /// without items, distinguished by `source` rather than a special type.
+  /// Same separation here: `OrderSource` differentiates the channel.
   MANUAL_ENTRY
 }
 
@@ -8466,13 +8552,22 @@ model PaymentLink {
   ecommerceMerchantId String
   ecommerceMerchant   EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Restrict)
   createdById         String
-  createdBy           Staff             @relation(fields: [createdById], references: [id])
+  createdBy           Staff             @relation("PaymentLinkCreatedBy", fields: [createdById], references: [id])
+
+  /// Staff explicitly chosen by the link creator to receive commission
+  /// attribution when the link is paid. Separate from `createdById`:
+  /// the link CREATOR may be an admin/manager who shouldn't earn the
+  /// commission. With 0 attributions → no commission. With N → commission
+  /// is split equally across all attributed staff (see finalizePaymentLink
+  /// Checkout + createSplitCommissionForPayment).
+  attributions PaymentLinkAttribution[]
 
   purpose PaymentLinkPurpose @default(PAYMENT)
 
-  // Optional product reference (for ITEM purpose — enables inventory deduction)
-  productId String?
-  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  /// Line items (only used for ITEM purpose). Bundle-style: customer pays
+  /// the fixed total of `sum(quantity × product.price)`. Deleted products
+  /// cascade out via PaymentLinkItem onDelete: Cascade.
+  items PaymentLinkItem[]
 
   title       String
   description String?
@@ -8504,6 +8599,68 @@ model PaymentLink {
   @@index([shortCode])
   @@index([status])
   @@index([createdAt])
+}
+
+/// Line item for an ITEM-purpose PaymentLink (bundle). Fixed quantity per
+/// product set at link creation. Stripe-style line_items pattern. Total =
+/// sum(quantity × (product.price + sum(modifier.price))) at checkout. The
+/// customer cannot edit the quantity or modifiers — for cart-style flows
+/// we'd need a separate model.
+model PaymentLinkItem {
+  id            String      @id @default(cuid())
+  paymentLinkId String
+  paymentLink   PaymentLink @relation(fields: [paymentLinkId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity      Int         @default(1)
+  /// Stable ordering for UI / preview / receipt — admin can drag-reorder
+  /// without changing the underlying rows.
+  position      Int         @default(0)
+  createdAt     DateTime    @default(now())
+
+  /// Pre-selected modifiers for this line. Admin picks them at link-creation
+  /// time. The customer cannot change them — the bundle is fixed. At payment
+  /// completion these are replayed into OrderItemModifier rows so cocina,
+  /// inventory deduction, and reports see the full configuration.
+  modifiers PaymentLinkItemModifier[]
+
+  @@unique([paymentLinkId, productId])
+  @@index([productId])
+}
+
+/// Pre-selected modifier for a bundle line item. Joins PaymentLinkItem ↔
+/// Modifier with a quantity (e.g. "2× extra cheese"). Validation in the
+/// service layer ensures: (a) the modifier belongs to one of the product's
+/// modifier groups, (b) required groups have at least one selection,
+/// (c) max-selection bounds per group are respected.
+model PaymentLinkItemModifier {
+  id                String          @id @default(cuid())
+  paymentLinkItemId String
+  paymentLinkItem   PaymentLinkItem @relation(fields: [paymentLinkItemId], references: [id], onDelete: Cascade)
+  modifierId        String
+  modifier          Modifier        @relation(fields: [modifierId], references: [id], onDelete: Cascade)
+  quantity          Int             @default(1)
+  createdAt         DateTime        @default(now())
+
+  @@unique([paymentLinkItemId, modifierId])
+  @@index([modifierId])
+}
+
+/// Many-to-many between PaymentLink and Staff. Each row = one staff member
+/// who shares commission for sales via this link. With N rows, commission
+/// is split equally (1/N). With 0 rows, no commission is calculated. The
+/// FIRST row also acts as `Payment.processedById` so reports/receipts have
+/// a single named staff to display.
+model PaymentLinkAttribution {
+  id            String      @id @default(cuid())
+  paymentLinkId String
+  paymentLink   PaymentLink @relation(fields: [paymentLinkId], references: [id], onDelete: Cascade)
+  staffId       String
+  staff         Staff       @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@unique([paymentLinkId, staffId])
+  @@index([staffId])
 }
 
 enum PaymentLinkPurpose {

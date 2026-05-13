@@ -34,6 +34,8 @@ import {
   publicCheckoutSchema as plCheckoutSchema,
   publicChargeSchema,
   publicSessionSchema,
+  publicStripeCheckoutSchema,
+  publicStripePaymentIntentSchema,
 } from '../schemas/dashboard/paymentLink.schema'
 
 const router = Router()
@@ -160,6 +162,25 @@ router.patch(
 router.get('/payment-links/:shortCode', readLimit, validateRequest(publicShortCodeSchema), paymentLinkPublicController.resolvePaymentLink)
 
 router.post('/payment-links/:shortCode/checkout', writeLimit, validateRequest(plCheckoutSchema), paymentLinkPublicController.createCheckout)
+
+// Stripe Connect hosted-checkout flow. Returns a redirect URL the public
+// checkout site sends the customer to — application_fee_amount (Avoqado's
+// margin) is automatically applied based on the merchant's platformFeeBps.
+router.post(
+  '/payment-links/:shortCode/stripe-checkout',
+  writeLimit,
+  validateRequest(publicStripeCheckoutSchema),
+  paymentLinkPublicController.createStripeCheckout,
+)
+
+// Stripe Elements (inline) flow — customer stays on pay.avoqado.io and pays
+// via embedded Stripe Elements. Returns clientSecret to confirm on the frontend.
+router.post(
+  '/payment-links/:shortCode/payment-intent',
+  writeLimit,
+  validateRequest(publicStripePaymentIntentSchema),
+  paymentLinkPublicController.createStripePaymentIntent,
+)
 
 router.post('/payment-links/:shortCode/charge', writeLimit, validateRequest(publicChargeSchema), paymentLinkPublicController.completeCharge)
 

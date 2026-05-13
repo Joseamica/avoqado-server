@@ -1122,3 +1122,209 @@ export async function getCommissionByPaymentId(
     configName: calculation.config.name,
   }
 }
+
+// ============================================
+// Split Commission (Payment Links — multi-staff attribution)
+// ============================================
+
+/**
+ * Create N commission rows for a single payment, splitting the base amount
+ * (and any tips/discounts/taxes carried into the commission base) equally
+ * across the provided staff list.
+ *
+ * Used exclusively by payment links with multiple attributed staff. Bypasses
+ * the recipient-enum cascade in `getRecipientStaffId` (the link itself names
+ * the recipients) and bypasses the paymentId-level idempotency guard (which
+ * was designed for the 1-recipient-per-payment TPV model). Per-staff
+ * idempotency is enforced row-by-row with `(paymentId, staffId)` lookups.
+ *
+ * Each row is computed independently:
+ *   1. Validate the staff is still active in the venue.
+ *   2. Apply any staff-level override (custom rate / exclusion).
+ *   3. Use the staff's role-based rate from `config.roleRates` if set,
+ *      otherwise the config defaultRate. (Tiered rates are intentionally
+ *      NOT applied for splits — the per-staff base is artificially small,
+ *      which would force everyone into the lowest tier.)
+ *   4. Apply min/max bounds AFTER splitting.
+ *   5. Round to cents.
+ *
+ * Failures for individual staff (excluded, inactive, override-excluded) are
+ * logged and skipped — they do not abort the other rows. This matches the
+ * spirit of `createCommissionForPayment`, which returns null silently on
+ * non-fatal skips.
+ *
+ * @returns Array of created calculations (one per eligible staff). May be
+ *          shorter than the input if some staff were filtered out.
+ */
+export async function createSplitCommissionForPayment(paymentId: string, staffIds: string[]): Promise<CommissionCalculationResult[]> {
+  logger.info('Creating SPLIT commission for payment', { paymentId, staffCount: staffIds.length })
+
+  if (staffIds.length === 0) return []
+  if (staffIds.length === 1) {
+    // Caller should have routed through createCommissionForPayment; guard
+    // anyway so this function is safe to call with any list length.
+    const single = await createCommissionForPayment(paymentId)
+    return single ? [single] : []
+  }
+
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    include: {
+      order: { select: { id: true, subtotal: true, discountAmount: true, taxAmount: true } },
+      shift: { select: { id: true } },
+      venue: { select: { id: true, timezone: true } },
+    },
+  })
+
+  if (!payment) throw new NotFoundError(`Payment ${paymentId} not found`)
+  if (payment.type === PaymentType.TEST) {
+    logger.info('Skipping split commission: TEST payment', { paymentId })
+    return []
+  }
+  if (payment.status !== 'COMPLETED') {
+    logger.info('Skipping split commission: Payment not COMPLETED', { paymentId, status: payment.status })
+    return []
+  }
+
+  const config = await findActiveCommissionConfig(payment.venueId, payment.createdAt)
+  if (!config) {
+    logger.info('No active commission config for venue (split)', { paymentId, venueId: payment.venueId })
+    return []
+  }
+
+  // Compute the FULL base amount once — same path as the single-recipient
+  // function uses for non-category configs. We then divide it equally
+  // before writing each row.
+  let totalBaseAmount: number
+  let totalTipAmount: number
+  let totalDiscountAmount: number
+  let totalTaxAmount: number
+
+  if (config.filterByCategories && config.categoryIds.length > 0 && payment.orderId) {
+    totalBaseAmount = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
+      includeTax: config.includeTax,
+      includeDiscount: config.includeDiscount,
+    })
+    totalTipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
+    totalDiscountAmount = 0
+    totalTaxAmount = 0
+    if (config.includeTips) totalBaseAmount += totalTipAmount
+  } else {
+    const result = calculateBaseAmount(
+      {
+        amount: payment.amount,
+        tipAmount: payment.tipAmount,
+        taxAmount: payment.order?.taxAmount,
+        discountAmount: payment.order?.discountAmount,
+      },
+      config,
+    )
+    totalBaseAmount = result.baseAmount
+    totalTipAmount = result.tipAmount
+    totalDiscountAmount = result.discountAmount
+    totalTaxAmount = result.taxAmount
+  }
+
+  if (totalBaseAmount <= 0) {
+    logger.info('Skipping split commission: base amount zero or negative', { paymentId, totalBaseAmount })
+    return []
+  }
+
+  const splitCount = staffIds.length
+  const splitBase = totalBaseAmount / splitCount
+  const splitTip = totalTipAmount / splitCount
+  const splitDiscount = totalDiscountAmount / splitCount
+  const splitTax = totalTaxAmount / splitCount
+
+  const results: CommissionCalculationResult[] = []
+
+  for (const staffId of staffIds) {
+    // Per-staff idempotency: skip if a calc already exists for this
+    // (paymentId, staffId). Lets webhooks retry without creating duplicates.
+    const existing = await prisma.commissionCalculation.findFirst({
+      where: { paymentId, staffId, status: { not: CommissionCalcStatus.VOIDED } },
+      select: { id: true },
+    })
+    if (existing) {
+      logger.info('Split commission row already exists, skipping', { paymentId, staffId })
+      continue
+    }
+
+    const staffInfo = await validateStaffForCommission(staffId, payment.venueId)
+    if (!staffInfo) {
+      logger.info('Staff not eligible for split commission, skipping', { paymentId, staffId })
+      continue
+    }
+
+    const override = await findActiveOverride(config.id, staffId, payment.createdAt)
+    if (override?.excludeFromCommissions) {
+      logger.info('Staff excluded via override, skipping split row', { paymentId, staffId })
+      continue
+    }
+
+    // Splits intentionally skip TIERED rate calculation — see function-level
+    // docstring. Pass tierRate=null so the cascade falls back to override →
+    // role-based → default.
+    const effectiveRate = calculateFinalRate(config, override, staffInfo.role, null)
+
+    let grossCommission: number
+    switch (config.calcType) {
+      case CommissionCalcType.FIXED:
+        // Fixed amount is per transaction — divide so the total still
+        // equals the configured fixed amount, not staffCount × it.
+        grossCommission = decimalToNumber(config.defaultRate) / splitCount
+        break
+      case CommissionCalcType.PERCENTAGE:
+      case CommissionCalcType.TIERED:
+      default:
+        grossCommission = splitBase * effectiveRate
+        break
+    }
+
+    let netCommission = applyCommissionBounds(grossCommission, config)
+    grossCommission = Math.round(grossCommission * 100) / 100
+    netCommission = Math.round(netCommission * 100) / 100
+
+    const calc = await prisma.commissionCalculation.create({
+      data: {
+        venueId: payment.venueId,
+        staffId,
+        paymentId: payment.id,
+        orderId: payment.orderId,
+        shiftId: payment.shift?.id,
+        configId: config.id,
+        baseAmount: splitBase,
+        tipAmount: splitTip,
+        discountAmount: splitDiscount,
+        taxAmount: splitTax,
+        effectiveRate,
+        grossCommission,
+        netCommission,
+        calcType: config.calcType,
+        status: CommissionCalcStatus.CALCULATED,
+        calculatedAt: new Date(),
+      },
+    })
+
+    logger.info('Split commission row created', {
+      calculationId: calc.id,
+      paymentId,
+      staffId,
+      splitBase,
+      netCommission,
+      splitCount,
+    })
+
+    results.push({
+      calculationId: calc.id,
+      paymentId,
+      staffId,
+      baseAmount: splitBase,
+      effectiveRate,
+      grossCommission,
+      netCommission,
+    })
+  }
+
+  return results
+}

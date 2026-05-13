@@ -194,7 +194,16 @@ process.on('uncaughtException', error => {
   }
 })
 process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection at:', promise, 'reason:', reason)
+  // Dev: log loudly but keep the process alive. A single unhandled rejection
+  // (e.g. from a logger crash or a stray third-party promise) shouldn't kill
+  // the dev server — the developer needs to see the rejection and fix it,
+  // not respawn tsx watch.
+  // Prod/staging: standard Node practice — gracefulShutdown and let the
+  // orchestrator respawn. State could be corrupted after an unhandled rejection.
+  logger.error('Unhandled Rejection', { reason, promise })
+  if (NODE_ENV === 'development') {
+    return
+  }
   gracefulShutdown('unhandledRejection')
 })
 

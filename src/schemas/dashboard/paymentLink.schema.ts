@@ -44,7 +44,36 @@ export const createPaymentLinkBodySchema = z
     expiresAt: z.string().datetime('Fecha de expiración inválida').optional(),
     redirectUrl: z.string().url('URL de redirección inválida').optional(),
     purpose: z.enum(['PAYMENT', 'ITEM', 'DONATION']).default('PAYMENT'),
-    productId: z.string().min(1, 'ID de producto inválido').optional(),
+    /** Bundle line items — required for ITEM purpose, ignored otherwise.
+     *  Each item may include pre-selected modifiers (size, toppings, etc.).
+     *  Service-layer validation enforces required/min/max selection rules. */
+    items: z
+      .array(
+        z.object({
+          productId: z.string().min(1, 'ID de producto inválido'),
+          quantity: z.number().int().min(1, 'La cantidad debe ser al menos 1').max(999, 'Cantidad demasiado grande'),
+          modifiers: z
+            .array(
+              z.object({
+                modifierId: z.string().min(1, 'ID de modificador inválido'),
+                quantity: z.number().int().min(1).max(99).optional(),
+              }),
+            )
+            .max(20, 'Máximo 20 modificadores por producto')
+            .optional(),
+        }),
+      )
+      .max(20, 'Máximo 20 productos por liga de pago')
+      .optional(),
+    // Optional channel pinning — when omitted the service auto-picks (Blumon
+    // first, then any active merchant). Required to disambiguate when the
+    // venue has multiple active ecommerce merchants (e.g. Stripe + Blumon).
+    ecommerceMerchantId: z.string().min(1).optional(),
+    // Optional commission attribution — array of staff IDs who earn
+    // commission for sales via this link. Empty/omitted → no commission.
+    // With N IDs → commission split equally across all N staff. See
+    // finalizePaymentLinkCheckout + createSplitCommissionForPayment.
+    attributedStaffIds: z.array(z.string().min(1)).max(10, 'Máximo 10 personas atribuidas').optional(),
     customFields: customFieldsSchema,
     tippingConfig: tippingConfigSchema,
   })
@@ -62,14 +91,14 @@ export const createPaymentLinkBodySchema = z
   )
   .refine(
     data => {
-      if (data.purpose === 'ITEM' && !data.productId) {
+      if (data.purpose === 'ITEM' && (!data.items || data.items.length === 0)) {
         return false
       }
       return true
     },
     {
-      message: 'El producto es requerido para ligas de pago de artículo',
-      path: ['productId'],
+      message: 'Se requiere al menos un producto para ligas de pago de artículo',
+      path: ['items'],
     },
   )
 
@@ -84,7 +113,25 @@ export const updatePaymentLinkBodySchema = z.object({
   expiresAt: z.string().datetime('Fecha de expiración inválida').optional().nullable(),
   redirectUrl: z.string().url('URL de redirección inválida').optional().nullable(),
   status: z.enum(['ACTIVE', 'PAUSED']).optional(),
-  productId: z.string().min(1, 'ID de producto inválido').optional().nullable(),
+  items: z
+    .array(
+      z.object({
+        productId: z.string().min(1, 'ID de producto inválido'),
+        quantity: z.number().int().min(1, 'La cantidad debe ser al menos 1').max(999, 'Cantidad demasiado grande'),
+        modifiers: z
+          .array(
+            z.object({
+              modifierId: z.string().min(1, 'ID de modificador inválido'),
+              quantity: z.number().int().min(1).max(99).optional(),
+            }),
+          )
+          .max(20, 'Máximo 20 modificadores por producto')
+          .optional(),
+      }),
+    )
+    .max(20, 'Máximo 20 productos por liga de pago')
+    .optional()
+    .nullable(),
   customFields: customFieldsSchema,
   tippingConfig: tippingConfigSchema,
 })
@@ -174,5 +221,44 @@ export const publicSessionSchema = z.object({
   params: z.object({
     shortCode: z.string().min(1),
     sessionId: z.string().min(1),
+  }),
+})
+
+/**
+ * Body schema for `POST /payment-links/:shortCode/stripe-checkout`.
+ *
+ * All fields optional — Stripe collects card data itself. Customer email +
+ * custom fields are forwarded into Stripe metadata for the receipt + our
+ * webhook handler.
+ */
+export const publicStripeCheckoutSchema = z.object({
+  params: z.object({
+    shortCode: z.string().min(1),
+  }),
+  body: z.object({
+    amount: z.number().positive().optional(),
+    quantity: z.number().int().positive().optional(),
+    tipAmount: z.number().nonnegative().optional(),
+    customerEmail: z.string().email('Email inválido').optional(),
+    customFieldResponses: z.record(z.string()).optional(),
+    returnUrl: z.string().url('URL de retorno inválida').optional(),
+  }),
+})
+
+/**
+ * Body schema for `POST /payment-links/:shortCode/payment-intent` (Stripe
+ * Elements / inline flow). Same body as the checkout variant minus the
+ * returnUrl — the Elements flow stays on our domain, no redirect needed.
+ */
+export const publicStripePaymentIntentSchema = z.object({
+  params: z.object({
+    shortCode: z.string().min(1),
+  }),
+  body: z.object({
+    amount: z.number().positive().optional(),
+    quantity: z.number().int().positive().optional(),
+    tipAmount: z.number().nonnegative().optional(),
+    customerEmail: z.string().email('Email inválido').optional(),
+    customFieldResponses: z.record(z.string()).optional(),
   }),
 })

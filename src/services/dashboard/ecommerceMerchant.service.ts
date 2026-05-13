@@ -18,6 +18,7 @@ import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppE
 import logger from '@/config/logger'
 import { generateAPIKeys } from '@/middlewares/sdk-auth.middleware'
 import { logAction } from './activity-log.service'
+import { getEcommercePlatformFeeBpsDefault } from '@/services/superadmin/platformSettings.service'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -26,7 +27,12 @@ import { logAction } from './activity-log.service'
 export interface CreateEcommerceMerchantData {
   venueId: string
   channelName: string
-  businessName: string
+  /**
+   * Legal business name. Optional from the client: for Stripe Connect, Stripe
+   * collects it during hosted onboarding, so the wizard only asks for
+   * channelName. The service defaults this to channelName when missing.
+   */
+  businessName?: string
   rfc?: string
   contactEmail: string
   contactPhone?: string
@@ -112,16 +118,32 @@ export async function createEcommerceMerchant(data: CreateEcommerceMerchantData)
     throw new NotFoundError(`Provider with ID ${data.providerId} not found`)
   }
 
-  // 4. Generate API keys (pk_live_xxx / sk_live_xxx or pk_test_xxx / sk_test_xxx)
-  const sandboxMode = data.sandboxMode ?? true
+  // 4. Resolve sandbox mode.
+  //
+  // For Stripe Connect, the client never picks test vs live — Stripe routes
+  // requests based on which API key the platform is using. Derive from the
+  // STRIPE_SECRET_KEY prefix so the UI badge matches the actual environment
+  // (sk_test_* → sandbox, sk_live_* → live).
+  //
+  // Other providers (Blumon, etc.) honor whatever the client passed.
+  const isStripeConnect = provider.code === 'STRIPE_CONNECT'
+  const sandboxMode = isStripeConnect ? !(process.env.STRIPE_SECRET_KEY ?? '').startsWith('sk_live_') : (data.sandboxMode ?? true)
+
+  // 5. Generate API keys (pk_live_xxx / sk_live_xxx or pk_test_xxx / sk_test_xxx)
   const { publicKey, secretKey, secretKeyHash } = generateAPIKeys(sandboxMode)
+
+  // 6. Resolve the platform fee default from PlatformSettings (singleton).
+  //    The DB column still has a hardcoded @default(100) at the Prisma layer
+  //    as a safety net, but this overrides it so Avoqado can adjust the
+  //    default fee for new merchants without touching code.
+  const platformFeeBpsDefault = await getEcommercePlatformFeeBpsDefault()
 
   // 5. Create merchant
   const merchant = await prisma.ecommerceMerchant.create({
     data: {
       venueId: data.venueId,
       channelName: data.channelName,
-      businessName: data.businessName,
+      businessName: data.businessName?.trim() || data.channelName,
       rfc: data.rfc,
       contactEmail: data.contactEmail,
       contactPhone: data.contactPhone,
@@ -137,6 +159,7 @@ export async function createEcommerceMerchant(data: CreateEcommerceMerchantData)
       dashboardUserId: data.dashboardUserId,
       active: data.active ?? true,
       sandboxMode,
+      platformFeeBps: platformFeeBpsDefault,
     },
     include: {
       venue: {
@@ -524,6 +547,50 @@ export async function regenerateAPIKeys(merchantId: string, venueId?: string) {
 }
 
 /**
+ * Updates the platform fee (Avoqado's margin) on an e-commerce merchant.
+ *
+ * Range validation is in the controller — this only does ownership/existence
+ * checks and the update. Caller is responsible for SUPERADMIN authorization
+ * (route middleware enforces it).
+ *
+ * @param merchantId - E-commerce merchant ID
+ * @param venueId - Venue ID for authorization scope (must match merchant)
+ * @param platformFeeBps - New fee in basis points (integer, 0-3000)
+ */
+export async function updatePlatformFeeBps(merchantId: string, venueId: string, platformFeeBps: number) {
+  const existing = await prisma.ecommerceMerchant.findUnique({
+    where: { id: merchantId },
+    select: { id: true, venueId: true, channelName: true, platformFeeBps: true },
+  })
+
+  if (!existing) throw new NotFoundError(`E-commerce merchant with ID ${merchantId} not found`)
+  if (existing.venueId !== venueId) throw new UnauthorizedError('Unauthorized access to this e-commerce merchant')
+
+  const updated = await prisma.ecommerceMerchant.update({
+    where: { id: merchantId },
+    data: { platformFeeBps },
+    select: { id: true, channelName: true, platformFeeBps: true },
+  })
+
+  logger.info('Platform fee updated for e-commerce merchant', {
+    merchantId,
+    venueId,
+    oldFeeBps: existing.platformFeeBps,
+    newFeeBps: platformFeeBps,
+  })
+
+  logAction({
+    venueId,
+    action: 'ECOMMERCE_MERCHANT_PLATFORM_FEE_UPDATED',
+    entity: 'EcommerceMerchant',
+    entityId: merchantId,
+    data: { oldFeeBps: existing.platformFeeBps, newFeeBps: platformFeeBps } as Prisma.InputJsonValue,
+  })
+
+  return updated
+}
+
+/**
  * Deletes an e-commerce merchant
  * ⚠️ CASCADE: Also deletes all checkout sessions
  *
@@ -534,7 +601,14 @@ export async function deleteEcommerceMerchant(merchantId: string, venueId?: stri
   // 1. Verify merchant exists and authorize
   const existing = await prisma.ecommerceMerchant.findUnique({
     where: { id: merchantId },
-    select: { id: true, venueId: true, channelName: true },
+    select: {
+      id: true,
+      venueId: true,
+      channelName: true,
+      chargesEnabled: true,
+      onboardingStatus: true,
+      provider: { select: { code: true } },
+    },
   })
 
   if (!existing) {
@@ -545,21 +619,54 @@ export async function deleteEcommerceMerchant(merchantId: string, venueId?: stri
     throw new UnauthorizedError('Unauthorized access to this e-commerce merchant')
   }
 
-  // 2. Check if there are active checkout sessions
-  const activeSessions = await prisma.checkoutSession.count({
-    where: {
-      ecommerceMerchantId: merchantId,
-      status: {
-        in: ['PENDING', 'PROCESSING'],
-      },
-    },
-  })
-
-  if (activeSessions > 0) {
-    throw new BadRequestError(`Cannot delete merchant with ${activeSessions} active checkout sessions. Cancel them first.`)
+  // 2. Soft-delete gate for Stripe Connect.
+  //
+  // If a Stripe Connect account is fully onboarded (charges enabled) we refuse
+  // hard delete: there's a live `acct_*` in Stripe that can still receive
+  // disputes, chargebacks and payouts. Hard-deleting our row would orphan it.
+  //
+  // The OWNER should use the "Desactivar" flow (toggle endpoint sets
+  // active=false) which pauses operations but preserves the Stripe account
+  // and audit trail. Permanent removal requires SUPERADMIN offboarding via
+  // /superadmin/stripe-connect/offboard (which also surfaces disputes /
+  // refunds / paid deposits that need attention first).
+  if (existing.provider?.code === 'STRIPE_CONNECT' && existing.chargesEnabled) {
+    throw new BadRequestError(
+      'Esta cuenta de Stripe ya está activa y procesando pagos. No se puede eliminar directamente. Usa "Desactivar" para pausar el canal — para eliminarla permanentemente contacta a soporte (requiere offboarding de Stripe).',
+    )
   }
 
-  // 3. Delete merchant (cascade will delete checkout sessions)
+  // 3. Check for blockers (FK constraints). Active checkout sessions are
+  // payments in progress — blocking is obvious. Payment links also reference
+  // the merchant and the Prisma relation is Restrict by default, so they too
+  // need to be cleaned up first.
+  const [activeSessions, linkedPaymentLinks] = await Promise.all([
+    prisma.checkoutSession.count({
+      where: {
+        ecommerceMerchantId: merchantId,
+        status: { in: ['PENDING', 'PROCESSING'] },
+      },
+    }),
+    prisma.paymentLink.count({ where: { ecommerceMerchantId: merchantId } }),
+  ])
+
+  if (activeSessions > 0) {
+    throw new BadRequestError(
+      `No se puede eliminar este canal: tiene ${activeSessions} sesi${activeSessions === 1 ? 'ón' : 'ones'} de pago activa${
+        activeSessions === 1 ? '' : 's'
+      }. Cancela esas sesiones e inténtalo de nuevo.`,
+    )
+  }
+
+  if (linkedPaymentLinks > 0) {
+    throw new BadRequestError(
+      `No se puede eliminar este canal: tiene ${linkedPaymentLinks} liga${linkedPaymentLinks === 1 ? '' : 's'} de pago asociada${
+        linkedPaymentLinks === 1 ? '' : 's'
+      }. Archívalas o elimínalas desde "Ligas de pago" primero.`,
+    )
+  }
+
+  // 3. Delete merchant (cascade will delete remaining non-active checkout sessions)
   await prisma.ecommerceMerchant.delete({
     where: { id: merchantId },
   })

@@ -36,7 +36,12 @@ async function getStripeConnectMerchant(venueId: string, merchantId: string) {
   return merchant
 }
 
-export async function createStripeOnboardingLink(venueId: string, merchantId: string, businessType: StripeBusinessType) {
+export async function createStripeOnboardingLink(
+  venueId: string,
+  merchantId: string,
+  businessType: StripeBusinessType,
+  returnPath?: string,
+) {
   const merchant = await getStripeConnectMerchant(venueId, merchantId)
   const providerCredentials = {
     ...toJsonObject(merchant.providerCredentials),
@@ -52,7 +57,7 @@ export async function createStripeOnboardingLink(venueId: string, merchantId: st
   })
 
   const provider = getProvider(merchantWithBusinessType)
-  return provider.createOnboardingLink(merchantWithBusinessType)
+  return provider.createOnboardingLink(merchantWithBusinessType, returnPath)
 }
 
 export async function getStripeOnboardingStatus(venueId: string, merchantId: string) {

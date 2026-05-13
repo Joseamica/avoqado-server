@@ -58,6 +58,54 @@ export async function createCheckout(req: Request, res: Response) {
 }
 
 /**
+ * POST /api/v1/public/payment-links/:shortCode/stripe-checkout
+ *
+ * Stripe Connect hosted-checkout entry point. The customer never enters card
+ * details on Avoqado's domain — we create a Stripe Checkout Session with
+ * `application_fee_amount` (Avoqado's margin) and return the redirect URL.
+ * The public checkout site (pay.avoqado.io) `window.location.assign`s to it.
+ *
+ * Body: { amount?, quantity?, tipAmount?, customerEmail?, customFieldResponses?, returnUrl? }
+ */
+export async function createStripeCheckout(req: Request, res: Response) {
+  try {
+    const { shortCode } = req.params
+    const result = await paymentLinkService.createStripeCheckoutForPaymentLink(shortCode, req.body)
+    res.status(201).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error('Error creating Stripe checkout for payment link:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'Error al iniciar pago con Stripe',
+    })
+  }
+}
+
+/**
+ * POST /api/v1/public/payment-links/:shortCode/payment-intent
+ *
+ * Stripe Connect Elements (inline) entry point. Creates a PaymentIntent on
+ * the connected account with Avoqado's `application_fee_amount` and returns
+ * the `client_secret` for the public checkout site to render Stripe Elements
+ * inline. Customer never leaves `pay.avoqado.io`.
+ *
+ * Body: { amount?, quantity?, tipAmount?, customerEmail?, customFieldResponses? }
+ */
+export async function createStripePaymentIntent(req: Request, res: Response) {
+  try {
+    const { shortCode } = req.params
+    const result = await paymentLinkService.createStripePaymentIntentForPaymentLink(shortCode, req.body)
+    res.status(201).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error('Error creating Stripe PaymentIntent for payment link:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'Error al iniciar pago con Stripe',
+    })
+  }
+}
+
+/**
  * POST /api/v1/public/payment-links/:shortCode/charge
  * Completes the charge after 3DS (if applicable)
  */

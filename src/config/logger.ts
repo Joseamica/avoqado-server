@@ -1,5 +1,6 @@
 import winston from 'winston'
 import path from 'path'
+import { inspect } from 'util'
 
 const { combine, timestamp, printf, colorize, json, splat } = winston.format
 
@@ -52,7 +53,10 @@ const consoleFormat = printf(info => {
   )
 
   if (Object.keys(metadata).length > 0) {
-    msg += ` ${JSON.stringify(metadata)}`
+    // util.inspect handles circular refs natively (AxiosError, ClientRequest,
+    // IncomingMessage all contain them). Using JSON.stringify here would throw
+    // TypeError inside Winston's async transform stream → unhandledRejection.
+    msg += ` ${inspect(metadata, { depth: 4, breakLength: 120, colors: false })}`
   }
   return msg
 })

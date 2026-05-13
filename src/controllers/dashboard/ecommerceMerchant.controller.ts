@@ -15,7 +15,51 @@
 
 import { Request, Response } from 'express'
 import * as ecommerceMerchantService from '@/services/dashboard/ecommerceMerchant.service'
+import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AVAILABLE PROVIDERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/ecommerce-merchants/available-providers
+ *
+ * Lists payment providers that can be used to set up an e-commerce channel
+ * for this venue. Accessible to anyone with venue access — the full
+ * /superadmin/payment-providers list is locked behind `system:manage` and not
+ * usable by venue OWNERs setting up their own ecommerce.
+ *
+ * Returns provider metadata only (id, code, name, configSchema). No secrets.
+ */
+export async function listAvailableProviders(req: Request, res: Response) {
+  try {
+    const providers = await prisma.paymentProvider.findMany({
+      where: { active: true },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        type: true,
+        countryCode: true,
+        configSchema: true,
+      },
+      orderBy: { name: 'asc' },
+    })
+
+    res.json({
+      success: true,
+      data: providers,
+      meta: { count: providers.length },
+    })
+  } catch (error: any) {
+    logger.error('Error listing available providers:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'Failed to list available providers',
+    })
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LIST & GET
@@ -227,6 +271,49 @@ export async function regenerateAPIKeys(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Failed to regenerate API keys',
+    })
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLATFORM FEE (SUPERADMIN)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * PATCH /api/v1/dashboard/venues/:venueId/ecommerce-merchants/:id/platform-fee
+ *
+ * Body: { platformFeeBps: number }
+ *
+ * Validates the value is an integer between 0 and 3000 basis points (0% to
+ * 30%). Anything more than 30% would be commercially absurd and probably
+ * indicates the caller meant decimal percent (e.g. sent `5` thinking 5%
+ * when they should have sent `500`).
+ */
+export async function updatePlatformFee(req: Request, res: Response) {
+  try {
+    const { venueId, id } = req.params
+    const { platformFeeBps } = req.body as { platformFeeBps?: number }
+
+    if (typeof platformFeeBps !== 'number' || !Number.isInteger(platformFeeBps)) {
+      return res.status(400).json({
+        success: false,
+        error: 'platformFeeBps debe ser un entero (puntos base, ej. 100 = 1%)',
+      })
+    }
+    if (platformFeeBps < 0 || platformFeeBps > 3000) {
+      return res.status(400).json({
+        success: false,
+        error: 'platformFeeBps debe estar entre 0 y 3000 (0% a 30%)',
+      })
+    }
+
+    const updated = await ecommerceMerchantService.updatePlatformFeeBps(id, venueId, platformFeeBps)
+    res.json({ success: true, data: updated })
+  } catch (error: any) {
+    logger.error('Error updating platform fee:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'Failed to update platform fee',
     })
   }
 }

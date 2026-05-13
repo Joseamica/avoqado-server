@@ -4,6 +4,8 @@ import * as costManagementController from '../../controllers/dashboard/cost-mana
 import * as venuePaymentReadinessController from '../../controllers/dashboard/venuePaymentReadiness.controller'
 import * as venuesSuperadminController from '../../controllers/dashboard/venues.superadmin.controller'
 import * as serverMetricsController from '../../controllers/dashboard/serverMetrics.controller'
+import * as platformSettingsController from '../../controllers/superadmin/platformSettings.controller'
+import * as ecommerceMerchantsSuperadminController from '../../controllers/superadmin/ecommerceMerchants.superadmin.controller'
 
 import { validateRequest } from '../../middlewares/validation'
 
@@ -328,6 +330,14 @@ router.get('/profit/export', validateRequest(exportProfitDataQuerySchema), costM
 // Support endpoints for dropdowns and selection
 router.get('/providers', superadminController.getProvidersList)
 router.get('/merchant-accounts/list', validateRequest(merchantAccountsQuerySchema), superadminController.getMerchantAccountsList)
+
+// ───── Platform Settings (global Avoqado config — singleton)
+router.get('/platform-settings', platformSettingsController.getPlatformSettings)
+router.patch('/platform-settings', platformSettingsController.updatePlatformSettings)
+
+// ───── E-commerce Merchants (cross-venue view, fee management)
+router.get('/ecommerce-merchants', ecommerceMerchantsSuperadminController.listAllEcommerceMerchants)
+router.get('/ecommerce-merchants/:id/fee-history', ecommerceMerchantsSuperadminController.getMerchantFeeHistory)
 
 // Payment Provider Management
 router.use('/payment-providers', paymentProviderRoutes)
