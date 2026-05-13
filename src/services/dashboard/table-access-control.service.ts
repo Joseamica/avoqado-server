@@ -201,6 +201,18 @@ export class TableAccessControlService {
       reason: 'Reservation data contains guest PII and deposit details',
     },
     {
+      table: 'CommissionSummary',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Commission summaries contain staff compensation data',
+    },
+    {
+      table: 'CommissionCalculation',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Commission calculations contain staff compensation data',
+    },
+    {
       table: 'ClassSession',
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,

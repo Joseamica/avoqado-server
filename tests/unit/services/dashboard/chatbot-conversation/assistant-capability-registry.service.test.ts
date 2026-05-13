@@ -114,6 +114,46 @@ describe('AssistantCapabilityRegistryService', () => {
     expect(executableIds).toContain('payments.list')
   })
 
+  it('registers customer, team, commission, and payment link summary read tools', () => {
+    const executableIds = registry.listExecutableCapabilities().map(capability => capability.id)
+
+    expect(registry.getCapability('customers.summary')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['customers:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('team.members')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['teams:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('commissions.summary')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['commissions:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(registry.getCapability('paymentLinks.summary')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['payment-link:read'],
+        riskLevel: 'low',
+      }),
+    )
+    expect(executableIds).toEqual(
+      expect.arrayContaining(['customers.summary', 'team.members', 'commissions.summary', 'paymentLinks.summary']),
+    )
+  })
+
   it('registers product how-to capabilities without business-data access', () => {
     const capability = registry.getCapability('howTo.teamInvite')
 

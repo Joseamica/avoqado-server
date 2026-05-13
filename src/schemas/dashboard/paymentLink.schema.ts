@@ -344,6 +344,40 @@ export const publicSessionSchema = z.object({
 })
 
 /**
+ * Body schema for `POST /payment-links/:shortCode/send-receipt-whatsapp`.
+ * Used by the customer-facing checkout to send their Stripe-hosted receipt
+ * to a phone number via the venue's pre-approved WhatsApp template.
+ */
+export const publicSendReceiptWhatsappSchema = z.object({
+  params: z.object({
+    shortCode: z.string().min(1),
+  }),
+  body: z.object({
+    sessionId: z.string().min(1, 'Sesión requerida'),
+    phone: z
+      .string()
+      .min(10, 'Teléfono inválido')
+      .max(20, 'Teléfono inválido')
+      .regex(/^[+\d\s\-()]+$/, 'Teléfono inválido'),
+  }),
+})
+
+/**
+ * Body schema for `POST /payment-links/:shortCode/send-receipt-email`.
+ * Used by the customer-facing checkout to email the Stripe-hosted receipt
+ * to a customer-supplied address.
+ */
+export const publicSendReceiptEmailSchema = z.object({
+  params: z.object({
+    shortCode: z.string().min(1),
+  }),
+  body: z.object({
+    sessionId: z.string().min(1, 'Sesión requerida'),
+    email: z.string().email('Correo inválido'),
+  }),
+})
+
+/**
  * Body schema for `POST /payment-links/:shortCode/stripe-checkout`.
  *
  * All fields optional — Stripe collects card data itself. Customer email +

@@ -42,9 +42,12 @@ import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { PaymentMethod, Prisma, ReservationStatus } from '@prisma/client'
 import * as availableBalanceService from './availableBalance.dashboard.service'
+import * as commissionCalculationService from './commission/commission-calculation.service'
+import * as customerDashboardService from './customer.dashboard.service'
 import * as paymentDashboardService from './payment.dashboard.service'
 import * as paymentLinkService from './paymentLink.service'
 import * as reservationService from './reservation.dashboard.service'
+import * as teamDashboardService from './team.dashboard.service'
 
 /**
  * Date range specification - supports both predefined periods and custom ranges
@@ -336,6 +339,61 @@ export interface PaymentLinksSummary {
     createdAt: Date
     expiresAt: Date | null
     createdByName: string | null
+  }>
+}
+
+export interface PaymentLinksAggregateSummary {
+  totalLinks: number
+  activeLinks: number
+  pausedLinks: number
+  fixedAmountLinks: number
+  openAmountLinks: number
+  totalCollected: number
+  paymentCount: number
+  checkoutSessionCount: number
+  currency: string
+}
+
+export interface CustomerSummary {
+  totalCustomers: number
+  activeCustomers: number
+  newCustomersThisMonth: number
+  vipCustomers: number
+  averageLifetimeValue: number
+  averageVisitsPerCustomer: number
+  topSpenders: Array<{
+    name: string
+    totalSpent: number
+    totalVisits: number
+  }>
+}
+
+export interface TeamMembersSummary {
+  total: number
+  limit: number
+  members: Array<{
+    staffVenueId: string
+    staffId: string
+    name: string
+    role: string
+    active: boolean
+    totalSales: number
+    totalTips: number
+    totalOrders: number
+    permissionSetName: string | null
+  }>
+}
+
+export interface CommissionsSummary {
+  totalPaid: number
+  totalPending: number
+  totalApproved: number
+  staffWithCommissions: number
+  averageCommission: number
+  topEarners: Array<{
+    staffName: string
+    totalEarned: number
+    calculationCount: number
   }>
 }
 
@@ -1524,6 +1582,111 @@ export class SharedQueryService {
         createdAt: link.createdAt,
         expiresAt: link.expiresAt,
         createdByName: link.createdBy ? `${link.createdBy.firstName || ''} ${link.createdBy.lastName || ''}`.trim() || null : null,
+      })),
+    }
+  }
+
+  /**
+   * Summarize payment links for the current venue.
+   *
+   * Used by:
+   * - AI Chatbot for "resumen de links de pago" queries
+   */
+  static async getPaymentLinksSummary(venueId: string): Promise<PaymentLinksAggregateSummary> {
+    const result = await paymentLinkService.getPaymentLinks(venueId, { limit: 100, offset: 0 })
+    const links = result.paymentLinks
+    const currency = links[0]?.currency || 'MXN'
+
+    return {
+      totalLinks: result.total,
+      activeLinks: links.filter(link => link.status === 'ACTIVE').length,
+      pausedLinks: links.filter(link => link.status === 'PAUSED').length,
+      fixedAmountLinks: links.filter(link => link.amountType === 'FIXED').length,
+      openAmountLinks: links.filter(link => link.amountType === 'OPEN').length,
+      totalCollected: links.reduce((sum, link) => sum + this.numberValue(link.totalCollected), 0),
+      paymentCount: links.reduce((sum, link) => sum + Number(link.paymentCount || 0), 0),
+      checkoutSessionCount: links.reduce((sum, link) => sum + Number(link._count?.checkoutSessions || 0), 0),
+      currency,
+    }
+  }
+
+  /**
+   * Summarize customers for the current venue without exposing PII.
+   *
+   * Used by:
+   * - Dashboard customer stats endpoint
+   * - AI Chatbot for "resumen de clientes" queries
+   */
+  static async getCustomerSummary(venueId: string): Promise<CustomerSummary> {
+    const stats = await customerDashboardService.getCustomerStats(venueId)
+
+    return {
+      totalCustomers: stats.totalCustomers,
+      activeCustomers: stats.activeCustomers,
+      newCustomersThisMonth: stats.newCustomersThisMonth,
+      vipCustomers: stats.vipCustomers,
+      averageLifetimeValue: stats.averageLifetimeValue,
+      averageVisitsPerCustomer: stats.averageVisitsPerCustomer,
+      topSpenders: stats.topSpenders.map(customer => ({
+        name: customer.name,
+        totalSpent: customer.totalSpent,
+        totalVisits: customer.totalVisits,
+      })),
+    }
+  }
+
+  /**
+   * List team members for the current venue with credential/contact fields removed.
+   *
+   * Used by:
+   * - Dashboard team list endpoint
+   * - AI Chatbot for "quién está en mi equipo" queries
+   */
+  static async getTeamMembers(
+    venueId: string,
+    filters: { search?: string; limit?: number; page?: number } = {},
+  ): Promise<TeamMembersSummary> {
+    const pageSize = Math.min(Math.max(Math.trunc(Number(filters.limit) || 10), 1), 25)
+    const page = Math.min(Math.max(Math.trunc(Number(filters.page) || 1), 1), 1000)
+    const result = await teamDashboardService.getTeamMembers(venueId, page, pageSize, filters.search)
+
+    return {
+      total: result.meta.totalCount,
+      limit: result.meta.pageSize,
+      members: result.data.map(member => ({
+        staffVenueId: member.id,
+        staffId: member.staffId,
+        name: `${member.firstName || ''} ${member.lastName || ''}`.trim() || 'Sin nombre',
+        role: member.role,
+        active: member.active,
+        totalSales: this.numberValue(member.totalSales),
+        totalTips: this.numberValue(member.totalTips),
+        totalOrders: Number(member.totalOrders || 0),
+        permissionSetName: member.permissionSetName,
+      })),
+    }
+  }
+
+  /**
+   * Summarize commissions for the current venue.
+   *
+   * Used by:
+   * - Dashboard commission stats endpoint
+   * - AI Chatbot for "cómo van mis comisiones" queries
+   */
+  static async getCommissionsSummary(venueId: string): Promise<CommissionsSummary> {
+    const stats = await commissionCalculationService.getVenueCommissionStats(venueId)
+
+    return {
+      totalPaid: stats.totalPaid,
+      totalPending: stats.totalPending,
+      totalApproved: stats.totalApproved,
+      staffWithCommissions: stats.staffWithCommissions,
+      averageCommission: stats.averageCommission,
+      topEarners: stats.topEarners.map(earner => ({
+        staffName: earner.staffName,
+        totalEarned: earner.totalEarned,
+        calculationCount: earner.calculationCount,
       })),
     }
   }

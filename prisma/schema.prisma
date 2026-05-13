@@ -2461,6 +2461,18 @@ model Payment {
   maskedPan String? // "411111******1111"
   entryMode CardEntryMode? // CONTACTLESS, CHIP, SWIPE, etc.
 
+  /// Stripe-hosted receipt URL (charges.data[0].receipt_url) — captured at
+  /// webhook completion for Stripe Connect payments so the customer
+  /// checkout can offer "Ver recibo" without re-hitting Stripe.
+  receiptUrl String? @db.VarChar(500)
+
+  /// EcommerceMerchant (Stripe Connect / Blumon channel) this payment was
+  /// processed through. Distinct from `merchantAccountId` which tracks the
+  /// in-person POS Banorte/Menta account. Set only for payments originating
+  /// from a CheckoutSession (payment links + future SDK checkouts).
+  ecommerceMerchantId String?
+  ecommerceMerchant   EcommerceMerchant? @relation(fields: [ecommerceMerchantId], references: [id], onDelete: SetNull)
+
   // Fee calculation
   feePercentage Decimal @db.Decimal(5, 4)
   feeAmount     Decimal @db.Decimal(10, 2)
@@ -2519,6 +2531,7 @@ model Payment {
   @@index([venueId, status, createdAt])
   @@index([merchantAccountId, createdAt])
   @@index([venueId, externalSource])
+  @@index([ecommerceMerchantId])
 }
 
 model PaymentAllocation {
@@ -3270,6 +3283,7 @@ model EcommerceMerchant {
   // Relations
   checkoutSessions CheckoutSession[]
   paymentLinks     PaymentLink[]
+  payments         Payment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

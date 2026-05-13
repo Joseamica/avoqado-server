@@ -1,14 +1,14 @@
 # Assistant Capabilities
 
-Generated: 2026-05-13T03:46:53.293Z
+Generated: 2026-05-13T13:29:41.294Z
 
 ## Summary
 
-- Total capabilities: 70
-- Status: registered 58, backlog 9, blocked 3
-- Kind: action 37, query 26, howTo 5, blocked 2
-- Risk: low 36, medium 22, high 9, critical 3
-- Scope: venue 69, superadmin 1
+- Total capabilities: 72
+- Status: registered 62, backlog 7, blocked 3
+- Kind: action 37, query 28, howTo 5, blocked 2
+- Risk: low 36, medium 24, high 9, critical 3
+- Scope: venue 71, superadmin 1
 
 ## Registered Executable Capabilities
 
@@ -18,6 +18,8 @@ Generated: 2026-05-13T03:46:53.293Z
 - `alert.resolve` (action, low) — permissions: inventory:update; source: alertService.resolveAlert
 - `averageTicket` (query, low) — permissions: payments:read, orders:read; source: shared_query.averageTicket
 - `businessOverview` (query, low) — permissions: payments:read, orders:read, reviews:read; source: shared_query.businessOverview
+- `commissions.summary` (query, medium) — permissions: commissions:read; source: shared_query.commissions.summary
+- `customers.summary` (query, medium) — permissions: customers:read; source: shared_query.customers.summary
 - `howTo.contactSupport` (howTo, low) — permissions: none; source: dashboard_knowledge_base
 - `howTo.paymentLinks` (howTo, low) — permissions: none; source: dashboard_knowledge_base
 - `howTo.permissions` (howTo, low) — permissions: none; source: dashboard_knowledge_base
@@ -50,6 +52,7 @@ Generated: 2026-05-13T03:46:53.293Z
 - `menu.product.delete` (action, high) — permissions: menu:delete; source: productService.deleteProduct
 - `menu.product.update` (action, medium) — permissions: menu:update; source: productService.updateProduct
 - `paymentLinks.list` (query, low) — permissions: payment-link:read; source: shared_query.paymentLinks.list
+- `paymentLinks.summary` (query, low) — permissions: payment-link:read; source: shared_query.paymentLinks.summary
 - `paymentMethodBreakdown` (query, low) — permissions: payments:read; source: shared_query.paymentMethodBreakdown
 - `payments.list` (query, medium) — permissions: payments:read; source: shared_query.payments.list
 - `payments.summary` (query, low) — permissions: payments:read; source: shared_query.payments.summary
@@ -69,19 +72,18 @@ Generated: 2026-05-13T03:46:53.293Z
 - `supplier.createPricing` (action, low) — permissions: inventory:create; source: supplierService.createSupplierPricing
 - `supplier.delete` (action, high) — permissions: inventory:delete; source: supplierService.deleteSupplier
 - `supplier.update` (action, medium) — permissions: inventory:update; source: supplierService.updateSupplier
+- `team.members` (query, medium) — permissions: teams:read; source: shared_query.team.members
 - `topProducts` (query, low) — permissions: orders:read, menu:read; source: shared_query.topProducts
 
 ## Backlog Contracts
 
 - `commissions.payouts` (query, medium) — permissions: commissions:payout; examples: payouts pendientes de comisiones
-- `commissions.summary` (query, low) — permissions: commissions:read; examples: comisiones de este mes
 - `creditPacks.balance` (query, medium) — permissions: credit-packs:read; examples: cuantos creditos le quedan a este cliente
 - `paymentLinks.create` (action, medium) — permissions: payment-link:create; examples: crea un link de pago por 500 pesos
 - `paymentLinks.detail` (query, low) — permissions: payment-link:read; examples: como va este link de pago
 - `reservations.cancel` (action, high) — permissions: reservations:update; examples: cancela esta reservacion
 - `reservations.create` (action, medium) — permissions: reservations:create; examples: crea una reservacion para hoy a las 8
 - `team.invite` (action, high) — permissions: team:invite; examples: invita a alguien a mi equipo
-- `team.members` (query, medium) — permissions: team:read; examples: quien esta en mi equipo
 
 ## Blocked Capabilities
 
@@ -103,8 +105,9 @@ Generated: 2026-05-13T03:46:53.293Z
 | `blocked.superadminSecrets` | blocked | blocked | superadmin | critical | - | - | security.blocklist |
 | `businessOverview` | query | registered | venue | low | payments:read, orders:read, reviews:read | - | shared_query.businessOverview |
 | `commissions.payouts` | query | backlog | venue | medium | commissions:payout | - | backlog |
-| `commissions.summary` | query | backlog | venue | low | commissions:read | - | backlog |
+| `commissions.summary` | query | registered | venue | medium | commissions:read | - | shared_query.commissions.summary |
 | `creditPacks.balance` | query | backlog | venue | medium | credit-packs:read | - | backlog |
+| `customers.summary` | query | registered | venue | medium | customers:read | - | shared_query.customers.summary |
 | `howTo.contactSupport` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
 | `howTo.paymentLinks` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
 | `howTo.permissions` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
@@ -139,6 +142,7 @@ Generated: 2026-05-13T03:46:53.293Z
 | `paymentLinks.create` | action | backlog | venue | medium | payment-link:create | single | backlog |
 | `paymentLinks.detail` | query | backlog | venue | low | payment-link:read | - | backlog |
 | `paymentLinks.list` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.list |
+| `paymentLinks.summary` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.summary |
 | `paymentMethodBreakdown` | query | registered | venue | low | payments:read | - | shared_query.paymentMethodBreakdown |
 | `payments.list` | query | registered | venue | medium | payments:read | - | shared_query.payments.list |
 | `payments.summary` | query | registered | venue | low | payments:read | - | shared_query.payments.summary |
@@ -161,5 +165,5 @@ Generated: 2026-05-13T03:46:53.293Z
 | `supplier.delete` | action | registered | venue | high | inventory:delete | double | supplierService.deleteSupplier |
 | `supplier.update` | action | registered | venue | medium | inventory:update | single | supplierService.updateSupplier |
 | `team.invite` | action | backlog | venue | high | team:invite | double | backlog |
-| `team.members` | query | backlog | venue | medium | team:read | - | backlog |
+| `team.members` | query | registered | venue | medium | teams:read | - | shared_query.team.members |
 | `topProducts` | query | registered | venue | low | orders:read, menu:read | - | shared_query.topProducts |

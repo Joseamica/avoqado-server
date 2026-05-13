@@ -14,7 +14,7 @@ de capacidades registradas del backend:
 
 El servidor tiene una superficie grande: en el barrido local se detectaron alrededor de 1,238 handlers de rutas, con mayor concentracion en
 `dashboard`, `tpv`, `mobile`, `dashboard/inventory`, `dashboard/commission`, `storesAnalysis`, `organizationDashboard`, `superadmin`,
-`reservations` y `payment-links`.
+`reservations`, `payment-links`, `customers` y `team`.
 
 El asistente conversacional no debe exponer esas rutas directamente. Debe cubrirlas por capacidades. Hoy la cobertura esta concentrada en
 analitica basica e inventario:
@@ -37,9 +37,9 @@ Salidas generadas:
 Ultima corrida local:
 
 - Endpoints detectados: 1,337
-- Sin capacidad mapeada: 615
+- Sin capacidad mapeada: 507
 - Bloqueados por default: 382
-- Parcialmente cubiertos: 335
+- Parcialmente cubiertos: 443
 - Cubiertos por heuristica exacta: 5
 
 El auditor extrae metodo, path, permisos directos/heredados, schemas de `validateRequest`, controller, servicios usados por el controller
@@ -74,8 +74,12 @@ archivo es la fuente de verdad para distinguir:
 - `payments.list`
 - `settlementCalendar`
 - `paymentLinks.list`
+- `paymentLinks.summary`
 - `reservations.summary`
 - `reservations.list`
+- `customers.summary`
+- `team.members`
+- `commissions.summary`
 - `adHocAnalytics`
 
 `adHocAnalytics` existe como fallback, pero no debe ser la estrategia de cobertura principal en produccion. Para estabilidad y seguridad,
@@ -169,10 +173,10 @@ Prioridad alta:
 
 - `settlements.detail`
 - `payments.detail`
-- `paymentLinks.summary`
-- `commissions.summary`
-- `customers.summary`
-- `team.members`
+- `paymentLinks.detail`
+- `commissions.payouts`
+- `customers.detail`
+- `creditPacks.balance`
 
 ### Fase 2: ayuda operativa
 

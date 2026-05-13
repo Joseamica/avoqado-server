@@ -137,6 +137,16 @@ export async function getPaymentsData(
           provider: { select: { id: true, code: true, name: true } },
         },
       },
+      // E-commerce merchant (Stripe Connect / Blumon channel) for payment-link
+      // rows. Dashboard's "Cuenta Comercial" column falls back to this when
+      // merchantAccount is null.
+      ecommerceMerchant: {
+        select: {
+          id: true,
+          channelName: true,
+          provider: { select: { id: true, code: true, name: true } },
+        },
+      },
       transactionCost: true,
     }
 
@@ -195,6 +205,13 @@ export async function getPaymentsData(
                 name: true,
               },
             },
+          },
+        },
+        ecommerceMerchant: {
+          select: {
+            id: true,
+            channelName: true,
+            provider: { select: { id: true, code: true, name: true } },
           },
         },
         transactionCost: true, // Include profit/cost information for SUPERADMIN
@@ -263,6 +280,13 @@ export async function getPaymentById(venueId: string, paymentId: string) {
               name: true,
             },
           },
+        },
+      },
+      ecommerceMerchant: {
+        select: {
+          id: true,
+          channelName: true,
+          provider: { select: { id: true, code: true, name: true } },
         },
       },
       transactionCost: true, // Include profit/cost information

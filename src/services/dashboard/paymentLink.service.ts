@@ -21,6 +21,7 @@ import emailService from '@/services/email.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
+import { sendReceiptWhatsApp } from '@/services/whatsapp.service'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -1195,6 +1196,78 @@ function mapStripeMethodToPaymentMethod(
   return 'OTHER'
 }
 
+/** Translate Stripe's lowercase brand strings into our CardBrand enum.
+ *  Stripe values: 'visa' | 'mastercard' | 'amex' | 'discover' | 'diners' |
+ *  'jcb' | 'unionpay' | 'unknown'. Anything we can't map → OTHER so reports
+ *  stay grouped instead of falling to NULL. */
+function mapStripeCardBrandToEnum(
+  brand: string | null | undefined,
+):
+  | 'VISA'
+  | 'MASTERCARD'
+  | 'AMERICAN_EXPRESS'
+  | 'DISCOVER'
+  | 'DINERS_CLUB'
+  | 'JCB'
+  | 'MAESTRO'
+  | 'UNIONPAY'
+  | 'ELO'
+  | 'HIPERCARD'
+  | 'OTHER'
+  | undefined {
+  if (!brand) return undefined
+  switch (brand) {
+    case 'visa':
+      return 'VISA'
+    case 'mastercard':
+      return 'MASTERCARD'
+    case 'amex':
+      return 'AMERICAN_EXPRESS'
+    case 'discover':
+      return 'DISCOVER'
+    case 'diners':
+      return 'DINERS_CLUB'
+    case 'jcb':
+      return 'JCB'
+    case 'unionpay':
+      return 'UNIONPAY'
+    default:
+      return 'OTHER'
+  }
+}
+
+/** Blumon returns uppercase brand strings (VISA, MASTERCARD, AMEX). Map to
+ *  our enum, falling back to OTHER for anything unexpected. */
+function mapBlumonCardBrandToEnum(
+  brand: unknown,
+):
+  | 'VISA'
+  | 'MASTERCARD'
+  | 'AMERICAN_EXPRESS'
+  | 'DISCOVER'
+  | 'DINERS_CLUB'
+  | 'JCB'
+  | 'MAESTRO'
+  | 'UNIONPAY'
+  | 'ELO'
+  | 'HIPERCARD'
+  | 'OTHER'
+  | undefined {
+  if (typeof brand !== 'string' || !brand) return undefined
+  const up = brand.toUpperCase()
+  if (up === 'VISA') return 'VISA'
+  if (up === 'MASTERCARD' || up === 'MASTER') return 'MASTERCARD'
+  if (up === 'AMEX' || up === 'AMERICAN_EXPRESS' || up === 'AMERICAN EXPRESS') return 'AMERICAN_EXPRESS'
+  if (up === 'DISCOVER') return 'DISCOVER'
+  if (up === 'DINERS' || up === 'DINERS_CLUB') return 'DINERS_CLUB'
+  if (up === 'JCB') return 'JCB'
+  if (up === 'MAESTRO') return 'MAESTRO'
+  if (up === 'UNIONPAY' || up === 'UNION_PAY') return 'UNIONPAY'
+  if (up === 'ELO') return 'ELO'
+  if (up === 'HIPERCARD') return 'HIPERCARD'
+  return 'OTHER'
+}
+
 export async function finalizePaymentLinkCheckout(args: {
   stripeSessionId: string
   paymentIntentId?: string | null
@@ -1222,6 +1295,11 @@ export async function finalizePaymentLinkCheckout(args: {
           },
         },
       },
+      // EcommerceMerchant gives us the connectAccountId we need to fetch
+      // full charge details (card brand / last4 / receipt_url) from Stripe.
+      ecommerceMerchant: {
+        select: { id: true, providerCredentials: true, provider: { select: { code: true } } },
+      },
     },
   })
 
@@ -1235,6 +1313,41 @@ export async function finalizePaymentLinkCheckout(args: {
   if (session.status === 'COMPLETED') {
     // Already processed — webhook retry. No-op.
     return
+  }
+
+  // Fetch charge details from Stripe (card brand, last4, receipt URL) using
+  // the connected account credentials. Best-effort: if Stripe is unreachable
+  // we still create the Payment row so finalization isn't blocked. The
+  // receipt URL is the most useful payload — `pay.avoqado.io` shows a
+  // "Ver recibo" button on success that links here.
+  const chargeDetails: {
+    cardBrand: string | null
+    last4: string | null
+    receiptUrl: string | null
+  } = { cardBrand: null, last4: null, receiptUrl: null }
+  const connectAccountId = (session.ecommerceMerchant?.providerCredentials as { connectAccountId?: string })?.connectAccountId
+  if (connectAccountId && args.paymentIntentId && session.ecommerceMerchant?.provider?.code === 'STRIPE_CONNECT') {
+    try {
+      const Stripe = (await import('stripe')).default
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2026-02-25.clover' as any })
+      const pi = await stripe.paymentIntents.retrieve(
+        args.paymentIntentId,
+        { expand: ['latest_charge'] },
+        { stripeAccount: connectAccountId },
+      )
+      const charge = typeof pi.latest_charge === 'object' && pi.latest_charge ? pi.latest_charge : null
+      if (charge) {
+        chargeDetails.receiptUrl = charge.receipt_url ?? null
+        const cardDetails = (charge.payment_method_details as { card?: { brand?: string; last4?: string } } | null)?.card
+        chargeDetails.cardBrand = cardDetails?.brand ?? null
+        chargeDetails.last4 = cardDetails?.last4 ?? null
+      }
+    } catch (err) {
+      logger.warn('Failed to fetch Stripe charge details (non-fatal)', {
+        paymentIntentId: args.paymentIntentId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
   }
 
   const metadata = (session.metadata ?? {}) as Record<string, any>
@@ -1371,6 +1484,10 @@ export async function finalizePaymentLinkCheckout(args: {
         // the attributions join table directly. When the link has no
         // attributions we leave processedById NULL and skip commission.
         processedById: primaryStaffId ?? undefined,
+        // Link to the EcommerceMerchant channel so the dashboard's "Cuenta
+        // Comercial" column can render which Stripe/Blumon channel
+        // processed this payment (vs the in-person Banorte/Menta accounts).
+        ecommerceMerchantId: session.ecommerceMerchant?.id,
         amount: grossForPayment,
         tipAmount,
         method,
@@ -1384,6 +1501,11 @@ export async function finalizePaymentLinkCheckout(args: {
         feePercentage,
         feeAmount,
         netAmount,
+        // Card brand + last 4 captured from the Stripe charge fetched above.
+        // Both nullable — async methods (OXXO, SPEI) won't populate them.
+        cardBrand: mapStripeCardBrandToEnum(chargeDetails.cardBrand),
+        maskedPan: chargeDetails.last4 ? `************${chargeDetails.last4}` : undefined,
+        receiptUrl: chargeDetails.receiptUrl ?? undefined,
         // Idempotency: PaymentIntent IDs are already unique per Stripe;
         // reuse as the key so duplicate webhooks (if they ever bypass the
         // ProcessedStripeEvent guard) still no-op via the unique index.
@@ -2116,6 +2238,9 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           venueId,
           orderId: order.id,
           processedById: primaryStaffId ?? undefined,
+          // Same EcommerceMerchant link as the Stripe path — drives the
+          // dashboard's "Cuenta Comercial" column for payment-link rows.
+          ecommerceMerchantId: session.ecommerceMerchant?.id,
           amount: subtotal,
           tipAmount: orderTipAmount,
           method: 'CREDIT_CARD',
@@ -2127,6 +2252,10 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           feePercentage: 0,
           feeAmount: 0,
           netAmount: subtotal,
+          // Card details captured at tokenize time + persisted in
+          // CheckoutSession.metadata (see createCheckoutSession).
+          cardBrand: mapBlumonCardBrandToEnum(metadata.cardBrand),
+          maskedPan: typeof metadata.maskedPan === 'string' ? metadata.maskedPan : undefined,
           idempotencyKey: chargeResult.transactionId,
         },
         select: { id: true },
@@ -2243,6 +2372,29 @@ export async function getSessionStatus(shortCode: string, sessionId: string) {
     throw new BadRequestError('Sesión no pertenece a esta liga de pago')
   }
 
+  // After completion, look up the Payment that finalize created — gives the
+  // customer-checkout success page the data it needs for the "Ver recibo"
+  // link + the masked card line ("Visa •••• 4242"). We don't expose it
+  // before status === COMPLETED to avoid leaking partial card details from
+  // an in-flight charge.
+  let payment: { receiptUrl: string | null; cardBrand: string | null; last4: string | null } | null = null
+  if (session.status === 'COMPLETED') {
+    const p = await prisma.payment.findFirst({
+      where: { processorId: sessionId },
+      select: { receiptUrl: true, cardBrand: true, maskedPan: true },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (p) {
+      payment = {
+        receiptUrl: p.receiptUrl,
+        cardBrand: p.cardBrand,
+        // maskedPan is stored as ************4242 — extract the last 4 for
+        // the UI so the customer-facing page doesn't have to parse it.
+        last4: p.maskedPan ? p.maskedPan.replace(/^[*]+/, '').slice(-4) : null,
+      }
+    }
+  }
+
   return {
     sessionId: session.sessionId,
     status: session.status,
@@ -2251,5 +2403,130 @@ export async function getSessionStatus(shortCode: string, sessionId: string) {
     completedAt: session.completedAt,
     errorMessage: session.errorMessage,
     redirectUrl: session.paymentLink?.redirectUrl,
+    payment,
   }
+}
+
+/**
+ * Send the Stripe-hosted receipt for a completed payment-link payment to a
+ * customer-provided phone number via the venue's WhatsApp Business template
+ * (`receipt_link`). Looks up the Payment by its CheckoutSession.sessionId
+ * (which is the PaymentIntent id for Stripe and the Blumon session id for
+ * legacy flows). Validates the link + session match so a customer can't
+ * trigger sends for unrelated payments.
+ */
+export async function sendPaymentLinkReceiptWhatsapp(shortCode: string, sessionId: string, phone: string) {
+  const session = await prisma.checkoutSession.findUnique({
+    where: { sessionId },
+    select: {
+      status: true,
+      paymentLink: { select: { shortCode: true } },
+    },
+  })
+
+  if (!session) throw new NotFoundError('Sesión de pago no encontrada')
+  if (session.paymentLink?.shortCode !== shortCode) {
+    throw new BadRequestError('Sesión no pertenece a esta liga de pago')
+  }
+  if (session.status !== 'COMPLETED') {
+    throw new BadRequestError('El pago aún no se ha completado')
+  }
+
+  const payment = await prisma.payment.findFirst({
+    where: { processorId: sessionId },
+    select: {
+      amount: true,
+      tipAmount: true,
+      receiptUrl: true,
+      venue: { select: { name: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  if (!payment) throw new NotFoundError('Pago no encontrado')
+  if (!payment.receiptUrl) {
+    throw new BadRequestError('Recibo aún no disponible — intenta de nuevo en unos segundos')
+  }
+
+  const total = new Prisma.Decimal(payment.amount).add(payment.tipAmount ?? 0)
+  const formatted = `$${total.toFixed(2)} MXN`
+
+  await sendReceiptWhatsApp(phone, {
+    venueName: payment.venue.name,
+    totalAmount: formatted,
+    receiptUrl: payment.receiptUrl,
+  })
+
+  return { sent: true }
+}
+
+/**
+ * Email the Stripe-hosted receipt URL for a completed payment-link payment
+ * to a customer-supplied address. Mirrors `sendPaymentLinkReceiptWhatsapp`
+ * — validates the link↔session relationship, requires COMPLETED status, and
+ * requires the Payment row to already carry a `receiptUrl` (captured at
+ * webhook time). Uses the existing `sendReceiptEmail` template so the
+ * customer gets the same branded receipt email Avoqado sends elsewhere.
+ */
+export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: string, email: string) {
+  const session = await prisma.checkoutSession.findUnique({
+    where: { sessionId },
+    select: {
+      status: true,
+      paymentLink: { select: { shortCode: true } },
+    },
+  })
+
+  if (!session) throw new NotFoundError('Sesión de pago no encontrada')
+  if (session.paymentLink?.shortCode !== shortCode) {
+    throw new BadRequestError('Sesión no pertenece a esta liga de pago')
+  }
+  if (session.status !== 'COMPLETED') {
+    throw new BadRequestError('El pago aún no se ha completado')
+  }
+
+  const payment = await prisma.payment.findFirst({
+    where: { processorId: sessionId },
+    include: {
+      venue: {
+        select: {
+          name: true,
+          logo: true,
+          address: true,
+          city: true,
+          state: true,
+          phone: true,
+          email: true,
+          currency: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  if (!payment) throw new NotFoundError('Pago no encontrado')
+  if (!payment.receiptUrl) {
+    throw new BadRequestError('Recibo aún no disponible — intenta de nuevo en unos segundos')
+  }
+
+  const total = new Prisma.Decimal(payment.amount).add(payment.tipAmount ?? 0).toNumber()
+  const receiptNumber = payment.id.slice(-4).toUpperCase()
+
+  await emailService.sendReceiptEmail(email, {
+    venueName: payment.venue.name,
+    receiptUrl: payment.receiptUrl,
+    receiptNumber,
+    venueLogoUrl: payment.venue.logo ?? undefined,
+    venueAddress: payment.venue.address ?? undefined,
+    venueCity: payment.venue.city ?? undefined,
+    venueState: payment.venue.state ?? undefined,
+    venuePhone: payment.venue.phone ?? undefined,
+    venueEmail: payment.venue.email ?? undefined,
+    currency: payment.venue.currency ?? 'MXN',
+    totalAmount: total,
+    tipAmount: payment.tipAmount ? Number(payment.tipAmount) : undefined,
+    paymentDate: payment.createdAt.toISOString(),
+  })
+
+  return { sent: true }
 }

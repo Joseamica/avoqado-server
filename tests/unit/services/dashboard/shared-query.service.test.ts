@@ -1,9 +1,12 @@
 import prisma from '@/utils/prismaClient'
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import * as availableBalanceService from '@/services/dashboard/availableBalance.dashboard.service'
+import * as commissionCalculationService from '@/services/dashboard/commission/commission-calculation.service'
+import * as customerDashboardService from '@/services/dashboard/customer.dashboard.service'
 import * as paymentLinkService from '@/services/dashboard/paymentLink.service'
 import * as paymentDashboardService from '@/services/dashboard/payment.dashboard.service'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
+import * as teamDashboardService from '@/services/dashboard/team.dashboard.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -21,6 +24,14 @@ jest.mock('@/services/dashboard/availableBalance.dashboard.service', () => ({
   getSettlementCalendar: jest.fn(),
 }))
 
+jest.mock('@/services/dashboard/commission/commission-calculation.service', () => ({
+  getVenueCommissionStats: jest.fn(),
+}))
+
+jest.mock('@/services/dashboard/customer.dashboard.service', () => ({
+  getCustomerStats: jest.fn(),
+}))
+
 jest.mock('@/services/dashboard/paymentLink.service', () => ({
   getPaymentLinks: jest.fn(),
 }))
@@ -32,6 +43,10 @@ jest.mock('@/services/dashboard/payment.dashboard.service', () => ({
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   getReservationStats: jest.fn(),
   getReservations: jest.fn(),
+}))
+
+jest.mock('@/services/dashboard/team.dashboard.service', () => ({
+  getTeamMembers: jest.fn(),
 }))
 
 describe('SharedQueryService', () => {
@@ -151,6 +166,145 @@ describe('SharedQueryService', () => {
           createdByName: 'Ana Admin',
         }),
       ])
+    })
+  })
+
+  describe('getPaymentLinksSummary', () => {
+    it('summarizes payment links from the dashboard payment link service', async () => {
+      ;(paymentLinkService.getPaymentLinks as jest.Mock).mockResolvedValue({
+        total: 2,
+        limit: 100,
+        offset: 0,
+        hasMore: false,
+        paymentLinks: [
+          {
+            id: 'pl-1',
+            status: 'ACTIVE',
+            amountType: 'FIXED',
+            currency: 'MXN',
+            totalCollected: 1000,
+            paymentCount: 2,
+            _count: { checkoutSessions: 3 },
+          },
+          {
+            id: 'pl-2',
+            status: 'PAUSED',
+            amountType: 'OPEN',
+            currency: 'MXN',
+            totalCollected: 250,
+            paymentCount: 1,
+            _count: { checkoutSessions: 1 },
+          },
+        ],
+      })
+
+      const result = await SharedQueryService.getPaymentLinksSummary('venue-test')
+
+      expect(paymentLinkService.getPaymentLinks).toHaveBeenCalledWith('venue-test', { limit: 100, offset: 0 })
+      expect(result).toEqual({
+        totalLinks: 2,
+        activeLinks: 1,
+        pausedLinks: 1,
+        fixedAmountLinks: 1,
+        openAmountLinks: 1,
+        totalCollected: 1250,
+        paymentCount: 3,
+        checkoutSessionCount: 4,
+        currency: 'MXN',
+      })
+    })
+  })
+
+  describe('getCustomerSummary', () => {
+    it('uses the dashboard customer stats service and returns aggregate customer data only', async () => {
+      ;(customerDashboardService.getCustomerStats as jest.Mock).mockResolvedValue({
+        totalCustomers: 10,
+        activeCustomers: 8,
+        newCustomersThisMonth: 3,
+        vipCustomers: 2,
+        averageLifetimeValue: 250.5,
+        averageVisitsPerCustomer: 4.2,
+        topSpenders: [{ id: 'cust-1', name: 'Ana Perez', totalSpent: 1000, totalVisits: 12 }],
+      })
+
+      const result = await SharedQueryService.getCustomerSummary('venue-test')
+
+      expect(customerDashboardService.getCustomerStats).toHaveBeenCalledWith('venue-test')
+      expect(result.topSpenders).toEqual([{ name: 'Ana Perez', totalSpent: 1000, totalVisits: 12 }])
+      expect(JSON.stringify(result)).not.toContain('cust-1')
+    })
+  })
+
+  describe('getTeamMembers', () => {
+    it('uses the dashboard team service and strips PINs from chatbot output', async () => {
+      ;(teamDashboardService.getTeamMembers as jest.Mock).mockResolvedValue({
+        data: [
+          {
+            id: 'staff-venue-1',
+            staffId: 'staff-1',
+            firstName: 'Ana',
+            lastName: 'Admin',
+            email: 'ana@example.com',
+            role: 'ADMIN',
+            active: true,
+            startDate: new Date('2026-01-01T00:00:00.000Z'),
+            endDate: null,
+            pin: '1234',
+            totalSales: 5000,
+            totalTips: 500,
+            totalOrders: 25,
+            averageRating: 0,
+            permissionSetId: 'perm-1',
+            permissionSetName: 'Admin',
+          },
+        ],
+        meta: {
+          totalCount: 1,
+          pageSize: 10,
+          currentPage: 1,
+          totalPages: 1,
+          hasNextPage: false,
+          hasPrevPage: false,
+        },
+      })
+
+      const result = await SharedQueryService.getTeamMembers('venue-test', { limit: 10 })
+
+      expect(teamDashboardService.getTeamMembers).toHaveBeenCalledWith('venue-test', 1, 10, undefined)
+      expect(result.members).toEqual([
+        {
+          staffVenueId: 'staff-venue-1',
+          staffId: 'staff-1',
+          name: 'Ana Admin',
+          role: 'ADMIN',
+          active: true,
+          totalSales: 5000,
+          totalTips: 500,
+          totalOrders: 25,
+          permissionSetName: 'Admin',
+        },
+      ])
+      expect(JSON.stringify(result)).not.toContain('1234')
+      expect(JSON.stringify(result)).not.toContain('ana@example.com')
+    })
+  })
+
+  describe('getCommissionsSummary', () => {
+    it('uses the dashboard commission stats service as source of truth', async () => {
+      ;(commissionCalculationService.getVenueCommissionStats as jest.Mock).mockResolvedValue({
+        totalPaid: 1000,
+        totalPending: 250,
+        totalApproved: 500,
+        staffWithCommissions: 3,
+        averageCommission: 125,
+        topEarners: [{ staffId: 'staff-1', staffName: 'Ana Admin', totalEarned: 750, calculationCount: 6 }],
+      })
+
+      const result = await SharedQueryService.getCommissionsSummary('venue-test')
+
+      expect(commissionCalculationService.getVenueCommissionStats).toHaveBeenCalledWith('venue-test')
+      expect(result.topEarners).toEqual([{ staffName: 'Ana Admin', totalEarned: 750, calculationCount: 6 }])
+      expect(JSON.stringify(result)).not.toContain('staff-1')
     })
   })
 

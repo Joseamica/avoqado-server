@@ -231,6 +231,15 @@ export class ConversationPlannerService {
       })
     }
 
+    if (this.hasPaymentLinksSummaryIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'paymentLinks.summary',
+        args: {},
+      })
+    }
+
     if (this.hasPaymentLinksListIntent(normalized)) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -255,6 +264,33 @@ export class ConversationPlannerService {
         kind: 'query',
         tool: 'reservations.list',
         args: { dateRange: this.extractDateRange(normalized) || 'today', limit: 10 },
+      })
+    }
+
+    if (this.hasCustomersSummaryIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'customers.summary',
+        args: {},
+      })
+    }
+
+    if (this.hasTeamMembersIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'team.members',
+        args: { limit: 10 },
+      })
+    }
+
+    if (this.hasCommissionsSummaryIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'commissions.summary',
+        args: {},
       })
     }
 
@@ -580,8 +616,16 @@ export class ConversationPlannerService {
   private hasPaymentLinksListIntent(normalized: string): boolean {
     const paymentLinkTerm = /\b(link|links|liga|ligas|enlace|enlaces)\s+(de\s+)?pago|payment\s+links?\b/.test(normalized)
     const readIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|activos?|show|list|see|active)\b/.test(normalized)
+    const summaryIntent = /\b(resumen|summary|total|cuantos|cuantas|metricas|estadisticas)\b/.test(normalized)
     const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|archiva|pausa|pausar)\b/.test(normalized)
-    return paymentLinkTerm && readIntent && !mutationIntent
+    return paymentLinkTerm && readIntent && !summaryIntent && !mutationIntent
+  }
+
+  private hasPaymentLinksSummaryIntent(normalized: string): boolean {
+    const paymentLinkTerm = /\b(link|links|liga|ligas|enlace|enlaces)\s+(de\s+)?pago|payment\s+links?\b/.test(normalized)
+    const summaryIntent = /\b(resumen|summary|total|cuantos|cuantas|metricas|estadisticas|como van|rendimiento)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|archiva|pausa|pausar)\b/.test(normalized)
+    return paymentLinkTerm && summaryIntent && !mutationIntent
   }
 
   private hasPaymentTerms(normalized: string): boolean {
@@ -619,6 +663,33 @@ export class ConversationPlannerService {
     const readIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|agenda|hoy|show|list|see)\b/.test(normalized)
     const countIntent = /\b(cuantas|cuantos|numero|total|cantidad|count|how many)\b/.test(normalized)
     return this.hasReservationTerms(normalized) && readIntent && !countIntent && !this.hasReservationMutationIntent(normalized)
+  }
+
+  private hasCustomersSummaryIntent(normalized: string): boolean {
+    const customerTerm = /\b(cliente|clientes|customers?)\b/.test(normalized)
+    const summaryIntent =
+      /\b(resumen|summary|total|cuantos|cuantas|metricas|estadisticas|nuevos|activos|vip|frecuentes|top|spenders?)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|elimina|liquida|settle)\b/.test(normalized)
+    return customerTerm && summaryIntent && !mutationIntent
+  }
+
+  private hasTeamMembersIntent(normalized: string): boolean {
+    const teamTerm = /\b(equipo|team|miembros|staff|empleados|colaboradores)\b/.test(normalized)
+    const readIntent = /\b(quien|quienes|que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|show|list|see)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|invita|invitar|actualiza|editar|edita|borra|borrar|elimina|desactiva)\b/.test(
+      normalized,
+    )
+    return teamTerm && readIntent && !mutationIntent
+  }
+
+  private hasCommissionsSummaryIntent(normalized: string): boolean {
+    const commissionTerm = /\b(comision|comisiones|commission|commissions)\b/.test(normalized)
+    const summaryIntent =
+      /\b(como van|resumen|summary|total|cuanto|cuantos|cuantas|pendiente|pendientes|pagado|pagadas|aprobado|top)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|aprueba|aprobar|paga|pagar|recalcula)\b/.test(
+      normalized,
+    )
+    return commissionTerm && summaryIntent && !mutationIntent
   }
 
   private extractDateRange(normalized: string): RelativeDateRange | undefined {

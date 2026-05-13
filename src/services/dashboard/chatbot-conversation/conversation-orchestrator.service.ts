@@ -541,6 +541,16 @@ export class ConversationOrchestratorService {
           links.links.length,
         )
       }
+      case 'paymentLinks.summary': {
+        const summary = await SharedQueryService.getPaymentLinksSummary(venueId)
+        return this.queryResult(
+          step.tool,
+          summary,
+          summary.totalLinks > 0
+            ? `Tienes ${summary.totalLinks} links de pago: ${summary.activeLinks} activos y ${summary.pausedLinks} pausados. Han cobrado ${this.money(summary.totalCollected, summary.currency)} en ${summary.paymentCount} pagos y ${summary.checkoutSessionCount} sesiones de checkout.`
+            : 'No encontré links de pago para este venue.',
+        )
+      }
       case 'reservations.summary': {
         const reservations = await SharedQueryService.getReservationSummary(venueId, dateRange)
         const byStatus = Object.entries(reservations.byStatus)
@@ -578,6 +588,54 @@ export class ConversationOrchestratorService {
             ? `Reservaciones de ${this.formatDateRangeName(dateRange)}:\n${list}${more}`
             : `No encontré reservaciones para ${this.formatDateRangeName(dateRange)}.`,
           reservations.reservations.length,
+        )
+      }
+      case 'customers.summary': {
+        const customers = await SharedQueryService.getCustomerSummary(venueId)
+        const topSpenders = customers.topSpenders
+          .slice(0, this.limit(step, 5))
+          .map(customer => `- ${customer.name}: ${this.money(customer.totalSpent)} en ${customer.totalVisits} visitas.`)
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          customers,
+          `Tienes ${customers.totalCustomers} clientes: ${customers.activeCustomers} activos, ${customers.newCustomersThisMonth} nuevos este mes y ${customers.vipCustomers} VIP. LTV promedio: ${this.money(customers.averageLifetimeValue)}; visitas promedio: ${customers.averageVisitsPerCustomer.toFixed(1)}.${topSpenders ? `\nTop clientes por consumo:\n${topSpenders}` : ''}`,
+          customers.topSpenders.length,
+        )
+      }
+      case 'team.members': {
+        const team = await SharedQueryService.getTeamMembers(venueId, {
+          limit: this.limit(step, 10),
+          search: typeof step.args.search === 'string' ? step.args.search : undefined,
+        })
+        const list = team.members
+          .map(member => {
+            const active = member.active ? 'activo' : 'inactivo'
+            const permissionSet = member.permissionSetName ? `, permisos: ${member.permissionSetName}` : ''
+            return `- ${member.name}: ${member.role}, ${active}, ${member.totalOrders} órdenes, ${this.money(member.totalSales)} en ventas${permissionSet}.`
+          })
+          .join('\n')
+        const more = team.total > team.members.length ? `\nHay ${team.total - team.members.length} más.` : ''
+        return this.queryResult(
+          step.tool,
+          team,
+          team.members.length > 0
+            ? `Tienes ${team.total} miembros en tu equipo:\n${list}${more}`
+            : 'No encontré miembros de equipo para este venue.',
+          team.members.length,
+        )
+      }
+      case 'commissions.summary': {
+        const commissions = await SharedQueryService.getCommissionsSummary(venueId)
+        const topEarners = commissions.topEarners
+          .slice(0, this.limit(step, 5))
+          .map(earner => `- ${earner.staffName}: ${this.money(earner.totalEarned)} en ${earner.calculationCount} cálculos.`)
+          .join('\n')
+        return this.queryResult(
+          step.tool,
+          commissions,
+          `Comisiones: ${this.money(commissions.totalPaid)} pagado, ${this.money(commissions.totalApproved)} aprobado y ${this.money(commissions.totalPending)} pendiente. ${commissions.staffWithCommissions} miembros tienen comisiones; promedio ${this.money(commissions.averageCommission)}.${topEarners ? `\nTop comisiones:\n${topEarners}` : ''}`,
+          commissions.topEarners.length,
         )
       }
       default:

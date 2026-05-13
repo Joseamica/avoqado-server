@@ -2229,7 +2229,7 @@ Servicios Tecnologicos Avo S.A. de C.V.
               <span style="font-size: 12px; color: #666;"> ${item.unit}</span>
             </td>
             <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: center;">
-              <span style="display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; color: #fff; background-color: ${statusColor};">${statusLabel}</span>
+              <span style="font-size: 13px; font-weight: 600; color: ${statusColor};">${statusLabel}</span>
             </td>
           </tr>`
       })

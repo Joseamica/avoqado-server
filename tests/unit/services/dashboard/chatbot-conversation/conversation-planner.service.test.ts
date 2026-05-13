@@ -84,6 +84,41 @@ describe('ConversationPlannerService', () => {
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
+  it('plans payment link summary questions deterministically', async () => {
+    const plan = await planner.plan({
+      message: 'dame un resumen de mis links de pago',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.mode).toBe('single')
+    expect(plan.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.summary', args: {} })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('plans customer, team, and commission questions deterministically', async () => {
+    const customers = await planner.plan({
+      message: 'resumen de clientes',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const team = await planner.plan({
+      message: 'quien esta en mi equipo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+    const commissions = await planner.plan({
+      message: 'como van mis comisiones',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(customers.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.summary', args: {} })])
+    expect(team.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'team.members', args: { limit: 10 } })])
+    expect(commissions.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.summary', args: {} })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
   it('plans reservation summary and list questions deterministically', async () => {
     const summary = await planner.plan({
       message: 'cuantas reservaciones tengo hoy',

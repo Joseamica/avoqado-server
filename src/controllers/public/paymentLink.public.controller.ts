@@ -151,3 +151,47 @@ export async function getSessionStatus(req: Request, res: Response) {
     })
   }
 }
+
+/**
+ * POST /api/v1/public/payment-links/:shortCode/send-receipt-whatsapp
+ * Sends the Stripe-hosted receipt for a completed payment to a customer-
+ * provided phone number via the venue's WhatsApp Business template.
+ */
+export async function sendReceiptWhatsapp(req: Request, res: Response) {
+  try {
+    const { shortCode } = req.params
+    const { sessionId, phone } = req.body as { sessionId: string; phone: string }
+
+    const result = await paymentLinkService.sendPaymentLinkReceiptWhatsapp(shortCode, sessionId, phone)
+
+    res.json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error('Error sending receipt via WhatsApp:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'No se pudo enviar el recibo por WhatsApp',
+    })
+  }
+}
+
+/**
+ * POST /api/v1/public/payment-links/:shortCode/send-receipt-email
+ * Emails the Stripe-hosted receipt for a completed payment to a customer-
+ * supplied address using the existing transactional template.
+ */
+export async function sendReceiptEmail(req: Request, res: Response) {
+  try {
+    const { shortCode } = req.params
+    const { sessionId, email } = req.body as { sessionId: string; email: string }
+
+    const result = await paymentLinkService.sendPaymentLinkReceiptEmail(shortCode, sessionId, email)
+
+    res.json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error('Error sending receipt via email:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'No se pudo enviar el recibo por correo',
+    })
+  }
+}

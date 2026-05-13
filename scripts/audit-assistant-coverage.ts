@@ -58,11 +58,16 @@ const ASSISTANT_TOOL_HINTS: Array<{ pattern: RegExp; tools: string[]; coverage: 
   { pattern: /orders/i, tools: ['pendingOrders'], coverage: 'partial' },
   { pattern: /shift/i, tools: ['activeShifts'], coverage: 'partial' },
   { pattern: /product|menu/i, tools: ['topProducts'], coverage: 'partial' },
-  { pattern: /payment-links/i, tools: ['paymentLinks.list', 'paymentLinks.detail', 'paymentLinks.create'], coverage: 'partial' },
+  {
+    pattern: /payment-links/i,
+    tools: ['paymentLinks.list', 'paymentLinks.summary', 'paymentLinks.detail', 'paymentLinks.create'],
+    coverage: 'partial',
+  },
   { pattern: /reservations/i, tools: ['reservations.summary', 'reservations.list', 'reservations.create'], coverage: 'partial' },
-  { pattern: /commissions/i, tools: ['commissions.summary', 'commissions.payouts'], coverage: 'missing' },
+  { pattern: /commissions/i, tools: ['commissions.summary', 'commissions.payouts'], coverage: 'partial' },
+  { pattern: /customers/i, tools: ['customers.summary', 'customers.detail', 'creditPacks.balance'], coverage: 'partial' },
   { pattern: /credit-packs|credits/i, tools: ['creditPacks.balance', 'creditPacks.list'], coverage: 'missing' },
-  { pattern: /team|permission|role/i, tools: ['team.members', 'team.invite', 'permissions.howTo'], coverage: 'missing' },
+  { pattern: /team|permission|role/i, tools: ['team.members', 'team.invite', 'permissions.howTo'], coverage: 'partial' },
 ]
 
 function main() {

@@ -128,6 +128,12 @@ export class ToolCatalogService {
         requiresDateRange: false,
       },
       {
+        name: 'paymentLinks.summary',
+        description: 'Summarize payment link count, activity, sessions, and collected amount.',
+        tables: ['PaymentLink'],
+        requiresDateRange: false,
+      },
+      {
         name: 'reservations.summary',
         description: 'Reservation count and status/channel breakdown for a period.',
         tables: ['Reservation'],
@@ -140,6 +146,24 @@ export class ToolCatalogService {
         tables: ['Reservation'],
         requiresDateRange: true,
         defaultDateRange: 'today',
+      },
+      {
+        name: 'customers.summary',
+        description: 'Customer count, active customers, VIP count, and top spender aggregate.',
+        tables: ['Customer'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'team.members',
+        description: 'List dashboard team members for the current venue.',
+        tables: ['Staff', 'StaffVenue'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'commissions.summary',
+        description: 'Venue commission totals, pending/approved/paid amounts, and top earners.',
+        tables: ['CommissionSummary', 'CommissionCalculation', 'Staff'],
+        requiresDateRange: false,
       },
       {
         name: 'adHocAnalytics',

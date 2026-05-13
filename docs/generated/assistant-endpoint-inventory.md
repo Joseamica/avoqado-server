@@ -1,37 +1,37 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-05-13T03:46:53.290Z
+Generated: 2026-05-13T13:29:41.291Z
 
 ## Summary
 
 - Total endpoints: 1337
-- Assistant tools registered: 70
-- Coverage: missing 615, blocked 382, partial 335, covered 5
+- Assistant tools registered: 72
+- Coverage: missing 507, partial 443, blocked 382, covered 5
 - Classifications: read 425, adminOnly 344, action 283, dangerousMutation 127, mutation 120, public 38
 - Scopes: venue 703, superadmin 307, unknown 167, organization 95, public 65
 
 ## Top Missing Domains
 
-- dashboard: 125
-- tpv: 40
-- stores-analysis: 32
+- dashboard: 118
+- tpv: 39
+- stores-analysis: 30
 - onboarding: 21
 - tpv-commands: 19
-- customers: 17
 - coupons: 15
-- configs: 14
 - mobile: 14
-- discounts: 13
 - ecommerce-merchants: 12
 - modifier-groups: 12
 - credit-packs: 11
+- discounts: 11
 - sdk: 11
-- staff: 9
-- team: 9
-- payouts: 8
 - class-sessions: 8
 - customer-groups: 8
 - consumer: 7
+- crypto: 7
+- features: 7
+- item-categories: 7
+- cash-drawer: 7
+- tables: 7
 
 ## High-Risk Or Admin-Only Endpoints
 
@@ -195,41 +195,41 @@ Generated: 2026-05-13T03:46:53.290Z
 | GET | `/api/v1/dashboard/auth/status` | read | unknown | missing | - | - | // Controller handles token presence internally for flexibility authDashboardController.getAuthStatus |
 | POST | `/api/v1/dashboard/auth/switch-venue` | action | unknown | missing | - | switchVenueSchema | // Validate the request body (changed from validateRequestMiddleware) authDashboardController.switchVenueController |
 | GET | `/api/v1/dashboard/auth/validate-reset-token/:token` | read | unknown | missing | - | - | authDashboardController.validateResetToken |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/aggregate` | action | venue | missing | commissions:update | - | controller.triggerAggregation |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/calculations/:calculationId/clawback` | dangerousMutation | venue | missing | commissions:update | - | controller.createClawback |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/calculations/:calculationId/void` | dangerousMutation | venue | missing | commissions:update | - | controller.voidCalculation |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/calculations/manual` | action | venue | missing | commissions:create | - | controller.createManualCommission |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/clawbacks` | read | venue | missing | commissions:read | - | controller.getClawbacks |
-| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/clawbacks/:clawbackId` | dangerousMutation | venue | missing | commissions:update | - | controller.voidClawback |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/clawbacks/:clawbackId` | read | venue | missing | commissions:read | - | controller.getClawbackById |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/aggregate` | action | venue | partial | commissions:update | - | controller.triggerAggregation |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/calculations/:calculationId/clawback` | dangerousMutation | venue | partial | commissions:update | - | controller.createClawback |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/calculations/:calculationId/void` | dangerousMutation | venue | partial | commissions:update | - | controller.voidCalculation |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/calculations/manual` | action | venue | partial | commissions:create | - | controller.createManualCommission |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/clawbacks` | read | venue | partial | commissions:read | - | controller.getClawbacks |
+| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/clawbacks/:clawbackId` | dangerousMutation | venue | partial | commissions:update | - | controller.voidClawback |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/clawbacks/:clawbackId` | read | venue | partial | commissions:read | - | controller.getClawbackById |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/clawbacks/stats` | read | venue | partial | commissions:read | - | controller.getClawbackStats |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs` | read | venue | missing | commissions:read | - | controller.getConfigs |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs` | action | venue | missing | commissions:create | - | controller.createConfig |
-| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId` | dangerousMutation | venue | missing | commissions:delete | - | controller.deleteConfig |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId` | read | venue | missing | commissions:read | - | controller.getConfigById |
-| PUT | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId` | mutation | venue | missing | commissions:update | - | controller.updateConfig |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/bulk-exclude` | dangerousMutation | venue | missing | commissions:update | - | controller.bulkExcludeStaff |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/copy` | action | venue | missing | commissions:create | - | controller.copyConfig |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/milestones` | read | venue | missing | commissions:read | - | controller.getMilestones |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/milestones` | action | venue | missing | commissions:create | - | controller.createMilestone |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/overrides` | read | venue | missing | commissions:read | - | controller.getOverrides |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/overrides` | action | venue | missing | commissions:create | - | controller.createOverride |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/tiers` | read | venue | missing | commissions:read | - | controller.getTiers |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/tiers` | action | venue | missing | commissions:create | - | controller.createTier |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/tiers/batch` | action | venue | missing | commissions:create | - | controller.createTiersBatch |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/effective-configs` | read | venue | missing | commissions:read | - | (inline handler) |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/effective-payout-config` | read | venue | missing | commissions:read | - | (inline handler) |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/goals` | read | venue | missing | commissions:read | - | controller.getSalesGoals |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/goals` | action | venue | missing | commissions:create | - | controller.createSalesGoal |
-| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/goals/:goalId` | dangerousMutation | venue | missing | commissions:delete | - | controller.deleteSalesGoal |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/goals/:goalId` | read | venue | missing | commissions:read | - | controller.getSalesGoalById |
-| PATCH | `/api/v1/dashboard/commissions/venues/:venueId/goals/:goalId` | mutation | venue | missing | commissions:update | - | controller.updateSalesGoal |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/job-status` | read | venue | missing | commissions:payout | - | controller.getJobStatus |
-| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/milestones/:milestoneId` | dangerousMutation | venue | missing | commissions:delete | - | controller.deleteMilestone |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/milestones/:milestoneId` | read | venue | missing | commissions:read | - | controller.getMilestoneById |
-| PUT | `/api/v1/dashboard/commissions/venues/:venueId/milestones/:milestoneId` | mutation | venue | missing | commissions:update | - | controller.updateMilestone |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs` | read | venue | partial | commissions:read | - | controller.getConfigs |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs` | action | venue | partial | commissions:create | - | controller.createConfig |
+| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId` | dangerousMutation | venue | partial | commissions:delete | - | controller.deleteConfig |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId` | read | venue | partial | commissions:read | - | controller.getConfigById |
+| PUT | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId` | mutation | venue | partial | commissions:update | - | controller.updateConfig |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/bulk-exclude` | dangerousMutation | venue | partial | commissions:update | - | controller.bulkExcludeStaff |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/copy` | action | venue | partial | commissions:create | - | controller.copyConfig |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/milestones` | read | venue | partial | commissions:read | - | controller.getMilestones |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/milestones` | action | venue | partial | commissions:create | - | controller.createMilestone |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/overrides` | read | venue | partial | commissions:read | - | controller.getOverrides |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/overrides` | action | venue | partial | commissions:create | - | controller.createOverride |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/tiers` | read | venue | partial | commissions:read | - | controller.getTiers |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/tiers` | action | venue | partial | commissions:create | - | controller.createTier |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/configs/:configId/tiers/batch` | action | venue | partial | commissions:create | - | controller.createTiersBatch |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/effective-configs` | read | venue | partial | commissions:read | - | (inline handler) |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/effective-payout-config` | read | venue | partial | commissions:read | - | (inline handler) |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/goals` | read | venue | partial | commissions:read | - | controller.getSalesGoals |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/goals` | action | venue | partial | commissions:create | - | controller.createSalesGoal |
+| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/goals/:goalId` | dangerousMutation | venue | partial | commissions:delete | - | controller.deleteSalesGoal |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/goals/:goalId` | read | venue | partial | commissions:read | - | controller.getSalesGoalById |
+| PATCH | `/api/v1/dashboard/commissions/venues/:venueId/goals/:goalId` | mutation | venue | partial | commissions:update | - | controller.updateSalesGoal |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/job-status` | read | venue | partial | commissions:payout | - | controller.getJobStatus |
+| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/milestones/:milestoneId` | dangerousMutation | venue | partial | commissions:delete | - | controller.deleteMilestone |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/milestones/:milestoneId` | read | venue | partial | commissions:read | - | controller.getMilestoneById |
+| PUT | `/api/v1/dashboard/commissions/venues/:venueId/milestones/:milestoneId` | mutation | venue | partial | commissions:update | - | controller.updateMilestone |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/my-commission-stats` | read | venue | partial | commissions:view_own | - | controller.getMyCommissionStats |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/my-commissions` | read | venue | missing | commissions:view_own | - | controller.getMyCommissions |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/my-commissions` | read | venue | partial | commissions:view_own | - | controller.getMyCommissions |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/org-configs` | adminOnly | venue | blocked | commissions:org-manage | - | (inline handler) |
 | POST | `/api/v1/dashboard/commissions/venues/:venueId/org-configs` | adminOnly | venue | blocked | commissions:org-manage | - | (inline handler) |
 | DELETE | `/api/v1/dashboard/commissions/venues/:venueId/org-configs/:configId` | adminOnly | venue | blocked | commissions:org-manage | - | (inline handler) |
@@ -237,39 +237,39 @@ Generated: 2026-05-13T03:46:53.290Z
 | DELETE | `/api/v1/dashboard/commissions/venues/:venueId/org-payout-config` | adminOnly | venue | blocked | commissions:org-manage | - | (inline handler) |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/org-payout-config` | adminOnly | venue | blocked | commissions:org-manage | - | (inline handler) |
 | PUT | `/api/v1/dashboard/commissions/venues/:venueId/org-payout-config` | adminOnly | venue | blocked | commissions:org-manage | - | (inline handler) |
-| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/overrides/:overrideId` | dangerousMutation | venue | missing | commissions:delete | - | controller.deleteOverride |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/overrides/:overrideId` | read | venue | missing | commissions:read | - | controller.getOverrideById |
-| PUT | `/api/v1/dashboard/commissions/venues/:venueId/overrides/:overrideId` | mutation | venue | missing | commissions:update | - | controller.updateOverride |
+| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/overrides/:overrideId` | dangerousMutation | venue | partial | commissions:delete | - | controller.deleteOverride |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/overrides/:overrideId` | read | venue | partial | commissions:read | - | controller.getOverrideById |
+| PUT | `/api/v1/dashboard/commissions/venues/:venueId/overrides/:overrideId` | mutation | venue | partial | commissions:update | - | controller.updateOverride |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/payments/:paymentId/commission` | read | venue | partial | commissions:read | - | controller.getCommissionByPayment |
 | POST | `/api/v1/dashboard/commissions/venues/:venueId/payments/commissions/batch` | action | venue | partial | commissions:read | - | controller.getCommissionsByPaymentsBatch |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/payouts` | read | venue | missing | commissions:payout | - | controller.getPayouts |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts` | dangerousMutation | venue | missing | commissions:payout | - | controller.createPayout |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId` | read | venue | missing | commissions:payout | - | controller.getPayoutById |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/approve` | dangerousMutation | venue | missing | commissions:payout | - | controller.approvePayout |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/cancel` | dangerousMutation | venue | missing | commissions:payout | - | controller.cancelPayout |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/complete` | dangerousMutation | venue | missing | commissions:payout | - | controller.completePayout |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/fail` | dangerousMutation | venue | missing | commissions:payout | - | controller.failPayout |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/process` | dangerousMutation | venue | missing | commissions:payout | - | controller.startPayoutProcessing |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/payouts` | read | venue | partial | commissions:payout | - | controller.getPayouts |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts` | dangerousMutation | venue | partial | commissions:payout | - | controller.createPayout |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId` | read | venue | partial | commissions:payout | - | controller.getPayoutById |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/approve` | dangerousMutation | venue | partial | commissions:payout | - | controller.approvePayout |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/cancel` | dangerousMutation | venue | partial | commissions:payout | - | controller.cancelPayout |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/complete` | dangerousMutation | venue | partial | commissions:payout | - | controller.completePayout |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/fail` | dangerousMutation | venue | partial | commissions:payout | - | controller.failPayout |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/payouts/:payoutId/process` | dangerousMutation | venue | partial | commissions:payout | - | controller.startPayoutProcessing |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/payouts/stats` | read | venue | partial | commissions:payout | - | controller.getPayoutStats |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/run-job` | dangerousMutation | venue | missing | commissions:payout | - | controller.runAggregationJob |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/achievements` | read | venue | missing | commissions:read | - | controller.getStaffAchievements |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/run-job` | dangerousMutation | venue | partial | commissions:payout | - | controller.runAggregationJob |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/achievements` | read | venue | partial | commissions:read | - | controller.getStaffAchievements |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/commission-stats` | read | venue | partial | commissions:read | - | controller.getStaffCommissionStats |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/commissions` | read | venue | missing | commissions:read | - | controller.getStaffCommissions |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/milestone-progress` | read | venue | missing | commissions:read | - | controller.getStaffMilestoneProgress |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/overrides` | read | venue | missing | commissions:read | - | controller.getStaffOverrides |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/payouts` | read | venue | missing | commissions:payout | - | controller.getStaffPayouts |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/pending-clawbacks` | read | venue | missing | commissions:read | - | controller.getPendingClawbacksForStaff |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/tier-progress` | read | venue | missing | commissions:read | - | controller.getStaffTierProgress |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/commissions` | read | venue | partial | commissions:read | - | controller.getStaffCommissions |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/milestone-progress` | read | venue | partial | commissions:read | - | controller.getStaffMilestoneProgress |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/overrides` | read | venue | partial | commissions:read | - | controller.getStaffOverrides |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/payouts` | read | venue | partial | commissions:payout | - | controller.getStaffPayouts |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/pending-clawbacks` | read | venue | partial | commissions:read | - | controller.getPendingClawbacksForStaff |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/staff/:staffId/tier-progress` | read | venue | partial | commissions:read | - | controller.getStaffTierProgress |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/stats` | read | venue | partial | commissions:read | - | controller.getVenueStats |
-| GET | `/api/v1/dashboard/commissions/venues/:venueId/summaries` | read | venue | missing | commissions:read | - | controller.getSummaries |
+| GET | `/api/v1/dashboard/commissions/venues/:venueId/summaries` | read | venue | partial | commissions:read | - | controller.getSummaries |
 | GET | `/api/v1/dashboard/commissions/venues/:venueId/summaries/:summaryId` | read | venue | partial | commissions:read | - | controller.getSummaryById |
 | POST | `/api/v1/dashboard/commissions/venues/:venueId/summaries/:summaryId/approve` | dangerousMutation | venue | partial | commissions:approve | - | controller.approveSummary |
 | POST | `/api/v1/dashboard/commissions/venues/:venueId/summaries/:summaryId/deduction` | action | venue | partial | commissions:update | - | controller.applyDeduction |
 | POST | `/api/v1/dashboard/commissions/venues/:venueId/summaries/:summaryId/dispute` | action | venue | partial | commissions:view_own | - | controller.disputeSummary |
 | POST | `/api/v1/dashboard/commissions/venues/:venueId/summaries/:summaryId/recalculate` | action | venue | partial | commissions:update | - | controller.recalculateSummary |
-| POST | `/api/v1/dashboard/commissions/venues/:venueId/summaries/bulk-approve` | dangerousMutation | venue | missing | commissions:approve | - | controller.bulkApproveSummaries |
-| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/tiers/:tierId` | dangerousMutation | venue | missing | commissions:delete | - | controller.deleteTier |
-| PUT | `/api/v1/dashboard/commissions/venues/:venueId/tiers/:tierId` | mutation | venue | missing | commissions:update | - | controller.updateTier |
+| POST | `/api/v1/dashboard/commissions/venues/:venueId/summaries/bulk-approve` | dangerousMutation | venue | partial | commissions:approve | - | controller.bulkApproveSummaries |
+| DELETE | `/api/v1/dashboard/commissions/venues/:venueId/tiers/:tierId` | dangerousMutation | venue | partial | commissions:delete | - | controller.deleteTier |
+| PUT | `/api/v1/dashboard/commissions/venues/:venueId/tiers/:tierId` | mutation | venue | partial | commissions:update | - | controller.updateTier |
 | GET | `/api/v1/dashboard/features` | read | unknown | missing | features:read | - | featureController.getAvailableFeatures |
 | GET | `/api/v1/dashboard/impersonation/eligible-targets` | read | unknown | missing | - | - | impersonationController.eligibleTargetsHandler |
 | POST | `/api/v1/dashboard/impersonation/extend` | dangerousMutation | unknown | missing | - | - | impersonationController.extendHandler |
@@ -333,12 +333,12 @@ Generated: 2026-05-13T03:46:53.290Z
 | GET | `/api/v1/dashboard/organizations/:orgId/stock-control/overview` | read | organization | partial | - | - | getOrgStockOverview |
 | GET | `/api/v1/dashboard/organizations/:orgId/stock-summary` | read | organization | partial | - | - | (inline handler) |
 | GET | `/api/v1/dashboard/organizations/:orgId/store-performance` | read | organization | missing | - | - | (inline handler) |
-| GET | `/api/v1/dashboard/organizations/:orgId/team` | read | organization | missing | - | - | (inline handler) |
-| GET | `/api/v1/dashboard/organizations/:orgId/team/:staffId/activity` | read | organization | missing | - | - | (inline handler) |
-| PATCH | `/api/v1/dashboard/organizations/:orgId/team/:staffId/pin` | mutation | organization | missing | - | - | (inline handler) |
-| POST | `/api/v1/dashboard/organizations/:orgId/team/:staffId/reset-password` | dangerousMutation | organization | missing | - | - | (inline handler) |
-| PATCH | `/api/v1/dashboard/organizations/:orgId/team/:staffId/role` | mutation | organization | missing | - | - | (inline handler) |
-| PATCH | `/api/v1/dashboard/organizations/:orgId/team/:staffId/status` | mutation | organization | missing | - | - | (inline handler) |
+| GET | `/api/v1/dashboard/organizations/:orgId/team` | read | organization | partial | - | - | (inline handler) |
+| GET | `/api/v1/dashboard/organizations/:orgId/team/:staffId/activity` | read | organization | partial | - | - | (inline handler) |
+| PATCH | `/api/v1/dashboard/organizations/:orgId/team/:staffId/pin` | mutation | organization | partial | - | - | (inline handler) |
+| POST | `/api/v1/dashboard/organizations/:orgId/team/:staffId/reset-password` | dangerousMutation | organization | partial | - | - | (inline handler) |
+| PATCH | `/api/v1/dashboard/organizations/:orgId/team/:staffId/role` | mutation | organization | partial | - | - | (inline handler) |
+| PATCH | `/api/v1/dashboard/organizations/:orgId/team/:staffId/status` | mutation | organization | partial | - | - | (inline handler) |
 | GET | `/api/v1/dashboard/organizations/:orgId/terminals` | read | organization | missing | - | - | (inline handler) |
 | POST | `/api/v1/dashboard/organizations/:orgId/terminals` | action | organization | missing | - | CreateOrgTerminalSchema | (inline handler) |
 | DELETE | `/api/v1/dashboard/organizations/:orgId/terminals/:terminalId` | dangerousMutation | organization | missing | - | DeleteOrgTerminalSchema | (inline handler) |
@@ -365,7 +365,7 @@ Generated: 2026-05-13T03:46:53.290Z
 | POST | `/api/v1/dashboard/reviews/:reviewId/generate-response` | action | unknown | covered | reviews:respond | - | reviewController.generateReviewResponse |
 | POST | `/api/v1/dashboard/reviews/:reviewId/response-feedback` | action | unknown | covered | reviews:respond | - | reviewController.submitResponseFeedback |
 | POST | `/api/v1/dashboard/reviews/:reviewId/submit-response` | action | unknown | covered | reviews:respond | - | reviewController.submitReviewResponse |
-| GET | `/api/v1/dashboard/role-permissions/hierarchy` | read | unknown | missing | settings:manage | - | rolePermissionController.getRoleHierarchyInfo |
+| GET | `/api/v1/dashboard/role-permissions/hierarchy` | read | unknown | partial | settings:manage | - | rolePermissionController.getRoleHierarchyInfo |
 | GET | `/api/v1/dashboard/superadmin/aggregators` | adminOnly | superadmin | blocked | - | - | aggregatorController.getAggregators |
 | POST | `/api/v1/dashboard/superadmin/aggregators` | adminOnly | superadmin | blocked | - | - | aggregatorController.createAggregator |
 | GET | `/api/v1/dashboard/superadmin/aggregators/:id` | adminOnly | superadmin | blocked | - | - | aggregatorController.getAggregatorById |
@@ -648,17 +648,17 @@ Generated: 2026-05-13T03:46:53.290Z
 | POST | `/api/v1/dashboard/venues/:venueId/customer-groups/:groupId/assign` | action | venue | missing | customer-groups:update | AssignCustomersSchema | customerGroupController.assignCustomersToGroup |
 | POST | `/api/v1/dashboard/venues/:venueId/customer-groups/:groupId/remove` | action | venue | missing | customer-groups:update | RemoveCustomersSchema | customerGroupController.removeCustomersFromGroup |
 | GET | `/api/v1/dashboard/venues/:venueId/customer-groups/stats` | read | venue | partial | customer-groups:read | z.object | customerGroupController.getCustomerGroupStats |
-| GET | `/api/v1/dashboard/venues/:venueId/customers` | read | venue | missing | customers:read | z.object | customerController.getCustomers |
-| POST | `/api/v1/dashboard/venues/:venueId/customers` | action | venue | missing | customers:create | CreateCustomerSchema | customerController.createCustomer |
-| DELETE | `/api/v1/dashboard/venues/:venueId/customers/:customerId` | dangerousMutation | venue | missing | customers:delete | CustomerParamsSchema | customerController.deleteCustomer |
-| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId` | read | venue | missing | customers:read | CustomerParamsSchema | customerController.getCustomerById |
-| PUT | `/api/v1/dashboard/venues/:venueId/customers/:customerId` | mutation | venue | missing | customers:update | UpdateCustomerSchema | customerController.updateCustomer |
-| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId/discounts` | read | venue | missing | discounts:read | z.object | discountController.getCustomerDiscounts |
-| POST | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/adjust` | action | venue | missing | loyalty:adjust | AdjustPointsSchema | loyaltyController.adjustPoints |
-| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/balance` | read | venue | missing | loyalty:read | LoyaltyParamsSchema | loyaltyController.getPointsBalance |
-| POST | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/redeem` | action | venue | missing | loyalty:redeem | RedeemPointsSchema | loyaltyController.redeemPoints |
-| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/transactions` | read | venue | missing | loyalty:read | z.object | loyaltyController.getLoyaltyTransactions |
-| POST | `/api/v1/dashboard/venues/:venueId/customers/:customerId/settle-balance` | action | venue | missing | customers:settle-balance | CustomerParamsSchema | customerController.settleCustomerBalance |
+| GET | `/api/v1/dashboard/venues/:venueId/customers` | read | venue | partial | customers:read | z.object | customerController.getCustomers |
+| POST | `/api/v1/dashboard/venues/:venueId/customers` | action | venue | partial | customers:create | CreateCustomerSchema | customerController.createCustomer |
+| DELETE | `/api/v1/dashboard/venues/:venueId/customers/:customerId` | dangerousMutation | venue | partial | customers:delete | CustomerParamsSchema | customerController.deleteCustomer |
+| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId` | read | venue | partial | customers:read | CustomerParamsSchema | customerController.getCustomerById |
+| PUT | `/api/v1/dashboard/venues/:venueId/customers/:customerId` | mutation | venue | partial | customers:update | UpdateCustomerSchema | customerController.updateCustomer |
+| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId/discounts` | read | venue | partial | discounts:read | z.object | discountController.getCustomerDiscounts |
+| POST | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/adjust` | action | venue | partial | loyalty:adjust | AdjustPointsSchema | loyaltyController.adjustPoints |
+| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/balance` | read | venue | partial | loyalty:read | LoyaltyParamsSchema | loyaltyController.getPointsBalance |
+| POST | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/redeem` | action | venue | partial | loyalty:redeem | RedeemPointsSchema | loyaltyController.redeemPoints |
+| GET | `/api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/transactions` | read | venue | partial | loyalty:read | z.object | loyaltyController.getLoyaltyTransactions |
+| POST | `/api/v1/dashboard/venues/:venueId/customers/:customerId/settle-balance` | action | venue | partial | customers:settle-balance | CustomerParamsSchema | customerController.settleCustomerBalance |
 | GET | `/api/v1/dashboard/venues/:venueId/customers/stats` | read | venue | partial | customers:read | CustomerVenueIdParamsSchema | customerController.getCustomerStats |
 | GET | `/api/v1/dashboard/venues/:venueId/discounts` | read | venue | missing | discounts:read | z.object | discountController.getDiscounts |
 | POST | `/api/v1/dashboard/venues/:venueId/discounts` | action | venue | missing | discounts:create | z.object | discountController.createDiscount |
@@ -666,8 +666,8 @@ Generated: 2026-05-13T03:46:53.290Z
 | GET | `/api/v1/dashboard/venues/:venueId/discounts/:discountId` | read | venue | missing | discounts:read | z.object | discountController.getDiscountById |
 | PUT | `/api/v1/dashboard/venues/:venueId/discounts/:discountId` | mutation | venue | missing | discounts:update | z.object | discountController.updateDiscount |
 | POST | `/api/v1/dashboard/venues/:venueId/discounts/:discountId/clone` | action | venue | missing | discounts:create | z.object | discountController.cloneDiscount |
-| POST | `/api/v1/dashboard/venues/:venueId/discounts/:discountId/customers` | action | venue | missing | discounts:update | z.object | discountController.assignDiscountToCustomer |
-| DELETE | `/api/v1/dashboard/venues/:venueId/discounts/:discountId/customers/:customerId` | dangerousMutation | venue | missing | discounts:update | z.object | discountController.removeDiscountFromCustomer |
+| POST | `/api/v1/dashboard/venues/:venueId/discounts/:discountId/customers` | action | venue | partial | discounts:update | z.object | discountController.assignDiscountToCustomer |
+| DELETE | `/api/v1/dashboard/venues/:venueId/discounts/:discountId/customers/:customerId` | dangerousMutation | venue | partial | discounts:update | z.object | discountController.removeDiscountFromCustomer |
 | GET | `/api/v1/dashboard/venues/:venueId/discounts/automatic` | read | venue | missing | discounts:read | z.object | discountController.getActiveAutomaticDiscounts |
 | GET | `/api/v1/dashboard/venues/:venueId/discounts/stats` | read | venue | partial | discounts:read | z.object | discountController.getDiscountStats |
 | GET | `/api/v1/dashboard/venues/:venueId/ecommerce-merchants` | read | venue | missing | - | listVenueEcommerceMerchantsSchema | ecommerceMerchantController.listEcommerceMerchants |
@@ -891,12 +891,12 @@ Generated: 2026-05-13T03:46:53.290Z
 | GET | `/api/v1/dashboard/venues/:venueId/payments/external-sources` | read | venue | partial | payment:create-manual | getExternalSourcesSchema | manualPaymentController.getExternalSources |
 | POST | `/api/v1/dashboard/venues/:venueId/payments/manual` | action | venue | partial | payment:create-manual | createManualPaymentSchema | manualPaymentController.createManualPayment |
 | GET | `/api/v1/dashboard/venues/:venueId/payments/waiters` | read | venue | partial | payment:create-manual | - | manualPaymentController.getEligibleWaiters |
-| GET | `/api/v1/dashboard/venues/:venueId/permission-sets` | read | venue | missing | settings:manage | - | permissionSetController.getAll |
-| POST | `/api/v1/dashboard/venues/:venueId/permission-sets` | action | venue | missing | role-permissions:update | CreatePermissionSetSchema | permissionSetController.create |
-| DELETE | `/api/v1/dashboard/venues/:venueId/permission-sets/:id` | dangerousMutation | venue | missing | settings:manage | - | permissionSetController.remove |
-| GET | `/api/v1/dashboard/venues/:venueId/permission-sets/:id` | read | venue | missing | settings:manage | - | permissionSetController.getById |
-| PUT | `/api/v1/dashboard/venues/:venueId/permission-sets/:id` | mutation | venue | missing | role-permissions:update | UpdatePermissionSetSchema | permissionSetController.update |
-| POST | `/api/v1/dashboard/venues/:venueId/permission-sets/:id/duplicate` | action | venue | missing | role-permissions:update | DuplicatePermissionSetSchema | permissionSetController.duplicate |
+| GET | `/api/v1/dashboard/venues/:venueId/permission-sets` | read | venue | partial | settings:manage | - | permissionSetController.getAll |
+| POST | `/api/v1/dashboard/venues/:venueId/permission-sets` | action | venue | partial | role-permissions:update | CreatePermissionSetSchema | permissionSetController.create |
+| DELETE | `/api/v1/dashboard/venues/:venueId/permission-sets/:id` | dangerousMutation | venue | partial | settings:manage | - | permissionSetController.remove |
+| GET | `/api/v1/dashboard/venues/:venueId/permission-sets/:id` | read | venue | partial | settings:manage | - | permissionSetController.getById |
+| PUT | `/api/v1/dashboard/venues/:venueId/permission-sets/:id` | mutation | venue | partial | role-permissions:update | UpdatePermissionSetSchema | permissionSetController.update |
+| POST | `/api/v1/dashboard/venues/:venueId/permission-sets/:id/duplicate` | action | venue | partial | role-permissions:update | DuplicatePermissionSetSchema | permissionSetController.duplicate |
 | GET | `/api/v1/dashboard/venues/:venueId/product-types` | read | venue | partial | menu:read | VenueIdParamsSchema | productController.getProductTypesHandler |
 | GET | `/api/v1/dashboard/venues/:venueId/products` | read | venue | partial | - | - | getProductsData |
 | GET | `/api/v1/dashboard/venues/:venueId/products` | read | venue | partial | menu:read | VenueIdParamsSchema | productController.getProductsHandler |
@@ -936,13 +936,13 @@ Generated: 2026-05-13T03:46:53.290Z
 | POST | `/api/v1/dashboard/venues/:venueId/reservations/waitlist/:entryId/promote` | action | venue | partial | reservations:update | z.object | (inline handler) |
 | GET | `/api/v1/dashboard/venues/:venueId/reviews` | read | venue | covered | reviews:read | - | reviewController.getReviewsData |
 | DELETE | `/api/v1/dashboard/venues/:venueId/reviews/:reviewId` | dangerousMutation | venue | covered | reviews:delete | - | // SUPERADMIN only reviewController.deleteReview |
-| DELETE | `/api/v1/dashboard/venues/:venueId/role-config` | dangerousMutation | venue | missing | role-config:update | RoleConfigParamsSchema | venueRoleConfigController.resetRoleConfigs |
-| GET | `/api/v1/dashboard/venues/:venueId/role-config` | read | venue | missing | role-config:read | RoleConfigParamsSchema | venueRoleConfigController.getRoleConfigs |
-| PUT | `/api/v1/dashboard/venues/:venueId/role-config` | mutation | venue | missing | role-config:update | z.object | venueRoleConfigController.updateRoleConfigs |
-| GET | `/api/v1/dashboard/venues/:venueId/role-permissions` | read | venue | missing | settings:manage | - | rolePermissionController.getAllRolePermissions |
-| DELETE | `/api/v1/dashboard/venues/:venueId/role-permissions/:role` | dangerousMutation | venue | missing | settings:manage | - | rolePermissionController.deleteRolePermissions |
-| GET | `/api/v1/dashboard/venues/:venueId/role-permissions/:role` | read | venue | missing | settings:manage | - | rolePermissionController.getRolePermissions |
-| PUT | `/api/v1/dashboard/venues/:venueId/role-permissions/:role` | mutation | venue | missing | settings:manage | - | rolePermissionController.updateRolePermissions |
+| DELETE | `/api/v1/dashboard/venues/:venueId/role-config` | dangerousMutation | venue | partial | role-config:update | RoleConfigParamsSchema | venueRoleConfigController.resetRoleConfigs |
+| GET | `/api/v1/dashboard/venues/:venueId/role-config` | read | venue | partial | role-config:read | RoleConfigParamsSchema | venueRoleConfigController.getRoleConfigs |
+| PUT | `/api/v1/dashboard/venues/:venueId/role-config` | mutation | venue | partial | role-config:update | z.object | venueRoleConfigController.updateRoleConfigs |
+| GET | `/api/v1/dashboard/venues/:venueId/role-permissions` | read | venue | partial | settings:manage | - | rolePermissionController.getAllRolePermissions |
+| DELETE | `/api/v1/dashboard/venues/:venueId/role-permissions/:role` | dangerousMutation | venue | partial | settings:manage | - | rolePermissionController.deleteRolePermissions |
+| GET | `/api/v1/dashboard/venues/:venueId/role-permissions/:role` | read | venue | partial | settings:manage | - | rolePermissionController.getRolePermissions |
+| PUT | `/api/v1/dashboard/venues/:venueId/role-permissions/:role` | mutation | venue | partial | settings:manage | - | rolePermissionController.updateRolePermissions |
 | GET | `/api/v1/dashboard/venues/:venueId/sale-verifications` | read | venue | missing | payments:read | - | saleVerificationController.listSaleVerifications |
 | PATCH | `/api/v1/dashboard/venues/:venueId/sale-verifications/:id/review` | mutation | venue | missing | sale-verifications:review | - | saleVerificationController.reviewSaleVerification |
 | GET | `/api/v1/dashboard/venues/:venueId/sale-verifications/daily` | read | venue | missing | payments:read | - | saleVerificationController.getDailySalesData |
@@ -1008,23 +1008,23 @@ Generated: 2026-05-13T03:46:53.290Z
 | PATCH | `/api/v1/dashboard/venues/:venueId/stores-analysis/store/:storeId/goals/:goalId` | mutation | venue | missing | - | - | (inline handler) |
 | GET | `/api/v1/dashboard/venues/:venueId/stores-analysis/store/:storeId/sales-trend` | read | venue | partial | - | - | (inline handler) |
 | GET | `/api/v1/dashboard/venues/:venueId/stores-analysis/store/:storeId/summary` | read | venue | partial | - | - | (inline handler) |
-| GET | `/api/v1/dashboard/venues/:venueId/stores-analysis/team/:staffId/activity` | read | venue | missing | - | - | (inline handler) |
-| PATCH | `/api/v1/dashboard/venues/:venueId/stores-analysis/team/:staffId/venues` | mutation | venue | missing | - | - | (inline handler) |
+| GET | `/api/v1/dashboard/venues/:venueId/stores-analysis/team/:staffId/activity` | read | venue | partial | - | - | (inline handler) |
+| PATCH | `/api/v1/dashboard/venues/:venueId/stores-analysis/team/:staffId/venues` | mutation | venue | partial | - | - | (inline handler) |
 | POST | `/api/v1/dashboard/venues/:venueId/stores-analysis/time-entry/:timeEntryId/reset-validation` | dangerousMutation | venue | missing | - | - | (inline handler) |
 | POST | `/api/v1/dashboard/venues/:venueId/stores-analysis/time-entry/:timeEntryId/validate` | action | venue | missing | - | - | (inline handler) |
 | GET | `/api/v1/dashboard/venues/:venueId/stores-analysis/venues` | read | venue | missing | - | - | (inline handler) |
 | GET | `/api/v1/dashboard/venues/:venueId/stores-analysis/zones` | read | venue | missing | - | - | (inline handler) |
 | POST | `/api/v1/dashboard/venues/:venueId/suspend` | action | venue | missing | venues:manage | - | venueController.suspendVenue |
-| GET | `/api/v1/dashboard/venues/:venueId/team` | read | venue | missing | teams:read | z.object | teamController.getTeamMembers |
-| POST | `/api/v1/dashboard/venues/:venueId/team` | action | venue | missing | teams:invite | InviteTeamMemberSchema | teamController.inviteTeamMember |
-| DELETE | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId` | dangerousMutation | venue | missing | teams:delete | TeamMemberParamsSchema | teamController.removeTeamMember |
-| GET | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId` | read | venue | missing | teams:read | TeamMemberParamsSchema | teamController.getTeamMember |
-| PATCH | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId` | mutation | venue | missing | teams:update | UpdateTeamMemberSchema | teamController.updateTeamMember |
+| GET | `/api/v1/dashboard/venues/:venueId/team` | read | venue | partial | teams:read | z.object | teamController.getTeamMembers |
+| POST | `/api/v1/dashboard/venues/:venueId/team` | action | venue | partial | teams:invite | InviteTeamMemberSchema | teamController.inviteTeamMember |
+| DELETE | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId` | dangerousMutation | venue | partial | teams:delete | TeamMemberParamsSchema | teamController.removeTeamMember |
+| GET | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId` | read | venue | partial | teams:read | TeamMemberParamsSchema | teamController.getTeamMember |
+| PATCH | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId` | mutation | venue | partial | teams:update | UpdateTeamMemberSchema | teamController.updateTeamMember |
 | DELETE | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId/hard-delete` | adminOnly | venue | blocked | - | TeamMemberParamsSchema | teamController.hardDeleteTeamMember |
-| PUT | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId/permission-set` | mutation | venue | missing | settings:manage | - | teamController.assignPermissionSet |
-| GET | `/api/v1/dashboard/venues/:venueId/team/invitations` | read | venue | missing | teams:read | TeamVenueIdParamsSchema | teamController.getPendingInvitations |
-| DELETE | `/api/v1/dashboard/venues/:venueId/team/invitations/:invitationId` | dangerousMutation | venue | missing | teams:delete | InvitationParamsSchema | teamController.cancelInvitation |
-| POST | `/api/v1/dashboard/venues/:venueId/team/invitations/:invitationId/resend` | action | venue | missing | teams:invite | InvitationParamsSchema | teamController.resendInvitation |
+| PUT | `/api/v1/dashboard/venues/:venueId/team/:teamMemberId/permission-set` | mutation | venue | partial | settings:manage | - | teamController.assignPermissionSet |
+| GET | `/api/v1/dashboard/venues/:venueId/team/invitations` | read | venue | partial | teams:read | TeamVenueIdParamsSchema | teamController.getPendingInvitations |
+| DELETE | `/api/v1/dashboard/venues/:venueId/team/invitations/:invitationId` | dangerousMutation | venue | partial | teams:delete | InvitationParamsSchema | teamController.cancelInvitation |
+| POST | `/api/v1/dashboard/venues/:venueId/team/invitations/:invitationId/resend` | action | venue | partial | teams:invite | InvitationParamsSchema | teamController.resendInvitation |
 | GET | `/api/v1/dashboard/venues/:venueId/tpv-commands` | read | venue | missing | tpv-commands:read | commandsQuerySchema | tpvCommandController.getCommands as any |
 | POST | `/api/v1/dashboard/venues/:venueId/tpv-commands` | action | venue | missing | tpv-commands:write | sendCommandSchema | tpvCommandController.sendCommand |
 | GET | `/api/v1/dashboard/venues/:venueId/tpv-commands/:commandId` | read | venue | missing | tpv-commands:read | - | tpvCommandController.getCommandStatus |
@@ -1097,8 +1097,8 @@ Generated: 2026-05-13T03:46:53.290Z
 | PUT | `/api/v1/mobile/venues/:venueId/coupons/:couponId` | mutation | venue | missing | - | - | couponMobileController.updateCoupon |
 | POST | `/api/v1/mobile/venues/:venueId/coupons/validate` | action | venue | missing | - | - | couponMobileController.validateCoupon |
 | GET | `/api/v1/mobile/venues/:venueId/customer-groups` | read | venue | missing | customers:read | - | customerGroupController.getCustomerGroups |
-| GET | `/api/v1/mobile/venues/:venueId/customers` | read | venue | missing | customers:read | - | customerController.getCustomers |
-| POST | `/api/v1/mobile/venues/:venueId/customers` | action | venue | missing | customers:create | - | customerController.createCustomer |
+| GET | `/api/v1/mobile/venues/:venueId/customers` | read | venue | partial | customers:read | - | customerController.getCustomers |
+| POST | `/api/v1/mobile/venues/:venueId/customers` | action | venue | partial | customers:create | - | customerController.createCustomer |
 | GET | `/api/v1/mobile/venues/:venueId/discounts` | read | venue | missing | - | - | discountMobileController.listDiscounts |
 | POST | `/api/v1/mobile/venues/:venueId/discounts` | action | venue | missing | - | - | discountMobileController.createDiscount |
 | DELETE | `/api/v1/mobile/venues/:venueId/discounts/:discountId` | dangerousMutation | venue | missing | - | - | discountMobileController.deleteDiscount |
@@ -1196,7 +1196,7 @@ Generated: 2026-05-13T03:46:53.290Z
 | GET | `/api/v1/organizations/:orgId/analytics/venue-benchmarks` | read | organization | partial | - | - | organizationController.getVenueBenchmarks |
 | GET | `/api/v1/organizations/:orgId/overview` | read | organization | partial | - | - | organizationController.getOrganizationOverview |
 | GET | `/api/v1/organizations/:orgId/stats` | read | organization | partial | - | - | organizationController.getOrganizationStats |
-| GET | `/api/v1/organizations/:orgId/team` | read | organization | missing | - | - | organizationController.getOrganizationTeam |
+| GET | `/api/v1/organizations/:orgId/team` | read | organization | partial | - | - | organizationController.getOrganizationTeam |
 | GET | `/api/v1/organizations/:orgId/venues` | read | organization | missing | - | - | organizationController.getOrganizationVenues |
 | GET | `/api/v1/partner/sales` | read | unknown | partial | - | - | (inline handler) |
 | POST | `/api/v1/pos-sync/test/pos-order` | action | unknown | missing | - | - | handlePosOrderTest |
@@ -1373,7 +1373,7 @@ Generated: 2026-05-13T03:46:53.290Z
 | GET | `/api/v1/superadmin/webhooks/metrics` | adminOnly | public | blocked | - | - | webhookController.getWebhookMetrics |
 | POST | `/api/v1/tpv/activate` | action | unknown | missing | - | activateTerminalSchema | activationController.activateTerminal |
 | POST | `/api/v1/tpv/auth/logout` | action | unknown | missing | - | logoutSchema | authController.staffLogout |
-| GET | `/api/v1/tpv/auth/permissions` | read | unknown | missing | - | - | (inline handler) |
+| GET | `/api/v1/tpv/auth/permissions` | read | unknown | partial | - | - | (inline handler) |
 | POST | `/api/v1/tpv/auth/refresh` | action | unknown | missing | - | refreshTokenSchema | authController.refreshAccessToken |
 | GET | `/api/v1/tpv/check-update` | read | unknown | missing | - | - | appUpdateController.checkForUpdate |
 | POST | `/api/v1/tpv/command-ack` | action | unknown | missing | - | - | heartbeatController.acknowledgeCommand |
@@ -1422,10 +1422,10 @@ Generated: 2026-05-13T03:46:53.290Z
 | POST | `/api/v1/tpv/venues/:venueId/crypto/cancel` | dangerousMutation | venue | missing | payments:create | cancelCryptoPaymentSchema | cryptoController.cancelCryptoPaymentHandler |
 | POST | `/api/v1/tpv/venues/:venueId/crypto/initiate` | action | venue | missing | payments:create | initiateCryptoPaymentSchema | cryptoController.initiateCryptoPaymentHandler |
 | GET | `/api/v1/tpv/venues/:venueId/crypto/status/:requestId` | read | venue | missing | - | getCryptoPaymentStatusSchema | cryptoController.getCryptoPaymentStatusHandler |
-| POST | `/api/v1/tpv/venues/:venueId/customers` | action | venue | missing | customers:create | - | customerController.quickCreateCustomer |
-| GET | `/api/v1/tpv/venues/:venueId/customers/:customerId` | read | venue | missing | customers:read | - | customerController.getCustomer |
-| GET | `/api/v1/tpv/venues/:venueId/customers/recent` | read | venue | missing | customers:read | - | customerController.getRecentCustomers |
-| GET | `/api/v1/tpv/venues/:venueId/customers/search` | read | venue | missing | customers:read | - | customerController.searchCustomers |
+| POST | `/api/v1/tpv/venues/:venueId/customers` | action | venue | partial | customers:create | - | customerController.quickCreateCustomer |
+| GET | `/api/v1/tpv/venues/:venueId/customers/:customerId` | read | venue | partial | customers:read | - | customerController.getCustomer |
+| GET | `/api/v1/tpv/venues/:venueId/customers/recent` | read | venue | partial | customers:read | - | customerController.getRecentCustomers |
+| GET | `/api/v1/tpv/venues/:venueId/customers/search` | read | venue | partial | customers:read | - | customerController.searchCustomers |
 | POST | `/api/v1/tpv/venues/:venueId/fast` | action | venue | missing | payments:create | recordFastPaymentParamsSchema, recordPaymentBodySchema | paymentController.recordFastPayment |
 | GET | `/api/v1/tpv/venues/:venueId/floor-elements` | read | venue | missing | - | - | floorElementController.getFloorElements |
 | POST | `/api/v1/tpv/venues/:venueId/floor-elements` | action | venue | missing | - | - | floorElementController.createFloorElement |

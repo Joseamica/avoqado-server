@@ -33,7 +33,16 @@ describe('ConversationOrchestratorService', () => {
     jest.clearAllMocks()
     ;(getUserAccess as jest.Mock).mockResolvedValue({
       role: StaffRole.ADMIN,
-      corePermissions: ['inventory:update', 'inventory:read', 'payment-link:read', 'reservations:read', 'payments:read'],
+      corePermissions: [
+        'inventory:update',
+        'inventory:read',
+        'payment-link:read',
+        'reservations:read',
+        'payments:read',
+        'customers:read',
+        'teams:read',
+        'commissions:read',
+      ],
     })
   })
 
@@ -182,6 +191,114 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).toContain('https://pay.avoqado.io/abc12345')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.list', status: 'executed' })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('answers payment link summary questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'getPaymentLinksSummary').mockResolvedValue({
+      totalLinks: 3,
+      activeLinks: 2,
+      pausedLinks: 1,
+      fixedAmountLinks: 2,
+      openAmountLinks: 1,
+      totalCollected: 1500,
+      paymentCount: 4,
+      checkoutSessionCount: 6,
+      currency: 'MXN',
+    })
+
+    const response = await orchestrator.process({
+      message: 'resumen de links de pago',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPaymentLinksSummary).toHaveBeenCalledWith('venue-1')
+    expect(response?.response).toContain('Tienes 3 links de pago')
+    expect(response?.response).toContain('$1,500.00')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.summary', status: 'executed' })])
+  })
+
+  it('answers customer summary questions without exposing customer IDs or contact data', async () => {
+    jest.spyOn(SharedQueryService, 'getCustomerSummary').mockResolvedValue({
+      totalCustomers: 10,
+      activeCustomers: 8,
+      newCustomersThisMonth: 3,
+      vipCustomers: 2,
+      averageLifetimeValue: 250,
+      averageVisitsPerCustomer: 4.2,
+      topSpenders: [{ name: 'Ana Perez', totalSpent: 1000, totalVisits: 12 }],
+    })
+
+    const response = await orchestrator.process({
+      message: 'resumen de clientes',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getCustomerSummary).toHaveBeenCalledWith('venue-1')
+    expect(response?.response).toContain('Tienes 10 clientes')
+    expect(response?.response).toContain('Ana Perez')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.summary', status: 'executed' })])
+  })
+
+  it('answers team member questions without exposing emails or PINs', async () => {
+    jest.spyOn(SharedQueryService, 'getTeamMembers').mockResolvedValue({
+      total: 1,
+      limit: 10,
+      members: [
+        {
+          staffVenueId: 'sv-1',
+          staffId: 'staff-1',
+          name: 'Ana Admin',
+          role: 'ADMIN',
+          active: true,
+          totalSales: 5000,
+          totalTips: 500,
+          totalOrders: 25,
+          permissionSetName: 'Admin',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'quien esta en mi equipo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getTeamMembers).toHaveBeenCalledWith('venue-1', { limit: 10, search: undefined })
+    expect(response?.response).toContain('Tienes 1 miembros en tu equipo')
+    expect(response?.response).toContain('Ana Admin')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'team.members', status: 'executed' })])
+  })
+
+  it('answers commission summary questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'getCommissionsSummary').mockResolvedValue({
+      totalPaid: 1000,
+      totalPending: 250,
+      totalApproved: 500,
+      staffWithCommissions: 3,
+      averageCommission: 125,
+      topEarners: [{ staffName: 'Ana Admin', totalEarned: 750, calculationCount: 6 }],
+    })
+
+    const response = await orchestrator.process({
+      message: 'como van mis comisiones',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getCommissionsSummary).toHaveBeenCalledWith('venue-1')
+    expect(response?.response).toContain('Comisiones')
+    expect(response?.response).toContain('$1,000.00 pagado')
+    expect(response?.response).toContain('Ana Admin')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.summary', status: 'executed' })])
   })
 
   it('blocks payment link list questions when the user lacks payment-link read permission', async () => {

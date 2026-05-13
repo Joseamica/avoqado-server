@@ -105,8 +105,12 @@ export type QueryToolName =
   | 'payments.list'
   | 'settlementCalendar'
   | 'paymentLinks.list'
+  | 'paymentLinks.summary'
   | 'reservations.summary'
   | 'reservations.list'
+  | 'customers.summary'
+  | 'team.members'
+  | 'commissions.summary'
   | 'adHocAnalytics'
 
 export interface QueryToolDefinition {

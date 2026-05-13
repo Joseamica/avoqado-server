@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T03:46:53.280Z",
+  "generatedAt": "2026-05-13T13:29:41.283Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -284,26 +284,29 @@
     {
       "id": "commissions.summary",
       "kind": "query",
-      "status": "backlog",
-      "description": "Summarize commissions for venue or staff.",
+      "status": "registered",
+      "description": "Venue commission totals, pending/approved/paid amounts, and top earners.",
       "scope": "venue",
       "requiresVenueScope": true,
       "permissions": [
         "commissions:read"
       ],
-      "riskLevel": "low",
+      "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.commissions.summary",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
       },
       "examples": [
-        "comisiones de este mes"
+        "como van mis comisiones",
+        "commission summary"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only commission aggregate for the active venue."
       ]
     },
     {
@@ -329,6 +332,34 @@
       ],
       "notes": [
         "Capability contract pending implementation. Do not expose as executable tool yet."
+      ]
+    },
+    {
+      "id": "customers.summary",
+      "kind": "query",
+      "status": "registered",
+      "description": "Customer count, active customers, VIP count, and top spender aggregate.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "customers:read"
+      ],
+      "riskLevel": "medium",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.customers.summary",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
+      },
+      "examples": [
+        "resumen de clientes",
+        "customer summary"
+      ],
+      "notes": [
+        "Read-only customer aggregate; chatbot response omits email, phone, and customer IDs."
       ]
     },
     {
@@ -1416,6 +1447,34 @@
       ]
     },
     {
+      "id": "paymentLinks.summary",
+      "kind": "query",
+      "status": "registered",
+      "description": "Summarize payment link count, activity, sessions, and collected amount.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "payment-link:read"
+      ],
+      "riskLevel": "low",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.paymentLinks.summary",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
+      },
+      "examples": [
+        "resumen de links de pago",
+        "payment link summary"
+      ],
+      "notes": [
+        "Read-only aggregate payment link totals for the current venue."
+      ]
+    },
+    {
       "id": "paymentMethodBreakdown",
       "kind": "query",
       "status": "registered",
@@ -2074,26 +2133,29 @@
     {
       "id": "team.members",
       "kind": "query",
-      "status": "backlog",
-      "description": "List dashboard team members.",
+      "status": "registered",
+      "description": "List dashboard team members for the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
       "permissions": [
-        "team:read"
+        "teams:read"
       ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.team.members",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
       },
       "examples": [
-        "quien esta en mi equipo"
+        "quien esta en mi equipo",
+        "show team members"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only staff list; chatbot response omits email, PIN, and credential fields."
       ]
     },
     {

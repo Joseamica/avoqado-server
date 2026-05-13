@@ -36,6 +36,8 @@ import {
   publicSessionSchema,
   publicStripeCheckoutSchema,
   publicStripePaymentIntentSchema,
+  publicSendReceiptWhatsappSchema,
+  publicSendReceiptEmailSchema,
 } from '../schemas/dashboard/paymentLink.schema'
 
 const router = Router()
@@ -189,6 +191,20 @@ router.get(
   readLimit,
   validateRequest(publicSessionSchema),
   paymentLinkPublicController.getSessionStatus,
+)
+
+router.post(
+  '/payment-links/:shortCode/send-receipt-whatsapp',
+  writeLimit,
+  validateRequest(publicSendReceiptWhatsappSchema),
+  paymentLinkPublicController.sendReceiptWhatsapp,
+)
+
+router.post(
+  '/payment-links/:shortCode/send-receipt-email',
+  writeLimit,
+  validateRequest(publicSendReceiptEmailSchema),
+  paymentLinkPublicController.sendReceiptEmail,
 )
 
 // ---- Landing Page Routes (unauthenticated) — called from avoqado.io frontend ----

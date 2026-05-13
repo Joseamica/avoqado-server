@@ -138,6 +138,12 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['que links de pago tengo', 'show payment links'],
     notes: ['Read-only payment link listing for the current venue.'],
   },
+  'paymentLinks.summary': {
+    permissions: ['payment-link:read'],
+    riskLevel: 'low',
+    examples: ['resumen de links de pago', 'payment link summary'],
+    notes: ['Read-only aggregate payment link totals for the current venue.'],
+  },
   'reservations.summary': {
     permissions: ['reservations:read'],
     riskLevel: 'low',
@@ -149,6 +155,24 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     riskLevel: 'medium',
     examples: ['muestrame mis reservas de hoy', 'show today reservations'],
     notes: ['Read-only reservation list; chatbot response omits phone, email, cancel secrets, and internal notes.'],
+  },
+  'customers.summary': {
+    permissions: ['customers:read'],
+    riskLevel: 'medium',
+    examples: ['resumen de clientes', 'customer summary'],
+    notes: ['Read-only customer aggregate; chatbot response omits email, phone, and customer IDs.'],
+  },
+  'team.members': {
+    permissions: ['teams:read'],
+    riskLevel: 'medium',
+    examples: ['quien esta en mi equipo', 'show team members'],
+    notes: ['Read-only staff list; chatbot response omits email, PIN, and credential fields.'],
+  },
+  'commissions.summary': {
+    permissions: ['commissions:read'],
+    riskLevel: 'medium',
+    examples: ['como van mis comisiones', 'commission summary'],
+    notes: ['Read-only commission aggregate for the active venue.'],
   },
   adHocAnalytics: {
     permissions: [],
@@ -184,7 +208,6 @@ const BACKLOG_CAPABILITIES: AssistantCapability[] = [
     'high',
     true,
   ),
-  backlog('commissions.summary', 'Summarize commissions for venue or staff.', 'commissions:read', ['comisiones de este mes']),
   backlog('commissions.payouts', 'Read commission payout state.', 'commissions:payout', ['payouts pendientes de comisiones'], 'medium'),
   backlog(
     'creditPacks.balance',
@@ -193,7 +216,6 @@ const BACKLOG_CAPABILITIES: AssistantCapability[] = [
     ['cuantos creditos le quedan a este cliente'],
     'medium',
   ),
-  backlog('team.members', 'List dashboard team members.', 'team:read', ['quien esta en mi equipo'], 'medium'),
   backlog(
     'team.invite',
     'Invite a user to the dashboard after confirmation.',
