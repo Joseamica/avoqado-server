@@ -313,6 +313,64 @@ export const addOrderItemsSchema = z.object({
   }),
 })
 
+// All monetary fields below are pesos as decimals, matching the rest of the
+// /tpv/* API (e.g. $25.45 is sent as 25.45, NOT as 2545 cents). The service
+// validates subtotal/discount/total with ±$0.01 tolerance for rounding.
+const createOrderWithItemsItemSchema = z
+  .object({
+    productId: z.string().cuid({ message: 'El ID del producto debe ser un CUID válido.' }).optional().nullable(),
+    name: z.string().min(1, { message: 'El nombre del ítem custom es requerido.' }).optional().nullable(),
+    quantity: z.number().int().positive({ message: 'La cantidad debe ser un entero positivo.' }),
+    unitPrice: z.number().nonnegative({ message: 'El precio unitario debe ser un número no negativo en pesos.' }).optional().nullable(),
+    modifierIds: z.array(z.string().cuid({ message: 'Los IDs de modificadores deben ser CUIDs válidos.' })).default([]),
+    notes: z.string().optional().nullable(),
+    isCortesia: z.boolean().default(false),
+    cortesiaReason: z.string().optional().nullable(),
+    itemDiscountId: z.string().cuid({ message: 'El ID del descuento debe ser un CUID válido.' }).optional().nullable(),
+  })
+  .refine(data => !!data.productId || (!!data.name && data.unitPrice != null), {
+    message: 'Cada ítem debe tener productId o name + unitPrice.',
+    path: ['productId'],
+  })
+  .refine(data => !data.isCortesia || !!data.cortesiaReason?.trim(), {
+    message: 'La razón de cortesía es requerida.',
+    path: ['cortesiaReason'],
+  })
+  .refine(data => !(data.isCortesia && data.itemDiscountId), {
+    message: 'Un ítem no puede tener cortesía y descuento al mismo tiempo.',
+    path: ['itemDiscountId'],
+  })
+
+export const createOrderWithItemsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  body: z
+    .object({
+      items: z.array(createOrderWithItemsItemSchema).min(1, { message: 'Debe proporcionar al menos un ítem.' }),
+      staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
+      orderType: z.enum(['DINE_IN', 'TAKEOUT', 'DELIVERY', 'PICKUP']).default('TAKEOUT'),
+      source: z.string().default('TPV'),
+      tableId: z.string().cuid({ message: 'El ID de la mesa debe ser un CUID válido.' }).optional().nullable(),
+      customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }).optional().nullable(),
+      discount: z.number().nonnegative({ message: 'El descuento debe ser un número no negativo en pesos.' }).default(0),
+      orderDiscountId: z.string().cuid({ message: 'El ID del descuento debe ser un CUID válido.' }).optional().nullable(),
+      taxAmount: z.number().nonnegative({ message: 'El impuesto debe ser un número no negativo en pesos.' }),
+      tip: z.number().nonnegative({ message: 'La propina debe ser un número no negativo en pesos.' }).default(0),
+      subtotal: z.number().nonnegative({ message: 'El subtotal debe ser un número no negativo en pesos.' }),
+      total: z.number().nonnegative({ message: 'El total debe ser un número no negativo en pesos.' }),
+      note: z.string().optional().nullable(),
+    })
+    .refine(data => data.taxAmount === 0, {
+      message: 'taxAmount debe ser 0 en V1 del nuevo Cobrar (la fórmula del payment service aún no incluye tax).',
+      path: ['taxAmount'],
+    })
+    .refine(data => data.tip === 0, {
+      message: 'La propina se agrega en el flujo de pago, no al crear la orden.',
+      path: ['tip'],
+    }),
+})
+
 export const removeOrderItemSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),

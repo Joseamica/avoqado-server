@@ -101,6 +101,25 @@ export async function createOrder(
   }
 }
 
+export async function createOrderWithItems(req: Request<{ venueId: string }, any, any>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const venueId = req.params.venueId
+
+    const order = await orderTpvService.createOrderWithItems(venueId, {
+      ...req.body,
+      deviceSerialNumber: req.authContext?.terminalSerialNumber,
+    })
+
+    res.status(201).json({
+      success: true,
+      data: order,
+      message: 'Order with items created successfully',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function addItemsToOrder(
   req: Request<{ venueId: string; orderId: string }, any, { items: any[]; version: number }>,
   res: Response,

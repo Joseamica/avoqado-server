@@ -47,6 +47,7 @@ import {
   clearTableSchema,
   compItemsSchema,
   createAndAddCustomerSchema,
+  createOrderWithItemsSchema,
   createProofOfSaleSchema,
   createSaleVerificationSchema,
   getAvailableDiscountsSchema,
@@ -670,6 +671,14 @@ router.get(
  *         description: Internal server error
  */
 router.post('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermission('orders:create'), orderController.createOrder)
+
+router.post(
+  '/venues/:venueId/orders/with-items',
+  authenticateTokenMiddleware,
+  checkPermission('orders:create'),
+  validateRequest(createOrderWithItemsSchema),
+  orderController.createOrderWithItems,
+)
 
 /**
  * @openapi
