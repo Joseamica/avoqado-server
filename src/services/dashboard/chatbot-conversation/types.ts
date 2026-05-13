@@ -101,6 +101,8 @@ export type QueryToolName =
   | 'activeShifts'
   | 'profitAnalysis'
   | 'paymentMethodBreakdown'
+  | 'payments.summary'
+  | 'payments.list'
   | 'settlementCalendar'
   | 'paymentLinks.list'
   | 'reservations.summary'

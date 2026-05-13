@@ -1,14 +1,14 @@
 # Assistant Capabilities
 
-Generated: 2026-05-13T03:20:24.957Z
+Generated: 2026-05-13T03:46:53.293Z
 
 ## Summary
 
-- Total capabilities: 68
-- Status: registered 56, backlog 9, blocked 3
-- Kind: action 37, query 24, howTo 5, blocked 2
-- Risk: low 35, medium 21, high 9, critical 3
-- Scope: venue 67, superadmin 1
+- Total capabilities: 70
+- Status: registered 58, backlog 9, blocked 3
+- Kind: action 37, query 26, howTo 5, blocked 2
+- Risk: low 36, medium 22, high 9, critical 3
+- Scope: venue 69, superadmin 1
 
 ## Registered Executable Capabilities
 
@@ -51,6 +51,8 @@ Generated: 2026-05-13T03:20:24.957Z
 - `menu.product.update` (action, medium) — permissions: menu:update; source: productService.updateProduct
 - `paymentLinks.list` (query, low) — permissions: payment-link:read; source: shared_query.paymentLinks.list
 - `paymentMethodBreakdown` (query, low) — permissions: payments:read; source: shared_query.paymentMethodBreakdown
+- `payments.list` (query, medium) — permissions: payments:read; source: shared_query.payments.list
+- `payments.summary` (query, low) — permissions: payments:read; source: shared_query.payments.summary
 - `pendingOrders` (query, low) — permissions: orders:read; source: shared_query.pendingOrders
 - `pricing.applySuggestedPrice` (action, medium) — permissions: menu:update; source: pricingService.applySuggestedPrice
 - `profitAnalysis` (query, medium) — permissions: payments:read, orders:read, inventory:read; source: shared_query.profitAnalysis
@@ -138,6 +140,8 @@ Generated: 2026-05-13T03:20:24.957Z
 | `paymentLinks.detail` | query | backlog | venue | low | payment-link:read | - | backlog |
 | `paymentLinks.list` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.list |
 | `paymentMethodBreakdown` | query | registered | venue | low | payments:read | - | shared_query.paymentMethodBreakdown |
+| `payments.list` | query | registered | venue | medium | payments:read | - | shared_query.payments.list |
+| `payments.summary` | query | registered | venue | low | payments:read | - | shared_query.payments.summary |
 | `pendingOrders` | query | registered | venue | low | orders:read | - | shared_query.pendingOrders |
 | `pricing.applySuggestedPrice` | action | registered | venue | medium | menu:update | single | pricingService.applySuggestedPrice |
 | `profitAnalysis` | query | registered | venue | medium | payments:read, orders:read, inventory:read | - | shared_query.profitAnalysis |

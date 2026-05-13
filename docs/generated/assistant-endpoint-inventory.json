@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T03:20:24.946Z",
+  "generatedAt": "2026-05-13T03:46:53.280Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -48,6 +48,8 @@
     "paymentLinks.detail",
     "paymentLinks.list",
     "paymentMethodBreakdown",
+    "payments.list",
+    "payments.summary",
     "pendingOrders",
     "pricing.applySuggestedPrice",
     "profitAnalysis",
@@ -2349,7 +2351,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -2378,7 +2382,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -10188,7 +10194,9 @@
       "scope": "unknown",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19527,7 +19535,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19556,7 +19566,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19585,7 +19597,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19614,7 +19628,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19644,7 +19660,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19670,7 +19688,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19696,7 +19716,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19722,7 +19744,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19748,7 +19772,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19777,7 +19803,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19806,7 +19834,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19832,7 +19862,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19863,7 +19895,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19894,7 +19928,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -19923,7 +19959,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -26252,7 +26290,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -26281,7 +26321,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -26311,7 +26353,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -34641,7 +34685,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -34674,7 +34720,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -34707,7 +34755,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
@@ -34736,7 +34786,9 @@
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
-        "paymentMethodBreakdown"
+        "paymentMethodBreakdown",
+        "payments.summary",
+        "payments.list"
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."

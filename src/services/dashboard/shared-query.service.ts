@@ -40,8 +40,9 @@
 import prisma from '@/utils/prismaClient'
 import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
-import { Prisma, ReservationStatus } from '@prisma/client'
+import { PaymentMethod, Prisma, ReservationStatus } from '@prisma/client'
 import * as availableBalanceService from './availableBalance.dashboard.service'
+import * as paymentDashboardService from './payment.dashboard.service'
 import * as paymentLinkService from './paymentLink.service'
 import * as reservationService from './reservation.dashboard.service'
 
@@ -338,6 +339,48 @@ export interface PaymentLinksSummary {
   }>
 }
 
+export interface PaymentsSummary {
+  totalPayments: number
+  completedPayments: number
+  refundedPayments: number
+  totalAmount: number
+  totalTips: number
+  currency: string
+  period: RelativeDateRange | 'custom'
+  dateRange: {
+    from: Date
+    to: Date
+  }
+}
+
+export interface PaymentsListSummary {
+  total: number
+  page: number
+  pageSize: number
+  pageCount: number
+  period: RelativeDateRange | 'custom'
+  dateRange: {
+    from: Date
+    to: Date
+  }
+  payments: Array<{
+    id: string
+    amount: number
+    tipAmount: number
+    currency: string
+    status: string
+    method: string
+    source: string | null
+    cardBrand: string | null
+    last4: string | null
+    createdAt: Date
+    processedByName: string | null
+    orderNumber: string | null
+    tableNumber: string | null
+    merchantName: string | null
+  }>
+}
+
 export interface ReservationSummary {
   total: number
   byStatus: Record<string, number>
@@ -576,7 +619,7 @@ export class SharedQueryService {
   static async getTopProducts(venueId: string, period: DateRangeSpec, limit: number = 10, timezone?: string): Promise<TopProduct[]> {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { timezone: true },
+      select: { timezone: true, currency: true },
     })
 
     if (!venue) {
@@ -640,7 +683,7 @@ export class SharedQueryService {
   ): Promise<ProductSales> {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { timezone: true },
+      select: { timezone: true, currency: true },
     })
 
     if (!venue) {
@@ -1486,6 +1529,105 @@ export class SharedQueryService {
   }
 
   /**
+   * List payments for the current venue and period with card/processor details minimized.
+   *
+   * Used by:
+   * - Dashboard payments list endpoint
+   * - AI Chatbot for "muéstrame los pagos de hoy" queries
+   */
+  static async getPayments(
+    venueId: string,
+    period: DateRangeSpec,
+    filters: { method?: string; source?: string; search?: string; limit?: number; page?: number } = {},
+    timezone?: string,
+  ): Promise<PaymentsListSummary> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true, currency: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const { from, to, periodName } = this.getDateRange(period, timezone || venue.timezone)
+    const pageSize = Math.min(Math.max(Math.trunc(Number(filters.limit) || 10), 1), 25)
+    const page = Math.min(Math.max(Math.trunc(Number(filters.page) || 1), 1), 1000)
+    const result = await paymentDashboardService.getPaymentsData(venueId, page, pageSize, {
+      startDate: from.toISOString(),
+      endDate: to.toISOString(),
+      method: this.normalizePaymentMethod(filters.method),
+      source: filters.source,
+      search: filters.search,
+    })
+
+    return {
+      total: result.meta.total,
+      page: result.meta.page,
+      pageSize: result.meta.pageSize,
+      pageCount: result.meta.pageCount,
+      period: periodName,
+      dateRange: { from, to },
+      payments: result.data.map(payment => ({
+        id: payment.id,
+        amount: this.numberValue(payment.amount),
+        tipAmount: this.numberValue(payment.tipAmount),
+        currency: (payment as any).currency || venue.currency || 'MXN',
+        status: payment.status,
+        method: payment.method,
+        source: payment.source,
+        cardBrand: payment.cardBrand,
+        last4: (payment as any).last4 || null,
+        createdAt: payment.createdAt,
+        processedByName: payment.processedBy
+          ? `${payment.processedBy.firstName || ''} ${payment.processedBy.lastName || ''}`.trim() || null
+          : null,
+        orderNumber: payment.order?.orderNumber || null,
+        tableNumber: (payment.order as any)?.table?.number || null,
+        merchantName: payment.merchantAccount?.displayName || payment.merchantAccount?.alias || null,
+      })),
+    }
+  }
+
+  /**
+   * Summarize payments for the current venue and period.
+   *
+   * Uses the same dashboard payment service as the list endpoint. The summary is
+   * capped to the first 100 dashboard rows until a dedicated dashboard aggregate
+   * endpoint exists.
+   */
+  static async getPaymentsSummary(venueId: string, period: DateRangeSpec, timezone?: string): Promise<PaymentsSummary> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true, currency: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const { from, to, periodName } = this.getDateRange(period, timezone || venue.timezone)
+    const result = await paymentDashboardService.getPaymentsData(venueId, 1, 100, {
+      startDate: from.toISOString(),
+      endDate: to.toISOString(),
+    })
+
+    const payments = result.data
+    const currency = (payments[0] as any)?.currency || venue.currency || 'MXN'
+
+    return {
+      totalPayments: result.meta.total,
+      completedPayments: payments.filter(payment => payment.status === 'COMPLETED').length,
+      refundedPayments: payments.filter(payment => payment.status === 'REFUNDED').length,
+      totalAmount: payments.reduce((sum, payment) => sum + this.numberValue(payment.amount), 0),
+      totalTips: payments.reduce((sum, payment) => sum + this.numberValue(payment.tipAmount), 0),
+      currency,
+      period: periodName,
+      dateRange: { from, to },
+    }
+  }
+
+  /**
    * Summarize reservations for the current venue and period.
    *
    * Used by:
@@ -1581,6 +1723,20 @@ export class SharedQueryService {
     const normalized = status.toUpperCase()
     const allowed: ReservationStatus[] = ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'COMPLETED', 'CANCELLED', 'NO_SHOW']
     return allowed.includes(normalized as ReservationStatus) ? (normalized as ReservationStatus) : undefined
+  }
+
+  private static normalizePaymentMethod(method?: string): PaymentMethod | undefined {
+    if (!method) return undefined
+    const normalized = method.toUpperCase()
+    const allowed = Object.values(PaymentMethod)
+    return allowed.includes(normalized as PaymentMethod) ? (normalized as PaymentMethod) : undefined
+  }
+
+  private static numberValue(value: unknown): number {
+    if (value == null) return 0
+    if (typeof value === 'number') return value
+    if (typeof value === 'object' && 'toNumber' in value && typeof value.toNumber === 'function') return value.toNumber()
+    return Number(value) || 0
   }
 
   /**

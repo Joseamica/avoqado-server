@@ -48,7 +48,7 @@ const ROUTER_USE_RE = /router\.use\s*\(/g
 const ASSISTANT_TOOL_HINTS: Array<{ pattern: RegExp; tools: string[]; coverage: EndpointInventoryRow['assistantCoverage'] }> = [
   { pattern: /sales|general-stats|stats|analytics|overview|summary/i, tools: ['sales', 'businessOverview'], coverage: 'partial' },
   { pattern: /available-balance|settlement|liquid/i, tools: ['settlementCalendar'], coverage: 'partial' },
-  { pattern: /payment-method|payments/i, tools: ['paymentMethodBreakdown'], coverage: 'partial' },
+  { pattern: /payment-method|payments/i, tools: ['paymentMethodBreakdown', 'payments.summary', 'payments.list'], coverage: 'partial' },
   { pattern: /reviews/i, tools: ['reviews'], coverage: 'covered' },
   {
     pattern: /inventory|stock|raw-material|recipe|purchase-order|supplier/i,

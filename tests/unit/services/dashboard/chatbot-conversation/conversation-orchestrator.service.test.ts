@@ -33,7 +33,7 @@ describe('ConversationOrchestratorService', () => {
     jest.clearAllMocks()
     ;(getUserAccess as jest.Mock).mockResolvedValue({
       role: StaffRole.ADMIN,
-      corePermissions: ['inventory:update', 'inventory:read', 'payment-link:read', 'reservations:read'],
+      corePermissions: ['inventory:update', 'inventory:read', 'payment-link:read', 'reservations:read', 'payments:read'],
     })
   })
 
@@ -310,6 +310,115 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.blocked).toBe(true)
     expect(response?.response).toContain('No tienes permisos suficientes')
     expect(SharedQueryService.getReservations).not.toHaveBeenCalled()
+  })
+
+  it('answers payment summary questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'getPaymentsSummary').mockResolvedValue({
+      totalPayments: 2,
+      completedPayments: 1,
+      refundedPayments: 1,
+      totalAmount: 600,
+      totalTips: 50,
+      currency: 'MXN',
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+    })
+
+    const response = await orchestrator.process({
+      message: 'cuantos pagos recibi hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPaymentsSummary).toHaveBeenCalledWith('venue-1', 'today')
+    expect(response?.response).toContain('recibiste 2 pagos')
+    expect(response?.response).toContain('$600.00')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'payments.summary', status: 'executed' })])
+  })
+
+  it('answers payment list questions without exposing authorization or masked PAN data', async () => {
+    jest.spyOn(SharedQueryService, 'getPayments').mockResolvedValue({
+      total: 1,
+      page: 1,
+      pageSize: 10,
+      pageCount: 1,
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+      payments: [
+        {
+          id: 'payment-1',
+          amount: 500,
+          tipAmount: 50,
+          currency: 'MXN',
+          status: 'COMPLETED',
+          method: 'CARD',
+          source: 'TPV',
+          cardBrand: 'VISA',
+          last4: '4242',
+          createdAt: new Date('2026-05-12T20:00:00.000Z'),
+          processedByName: 'Ana Admin',
+          orderNumber: 'ORD-7',
+          tableNumber: '12',
+          merchantName: 'Stripe MXN',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'muestrame los pagos de hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPayments).toHaveBeenCalledWith('venue-1', 'today', {
+      limit: 10,
+      method: undefined,
+      source: undefined,
+      search: undefined,
+    })
+    expect(response?.response).toContain('Pagos de hoy')
+    expect(response?.response).toContain('$500.00')
+    expect(response?.response).toContain('terminación 4242')
+    expect(response?.response).not.toContain('authorization')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'payments.list', status: 'executed' })])
+  })
+
+  it('blocks payment list questions when the user lacks payments read permission', async () => {
+    ;(getUserAccess as jest.Mock).mockResolvedValueOnce({
+      role: StaffRole.VIEWER,
+      corePermissions: ['inventory:read'],
+    })
+    jest.spyOn(SharedQueryService, 'getPayments').mockResolvedValue({
+      total: 0,
+      page: 1,
+      pageSize: 10,
+      pageCount: 0,
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+      payments: [],
+    })
+
+    const response = await orchestrator.process({
+      message: 'muestrame los pagos de hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.MANAGER,
+    })
+
+    expect(response?.metadata.blocked).toBe(true)
+    expect(response?.response).toContain('No tienes permisos suficientes')
+    expect(SharedQueryService.getPayments).not.toHaveBeenCalled()
   })
 
   it('previews CRUD and skips dependent reads until confirmation', async () => {

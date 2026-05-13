@@ -1,11 +1,11 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-05-13T03:20:24.954Z
+Generated: 2026-05-13T03:46:53.290Z
 
 ## Summary
 
 - Total endpoints: 1337
-- Assistant tools registered: 68
+- Assistant tools registered: 70
 - Coverage: missing 615, blocked 382, partial 335, covered 5
 - Classifications: read 425, adminOnly 344, action 283, dangerousMutation 127, mutation 120, public 38
 - Scopes: venue 703, superadmin 307, unknown 167, organization 95, public 65

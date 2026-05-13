@@ -70,6 +70,8 @@ archivo es la fuente de verdad para distinguir:
 - `activeShifts`
 - `profitAnalysis`
 - `paymentMethodBreakdown`
+- `payments.summary`
+- `payments.list`
 - `settlementCalendar`
 - `paymentLinks.list`
 - `reservations.summary`
@@ -166,7 +168,6 @@ Esto no entrena automaticamente el modelo base; alimenta RAG/evaluaciones para q
 Prioridad alta:
 
 - `settlements.detail`
-- `payments.list`
 - `payments.detail`
 - `paymentLinks.summary`
 - `commissions.summary`

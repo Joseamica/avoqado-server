@@ -114,6 +114,18 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['que metodo de pago se usa mas', 'payment method breakdown'],
     notes: ['Aggregate payment method totals.'],
   },
+  'payments.summary': {
+    permissions: ['payments:read'],
+    riskLevel: 'low',
+    examples: ['cuantos pagos recibi hoy', 'payment summary today'],
+    notes: ['Read-only payment summary for the active venue.'],
+  },
+  'payments.list': {
+    permissions: ['payments:read'],
+    riskLevel: 'medium',
+    examples: ['muestrame los pagos de hoy', 'show payments today'],
+    notes: ['Read-only payment list; chatbot response omits masked PAN and authorization numbers.'],
+  },
   settlementCalendar: {
     permissions: ['settlements:read'],
     riskLevel: 'low',

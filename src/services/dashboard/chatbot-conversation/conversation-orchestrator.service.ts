@@ -466,6 +466,42 @@ export class ConversationOrchestratorService {
           breakdown.methods.length,
         )
       }
+      case 'payments.summary': {
+        const payments = await SharedQueryService.getPaymentsSummary(venueId, dateRange)
+        return this.queryResult(
+          step.tool,
+          payments,
+          payments.totalPayments > 0
+            ? `En ${this.formatDateRangeName(dateRange)} recibiste ${payments.totalPayments} pagos por ${this.money(payments.totalAmount, payments.currency)} en total, con ${this.money(payments.totalTips, payments.currency)} en propinas. Completados: ${payments.completedPayments}; reembolsados: ${payments.refundedPayments}.`
+            : `No encontré pagos para ${this.formatDateRangeName(dateRange)}.`,
+        )
+      }
+      case 'payments.list': {
+        const payments = await SharedQueryService.getPayments(venueId, dateRange, {
+          limit: this.limit(step, 10),
+          method: typeof step.args.method === 'string' ? step.args.method : undefined,
+          source: typeof step.args.source === 'string' ? step.args.source : undefined,
+          search: typeof step.args.search === 'string' ? step.args.search : undefined,
+        })
+        const list = payments.payments
+          .map(payment => {
+            const card = payment.last4 ? `, terminación ${payment.last4}` : ''
+            const order = payment.orderNumber ? `, orden ${payment.orderNumber}` : ''
+            const table = payment.tableNumber ? `, mesa ${payment.tableNumber}` : ''
+            const staff = payment.processedByName ? `, procesó ${payment.processedByName}` : ''
+            return `- ${this.formatDateTime(payment.createdAt)}: ${this.money(payment.amount, payment.currency)} + ${this.money(payment.tipAmount, payment.currency)} propina, ${payment.method}, ${payment.status}${card}${order}${table}${staff}.`
+          })
+          .join('\n')
+        const more = payments.total > payments.payments.length ? `\nHay ${payments.total - payments.payments.length} más.` : ''
+        return this.queryResult(
+          step.tool,
+          payments,
+          payments.payments.length > 0
+            ? `Pagos de ${this.formatDateRangeName(dateRange)}:\n${list}${more}`
+            : `No encontré pagos para ${this.formatDateRangeName(dateRange)}.`,
+          payments.payments.length,
+        )
+      }
       case 'settlementCalendar': {
         const settlement = await SharedQueryService.getSettlementCalendarForPeriod(venueId, dateRange)
         const list = settlement.entries

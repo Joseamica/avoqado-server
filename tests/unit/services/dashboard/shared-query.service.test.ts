@@ -2,6 +2,7 @@ import prisma from '@/utils/prismaClient'
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import * as availableBalanceService from '@/services/dashboard/availableBalance.dashboard.service'
 import * as paymentLinkService from '@/services/dashboard/paymentLink.service'
+import * as paymentDashboardService from '@/services/dashboard/payment.dashboard.service'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -22,6 +23,10 @@ jest.mock('@/services/dashboard/availableBalance.dashboard.service', () => ({
 
 jest.mock('@/services/dashboard/paymentLink.service', () => ({
   getPaymentLinks: jest.fn(),
+}))
+
+jest.mock('@/services/dashboard/payment.dashboard.service', () => ({
+  getPaymentsData: jest.fn(),
 }))
 
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
@@ -234,6 +239,108 @@ describe('SharedQueryService', () => {
       expect(JSON.stringify(result)).not.toContain('+525500000000')
       expect(JSON.stringify(result)).not.toContain('secret')
       expect(JSON.stringify(result)).not.toContain('VIP')
+    })
+  })
+
+  describe('getPayments', () => {
+    it('uses the dashboard payment service as source of truth and returns a safe list', async () => {
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'UTC', currency: 'MXN' })
+      ;(paymentDashboardService.getPaymentsData as jest.Mock).mockResolvedValue({
+        data: [
+          {
+            id: 'payment-1',
+            amount: 500,
+            tipAmount: 50,
+            netAmount: 550,
+            currency: 'MXN',
+            status: 'COMPLETED',
+            method: 'CARD',
+            source: 'TPV',
+            cardBrand: 'VISA',
+            last4: '4242',
+            maskedPan: '411111******4242',
+            authorizationNumber: 'secret-auth',
+            referenceNumber: 'ref-123',
+            createdAt: new Date('2026-05-12T20:00:00.000Z'),
+            processedBy: { firstName: 'Ana', lastName: 'Admin' },
+            order: { orderNumber: 'ORD-7', table: { number: '12' } },
+            merchantAccount: { name: 'Stripe MXN', provider: { name: 'Stripe' } },
+          },
+        ],
+        meta: { total: 1, page: 1, pageSize: 10, pageCount: 1 },
+      })
+
+      const result = await SharedQueryService.getPayments('venue-test', 'today', { limit: 10 })
+
+      expect(paymentDashboardService.getPaymentsData).toHaveBeenCalledWith('venue-test', 1, 10, {
+        startDate: '2026-05-12T00:00:00.000Z',
+        endDate: '2026-05-12T23:59:59.999Z',
+        method: undefined,
+        source: undefined,
+        search: undefined,
+      })
+      expect(result.payments).toEqual([
+        expect.objectContaining({
+          id: 'payment-1',
+          amount: 500,
+          tipAmount: 50,
+          currency: 'MXN',
+          status: 'COMPLETED',
+          method: 'CARD',
+          last4: '4242',
+          processedByName: 'Ana Admin',
+          orderNumber: 'ORD-7',
+          tableNumber: '12',
+        }),
+      ])
+      expect(JSON.stringify(result)).not.toContain('411111')
+      expect(JSON.stringify(result)).not.toContain('secret-auth')
+    })
+
+    it('summarizes returned dashboard payments without exposing card data', async () => {
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'UTC', currency: 'MXN' })
+      ;(paymentDashboardService.getPaymentsData as jest.Mock).mockResolvedValue({
+        data: [
+          {
+            id: 'payment-1',
+            amount: 500,
+            tipAmount: 50,
+            currency: 'MXN',
+            status: 'COMPLETED',
+            method: 'CARD',
+            source: 'TPV',
+            createdAt: new Date('2026-05-12T20:00:00.000Z'),
+          },
+          {
+            id: 'payment-2',
+            amount: 100,
+            tipAmount: 0,
+            currency: 'MXN',
+            status: 'REFUNDED',
+            method: 'CASH',
+            source: 'MANUAL',
+            createdAt: new Date('2026-05-12T21:00:00.000Z'),
+          },
+        ],
+        meta: { total: 2, page: 1, pageSize: 100, pageCount: 1 },
+      })
+
+      const result = await SharedQueryService.getPaymentsSummary('venue-test', 'today')
+
+      expect(paymentDashboardService.getPaymentsData).toHaveBeenCalledWith('venue-test', 1, 100, {
+        startDate: '2026-05-12T00:00:00.000Z',
+        endDate: '2026-05-12T23:59:59.999Z',
+      })
+      expect(result).toEqual(
+        expect.objectContaining({
+          totalPayments: 2,
+          completedPayments: 1,
+          refundedPayments: 1,
+          totalAmount: 600,
+          totalTips: 50,
+          currency: 'MXN',
+        }),
+      )
     })
   })
 })

@@ -213,6 +213,24 @@ export class ConversationPlannerService {
       })
     }
 
+    if (this.hasPaymentsSummaryIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'payments.summary',
+        args: { dateRange: this.extractDateRange(normalized) || 'today' },
+      })
+    }
+
+    if (this.hasPaymentsListIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'payments.list',
+        args: { dateRange: this.extractDateRange(normalized) || 'today', limit: 10 },
+      })
+    }
+
     if (this.hasPaymentLinksListIntent(normalized)) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -564,6 +582,22 @@ export class ConversationPlannerService {
     const readIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|activos?|show|list|see|active)\b/.test(normalized)
     const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|archiva|pausa|pausar)\b/.test(normalized)
     return paymentLinkTerm && readIntent && !mutationIntent
+  }
+
+  private hasPaymentTerms(normalized: string): boolean {
+    return /\b(pagos|cobros|transacciones|payment|payments|charges|transactions)\b/.test(normalized)
+  }
+
+  private hasPaymentsSummaryIntent(normalized: string): boolean {
+    const summaryIntent = /\b(cuantos|cuantas|cuanto|cuanta|total|monto|recibi|recibidos|recibidas|amount|how many|how much)\b/.test(
+      normalized,
+    )
+    return this.hasPaymentTerms(normalized) && summaryIntent
+  }
+
+  private hasPaymentsListIntent(normalized: string): boolean {
+    const listIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|show|list|see)\b/.test(normalized)
+    return this.hasPaymentTerms(normalized) && listIntent && !this.hasPaymentsSummaryIntent(normalized)
   }
 
   private hasReservationTerms(normalized: string): boolean {

@@ -101,6 +101,20 @@ export class ToolCatalogService {
         defaultDateRange: 'thisMonth',
       },
       {
+        name: 'payments.summary',
+        description: 'Payment count, amount, tips, and status summary for a period.',
+        tables: ['Payment'],
+        requiresDateRange: true,
+        defaultDateRange: 'today',
+      },
+      {
+        name: 'payments.list',
+        description: 'List payments for the current venue and period.',
+        tables: ['Payment'],
+        requiresDateRange: true,
+        defaultDateRange: 'today',
+      },
+      {
         name: 'settlementCalendar',
         description: 'Settlement, liquidation, dispersion, or payout amount by settlement date for a period.',
         tables: ['Payment'],

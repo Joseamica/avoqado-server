@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T03:20:24.946Z",
+  "generatedAt": "2026-05-13T03:46:53.280Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -1442,6 +1442,64 @@
       ],
       "notes": [
         "Aggregate payment method totals."
+      ]
+    },
+    {
+      "id": "payments.list",
+      "kind": "query",
+      "status": "registered",
+      "description": "List payments for the current venue and period.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "payments:read"
+      ],
+      "riskLevel": "medium",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.payments.list",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
+      },
+      "examples": [
+        "muestrame los pagos de hoy",
+        "show payments today"
+      ],
+      "notes": [
+        "Read-only payment list; chatbot response omits masked PAN and authorization numbers."
+      ]
+    },
+    {
+      "id": "payments.summary",
+      "kind": "query",
+      "status": "registered",
+      "description": "Payment count, amount, tips, and status summary for a period.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "payments:read"
+      ],
+      "riskLevel": "low",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.payments.summary",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
+      },
+      "examples": [
+        "cuantos pagos recibi hoy",
+        "payment summary today"
+      ],
+      "notes": [
+        "Read-only payment summary for the active venue."
       ]
     },
     {

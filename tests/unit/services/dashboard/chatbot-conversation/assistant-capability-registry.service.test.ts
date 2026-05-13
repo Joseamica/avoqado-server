@@ -91,6 +91,29 @@ describe('AssistantCapabilityRegistryService', () => {
     expect(executableIds).not.toContain('reservations.create')
   })
 
+  it('registers payment read tools as executable venue-scoped capabilities', () => {
+    const executableIds = registry.listExecutableCapabilities().map(capability => capability.id)
+
+    expect(registry.getCapability('payments.summary')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['payments:read'],
+        riskLevel: 'low',
+      }),
+    )
+    expect(registry.getCapability('payments.list')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['payments:read'],
+        riskLevel: 'medium',
+      }),
+    )
+    expect(executableIds).toContain('payments.summary')
+    expect(executableIds).toContain('payments.list')
+  })
+
   it('registers product how-to capabilities without business-data access', () => {
     const capability = registry.getCapability('howTo.teamInvite')
 
