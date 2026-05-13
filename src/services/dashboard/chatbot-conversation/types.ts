@@ -102,6 +102,9 @@ export type QueryToolName =
   | 'profitAnalysis'
   | 'paymentMethodBreakdown'
   | 'settlementCalendar'
+  | 'paymentLinks.list'
+  | 'reservations.summary'
+  | 'reservations.list'
   | 'adHocAnalytics'
 
 export interface QueryToolDefinition {

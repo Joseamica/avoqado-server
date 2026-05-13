@@ -156,6 +156,12 @@ export class TableAccessControlService {
       reason: 'Payment data is highly sensitive financial information',
     },
     {
+      table: 'PaymentLink',
+      accessLevel: AccessLevel.RESTRICTED,
+      allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,
+      reason: 'Payment links expose collection URLs and payment configuration',
+    },
+    {
       table: 'Customer',
       accessLevel: AccessLevel.RESTRICTED,
       allowedRoles: TableAccessControlService.MANAGER_AND_ABOVE,

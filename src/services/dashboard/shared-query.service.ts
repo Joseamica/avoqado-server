@@ -40,8 +40,10 @@
 import prisma from '@/utils/prismaClient'
 import { getVenueDateRange, type RelativeDateRange } from '@/utils/datetime'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
-import { Prisma } from '@prisma/client'
+import { Prisma, ReservationStatus } from '@prisma/client'
 import * as availableBalanceService from './availableBalance.dashboard.service'
+import * as paymentLinkService from './paymentLink.service'
+import * as reservationService from './reservation.dashboard.service'
 
 /**
  * Date range specification - supports both predefined periods and custom ranges
@@ -309,6 +311,67 @@ export interface SettlementCalendarSummary {
       netAmount: number
       transactionCount: number
     }>
+  }>
+}
+
+export interface PaymentLinksSummary {
+  total: number
+  limit: number
+  offset: number
+  hasMore: boolean
+  links: Array<{
+    id: string
+    title: string
+    shortCode: string
+    status: string
+    purpose: string
+    amountType: string
+    amount: number | null
+    currency: string
+    isReusable: boolean
+    totalCollected: number
+    paymentCount: number
+    checkoutSessionCount: number
+    createdAt: Date
+    expiresAt: Date | null
+    createdByName: string | null
+  }>
+}
+
+export interface ReservationSummary {
+  total: number
+  byStatus: Record<string, number>
+  byChannel: Record<string, number>
+  noShowRate: number
+  period: RelativeDateRange | 'custom'
+  dateRange: {
+    from: Date
+    to: Date
+  }
+}
+
+export interface ReservationListSummary {
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
+  period: RelativeDateRange | 'custom'
+  dateRange: {
+    from: Date
+    to: Date
+  }
+  reservations: Array<{
+    confirmationCode: string
+    status: string
+    channel: string
+    startsAt: Date
+    endsAt: Date
+    partySize: number
+    guestName: string | null
+    customerName: string | null
+    tableNumber: string | null
+    productName: string | null
+    assignedStaffName: string | null
   }>
 }
 
@@ -1377,6 +1440,147 @@ export class SharedQueryService {
         })),
       })),
     }
+  }
+
+  /**
+   * List payment links for the current venue.
+   *
+   * Used by:
+   * - Dashboard payment-links list endpoint
+   * - AI Chatbot for "¿qué links de pago tengo?" queries
+   */
+  static async getPaymentLinks(
+    venueId: string,
+    filters: { status?: string; search?: string; limit?: number; offset?: number } = {},
+  ): Promise<PaymentLinksSummary> {
+    const result = await paymentLinkService.getPaymentLinks(venueId, {
+      status: filters.status,
+      search: filters.search,
+      limit: filters.limit,
+      offset: filters.offset,
+    })
+
+    return {
+      total: result.total,
+      limit: result.limit,
+      offset: result.offset,
+      hasMore: result.hasMore,
+      links: result.paymentLinks.map(link => ({
+        id: link.id,
+        title: link.title,
+        shortCode: link.shortCode,
+        status: link.status,
+        purpose: link.purpose,
+        amountType: link.amountType,
+        amount: link.amount == null ? null : Number(link.amount),
+        currency: link.currency,
+        isReusable: link.isReusable,
+        totalCollected: Number(link.totalCollected),
+        paymentCount: link.paymentCount,
+        checkoutSessionCount: link._count?.checkoutSessions ?? 0,
+        createdAt: link.createdAt,
+        expiresAt: link.expiresAt,
+        createdByName: link.createdBy ? `${link.createdBy.firstName || ''} ${link.createdBy.lastName || ''}`.trim() || null : null,
+      })),
+    }
+  }
+
+  /**
+   * Summarize reservations for the current venue and period.
+   *
+   * Used by:
+   * - Dashboard reservations stats endpoint
+   * - AI Chatbot for "¿cuántas reservaciones tengo hoy?" queries
+   */
+  static async getReservationSummary(venueId: string, period: DateRangeSpec, timezone?: string): Promise<ReservationSummary> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const { from, to, periodName } = this.getDateRange(period, timezone || venue.timezone)
+    const stats = await reservationService.getReservationStats(venueId, from, to)
+
+    return {
+      ...stats,
+      period: periodName,
+      dateRange: { from, to },
+    }
+  }
+
+  /**
+   * List reservations for the current venue and period with PII-minimized fields.
+   *
+   * Used by:
+   * - Dashboard reservations list endpoint
+   * - AI Chatbot for "muéstrame mis reservas de hoy" queries
+   */
+  static async getReservations(
+    venueId: string,
+    period: DateRangeSpec,
+    filters: { status?: string; search?: string; limit?: number; page?: number } = {},
+    timezone?: string,
+  ): Promise<ReservationListSummary> {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { timezone: true },
+    })
+
+    if (!venue) {
+      throw new Error(`Venue not found: ${venueId}`)
+    }
+
+    const { from, to, periodName } = this.getDateRange(period, timezone || venue.timezone)
+    const pageSize = Math.min(Math.max(Math.trunc(Number(filters.limit) || 10), 1), 25)
+    const page = Math.min(Math.max(Math.trunc(Number(filters.page) || 1), 1), 1000)
+    const result = await reservationService.getReservations(
+      venueId,
+      {
+        dateFrom: from,
+        dateTo: to,
+        status: this.normalizeReservationStatus(filters.status),
+        search: filters.search,
+      },
+      page,
+      pageSize,
+    )
+
+    return {
+      total: result.meta.total,
+      page: result.meta.page,
+      pageSize: result.meta.pageSize,
+      totalPages: result.meta.totalPages,
+      period: periodName,
+      dateRange: { from, to },
+      reservations: result.data.map(reservation => ({
+        confirmationCode: reservation.confirmationCode,
+        status: reservation.status,
+        channel: reservation.channel,
+        startsAt: reservation.startsAt,
+        endsAt: reservation.endsAt,
+        partySize: reservation.partySize,
+        guestName: reservation.guestName || null,
+        customerName: reservation.customer
+          ? `${reservation.customer.firstName || ''} ${reservation.customer.lastName || ''}`.trim() || null
+          : null,
+        tableNumber: reservation.table?.number || null,
+        productName: reservation.product?.name || null,
+        assignedStaffName: reservation.assignedStaff
+          ? `${reservation.assignedStaff.firstName || ''} ${reservation.assignedStaff.lastName || ''}`.trim() || null
+          : null,
+      })),
+    }
+  }
+
+  private static normalizeReservationStatus(status?: string): ReservationStatus | undefined {
+    if (!status) return undefined
+    const normalized = status.toUpperCase()
+    const allowed: ReservationStatus[] = ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'COMPLETED', 'CANCELLED', 'NO_SHOW']
+    return allowed.includes(normalized as ReservationStatus) ? (normalized as ReservationStatus) : undefined
   }
 
   /**

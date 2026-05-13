@@ -120,6 +120,24 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
     examples: ['cuanto me liquidan hoy', 'how much is my payout today'],
     notes: ['Uses available balance settlement calendar as source of truth.'],
   },
+  'paymentLinks.list': {
+    permissions: ['payment-link:read'],
+    riskLevel: 'low',
+    examples: ['que links de pago tengo', 'show payment links'],
+    notes: ['Read-only payment link listing for the current venue.'],
+  },
+  'reservations.summary': {
+    permissions: ['reservations:read'],
+    riskLevel: 'low',
+    examples: ['cuantas reservaciones tengo hoy', 'how many reservations today'],
+    notes: ['Read-only reservation aggregate for the active venue.'],
+  },
+  'reservations.list': {
+    permissions: ['reservations:read'],
+    riskLevel: 'medium',
+    examples: ['muestrame mis reservas de hoy', 'show today reservations'],
+    notes: ['Read-only reservation list; chatbot response omits phone, email, cancel secrets, and internal notes.'],
+  },
   adHocAnalytics: {
     permissions: [],
     riskLevel: 'critical',
@@ -129,10 +147,6 @@ const QUERY_CAPABILITY_METADATA: Record<string, Pick<AssistantCapability, 'permi
 }
 
 const BACKLOG_CAPABILITIES: AssistantCapability[] = [
-  backlog('paymentLinks.list', 'List payment links for the current venue.', 'payment-link:read', [
-    'que links de pago tengo',
-    'show payment links',
-  ]),
   backlog('paymentLinks.detail', 'Show a single payment link by safe identifier.', 'payment-link:read', ['como va este link de pago']),
   backlog(
     'paymentLinks.create',
@@ -142,8 +156,6 @@ const BACKLOG_CAPABILITIES: AssistantCapability[] = [
     'medium',
     true,
   ),
-  backlog('reservations.summary', 'Summarize reservations for a period.', 'reservations:read', ['cuantas reservaciones tengo hoy']),
-  backlog('reservations.list', 'List reservations for the current venue.', 'reservations:read', ['muestrame mis reservas de hoy']),
   backlog(
     'reservations.create',
     'Create a reservation after collecting required guest/session fields.',

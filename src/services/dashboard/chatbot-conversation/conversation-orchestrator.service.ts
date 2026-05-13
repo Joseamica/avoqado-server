@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
 import { StaffRole } from '@prisma/client'
 import { getUserAccess } from '@/services/access/access.service'
+import { evaluatePermissionList } from '@/lib/permissions'
 import { RelativeDateRange } from '@/utils/datetime'
 import { SharedQueryService } from '../shared-query.service'
 import { SecurityViolationType } from '../security-response.service'
@@ -9,6 +10,7 @@ import { ActionEngine } from '../chatbot-actions/action-engine.service'
 import { ActionClassification, ActionContext, ActionResponse } from '../chatbot-actions/types'
 import { ConversationPlannerService } from './conversation-planner.service'
 import { ToolCatalogService } from './tool-catalog.service'
+import { AssistantCapabilityRegistryService } from './assistant-capability-registry.service'
 import { ConversationPlan, OrchestratorRequest, PlanStepMetadata, PlannerQueryStep, PlannerStep } from './types'
 
 interface OrchestratorResponse {
@@ -42,6 +44,7 @@ interface QueryExecutionResult {
 export class ConversationOrchestratorService {
   private readonly planner: ConversationPlannerService
   private readonly toolCatalog: ToolCatalogService
+  private readonly capabilityRegistry: AssistantCapabilityRegistryService
 
   constructor(
     openai: OpenAI,
@@ -49,6 +52,7 @@ export class ConversationOrchestratorService {
     toolCatalog = new ToolCatalogService(),
   ) {
     this.toolCatalog = toolCatalog
+    this.capabilityRegistry = new AssistantCapabilityRegistryService(toolCatalog)
     this.planner = new ConversationPlannerService(openai, toolCatalog)
   }
 
@@ -161,7 +165,7 @@ export class ConversationOrchestratorService {
           continue
         }
 
-        const access = this.validateQueryAccess(step, request.userRole || UserRole.VIEWER)
+        const access = await this.validateQueryAccess(step, request)
         if (!access.allowed) {
           responseBlocks.push(access.message)
           metadataSteps.push(this.stepMetadata(step, 'blocked'))
@@ -244,10 +248,10 @@ export class ConversationOrchestratorService {
     return this.actionEngine.processAction(classification, context)
   }
 
-  private validateQueryAccess(
+  private async validateQueryAccess(
     step: PlannerQueryStep,
-    userRole: UserRole,
-  ): { allowed: true } | { allowed: false; message: string; violationType: SecurityViolationType } {
+    request: OrchestratorRequest,
+  ): Promise<{ allowed: true } | { allowed: false; message: string; violationType: SecurityViolationType }> {
     const tool = this.toolCatalog.getQueryTool(step.tool)
     if (!tool) {
       return {
@@ -261,6 +265,30 @@ export class ConversationOrchestratorService {
       return { allowed: true }
     }
 
+    const capability = this.capabilityRegistry.getCapability(step.tool)
+    if (capability?.status === 'blocked') {
+      return {
+        allowed: false,
+        message: 'Esa consulta no está habilitada como herramienta segura.',
+        violationType: SecurityViolationType.UNAUTHORIZED_TABLE,
+      }
+    }
+
+    if (capability?.permissions.length) {
+      const permissionAccess = await getUserAccess(request.userId, request.venueId)
+      const hasRequiredPermission =
+        request.userRole === UserRole.SUPERADMIN ||
+        capability.permissions.every(permission => evaluatePermissionList(permissionAccess.corePermissions, permission))
+      if (!hasRequiredPermission) {
+        return {
+          allowed: false,
+          message: 'No tienes permisos suficientes para consultar esa información.',
+          violationType: SecurityViolationType.UNAUTHORIZED_TABLE,
+        }
+      }
+    }
+
+    const userRole = request.userRole || UserRole.VIEWER
     const validation = TableAccessControlService.validateAccess(tool.tables, userRole)
     if (validation.allowed) {
       return { allowed: true }
@@ -456,6 +484,66 @@ export class ConversationOrchestratorService {
           settlement.entries.length,
         )
       }
+      case 'paymentLinks.list': {
+        const links = await SharedQueryService.getPaymentLinks(venueId, {
+          limit: this.limit(step, 10),
+          status: typeof step.args.status === 'string' ? step.args.status : undefined,
+          search: typeof step.args.search === 'string' ? step.args.search : undefined,
+        })
+        const list = links.links
+          .slice(0, this.limit(step, 10))
+          .map(link => {
+            const amount = link.amountType === 'OPEN' || link.amount == null ? 'monto abierto' : this.money(link.amount, link.currency)
+            return `- ${link.title}: ${link.status}, ${amount}, ${link.paymentCount} pagos, ${this.money(link.totalCollected, link.currency)} cobrado. https://pay.avoqado.io/${link.shortCode}`
+          })
+          .join('\n')
+        const more = links.hasMore ? `\nHay ${links.total - links.links.length} más.` : ''
+        return this.queryResult(
+          step.tool,
+          links,
+          links.links.length > 0 ? `Tienes ${links.total} links de pago:\n${list}${more}` : 'No encontré links de pago para este venue.',
+          links.links.length,
+        )
+      }
+      case 'reservations.summary': {
+        const reservations = await SharedQueryService.getReservationSummary(venueId, dateRange)
+        const byStatus = Object.entries(reservations.byStatus)
+          .map(([status, count]) => `${status}: ${count}`)
+          .join(', ')
+        return this.queryResult(
+          step.tool,
+          reservations,
+          reservations.total > 0
+            ? `En ${this.formatDateRangeName(dateRange)} tienes ${reservations.total} reservaciones. ${byStatus || 'Sin desglose por estado'}. No-show: ${reservations.noShowRate.toFixed(1)}%.`
+            : `No encontré reservaciones para ${this.formatDateRangeName(dateRange)}.`,
+        )
+      }
+      case 'reservations.list': {
+        const reservations = await SharedQueryService.getReservations(venueId, dateRange, {
+          limit: this.limit(step, 10),
+          status: typeof step.args.status === 'string' ? step.args.status : undefined,
+          search: typeof step.args.search === 'string' ? step.args.search : undefined,
+        })
+        const list = reservations.reservations
+          .map(reservation => {
+            const name = reservation.guestName || reservation.customerName || 'Sin nombre'
+            const service = reservation.productName ? `, ${reservation.productName}` : ''
+            const table = reservation.tableNumber ? `, mesa ${reservation.tableNumber}` : ''
+            const staff = reservation.assignedStaffName ? `, atiende ${reservation.assignedStaffName}` : ''
+            return `- ${this.formatDateTime(reservation.startsAt)}: ${name}, ${reservation.partySize} pax, ${reservation.status}${service}${table}${staff} (${reservation.confirmationCode}).`
+          })
+          .join('\n')
+        const more =
+          reservations.total > reservations.reservations.length ? `\nHay ${reservations.total - reservations.reservations.length} más.` : ''
+        return this.queryResult(
+          step.tool,
+          reservations,
+          reservations.reservations.length > 0
+            ? `Reservaciones de ${this.formatDateRangeName(dateRange)}:\n${list}${more}`
+            : `No encontré reservaciones para ${this.formatDateRangeName(dateRange)}.`,
+          reservations.reservations.length,
+        )
+      }
       default:
         throw new Error(`Unsupported query tool: ${step.tool}`)
     }
@@ -519,6 +607,15 @@ export class ConversationOrchestratorService {
       allTime: 'todo el historial',
     }
     return names[dateRange] || dateRange
+  }
+
+  private formatDateTime(date: Date): string {
+    return new Intl.DateTimeFormat('es-MX', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(date)
   }
 
   private money(value: number, currency = 'MXN'): string {

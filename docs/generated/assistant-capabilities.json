@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T01:44:10.515Z",
+  "generatedAt": "2026-05-13T03:20:24.946Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -1390,7 +1390,7 @@
     {
       "id": "paymentLinks.list",
       "kind": "query",
-      "status": "backlog",
+      "status": "registered",
       "description": "List payment links for the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
@@ -1400,17 +1400,19 @@
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.paymentLinks.list",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "limit?"
+        ]
       },
       "examples": [
         "que links de pago tengo",
         "show payment links"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only payment link listing for the current venue."
       ]
     },
     {
@@ -1670,33 +1672,37 @@
     {
       "id": "reservations.list",
       "kind": "query",
-      "status": "backlog",
-      "description": "List reservations for the current venue.",
+      "status": "registered",
+      "description": "List reservations for the current venue and period.",
       "scope": "venue",
       "requiresVenueScope": true,
       "permissions": [
         "reservations:read"
       ],
-      "riskLevel": "low",
+      "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.reservations.list",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
       "examples": [
-        "muestrame mis reservas de hoy"
+        "muestrame mis reservas de hoy",
+        "show today reservations"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only reservation list; chatbot response omits phone, email, cancel secrets, and internal notes."
       ]
     },
     {
       "id": "reservations.summary",
       "kind": "query",
-      "status": "backlog",
-      "description": "Summarize reservations for a period.",
+      "status": "registered",
+      "description": "Reservation count and status/channel breakdown for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
       "permissions": [
@@ -1705,16 +1711,20 @@
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
-      "dataSource": "backlog",
+      "dataSource": "shared_query.reservations.summary",
       "schema": {
-        "type": "backlogContract",
-        "fields": []
+        "type": "queryTool",
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
       "examples": [
-        "cuantas reservaciones tengo hoy"
+        "cuantas reservaciones tengo hoy",
+        "how many reservations today"
       ],
       "notes": [
-        "Capability contract pending implementation. Do not expose as executable tool yet."
+        "Read-only reservation aggregate for the active venue."
       ]
     },
     {

@@ -33,7 +33,7 @@ describe('ConversationOrchestratorService', () => {
     jest.clearAllMocks()
     ;(getUserAccess as jest.Mock).mockResolvedValue({
       role: StaffRole.ADMIN,
-      corePermissions: ['inventory:update', 'inventory:read'],
+      corePermissions: ['inventory:update', 'inventory:read', 'payment-link:read', 'reservations:read'],
     })
   })
 
@@ -136,6 +136,180 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.dataSourcesUsed).toContain('shared_query.settlementCalendar')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'settlementCalendar', status: 'executed' })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('answers payment link list questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'getPaymentLinks').mockResolvedValue({
+      total: 1,
+      limit: 10,
+      offset: 0,
+      hasMore: false,
+      links: [
+        {
+          id: 'pl-1',
+          title: 'Cena privada',
+          shortCode: 'abc12345',
+          status: 'ACTIVE',
+          purpose: 'PAYMENT',
+          amountType: 'FIXED',
+          amount: 500,
+          currency: 'MXN',
+          isReusable: true,
+          totalCollected: 1000,
+          paymentCount: 2,
+          checkoutSessionCount: 2,
+          createdAt: new Date('2026-05-12T12:00:00.000Z'),
+          expiresAt: null,
+          createdByName: 'Ana Admin',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'que links de pago tengo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPaymentLinks).toHaveBeenCalledWith('venue-1', {
+      limit: 10,
+      status: undefined,
+      search: undefined,
+    })
+    expect(response?.response).toContain('Tienes 1 links de pago')
+    expect(response?.response).toContain('Cena privada')
+    expect(response?.response).toContain('https://pay.avoqado.io/abc12345')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.list', status: 'executed' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('blocks payment link list questions when the user lacks payment-link read permission', async () => {
+    ;(getUserAccess as jest.Mock).mockResolvedValueOnce({
+      role: StaffRole.VIEWER,
+      corePermissions: ['inventory:read'],
+    })
+    jest.spyOn(SharedQueryService, 'getPaymentLinks').mockResolvedValue({
+      total: 0,
+      limit: 10,
+      offset: 0,
+      hasMore: false,
+      links: [],
+    })
+
+    const response = await orchestrator.process({
+      message: 'que links de pago tengo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.MANAGER,
+    })
+
+    expect(response?.metadata.blocked).toBe(true)
+    expect(response?.response).toContain('No tienes permisos suficientes')
+    expect(SharedQueryService.getPaymentLinks).not.toHaveBeenCalled()
+  })
+
+  it('answers reservation summary questions with the registered shared query tool', async () => {
+    jest.spyOn(SharedQueryService, 'getReservationSummary').mockResolvedValue({
+      total: 3,
+      byStatus: { CONFIRMED: 2, PENDING: 1 },
+      byChannel: { WEB: 3 },
+      noShowRate: 0,
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+    })
+
+    const response = await orchestrator.process({
+      message: 'cuantas reservaciones tengo hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getReservationSummary).toHaveBeenCalledWith('venue-1', 'today')
+    expect(response?.response).toContain('tienes 3 reservaciones')
+    expect(response?.response).toContain('CONFIRMED: 2')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.summary', status: 'executed' })])
+  })
+
+  it('answers reservation list questions without exposing guest contact details', async () => {
+    jest.spyOn(SharedQueryService, 'getReservations').mockResolvedValue({
+      total: 1,
+      page: 1,
+      pageSize: 10,
+      totalPages: 1,
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+      reservations: [
+        {
+          confirmationCode: 'RES-ABC123',
+          status: 'CONFIRMED',
+          channel: 'WEB',
+          startsAt: new Date('2026-05-12T20:00:00.000Z'),
+          endsAt: new Date('2026-05-12T21:00:00.000Z'),
+          partySize: 4,
+          guestName: 'Mesa Perez',
+          customerName: 'Ana Perez',
+          tableNumber: '12',
+          productName: 'Cena',
+          assignedStaffName: 'Luis Host',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'muestrame mis reservas de hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getReservations).toHaveBeenCalledWith('venue-1', 'today', {
+      limit: 10,
+      status: undefined,
+      search: undefined,
+    })
+    expect(response?.response).toContain('Reservaciones de hoy')
+    expect(response?.response).toContain('Mesa Perez')
+    expect(response?.response).toContain('RES-ABC123')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.list', status: 'executed' })])
+  })
+
+  it('blocks reservation queries when the user lacks reservations read permission', async () => {
+    ;(getUserAccess as jest.Mock).mockResolvedValueOnce({
+      role: StaffRole.VIEWER,
+      corePermissions: ['inventory:read'],
+    })
+    jest.spyOn(SharedQueryService, 'getReservations').mockResolvedValue({
+      total: 0,
+      page: 1,
+      pageSize: 10,
+      totalPages: 0,
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+      reservations: [],
+    })
+
+    const response = await orchestrator.process({
+      message: 'muestrame mis reservas de hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.MANAGER,
+    })
+
+    expect(response?.metadata.blocked).toBe(true)
+    expect(response?.response).toContain('No tienes permisos suficientes')
+    expect(SharedQueryService.getReservations).not.toHaveBeenCalled()
   })
 
   it('previews CRUD and skips dependent reads until confirmation', async () => {

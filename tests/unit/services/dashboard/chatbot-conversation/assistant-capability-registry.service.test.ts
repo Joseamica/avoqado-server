@@ -54,14 +54,28 @@ describe('AssistantCapabilityRegistryService', () => {
     expect(capability?.schema.fields).toContain('name')
   })
 
-  it('keeps future payment link and reservation capabilities as backlog, not executable', () => {
+  it('registers payment link and reservation read tools while keeping reservation create as backlog', () => {
     const executableIds = registry.listExecutableCapabilities().map(capability => capability.id)
 
     expect(registry.getCapability('paymentLinks.list')).toEqual(
       expect.objectContaining({
-        status: 'backlog',
+        status: 'registered',
         requiresVenueScope: true,
         permissions: ['payment-link:read'],
+      }),
+    )
+    expect(registry.getCapability('reservations.summary')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['reservations:read'],
+      }),
+    )
+    expect(registry.getCapability('reservations.list')).toEqual(
+      expect.objectContaining({
+        status: 'registered',
+        requiresVenueScope: true,
+        permissions: ['reservations:read'],
       }),
     )
     expect(registry.getCapability('reservations.create')).toEqual(
@@ -71,7 +85,9 @@ describe('AssistantCapabilityRegistryService', () => {
         permissions: ['reservations:create'],
       }),
     )
-    expect(executableIds).not.toContain('paymentLinks.list')
+    expect(executableIds).toContain('paymentLinks.list')
+    expect(executableIds).toContain('reservations.summary')
+    expect(executableIds).toContain('reservations.list')
     expect(executableIds).not.toContain('reservations.create')
   })
 

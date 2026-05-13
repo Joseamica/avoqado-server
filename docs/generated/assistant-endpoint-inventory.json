@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T01:44:10.515Z",
+  "generatedAt": "2026-05-13T03:20:24.946Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -230,14 +230,14 @@
       "schemas": [],
       "classification": "read",
       "scope": "unknown",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -261,14 +261,14 @@
       ],
       "classification": "action",
       "scope": "unknown",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -376,14 +376,14 @@
       ],
       "classification": "action",
       "scope": "unknown",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -407,14 +407,14 @@
       ],
       "classification": "dangerousMutation",
       "scope": "unknown",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19232,14 +19232,14 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19265,14 +19265,14 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19298,14 +19298,14 @@
       ],
       "classification": "dangerousMutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19331,14 +19331,14 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19364,14 +19364,14 @@
       ],
       "classification": "mutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19395,14 +19395,14 @@
       "schemas": [],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19428,14 +19428,14 @@
       ],
       "classification": "mutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19459,14 +19459,14 @@
       "schemas": [],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -19492,14 +19492,14 @@
       ],
       "classification": "mutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "paymentLinks.list",
         "paymentLinks.detail",
         "paymentLinks.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20634,14 +20634,14 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20668,14 +20668,14 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20699,14 +20699,14 @@
       "schemas": [],
       "classification": "dangerousMutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20730,14 +20730,14 @@
       "schemas": [],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20764,14 +20764,14 @@
       ],
       "classification": "mutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20795,14 +20795,14 @@
       "schemas": [],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20826,14 +20826,14 @@
       "schemas": [],
       "classification": "dangerousMutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20857,14 +20857,14 @@
       "schemas": [],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20888,14 +20888,14 @@
       "schemas": [],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20922,14 +20922,14 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20956,14 +20956,14 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -20989,14 +20989,14 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -21020,14 +21020,14 @@
       "schemas": [],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -21053,14 +21053,14 @@
       ],
       "classification": "mutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -21115,14 +21115,14 @@
       ],
       "classification": "read",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -21145,14 +21145,14 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -21175,14 +21175,14 @@
       ],
       "classification": "dangerousMutation",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -21205,14 +21205,14 @@
       ],
       "classification": "action",
       "scope": "venue",
-      "assistantCoverage": "missing",
+      "assistantCoverage": "partial",
       "assistantTools": [
         "reservations.summary",
         "reservations.list",
         "reservations.create"
       ],
       "notes": [
-        "Backlog capability contract exists, but it is not executable yet."
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {

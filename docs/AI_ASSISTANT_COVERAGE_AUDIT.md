@@ -37,9 +37,9 @@ Salidas generadas:
 Ultima corrida local:
 
 - Endpoints detectados: 1,337
-- Sin capacidad mapeada: 646
+- Sin capacidad mapeada: 615
 - Bloqueados por default: 382
-- Parcialmente cubiertos: 304
+- Parcialmente cubiertos: 335
 - Cubiertos por heuristica exacta: 5
 
 El auditor extrae metodo, path, permisos directos/heredados, schemas de `validateRequest`, controller, servicios usados por el controller
@@ -71,6 +71,9 @@ archivo es la fuente de verdad para distinguir:
 - `profitAnalysis`
 - `paymentMethodBreakdown`
 - `settlementCalendar`
+- `paymentLinks.list`
+- `reservations.summary`
+- `reservations.list`
 - `adHocAnalytics`
 
 `adHocAnalytics` existe como fallback, pero no debe ser la estrategia de cobertura principal en produccion. Para estabilidad y seguridad,
@@ -166,9 +169,6 @@ Prioridad alta:
 - `payments.list`
 - `payments.detail`
 - `paymentLinks.summary`
-- `paymentLinks.list`
-- `reservations.summary`
-- `reservations.list`
 - `commissions.summary`
 - `customers.summary`
 - `team.members`

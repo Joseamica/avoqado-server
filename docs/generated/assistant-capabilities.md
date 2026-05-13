@@ -1,13 +1,13 @@
 # Assistant Capabilities
 
-Generated: 2026-05-13T01:44:10.528Z
+Generated: 2026-05-13T03:20:24.957Z
 
 ## Summary
 
 - Total capabilities: 68
-- Status: registered 53, backlog 12, blocked 3
+- Status: registered 56, backlog 9, blocked 3
 - Kind: action 37, query 24, howTo 5, blocked 2
-- Risk: low 36, medium 20, high 9, critical 3
+- Risk: low 35, medium 21, high 9, critical 3
 - Scope: venue 67, superadmin 1
 
 ## Registered Executable Capabilities
@@ -49,6 +49,7 @@ Generated: 2026-05-13T01:44:10.528Z
 - `menu.product.create` (action, low) — permissions: menu:create; source: productService.createProduct
 - `menu.product.delete` (action, high) — permissions: menu:delete; source: productService.deleteProduct
 - `menu.product.update` (action, medium) — permissions: menu:update; source: productService.updateProduct
+- `paymentLinks.list` (query, low) — permissions: payment-link:read; source: shared_query.paymentLinks.list
 - `paymentMethodBreakdown` (query, low) — permissions: payments:read; source: shared_query.paymentMethodBreakdown
 - `pendingOrders` (query, low) — permissions: orders:read; source: shared_query.pendingOrders
 - `pricing.applySuggestedPrice` (action, medium) — permissions: menu:update; source: pricingService.applySuggestedPrice
@@ -56,6 +57,8 @@ Generated: 2026-05-13T01:44:10.528Z
 - `recipeCount` (query, low) — permissions: inventory:read; source: shared_query.recipeCount
 - `recipeList` (query, low) — permissions: inventory:read; source: shared_query.recipeList
 - `recipeUsage` (query, low) — permissions: inventory:read, orders:read; source: shared_query.recipeUsage
+- `reservations.list` (query, medium) — permissions: reservations:read; source: shared_query.reservations.list
+- `reservations.summary` (query, low) — permissions: reservations:read; source: shared_query.reservations.summary
 - `reviews` (query, low) — permissions: reviews:read; source: shared_query.reviews
 - `sales` (query, low) — permissions: payments:read, orders:read; source: shared_query.sales
 - `settlementCalendar` (query, low) — permissions: settlements:read; source: shared_query.settlementCalendar
@@ -73,11 +76,8 @@ Generated: 2026-05-13T01:44:10.528Z
 - `creditPacks.balance` (query, medium) — permissions: credit-packs:read; examples: cuantos creditos le quedan a este cliente
 - `paymentLinks.create` (action, medium) — permissions: payment-link:create; examples: crea un link de pago por 500 pesos
 - `paymentLinks.detail` (query, low) — permissions: payment-link:read; examples: como va este link de pago
-- `paymentLinks.list` (query, low) — permissions: payment-link:read; examples: que links de pago tengo | show payment links
 - `reservations.cancel` (action, high) — permissions: reservations:update; examples: cancela esta reservacion
 - `reservations.create` (action, medium) — permissions: reservations:create; examples: crea una reservacion para hoy a las 8
-- `reservations.list` (query, low) — permissions: reservations:read; examples: muestrame mis reservas de hoy
-- `reservations.summary` (query, low) — permissions: reservations:read; examples: cuantas reservaciones tengo hoy
 - `team.invite` (action, high) — permissions: team:invite; examples: invita a alguien a mi equipo
 - `team.members` (query, medium) — permissions: team:read; examples: quien esta en mi equipo
 
@@ -136,7 +136,7 @@ Generated: 2026-05-13T01:44:10.528Z
 | `menu.product.update` | action | registered | venue | medium | menu:update | single | productService.updateProduct |
 | `paymentLinks.create` | action | backlog | venue | medium | payment-link:create | single | backlog |
 | `paymentLinks.detail` | query | backlog | venue | low | payment-link:read | - | backlog |
-| `paymentLinks.list` | query | backlog | venue | low | payment-link:read | - | backlog |
+| `paymentLinks.list` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.list |
 | `paymentMethodBreakdown` | query | registered | venue | low | payments:read | - | shared_query.paymentMethodBreakdown |
 | `pendingOrders` | query | registered | venue | low | orders:read | - | shared_query.pendingOrders |
 | `pricing.applySuggestedPrice` | action | registered | venue | medium | menu:update | single | pricingService.applySuggestedPrice |
@@ -146,8 +146,8 @@ Generated: 2026-05-13T01:44:10.528Z
 | `recipeUsage` | query | registered | venue | low | inventory:read, orders:read | - | shared_query.recipeUsage |
 | `reservations.cancel` | action | backlog | venue | high | reservations:update | double | backlog |
 | `reservations.create` | action | backlog | venue | medium | reservations:create | single | backlog |
-| `reservations.list` | query | backlog | venue | low | reservations:read | - | backlog |
-| `reservations.summary` | query | backlog | venue | low | reservations:read | - | backlog |
+| `reservations.list` | query | registered | venue | medium | reservations:read | - | shared_query.reservations.list |
+| `reservations.summary` | query | registered | venue | low | reservations:read | - | shared_query.reservations.summary |
 | `reviews` | query | registered | venue | low | reviews:read | - | shared_query.reviews |
 | `sales` | query | registered | venue | low | payments:read, orders:read | - | shared_query.sales |
 | `settlementCalendar` | query | registered | venue | low | settlements:read | - | shared_query.settlementCalendar |

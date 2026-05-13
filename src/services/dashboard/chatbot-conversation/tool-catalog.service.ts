@@ -108,6 +108,26 @@ export class ToolCatalogService {
         defaultDateRange: 'today',
       },
       {
+        name: 'paymentLinks.list',
+        description: 'List payment links for the current venue.',
+        tables: ['PaymentLink'],
+        requiresDateRange: false,
+      },
+      {
+        name: 'reservations.summary',
+        description: 'Reservation count and status/channel breakdown for a period.',
+        tables: ['Reservation'],
+        requiresDateRange: true,
+        defaultDateRange: 'today',
+      },
+      {
+        name: 'reservations.list',
+        description: 'List reservations for the current venue and period.',
+        tables: ['Reservation'],
+        requiresDateRange: true,
+        defaultDateRange: 'today',
+      },
+      {
         name: 'adHocAnalytics',
         description: 'Fallback for analytics questions not covered by known tools.',
         tables: [],

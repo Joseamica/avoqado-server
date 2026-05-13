@@ -58,8 +58,8 @@ const ASSISTANT_TOOL_HINTS: Array<{ pattern: RegExp; tools: string[]; coverage: 
   { pattern: /orders/i, tools: ['pendingOrders'], coverage: 'partial' },
   { pattern: /shift/i, tools: ['activeShifts'], coverage: 'partial' },
   { pattern: /product|menu/i, tools: ['topProducts'], coverage: 'partial' },
-  { pattern: /payment-links/i, tools: ['paymentLinks.list', 'paymentLinks.detail', 'paymentLinks.create'], coverage: 'missing' },
-  { pattern: /reservations/i, tools: ['reservations.summary', 'reservations.list', 'reservations.create'], coverage: 'missing' },
+  { pattern: /payment-links/i, tools: ['paymentLinks.list', 'paymentLinks.detail', 'paymentLinks.create'], coverage: 'partial' },
+  { pattern: /reservations/i, tools: ['reservations.summary', 'reservations.list', 'reservations.create'], coverage: 'partial' },
   { pattern: /commissions/i, tools: ['commissions.summary', 'commissions.payouts'], coverage: 'missing' },
   { pattern: /credit-packs|credits/i, tools: ['creditPacks.balance', 'creditPacks.list'], coverage: 'missing' },
   { pattern: /team|permission|role/i, tools: ['team.members', 'team.invite', 'permissions.howTo'], coverage: 'missing' },
@@ -538,7 +538,11 @@ function classifyAssistantCoverage(
   if (!hint) return { assistantCoverage: 'missing', assistantTools: [], notes: ['No assistant capability mapped yet.'] }
 
   const matchedCapabilities = hint.tools
-    .map(tool => capabilities.find(capability => capability.id === tool || capability.id.startsWith(tool.split('.')[0])))
+    .map(
+      tool =>
+        capabilities.find(capability => capability.id === tool) ||
+        capabilities.find(capability => capability.id.startsWith(tool.split('.')[0])),
+    )
     .filter((capability): capability is AssistantCapability => Boolean(capability))
   const hasRegistered = matchedCapabilities.some(capability => capability.status === 'registered')
   const hasBacklog = matchedCapabilities.some(capability => capability.status === 'backlog')

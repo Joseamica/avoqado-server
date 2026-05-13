@@ -213,6 +213,33 @@ export class ConversationPlannerService {
       })
     }
 
+    if (this.hasPaymentLinksListIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'paymentLinks.list',
+        args: { limit: 10 },
+      })
+    }
+
+    if (this.hasReservationSummaryIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'reservations.summary',
+        args: { dateRange: this.extractDateRange(normalized) || 'today' },
+      })
+    }
+
+    if (this.hasReservationListIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'reservations.list',
+        args: { dateRange: this.extractDateRange(normalized) || 'today', limit: 10 },
+      })
+    }
+
     if (containsCrud && this.hasPostMutationReadIntent(normalized)) {
       const lastQuery = steps.find(step => step.kind === 'query' && step.id !== 'action_1')
       if (lastQuery && lastQuery.kind === 'query') {
@@ -530,6 +557,34 @@ export class ConversationPlannerService {
     const settlementTerm =
       /\b(liquidacion|liquidaciones|liquid\w*|dispers\w*|deposit\w*|pagan|pago|pagaran|payout|settlement|settle|deposit)\b/.test(normalized)
     return asksAmount && settlementTerm
+  }
+
+  private hasPaymentLinksListIntent(normalized: string): boolean {
+    const paymentLinkTerm = /\b(link|links|liga|ligas|enlace|enlaces)\s+(de\s+)?pago|payment\s+links?\b/.test(normalized)
+    const readIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|activos?|show|list|see|active)\b/.test(normalized)
+    const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|archiva|pausa|pausar)\b/.test(normalized)
+    return paymentLinkTerm && readIntent && !mutationIntent
+  }
+
+  private hasReservationTerms(normalized: string): boolean {
+    return /\b(reserva|reservas|reservacion|reservaciones|booking|bookings|reservation|reservations)\b/.test(normalized)
+  }
+
+  private hasReservationMutationIntent(normalized: string): boolean {
+    return /\b(crea|crear|agrega|agregar|nueva|nuevo|cancela|cancelar|borra|borrar|elimina|eliminar|confirma|confirmar|check[- ]?in|completa|completar|reagenda|reagendar|mueve|mover|cambia|cambiar)\b/.test(
+      normalized,
+    )
+  }
+
+  private hasReservationSummaryIntent(normalized: string): boolean {
+    const countIntent = /\b(cuantas|cuantos|numero|total|cantidad|count|how many)\b/.test(normalized)
+    return this.hasReservationTerms(normalized) && countIntent && !this.hasReservationMutationIntent(normalized)
+  }
+
+  private hasReservationListIntent(normalized: string): boolean {
+    const readIntent = /\b(que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|agenda|hoy|show|list|see)\b/.test(normalized)
+    const countIntent = /\b(cuantas|cuantos|numero|total|cantidad|count|how many)\b/.test(normalized)
+    return this.hasReservationTerms(normalized) && readIntent && !countIntent && !this.hasReservationMutationIntent(normalized)
   }
 
   private extractDateRange(normalized: string): RelativeDateRange | undefined {

@@ -1,12 +1,12 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-05-13T01:44:10.525Z
+Generated: 2026-05-13T03:20:24.954Z
 
 ## Summary
 
 - Total endpoints: 1337
 - Assistant tools registered: 68
-- Coverage: missing 646, blocked 382, partial 304, covered 5
+- Coverage: missing 615, blocked 382, partial 335, covered 5
 - Classifications: read 425, adminOnly 344, action 283, dangerousMutation 127, mutation 120, public 38
 - Scopes: venue 703, superadmin 307, unknown 167, organization 95, public 65
 
@@ -17,7 +17,6 @@ Generated: 2026-05-13T01:44:10.525Z
 - stores-analysis: 32
 - onboarding: 21
 - tpv-commands: 19
-- reservations: 18
 - customers: 17
 - coupons: 15
 - configs: 14
@@ -25,13 +24,14 @@ Generated: 2026-05-13T01:44:10.525Z
 - discounts: 13
 - ecommerce-merchants: 12
 - modifier-groups: 12
-- consumer: 11
 - credit-packs: 11
 - sdk: 11
 - staff: 9
-- payment-links: 9
 - team: 9
 - payouts: 8
+- class-sessions: 8
+- customer-groups: 8
+- consumer: 7
 
 ## High-Risk Or Admin-Only Endpoints
 
@@ -165,13 +165,13 @@ Generated: 2026-05-13T01:44:10.525Z
 | GET | `/api/v1/consumer/credits` | read | unknown | missing | - | - | creditController.mine |
 | POST | `/api/v1/consumer/credits/checkout/finalize` | action | unknown | missing | - | consumerFinalizeCreditCheckoutSchema | creditController.finalizeCheckout |
 | GET | `/api/v1/consumer/me` | read | unknown | missing | - | - | authController.me |
-| GET | `/api/v1/consumer/reservations` | read | unknown | missing | - | - | reservationController.mine |
-| POST | `/api/v1/consumer/reservations/deposit/finalize` | action | unknown | missing | - | consumerFinalizeReservationDepositCheckoutSchema | reservationController.finalizeDepositCheckout |
+| GET | `/api/v1/consumer/reservations` | read | unknown | partial | - | - | reservationController.mine |
+| POST | `/api/v1/consumer/reservations/deposit/finalize` | action | unknown | partial | - | consumerFinalizeReservationDepositCheckoutSchema | reservationController.finalizeDepositCheckout |
 | GET | `/api/v1/consumer/venues` | read | unknown | missing | - | searchConsumerVenuesSchema | venueController.search |
 | GET | `/api/v1/consumer/venues/:venueSlug` | read | unknown | missing | - | consumerVenueParamsSchema | venueController.detail |
 | POST | `/api/v1/consumer/venues/:venueSlug/credit-packs/:packId/checkout` | action | unknown | missing | - | consumerCreateCreditCheckoutSchema | creditController.createCheckout |
-| POST | `/api/v1/consumer/venues/:venueSlug/reservations` | action | unknown | missing | - | consumerCreateReservationSchema | reservationController.create |
-| POST | `/api/v1/consumer/venues/:venueSlug/reservations/:cancelSecret/payment` | dangerousMutation | unknown | missing | - | consumerReservationDepositCheckoutSchema | reservationController.createDepositCheckout |
+| POST | `/api/v1/consumer/venues/:venueSlug/reservations` | action | unknown | partial | - | consumerCreateReservationSchema | reservationController.create |
+| POST | `/api/v1/consumer/venues/:venueSlug/reservations/:cancelSecret/payment` | dangerousMutation | unknown | partial | - | consumerReservationDepositCheckoutSchema | reservationController.createDepositCheckout |
 | PATCH | `/api/v1/dashboard/:venueId/account` | mutation | unknown | missing | - | updateAccountSchema | authDashboardController.updateAccountController |
 | POST | `/api/v1/dashboard/assistant/actions/confirm` | action | unknown | missing | - | assistantActionConfirmSchema | textToSqlAssistantController.confirmAssistantAction |
 | POST | `/api/v1/dashboard/assistant/actions/preview` | action | unknown | missing | - | assistantActionPreviewSchema | textToSqlAssistantController.previewAssistantAction |
@@ -867,15 +867,15 @@ Generated: 2026-05-13T01:44:10.525Z
 | GET | `/api/v1/dashboard/venues/:venueId/payment-config/merchant-accounts` | adminOnly | venue | blocked | system:config | - | venuePaymentConfigController.getVenueMerchantAccounts |
 | GET | `/api/v1/dashboard/venues/:venueId/payment-config/pricing-structures` | adminOnly | venue | blocked | system:config | - | venuePaymentConfigController.getVenuePricingStructures |
 | GET | `/api/v1/dashboard/venues/:venueId/payment-config/readiness` | adminOnly | venue | blocked | system:config | - | venuePaymentReadinessController.getVenuePaymentReadiness |
-| GET | `/api/v1/dashboard/venues/:venueId/payment-links` | read | venue | missing | payment-link:read | listPaymentLinksSchema | paymentLinkController.listPaymentLinks |
-| POST | `/api/v1/dashboard/venues/:venueId/payment-links` | action | venue | missing | payment-link:read | createPaymentLinkSchema | paymentLinkController.createPaymentLink |
-| DELETE | `/api/v1/dashboard/venues/:venueId/payment-links/:linkId` | dangerousMutation | venue | missing | payment-link:read | getPaymentLinkSchema | paymentLinkController.archivePaymentLink |
-| GET | `/api/v1/dashboard/venues/:venueId/payment-links/:linkId` | read | venue | missing | payment-link:read | getPaymentLinkSchema | paymentLinkController.getPaymentLink |
-| PUT | `/api/v1/dashboard/venues/:venueId/payment-links/:linkId` | mutation | venue | missing | payment-link:read | updatePaymentLinkSchema | paymentLinkController.updatePaymentLink |
-| GET | `/api/v1/dashboard/venues/:venueId/payment-links/branding/config` | read | venue | missing | payment-link:read | - | paymentLinkController.getPaymentLinkBranding |
-| PUT | `/api/v1/dashboard/venues/:venueId/payment-links/branding/config` | mutation | venue | missing | payment-link:read | updatePaymentLinkBrandingSchema | paymentLinkController.updatePaymentLinkBranding |
-| GET | `/api/v1/dashboard/venues/:venueId/payment-links/settings` | read | venue | missing | payment-link:read | - | paymentLinkController.getPaymentLinkSettingsHandler |
-| PATCH | `/api/v1/dashboard/venues/:venueId/payment-links/settings` | mutation | venue | missing | payment-link:read | updatePaymentLinkSettingsSchema | paymentLinkController.updatePaymentLinkSettingsHandler |
+| GET | `/api/v1/dashboard/venues/:venueId/payment-links` | read | venue | partial | payment-link:read | listPaymentLinksSchema | paymentLinkController.listPaymentLinks |
+| POST | `/api/v1/dashboard/venues/:venueId/payment-links` | action | venue | partial | payment-link:read | createPaymentLinkSchema | paymentLinkController.createPaymentLink |
+| DELETE | `/api/v1/dashboard/venues/:venueId/payment-links/:linkId` | dangerousMutation | venue | partial | payment-link:read | getPaymentLinkSchema | paymentLinkController.archivePaymentLink |
+| GET | `/api/v1/dashboard/venues/:venueId/payment-links/:linkId` | read | venue | partial | payment-link:read | getPaymentLinkSchema | paymentLinkController.getPaymentLink |
+| PUT | `/api/v1/dashboard/venues/:venueId/payment-links/:linkId` | mutation | venue | partial | payment-link:read | updatePaymentLinkSchema | paymentLinkController.updatePaymentLink |
+| GET | `/api/v1/dashboard/venues/:venueId/payment-links/branding/config` | read | venue | partial | payment-link:read | - | paymentLinkController.getPaymentLinkBranding |
+| PUT | `/api/v1/dashboard/venues/:venueId/payment-links/branding/config` | mutation | venue | partial | payment-link:read | updatePaymentLinkBrandingSchema | paymentLinkController.updatePaymentLinkBranding |
+| GET | `/api/v1/dashboard/venues/:venueId/payment-links/settings` | read | venue | partial | payment-link:read | - | paymentLinkController.getPaymentLinkSettingsHandler |
+| PATCH | `/api/v1/dashboard/venues/:venueId/payment-links/settings` | mutation | venue | partial | payment-link:read | updatePaymentLinkSettingsSchema | paymentLinkController.updatePaymentLinkSettingsHandler |
 | PUT | `/api/v1/dashboard/venues/:venueId/payment-method` | mutation | venue | partial | venues:manage | updatePaymentMethodSchema | venueController.updateVenuePaymentMethod |
 | GET | `/api/v1/dashboard/venues/:venueId/payment-methods` | read | venue | partial | venues:manage | - | venueController.listVenuePaymentMethods |
 | DELETE | `/api/v1/dashboard/venues/:venueId/payment-methods/:paymentMethodId` | dangerousMutation | venue | partial | venues:manage | - | venueController.detachVenuePaymentMethod |
@@ -915,25 +915,25 @@ Generated: 2026-05-13T01:44:10.525Z
 | POST | `/api/v1/dashboard/venues/:venueId/promoters/:promoterId/deposits/:depositId/reject` | action | venue | missing | - | - | (inline handler) |
 | POST | `/api/v1/dashboard/venues/:venueId/reactivate` | action | venue | missing | venues:manage | - | venueController.reactivateVenue |
 | GET | `/api/v1/dashboard/venues/:venueId/receipts/:receiptId` | read | venue | missing | payments:read | - | paymentController.getReceiptById |
-| GET | `/api/v1/dashboard/venues/:venueId/reservations` | read | venue | missing | reservations:read | z.object | controller.getReservations |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations` | action | venue | missing | reservations:create | z.object | controller.createReservation |
-| DELETE | `/api/v1/dashboard/venues/:venueId/reservations/:id` | dangerousMutation | venue | missing | reservations:cancel | - | controller.deleteReservation |
-| GET | `/api/v1/dashboard/venues/:venueId/reservations/:id` | read | venue | missing | reservations:read | - | controller.getReservation |
-| PUT | `/api/v1/dashboard/venues/:venueId/reservations/:id` | mutation | venue | missing | reservations:update | z.object | controller.updateReservation |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/check-in` | action | venue | missing | reservations:update | - | controller.checkInReservation |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/complete` | dangerousMutation | venue | missing | reservations:update | - | controller.completeReservation |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/confirm` | action | venue | missing | reservations:update | - | controller.confirmReservation |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/no-show` | action | venue | missing | reservations:update | - | controller.markNoShow |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/reschedule` | action | venue | missing | reservations:update | z.object | controller.rescheduleReservation |
-| GET | `/api/v1/dashboard/venues/:venueId/reservations/availability` | read | venue | missing | reservations:read | z.object | controller.getAvailability |
-| GET | `/api/v1/dashboard/venues/:venueId/reservations/calendar` | read | venue | missing | reservations:read | z.object | controller.getCalendar |
-| GET | `/api/v1/dashboard/venues/:venueId/reservations/settings` | read | venue | missing | reservations:read | - | controller.getSettings |
-| PUT | `/api/v1/dashboard/venues/:venueId/reservations/settings` | mutation | venue | missing | reservations:update | z.object | controller.updateSettings |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations` | read | venue | partial | reservations:read | z.object | controller.getReservations |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations` | action | venue | partial | reservations:create | z.object | controller.createReservation |
+| DELETE | `/api/v1/dashboard/venues/:venueId/reservations/:id` | dangerousMutation | venue | partial | reservations:cancel | - | controller.deleteReservation |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations/:id` | read | venue | partial | reservations:read | - | controller.getReservation |
+| PUT | `/api/v1/dashboard/venues/:venueId/reservations/:id` | mutation | venue | partial | reservations:update | z.object | controller.updateReservation |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/check-in` | action | venue | partial | reservations:update | - | controller.checkInReservation |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/complete` | dangerousMutation | venue | partial | reservations:update | - | controller.completeReservation |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/confirm` | action | venue | partial | reservations:update | - | controller.confirmReservation |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/no-show` | action | venue | partial | reservations:update | - | controller.markNoShow |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations/:id/reschedule` | action | venue | partial | reservations:update | z.object | controller.rescheduleReservation |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations/availability` | read | venue | partial | reservations:read | z.object | controller.getAvailability |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations/calendar` | read | venue | partial | reservations:read | z.object | controller.getCalendar |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations/settings` | read | venue | partial | reservations:read | - | controller.getSettings |
+| PUT | `/api/v1/dashboard/venues/:venueId/reservations/settings` | mutation | venue | partial | reservations:update | z.object | controller.updateSettings |
 | GET | `/api/v1/dashboard/venues/:venueId/reservations/stats` | read | venue | partial | reservations:read | z.object | controller.getStats |
-| GET | `/api/v1/dashboard/venues/:venueId/reservations/waitlist` | read | venue | missing | reservations:read | z.object | (inline handler) |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations/waitlist` | action | venue | missing | reservations:create | z.object | (inline handler) |
-| DELETE | `/api/v1/dashboard/venues/:venueId/reservations/waitlist/:entryId` | dangerousMutation | venue | missing | reservations:cancel | z.object | (inline handler) |
-| POST | `/api/v1/dashboard/venues/:venueId/reservations/waitlist/:entryId/promote` | action | venue | missing | reservations:update | z.object | (inline handler) |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations/waitlist` | read | venue | partial | reservations:read | z.object | (inline handler) |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations/waitlist` | action | venue | partial | reservations:create | z.object | (inline handler) |
+| DELETE | `/api/v1/dashboard/venues/:venueId/reservations/waitlist/:entryId` | dangerousMutation | venue | partial | reservations:cancel | z.object | (inline handler) |
+| POST | `/api/v1/dashboard/venues/:venueId/reservations/waitlist/:entryId/promote` | action | venue | partial | reservations:update | z.object | (inline handler) |
 | GET | `/api/v1/dashboard/venues/:venueId/reviews` | read | venue | covered | reviews:read | - | reviewController.getReviewsData |
 | DELETE | `/api/v1/dashboard/venues/:venueId/reviews/:reviewId` | dangerousMutation | venue | covered | reviews:delete | - | // SUPERADMIN only reviewController.deleteReview |
 | DELETE | `/api/v1/dashboard/venues/:venueId/role-config` | dangerousMutation | venue | missing | role-config:update | RoleConfigParamsSchema | venueRoleConfigController.resetRoleConfigs |
